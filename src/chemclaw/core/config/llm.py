@@ -258,6 +258,42 @@ class LlmSettings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _effort_is_provider_scoped(self) -> Self:
+        """`llm_effort` is refused on the Anthropic path, because there it means something else.
+
+        **Measured, not read off the documentation, and the first version of this feature had it
+        wrong.** `_generation_options` passes `reasoning_effort` to whichever client is configured
+        on the strength of both accepting the kwarg. Both do accept it; they do not do the same
+        thing with it. Against `langchain-anthropic`, `_get_request_payload` for `claude-sonnet-5`:
+
+            reasoning_effort="high"  ->  output_config={'effort': 'high'}
+                                         thinking={'type': 'adaptive', 'display': 'summarized'}
+
+        So on that provider the knob silently enables **extended thinking**, which is a different
+        decision with three consequences the setting's name does not hint at: `thinking` and a set
+        `temperature` cannot both be sent (a 400, and `llm_provider._failover_exceptions`
+        deliberately does not fail 400s over, so *every* turn fails); thinking tokens are drawn from
+        `llm_max_tokens`, shrinking the answer allowance `agent/context_budget.py` reserves it as;
+        and a model with no effort levels is still sent `output_config`.
+
+        Refused rather than translated, and refused rather than silently ignored. Translating means
+        choosing a thinking budget nobody has asked for and making two other settings conditional on
+        this one. Ignoring means a profile that says `effort: high` quietly getting default effort —
+        a control that reads as one and is not, which this repository has a standing rule against.
+        Turning it on for Anthropic is a real decision and wants its own ADR; until then this says
+        so at startup instead of at the first turn.
+        """
+        if self.llm_effort is not None and self.llm_provider == "anthropic":
+            raise ValueError(
+                "llm_effort is only supported on llm_provider='openai_compatible'; on 'anthropic' "
+                "reasoning_effort enables extended thinking (measured: it adds "
+                "thinking={'type': 'adaptive'}), which conflicts with llm_temperature and draws "
+                "from llm_max_tokens. Unset CHEMCLAW_LLM_EFFORT, or set "
+                "CHEMCLAW_LLM_PROVIDER=openai_compatible."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _embedding_provider_config(self) -> Self:
         """`openai_compatible` embeddings need the shared endpoint and a model name.
 

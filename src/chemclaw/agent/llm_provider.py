@@ -484,14 +484,19 @@ def _generation_options(effort: str | None = None) -> dict[str, Any]:
     `core/config/llm.py` records having broken every turn once: some OpenAI-compatible endpoints
     reject an explicit null, so "unset" has to mean *absent from the request*, not present-and-null.
 
-    **`reasoning_effort` is here rather than in a per-provider branch because both clients take
-    it**, which was measured on the installed distributions rather than assumed: the two spell
-    reasoning differently in their own APIs (`thinking` with a token budget on one side), and it
-    would have been reasonable to expect a translation layer. There is none to write. What the
-    translation *would* have cost is worth recording, since it is why the shared kwarg is a
-    relief rather than a coincidence: Anthropic's `thinking` must be budgeted under `max_tokens`
-    and refuses a set `temperature`, so a translation would have made two other settings
-    conditional on this one.
+    **`reasoning_effort` is here, and it is scoped to one provider by config rather than by a
+    branch in this function.** The first version of this said the two clients "both take it, so
+    there is no translation to write", on the strength of both *accepting* the kwarg. They accept
+    it and they do not mean the same thing by it — measured through `_get_request_payload` rather
+    than off the constructed object, which is the check that would have caught it:
+    `langchain-anthropic` folds it into `output_config.effort` and injects
+    `thinking={'type': 'adaptive'}`, i.e. extended thinking, with the `temperature` conflict and
+    the `max_tokens` draw that implies.
+
+    So `LlmSettings._effort_is_provider_scoped` refuses the setting on the Anthropic path and this
+    function stays a plain pass-through for the provider where the name means what it says. The
+    lesson is the general one: an attribute that round-trips on a client proves the constructor
+    accepted a kwarg, and nothing at all about what reaches the wire.
 
     The same absent-when-unset rule, and it binds harder here: a rejected parameter is a 400, and
     `_failover_exceptions` deliberately does not fail those over.

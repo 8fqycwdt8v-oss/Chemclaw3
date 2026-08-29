@@ -45,9 +45,12 @@ def _billing(*costs: int) -> list[AIMessage]:
     every agent by `FilesystemMiddleware` and reads the scratchpad, so driving the loop costs the
     test nothing and touches nothing.
 
-    `total_tokens` is set independently of the input/output split rather than derived from it —
-    `graph_usage_tokens` prefers the provider's own total, and a fixture that computed it here
-    would be asserting this test's arithmetic instead of that rule.
+    `total_tokens` is stated explicitly rather than left for the reader to derive. It does **not**
+    discriminate the two branches of `graph_usage_tokens` — `cost // 2 + (cost - cost // 2)` is
+    `cost` identically, so a fixture shaped like this one cannot tell "prefer the provider's total"
+    from "sum the parts", and an earlier version of this docstring claimed it could.
+    `tests/test_budget.py::test_a_reported_total_is_preferred_and_a_missing_one_is_derived` is
+    where that rule is actually pinned.
     """
     messages = []
     for index, cost in enumerate(costs):
@@ -94,9 +97,16 @@ def test_the_meter_reaches_the_channel_and_the_state_carries_the_total(
 ) -> None:
     """A turn's bill accumulates across model calls and is readable from what the run returns.
 
-    This is the channel half. Without the `state_schema` declaration on `MeterTurnSpend` the update
-    is dropped silently and `billed_tokens` comes back absent — which is what the first attempt at
-    this design did, and why the assertion is on the returned state rather than on the middleware.
+    This is the channel half: the assertion is on the state the run *returns*, because a middleware
+    that accumulates perfectly into a channel the graph does not declare is dropped in silence.
+
+    **The declaration that makes it work is `create_agent(state_schema=ChemclawState)` in
+    `langgraph_agent`, not `MeterTurnSpend.state_schema`** — and an earlier version of this
+    docstring said the opposite. Measured by removing the middleware's own declaration: nothing
+    changes, here or in `tests/test_state_channels.py`, because the graph already has the channel.
+    The attribute is kept for the case this file cannot reach — a graph compiled around this
+    middleware without that argument — but it is not what this test proves, and claiming it was
+    made an unfalsifiable statement out of a real lesson.
     """
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
     graph = build_langgraph_agent(model=_Model(messages=iter(_billing(400))))
@@ -291,3 +301,90 @@ def test_a_fan_out_shares_one_budget_rather_than_getting_one_each(
         f"{final['billed_tokens']} were counted — a fan-out that under-counts gives every helper "
         "its own share of one budget"
     )
+
+
+def test_the_budget_is_a_ceiling_reached_not_a_ceiling_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn that lands exactly on its budget is capped, not waved through.
+
+    `enforce_spend_cap` compares `billed >= budget`, and every other case in this file is strictly
+    over — 600 against 500, 1,200 against 1,000 — so `>=` and `>` were indistinguishable and a
+    one-character change to the comparison survived the whole suite.
+
+    Exactly-on-budget is the boundary a deployment actually meets, because a budget is usually a
+    round number and `agent_max_turn_billed_tokens` is compared against a running total that steps
+    through many values. `>=` is the documented intent: the budget is what a turn may spend, so
+    having spent it is having reached the ceiling.
+    """
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 1_000)
+    # Two calls of exactly 500 land the total on 1,000 — equal to the budget, never above it.
+    graph = build_langgraph_agent(model=_Model(messages=iter(_billing(500, 500, 500))))
+
+    result = asyncio.run(graph.ainvoke(turn_input("hello")))
+
+    assert result["billed_tokens"] == 1_000
+    assert spend_capped(result), (
+        "a turn that spent exactly its budget was allowed another model call — the comparison is "
+        "`>=` deliberately, and `>` would let every round-number budget overrun by one call"
+    )
+
+
+def test_tokens_spent_inside_a_tool_body_count_against_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model call the graph never sees still bills the turn, so the cap has to see it.
+
+    **The measured gap this closes.** `MeterTurnSpend` books one figure per *model response*, so it
+    is blind to two real classes of provider call: a call made inside a tool body
+    (`agent/condense.py` makes one per protocol, up to 24) and the discarded first attempt of a
+    repaired tool call (`model_calls.RepairInvalidToolCalls` re-invokes the handler and returns
+    only the repair). Measured before this fix: 5,200 tokens spent against a 150-token budget with
+    the cap never firing, which is the "drowned its plan in tool output" shape this module's
+    docstring names as the reason an iteration cap is not enough.
+
+    The turn's ledger sees both because both ride the stream the runner meters, so
+    `enforce_spend_cap` takes the larger of the two readings. Simulated here by booking into that
+    ledger directly — which is what a streamed in-tool call does — rather than by standing up the
+    protocol condenser, because the property under test is *which reading the cap trusts*.
+    """
+    from chemclaw.agent.turn_usage import TurnUsage, reset_turn_usage, set_turn_usage
+
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 1_000)
+    usage = TurnUsage()
+    token = set_turn_usage(usage)
+    try:
+        # One graph call of 100 — nowhere near the budget by the channel's reckoning — while a tool
+        # body spends 5,000 that the middleware cannot see.
+        usage.add(TurnUsage(total=5_000))
+        graph = build_langgraph_agent(model=_Model(messages=iter(_billing(100, 100))))
+        result = asyncio.run(graph.ainvoke(turn_input("hello")))
+    finally:
+        reset_turn_usage(token)
+
+    # Absent or small: with the ledger already past the budget the cap fires at the first
+    # `before_model`, so `MeterTurnSpend` may never run and never write the channel at all. That
+    # is the correct outcome — the money was already spent — and it is also why the assertion
+    # cannot be a comparison on a key that need not exist.
+    assert result.get("billed_tokens", 0) < 1_000, (
+        "the channel alone should not have reached the budget — this test would then prove nothing"
+    )
+    assert spend_capped(result), (
+        "5,000 tokens were spent inside a tool body and the cap did not fire — the guard is blind "
+        "to every provider call that is not a graph model response"
+    )
+
+
+def test_the_cap_still_binds_with_no_turn_ledger_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Off the request path the channel is the only reading, and it still works.
+
+    `metered_turn_tokens()` is 0 for a CLI turn, a template step or a test with no ledger, so `max`
+    has to degrade to exactly the previous behaviour rather than to an unbounded turn. This is the
+    counter-example that keeps the widening honest.
+    """
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 500)
+    graph = build_langgraph_agent(model=_Model(messages=iter(_billing(600, 600))))
+
+    result = asyncio.run(graph.ainvoke(turn_input("hello")))
+
+    assert spend_capped(result)

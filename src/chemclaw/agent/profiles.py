@@ -69,7 +69,12 @@ class AgentProfile(BaseModel):
     #
     # Typed here as a literal rather than imported from `LlmSettings` because this module
     # deliberately imports no settings (see the module docstring); the two are pinned against each
-    # other by `tests/test_profiles.py` instead, the way `harness_autonomy` already is.
+    # other by `tests/test_llm_effort.py` instead, the way `harness_autonomy` already is.
+    #
+    # **Only meaningful on `llm_provider='openai_compatible'`**, which
+    # `LlmSettings._effort_is_provider_scoped` enforces at startup: on the Anthropic path the same
+    # parameter enables extended thinking rather than setting an effort level (measured), which is
+    # a different decision with its own costs.
     effort: Literal["low", "medium", "high"] | None = None
 
 

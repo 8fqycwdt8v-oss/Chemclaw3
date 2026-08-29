@@ -318,3 +318,264 @@ def test_a_memory_deployment_says_it_cannot_fork_rather_than_failing_oddly() -> 
 
     assert response.status_code == 501
     assert "durable session store" in response.json()["detail"]
+
+
+async def _seed_tool_result(session_id: str, text: str) -> str:
+    """One stored tool result for `session_id`, returning its content hash."""
+    import hashlib
+
+    content_hash = hashlib.sha256(text.encode()).hexdigest()
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO tool_result_blobs (content_hash, byte_size, data) "
+                "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                (content_hash, len(text.encode()), text.encode()),
+            )
+            await cur.execute(
+                "INSERT INTO tool_result_links (session_id, content_hash, tool) "
+                "VALUES (%s, %s, 'gather_evidence') ON CONFLICT DO NOTHING",
+                (session_id, content_hash),
+            )
+        await conn.commit()
+    return content_hash
+
+
+async def _thread_age_days(thread_id: str) -> float:
+    """How old the newest checkpoint of `thread_id` claims to be, in days."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT EXTRACT(EPOCH FROM (now() - max((checkpoint->>'ts')::timestamptz))) / 86400 "
+            "FROM checkpoints WHERE thread_id = %s",
+            (thread_id,),
+        )
+        row = await cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else -1.0
+
+
+def test_a_fork_of_an_aged_conversation_is_not_expired_the_moment_it_is_made() -> None:
+    """The fork's retention clock starts at the fork, not at the parent's last turn.
+
+    **The failure this pins is silent and total.** `durable/retention.py` expires a thread on
+    `max((checkpoint->>'ts')::timestamptz)`, and a copied checkpoint carries the parent's `ts`. So a
+    fork of a conversation last touched a year ago was already past the window when it was created:
+    the next sweep deleted its whole thread while `session_owners` and `session_messages` survived,
+    leaving a session that lists, opens, and renders every turn of its transcript — and then takes
+    its next turn with **no history at all**, because context comes from the checkpointer and not
+    from the rows the chemist can see.
+
+    Asserted through the real sweep rather than on the timestamp alone, because the timestamp is
+    only interesting for what retention does with it.
+    """
+
+    async def _run() -> tuple[float, dict[str, int], dict[str, int]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        try:
+            await _seed("fork-aged")
+            # Age the parent well past the window, the way a real conversation ages.
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE checkpoints SET checkpoint = jsonb_set(checkpoint, '{ts}', "
+                        "to_jsonb((now() - interval '400 days')::text)) WHERE thread_id = %s",
+                        ("fork-aged",),
+                    )
+                await conn.commit()
+
+            child = await fork_session("fork-aged", "owner-1", None)
+            age = await _thread_age_days(child)
+
+            from chemclaw.durable.retention import prune_expired_rows
+
+            await prune_expired_rows()
+            return age, await _counts(child), await _counts("fork-aged")
+        finally:
+            monkeypatch.undo()
+
+    age, child_after, parent_after = asyncio.run(_run())
+
+    assert age < 1.0, f"the fork was born {age:.0f} days old — it inherited the parent's clock"
+    assert child_after["checkpoints"] > 0, (
+        "the retention sweep deleted the fork's whole thread: the session still lists and its "
+        "transcript still renders, but its next turn would run with no history"
+    )
+    # The parent is genuinely expired and is *meant* to go — that is what makes the assertion above
+    # about the fork's own clock rather than about the sweep having done nothing.
+    assert parent_after["checkpoints"] == 0, "the parent was not expired, so this proves nothing"
+
+
+def test_a_forks_ownership_row_commits_with_its_data_or_not_at_all() -> None:
+    """No copied transcript can exist without the ownership row that makes erasure find it.
+
+    `agent/leaver.py` scopes erasure through `SELECT session_id FROM session_owners WHERE owner =
+    ANY(...)`. A fork whose rows landed without an ownership row is therefore **structurally
+    unreachable** by the one sweep that must never miss anything — a chemist's transcript survives
+    their own erasure while the report says it was complete.
+
+    Injected at the ownership write specifically, because that is the statement the first version
+    of this module ran *after* the commit, on a separate round trip.
+    """
+
+    async def _run() -> None:
+        """Fail the ownership write specifically, after the copy has already written its rows."""
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            session_fork,
+            "_RECORD_OWNER",
+            "INSERT INTO no_such_owners (a, b, c) VALUES (%s, %s, %s)",
+        )
+        try:
+            with pytest.raises(psycopg.errors.UndefinedTable):
+                await fork_session("fork-atomic-owner", "owner-1", None)
+        finally:
+            monkeypatch.undo()
+
+    async def _message_sessions() -> set[str]:
+        """Every session id that currently holds a transcript row."""
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute("SELECT DISTINCT session_id FROM session_messages")
+            return {str(r[0]) for r in await cur.fetchall()}
+
+    async def _drive() -> tuple[set[str], set[str]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _seed("fork-atomic-owner")
+        before = await _message_sessions()
+        await _run()
+        return before, await _message_sessions()
+
+    before, after = asyncio.run(_drive())
+
+    # **The set, not a count.** This file's other tests create sessions in the same schema, so
+    # "how many transcript rows exist" is not a question about this fork — the first version of
+    # this assertion counted theirs, passed alone and failed beside them. The same isolation
+    # mistake the atomicity test above already had to be corrected for.
+    assert after == before, (
+        f"a failed fork stranded transcript rows under {sorted(after - before)} with no ownership "
+        "row — erasure scopes through session_owners and cannot reach them"
+    )
+
+
+def test_a_fork_can_still_fetch_the_tool_results_its_transcript_points_at() -> None:
+    """The fork carries the links, so a stored result resolves instead of collapsing to a preview.
+
+    A `session_messages` row holds a `result_ref` handle; `api/tool_results.py` resolves it through
+    `tool_result_links` joined on `session_id`. Copy the transcript without the links and every
+    handle in the fork resolves to nothing — the chemist sees the 400-character preview where the
+    parent shows what the tool actually returned (`D-2026-08-09-a-preview-is-not-a-result`).
+
+    The blob is shared rather than copied, which the hash assertion pins: a fork must cost one row
+    per result, not a second copy of the bytes.
+    """
+
+    async def _run() -> tuple[list[str], list[str]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _seed("fork-results")
+        content_hash = await _seed_tool_result("fork-results", "the full tool output")
+
+        child = await fork_session("fork-results", "owner-1", None)
+
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT content_hash FROM tool_result_links WHERE session_id = %s", (child,)
+            )
+            child_hashes = [str(r[0]) for r in await cur.fetchall()]
+        return child_hashes, [content_hash]
+
+    child_hashes, parent_hashes = asyncio.run(_run())
+
+    assert child_hashes == parent_hashes, (
+        "the fork holds no link to the parent's tool results, so every result_ref in its "
+        "transcript resolves to nothing and renders as a preview"
+    )
+
+
+def test_the_route_forks_under_the_caller_and_keeps_the_parents_profile() -> None:
+    """The success path of `POST /sessions/{id}/fork`, which nothing exercised.
+
+    **Both arguments the route passes are security-relevant and neither was covered.** Mutating the
+    handler to `fork_session(session_id, "somebody-else", None)` left 64 tests green: the fork
+    would land under a principal who never asked for it, and would drop the parent's profile —
+    which is attenuation-only, so restoring the default *widens* what the child may do. That is the
+    exact widening `session_fork`'s docstring argues against and `test_the_fork_is_owned_by_the_
+    caller_and_keeps_the_parent_s_profile` pins one layer down, at a function the route could stop
+    calling correctly without anything noticing.
+
+    Driven through the real app with a durable store, because the seam under test *is* the handler.
+    """
+    from fastapi.testclient import TestClient
+
+    from chemclaw.agent.session_store import SessionOwnerStore
+    from chemclaw.api.auth import Principal, require_principal
+    from tests.test_service import _app
+
+    async def _prepare() -> str:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        parent = "fork-route-parent"
+        await _seed(parent)
+        await SessionOwnerStore().record(parent, "alice", "safety")
+        return parent
+
+    parent = asyncio.run(_prepare())
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(settings, "session_store", "postgres")
+        app = _app()
+        app.dependency_overrides[require_principal] = lambda: Principal(
+            oid="alice", upn="a@corp", roles=frozenset()
+        )
+        client = TestClient(app)
+        response = client.post(f"/sessions/{parent}/fork")
+
+    assert response.status_code == 200, response.text
+    child = response.json()["session_id"]
+
+    found, owner, profile = asyncio.run(SessionOwnerStore().lookup(child))
+    assert found
+    assert owner == "alice", f"the fork landed under {owner!r} rather than the caller"
+    assert profile == "safety", (
+        f"the fork dropped the parent's profile (got {profile!r}) — a profile only ever narrows, "
+        "so the child can now do more than the session it was forked from"
+    )
+
+
+def test_forking_a_session_with_no_state_is_a_409_not_a_500() -> None:
+    """A caller error is reported as one — the mapping `SessionForkError` exists to produce.
+
+    Untested until now: dropping the `except SessionForkError` clause turns this into an unhandled
+    exception and a 500, which tells a chemist "the service broke" about a request that was simply
+    made too early. 409 says *this session has taken no turn yet*, which is actionable.
+    """
+    from fastapi.testclient import TestClient
+
+    from chemclaw.agent.session_store import SessionOwnerStore
+    from chemclaw.api.auth import Principal, require_principal
+    from tests.test_service import _app
+
+    async def _prepare() -> str:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        empty = "fork-route-empty"
+        await SessionOwnerStore().record(empty, "alice", None)
+        return empty
+
+    empty = asyncio.run(_prepare())
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(settings, "session_store", "postgres")
+        app = _app()
+        app.dependency_overrides[require_principal] = lambda: Principal(
+            oid="alice", upn="a@corp", roles=frozenset()
+        )
+        client = TestClient(app)
+        response = client.post(f"/sessions/{empty}/fork")
+
+    assert response.status_code == 409, f"expected a caller error, got {response.status_code}"
+    assert "no saved state" in response.json()["detail"]

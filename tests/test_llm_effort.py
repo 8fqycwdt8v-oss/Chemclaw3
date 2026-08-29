@@ -15,6 +15,7 @@ reject an explicit null — the rule `core/config/llm.py` records having broken 
 from typing import Any
 
 import pytest
+from pydantic import SecretStr, ValidationError
 
 from chemclaw.agent.llm_provider import build_chat_model
 from chemclaw.agent.profiles import AgentProfile
@@ -35,27 +36,30 @@ def _anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
 
-@pytest.mark.parametrize("provider", ["openai_compatible", "anthropic"])
-def test_the_configured_effort_reaches_the_client_on_either_provider(
-    monkeypatch: pytest.MonkeyPatch, provider: str
+def test_the_configured_effort_reaches_the_wire_on_the_provider_that_supports_it(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both branches send it, which is why it lives in `_generation_options` and not in a branch.
+    """Asserted on the **request payload**, not on the constructed object.
 
-    Parametrised over the provider rather than written twice, because the claim being made is
-    precisely that the two agree — a per-provider test pair could pass with one of them silently
-    doing nothing.
+    The first version of this file asserted `model.reasoning_effort == "high"` and called that
+    proof the feature worked. It is not: both clients are `extra="ignore"` pydantic models, so the
+    attribute says the constructor accepted a kwarg and says nothing about what is sent. That gap
+    is exactly where the defect this test now guards lived — the same attribute assertion passed on
+    Anthropic while the wire carried `output_config` plus injected extended thinking.
+
+    `_default_params` is what `ChatOpenAI` builds its request from, so this reads the payload the
+    endpoint would receive.
     """
-    (_openai if provider == "openai_compatible" else _anthropic)(monkeypatch)
+    _openai(monkeypatch)
     monkeypatch.setattr(settings, "llm_effort", "high")
 
-    model = build_chat_model()
+    params = build_chat_model()._default_params
 
-    assert getattr(model, "reasoning_effort", None) == "high"
+    assert params["reasoning_effort"] == "high"
 
 
-@pytest.mark.parametrize("provider", ["openai_compatible", "anthropic"])
 def test_an_unset_effort_leaves_the_parameter_off_the_request(
-    monkeypatch: pytest.MonkeyPatch, provider: str
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The shipped default sends nothing — an absent key, not a null one.
 
@@ -63,12 +67,58 @@ def test_an_unset_effort_leaves_the_parameter_off_the_request(
     dislikes is deliberately *not* failed over (`_failover_exceptions`), so a knob that defaulted
     to sending something would fail every turn on an endpoint that had never been asked about it.
     """
-    (_openai if provider == "openai_compatible" else _anthropic)(monkeypatch)
+    _openai(monkeypatch)
     monkeypatch.setattr(settings, "llm_effort", None)
 
-    model = build_chat_model()
+    params = build_chat_model()._default_params
 
-    assert getattr(model, "reasoning_effort", None) is None
+    assert params.get("reasoning_effort") is None
+
+
+def test_effort_is_refused_on_anthropic_where_it_means_extended_thinking() -> None:
+    """The config refuses the combination at startup rather than at the first turn.
+
+    **What the refusal is protecting against, measured rather than reasoned:** against
+    `langchain-anthropic`, `reasoning_effort="high"` renders as `output_config={'effort': 'high'}`
+    *and* `thinking={'type': 'adaptive', 'display': 'summarized'}`. That is extended thinking, not
+    an effort level — and it cannot be combined with a set `temperature` (a 400, which is not
+    failed over, so every turn fails) and draws its tokens from `llm_max_tokens`.
+
+    Constructed rather than monkeypatched, because a `@model_validator` runs at construction and
+    `setattr` on a live settings object never consults it — which is why the rest of this file
+    cannot cover this and a test that patched the singleton would prove nothing.
+    """
+    with pytest.raises(ValidationError, match="only supported on"):
+        LlmSettings(llm_provider="anthropic", llm_effort="high")
+
+
+def test_the_anthropic_payload_is_why_that_refusal_exists() -> None:
+    """Pins the upstream behaviour the refusal is written against, so a change is visible.
+
+    If `langchain-anthropic` ever makes `reasoning_effort` a plain effort level with no injected
+    thinking, this test goes red and the refusal above can be revisited — which is the point of
+    asserting somebody else's behaviour rather than only our reaction to it. The same shape
+    `tests/test_upstream_surface.py` uses for every other coupling to an upstream promise.
+    """
+    from langchain_anthropic import ChatAnthropic
+
+    # `max_tokens` and `reasoning_effort` are pydantic field aliases upstream does not expose to a
+    # type checker, which is itself part of the point: the kwarg surface is not statically known,
+    # so what a client accepts has to be measured rather than trusted.
+    client = ChatAnthropic(  # type: ignore[call-arg]
+        model_name="claude-sonnet-5",
+        api_key=SecretStr("x"),
+        max_tokens=4096,
+        stop=None,
+        reasoning_effort="high",
+    )
+    payload = client._get_request_payload([("user", "hi")])
+
+    assert payload["output_config"] == {"effort": "high"}
+    assert payload["thinking"]["type"] == "adaptive", (
+        "upstream no longer injects extended thinking for reasoning_effort — "
+        "LlmSettings._effort_is_provider_scoped can be revisited"
+    )
 
 
 def test_a_profile_s_effort_beats_the_deployment_s(monkeypatch: pytest.MonkeyPatch) -> None:
