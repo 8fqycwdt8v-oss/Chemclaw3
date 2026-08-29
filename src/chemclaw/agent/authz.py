@@ -170,6 +170,14 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         # classified below — asking somebody to run four reactions spends real resources, and the
         # plan gate is exactly the control that should see it.
         "check_pending_requests",
+        # The commitment mirror (D-2026-08-29-a-mirror-is-not-a-plan). A read of rows a
+        # portfolio export wrote. There is deliberately no writing counterpart: moving a
+        # milestone belongs to the system that owns it.
+        "review_commitments",
+        # The evidence pack (D-2026-08-29-an-evidence-pack-is-assembly-not-capture). Five
+        # SELECTs scoped to one conversation. It returns free text where the other
+        # operational readings do not, and the session scoping is what makes that safe.
+        "assemble_evidence_pack",
         # The operational read model (D-2026-08-29). Four `GROUP BY`s over tables this system
         # itself wrote, returning counts and bounded vocabularies. It is a read in the strongest
         # sense available here: it cannot even reach a caller's free text, let alone write one.

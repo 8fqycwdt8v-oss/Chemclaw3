@@ -134,6 +134,16 @@ explicitly, with the `while` and the `due_at` check deciding which of the two ev
 Neither is visible without a broker, which is why these tests drive the time-skipping server rather
 than calling the workflow body.
 
+**And a third, found by a declaration gate rather than by a test of the workflow itself.** `AwaitAnswerWorkflow` was registered on the `background` queue and **not imported by**
+`durable/background_worker.py`, so no worker in a real deployment would have served it: every
+wait would have sat in the queue forever, which is indistinguishable from a wait nobody has
+answered yet. That is precisely the failure `durable/registry.py`'s own docstring says the
+registry exists to prevent — *"a workflow that is written, tested and imported but missing
+from the worker's list is a workflow that never runs, and nothing fails until someone submits
+one and it sits in the queue forever"* — reached through the one door the registry does not
+cover, because registration happens at *import* and the worker module is what imports.
+`tests/test_workflow_registry.py` caught it while asking a different question.
+
 ## Consequences
 
 - `request_external_input` is an expensive action (`CORE_EXPENSIVE_ACTIONS`). The resource it spends

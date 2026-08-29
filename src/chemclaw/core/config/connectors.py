@@ -163,3 +163,10 @@ class ConnectorSettings(BaseSettings):
     def connectors_enabled_list(self) -> list[str]:
         """The explicitly enabled connector names; empty means "every discovered bundle"."""
         return [c for c in self.connectors_enabled.split(os.pathsep) if c]
+
+    # How long an irreversible effect's per-call approval stays open before the job gives up
+    # (`D-2026-08-29-an-effect-declares-whether-it-can-be-undone`). Deliberately short beside the
+    # durable wait's 90-day ceiling: an approval nobody answered in three days is a decision that
+    # was not taken, and the arguments a chemist approved a week ago describe a situation that has
+    # moved. An expiry fails the job and attempts nothing, which is the safe direction.
+    effect_approval_deadline_days: float = Field(default=3.0, gt=0)

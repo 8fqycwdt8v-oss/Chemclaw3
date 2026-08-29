@@ -53,7 +53,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.ids import stable_hash
     from chemclaw.durable import pending_store
     from chemclaw.durable.notify import notify_session_best_effort
-    from chemclaw.durable.publish import BAD_DATA_RETRY
+    from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
     from chemclaw.durable.registry import durable_activity, durable_workflow
 
 #: The push-back kind a waiting request sends into the requester's mailbox. One kind for both the
@@ -214,6 +214,7 @@ class AwaitAnswerWorkflow:
             open_pending_request_activity,
             _OpenInput(request_id=request_id, request=request, due_at=due_at.isoformat()),
             start_to_close_timeout=activity_timeout,
+            schedule_to_start_timeout=queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,
         )
         await self._notify(request, request_id, due_at.isoformat())
@@ -286,6 +287,7 @@ class AwaitAnswerWorkflow:
                     start_to_close_timeout=timedelta(
                         seconds=settings.awaiting_activity_timeout_seconds
                     ),
+                    schedule_to_start_timeout=queue_wait_timeout(),
                     retry_policy=BAD_DATA_RETRY,
                 )
                 await self._notify(request, request_id, due_at.isoformat())
@@ -343,6 +345,7 @@ class AwaitAnswerWorkflow:
                 payload=payload or {},
             ),
             start_to_close_timeout=timeout,
+            schedule_to_start_timeout=queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,
             cancellation_type=(
                 workflow.ActivityCancellationType.ABANDON

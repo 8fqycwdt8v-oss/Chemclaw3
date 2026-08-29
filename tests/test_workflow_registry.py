@@ -279,6 +279,11 @@ _MAY_PARK = frozenset(
         "DocumentShareSyncWorkflow",
         "ObservationSynthesisWorkflow",
         "PublishResultsWorkflow",
+        # The commitment mirror. A periodic job over an export nobody is waiting on: a bug in it
+        # should park until somebody ships a fix rather than fail, because a mirror that stops
+        # refreshing reports its own staleness through `observed_at` and every reading leads with
+        # it — so the failure is visible without the workflow having to fail.
+        "CommitmentSyncWorkflow",
         "RetentionWorkflow",
     }
 )

@@ -266,6 +266,83 @@ class JobParam(BaseModel):
     required: bool = True
 
 
+class EffectSpec(BaseModel):
+    """What a job changes in a system this deployment does not own, and whether it can be undone.
+
+    **The write path was never missing; the distinction was.** `ConnectorManifest` already routes
+    mutation through `jobs:` — "which core authorizes, dry-run-gates and attributes" — and has since
+    D-029. What nothing said was whether a job writes *our* database or somebody else's system of
+    record, and the two are not the same act: re-running a cached calculation is free, and filing a
+    deviation twice is a second deviation. Nothing declared reversibility either, so every job was
+    gated identically whether it could be undone or not.
+
+    That gap is what `D-2026-08-15-the-plan-gate-stays-a-refusal-because-an-interrupt-cannot-ask-
+    the-question` left open in as many words: `HumanInTheLoopMiddleware` was declined for plan
+    approval and **"not declined for per-call approval of an irreversible action, which is a
+    different, still-open question."** This is the declaration that makes that question askable.
+
+    Declaring this changes three things at once, and each is enforced rather than requested:
+
+    - the job is **state-changing** and **expensive**, so the plan gate and `authorize_trigger` both
+      see it (`_effects_are_gated` below refuses a manifest that says otherwise);
+    - `reversal: irreversible` means the run **suspends on a human approval before it acts**, which
+      is what the durable wait exists for and is a per-call decision rather than a plan-wide one;
+    - every attempt is recorded in `effects` — before and after — so an evidence pack can say what
+      this system changed outside itself, and so a crashed run leaves a row saying it *might* have.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    system: str = Field(
+        min_length=1,
+        description=(
+            "What this reaches, in the operator's words — 'the QMS', 'the LIMS', 'the portfolio "
+            "tool'. Free text and never parsed: it is what a person reads in an approval request "
+            "and in an evidence pack, and a vocabulary this repository invented would be a list of "
+            "the systems it happened to imagine."
+        ),
+    )
+    reversal: Literal["idempotent", "compensating", "irreversible"] = Field(
+        description=(
+            "Whether the effect can be undone. `idempotent` — applying it twice is applying it "
+            "once (setting a status, upserting a row). `compensating` — it can be undone by "
+            "another declared job, named in `compensation`. `irreversible` — it cannot, so a human "
+            "approves this specific call before it runs. **There is no default**, because the "
+            "safe-looking one is the wrong one: a job whose author did not think about reversal is "
+            "far likelier to be irreversible than idempotent, and a default would let the "
+            "un-thought-about case take the cheapest gate."
+        )
+    )
+    compensation: str = Field(
+        default="",
+        description=(
+            "The job that undoes this one, for `reversal: compensating`. A job name in this same "
+            "bundle — not a workflow type, so it is gated, attributed and recorded exactly as any "
+            "other effect, including being an effect itself."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _compensating_names_its_compensation(self) -> Self:
+        """A compensating effect must name what undoes it, and no other kind may name one.
+
+        Both directions, because both are a claim: an unnamed compensation is a reversibility
+        nobody can perform, and a compensation on an irreversible effect is the opposite claim in
+        the same field.
+        """
+        if self.reversal == "compensating" and not self.compensation:
+            raise ValueError(
+                "an effect declaring `reversal: compensating` must name the job that undoes it "
+                "in `compensation:` — a reversibility nobody can perform is not one"
+            )
+        if self.reversal != "compensating" and self.compensation:
+            raise ValueError(
+                f"an effect declaring `reversal: {self.reversal}` also names a `compensation:`; "
+                "only a compensating effect has one"
+            )
+        return self
+
+
 class JobSpec(BaseModel):
     """A durable capability: one generated agent tool that starts one connector-owned workflow.
 
@@ -332,6 +409,10 @@ class JobSpec(BaseModel):
     precondition: str | None = Field(default=None, pattern=r"^[\w.]+:[A-Za-z_]\w*$")
     expensive: bool = False
     publish_to_graph: bool = False
+    # What this job changes *outside* this deployment, and whether it can be undone. Absent means
+    # the job's writes are this system's own — a calculation cached, a note proposed, a row
+    # recorded — which is every job in this repository today.
+    effect: EffectSpec | None = None
     # How long the launcher waits for the run to finish before handing back a job id instead.
     # Unset (the default) means "always a job": start it, return the id, poll it.
     #
@@ -377,6 +458,23 @@ class JobSpec(BaseModel):
     # exhausts the whole ceiling, the activity's retry policy becomes unreachable, and the run dies
     # as a bare `WorkflowExecutionTimedOut` naming no setting at all.
     timeout_seconds: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _effects_are_gated(self) -> Self:
+        """A job that changes somebody else's system is expensive by declaration, not by choice.
+
+        `expensive` is what puts a job in `authorize_trigger`'s set, so a manifest could otherwise
+        declare an external effect that any authenticated user could trigger. Refused rather than
+        silently corrected: a manifest saying `expensive: false` beside an `effect:` block is an
+        author who believed one of the two, and which one they believed matters.
+        """
+        if self.effect is not None and not self.expensive:
+            raise ValueError(
+                f"job {self.name!r} declares an `effect:` on {self.effect.system!r} but is not "
+                "`expensive: true`. A job that changes a system this deployment does not own must "
+                "be entitled, not merely authenticated"
+            )
+        return self
 
     @model_validator(mode="after")
     def _one_way_to_declare_params(self) -> Self:

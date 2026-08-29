@@ -198,6 +198,13 @@ jobs:
       - name: Validate result sinks
         run: make sink-validate
 
+      # Same discipline one seam over: a channel named in `CHEMCLAW_DELIVERY_CHANNELS` with no
+      # folder, or a `config:` block the driver's signature refuses, surfaces as messages silently
+      # not arriving — which looks exactly like a deployment with nothing to deliver
+      # (D-2026-08-29-a-digest-nobody-receives-is-not-delivered).
+      - name: Validate delivery channels
+        run: make channel-validate
+
       - name: Validate step templates
         run: make template-validate
 

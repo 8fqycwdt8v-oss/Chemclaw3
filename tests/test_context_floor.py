@@ -127,15 +127,25 @@ load_profiles()
 #:
 #: **Lowering this constant is the commit that proves a reduction happened, so it is not lowered by
 #: a commit that only measured one.**
-#: **Raised to 29,900 on 2026-08-29, and the reason is recorded rather than assumed.** F2 and F3
-#: added three tools to the `default` surface — `review_activity`, `request_external_input` and
-#: `check_pending_requests` — measured at 1,399 tokens between them *after* a trimming pass took
-#: 225 off the first two by moving developer rationale out of the docstrings the schema ships. The
-#: prefix went 28,210 → 29,609. Two of the three are the reason a project leader can be answered at
-#: all (the operational read model and the inbox over the durable wait), so this is capability
-#: rather than drift — but it is exactly the growth the § 5 row is about, and it makes the
-#: `default` allow-list below the next thing worth doing rather than a nice-to-have.
-CEILINGS: dict[str, int] = {"__default__": 29_900}
+#: **Raised twice on 2026-08-29, 28,210 → 30,390, and the arithmetic is recorded rather than
+#: assumed.** The eight infrastructure findings of the 2026-08-28 audit added five tools to the
+#: `default` surface, measured at **2,170 tokens between them** after a trimming pass took 225 out
+#: of the two largest by moving developer rationale out of the docstrings a schema ships:
+#: `review_activity` 585, `request_external_input` 533, `review_commitments` 421,
+#: `assemble_evidence_pack` 350, `check_pending_requests` 281.
+#:
+#: Four of the five are the reason a project leader can be answered at all — the operational read
+#: model, the inbox over the durable wait, the commitment mirror and the evidence pack — so this is
+#: capability rather than drift. It is also **exactly the growth § 5's row is about**, and two
+#: raises in one day is the argument for that row rather than against it: the `default` allow-list
+#: measures **-5,787 tokens (-21%)**, which is more than twice what this work added, and it is a
+#: `data/profiles` edit rather than a tool change. That row is now the next thing worth doing here,
+#: and it stays blocked on the live lane for the reason it gives — a cheaper prompt that stops
+#: finding tools is a regression with a good-looking metric.
+#:
+#: **Lowering this constant is the commit that proves a reduction happened, so it is not lowered by
+#: a commit that only measured one.**
+CEILINGS: dict[str, int] = {"__default__": 30_500}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

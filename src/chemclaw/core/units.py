@@ -50,6 +50,19 @@ Dimension = Literal[
     "molar_mass",
     "length",
     "fraction",
+    # **A log scale is its own dimension, and each one is its own.** `log S` and `pKa` are both
+    # "dimensionless" in the sense that they carry no units, and treating them that way would make
+    # them interconvertible with each other and with `%` — so a chemist reporting a pKa into the
+    # solubility ledger would be accepted silently. Nothing converts into a log scale, which is
+    # exactly what a dimension of its own expresses.
+    "log_solubility",
+    "acidity",
+    # Mass per volume is **not** the same dimension as molarity here, deliberately. Converting
+    # mg/mL to M needs the molar mass of the substance, which is a fact about the sample rather
+    # than about the units — and this module has no algebra over derived units precisely so that it
+    # cannot invent one. Keeping them apart means `0.5 mg/mL` compared against a limit in `mM`
+    # refuses, which is the right answer: the conversion needs an input nobody supplied.
+    "mass_concentration",
 ]
 
 
@@ -69,18 +82,36 @@ class Unit:
     offset: float = 0.0
 
 
-# The registry. One row per spelling a chemist actually writes, including the ones that differ only
-# in casing or in a micro sign, because a value refused for a spelling is a value not recorded.
+# The registry, and the reason there are two of them.
+#
+# **Unit symbols are case-sensitive, and folding them is a real hazard rather than a pedantry.**
+# `M` is molar and `m` is metre; `mM` is millimolar and `mm` is millimetre. A case-insensitive
+# lookup makes each of those pairs one spelling and picks whichever was registered first — so a
+# limit stated in `mM` would be read as millimetres, refuse nothing, and compare against a
+# concentration as though it were a length. Measured while building this: a folded registry could
+# not hold molarity and length at once.
+#
+# So `_UNITS` is exact and `_FOLDED` is the convenience layer, holding a lowercase spelling **only
+# while it is unambiguous**. A fold claimed by two different units maps to `None`, and `parse_unit`
+# refuses it by name rather than guessing — which is how `mm` behaves once both are registered.
 _UNITS: dict[str, Unit] = {}
+_FOLDED: dict[str, Unit | None] = {}
 
 
 def _register(unit: Unit, *aliases: str) -> None:
-    """Add a unit under its symbol and every spelling that means it."""
+    """Add a unit under its exact symbol and every spelling that means it."""
     for name in (unit.symbol, *aliases):
-        key = name.strip().lower()
+        key = name.strip()
         if key in _UNITS:  # pragma: no cover - a programming error, caught at import
-            raise ValueError(f"unit spelling {name!r} is already registered")
+            raise ValueError(
+                f"unit spelling {key!r} (for {unit.symbol!r}) is already registered for "
+                f"{_UNITS[key].symbol!r}"
+            )
         _UNITS[key] = unit
+        folded = key.lower()
+        # Claimed by a *different* unit already: neither may answer for it.
+        existing = _FOLDED.get(folded, unit)
+        _FOLDED[folded] = unit if existing is unit else None
 
 
 # Dimensionless, and the two that are dimensionless but *scaled* — which is the distinction that
@@ -101,9 +132,9 @@ _register(Unit("mol", "amount"), "mole", "moles")
 _register(Unit("mmol", "amount", 1e-3), "millimole")
 _register(Unit("umol", "amount", 1e-6), "µmol", "μmol", "micromole")
 
-_register(Unit("L", "volume"), "l", "litre", "liter")
-_register(Unit("mL", "volume", 1e-3), "ml", "millilitre", "milliliter")
-_register(Unit("uL", "volume", 1e-6), "µl", "μl", "ul", "microlitre", "microliter")
+_register(Unit("L", "volume"), "litre", "liter")
+_register(Unit("mL", "volume", 1e-3), "millilitre", "milliliter")
+_register(Unit("uL", "volume", 1e-6), "µl", "μl", "microlitre", "microliter")
 
 _register(Unit("s", "time"), "sec", "second", "seconds")
 _register(Unit("min", "time", 60.0), "minute", "minutes")
@@ -119,23 +150,30 @@ _register(Unit("kPa", "pressure", 1e3))
 _register(Unit("bar", "pressure", 1e5))
 _register(Unit("mbar", "pressure", 1e2), "millibar")
 
-_register(Unit("kJ/mol", "energy_per_amount"), "kj/mol", "kjmol")
-_register(Unit("kcal/mol", "energy_per_amount", 4.184), "kcal/mol", "kcalmol")
+_register(Unit("kJ/mol", "energy_per_amount"), "kjmol", "kj mol-1")
+_register(Unit("kcal/mol", "energy_per_amount", 4.184), "kcalmol", "kcal mol-1")
 _register(Unit("hartree", "energy_per_amount", 2625.4996), "eh", "ha", "au")
-_register(Unit("eV", "energy_per_amount", 96.485_332), "ev")
+_register(Unit("eV", "energy_per_amount", 96.485_332), "electronvolt")
 
-_register(Unit("M", "concentration"), "mol/l", "mol/L", "molar")
+_register(Unit("M", "concentration"), "mol/L", "molar")
 _register(Unit("mM", "concentration", 1e-3), "mmol/l", "millimolar")
 _register(Unit("uM", "concentration", 1e-6), "µm", "μm", "umol/l", "micromolar")
-_register(Unit("mg/mL", "concentration", -1.0), "mg/ml", "g/L", "g/l")
+_register(Unit("mg/mL", "mass_concentration"), "g/L")
+_register(Unit("ug/mL", "mass_concentration", 1e-3), "µg/mL", "μg/mL", "mg/L")
 
 _register(Unit("g/mol", "molar_mass"), "g mol-1", "da", "dalton")
 
-_register(Unit("m", "length"), "metre", "meter")
+# The two calibrated properties' own scales, spelled exactly as `_CALIBRATED` spells them in
+# `connectors/calc/server/tools.py`, because the ledger's unit column and this registry have to
+# agree on the string or the check is a no-op.
+_register(Unit("log S", "log_solubility"), "logs", "log10(mol/l)")
+_register(Unit("pKa", "acidity"))
+
+_register(Unit("m", "length"), "metre", "meter")  # `mm`/`cm`/`nm` follow below
 _register(Unit("cm", "length", 1e-2), "centimetre", "centimeter")
 _register(Unit("mm", "length", 1e-3), "millimetre", "millimeter")
 _register(Unit("nm", "length", 1e-9), "nanometre", "nanometer")
-_register(Unit("A", "length", 1e-10), "angstrom", "å", "Å")
+_register(Unit("angstrom", "length", 1e-10), "å", "ang")
 
 
 class UnitError(ValueError):
@@ -153,12 +191,20 @@ def parse_unit(symbol: str) -> Unit:
     would put "0.5 furlongs" in the same column as "0.5", and every comparison downstream would
     then be arithmetic on a number whose meaning nobody can recover.
     """
-    key = symbol.strip().lower()
+    key = symbol.strip()
     if key in _UNITS:
         return _UNITS[key]
+    folded = _FOLDED.get(key.lower(), "missing")
+    if folded is None:
+        raise UnitError(
+            f"unit {symbol!r} is ambiguous once case is ignored — this domain distinguishes M from "
+            "m and mM from mm, so write the symbol exactly"
+        )
+    if isinstance(folded, Unit):
+        return folded
     raise UnitError(
-        f"unknown unit {symbol!r}. Known spellings include: "
-        f"{', '.join(sorted({unit.symbol or '(dimensionless)' for unit in _UNITS.values()}))}"
+        f"unknown unit {symbol!r}. Known symbols: "
+        f"{', '.join(sorted(unit.symbol or '(dimensionless)' for unit in set(_UNITS.values())))}"
     )
 
 
@@ -239,3 +285,22 @@ class Measurement:
 def same_dimension(first: str, second: str) -> bool:
     """Whether two unit spellings measure the same kind of thing. Raises on an unknown one."""
     return parse_unit(first).dimension == parse_unit(second).dimension
+
+
+def reconcile(value: float, reported: str, expected: str) -> float:
+    """`value`, reported in `reported`, expressed in `expected` — or refuse.
+
+    The one call a ledger makes. `reported` empty means the caller stated no unit, which is
+    accepted as "the ledger's own unit" rather than refused: every measurement stored before this
+    existed carries an empty unit, and refusing the unstated case would make the common path fail
+    while the *wrong* path (a number in the wrong unit, silently stored) is the one this exists to
+    catch.
+
+    Raises:
+        UnitError: When `reported` is unknown, or measures something `expected` does not. A pKa
+            reported into the solubility ledger, or a `mg/mL` where the column holds log S, is
+            refused here rather than becoming a residual nobody can explain.
+    """
+    if not reported.strip():
+        return value
+    return Measurement.of(value, reported).to(expected).value

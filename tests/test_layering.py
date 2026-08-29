@@ -372,10 +372,19 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # driver seam with the same shape and the same credential discipline. Nothing imports back:
     # `publish` is imported *by* `durable` (the drain) and lazily by `science` (the enqueue hook),
     # and imports neither.
+    # The outbound delivery seam (F7). A leaf on the kernel, like `publish`: it reads config
+    # and the log redaction filter and nothing else. `durable` imports it (the digest job
+    # is the caller); it imports nothing back, and nothing reads *from* a channel.
+    ("chemclaw.deliver", "chemclaw.core"),
+    ("chemclaw.durable", "chemclaw.deliver"),
     ("chemclaw.publish", "chemclaw.core"),
     ("chemclaw.publish", "chemclaw.ingest"),
     ("chemclaw.durable", "chemclaw.publish"),
     ("chemclaw.cli", "chemclaw.publish"),
+    # `cli/validate_channels.py` is `make channel-validate`, the same shape every other
+    # validator entrypoint has: a terminal command that reads one seam's manifests and
+    # binds each driver's signature. Nothing in `deliver` imports back.
+    ("chemclaw.cli", "chemclaw.deliver"),
     # The `results` bundle's job re-queues stored calculations, and the walk it runs is
     # `publish.backfill`. That module is in the publish layer rather than in `cli/` *because* of
     # this edge: the walk began in the CLI, which made this a connector importing a terminal

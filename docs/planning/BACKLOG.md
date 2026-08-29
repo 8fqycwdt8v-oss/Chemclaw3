@@ -582,6 +582,15 @@ only holds defects can only ever restore the system to what it already intended 
       the skill gate. The two single-job wrapper templates (681 tokens) are the other candidate, and
       deleting a named protocol the shipped skill routes to is its own decision.
 
+      **2026-08-29 makes this the next thing worth doing here.** The eight infrastructure
+      findings added five tools to `default` — `review_activity`, `request_external_input`,
+      `check_pending_requests`, `review_commitments`, `assemble_evidence_pack` — measured at
+      **2,170 tokens** after a trimming pass, and the ceiling moved twice in one day
+      (28,210 → 30,390, ceiling now 30,500). Four of the five are what makes the manager
+      persona answerable at all, so this is capability rather than drift — and the
+      allow-list's **-5,787** is more than twice what the whole of that work cost. Still
+      blocked on the live lane for the reason above.
+
 - [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
       what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
       carry design arguments in their class docstrings — *"One `objectives` field rather than a lead

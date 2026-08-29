@@ -1,0 +1,12 @@
+# Deliver each message as a file into a mounted directory.
+#
+# No client, no credential and no outbound call: the same argument `chemclaw.ingest.documents`
+# makes in the other direction, and the reason this is the channel a site can enable first.
+name: share
+description: >-
+  Write each message into a mounted directory as Markdown. For a site that already mounts a team
+  share — the delivery costs no credential and makes no outbound call, so it needs no egress rule.
+driver: chemclaw.deliver.driver:file_channel
+config:
+  directory: /var/chemclaw/outbox
+  suffix: .md

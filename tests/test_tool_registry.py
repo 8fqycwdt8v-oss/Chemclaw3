@@ -73,6 +73,12 @@ _EXPECTED_INPROCESS_TOOLS = {
     # bundle owning it would make four copies of one deadline.
     "request_external_input",
     "check_pending_requests",
+    # The commitment mirror (D-2026-08-29). In-process because the mirror is core's: it
+    # spans every source, and a bundle owning it could see only its own.
+    "review_commitments",
+    # The evidence pack (D-2026-08-29). In-process for the reason every operational read
+    # is: it spans the whole record, and a bundle could see only its own part of it.
+    "assemble_evidence_pack",
 }
 
 

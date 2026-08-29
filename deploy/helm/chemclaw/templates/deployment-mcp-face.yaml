@@ -1,0 +1,76 @@
+{{- /* Core's read-only MCP face: this system reachable as a *tool* by somebody else's agent. */ -}}
+{{- /* Its own Deployment rather than a flag on the front door, because it serves a different */ -}}
+{{- /* surface on a different credential and must be scalable and revocable independently — a */ -}}
+{{- /* front door that also spoke MCP would have one bearer token standing in for two very */ -}}
+{{- /* different authorities (D-2026-08-29-a-digest-nobody-receives-is-not-delivered). */ -}}
+{{- /* Off by default: a deployment that does not want to be reachable renders no pod at all, */ -}}
+{{- /* which is a stronger posture than a pod nobody has a token for. */ -}}
+{{- if .Values.mcpFace.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "chemclaw.name" . }}-mcp-face
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-face
+spec:
+  replicas: {{ .Values.mcpFace.replicas }}
+  selector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mcp-face
+  template:
+    metadata:
+      annotations:
+        {{- include "chemclaw.configChecksum" . | nindent 8 }}
+      labels:
+        {{- include "chemclaw.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mcp-face
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- include "chemclaw.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "chemclaw.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: mcp-face
+          image: "{{ include "chemclaw.image" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "chemclaw.containerSecurityContext" . | nindent 12 }}
+          env:
+            - name: CHEMCLAW_COMPONENT
+              value: "mcp-face"
+            {{- include "chemclaw.otelResourceEnv" (dict "component" "mcp-face") | nindent 12 }}
+            {{- include "chemclaw.env" . | nindent 12 }}
+          envFrom:
+            {{- include "chemclaw.envFrom" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+          {{- /* `/healthz` and `/metrics` stay open here as on every connector: a kubelet probe
+               and a Prometheus scrape carry no identity. Only `/mcp` requires the bearer, and it
+               fails closed when the variable is unset. */}}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources.service | nindent 12 }}
+          volumeMounts:
+            {{- include "chemclaw.tlsMount" . | nindent 12 }}
+            {{- include "chemclaw.knowledgeMounts" . | nindent 12 }}
+        {{- include "chemclaw.knowledgeSidecar" . | nindent 8 }}
+      initContainers:
+        {{- include "chemclaw.knowledgeInit" . | nindent 8 }}
+      volumes:
+        {{- include "chemclaw.volumes" . | nindent 8 }}
+{{- end }}

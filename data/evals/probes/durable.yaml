@@ -264,6 +264,7 @@ probes:
       The stability pull for lot 42 is due from QC in two weeks and I keep forgetting to chase it.
       Can you hold that open and tell me when it lands?
     expects_tools: [request_external_input]
+    expects_job: true
     forbids_claims:
       - "that the system will email, message or notify anyone outside it"
       - "a result, timepoint or specification for the pull"

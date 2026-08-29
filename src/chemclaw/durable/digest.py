@@ -35,12 +35,14 @@ import logging
 from collections.abc import Sequence
 from datetime import timedelta
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.subscriptions import Subscription, all_subscriptions, mark_reported
     from chemclaw.core.config import settings
+    from chemclaw.deliver.message import Message
+    from chemclaw.deliver.registry import deliver, delivery_enabled
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.kg.graph import load_notes
     from chemclaw.kg.note import Note
@@ -178,6 +180,35 @@ async def acknowledge_digest(subscription_id: int, note_ids: list[str]) -> None:
     await mark_reported(subscription_id, note_ids)
 
 
+class DeliveryInput(BaseModel):
+    """The typed argument for `deliver_digest_activity`."""
+
+    owner: str
+    query: str
+    note_ids: list[str] = Field(default_factory=list)
+
+
+@durable_activity("background")
+@activity.defn
+async def deliver_digest_activity(payload: DeliveryInput) -> list[str]:
+    """Send one subscriber's digest on every enabled outbound channel, and say which took it.
+
+    An activity because it is I/O, and one that never raises for an unreachable destination: the
+    registry's `deliver` swallows a single channel's failure so one broken webhook is not everyone's
+    outage. What it *does* raise on is a misconfigured seam — a channel named in
+    `CHEMCLAW_DELIVERY_CHANNELS` with no folder — because an operator who spelled a channel wrong
+    means to be delivering and is not.
+    """
+    return await deliver(
+        Message(
+            recipient=payload.owner,
+            subject=f"New for your standing query: {payload.query}",
+            body="\n".join(f"- {note_id}" for note_id in payload.note_ids),
+            kind="digest",
+        )
+    )
+
+
 @durable_workflow("background")
 @workflow.defn
 class DigestWorkflow:
@@ -210,6 +241,21 @@ class DigestWorkflow:
             # that actually happens.
             if not sent:
                 continue
+            # **Also out of the building, when a deployment has said where.** The mailbox above is
+            # still the durable handover and still what the watermark turns on — a chemist who does
+            # open the app must see the digest whether or not a channel took it, and a channel
+            # outage must not re-report matches the mailbox already holds. So this runs *after* the
+            # acknowledging condition is already satisfied and its result is deliberately not part
+            # of it: outbound delivery is a courtesy on top of a delivered digest, not a second
+            # delivery the watermark waits on.
+            if delivery_enabled():
+                await workflow.execute_activity(
+                    deliver_digest_activity,
+                    DeliveryInput(owner=item.owner, query=item.query, note_ids=list(item.note_ids)),
+                    start_to_close_timeout=timeout,
+                    schedule_to_start_timeout=queue_wait_timeout(),
+                    retry_policy=BAD_DATA_RETRY,
+                )
             await workflow.execute_activity(
                 acknowledge_digest,
                 args=[item.subscription_id, item.note_ids],

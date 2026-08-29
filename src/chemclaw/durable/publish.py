@@ -63,6 +63,12 @@ _BAD_DATA_TYPES = [
     "MetricError",
     "PlaybookError",
     "NoteError",
+    # A channel named in `CHEMCLAW_DELIVERY_CHANNELS` with no folder, or a `config:`
+    # block the driver's signature refuses (`chemclaw.deliver.registry`). Both are a
+    # deployment's declaration disagreeing with what is on disk, and a retry finds the
+    # same disagreement — the destination being *unreachable* is a different failure
+    # and raises from the driver, not from here.
+    "DeliveryChannelError",
     "EvalCaseError",
     # A run scored against a baseline recorded on a *different* case-set
     # (`chemclaw.evals.baseline`). Bad data by the same test as every entry here: the committed

@@ -144,3 +144,13 @@ class SourcesSettings(BaseSettings):
                 f"data source names must be unique in data_sources; duplicated: {duplicated}"
             )
         return self
+
+    # How long one source's commitment mirror pass may take (F4). A portfolio export is a snapshot
+    # rather than a stream, so this bounds a whole-set read rather than a page — larger than the
+    # ELN's per-chunk budget for that reason, and still a ceiling rather than an expectation.
+    commitment_sync_timeout_seconds: float = Field(default=300.0, gt=0)
+
+    # How often the mirror refreshes, in minutes. It is also runnable on demand. The default is
+    # daily: a portfolio tool's dates move on a human cadence, and a tighter loop would spend a
+    # vendor's API budget to learn nothing.
+    commitment_sync_schedule_minutes: int = Field(default=1440, gt=0)

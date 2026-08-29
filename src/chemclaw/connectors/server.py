@@ -189,12 +189,24 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     misconfigured deployment fails closed instead of accepting the empty string.
     """
 
-    def __init__(self, app: Any, *, connector: str) -> None:
-        """Bind the connector name; the declared auth mode is resolved on first request."""
+    def __init__(self, app: Any, *, connector: str, token_env: str | None = None) -> None:
+        """Bind the connector name; the declared auth mode is resolved on first request.
+
+        `token_env` is for a surface that has no `connector.yaml` to be resolved *from* — core's own
+        read-only MCP face (`api/mcp_face.py`) is the one such caller. Supplied here, it is used
+        directly and the manifest lookup never runs, which matters because the lookup's
+        "undiscovered and ships no manifest" branch treats an app as synthetic and leaves it
+        **open**. That is the right default for the transport tests that build a bare app, and it
+        is the wrong one for a surface exposing the corpus, so such a surface states its credential
+        rather than inheriting an absence.
+        """
         super().__init__(app)
         self._connector = connector
-        self._token_env: str | None = None
-        self._resolved = False
+        self._token_env: str | None = token_env
+        # An explicitly supplied name needs no resolution; an explicitly supplied *empty* one is a
+        # deployment that meant to require a token and has not named the variable, which fails
+        # closed on the `not expected` branch below rather than opening the surface.
+        self._resolved = token_env is not None
 
     def _declared(self) -> str | None:
         """The env var this bundle's manifest names, resolved once, on first use.
@@ -473,7 +485,11 @@ def _publishing(
 
 
 def connector_app(
-    server: FastMCP, *, name: str, on_start: Callable[[], Coroutine[Any, Any, None]] | None = None
+    server: FastMCP,
+    *,
+    name: str,
+    on_start: Callable[[], Coroutine[Any, Any, None]] | None = None,
+    token_env: str | None = None,
 ) -> FastAPI:
     """Build the FastAPI app that serves one connector's MCP capability.
 
@@ -487,6 +503,10 @@ def connector_app(
             now refuses a served tool the manifest does not declare.
         name: The connector's name (must match its bundle folder and manifest `name`), used in the
             health payload and the request log.
+        token_env: The environment variable holding this surface's bearer token, for a surface
+            with no `connector.yaml` to resolve one from — core's read-only MCP face is the one
+            such caller. Omitted, the bundle's manifest decides, which is what every connector
+            does. See `BearerAuthMiddleware.__init__` for why an app with neither is left open.
         on_start: Optional coroutine started once at startup — the hook a bundle uses to report
             the state of what it serves (`molfp`/`rxnfp` log how many fingerprints their index
             actually holds, so an operator learns of an unbuilt index before a chemist does).
@@ -539,7 +559,7 @@ def connector_app(
     # and passes straight through for `mode: none`. Read from the registry rather than taken as an
     # argument, so the seven `app.py` modules stay one line each and no bundle can forget to wire
     # it — the declaration is in the manifest and the enforcement follows it.
-    app.add_middleware(BearerAuthMiddleware, connector=name)
+    app.add_middleware(BearerAuthMiddleware, connector=name, token_env=token_env)
     # Added *after* `CallerLogMiddleware`: Starlette wraps in add-order with the most recently
     # added outermost, so this one now sits outside it and refuses an oversized body before any
     # handler — including the logging middleware's own `dispatch` — ever reads it (Sec-5: `/mcp`

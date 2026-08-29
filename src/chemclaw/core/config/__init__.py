@@ -58,6 +58,7 @@ from chemclaw.core.config.agent import AgentSettings
 from chemclaw.core.config.bo import BoSettings
 from chemclaw.core.config.calculators import CalculatorSettings
 from chemclaw.core.config.connectors import ConnectorSettings
+from chemclaw.core.config.deliver import DeliverySettings
 from chemclaw.core.config.eln import ElnSettings
 from chemclaw.core.config.entra import EntraSettings
 from chemclaw.core.config.evals import EvalSettings
@@ -101,6 +102,7 @@ __all__ = [
     "LlmSettings",
     "MemorySettings",
     "ObservabilitySettings",
+    "DeliverySettings",
     "PublishSettings",
     "ReportSettings",
     "RetrievalSettings",
@@ -180,6 +182,7 @@ class Settings(
     MemorySettings,
     RetrievalSettings,
     ReportSettings,
+    DeliverySettings,
     PublishSettings,
 ):
     """Environment configuration, loaded from process env then a local `.env`.

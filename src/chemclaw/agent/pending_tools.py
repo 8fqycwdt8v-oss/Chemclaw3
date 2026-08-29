@@ -88,8 +88,8 @@ async def request_external_input(
             request.model_dump(mode="json"),
             id=request_id,
             task_queue=settings.background_task_queue,
-            # **The policy `start_approval` was missing.** `D-2026-08-25` recorded that a decided
-            # hold could be started again under the same id because no policy was set. Neither
+            # **The policy the deleted D-032 hold was missing.** `D-2026-08-25` recorded that a
+            # decided hold could be restarted under the same id because no policy was set. Neither
             # obvious answer works: an *expired* wait completes normally, so both
             # `REJECT_DUPLICATE` and `ALLOW_DUPLICATE_FAILED_ONLY` would make a lapsed question
             # unaskable forever. `ALLOW_DUPLICATE` is correct here precisely because expiry is an
