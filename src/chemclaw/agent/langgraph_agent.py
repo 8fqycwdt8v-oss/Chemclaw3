@@ -72,7 +72,7 @@ import logging
 import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Annotated, Any, NotRequired
+from typing import Annotated, Any, NotRequired, cast
 
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, StateBackend
@@ -113,7 +113,12 @@ from chemclaw.agent.skill_backend import NarrowedSkillsBackend
 from chemclaw.agent.skill_manifest import declared_tools
 from chemclaw.agent.spend_cap import MeterTurnSpend, enforce_spend_cap
 from chemclaw.agent.state import ChemclawState
-from chemclaw.agent.subagents import general_purpose_helper, governed_roster
+from chemclaw.agent.subagents import (
+    HELPER_BRIEF,
+    general_purpose_helper,
+    governed_roster,
+    helper_profile,
+)
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
@@ -210,8 +215,27 @@ def build_langgraph_agent(
     prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
     # Resolved before the skills, because the skills are narrowed by them: a skill is judgment
     # *about* tools, so which tools this profile advertises decides which judgment is worth
-    # offering (`skills_middleware`).
+    # offering (`skills_middleware`). A helper's skills therefore narrow with its tools, at no extra
+    # cost and by the mechanism that already existed — which is D-2026-08-10's fourth invariant
+    # ("skills do not inherit") arriving as a consequence rather than as a second gate.
     tools = _capability_tools(prof)
+    # **The helper's narrowing is applied here rather than in `_subagents`, and both the position
+    # and the second call are the point.** `helper=True` is the one switch that says "this graph is
+    # behind the `task` tool", so everything a helper is — no side-effecting tool, no tool that
+    # speaks to the chemist, its own model route — travels with it, and a second caller compiling a
+    # helper cannot get a governed-but-unnarrowed one by forgetting a step. That is the failure
+    # `_subagents` already has a scar from: its first version expressed "no helpers of its own" by
+    # passing an empty roster, and upstream filled the roster back in.
+    #
+    # The names are taken from `tools` rather than from the registry because only this side of
+    # `_capability_tools` has seen `_register_generated_tools()` run — read any earlier and a
+    # deployment's `run_*` launchers and template launchers are simply absent, which would give the
+    # right answer today (they are side-effecting, so they are subtracted anyway) for a reason that
+    # stops being true the first time a generated tool is a read. Filtering the registry twice is a
+    # dict comprehension over a value already computed; being right by construction is worth it.
+    if helper:
+        prof = helper_profile(prof, frozenset(fn.__name__ for fn in tools))
+        tools = _capability_tools(prof)
     audit = make_audit_middleware(
         correlation_id=correlation_id if correlation_id is not None else uuid.uuid4().hex,
         actor=actor,
@@ -234,7 +258,7 @@ def build_langgraph_agent(
     # the profile here rather than read from settings there, because effort is a property of *this
     # agent* — a property-lookup profile and a campaign-design profile want different answers from
     # the same deployment, which is the whole reason the field is on the profile.
-    chat_model = model if model is not None else build_chat_model(effort=prof.effort)
+    chat_model = _resolve_chat_model(model, prof)
     # The connectors are already narrowed by the profile and already open: `connector_specs` applies
     # `mcp_server_names`, the manifest allow-list bounds each surviving bundle, and
     # `open_connector_specs` returns only what a reachable server actually advertised. An
@@ -248,7 +272,12 @@ def build_langgraph_agent(
     shared: dict[str, Any] = {
         "model": chat_model,
         "tools": bound,
-        "system_prompt": instructions_for(prof),
+        # A helper is told what it is *in addition to* what its caller was told, rather than
+        # instead of it: the domain guidance is exactly as relevant to the piece as to the whole,
+        # and a helper that has to be told what a knowledge note is would need the whole prompt
+        # rewritten anyway. What it adds is the part its caller's prompt cannot be right about —
+        # that this graph reads and reports, sees no conversation, and reaches no connector.
+        "system_prompt": instructions_for(prof) + (HELPER_BRIEF if helper else ""),
         "state_schema": ChemclawState,
         "middleware": _middleware(prof, backend, audit, chat_model, labelled),
         "name": "chemclaw",
@@ -282,6 +311,42 @@ def build_langgraph_agent(
         subagents=_subagents(prof, chat_model, audit_sink, correlation_id, actor),
         **shared,
     )
+
+
+def _resolve_chat_model(supplied: Any | None, profile: AgentProfile) -> Any:
+    """The model this graph runs on: a caller's, this profile's route, or the deployment default.
+
+    Three inputs and one rule — **a route that a deployment actually mapped wins; nothing else
+    changes anything.**
+
+    - `AgentProfile.model_route` names a key in `settings.model_routes`. When that key has an entry,
+      the model is built from it, because the route is the only reason the field exists: a helper
+      whose caller runs on the frontier model is meant to read on a smaller one
+      (`agent/subagents.py`), and a supplied model would silently defeat that.
+    - When the key has *no* entry — the shipped default, where `model_routes` is empty — a caller's
+      model is reused as it always was. `build_chat_model` would answer this case too, by falling
+      back to `llm_model`/`agent_model`; what it cannot do is know that an identical client already
+      exists. A turn compiles two graphs, so taking that fallback would build two clients per turn
+      to hold the same configuration, and would hand a test that passed a fake model a real one.
+    - With no model supplied and no route, this is the call every build has always made.
+
+    The effort travels with whichever branch runs, because effort is a property of the agent rather
+    than of the endpoint — see `AgentProfile.effort`, and note that `build_chat_model` refuses a
+    non-`None` effort on the Anthropic path wherever it arrives from.
+
+    Args:
+        supplied: The model a caller handed to `build_langgraph_agent`, if any.
+        profile: The resolved profile — for a helper, the narrowed one.
+
+    Returns:
+        A LangChain chat model. Construction only; no network call.
+    """
+    routed = profile.model_route is not None and profile.model_route in settings.model_routes
+    if routed:
+        return build_chat_model(cast(str, profile.model_route), effort=profile.effort)
+    if supplied is not None:
+        return supplied
+    return build_chat_model(effort=profile.effort)
 
 
 def _middleware(

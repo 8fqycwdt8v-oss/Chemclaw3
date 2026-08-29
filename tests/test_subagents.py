@@ -19,21 +19,50 @@ The properties, in the order they would hurt:
 """
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 
+from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.state import turn_config, turn_input
+from chemclaw.agent.subagents import (
+    HELPER_BRIEF,
+    SPEAKS_TO_THE_CHEMIST,
+    general_purpose_helper,
+)
 from chemclaw.core.config import settings
+from chemclaw.core.tool_registry import registered_tool_names
 
 
 def _model() -> GenericFakeChatModel:
     """A model that resolves without credentials — construction only, no call is made."""
     return GenericFakeChatModel(messages=iter([AIMessage(content="ok")]))
+
+
+def _routes_asked(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every route key `build_langgraph_agent` asks the provider seam to build a model for.
+
+    The model a compiled graph will call is not reachable from the graph: LangGraph's model node is
+    a closure, and prising the client back out of it would be a seventh reader of a shape upstream
+    never promised — the exact thing `tests/test_upstream_surface.py` exists to count. So these two
+    tests assert the claim `_resolve_chat_model` actually makes, which is about *construction*: a
+    routed profile builds a client from its route, and an unrouted one builds nothing at all because
+    a usable client already exists. `build_chat_model` is the one place a model is built, which is
+    what makes watching it equivalent to watching every client this build creates.
+    """
+    asked: list[str] = []
+
+    def _record(task: str = "agent", *, effort: str | None = None) -> Any:
+        asked.append(task)
+        return _model()
+
+    monkeypatch.setattr("chemclaw.agent.langgraph_agent.build_chat_model", _record)
+    return asked
 
 
 def _tool_names(graph: Any) -> set[str]:
@@ -94,15 +123,202 @@ def test_a_helper_holds_no_tool_its_caller_does_not(agent: Any, helper: Any) -> 
     """The attenuation invariant, on the two compiled surfaces rather than the two profiles.
 
     Delegation must not become a way to reach a capability the delegating agent could not reach
-    directly. Written as a subset relation rather than an equality so that narrowing the helper
-    further stays legal, and stated over what each graph *bound* — a profile comparison would be a
-    tautology here, since the helper is built from its caller's profile.
+    directly. Stated over what each graph *bound* — a profile comparison would be a tautology, since
+    the helper's profile is derived from its caller's.
+
+    Asserted as a **strict** subset since `helper_profile` began subtracting, and that word is the
+    whole difference between this test and the one it replaced. A subset assertion over two surfaces
+    that were equal by construction passed for months while a helper held every launcher and every
+    write its caller did; it could not have failed, because the only way to break it was to add a
+    tool to the helper that nobody had a way to add.
     """
     widened = _tool_names(helper) - _tool_names(agent)
     assert not widened, (
         f"a helper holds {sorted(widened)}, which its caller does not; a subagent is an "
         "attenuation of the agent that spawns it, never a new actor"
     )
+    assert _tool_names(helper) < _tool_names(agent), (
+        "a helper's surface is equal to its caller's, so this file's attenuation assertions are "
+        "comparing a value with itself again"
+    )
+
+
+def test_a_helper_holds_nothing_that_changes_anything(helper: Any) -> None:
+    """The narrowing `helper_profile` exists for, against the classification it derives from.
+
+    The defect this closes was not a hole in a gate — every gate held — but a surface that did not
+    match its own description. The `task` tool told the model a helper was for isolation and
+    parallel reading while the helper held its caller's nine `run_*` durable job launchers,
+    `propose_knowledge_note`, `start_optimization_campaign` and `request_external_input`: a brief
+    the *model* wrote could open a pull request against the knowledge graph, spend hours of pod
+    time, and put a durable question into somebody's inbox, from a context the chemist never sees.
+
+    Asserted against `side_effecting_tools()` rather than a list transcribed here, so that the test
+    and the narrowing read the same source and a connector or template added later is covered by
+    both on the same day.
+    """
+    reachable = _tool_names(helper) & side_effecting_tools()
+    assert not reachable, (
+        f"a helper can call {sorted(reachable)}, which change something outside the turn; a helper "
+        "reads and reports, and the agent that spawned it is what acts on what it found"
+    )
+
+
+def test_a_helper_cannot_put_a_question_on_the_chemists_stream(helper: Any) -> None:
+    """The one exclusion `side_effecting_tools()` cannot express, and why it is not that set's bug.
+
+    `ask_clarifying_question` is correctly classified read-only: it writes no row and starts no
+    workflow. What it does is record a turn *signal*, and a signal is delivered on the turn's
+    stream — so a helper calling it shows the chemist a question apparently asked by the agent they
+    are talking to, while the answer arrives in a conversation the helper has already left and
+    cannot see.
+    """
+    assert "ask_clarifying_question" in _tool_names(build_langgraph_agent(model=_model()))
+    assert "ask_clarifying_question" not in _tool_names(helper)
+
+
+def test_the_set_of_tools_that_speak_to_the_chemist_is_derived_not_remembered() -> None:
+    """`SPEAKS_TO_THE_CHEMIST` is a hand-written constant, so this is what keeps it honest.
+
+    A second tool that records a turn signal without changing anything would reach a helper in
+    silence, and the failure would present to a chemist as their agent asking a question it never
+    asked. So the set is re-derived here from the source it summarises — the registry tools defined
+    in modules that call one of `turn_signals`' `record_*` writers — and compared. Anything already
+    classified as side-effecting is excluded from the comparison, because `helper_profile` subtracts
+    that set separately and a tool needs only one of the two reasons to be out.
+
+    The same shape as `tests/test_message_pairing.py`'s scan for a second shape stamp: a constant
+    nothing checks is a constant that was right on the day it was written.
+
+    **What this scan does not see**, said plainly rather than implied by its passing: a tool whose
+    own body does not name a writer but calls something that does. The scan reads each registered
+    tool's body, which catches the direct shape every current signal-writing tool has, and it would
+    not catch an indirect one. That is a smaller gap than a constant with nothing checking it at
+    all, and naming it is what keeps the next reader from trusting it for more than it does.
+    """
+    import ast
+
+    writers = {"record_question", "record_job_started", "record_proposal"}
+    registered = registered_tool_names()
+    speakers: set[str] = set()
+    for module in Path("src/chemclaw").rglob("*.py"):
+        for node in ast.walk(ast.parse(module.read_text())):
+            if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+                continue
+            if node.name not in registered:
+                continue
+            called = {
+                inner.func.id
+                for inner in ast.walk(node)
+                if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+            }
+            if called & writers:
+                speakers.add(node.name)
+
+    assert speakers - side_effecting_tools() == SPEAKS_TO_THE_CHEMIST, (
+        f"the tools that reach the chemist's stream without changing anything are "
+        f"{sorted(speakers - side_effecting_tools())}, and `SPEAKS_TO_THE_CHEMIST` names "
+        f"{sorted(SPEAKS_TO_THE_CHEMIST)}; a helper would reach the difference"
+    )
+
+
+def test_a_helper_inherits_the_narrowing_of_a_caller_that_already_narrowed() -> None:
+    """The subtraction composes with a profile's own `tool_names`, rather than replacing it.
+
+    The risk in deriving a helper's surface from "everything in-process minus what acts" is that it
+    reads the *registry* rather than the caller, and would then hand a narrow profile's helper tools
+    the narrow profile itself does not advertise. `helper_profile` takes what the caller's build
+    actually resolved, so the two narrowings compose in the only direction they can.
+    """
+    narrow = AgentProfile(
+        name="narrow", tool_names=frozenset({"find_notes", "propose_knowledge_note"})
+    )
+    caller = build_langgraph_agent(model=_model(), profile=narrow)
+    helper = build_langgraph_agent(model=_model(), profile=narrow, helper=True)
+
+    assert {"find_notes", "propose_knowledge_note"} <= _tool_names(caller)
+    assert "find_notes" in _tool_names(helper)
+    assert "propose_knowledge_note" not in _tool_names(helper)
+    assert "gather_evidence" not in _tool_names(helper), (
+        "the helper reached a read its caller does not advertise, so the derivation read the "
+        "registry rather than the caller"
+    )
+
+
+def test_an_unrouted_helper_reuses_the_model_its_caller_already_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shipped default: `model_routes` is empty, so nothing about model construction changes.
+
+    Stated as an identity rather than as an equality of configuration, because the thing worth
+    holding is that no *second* client is built. `build_chat_model` would answer an unrouted
+    `"helper"` by falling back to the deployment default and returning a new, identically configured
+    object — correct, and paid for twice per turn, and fatal to every test in this file that hands
+    in a model no credential exists for.
+    """
+    asked = _routes_asked(monkeypatch)
+    monkeypatch.setattr(settings, "model_routes", {})
+
+    build_langgraph_agent(model=_model(), profile=AgentProfile(name="default"), helper=True)
+    assert asked == [], (
+        "an unrouted helper built its own client; a turn compiles two graphs, so this is two "
+        "identically configured clients per turn, and a real one handed to a test that gave a fake"
+    )
+
+
+def test_a_routed_helper_is_built_from_its_route_even_when_a_model_was_supplied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cost lever, and the reason a supplied model must not win over a configured route.
+
+    A helper exists to read in its own context window, and the whole point of routing it is that the
+    reading need not be billed at the frontier model's rate. Every production build reaches
+    `build_langgraph_agent` with no model at all, but `_subagents` hands the helper its caller's —
+    so a supplied model silently defeating the route would defeat it in exactly the configuration
+    the feature is for.
+
+    Asserted on the route key that was asked for rather than on the client that came back: which
+    model id a key maps to is the deployment's answer, and `build_chat_model` is the one place that
+    resolves it.
+    """
+    asked = _routes_asked(monkeypatch)
+    monkeypatch.setattr(settings, "model_routes", {"helper": "a-smaller-model"})
+
+    build_langgraph_agent(model=_model(), profile=AgentProfile(name="default"), helper=True)
+    assert asked == ["helper"]
+
+    # The caller's own build compiles its helper, so the route is asked for there too — that is the
+    # production path, where the only model ever supplied is the caller's own. What must not happen
+    # is the caller's model being rebuilt: it is unrouted, and it was already handed in.
+    asked.clear()
+    build_langgraph_agent(model=_model(), profile=AgentProfile(name="default"))
+    assert asked == ["helper"], "the roster's helper is routed on the caller's path too"
+    assert "agent" not in asked, "the caller's own model is unrouted and must not be rebuilt"
+
+
+def test_the_two_texts_a_helper_is_defined_by_state_the_same_bounds() -> None:
+    """The `task` description and the helper's own brief must not describe different mechanisms.
+
+    `D-2026-08-12` found the supervisor prompt and the `task` description disagreeing — one said
+    route by capability, the other said isolate a big job — and recorded that the disagreement was
+    the real defect, since the model reads both and can only act on one. The same pair exists here:
+    the caller reads the roster description when deciding whether to spawn, and the helper reads
+    `HELPER_BRIEF` when deciding what it may do.
+
+    Asserted on the bounds rather than the wording, because two texts required to match word for
+    word are two texts nobody may improve.
+    """
+    described = general_purpose_helper(object())["description"]
+    for text, who in ((described, "the task description"), (HELPER_BRIEF, "the helper's brief")):
+        lowered = text.lower()
+        assert "read" in lowered, f"{who} does not say a helper reads"
+        assert "connector" in lowered, f"{who} does not say a helper reaches no connector"
+        assert "durable job" in lowered or "start a durable" in lowered, (
+            f"{who} does not say a helper starts nothing"
+        )
+        assert "context window" in lowered or "sees nothing of" in lowered, (
+            f"{who} does not say a helper is context-isolated"
+        )
 
 
 def test_a_helper_cannot_spawn_a_helper(agent: Any, helper: Any) -> None:

@@ -1,91 +1,111 @@
-# A refusal is not a failure — the third pass over the unparseable-tool-call change
+# Subagents: a helper that is cheaper and narrower than its caller (A + B), and a look at C/D/E
 
-Four fresh reviewers over `4a657ad` (#282) + `4859748` (#284), each running the code. The
-announcement rule and the `Counter` arithmetic came back sound; everything below is what they found
-beside it. Every item is verified in this session before it is fixed.
+Context: `docs/decisions/D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` deleted the
+specialist team as unreachable code, and the delegation *question* was never settled — the two
+measurements it rests on (2/15 and 14/15-vs-14/15) were taken on different harnesses, one sample per
+probe, against the wrong dependent variable (delegation rate rather than cost/quality per task).
+What ships today is one governed `general-purpose` helper built from its caller's *own* profile:
+same model, same instructions, and — measured against the live registry — the same 54 in-process
+tools, including nine durable job launchers, `propose_knowledge_note`, `start_optimization_campaign`
+and `request_external_input`. The helper's own `task` description says it is for isolation and
+parallel reading. Its surface says otherwise.
 
-## Code
+## A — a profile may name the model route it runs on
 
-- [x] **C1 `_empty_answer_event` calls a gate refusal a failure.** `lost = tool_failures +
-      tool_refusals` rendered as "N tool call(s) failed". Contradicts
-      `D-2026-08-28-a-refusal-the-wire-cannot-name-is-a-fault-to-everyone-downstream` and
-      `_TurnLedger.tool_refusals`' own comment ("the control working, which must not be read as a
-      failure"). Fix: count them separately and give the refusal its own next step.
-- [x] **C2 the log and the message disagree.** The WARNING logs `tool_failures`, the sentence used
-      `failures + refusals` — one turn says `0 failed` and `3 tool call(s) failed`. Fix: one source.
-- [x] **C3 the remedy replaces rather than adds.** One failure among 29 calls deletes the
-      narrower-question advice on the exact du-03 shape the docstring cites. Fix: state the counts
-      always; let the remedy name failures, refusals or neither.
-- [x] **C4 `error` is head-truncated and not repr'd.** The head duplicates `arguments` verbatim
-      (upstream folds the document into the exception text), so bounding head-only drops the
-      `JSONDecodeError` reason — the only part not already printed beside it. Not repr'd means raw
-      newlines reach the WARNING (forgeable log line when `log_json=false`, the default) and the
-      chemist's message. Fix: repr, keep the tail.
-- [x] **C5 nothing caps the *number* of lost calls.** 1000 → an 841 kB corrective `HumanMessage`,
-      appended below `context_compaction_middleware` where nothing can reduce it — the failure
-      `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` exists to prevent, in the same
-      function. Fix: a configured ceiling with a "and N more" notice.
-- [x] **C6 a raising repair loses the announcement.** `_count_invalid` runs before the retry and
-      `_announce_unrun` after it, so a 429 on the second call books the counter and tells the
-      chemist nothing. Fix: announce the first reply's losses on the way out.
-- [x] **C7 the dangling parenthetical and the no-op f-string** in the new remedy.
+- [x] `AgentProfile.model_route: str | None` — a key into the existing `settings.model_routes`
+      table, **not** a model id (a model id in a checked-in profile YAML would hardcode a site's
+      model names into this repository; `model_routes` is the seam that exists to avoid that).
+- [x] `build_langgraph_agent` resolves it through `build_chat_model(task=...)`, the one place a
+      model is built. Unrouted key ⇒ today's behaviour byte-for-byte (no second client).
+- [x] The helper's derived profile carries `model_route="helper"`, so
+      `CHEMCLAW_MODEL_ROUTES='{"helper":"internal-small"}'` is the whole cost lever.
 
-## Prose
+## B — a helper holds only what its story claims
 
-- [x] **P1 the `RepairInvalidToolCalls` class docstring is the pre-#284 rule**, present tense,
-      naming `_report_lost_calls` (deleted) and asserting a `tool_failed` on a repair that works —
-      which the test added in the same commit asserts does not happen.
-- [x] **P2 `tests/test_langgraph_stream.py`'s docstring** carries the same dead name, "no id to
-      give", and "every turn that survives an unparseable emission now writes `\"\"`".
-- [x] **P3 ADR2's "published to Phoenix as a 1.0" is false.** `evals/phoenix.py` guards that yield
-      on `error_code or transport_error`; the measured turn answered, so no annotation is published.
-- [x] **P4 the boundedness claim is misattributed** — it is `invalid_tool_calls`' docstring, not
-      `BrokenCall.error`'s. In ADR2 and in `lessons.md`.
-- [x] **P5 `core/metrics.py` HELP** still reads as though the counter and the stream count the same
-      thing; they answer different questions by design.
-- [x] **P6 `_empty_answer_event`'s docstring says "the two `tool_failed` events"** — after #284 the
-      unrepaired case emits one.
-- [x] **P7 `lessons.md` says "three defects introduced"** where one was.
-
-## Tests (each of these is a claim no test can see)
-
-- [x] **T1 `_empty_answer_event` has no test at all** — `grep "reason to start from" tests/` is
-      empty. Both branches, the refusal case, the count.
-- [x] **T2 the `Counter` multiplicity rule** `_announce_unrun`'s docstring argues for in a
-      paragraph: two calls to one tool, one re-issued. A set difference passes every current test.
-- [x] **T3 the parse error reaching the chemist** — deleting `{error}` from the sentence survives.
-- [x] **T4 a repaired reply breaking a *different* tool** than the first.
-- [x] **T5 the sync path's announcement** — only the async path is ever driven.
-- [x] **T6 end to end**: the middleware behind `graph_events`, signal → real `ToolFailedEvent`.
-- [x] **T7 the bound on what is actually sent** — `ToolFailedEvent.message` and the corrective
-      `HumanMessage`, not only `BrokenCall`.
+- [x] `helper_profile(caller)` in `agent/subagents.py`: the caller's profile minus
+      `authz.side_effecting_tools()` — derived from the existing maintained partition, so a bundle
+      added next year is excluded on the day it is enabled, not the day someone remembers.
+- [x] Minus `ask_clarifying_question` as well: it is classified read-only and it writes a turn
+      signal, so a helper calling it puts a question on the *chemist's* stream from a context the
+      chemist cannot see, and never sees the answer.
+- [x] Applied inside `build_langgraph_agent(helper=True)` rather than in `_subagents`, so the
+      narrowing cannot be forgotten by a future caller.
+- [x] `HELPER_BRIEF` appended to the helper's system prompt, next to the `task` description in the
+      same module — the two texts a helper is defined by, side by side, with a test that they agree.
+- [x] Update the `task` description: "holds the same in-process tools you do" becomes false.
 
 ## Verification
 
-- [x] `make lint type test` green, with Postgres and Temporal up, skips named.
-- [x] Live lane: storm C+F **11/11**, and the F6 turn hand-driven — one `tool_failed`, and
-      `"0 tool call(s) ran, 1 failed … The failure(s) reported above are the place to start"`.
-- [x] ADR + ledger row + `lessons.md`.
+- [x] `tests/test_subagents.py`: attenuation becomes a *strict* subset; new tests for the
+      side-effecting exclusion, the chemist-facing exclusion, the routed/unrouted model, and the
+      two texts agreeing.
+- [x] A scan test deriving the chemist-facing set, so a second such tool fails the suite.
+- [x] `make lint type test`, reporting what the run skipped.
+
+## Then: investigate C, D, E and report whether to build
+
+- [x] C — per-helper connector sessions (is the deadlock a *sharing* hazard or a concurrency one?)
+- [x] D — an advisor (a consult that holds no tools; the invariant never contemplated it)
+- [x] E — a second roster name
 
 ## Review
 
-All seventeen items done. The two that changed the shape of the work:
+**A and B are implemented, measured and merged into one change.**
 
-**`_empty_answer_event` was the whole of the third pass's user-visible harm** and had no test of any
-kind, so both its defects — a refusal counted as a failure, and the advice replaced rather than
-added — were invisible to a green gate. The tests written for it caught a *third* defect while
-being written: the remedy strings ended in a period before `(session …)`, the exact dangling
-parenthetical a reviewer had reported, which I had "fixed" without reading the rendered output.
+*A landed as `AgentProfile.model_route` rather than `AgentProfile.model`, and that is the one
+deviation from the plan as asked.* A model *id* on a profile would put a site's model names into a
+checked-in `data/profiles/*.yaml`, which is precisely what `settings.model_routes` — the per-task
+routing table `build_chat_model(task)` already reads — exists so that nobody has to do. A route
+*key* keeps the deployment's answer in the deployment. It also gave the field a second real caller
+without inventing one: a session profile may name a route too.
 
-**I marked the live-lane row done before running it**, in the plan for a review whose subject is
-claims nobody checked. Caught on the way past, run, and the row now carries its result — which is
-the only form of that row worth having.
+*B landed as a subtraction of `authz.side_effecting_tools()` rather than a hand-written allow-list*,
+because that partition already exists, is already assembled from three sources that own their own
+knowledge, and is already held to the tool registry by `tests/test_authz.py`. A list in
+`agent/subagents.py` would have been a fourth source, correct on the day it was written.
 
-**A mutation-proof loop nearly cost the session's work.** `git checkout -- src/` as the restore step
-discarded every uncommitted source fix, and the only symptom was a red baseline I could have read as
-a regression. Everything was reapplied and the loop redone against a commit. Recorded in
-`lessons.md`; the derived rule is that a revert-to-prove loop restores from a committed baseline,
-one file at a time, and checks the baseline is green before believing any mutation result.
+**Measured, on the default profile against the two compiled graphs:** the caller binds **61** tools,
+the helper binds **24**. The difference is nine `run_*` durable job launchers, every knowledge-graph
+and preference write, `request_external_input`, `ask_clarifying_question` and `task`. Nothing
+widened. Before this, the two surfaces were identical, which is why the attenuation test could not
+have failed — it is now a strict subset.
 
-The `Counter` arithmetic and the announcement rule from #284 survived the review unchanged, which is
-worth recording as the one thing that did not need fixing.
+**One thing found while implementing, and it changed the design.** The first version read the tool
+registry inside `helper_profile`. That is wrong ordering: the registry is complete only after
+`_capability_tools` has run `_register_generated_tools()`, so a set read earlier is missing every
+launcher a deployment generated. It gave the right answer today — those are all side-effecting and
+subtracted anyway — for a reason that stops being true the first time a generated tool is a read.
+The caller's resolved names are now passed in, and the call site says why.
+
+**One test was rewritten rather than added.** The first version of the routed-model test read the
+chat model back off the compiled graph; LangGraph's model node is a closure, and prising the client
+out of it would have been a seventh reader of a shape upstream never promised — the thing
+`tests/test_upstream_surface.py` exists to count. The tests now assert what
+`_resolve_chat_model` actually claims, which is about construction: a routed profile builds from its
+route, an unrouted one builds nothing because a usable client already exists.
+
+**Gate:** `make lint` clean, `make type` clean (795 files), `make test` **6241 passed, 14 skipped**
+— run with `dockerd` and `make up` first, so the Postgres-backed suite actually ran. The 14 skips
+are `helm` not installed (7), a truncated git history the migration-additivity checks cannot use
+(3), the two live prompt-caching probes whose Anthropic credential has no credit, and two others in
+the same families — not the ~216 that a suite run without Postgres would have skipped silently.
+
+**C, D and E were investigated and none is built.** Findings are `docs/planning/BACKLOG.md` rows in
+§4, each with what would change the answer:
+
+- **C (per-helper connectors): the stated reason is not the binding one.** The deadlock measurement
+  is about *sharing one session object*, not concurrency — a helper with its own sessions shares
+  nothing. What actually binds is the lifecycle: connectors are opened by the async caller into an
+  exit stack *before* the synchronous `build_langgraph_agent` runs, and the roster is frozen per
+  compiled graph, so a per-helper set means opening a second full set eagerly on every turn against
+  an unmeasured spawn rate. Fix the prose now; let the measurement decide the behaviour.
+- **D (an advisor): permitted by every merged decision, and the design is already determined.**
+  `D-2026-08-25`'s thread-versus-tool table resolves all seven rows in an advisor-as-tool's favour,
+  which is the injection objection that killed the summarizer three times; `agent/condense.py` is
+  the precedent for the in-tool model call, including how its spend reaches the cap. It is blocked
+  on a second model tier and on evidence, not on architecture.
+- **E (a second roster name): mostly eaten by B.** The case for it was a read-only reader beside a
+  full-capability helper; the only helper is now read-only. Leave closed until the measurement asks.
+
+**And the delegation question is still open.** This change does not answer it and does not claim to.
+The row that would is in §4, with the arms it needs — which exist as of this change.
