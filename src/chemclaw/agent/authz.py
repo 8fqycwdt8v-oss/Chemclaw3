@@ -117,6 +117,12 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
             "stop_watching",  # deletes from subscriptions
             "request_development_report",  # starts a durable report workflow
             "synthesize_memory",  # starts a corpus scan that opens knowledge PRs
+            # Both write `experiment_protocols` and its append-only revision table. State-changing
+            # rather than write-gated: a design is a working document a chemist owns, not a
+            # knowledge claim, so the plan gate is the right control and a privileged-role default
+            # would put drafting a protocol behind the same door as pushing to the graph.
+            "structure_experiment_request",  # writes the structured ask as revision 1
+            "draft_experiment_protocol",  # writes a protocol revision
         }
     )
     | DEFAULT_WRITE_TOOL_GATES
@@ -153,6 +159,11 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         # mining job writes, and its whole purpose is to point at evidence worth gathering
         # *before* anything is authorized.
         "recall_observations",
+        # Reading back a stored design and listing what exists. Reads, and ones the agent should
+        # make *before* revising anything — a revision derived from a remembered document rather
+        # than from the current head is the write this pair exists to prevent.
+        "read_experiment_protocol",
+        "find_experiment_protocols",
         "get_durable_job_status",
         "list_attachments",
         "list_watches",

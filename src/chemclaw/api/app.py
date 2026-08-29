@@ -63,6 +63,7 @@ from chemclaw.api.routes import (
     ops,
     plan,
     proposals,
+    protocols,
     results,
     sessions,
     streams,
@@ -424,6 +425,7 @@ def create_app(
         proposals,
         notes,
         jobs,
+        protocols,
     ):
         module.register(app)
 

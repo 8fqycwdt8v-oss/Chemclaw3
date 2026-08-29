@@ -1233,3 +1233,51 @@ And the second-order rule, which is the one that actually caught these: **review
 work adversarially, against a live system, with someone else's eyes.** Four parallel passes cost
 one message and found what one careful author plus a green gate did not. The gate proves the change
 did not break what was already tested; it says nothing about what the change itself introduced.
+
+## 2026-08-28 — `git stash -u` is `git add -A` wearing a different verb
+
+I ran `git stash -u` to check whether a suite failure was pre-existing, **while three subagents were
+writing files in the tree**. It worked — the pop restored everything and the stash list came back
+empty — and that is luck rather than evidence. Rule 4 says the working tree is not mine when other
+agents are in it and names `git add -A` as the weapon; `stash -u` is strictly worse, because it
+*removes* their untracked files for the duration and a write landing in that window has nowhere to
+go. Two hundred tests were untracked at the time.
+
+The check I wanted was cheap and safe: run the failing test alone against the current tree first,
+and only reach for a clean baseline once the tree is mine. As it turned out I did not need a
+baseline at all — the failure was the docker daemon dying mid-run, which rule 3 already predicts and
+which `docker info` answers in one call.
+
+**Before any command that rewrites the working tree wholesale — `stash`, `clean`, `checkout .`,
+`reset --hard` — run `ListAgents`.** If anything is running, the command is not available to me.
+
+## 2026-08-28 — a count in prose went stale inside one hour
+
+I wrote "thirteen deterministic verdicts" in a package README, a module docstring and an ADR. Two
+hours later I added a fourteenth check and all three were false. `D-2026-08-01-the-count-lives-in-
+the-test-not-in-the-prose` is about exactly this and I had read it that morning.
+
+The tell is that I *derived* the number by counting a tuple I had just written, which is the same
+act as hardcoding it. Three of the four numbers I have written this session went stale or were wrong
+(the fourth, a token measurement, only survived because I re-ran it). A number in prose is a claim
+that needs a producer; where there is none, name the producer instead — "`check_ids()` is the list"
+costs the same characters and cannot rot.
+
+**Corollary that bit separately:** I then described severities *per check* ("charge_is_consistent is
+a warning") when the function returns `blocker` on three branches and `warning` on two. A property
+that varies by branch cannot be summarised by listing function names, and deriving it from one
+empty-design call — which is what I did — samples exactly one branch.
+
+## 2026-08-28 — a clean rebuild is not a neutral act when a harness serves the build
+
+I ran `rm -rf dist && npm run build` to check a security gate honestly, and eight Playwright tests
+went red. Nothing was broken: the e2e `webServer` serves `dist/server.js` and `dist/client`, and that
+suite runs unauthenticated, so it needs the `ALLOW_DEV_AUTH=true` build that CI makes for it — my
+production build had correctly stripped the dev auth provider out.
+
+I nearly filed it as a UI regression. What stopped it was reading the browser console line in the
+Playwright output instead of the assertion: `AUTH_MODE=dev is not permitted in this production
+build`, which names the cause exactly. **Rule 12 again — read the failure before classifying it —
+and one specific to build artefacts: when a test harness consumes a build directory, the build flags
+are part of the fixture.** Rebuild the way the harness does, and check `.github/workflows/` for
+which flags that is rather than guessing.

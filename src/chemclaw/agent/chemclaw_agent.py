@@ -40,6 +40,7 @@ from chemclaw.agent import durable_tools as _durable_tools  # noqa: F401
 from chemclaw.agent import graph_tools as _graph_tools  # noqa: F401
 from chemclaw.agent import memory_tools as _memory_tools  # noqa: F401
 from chemclaw.agent import preferences as _preferences  # noqa: F401
+from chemclaw.agent import protocol_design_tools as _protocol_design_tools  # noqa: F401
 from chemclaw.agent import protocol_tools as _protocol_tools  # noqa: F401
 from chemclaw.agent import research_tools as _research_tools  # noqa: F401
 from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401

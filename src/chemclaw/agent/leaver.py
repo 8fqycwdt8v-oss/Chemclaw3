@@ -271,6 +271,29 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("bo_campaigns", ("opened_by",), "who framed an optimization campaign's decision space"),
     ("job_records", ("requested_by",), "who requested a durable calculation"),
     ("turn_costs", ("actor",), "what a person's turns cost, the record an operator bills against"),
+    # The two prescriptive-tier columns, retained on `bo_campaigns.opened_by`'s line: a design is a
+    # shared scientific artifact and who framed it is part of its provenance, not an incidental
+    # stamp on somebody's private row.
+    #
+    # **The revision's `author` is the stronger case of the two, and it is the reason that table is
+    # append-only.** A chemist alters almost every first draft, and `author_kind` beside `author` is
+    # what tells an agent's draft apart from the expert's correction of it — the most informative
+    # observation this system can make about its own suggestions. Erasing the author would leave the
+    # correction standing with nobody attached to it, which is an unattributable claim about
+    # somebody's chemistry rather than a smaller record of it. A credential that could rewrite one
+    # of these rows does not exist by grant; neither should one that could empty it here.
+    (
+        "experiment_protocols",
+        ("opened_by",),
+        "who opened a prescriptive experiment design — the provenance of an artifact a laboratory "
+        "may still act on",
+    ),
+    (
+        "experiment_protocol_revisions",
+        ("author",),
+        "who wrote each revision of a design — with `author_kind`, the thing that makes an "
+        "expert's correction of a generated protocol attributable at all",
+    ),
 )
 
 
