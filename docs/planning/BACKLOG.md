@@ -280,13 +280,6 @@ topic).
       reads this repository's manifests, so a site adding a second ORD source fails the test rather
       than the code taking the name as an argument.
 
-- [ ] **Two suite runs against one database corrupt each other's turn claims** — [S], environmental
-      but real. `tests/test_api_sessions.py` uses a fixed session id, and a concurrent run's
-      `SessionTurnClaims().release(...)` clears this run's claim — observed once as a spurious 204
-      where 409 was expected, never reproduced serially. Harmless today because CI runs one job per
-      database; it becomes a flake generator the day that stops being true. Fixture ids should carry
-      the pid suffix `tests/pg.py` already uses for the schema.
-
 - [ ] **The corpus drain is the one ingest pass with no metric** — [S].
       `chemclaw_ingest_records_total{source,outcome}` is emitted by the ELN sync
       (`ingest/eln/sync.py:319`), the document sync (`ingest/documents/sync.py:312`) and the
