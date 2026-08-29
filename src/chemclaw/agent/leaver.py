@@ -288,17 +288,18 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "an entitlement rather than a person",
     ),
     ("turn_costs", ("actor",), "what a person's turns cost, the record an operator bills against"),
-    # The two prescriptive-tier columns, retained on `bo_campaigns.opened_by`'s line: a design is a
-    # shared scientific artifact and who framed it is part of its provenance, not an incidental
+    # The three prescriptive-tier columns, retained on `bo_campaigns.opened_by`'s line: a design is
+    # a shared scientific artifact and who framed it is part of its provenance, not an incidental
     # stamp on somebody's private row.
     #
-    # **The revision's `author` is the stronger case of the two, and it is the reason that table is
+    # **The revision's `author` is the stronger case, and it is the reason that table is
     # append-only.** A chemist alters almost every first draft, and `author_kind` beside `author` is
     # what tells an agent's draft apart from the expert's correction of it — the most informative
     # observation this system can make about its own suggestions. Erasing the author would leave the
     # correction standing with nobody attached to it, which is an unattributable claim about
     # somebody's chemistry rather than a smaller record of it. A credential that could rewrite one
-    # of these rows does not exist by grant; neither should one that could empty it here.
+    # of these rows does not exist by grant; neither should one that could empty it here. The
+    # sign-off's `actor` is stronger still, and its entry below says why.
     (
         "experiment_protocols",
         ("opened_by",),
@@ -310,6 +311,13 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
         ("author",),
         "who wrote each revision of a design — with `author_kind`, the thing that makes an "
         "expert's correction of a generated protocol attributable at all",
+    ),
+    (
+        "experiment_protocol_status_events",
+        ("actor",),
+        "who approved, ran or abandoned a design and at which revision — the strongest case of "
+        "the three, because an approval with nobody attached to it is not a smaller record of an "
+        "approval, it is a claim that one happened",
     ),
 )
 

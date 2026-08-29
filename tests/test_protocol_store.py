@@ -12,7 +12,7 @@ did not know about. Two chemists editing one plate is the ordinary case.
 
 import asyncio
 from collections.abc import Callable, Coroutine
-from typing import Any, TypeVar
+from typing import Any, TypeVar, get_args
 
 import psycopg
 import pytest
@@ -406,6 +406,33 @@ def test_the_one_automatic_status_transition_and_the_two_that_are_not(backend: s
     _run(_body)
 
 
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_every_status_the_type_allows_is_a_status_the_schema_accepts(backend: str) -> None:
+    """Two `CHECK (status IN (...))` constraints now restate `DesignStatus`, in SQL.
+
+    Neither can be derived from the Literal, so a sixth status added in Python would pass mypy,
+    pass every in-memory test, and be rejected by Postgres at runtime — on the write, in front of a
+    chemist. Driving all five through the real store is what ties the three declarations together.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design_id = _id(backend, "allstatuses")
+        design = _design(arms=1)
+        await store.append(
+            design_id, design, run_checks(design), kind="protocol", author_kind="agent"
+        )
+        for status in get_args(DesignStatus):
+            await store.set_status(design_id, status, "chemist-a", f"moving to {status}")
+            summary = await store.summary(design_id)
+            assert summary is not None and summary.status == status
+
+        recorded = [event.status for event in await store.status_history(design_id)]
+        assert recorded == list(reversed(get_args(DesignStatus)))
+
+    _run(_body)
+
+
 def test_advanced_states_the_rule_the_stores_both_implement() -> None:
     """The one function both backends read, so the transition cannot differ between them."""
     assert advanced("requested", "protocol") == "draft"
@@ -414,11 +441,81 @@ def test_advanced_states_the_rule_the_stores_both_implement() -> None:
     # one, since correcting the ask a protocol was approved against un-approves it just as surely.
     assert advanced("approved", "protocol") == "draft"
     assert advanced("approved", "request") == "draft"
-    # The three that are held. `abandoned` is the one worth stating: it must not be revived by a
+    # **`executed` is the same sentence one word along**, and this assertion used to read the other
+    # way — written from the same belief as the code it was checking. A header saying a design was
+    # run, over a document that was not, is the `approved` defect with a worse word in it.
+    assert advanced("executed", "protocol") == "draft"
+    assert advanced("executed", "request") == "draft"
+    # The two that are held. `abandoned` is the one worth stating: it must not be revived by a
     # write, only by a person.
-    for status in ("draft", "executed", "abandoned"):
+    for status in ("draft", "abandoned"):
         assert advanced(status, "protocol") == status
         assert advanced(status, "request") == status
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_status_move_records_which_revision_it_was_made_against(backend: str) -> None:
+    """The record `advanced()`'s docstring claimed and `set_status` did not keep.
+
+    An approval is retired by the next revision, correctly — so unless the move itself is recorded
+    against a revision, "which document did the chemist approve?" has no answer anywhere. Before
+    this, `set_status` wrote one column on the header row and logged a line without the revision
+    in it.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design_id = _id(backend, "signoff")
+        design = _design(arms=2)
+        await store.append(
+            design_id, design, run_checks(design), kind="protocol", author_kind="agent"
+        )
+        await store.set_status(design_id, "approved", "chemist-a", "80 C is the precedent")
+
+        # The revision that un-approves it.
+        await store.append(
+            design_id,
+            design,
+            run_checks(design),
+            kind="protocol",
+            author_kind="agent",
+            parent_revision=1,
+            change_note="an agent redrafted it at 200 C",
+        )
+        summary = await store.summary(design_id)
+        assert summary is not None and summary.status == "draft"
+
+        events = await store.status_history(design_id)
+        assert len(events) == 1
+        assert events[0].status == "approved"
+        assert events[0].revision == 1
+        assert events[0].actor == "chemist-a"
+        assert events[0].reason == "80 C is the precedent"
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_status_history_is_newest_first_and_empty_before_any_move(backend: str) -> None:
+    """Newest first, because a reader asks what a design's state is now and why."""
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design_id = _id(backend, "signoffs")
+        design = _design(arms=1)
+        await store.append(
+            design_id, design, run_checks(design), kind="protocol", author_kind="agent"
+        )
+        assert await store.status_history(design_id) == []
+
+        await store.set_status(design_id, "approved", "chemist-a", "fine")
+        await store.set_status(design_id, "executed", "chemist-b", "ran it Tuesday")
+        events = await store.status_history(design_id)
+        assert [event.status for event in events] == ["executed", "approved"]
+        assert [event.reason for event in events] == ["ran it Tuesday", "fine"]
+        assert {event.revision for event in events} == {1}
+
+    _run(_body)
 
 
 def test_the_default_store_follows_the_session_store_switch(

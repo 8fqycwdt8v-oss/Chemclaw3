@@ -291,3 +291,37 @@ blocker.
 
 Each fix was verified against the review's own reproduction rather than against a new test alone.
 The remaining open items are unchanged and are in `docs/planning/BACKLOG.md`.
+
+## 7 — Second review cycle (2026-08-29)
+
+A second adversarial pass, over the code the first cycle's fifteen fixes left behind, found **six**
+more — `D-2026-08-29-a-sign-off-names-a-revision-or-it-names-nothing`. All fixed, in this repository
+and in `Chemclaw3_ui`.
+
+**The largest is a fix whose stated cost was paid by a record that did not exist.** `advanced()`
+retires an `approved` status when a revision lands, correctly; the docstring paying for that said
+"which revision *was* approved stays recoverable: `set_status` records it", and `set_status` wrote
+one header column and logged a line without the revision in it. `experiment_protocol_status_events`
+(077) is that record now — revision, actor, reason, append-only by grant, and returned on
+`GET /protocols/{id}` so it can be read rather than merely stored.
+
+**The `reason` was worse than latent.** The route validated it to 2,000 characters and dropped it,
+while `Chemclaw3_ui` labels its box "recorded with the move", disables every status button until it
+is filled in, and confirms "recorded against you with the reason you wrote" — a control an
+interface *tells a person* is operating. `executed` joins `approved` as a status a revision retires
+(a header saying a design was run, over a document that was not).
+
+**And the UI could not render a protocol at all.** `ProtocolView` declared
+`{ revision: DesignRevision }` where the service returns the revision flat, so `revision.design` was
+`undefined` and the document page threw on `design.request.title` — under 808 unit tests and 8
+browser tests, every stub and the e2e fixture emitting the same invented shape. Settled by dumping
+`DesignOut.model_json_schema()`; fixed in `Chemclaw3_ui#55`, where re-nesting a stub now fails six
+tests.
+
+The rest: a `replicate_of` naming a real arm with different conditions (measured, a full 2-level
+grid reported as "reduced design: 2 of 4" with zero checks failing); `render.summarise` as a fourth
+caller re-spelling `has_protocol`; a duplicated `reaction_records` in the grant matrix; and one
+merge that committed conflict markers into the ADR ledger, dropping eight of `origin/main`'s rows.
+
+Each behaviour fix was proven non-vacuous by mutation — five mutations, each failing only its
+intended test.

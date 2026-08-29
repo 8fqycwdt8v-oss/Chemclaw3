@@ -37,7 +37,7 @@ written once. A second "HTE campaign" type would have duplicated all five.
 | `layout.py` | Plate arithmetic: formats, well labels, placement, run order. No chemistry. |
 | `diff.py` | What changed between two revisions, as dotted paths. |
 | `render.py` | The receipt a tool returns, the run sheet, and the Markdown a chemist reads. |
-| `store.py` | `experiment_protocols` + its append-only revision table. |
+| `store.py` | `experiment_protocols` + its two append-only tables: the revision history, and the sign-offs that name the revision each was made on. |
 
 ## What is deliberately not here
 
@@ -72,8 +72,15 @@ What the two rules share is that neither permits the inference to be silent.
 
 ## Tables
 
-`experiment_protocols` (one row per design: identity, status, head revision) and
+`experiment_protocols` (one row per design: identity, status, head revision),
 `experiment_protocol_revisions` (append-only; `document`, `checks`, `parent_revision`,
-`author_kind`). Migration `073`. The revision table has `INSERT` and no `UPDATE` by grant, not by
-convention — a revision is what an expert's correction *is*, so a credential that could rewrite one
-could erase the signal the table exists to keep.
+`author_kind`) and `experiment_protocol_status_events` (append-only; which revision somebody
+approved, ran or abandoned, who they were, and their reason). Migrations `073` and `077`. The two
+append-only tables have `INSERT` and no `UPDATE` by grant, not by convention — a revision is what an
+expert's correction *is*, and a status event is what a sign-off *is*, so a credential that could
+rewrite either could erase the signal the table exists to keep, or forge one.
+
+The third table exists because the header's `status` describes the **head**: `store.advanced()`
+retires an `approved` or `executed` status the moment a revision lands on it, correctly, because
+both are claims about a document and the document changed. Nothing on the header row can then say
+*which* document a chemist signed off on.

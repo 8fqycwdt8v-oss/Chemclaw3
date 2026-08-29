@@ -38,6 +38,7 @@ from chemclaw.protocols.models import (
     DesignSummary,
     ExperimentDesign,
     ProtocolCheck,
+    StatusEvent,
 )
 from chemclaw.protocols.store import RevisionConflict, UnknownDesign, default_design_store
 
@@ -78,6 +79,12 @@ class DesignOut(BaseModel):
     design: ExperimentDesign
     checks: list[ProtocolCheck] = Field(default_factory=list)
     history: list[RevisionSummary] = Field(default_factory=list)
+    # Who approved, ran or abandoned this design and at which revision. Beside the document rather
+    # than behind a route of its own, for the reason `history` is: a reader deciding whether to run
+    # a protocol needs "revision 3 was approved by X" at the same instant as the revision they are
+    # looking at, and a design demoted back to `draft` by a later revision has that fact *only*
+    # here.
+    status_history: list[StatusEvent] = Field(default_factory=list)
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -110,6 +117,11 @@ class StatusIn(BaseModel):
     """A lifecycle move."""
 
     status: DesignStatus
+    # **Recorded, which it was not.** `Chemclaw3_ui`'s status panel labels this "recorded with the
+    # move", disables every button until it is filled in, and confirms "the move is recorded
+    # against you with the reason you wrote" — and `set_status` took no `reason` at all, so the one
+    # sentence anybody writes about a design ("abandoned — the SM decomposes above 40 °C") was
+    # accepted from the chemist, validated to 2,000 characters, and dropped on the way to a 204.
     reason: str = Field(default="", max_length=2000)
 
     model_config = ConfigDict(extra="forbid")
@@ -167,6 +179,7 @@ async def get_protocol(
         created_at=stored.created_at,
         design=stored.design,
         checks=stored.checks,
+        status_history=await store.status_history(design_id),
         history=[
             RevisionSummary(
                 revision=item.revision,
@@ -278,7 +291,9 @@ async def post_status(
 ) -> Response:
     """Move a design's lifecycle status — approve it, mark it run, or abandon it."""
     try:
-        await default_design_store().set_status(design_id, body.status, principal.oid or "")
+        await default_design_store().set_status(
+            design_id, body.status, principal.oid or "", body.reason
+        )
     except UnknownDesign as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ChemclawError as exc:  # pragma: no cover - the store raises only UnknownDesign today

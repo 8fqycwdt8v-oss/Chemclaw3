@@ -133,9 +133,12 @@ def summarise(design: ExperimentDesign, checks: list[ProtocolCheck]) -> str:
     """The one sentence that says what this design is and whether it is runnable."""
     failed = [c for c in checks if not c.passed]
     blocking = [c for c in failed if c.severity == "blocker"]
-    if not design.arms and not design.base.steps and not design.base.charge:
+    if not design.has_protocol:
         # A design holding only the structured ask. Saying "0 arms over 0 factors" here would read
-        # as an empty protocol rather than as an intake nobody has drafted yet.
+        # as an empty protocol rather than as an intake nobody has drafted yet. `has_protocol`
+        # rather than the condition spelled out again: this was the fourth caller deciding it
+        # separately, in the release whose own note says that is how the second and third got it
+        # wrong.
         shape = "the structured ask, no procedure yet"
     elif design.request.mode == "single":
         shape = "1 experiment"

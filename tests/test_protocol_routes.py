@@ -435,6 +435,49 @@ def test_moving_a_designs_status_answers_204(
     assert summary is not None and summary.status == "approved"
 
 
+def test_the_reason_the_ui_makes_mandatory_is_actually_recorded(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """The reason the UI makes mandatory reaches the record.
+
+    `Chemclaw3_ui` disables every status button until a reason is typed and confirms the move is
+    "recorded against you with the reason you wrote" — and `set_status` took no `reason` at all, so
+    a field validated to 2,000 characters was dropped on the way to a 204. The test above sent one
+    and asserted only the status, which is how it stayed invisible.
+    """
+    _seed(store, _design(), status="draft")
+    client.post(
+        f"/protocols/{_DESIGN_ID}/status",
+        json={"status": "abandoned", "reason": "the SM decomposes above 40 C"},
+    )
+
+    events = asyncio.run(store.status_history(_DESIGN_ID))
+    assert len(events) == 1
+    assert events[0].reason == "the SM decomposes above 40 C"
+    assert events[0].actor == _OID
+    assert events[0].revision == 1
+
+
+def test_reading_a_design_carries_who_signed_off_on_which_revision(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """Stored is not read.
+
+    A record nothing can reach answers no question, so the sign-off comes back beside the document
+    — the same round trip the revision history already takes.
+    """
+    _seed(store, _design(), status="draft")
+    client.post(
+        f"/protocols/{_DESIGN_ID}/status", json={"status": "approved", "reason": "80 C is right"}
+    )
+
+    body = client.get(f"/protocols/{_DESIGN_ID}").json()
+    assert [event["status"] for event in body["status_history"]] == ["approved"]
+    assert body["status_history"][0]["revision"] == 1
+    assert body["status_history"][0]["reason"] == "80 C is right"
+    assert body["status_history"][0]["actor"] == _OID
+
+
 def test_moving_an_unknown_designs_status_is_a_404(client: TestClient) -> None:
     response = client.post("/protocols/design-nothing/status", json={"status": "approved"})
     assert response.status_code == 404

@@ -443,6 +443,29 @@ class ExperimentDesign(BaseModel):
         dangling = sorted({arm.replicate_of for arm in self.arms if arm.replicate_of} - set(ids))
         if dangling:
             raise ValueError(f"replicate_of names no arm in this design: {', '.join(dangling)}")
+        # **A replicate has to run the same conditions**, which is the second half of the same
+        # hole. `replicate_of` naming a *real* arm with different levels was accepted, and it
+        # defeated the same two readers a dangling one did: `arms_are_distinct` skips every arm
+        # carrying `replicate_of`, and `coverage_is_stated` counts none of them towards the grid —
+        # so two mislabelled arms turned a full grid into "reduced design: 2 of 4" while the run
+        # sheet told a chemist A2 was a repeat of A1. Averaging a replicate pair is how the noise
+        # of an assay is estimated; averaging two different conditions reports that noise as the
+        # answer. An arm that varies something is not a replicate, and clearing `replicate_of` is
+        # what says so.
+        by_id = {arm.arm_id: arm for arm in self.arms}
+        differing = [
+            arm.arm_id
+            for arm in self.arms
+            if arm.replicate_of
+            and (arm.levels, arm.setpoints)
+            != (by_id[arm.replicate_of].levels, by_id[arm.replicate_of].setpoints)
+        ]
+        if differing:
+            raise ValueError(
+                "these arms are marked as replicates but run different conditions from the arm "
+                f"they name: {', '.join(differing)}. Clear `replicate_of` on an arm that varies "
+                "something — a replicate is the same conditions run again"
+            )
         expected = list(range(1, len(self.base.steps) + 1))
         if [step.index for step in self.base.steps] != expected:
             raise ValueError("steps must be numbered 1..n in order")
@@ -453,9 +476,10 @@ class ExperimentDesign(BaseModel):
         """Whether this design says what to do, rather than only what is being asked for.
 
         The one definition, read by `checks.is_a_protocol`, by the intake (which must not replace a
-        drafted design with an empty ask) and by the edit route (which must not grade a correction
-        to the *ask* at the protocol stage). Three callers deciding it separately is how the second
-        and third got it wrong.
+        drafted design with an empty ask), by the edit route (which must not grade a correction to
+        the *ask* at the protocol stage) and by `render.summarise`. Callers deciding it separately
+        is how the second and third got it wrong — and `summarise` was still spelling the condition
+        out when that sentence was written, which is how the fourth nearly did.
         """
         return bool(self.arms or self.base.steps or self.base.charge)
 
@@ -493,6 +517,27 @@ class DesignRevision(BaseModel):
     def blockers(self) -> list[ProtocolCheck]:
         """The checks that failed at `blocker` severity."""
         return [c for c in self.checks if c.severity == "blocker" and not c.passed]
+
+
+class StatusEvent(BaseModel):
+    """One recorded lifecycle move: which revision somebody signed off on, and why.
+
+    The header's `status` describes the *head*, and `store.advanced` moves it back to `draft` when
+    a new revision lands on an approved or executed design — correctly, because an approval is a
+    statement about a document and the document changed. That leaves exactly one question with no
+    answer on the header row, and this is it: which revision a person actually approved, executed
+    or abandoned. Only a deliberate move is recorded; an automatic demotion has no actor and no
+    reason, and the revision that carries it is already in the history.
+    """
+
+    status: DesignStatus
+    #: The head revision at the instant of the move — the document that was signed off on.
+    revision: int = Field(ge=0)
+    actor: str = ""
+    reason: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
 
 class DesignSummary(BaseModel):

@@ -1,10 +1,18 @@
 """The revision history of every design — append-only, because an edit is the evidence.
 
-Two tables and one rule: **a revision is never updated.** A change is a new row naming the row it
-came from. That is what makes an expert's alteration of the first shot observable at all, and it is
-what makes a concurrent edit a refusal instead of a silent overwrite — `parent_revision` is
-compared against the head, so two people editing one protocol produce a `RevisionConflict` rather
-than one of them losing their work without being told.
+Three tables and one rule. The header row is a mutable projection — its status, head revision and
+counts move with the head, and the grant gives UPDATE on it alone. **The two beneath it are
+append-only:** a change is a new row naming the row it came from, and a sign-off is a new row
+naming the revision it was made on. That is what makes an expert's alteration of the first shot
+observable at all, and it is what makes a concurrent edit a refusal instead of a silent overwrite —
+`parent_revision` is compared against the head, so two people editing one protocol produce a
+`RevisionConflict` rather than one of them losing their work without being told.
+
+The third table is `experiment_protocol_status_events`, and it exists because the header's `status`
+describes the **head**: `advanced()` retires an `approved` or `executed` status the moment a new
+revision lands, correctly, and that leaves nowhere on the header row to say *which document* a
+chemist signed off on. Only a deliberate move is recorded — an automatic demotion has no actor and
+no reason, and the revision that caused it is already in the history.
 
 Shaped as `ingest.eln.records` is, and for the same reason: a Protocol with an in-memory and a
 Postgres implementation, so the drafting path is testable with no database while the store that
@@ -41,6 +49,7 @@ from chemclaw.protocols.models import (
     DesignSummary,
     ExperimentDesign,
     ProtocolCheck,
+    StatusEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -81,6 +90,29 @@ VALUES
 """
 
 _SELECT_HEAD = "SELECT head_revision, status FROM experiment_protocols WHERE design_id = %s"
+
+# `RETURNING head_revision` rather than a second SELECT: the revision the event is stamped with has
+# to be the one the status was set against, and reading it separately leaves a window in which an
+# append moves the head between the two statements.
+_SET_STATUS = """
+UPDATE experiment_protocols SET status = %(status)s, updated_at = now()
+WHERE design_id = %(design_id)s
+RETURNING head_revision
+"""
+
+_INSERT_STATUS_EVENT = """
+INSERT INTO experiment_protocol_status_events
+    (design_id, revision, status, actor, reason, created_at)
+VALUES
+    (%(design_id)s, %(revision)s, %(status)s, %(actor)s, %(reason)s, now())
+"""
+
+_SELECT_STATUS_EVENTS = """
+SELECT status, revision, actor, reason, created_at
+FROM experiment_protocol_status_events
+WHERE design_id = %s
+ORDER BY id DESC
+"""
 
 _SELECT_SUMMARY = """
 SELECT design_id, title, mode, status, project, opened_by, head_revision, arm_count,
@@ -142,8 +174,18 @@ class DesignStore(Protocol):
         """Designs, newest first."""
         ...
 
-    async def set_status(self, design_id: str, status: DesignStatus, actor: str = "") -> None:
-        """Move a design's lifecycle status."""
+    async def set_status(
+        self, design_id: str, status: DesignStatus, actor: str = "", reason: str = ""
+    ) -> None:
+        """Move a design's lifecycle status, recording who moved it, why, and from which revision.
+
+        Raises:
+            UnknownDesign: nothing in the store answers to `design_id`.
+        """
+        ...
+
+    async def status_history(self, design_id: str) -> list[StatusEvent]:
+        """Every recorded lifecycle move, newest first."""
         ...
 
 
@@ -154,6 +196,7 @@ class InMemoryDesignStore:
         """Start empty; process-lifetime, because a store that forgets between calls is not one."""
         self._revisions: dict[str, list[DesignRevision]] = {}
         self._meta: dict[str, dict[str, Any]] = {}
+        self._status_events: dict[str, list[StatusEvent]] = {}
 
     async def append(
         self,
@@ -279,12 +322,26 @@ class InMemoryDesignStore:
         ]
         return sorted(summaries, key=lambda s: s.updated_at, reverse=True)[:limit]
 
-    async def set_status(self, design_id: str, status: DesignStatus, actor: str = "") -> None:
-        """Move a design's lifecycle status."""
+    async def set_status(
+        self, design_id: str, status: DesignStatus, actor: str = "", reason: str = ""
+    ) -> None:
+        """Move a design's lifecycle status, recording the move against the head revision."""
         if design_id not in self._meta:
             raise UnknownDesign(f"no design {design_id!r}")
         self._meta[design_id]["status"] = status
         self._meta[design_id]["updated_at"] = datetime.now(UTC)
+        self._status_events.setdefault(design_id, []).append(
+            StatusEvent(
+                status=status,
+                revision=self._revisions[design_id][-1].revision,
+                actor=actor,
+                reason=reason,
+            )
+        )
+
+    async def status_history(self, design_id: str) -> list[StatusEvent]:
+        """Every recorded lifecycle move, newest first."""
+        return list(reversed(self._status_events.get(design_id, [])))
 
 
 class PostgresDesignStore:
@@ -448,42 +505,86 @@ class PostgresDesignStore:
                 rows = await cur.fetchall()
         return [_summary(row) for row in rows]
 
-    async def set_status(self, design_id: str, status: DesignStatus, actor: str = "") -> None:
-        """Move a design's lifecycle status."""
+    async def set_status(
+        self, design_id: str, status: DesignStatus, actor: str = "", reason: str = ""
+    ) -> None:
+        """Move a design's lifecycle status, recording the move against the head revision.
+
+        The event row is the whole reason this is two statements in one transaction. `advanced()`
+        demotes an approved or executed design back to `draft` when a revision lands on it, so the
+        header cannot say which document a person signed off on — and until this table existed
+        nothing could, while `advanced()`'s own docstring said `set_status` recorded it.
+        """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    "UPDATE experiment_protocols SET status = %s, updated_at = now() "
-                    "WHERE design_id = %s",
-                    (status, design_id),
-                )
-                if cur.rowcount == 0:
+                await cur.execute(_SET_STATUS, {"status": status, "design_id": design_id})
+                row = await cur.fetchone()
+                if row is None:
                     raise UnknownDesign(f"no design {design_id!r}")
+                await cur.execute(
+                    _INSERT_STATUS_EVENT,
+                    {
+                        "design_id": design_id,
+                        "revision": row[0],
+                        "status": status,
+                        "actor": actor,
+                        "reason": reason,
+                    },
+                )
             await conn.commit()
-        logger.info("protocol.status design_id=%s status=%s actor=%s", design_id, status, actor)
+        logger.info(
+            "protocol.status design_id=%s status=%s revision=%s actor=%s",
+            design_id,
+            status,
+            row[0],
+            actor,
+        )
+
+    async def status_history(self, design_id: str) -> list[StatusEvent]:
+        """Every recorded lifecycle move, newest first."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_SELECT_STATUS_EVENTS, (design_id,))
+                rows = await cur.fetchall()
+        return [
+            StatusEvent(
+                status=row[0], revision=row[1], actor=row[2], reason=row[3], created_at=row[4]
+            )
+            for row in rows
+        ]
+
+
+#: The statuses a new revision retires, because each is a claim about a *document* rather than
+#: about the design: somebody approved these conditions, or somebody ran them. A revision replaces
+#: the document, so the claim no longer describes what `GET /protocols/{id}` serves.
+_RETIRED_BY_A_REVISION: frozenset[DesignStatus] = frozenset({"approved", "executed"})
 
 
 def advanced(current: DesignStatus, kind: str) -> DesignStatus:
     """The status a design has after a revision of `kind` lands on it.
 
-    Two automatic transitions, and the second is a correction. A design that held only a structured
-    ask becomes a `draft` the moment a protocol revision arrives — that one was always here.
+    A design that held only a structured ask becomes a `draft` the moment a protocol revision
+    arrives — that transition was always here.
 
-    **An `approved` design becomes a `draft` again when a new revision lands**, because an approval
-    is a statement about a *document* and the document has changed. The first version held the
-    status instead, reasoning that a re-draft must not silently un-approve — which is true of the
-    word and false of the thing: measured, a chemist approving revision 1 at 80 °C and an agent then
-    drafting revision 2 at 200 °C left a header reading `approved` over a protocol nobody had read,
-    and `GET /protocols/{id}` serves the head. That is the one path in this tier to somebody running
-    conditions no one signed off. Which revision *was* approved stays recoverable: `set_status`
-    records it, and the revision history is append-only.
+    **An `approved` or `executed` design becomes a `draft` again when a new revision lands**,
+    because both are statements about a *document* and the document has changed. The first version
+    held `approved`, reasoning that a re-draft must not silently un-approve — true of the word and
+    false of the thing: measured, a chemist approving revision 1 at 80 °C and an agent then drafting
+    revision 2 at 200 °C left a header reading `approved` over a protocol nobody had read, and every
+    default read serves the head. `executed` was left behind in that fix and is the same sentence
+    one word along: a header saying a design was run, over a document that was not.
 
-    `abandoned` is deliberately not in that shape and is held: a design somebody decided not to run
+    **What makes the demotion affordable is `experiment_protocol_status_events`**, and it is worth
+    saying plainly that this docstring used to claim a record that did not exist — "`set_status`
+    records it" was written above a `set_status` that wrote one column on the header row and logged
+    a line without the revision in it. It records it now: which revision, by whom, and why.
+
+    `abandoned` is deliberately not in that set and is held: a design somebody decided not to run
     does not come back because an agent wrote to it, and the way back is a person's `set_status`.
     """
     if current == "requested" and kind == "protocol":
         return "draft"
-    return "draft" if current == "approved" else current
+    return "draft" if current in _RETIRED_BY_A_REVISION else current
 
 
 def _require_head(design_id: str, head: int, parent_revision: int) -> None:

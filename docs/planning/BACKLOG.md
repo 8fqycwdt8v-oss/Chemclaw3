@@ -646,22 +646,24 @@ only holds defects can only ever restore the system to what it already intended 
       Anchors: `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
       `science/bo/problem.py`.
 
-      **A big schema costs graph-build time as well as prompt tokens, and that half was never
-      measured** (2026-08-29). The four protocol tools raised the per-turn compile by **30 ms
-      (209 → 239, +14%) for four tools out of ~98** — isolated by deleting the import that registers
-      them — and failed `test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget`
-      in CI at 408 ms against a 400 ms bound, which is now 550 with that number written in. Profiled,
-      **79% of the whole build is `langchain_core.tools.convert.tool`** → `validate_arguments` →
-      `create_model`: every build re-derives a pydantic model from every tool's signature, so build
-      time is proportional to schema size exactly as the prompt cost is.
+      **A big schema costs graph-build time as well as prompt tokens — and the larger half of that
+      was fixed on `main` while this row was being written** (2026-08-29). The four protocol tools
+      raised the per-turn compile by **30 ms (209 → 239, +14%) for four tools out of ~98**, isolated
+      by deleting the import that registers them, and profiling put **79% of the whole build** in
+      `langchain_core.tools.convert.tool` → `validate_arguments` → `create_model`: every build
+      re-derived a pydantic model from every tool's signature, so build time was proportional to
+      schema size exactly as prompt cost is.
 
-      That makes the second, larger lever visible: **caching the `StructuredTool` per function**
-      instead of re-wrapping process-scoped callables on every build would cut ~79% of the build for
-      *every* tool, not only the oversized ones — and unlike the `$ref` question it needs no
-      provider to agree. What it needs first is a measurement of whether anything mutates a tool
-      per turn (the connector tools are per-turn and come from a different path; the `@tool`
-      callables in `core.tool_registry` are module-level singletons). Anchor:
-      `agent/langgraph_agent.py::_capability_tools`.
+      **That is history rather than an open item.** `agent/tool_schema.py::as_structured_tool` now
+      converts each registered callable once per process, keyed on the function object, and the
+      merged tree measures **38.7 ms** with all four protocol tools present — so the build-time
+      half of this row is closed, and the bound in
+      `tests/test_langgraph_connectors.py::test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget`
+      came *down* to 250 rather than up. It is recorded here because the
+      finding still holds where the cache cannot reach: a tool's schema is still generated once,
+      and the *prompt* cost above is unchanged and paid every turn. Anchors:
+      `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
+      `science/bo/problem.py`.
 
 - [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
       what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models

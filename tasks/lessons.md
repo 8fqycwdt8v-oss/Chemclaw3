@@ -1433,3 +1433,56 @@ per-turn compile 30 ms (209 → 239, isolated by deleting their registration imp
 put **79% of the whole build** in `langchain_core.tools.convert` re-deriving a pydantic model from
 every tool's signature on every build. Build time is proportional to schema size exactly as prompt
 cost is — a second cost of an oversized tool schema that nobody here had measured.
+
+## 2026-08-29 — a fix can be paid for with a record that does not exist
+
+The second adversarial pass over `chemclaw.protocols` found six more defects on top of the first
+pass's fifteen. The one worth a rule is not any of the six; it is the shape the largest one had.
+
+`store.advanced()` demotes an `approved` design back to `draft` when a revision lands on it. That is
+correct, and the docstring arguing for it ends: *"Which revision was approved stays recoverable:
+`set_status` records it."* `set_status` wrote one column on the header row and logged a line that
+did not carry the revision. **I wrote the demotion and the sentence excusing its cost in the same
+commit, one screen apart, and the sentence was an invention.**
+
+Rule 14 and the previous entry's rule 3 both say a docstring is a bug detector and that prose I
+wrote in the same breath as the code is not. This is the sharper case, because the false sentence
+was not describing the code beside it — it was describing *somewhere else*, and describing it as a
+reason to accept a loss. So:
+
+1. **A cost-is-affordable claim names a mechanism; open the mechanism.** "X stays recoverable
+   because Y records it" is a claim about Y, in a comment about X. It reads as reassurance and it
+   is a testable assertion about a different function. Every time I justify removing, demoting or
+   overwriting something by naming what still holds it, the next action is to open that thing.
+2. **A field the API accepts and never reads is a control that lies.** `POST
+   /protocols/{id}/status` validated a `reason` to 2,000 characters and dropped it — while the UI
+   labelled the box "recorded with the move", *disabled every button until it was filled in*, and
+   confirmed "recorded against you with the reason you wrote". That is worse than a dead parameter:
+   it is a promise made to a person, three times, in their own screen. **Trace every request field
+   to a write, and grep the consumer repository for the ones a person types.**
+3. **A fixture that agrees with my type proves nothing about the service.** The UI's
+   `GET /protocols/{id}` type was nested where the service is flat, so `revision.design` was
+   `undefined` and the document page threw on its first field — under 808 green unit tests and 8
+   green browser tests, one of whose docstrings says it exists to prove the page "renders against a
+   real proxied response rather than a stubbed one". Every stub was written from the same belief as
+   the type. **A cross-repository shape is verified by dumping the producer's own schema, not by
+   re-reading the consumer.** One `model_json_schema()` call ended a question three test suites
+   could not.
+4. **Resolve a merge, then grep for the markers.** `docs/decisions/README.md` went to a commit with
+   `<<<<<<< HEAD` in it and eight of `origin/main`'s ADR rows dropped. `make lint` and `make type`
+   were both green, because the file is Markdown. The suite caught it; my own reading did not.
+
+5. **Do not touch the shared database while a full suite is running against it.** I started
+   `make cov`, then ran a mutation that dropped a table and re-migrated it. The suite's own
+   Postgres-backed tests were reading that table at the time, so the run stopped being evidence
+   about anything and had to be thrown away and restarted. The sandbox has one Postgres and
+   `tests/pg.py` points every backend test at it. **While a suite is running, the only safe
+   commands are read-only ones** — a mutation experiment waits, or runs against a database of its
+   own.
+
+6. **The "run exactly what CI runs" rule is per repository, and the UI's gate is seven commands.**
+   I ran `typecheck`, `lint` and `test` in `Chemclaw3_ui`, called it green, and CI failed on
+   `npm run format:check`. The check job is `npm audit --omit=dev --audit-level=high`, `typecheck`,
+   `lint`, `format:check`, `test`, `check:contrast`, `build`; the e2e job adds **both directions**
+   of `check:no-dev-auth` (a default build must not carry the dev provider, an `ALLOW_DEV_AUTH=true`
+   build must) and `test:e2e`. Same `grep -n 'run: ' .github/workflows/*.yml`, different repository.
