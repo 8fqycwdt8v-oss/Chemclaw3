@@ -2,8 +2,8 @@
 
 The live passes so far used a real model, which bounds volume by cost and — the sharper limit —
 puts the interesting inputs out of reach. A real model will not reliably emit an empty function
-name, a truncated argument document, forty parallel calls or a turn with no prose, and every one of
-those has been a live defect in this system. `cli/mock_llm.py` makes them a parameter, so this
+name, an unparseable argument document, forty parallel calls or a turn with no prose, and every one
+of those has been a live defect in this system. `cli/mock_llm.py` makes them a parameter, so this
 harness can ask for them by name.
 
 **It is committed, and that is a decision rather than tidiness.** The 2026-07 load test's harness
@@ -459,7 +459,7 @@ async def family_f_adversarial() -> list[Finding]:
     cases: list[tuple[str, str, Callable[[TurnResult], bool]]] = [
         (
             "f-malformed-json",
-            "a truncated argument document is reported, not swallowed",
+            "an unparseable argument document is reported, not swallowed",
             _bad_call_was_reported,
         ),
         (
