@@ -229,6 +229,10 @@ def test_the_factor_tables_are_not_looked_for_under_the_export_tree() -> None:
 
     resolved = _default_real_data(ord_export_dir)
 
+    # Narrowed rather than assumed: the helper returns `Path | None`, and an assertion written
+    # against the optional would pass vacuously if it ever started returning `None` for the lane's
+    # own layout — which is the one input this test exists to pin.
+    assert resolved is not None
     assert "data/app" not in resolved.as_posix()
     assert resolved.parents[2].name != "data"
 
