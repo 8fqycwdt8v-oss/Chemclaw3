@@ -63,6 +63,11 @@ _EXPECTED_INPROCESS_TOOLS = {
     # is core's for the same reason the status tool is — it is generic over every job, and a
     # connector must not be able to see another bundle's runs.
     "find_past_jobs",
+    # The operational read model (D-2026-08-29). In-process for the same reason `find_past_jobs`
+    # is: it is generic over every capability, and a connector bundle must not be able to read
+    # another bundle's record — nor, being a projection of the audit trail itself, may the
+    # capability that writes that trail be the thing that reads it back.
+    "review_activity",
 }
 
 

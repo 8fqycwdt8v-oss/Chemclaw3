@@ -153,6 +153,10 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         # mining job writes, and its whole purpose is to point at evidence worth gathering
         # *before* anything is authorized.
         "recall_observations",
+        # The operational read model (D-2026-08-29). Four `GROUP BY`s over tables this system
+        # itself wrote, returning counts and bounded vocabularies. It is a read in the strongest
+        # sense available here: it cannot even reach a caller's free text, let alone write one.
+        "review_activity",
         "get_durable_job_status",
         "list_attachments",
         "list_watches",

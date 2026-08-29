@@ -289,6 +289,10 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # `kg -> agent` is gone from the graph and from this policy — kg may no longer import agent.
     ("chemclaw.agent", "chemclaw.kg"),
     ("chemclaw.agent", "chemclaw.memory"),
+    # The operational read model (F3). `agent/operations_tools.py` is the tool over it, in the
+    # same relationship `agent/memory_tools.py` has to `memory/`: the store is below, the
+    # conversation plumbing is here.
+    ("chemclaw.agent", "chemclaw.operations"),
     ("chemclaw.agent", "chemclaw.retrieval"),
     ("chemclaw.agent", "chemclaw.science"),
     ("chemclaw.agent", "chemclaw.templates"),
@@ -358,6 +362,10 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.memory", "chemclaw.ingest"),
     ("chemclaw.memory", "chemclaw.kg"),
     ("chemclaw.memory", "chemclaw.science"),
+    # `operations` reads five of this system's own tables and nothing else. It is a leaf on
+    # the kernel by construction: a reading of the record must not be able to reach the
+    # capability that wrote it, or the trail would be able to describe itself.
+    ("chemclaw.operations", "chemclaw.core"),
     # The result-publication seam (D-2026-08-25). It is a leaf that consumes what the system
     # produced: it reads the kernel and, for its SQL driver, the warehouse connection Protocol that
     # `ingest` already defines — reusing that rather than defining a second `module:callable`

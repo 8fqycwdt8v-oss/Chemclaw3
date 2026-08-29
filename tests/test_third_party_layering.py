@@ -255,6 +255,9 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.ingest", "postgres"): "the document chunk index",
     ("chemclaw.ingest", "rdkit"): "an ELN row's structure is canonicalised on the way in",
     ("chemclaw.memory", "postgres"): "the memory layers are tables",
+    ("chemclaw.operations", "postgres"): (
+        "the operational read model is five SELECTs over this system's own tables"
+    ),
     ("chemclaw.retrieval", "postgres"): "the vector index is pgvector",
     ("chemclaw.evals", "httpx"): "the live probe drives the real front door over HTTP",
     ("chemclaw.evals", "temporal"): "the live probe polls real durable jobs",
