@@ -304,7 +304,7 @@ def test_report_measurement_never_claims_a_store_that_did_not_happen(
     table was touched at all.
     """
     monkeypatch.setattr(settings, "calibration_enabled", False)
-    answer = asyncio.run(calc_tools.report_measurement("pka", "CCO", 15.9))
+    answer = asyncio.run(calc_tools.report_measurement("pka", "CCO", 15.9, "pKa"))
     assert "NOT recorded" in answer
     assert "not stored" in answer
     # The exact phrase the old branch used, which a reader acts on.
@@ -329,7 +329,7 @@ def test_report_measurement_surfaces_a_failed_write_instead_of_swallowing_it(
 
     monkeypatch.setattr("chemclaw.science.calc.calibration.db.connection", _explode)
     with pytest.raises(ConnectionError):
-        asyncio.run(calc_tools.report_measurement("pka", "CCO", 15.9))
+        asyncio.run(calc_tools.report_measurement("pka", "CCO", 15.9, "pKa"))
 
 
 def test_a_disabled_ledger_is_none_and_a_stored_unpredicted_value_is_zero(
@@ -344,3 +344,30 @@ def test_a_disabled_ledger_is_none_and_a_stored_unpredicted_value_is_zero(
 
     monkeypatch.setattr(settings, "calibration_enabled", False)
     assert asyncio.run(calibration.record_observation("pka", "h", 1.0, source="bench")) is None
+
+
+def test_a_measurement_with_no_stated_unit_is_refused_rather_than_stamped() -> None:
+    """The value that reaches the ledger must be in the unit the ledger says it is in.
+
+    `unit` used to default to empty and the row was stamped with the ledger's own unit regardless,
+    so a chemist reporting "0.5 mg/mL" had `0.5` recorded as **log S**. For MW 300 the true log S is
+    −2.78, so `calculator_trust` would report that calculator as biased by 3.3 log units — a factor
+    of ~2000 — on the strength of one row. Worse than the empty string it replaced: an empty unit
+    marked the row as unstated, and asserting the wrong one removes the only way to find it again.
+
+    The refusal names the ledger's unit, so the model can ask the chemist rather than guess.
+    """
+    with pytest.raises(ValueError, match="state the unit"):
+        asyncio.run(calc_tools.report_measurement("solubility", "CCO", 0.5))
+    with pytest.raises(ValueError, match="state the unit"):
+        asyncio.run(calc_tools.report_measurement("pka", "CCO", 15.9))
+
+    # **And the spellings that used to walk around it.** The lookup was exact-match on a
+    # model-supplied string, so one capital letter or a trailing space skipped the refusal
+    # and stored
+    # the row with the empty unit the control exists to prevent. (The first version of this test
+    # asserted this case with `"pka"`, which *is* calibrated — so it covered the same branch twice
+    # and its comment described coverage that did not exist.)
+    for spelling in ("PKA", "pka ", " Solubility"):
+        with pytest.raises(ValueError, match="state the unit"):
+            asyncio.run(calc_tools.report_measurement(spelling, "CCO", 15.9))

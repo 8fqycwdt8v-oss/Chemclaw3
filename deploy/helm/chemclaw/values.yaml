@@ -84,10 +84,26 @@ service:
 # anonymously.
 #
 # It serves reads only: the advertised set is derived from `agent.authz.READ_ONLY_TOOLS` minus the
-# turn-scoped ones, so nothing here can launch a job, propose a note or settle a wait.
+# ones `WITHHELD` names, so nothing here can launch a job, propose a note or settle a wait — and
+# nothing here answers a question about this deployment's *people* rather than its chemistry, which
+# is the second predicate and the one that was originally wrong.
 mcpFace:
   enabled: false
   replicas: 1
+  route:
+    # Publishing the face outside the cluster, opt-in and separate from `route.enabled`. That knob
+    # governs the chat front door, where a person authenticates through Entra; this one exposes a
+    # surface whose entire authorization is "holds one bearer token". They are different decisions
+    # and a deployment states them separately.
+    enabled: false
+  # Namespaces whose pods may reach the face, as label selectors — deliberately *not* shared with
+  # `networkPolicy.ingressNamespaces`, which names the router namespace that may reach the chat
+  # front door. Empty means this release's own pods only.
+  #
+  # Until this existed no ingress policy selected the face at all, and a pod no ingress policy
+  # selects is unrestricted for ingress: every pod in the cluster could reach it, including the
+  # deliberately unauthenticated `/healthz` and `/metrics`.
+  ingressNamespaces: []
 
 workers:
   background:

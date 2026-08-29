@@ -1015,6 +1015,19 @@ Two things to know before reading any of them:
 already lost are not recoverable — `durable/retention.py` refuses to prune this table for the same
 reason this is critical.
 
+#### ChemclawDeliveryChannelFailing
+`warning`. An outbound channel is refusing messages, and the digest that could not be sent was
+**still acknowledged** — the watermark turns on the in-app mailbox, deliberately, so nothing
+retries this. Recipients on that channel are simply not being reached, and the notes it covered
+will not re-qualify. The `channel` label names the folder; the `deliver.channel_failed` log marker
+carries the driver and the error. Check the destination first (a rotated webhook secret and a
+retired URL are the two common ones), then `CHEMCLAW_DELIVERY_CHANNELS` against the folders on
+`CHEMCLAW_DELIVERY_CHANNELS_DIR`.
+
+This counter and `chemclaw_deliveries_total` are the pair worth reading together: one channel at
+zero while another climbs is a broken destination, and both at zero with delivery configured is an
+outage of the seam itself.
+
 #### ChemclawVerifierDegraded
 `warning`. Answers are being scored by the citation gate instead of the judge, so every affected
 turn goes to human review: this is a review-queue load signal as much as a model one. Check the

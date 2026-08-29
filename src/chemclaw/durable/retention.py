@@ -336,6 +336,9 @@ _NOT_PRUNED: dict[str, str] = {
     "experiment_protocol_revisions": "refused: the append-only history of a design, whose human "
     "revisions are an expert's corrections of a generated protocol — INSERT-only by grant, so "
     "neither a clock nor an UPDATE can reach one",
+    "experiment_protocol_status_events": "refused: who approved, ran or abandoned which revision "
+    "of a design, and why — the only record of a sign-off, because a later revision moves the "
+    "header's status off it. INSERT-only by grant, like the revisions it points at",
     # Disposed by a mechanism that is not an age cutoff, and deliberately not duplicated here.
     "checkpoint_blobs": "swept by `_prune_checkpoints` with the thread it belongs to, not by a "
     "cutoff of its own — `checkpoints` in `_PRUNABLE` is the key that finds it",

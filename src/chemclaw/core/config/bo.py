@@ -89,5 +89,5 @@ class BoSettings(BaseSettings):
     # (D-2026-08-29-a-decision-that-waits-is-a-workflow). A plate turnaround is the unit here, not
     # a machine timeout: fourteen days is two working weeks, which is long enough that a batch
     # genuinely in progress is not abandoned and short enough that a campaign nobody is running
-    # stops asking. Clamped again by `awaiting_max_days`.
+    # stops asking. Clamped against `awaiting_max_days` by `open_pending_request_activity`.
     bo_measurement_deadline_days: float = Field(default=14.0, gt=0)

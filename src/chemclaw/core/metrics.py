@@ -411,6 +411,22 @@ _COUNTERS: dict[str, str] = {
     # A model call that needed no reduction increments neither, so a flat zero means "never over
     # budget" and an absent series means "not wired" — the distinction the previous state of this
     # subsystem could not express.
+    # **Outbound delivery, which shipped with no signal of any kind.** `chemclaw.deliver.registry`
+    # held no
+    # logger and no metric, `deliver()` swallowed every per-channel failure with a comment saying
+    # the caller would log it, and the one caller discarded the return value — so "every digest was
+    # dropped" and "every digest was delivered" produced identical observations. A seam built
+    # because a project leader could not be reached on a Monday morning could fail totally and
+    # silently, which is the same failure one layer in.
+    #
+    # Two counters rather than one, because a ratio is the question an operator actually has: a
+    # channel that takes nothing while another takes everything is a broken webhook, and both
+    # failing is an outage.
+    "chemclaw_deliveries_total": ("Messages a delivery channel accepted, by channel."),
+    "chemclaw_delivery_failures_total": (
+        "Messages a delivery channel refused or could not be sent, by channel. A failure here is "
+        "swallowed so one channel's outage is not everyone's, which is exactly why it must count."
+    ),
     "chemclaw_context_compactions_total": (
         "Model calls whose message list was reduced to stay inside the context token budget."
     ),
@@ -792,6 +808,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Four values, fixed by a CHECK constraint in `infra/sql/027_note_proposals.sql` — the only
     # label in this registry whose cardinality is bounded by the database rather than by trust.
     "chemclaw_note_proposals_total": ("state",),
+    # Bounded by `CHEMCLAW_DELIVERY_CHANNELS` — a deployment's own list of channel folder names,
+    # never a caller's string. Same rule as every label here.
+    "chemclaw_deliveries_total": ("channel",),
+    "chemclaw_delivery_failures_total": ("channel",),
     # Three values, fixed in `agent/condense.py`'s own `DigestSource` literal rather than by a
     # caller: `extracted`, `degraded`, `oversized`. Bounded by the code that emits it, which is the
     # same guarantee `state` above gets from a CHECK constraint.

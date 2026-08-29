@@ -646,6 +646,25 @@ only holds defects can only ever restore the system to what it already intended 
       Anchors: `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
       `science/bo/problem.py`.
 
+      **A big schema costs graph-build time as well as prompt tokens — and the larger half of that
+      was fixed on `main` while this row was being written** (2026-08-29). The four protocol tools
+      raised the per-turn compile by **30 ms (209 → 239, +14%) for four tools out of ~98**, isolated
+      by deleting the import that registers them, and profiling put **79% of the whole build** in
+      `langchain_core.tools.convert.tool` → `validate_arguments` → `create_model`: every build
+      re-derived a pydantic model from every tool's signature, so build time was proportional to
+      schema size exactly as prompt cost is.
+
+      **That is history rather than an open item.** `agent/tool_schema.py::as_structured_tool` now
+      converts each registered callable once per process, keyed on the function object, and the
+      merged tree measures **38.7 ms** with all four protocol tools present — so the build-time
+      half of this row is closed, and the bound in
+      `tests/test_langgraph_connectors.py::test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget`
+      came *down* to 250 rather than up. It is recorded here because the
+      finding still holds where the cache cannot reach: a tool's schema is still generated once,
+      and the *prompt* cost above is unchanged and paid every turn. Anchors:
+      `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
+      `science/bo/problem.py`.
+
 - [ ] **The static-prefix ratchet gates a number 24% below what the deployment pays** — [S], found
       2026-08-29 while measuring for `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`.
       `tests/test_context_floor.py` counts `convert_to_openai_tool` over `_capability_tools`, and

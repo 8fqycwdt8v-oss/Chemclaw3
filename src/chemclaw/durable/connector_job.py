@@ -198,6 +198,16 @@ class ConnectorJobInput(BaseModel):
     # Additive and defaulted because it crosses the Temporal wire and histories are in flight.
     effect_system: str = ""
     effect_reversal: str = ""
+    # **Who may approve an irreversible one**, resolved from configuration at the launch site for
+    # the same reason `effect_system` is copied there: a workflow may not read `settings`, because a
+    # value that changed mid-flight would make a replay emit a different child than the history
+    # holds. Empty means no approver role is configured, which `_approve_effect` refuses under
+    # enforcement rather than falling back to "anybody".
+    effect_approver: str = ""
+    #: How long that approval stays open, already clamped against the deployment's ceiling at the
+    #: launch site — a workflow-side clamp would put a timer count under a value that can change
+    #: between an execution and its replay.
+    effect_approval_days: float = 3.0
 
 
 class ConnectorJobResult(BaseModel):
@@ -215,6 +225,16 @@ class ConnectorJobResult(BaseModel):
     summary: str = Field(min_length=1)
     data: dict[str, Any] = Field(default_factory=dict)
     note: Note | None = None
+    # **The far side's own handle for what this run changed** — a ticket number, a deviation id, a
+    # batch record. Empty for the jobs that change nothing outside this deployment, which is every
+    # job in this repository today.
+    #
+    # It is on the *result* because the connector that made the change is the only thing that knows
+    # it, and that is the producer the column lacked: `effects.external_ref` shipped with three
+    # readers calling it "the only handle an operator can undo this by hand", a `SettleEffectInput`
+    # with no such field, and therefore an empty string on every row it would ever hold — the
+    # `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` shape exactly.
+    external_ref: str = ""
     # The calculation keys this run rested on, so a conclusion drawn from it can cite them
     # (D-2026-08-21). `propose_knowledge_note`'s `calc_refs` argument has told the model to "get
     # them from a job's result envelope" since D-133 and no envelope carried any: the only
@@ -528,7 +548,9 @@ class ConnectorJobWorkflow:
             approved_by = await self._approve_effect(job, job_id)
             await self._begin_effect(job, job_id, approved_by)
             result = await self._run_child(job)
-            await self._settle_effect(job, job_id, "applied", result.summary)
+            await self._settle_effect(
+                job, job_id, "applied", result.summary, external_ref=result.external_ref
+            )
             return await self._finish(job, result, started_at)
         except BaseException as exc:
             # **The ledger is settled first, before anything best-effort.** A failed effect that is
@@ -597,6 +619,20 @@ class ConnectorJobWorkflow:
         """
         if job.effect_reversal != "irreversible":
             return ""
+        # **Fail closed on an unrouted approval, in dev as well as under Entra.** `asked_of=""`
+        # means "whoever is around" to the answer gate, so an irreversible change would be
+        # approvable by any authenticated caller — including the person who asked for it, which is
+        # the one outcome this gate exists to prevent. Unconditional rather than split on
+        # `entra_required` for two reasons: a workflow may not read `settings` at all (the replay
+        # hazard `commitment_sync` states), and there is no version of "nobody in particular signs
+        # off an unrecoverable change" that is right. A deployment that runs irreversible effects
+        # names an approver; a dev one that wants to exercise the path sets the same variable.
+        if not job.effect_approver:
+            raise ApplicationError(
+                f"{job.job!r} changes {job.effect_system} irreversibly and no approver role is "
+                "configured (CHEMCLAW_EFFECT_APPROVAL_ROLE); nothing was attempted",
+                non_retryable=True,
+            )
         outcome = AwaitOutcome.model_validate(
             await workflow.execute_child_workflow(
                 AwaitAnswerWorkflow.run,
@@ -607,7 +643,10 @@ class ConnectorJobWorkflow:
                     requested_by=job.requested_by,
                     session_id=job.session_id,
                     correlation_id=job.correlation_id,
-                    deadline_days=settings.effect_approval_deadline_days,
+                    # Routed, so the answer gate has something to check. Unrouted, this reached
+                    # `_may_answer`'s "anybody" branch and the requester could approve themselves.
+                    asked_of=job.effect_approver,
+                    deadline_days=job.effect_approval_days,
                 ).model_dump(mode="json"),
                 id=f"{job_id}:approval",
                 task_queue=settings.background_task_queue,
@@ -644,7 +683,12 @@ class ConnectorJobWorkflow:
         )
 
     async def _settle_effect(
-        self, job: ConnectorJobInput, job_id: str, state: str, detail: str
+        self,
+        job: ConnectorJobInput,
+        job_id: str,
+        state: str,
+        detail: str,
+        external_ref: str = "",
     ) -> None:
         """Record how the attempt ended. Never raises: the ledger must not fail the job."""
         if not job.effect_system:
@@ -652,7 +696,9 @@ class ConnectorJobWorkflow:
         try:
             await workflow.execute_activity(
                 settle_effect_activity,
-                SettleEffectInput(effect_id=job_id, state=state, detail=detail),
+                SettleEffectInput(
+                    effect_id=job_id, state=state, detail=detail, external_ref=external_ref
+                ),
                 start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
                 schedule_to_start_timeout=queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
@@ -899,6 +945,9 @@ class SettleEffectInput(BaseModel):
     effect_id: str
     state: str
     detail: str = ""
+    #: The far side's handle, from the child's result envelope. Empty leaves whatever an earlier
+    #: settle recorded rather than erasing it — see `_SETTLE`.
+    external_ref: str = ""
 
 
 @durable_activity("background")
@@ -912,4 +961,9 @@ async def record_effect_activity(record: EffectRecord) -> None:
 @activity.defn
 async def settle_effect_activity(payload: SettleEffectInput) -> None:
     """Record how an attempted effect ended."""
-    await settle_effect(payload.effect_id, state=payload.state, detail=payload.detail)
+    await settle_effect(
+        payload.effect_id,
+        state=payload.state,
+        detail=payload.detail,
+        external_ref=payload.external_ref,
+    )

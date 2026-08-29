@@ -56,7 +56,7 @@ from langchain.agents.middleware.types import ExtendedModelResponse
 from langgraph.types import Command
 
 from chemclaw.agent.state import ChemclawState
-from chemclaw.agent.turn_usage import graph_usage_tokens
+from chemclaw.agent.turn_usage import graph_usage_tokens, metered_turn_tokens
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import degraded
 
@@ -107,6 +107,21 @@ def turn_billed_tokens() -> int:
     return watch.billed if watch is not None else 0
 
 
+def record_spend_cap(billed: int) -> None:
+    """Mark this turn as stopped by its spend cap, having billed `billed`.
+
+    The public counterpart to `agent/loop_cap.record_loop_cap`, and it exists for the same two
+    readers that one does: `api/runner._spend_cap_event` asks whether the guard fired, and a test
+    needs to say that it did without standing up a graph that genuinely overspends.
+
+    Public rather than reached for through `_mark`, which is what `tests/test_runner.py` did first.
+    The sibling module exposes a named recorder; a test file that has to know a private name to
+    exercise the front door is one a rename breaks for no reason, and the asymmetry between the two
+    caps was accidental rather than meant.
+    """
+    _mark(billed, capped=True)
+
+
 def _mark(billed: int, *, capped: bool = False) -> None:
     """Record this turn's running spend on the watch, and whether the cap has now fired.
 
@@ -151,7 +166,27 @@ def enforce_spend_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] 
     budget = settings.agent_max_turn_billed_tokens
     if not budget:
         return None
-    billed = int(state.get("billed_tokens", 0))
+    # **The larger of the two readings, because each sees calls the other cannot.**
+    #
+    # `billed_tokens` counts what this middleware metered: one figure per model response, folded
+    # across the subagent boundary. Two whole classes of provider call never reach it, and both
+    # were measured rather than reasoned about:
+    #
+    # - **A repaired call is two calls.** `model_calls.RepairInvalidToolCalls` re-invokes the
+    #   handler when the model emits unparseable tool arguments and returns only the repaired
+    #   response, whose `usage_metadata` is its own. `MeterTurnSpend` wraps that middleware from
+    #   outside, so it books one bill for two calls — measured at 700 booked against 1,200 spent.
+    #   A model looping on malformed arguments is precisely the runaway this guard exists for, and
+    #   it was the case the guard under-counted worst.
+    # - **A model call inside a tool body is invisible.** `agent/condense.py` makes one per
+    #   protocol, up to `protocol_digest_max_protocols`, and a tool body is not a graph node.
+    #   Measured: 5,200 tokens spent against a 150-token budget with the cap never firing.
+    #
+    # The turn's own ledger sees both, because both ride the message stream the runner meters
+    # (`agent/turn_usage.metered_turn_tokens`). It is 0 off the request path, where the channel is
+    # the only reading there is — so `max` degrades to today's behaviour exactly where no ledger
+    # exists, and closes both gaps where one does.
+    billed = max(int(state.get("billed_tokens", 0)), metered_turn_tokens())
     if billed < budget:
         return None
     logger.warning("the turn hit its %d billed-token cap after %d tokens", budget, billed)
@@ -195,9 +230,15 @@ class MeterTurnSpend(AgentMiddleware[Any, Any, Any]):
     difference between "reported nothing" and "we could not read it" stays visible.
     """
 
-    #: Declared so LangGraph creates `billed_tokens` on any graph this middleware is attached to.
-    #: Without it the update below is dropped in silence — the defect `tests/test_state_channels.py`
-    #: exists to catch, and the one the first probe of this design walked straight into.
+    #: Declared so `billed_tokens` exists on a graph compiled around this middleware alone.
+    #:
+    #: **It is belt-and-braces here, not the thing that makes the write land**, and the comment
+    #: that used to sit in this slot claimed otherwise. `build_langgraph_agent` passes
+    #: `state_schema=ChemclawState` to `create_agent`, so the channel exists on every graph this
+    #: repository compiles; removing this attribute changes nothing, measured. The write *would*
+    #: be dropped in silence on a graph that declared neither — which is the failure
+    #: `tests/test_state_channels.py` exists to catch and the one the first probe of this design
+    #: hit — but that graph is not one this repository builds, so no test here can prove it.
     state_schema = ChemclawState
 
     def _update(self, request: ModelRequest[Any], response: Any) -> Any:

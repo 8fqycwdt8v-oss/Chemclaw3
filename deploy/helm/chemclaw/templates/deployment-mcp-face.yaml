@@ -74,3 +74,48 @@ spec:
       volumes:
         {{- include "chemclaw.volumes" . | nindent 8 }}
 {{- end }}
+{{- if .Values.mcpFace.enabled }}
+---
+{{- /* The Service the face is addressed by. Without one the Deployment listened on a port nothing
+       could resolve by name and no Route published, so "reachable by somebody else's agent" — the
+       entire premise of this component — was not deliverable from this chart. */ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "chemclaw.name" . }}-mcp-face
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-face
+spec:
+  selector:
+    {{- include "chemclaw.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-face
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+{{- if .Values.mcpFace.route.enabled }}
+---
+{{- /* Publishing the face outside the cluster is opt-in and off by default. A partner agent
+       reaching it is the point of the component, and it is still a surface serving this
+       programme's chemistry to whatever holds one bearer token — so a deployment says so
+       explicitly rather than inheriting it from `route.enabled`, which governs the chat front
+       door and answers a different question. */ -}}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "chemclaw.name" . }}-mcp-face
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-face
+spec:
+  to:
+    kind: Service
+    name: {{ include "chemclaw.name" . }}-mcp-face
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+{{- end }}
+{{- end }}

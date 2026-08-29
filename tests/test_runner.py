@@ -28,6 +28,7 @@ import chemclaw.api.runner_trace as runner_trace
 from chemclaw.agent.loop_cap import record_loop_cap
 from chemclaw.agent.plan_gate import PLAN_APPROVAL_PROMPT
 from chemclaw.agent.session import TurnSession
+from chemclaw.agent.spend_cap import record_spend_cap
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
 from chemclaw.api.events import (
     AnswerEvent,
@@ -41,6 +42,7 @@ from chemclaw.api.events import (
     ToolResultEvent,
 )
 from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
 from chemclaw.core.turn_signals import record_job_started
 from tests.fakes import FakeUpdate, fed
 from tests.fakes_turn import Piece, ScriptedTurn
@@ -268,6 +270,58 @@ def test_a_capped_turn_reports_the_runaway_guard_before_its_partial_answer() -> 
     # Before the answer, so a surface can mark it partial as it lands rather than retroactively.
     assert events.index(errors[0]) < events.index(_answer(events))
     assert _answer(events).text == "still working on it"
+
+
+class _CappedSpendAgent(ScriptedTurn):
+    """A turn whose spend guard fired, marked the way a real one marks it.
+
+    The same shape as `_CappedLoopAgent` above and for the same reason: the guard itself is proven
+    on a compiled graph in `tests/test_spend_cap.py`, and what is unproven until here is the
+    *front door* — that the runner reads the mark and turns it into something a chemist sees.
+    """
+
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
+        record_spend_cap(1_234_567)
+        yield "as much as the budget bought"
+
+
+def test_a_turn_stopped_by_its_budget_says_so_before_its_partial_answer() -> None:
+    """The spend cap stops being silent at the front door — the half nothing covered.
+
+    **This is the test whose absence let the whole runner half be deleted without a murmur.**
+    Neutering `_spend_cap_event` — the error event, the token count in its message,
+    `ledger.spend_capped`, the counter — left 229 tests green across every file that mentions
+    spend: `tests/test_spend_cap.py` never goes through `run_turn`, and
+    `tests/test_api_observability.py` calls `_settle_outcome` on a ledger it built by hand. So the
+    guard's own machinery was proven and its only user-visible consequence was asserted in prose.
+
+    The loop cap has had this test since it was written (`_CappedLoopAgent` above); the spend cap
+    inherited that module's whole design and not its coverage.
+
+    The number is asserted because it is the actionable half: "the turn stopped" and "the turn
+    stopped after 1,234,567 tokens against your 1,000,000 budget" are different messages, and only
+    the second lets a chemist tell a request that was too big from a ceiling that is too low.
+    """
+    events = _events(_CappedSpendAgent())
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert [e.code for e in errors] == ["spend_cap_reached"]
+    assert errors[0].retryable is False
+    assert "1,234,567" in errors[0].message, "the refusal does not say what the turn actually spent"
+    # Before the answer, so a surface marks it partial as it lands rather than retroactively —
+    # and `Chemclaw3_ui`'s `PARTIAL_ANSWER_CODES` depends on exactly this ordering.
+    assert events.index(errors[0]) < events.index(_answer(events))
+    assert _answer(events).text == "as much as the budget bought"
+
+
+def test_a_capped_turns_spend_is_counted_for_an_operator() -> None:
+    """The counter moves, which is the only way a deployment sees the guard firing at all.
+
+    Declared-ness is asserted in `tests/test_spend_cap.py`; that a turn ever *increments* it was
+    not, and deleting the `METRICS.increment` line survived the suite.
+    """
+    before = METRICS.value("chemclaw_turn_spend_caps_total")
+    _events(_CappedSpendAgent())
+    assert METRICS.value("chemclaw_turn_spend_caps_total") == before + 1
 
 
 def test_an_ordinary_turn_does_not_claim_the_cap_fired() -> None:

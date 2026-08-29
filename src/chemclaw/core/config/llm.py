@@ -92,14 +92,21 @@ class LlmSettings(BaseSettings):
     # How hard the model is asked to think before answering — the deployment's default, which a
     # profile may override per agent (`AgentProfile.effort`).
     #
-    # **`low | medium | high` is the intersection, and the intersection is the point.** Both
-    # clients this repository constructs take a `reasoning_effort` kwarg — measured on the
-    # installed distributions rather than read off the documentation, because the two spell the
-    # idea differently in their own APIs and it was not obvious they had converged. `ChatAnthropic`
-    # types it `Literal["max","xhigh","high","medium","low"]` and `ChatOpenAI` types it `str |
-    # None`. Publishing the union would make `max` a value that works on the dev path and is
-    # meaningless on the shipped one; publishing the intersection keeps the promise
-    # `_generation_options` already makes, that a generation setting means the same thing on both.
+    # **`openai_compatible` only**, enforced by `_effort_is_provider_scoped` below for this field
+    # and by `llm_provider.build_chat_model` for every path including `AgentProfile.effort`.
+    #
+    # This comment used to argue the opposite, and the retraction is the useful part. It said both
+    # clients "take a `reasoning_effort` kwarg — measured on the installed distributions", and that
+    # publishing `low | medium | high` as their intersection "keeps the promise that a generation
+    # setting means the same thing on both". What was measured was that both clients *accept* the
+    # kwarg; what neither was asked is what they *send*. Through `_get_request_payload`,
+    # `ChatAnthropic` turns it into `output_config={'effort': ...}` **plus** an injected
+    # `thinking={'type': 'adaptive'}` — extended thinking, a different feature with a `temperature`
+    # conflict and a claim on `llm_max_tokens`. There was no intersection to publish; there were
+    # two parameters wearing one name.
+    #
+    # `low | medium | high` survives as the vocabulary because it is what the supported provider
+    # honours, not because it is shared.
     #
     # **`None` means the key is absent from the request**, not present-and-null — the rule this
     # module records having broken every turn once, and it binds harder here than for
@@ -109,9 +116,10 @@ class LlmSettings(BaseSettings):
     # deployment turns it on against an endpoint it has checked.
     #
     # Both clients are `extra="ignore"`, so a client that stopped accepting this kwarg would drop
-    # it in silence rather than raise. `tests/test_llm_provider.py` asserts the attribute on the
-    # constructed object for exactly that reason — the value has to be observably *on* the model,
-    # not merely passed toward it.
+    # it in silence rather than raise — which is why `tests/test_llm_effort.py` asserts the
+    # **request payload** rather than the attribute on the constructed object. An earlier version
+    # of this comment cited `tests/test_llm_provider.py` for an attribute assertion; that file
+    # contains no `effort`, and the assertion it described is the one that missed all of the above.
     llm_effort: Literal["low", "medium", "high"] | None = None
     # **The model's context window, and until this existed no number anywhere in this tree was
     # one.** `agent_context_token_budget` is 100,000 by fiat, the ~28,000-token static prefix sits
@@ -255,6 +263,42 @@ class LlmSettings(BaseSettings):
                 raise ValueError(
                     f"llm_provider='openai_compatible' requires {', '.join(missing)} to be set"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _effort_is_provider_scoped(self) -> Self:
+        """`llm_effort` is refused on the Anthropic path, because there it means something else.
+
+        **Measured, not read off the documentation, and the first version of this feature had it
+        wrong.** `_generation_options` passes `reasoning_effort` to whichever client is configured
+        on the strength of both accepting the kwarg. Both do accept it; they do not do the same
+        thing with it. Against `langchain-anthropic`, `_get_request_payload` for `claude-sonnet-5`:
+
+            reasoning_effort="high"  ->  output_config={'effort': 'high'}
+                                         thinking={'type': 'adaptive', 'display': 'summarized'}
+
+        So on that provider the knob silently enables **extended thinking**, which is a different
+        decision with three consequences the setting's name does not hint at: `thinking` and a set
+        `temperature` cannot both be sent (a 400, and `llm_provider._failover_exceptions`
+        deliberately does not fail 400s over, so *every* turn fails); thinking tokens are drawn from
+        `llm_max_tokens`, shrinking the answer allowance `agent/context_budget.py` reserves it as;
+        and a model with no effort levels is still sent `output_config`.
+
+        Refused rather than translated, and refused rather than silently ignored. Translating means
+        choosing a thinking budget nobody has asked for and making two other settings conditional on
+        this one. Ignoring means a profile that says `effort: high` quietly getting default effort —
+        a control that reads as one and is not, which this repository has a standing rule against.
+        Turning it on for Anthropic is a real decision and wants its own ADR; until then this says
+        so at startup instead of at the first turn.
+        """
+        if self.llm_effort is not None and self.llm_provider == "anthropic":
+            raise ValueError(
+                "llm_effort is only supported on llm_provider='openai_compatible'; on 'anthropic' "
+                "reasoning_effort enables extended thinking (measured: it adds "
+                "thinking={'type': 'adaptive'}), which conflicts with llm_temperature and draws "
+                "from llm_max_tokens. Unset CHEMCLAW_LLM_EFFORT, or set "
+                "CHEMCLAW_LLM_PROVIDER=openai_compatible."
+            )
         return self
 
     @model_validator(mode="after")

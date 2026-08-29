@@ -53,13 +53,21 @@ async def mirror_commitments_activity(source: str) -> CommitmentSyncResult:
     the upsert is keyed on `(source, external_id)` — which is also why a source that cannot answer
     incrementally may return its whole snapshot.
     """
-    since = await load_cursor(source)
+    # **Namespaced, because `sync_cursors` is keyed on the source name alone and one source may
+    # declare both halves.** Nothing in `DataSourceManifest` forbids an `ingest:` and a
+    # `commitments:` on one manifest — the model requires *at least* one — and both syncs would then
+    # read and write the same row. The commitment mirror stores wall-clock now; the next ELN sync
+    # would load it and fetch only entries newer than that, silently skipping every unread entry.
+    # That is precisely the failure `ingest/eln/cursor.py` argues cannot happen ("it can never move
+    # it past an entry nobody read"), and that argument assumes one writer per source.
+    cursor_key = f"{source}:commitments"
+    since = await load_cursor(cursor_key)
     adapter = make_data_source(source).commitments
     if adapter is None:  # pragma: no cover - guarded by `active_commitment_sources`
         return CommitmentSyncResult(source=source)
     commitments = await adapter.fetch_commitments(since)
     written = await record_commitments(commitments)
-    await store_cursor(source, activity.info().started_time)
+    await store_cursor(cursor_key, activity.info().started_time)
     return CommitmentSyncResult(
         source=source,
         mirrored=written,

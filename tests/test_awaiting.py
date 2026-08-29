@@ -11,7 +11,9 @@ primitive rather than becoming one per caller, which is the whole argument for b
 """
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from temporalio import workflow
 from temporalio.client import Client
@@ -61,8 +63,20 @@ def _field(payload: object, name: str) -> str:
 def _worker(client: Client, projection: _Projection) -> Worker:
     """A worker serving the wait, with the projection activities replaced by recorders."""
 
-    async def open_activity(payload: object) -> None:
+    async def open_activity(payload: object) -> str:
+        """Stands in for the projection, and must honour its contract.
+
+        The real activity owns the clamp against `awaiting_max_days` and *returns* the deadline the
+        workflow schedules its timers against — one place, on the path every caller takes, because
+        clamping at each launch site reached two of three. A stub that returned `None` made the
+        workflow fail on the first line that used the value, which is the stub being wrong rather
+        than the workflow: a recorder still has to answer what it is asked for.
+        """
         projection.opened.append(_field(payload, "request_id"))
+        request: Any = payload["request"] if isinstance(payload, dict) else payload.request  # type: ignore[attr-defined]
+        days = request["deadline_days"] if isinstance(request, dict) else request.deadline_days
+        deadline = timedelta(days=max(0.0, min(float(days), settings.awaiting_max_days)))
+        return (datetime.fromisoformat(_field(payload, "started_at")) + deadline).isoformat()
 
     async def settle_activity(payload: object) -> bool:
         projection.settled.append(
@@ -302,3 +316,63 @@ def test_the_migration_refuses_an_unattributed_answer() -> None:
     ).read_text(encoding="utf-8")
     assert "pending_requests_answer_is_attributed" in sql
     assert "answered_at IS NOT NULL AND answered_by <> ''" in sql
+
+
+def test_the_deadline_ceiling_is_applied_by_the_activity_every_caller_goes_through() -> None:
+    """`awaiting_max_days` had no test, which is why the clamp reached two of three launch sites.
+
+    It was first applied at each caller. `agent/pending_tools.py` and `connectors/jobs.py` got it;
+    `connectors/bo/workflows.py` passed `bo_measurement_deadline_days` straight through, so a
+    mis-set value opened a ten-year run on the broker — the thing the ceiling exists to prevent —
+    while two docstrings went on saying the value was clamped.
+
+    It now lives in `open_pending_request_activity`, which every wait goes through, and the workflow
+    takes `due_at` from that activity's *result* so a replay reads the deadline the original
+    execution used. This drives the activity directly: a caller cannot skip it, so neither can this.
+    """
+    from chemclaw.durable.awaiting import (
+        AwaitRequest,
+        _OpenInput,
+        open_pending_request_activity,
+    )
+    from tests.pg import migrated_db_or_skip
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        started = datetime(2026, 1, 1, tzinfo=UTC)
+        opened = await open_pending_request_activity(
+            _OpenInput(
+                request_id="req-clamp-probe",
+                request=AwaitRequest(
+                    kind="measurement",
+                    subject="a wildly optimistic deadline",
+                    requested_by="u-1",
+                    deadline_days=3650.0,
+                ),
+                started_at=started.isoformat(),
+                run_id="run-clamp",
+            )
+        )
+        capped = datetime.fromisoformat(opened) - started
+        assert capped <= timedelta(days=settings.awaiting_max_days), (
+            f"a caller asked for 3650 days and got {capped.days}; the ceiling is "
+            f"{settings.awaiting_max_days}"
+        )
+
+        # And a deadline inside the ceiling is passed through untouched.
+        modest = await open_pending_request_activity(
+            _OpenInput(
+                request_id="req-clamp-probe-2",
+                request=AwaitRequest(
+                    kind="measurement",
+                    subject="an ordinary deadline",
+                    requested_by="u-1",
+                    deadline_days=2.0,
+                ),
+                started_at=started.isoformat(),
+                run_id="run-clamp",
+            )
+        )
+        assert datetime.fromisoformat(modest) - started == timedelta(days=2)
+
+    asyncio.run(_run())

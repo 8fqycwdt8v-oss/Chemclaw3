@@ -85,6 +85,20 @@ _EXPECTED_SUBSYSTEMS = {
     # moving, which reads as "no durable work" rather than as "nobody asked".
     "jobs_in_flight",
     "log_redaction",
+    # `durable/digest.deliver_digest_activity`. Outbound delivery shipped with no signal of any
+    # kind: `deliver()` swallows a per-channel failure so one broken webhook is not everyone's
+    # outage, the caller discarded the return value, and nothing in `chemclaw.deliver.registry` held
+    # a logger
+    # or a metric — so every digest being dropped and every digest being delivered produced
+    # identical observations. Swallowed deliberately (the mailbox is the durable handover and the
+    # watermark turns on it), which is exactly why it has to be counted.
+    "digest_delivery",
+    # `deliver/message._connector_secret_envs`. The half of the redaction inventory that leaves the
+    # cluster: if the connector bearer-token names cannot be resolved, tokens quoted inside a tool
+    # error stop being scrubbed from outbound webhook bodies for the life of the process. Its
+    # sibling in `core/logging` has had this signal since it was written; this one shipped with a
+    # bare `logger.error`, which is the only security degradation in the tree with no counter.
+    "deliver_redaction",
     "plan_approval",
     "preferences",
     # `agent.condense`, added with the protocol condenser. Two degradations share it and both
