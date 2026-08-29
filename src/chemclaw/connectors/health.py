@@ -100,8 +100,8 @@ class ConnectorsUnavailable(RuntimeError):
     """`connectors_required` is set and at least one enabled connector could not be reached."""
 
 
-async def _probe(client: httpx.AsyncClient, name: str, url: str) -> ConnectorHealth:
-    """Probe one connector's health endpoint, bounded by `connector_health_timeout_seconds`.
+async def _probe(client: httpx.AsyncClient, name: str, url: str, budget: float) -> ConnectorHealth:
+    """Probe one connector's health endpoint, bounded by `budget` seconds of wall clock.
 
     Any 2xx counts as healthy: a health route's contract is its status, and demanding a body shape
     would couple us to every connector's internals — including third-party servers we do not own.
@@ -109,9 +109,37 @@ async def _probe(client: httpx.AsyncClient, name: str, url: str) -> ConnectorHea
     The client is passed in rather than built here: one per connector meant six TCP setups (and,
     behind an mTLS ingress, six handshakes) on every readiness probe, which the kubelet runs every
     10 seconds per pod.
+
+    **`asyncio.wait_for`, not the client's `timeout=`, is what makes the budget a budget.** httpx's
+    is a *per-operation* timeout: the read leg restarts it on every socket read, so an endpoint
+    trickling one byte at a time is never late and never done — measured against the shipped 2 s
+    budget, a `/healthz` emitting a byte every 1.5 s held this function for **16.6 s** and then
+    reported `healthy`. The connect leg has the same shape one level down, because httpcore charges
+    the connect timeout separately to the TCP connect and to the TLS handshake, so a fast SYN
+    followed by a stalled handshake spends it twice. This is the same correction the queue half
+    took (`_probe_queues`), for the same reason: `/readyz` is inside a kubelet probe whose
+    `timeoutSeconds` is *derived* from this number, and a derivation is only honest if the number
+    bounds the whole answer.
+
+    The bound is **per endpoint** here where the queue half bounds its whole leg, and the
+    difference is structural rather than stylistic: the queue half shares one `connect()`, so a
+    per-bundle bound could not describe the time the shared connect already spent, while HTTP
+    probes share only a connection pool and are otherwise independent. Bounding each one keeps the
+    per-connector verdict — a fleet where one endpoint is dark and five answer reports exactly
+    that, rather than one `unreachable` verdict smeared over all six — and the sweep still comes
+    back inside one budget because the probes run concurrently.
     """
     try:
-        response = await client.get(url)
+        response = await asyncio.wait_for(client.get(url), budget)
+    except TimeoutError:
+        # Named rather than rendered: a bare `TimeoutError` stringifies to "", so the detail would
+        # stop exactly where the reason should start. Same defect, same fix, as `_probe_queues`.
+        record_reachability(name, reachable=False)
+        return ConnectorHealth(
+            name=name,
+            state="unreachable",
+            detail=f"health check did not answer within {budget}s",
+        )
     except httpx.HTTPError as exc:
         record_reachability(name, reachable=False)
         return ConnectorHealth(
@@ -129,7 +157,7 @@ async def _probe(client: httpx.AsyncClient, name: str, url: str) -> ConnectorHea
     )
 
 
-async def _probe_queue(client: Client, name: str, queue: str) -> ConnectorHealth:
+async def _probe_queue(client: Client, name: str, queue: str, budget: float) -> ConnectorHealth:
     """Ask Temporal whether anything is polling this bundle's queue.
 
     `TASK_QUEUE_TYPE_WORKFLOW` rather than the activity queue: every bundle that declares a job
@@ -155,7 +183,7 @@ async def _probe_queue(client: Client, name: str, queue: str) -> ConnectorHealth
     )
     try:
         response = await client.workflow_service.describe_task_queue(
-            request, timeout=timedelta(seconds=settings.connector_health_timeout_seconds)
+            request, timeout=timedelta(seconds=budget)
         )
     except Exception as exc:
         return ConnectorHealth(
@@ -175,17 +203,23 @@ async def _probe_queue(client: Client, name: str, queue: str) -> ConnectorHealth
     )
 
 
-async def _probe_endpoints(targets: list[tuple[str, str]]) -> list[ConnectorHealth]:
-    """Probe every HTTP health route concurrently, over one client for the whole sweep."""
+async def _probe_endpoints(targets: list[tuple[str, str]], budget: float) -> list[ConnectorHealth]:
+    """Probe every HTTP health route concurrently, over one client for the whole sweep.
+
+    The client keeps its `timeout=` as well as the per-probe wall clock, and the two are not
+    redundant: the kwarg is what stops a *socket* operation, so a probe that `wait_for` cancels
+    does not leave a half-open connection in the pool for the next sweep to inherit. What it is
+    not — and was relied on to be — is a bound on the answer. See `_probe`.
+    """
     if not targets:
         return []
-    async with httpx.AsyncClient(
-        timeout=settings.connector_health_timeout_seconds, trust_env=False
-    ) as client:
-        return list(await asyncio.gather(*(_probe(client, name, url) for name, url in targets)))
+    async with httpx.AsyncClient(timeout=budget, trust_env=False) as client:
+        return list(
+            await asyncio.gather(*(_probe(client, name, url, budget) for name, url in targets))
+        )
 
 
-async def _describe_queues(targets: list[tuple[str, str]]) -> list[ConnectorHealth]:
+async def _describe_queues(targets: list[tuple[str, str]], budget: float) -> list[ConnectorHealth]:
     """Connect once, then ask every queue concurrently.
 
     One client for the whole sweep, from the same process-wide `connect()` every durable caller
@@ -193,13 +227,13 @@ async def _describe_queues(targets: list[tuple[str, str]]) -> list[ConnectorHeal
     front door that does not gets one channel rather than one per bundle.
     """
     client = await connect()
-    return list(await asyncio.gather(*(_probe_queue(client, n, q) for n, q in targets)))
+    return list(await asyncio.gather(*(_probe_queue(client, n, q, budget) for n, q in targets)))
 
 
-async def _probe_queues(targets: list[tuple[str, str]]) -> list[ConnectorHealth]:
+async def _probe_queues(targets: list[tuple[str, str]], budget: float) -> list[ConnectorHealth]:
     """Probe every durable bundle's queue, or report them all `unknown` if the broker is not there.
 
-    **`connector_health_timeout_seconds` is the budget for this half, not for each step in it.**
+    **`budget` is the bound for this half, not for each step in it.**
     The connect and the RPC used to carry that bound one each, so a broker reachable enough to
     accept a connection and then blackhole the RPC cost twice it — and the whole sweep is what
     `/readyz` waits on, inside a kubelet probe whose *default* timeout is one second. A budget
@@ -211,13 +245,21 @@ async def _probe_queues(targets: list[tuple[str, str]]) -> list[ConnectorHealth]
     A broker that refuses fails in milliseconds; one that blackholes the SYN would otherwise hold
     the readiness route — and startup — for the SDK's own connect timeout. `connect()` caches only
     successful clients, so a bounded failure here does not poison the singleton for the job tools.
+
+    **Sharing one budget across the connect and the RPC is right for a poll and wrong for a boot**,
+    which is why the budget is an argument rather than a read of the setting. The *first* check
+    after process start pays a cold connect — the PEM files parsed, the mTLS handshake done — and
+    whatever that costs is taken out of the RPC that would have distinguished `unpolled` from
+    `unknown`. On a poll that trade is correct: the client is cached, the connect is free, and the
+    caller is a kubelet with a stopwatch. At startup it is not: `check_connectors_at_startup` runs
+    once, its verdict is irreversible for that boot, and under `connectors_required` a queue with
+    no poller reported `unknown` because the handshake was slow is a fleet at zero replicas that
+    passes the gate whose whole purpose is to refuse it.
     """
     if not targets:
         return []
     try:
-        return await asyncio.wait_for(
-            _describe_queues(targets), settings.connector_health_timeout_seconds
-        )
+        return await asyncio.wait_for(_describe_queues(targets, budget), budget)
     except (SubsystemUnavailableError, TimeoutError) as exc:
         # Every bundle gets the same verdict because they share the one dependency that failed —
         # whether it failed at the connect or ran the budget out on the RPC. Both are "we could not
@@ -238,8 +280,15 @@ async def _probe_queues(targets: list[tuple[str, str]]) -> list[ConnectorHealth]
         ]
 
 
-async def probe_connectors() -> list[ConnectorHealth]:
+async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]:
     """Probe every enabled connector concurrently; never raises, so a caller can always report.
+
+    Args:
+        budget: Seconds one connector's probe may take, in both halves. `None` — every caller on
+            the hot path — is `connector_health_timeout_seconds`, read here rather than defaulted
+            in the signature so a deployment (and a test) that overrides it is honoured. The one
+            caller that passes something else is the startup sweep; see
+            `check_connectors_at_startup`.
 
     Concurrent because probes are independent and a serial sweep would make startup wait for the sum
     of the timeouts rather than the slowest one. That is why the two halves are gathered as well as
@@ -250,6 +299,7 @@ async def probe_connectors() -> list[ConnectorHealth]:
     and wins where there is one; a bundle with no health route but with `jobs:` is reachable exactly
     when something polls its queue; a bundle with neither has nothing to ask and stays `unprobed`.
     """
+    bound = settings.connector_health_timeout_seconds if budget is None else budget
     endpoints: list[tuple[str, str]] = []
     queues: list[tuple[str, str]] = []
     unprobed: list[ConnectorHealth] = []
@@ -267,12 +317,25 @@ async def probe_connectors() -> list[ConnectorHealth]:
             # Nothing to ask: no endpoint and no durable work, stdio (spawned per turn), or an
             # HTTP endpoint that declares no health route.
             unprobed.append(ConnectorHealth(name=manifest.name, state="unprobed"))
-    probed, polled = await asyncio.gather(_probe_endpoints(endpoints), _probe_queues(queues))
+    probed, polled = await asyncio.gather(
+        _probe_endpoints(endpoints, bound), _probe_queues(queues, bound)
+    )
     return sorted([*probed, *polled, *unprobed], key=lambda health: health.name)
 
 
 async def check_connectors_at_startup() -> list[ConnectorHealth]:
     """Probe the enabled connectors at startup, logging it and honoring `connectors_required`.
+
+    **On its own budget — `connector_startup_health_timeout_seconds` — and not the poll's.** The
+    two checks look alike and are answering under opposite constraints. A `/readyz` sweep runs
+    every 10 seconds per pod inside a kubelet timeout, reuses a cached Temporal client, and is
+    wrong for at most one period: speed is the property that matters, and `unknown` costs a poll.
+    This sweep runs once, pays the cold connect nothing else will pay again (PEM parsing, the mTLS
+    handshake), and produces a verdict that is final for the boot — under `connectors_required` it
+    is the difference between refusing to serve and serving a fleet whose jobs nothing runs. Its
+    cost is paid once at start, so there is no reason for it to share the poll's tight budget, and
+    one good reason not to: `unpolled` needs the RPC to *answer*, and a cold connect inside a 2 s
+    budget can leave too little for it.
 
     Returns:
         Every enabled connector's health, for the readiness route and the unhealthy gauge to read.
@@ -283,7 +346,7 @@ async def check_connectors_at_startup() -> list[ConnectorHealth]:
             a silently reduced tool surface is worse than not serving. A bundle whose queue has no
             poller is one of those: its jobs are the capability, and nothing runs them.
     """
-    health = await probe_connectors()
+    health = await probe_connectors(settings.connector_startup_health_timeout_seconds)
     down = [item for item in health if item.unhealthy]
     if down:
         # WARNING, not ERROR, on the default path: the service is deliberately still serving.
