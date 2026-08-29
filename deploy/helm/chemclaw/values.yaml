@@ -1032,6 +1032,12 @@ monitoring:
     # panel in `dashboards/chemclaw-data.json` and reading that for a fortnight is how to pick the
     # number. The sync sidecar's own `staleness` liveness probe is the other half of this signal
     # and needs no threshold from here, because it reads when the refresh last *ran*.
+    #
+    # This number gates **both** arms of the rule. The gauge reports -1 for a tree holding no note
+    # at all, and the alert fires on that too (`age > threshold or age < 0`) — a plain comparison
+    # never could, since -1 is not greater than a positive number. Leaving it at 0 therefore also
+    # opts out of the empty-volume alarm, which is deliberate: a deployment that does not use the
+    # knowledge graph has an empty tree on purpose.
     knowledgeCorpusStaleSeconds: 0
     # **When a periodic producer's series is simply absent.** Four gauge families here
     # (`chemclaw_outbox_pending`, `chemclaw_outbox_oldest_pending_seconds`,
