@@ -15,14 +15,15 @@ database an unqualified name resolves through `public` and passes locally while 
 import asyncio
 from typing import Any, cast
 
+import psycopg
 import pytest
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 from psycopg.types.json import Jsonb
 
-from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent import session_fork
 from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.session_fork import SessionForkError, fork_session
 from chemclaw.agent.session_store import SessionOwnerStore
 from chemclaw.agent.state import turn_config, turn_input
@@ -258,29 +259,43 @@ def test_a_copy_that_fails_partway_leaves_no_half_session_behind() -> None:
     tables' rows are already written when it raises — the exact shape a partial fork would take.
     """
 
-    async def _run() -> dict[str, int]:
-        await migrated_db_or_skip()
-        await create_checkpoint_tables()
-        await _seed("fork-atomic")
+    async def _run() -> None:
+        """Point the copy at a table that does not exist, so it fails after three succeed."""
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(
             session_fork, "CHECKPOINT_TABLES", (*CHECKPOINT_TABLES, "no_such_table")
         )
         try:
-            with pytest.raises(Exception):
+            # The specific error, not a blind `Exception`: a bare catch would pass if the fork
+            # failed for some entirely unrelated reason and prove nothing about atomicity.
+            with pytest.raises(psycopg.errors.UndefinedTable):
                 await fork_session("fork-atomic", "owner-1", None)
         finally:
             monkeypatch.undo()
-        # Nothing may survive under *any* child id: the fork mints its own, so the assertion is
-        # over the whole table rather than over one id this test does not know.
-        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
-            await cur.execute(
-                "SELECT count(*) FROM checkpoints WHERE thread_id <> %s", ("fork-atomic",)
-            )
-            row = await cur.fetchone()
-            return {"orphans": int(row[0]) if row else 0}
 
-    assert asyncio.run(_run()) == {"orphans": 0}, "a failed fork left checkpoint rows behind"
+    async def _threads() -> set[str]:
+        """Every thread id in the checkpoint table right now."""
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute("SELECT DISTINCT thread_id FROM checkpoints")
+            return {str(row[0]) for row in await cur.fetchall()}
+
+    async def _drive() -> tuple[set[str], set[str]]:
+        """The thread-id set before the failed fork and after it."""
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _seed("fork-atomic")
+        before = await _threads()
+        await _run()
+        return before, await _threads()
+
+    before, after = asyncio.run(_drive())
+
+    # **The set, not a count over the whole table.** The fork mints its own child id and the call
+    # raises before returning it, so there is no id to look for — and the first version of this
+    # assertion counted every row not belonging to the parent, which passed alone and failed beside
+    # the other tests in this file, whose threads share the schema. Comparing the set before with
+    # the set after names exactly this fork's leftovers and nobody else's.
+    assert after == before, f"a failed fork left threads behind: {sorted(after - before)}"
 
 
 def test_a_memory_deployment_says_it_cannot_fork_rather_than_failing_oddly() -> None:
