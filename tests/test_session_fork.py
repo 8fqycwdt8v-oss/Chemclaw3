@@ -13,6 +13,7 @@ database an unqualified name resolves through `public` and passes locally while 
 """
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import psycopg
@@ -40,7 +41,32 @@ class _Model(GenericFakeChatModel):
         return self
 
 
-async def _seed(thread_id: str, *, versions: tuple[str, ...] = ("1", "2")) -> None:
+#: A fresh timestamp per run, so seeded threads are always young relative to the sweep.
+_NOW = datetime.now(UTC)
+
+
+def _seeded_ts(index: int) -> str:
+    """The `ts` for the `index`-th seeded checkpoint — **distinct, and ordered oldest first**.
+
+    Distinct because `_RESTAMP_NEWEST` picks one row by `ORDER BY ts DESC LIMIT 1`, and a fixture
+    that stamps every checkpoint with the same instant makes `DESC` and `ASC` interchangeable. A
+    mutation audit measured exactly that: stamping the *oldest* row instead of the newest, and
+    stamping *every* row, both passed the entire 6,154-test suite. The module's docstring claims in
+    bold that only the newest is restamped and that older checkpoints keep the times the parent
+    wrote them; neither half was established anywhere, because no thread reaching that code had two
+    different timestamps in it.
+
+    An hour apart, so ordering is unambiguous and both rows still sit inside any realistic
+    retention window.
+    """
+    return (_NOW - timedelta(hours=len(_VERSIONS) - index)).isoformat()
+
+
+#: The checkpoint versions `_seed` writes, named once because `_seeded_ts` counts them.
+_VERSIONS = ("1", "2")
+
+
+async def _seed(thread_id: str, *, versions: tuple[str, ...] = _VERSIONS) -> None:
     """A thread with two checkpoints and one blob per version — the shape a fork must preserve.
 
     **Two versions is the point, not padding.** `checkpoint_blobs` rows are shared across a
@@ -59,7 +85,12 @@ async def _seed(thread_id: str, *, versions: tuple[str, ...] = ("1", "2")) -> No
                     (
                         thread_id,
                         f"ckpt-{index}",
-                        Jsonb({"v": 1, "id": f"ckpt-{index}", "ts": "2026-08-29T00:00:00+00:00"}),
+                        # **Relative to now, never a literal date.** A hardcoded `ts` is a slow
+                        # fuse: every seeded thread ages in real time, so a month after it was
+                        # written the aged-fork test's `prune_expired_rows()` — which sweeps the
+                        # whole schema, not one thread — would start expiring the other tests'
+                        # fixtures and failing them for a reason none of them names.
+                        Jsonb({"v": 1, "id": f"ckpt-{index}", "ts": _seeded_ts(index)}),
                     ),
                 )
                 await cur.execute(
@@ -318,3 +349,446 @@ def test_a_memory_deployment_says_it_cannot_fork_rather_than_failing_oddly() -> 
 
     assert response.status_code == 501
     assert "durable session store" in response.json()["detail"]
+
+
+async def _seed_tool_result(session_id: str, text: str) -> str:
+    """One stored tool result for `session_id`, returning its content hash."""
+    import hashlib
+
+    content_hash = hashlib.sha256(text.encode()).hexdigest()
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO tool_result_blobs (content_hash, byte_size, data) "
+                "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                (content_hash, len(text.encode()), text.encode()),
+            )
+            await cur.execute(
+                "INSERT INTO tool_result_links (session_id, content_hash, tool) "
+                "VALUES (%s, %s, 'gather_evidence') ON CONFLICT DO NOTHING",
+                (session_id, content_hash),
+            )
+        await conn.commit()
+    return content_hash
+
+
+async def _thread_age_days(thread_id: str) -> float:
+    """How old the newest checkpoint of `thread_id` claims to be, in days."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT EXTRACT(EPOCH FROM (now() - max((checkpoint->>'ts')::timestamptz))) / 86400 "
+            "FROM checkpoints WHERE thread_id = %s",
+            (thread_id,),
+        )
+        row = await cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else -1.0
+
+
+def test_a_fork_of_an_aged_conversation_is_not_expired_the_moment_it_is_made() -> None:
+    """The fork's retention clock starts at the fork, not at the parent's last turn.
+
+    **The failure this pins is silent and total.** `durable/retention.py` expires a thread on
+    `max((checkpoint->>'ts')::timestamptz)`, and a copied checkpoint carries the parent's `ts`. So a
+    fork of a conversation last touched a year ago was already past the window when it was created:
+    the next sweep deleted its whole thread while `session_owners` and `session_messages` survived,
+    leaving a session that lists, opens, and renders every turn of its transcript — and then takes
+    its next turn with **no history at all**, because context comes from the checkpointer and not
+    from the rows the chemist can see.
+
+    Asserted through the real sweep rather than on the timestamp alone, because the timestamp is
+    only interesting for what retention does with it.
+    """
+
+    async def _run() -> tuple[float, dict[str, int], dict[str, int]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        try:
+            await _seed("fork-aged")
+            # Age the parent well past the window, the way a real conversation ages.
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE checkpoints SET checkpoint = jsonb_set(checkpoint, '{ts}', "
+                        "to_jsonb((now() - interval '400 days')::text)) WHERE thread_id = %s",
+                        ("fork-aged",),
+                    )
+                await conn.commit()
+
+            child = await fork_session("fork-aged", "owner-1", None)
+            age = await _thread_age_days(child)
+
+            from chemclaw.durable.retention import prune_expired_rows
+
+            await prune_expired_rows()
+            return age, await _counts(child), await _counts("fork-aged")
+        finally:
+            monkeypatch.undo()
+
+    age, child_after, parent_after = asyncio.run(_run())
+
+    assert age < 1.0, f"the fork was born {age:.0f} days old — it inherited the parent's clock"
+    assert child_after["checkpoints"] > 0, (
+        "the retention sweep deleted the fork's whole thread: the session still lists and its "
+        "transcript still renders, but its next turn would run with no history"
+    )
+    # The parent is genuinely expired and is *meant* to go — that is what makes the assertion above
+    # about the fork's own clock rather than about the sweep having done nothing.
+    assert parent_after["checkpoints"] == 0, "the parent was not expired, so this proves nothing"
+
+
+def test_a_forks_ownership_row_commits_with_its_data_or_not_at_all() -> None:
+    """No copied transcript can exist without the ownership row that makes erasure find it.
+
+    `agent/leaver.py` scopes erasure through `SELECT session_id FROM session_owners WHERE owner =
+    ANY(...)`. A fork whose rows landed without an ownership row is therefore **structurally
+    unreachable** by the one sweep that must never miss anything — a chemist's transcript survives
+    their own erasure while the report says it was complete.
+
+    Injected at the ownership write specifically, because that is the statement the first version
+    of this module ran *after* the commit, on a separate round trip.
+    """
+
+    async def _run() -> None:
+        """Fail the ownership write specifically, after the copy has already written its rows."""
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            session_fork,
+            "_OWNER_INSERT",
+            "INSERT INTO no_such_owners (a, b, c) VALUES (%s, %s, %s)",
+        )
+        try:
+            with pytest.raises(psycopg.errors.UndefinedTable):
+                await fork_session("fork-atomic-owner", "owner-1", None)
+        finally:
+            monkeypatch.undo()
+
+    async def _message_sessions() -> set[str]:
+        """Every session id that currently holds a transcript row."""
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute("SELECT DISTINCT session_id FROM session_messages")
+            return {str(r[0]) for r in await cur.fetchall()}
+
+    async def _drive() -> tuple[set[str], set[str]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _seed("fork-atomic-owner")
+        before = await _message_sessions()
+        await _run()
+        return before, await _message_sessions()
+
+    before, after = asyncio.run(_drive())
+
+    # **The set, not a count.** This file's other tests create sessions in the same schema, so
+    # "how many transcript rows exist" is not a question about this fork — the first version of
+    # this assertion counted theirs, passed alone and failed beside them. The same isolation
+    # mistake the atomicity test above already had to be corrected for.
+    assert after == before, (
+        f"a failed fork stranded transcript rows under {sorted(after - before)} with no ownership "
+        "row — erasure scopes through session_owners and cannot reach them"
+    )
+
+
+def test_a_fork_can_still_fetch_the_tool_results_its_transcript_points_at() -> None:
+    """The fork carries the links, so a stored result resolves instead of collapsing to a preview.
+
+    A `session_messages` row holds a `result_ref` handle; `api/tool_results.py` resolves it through
+    `tool_result_links` joined on `session_id`. Copy the transcript without the links and every
+    handle in the fork resolves to nothing — the chemist sees the 400-character preview where the
+    parent shows what the tool actually returned (`D-2026-08-09-a-preview-is-not-a-result`).
+
+    The blob is shared rather than copied, which the hash assertion pins: a fork must cost one row
+    per result, not a second copy of the bytes.
+    """
+
+    async def _run() -> tuple[list[str], list[str]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _seed("fork-results")
+        content_hash = await _seed_tool_result("fork-results", "the full tool output")
+
+        child = await fork_session("fork-results", "owner-1", None)
+
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT content_hash FROM tool_result_links WHERE session_id = %s", (child,)
+            )
+            child_hashes = [str(r[0]) for r in await cur.fetchall()]
+        return child_hashes, [content_hash]
+
+    child_hashes, parent_hashes = asyncio.run(_run())
+
+    assert child_hashes == parent_hashes, (
+        "the fork holds no link to the parent's tool results, so every result_ref in its "
+        "transcript resolves to nothing and renders as a preview"
+    )
+
+
+def test_the_route_forks_under_the_caller_and_keeps_the_parents_profile() -> None:
+    """The success path of `POST /sessions/{id}/fork`, which nothing exercised.
+
+    **Both arguments the route passes are security-relevant and neither was covered.** Mutating the
+    handler to `fork_session(session_id, "somebody-else", None)` left 64 tests green: the fork
+    would land under a principal who never asked for it, and would drop the parent's profile —
+    which is attenuation-only, so restoring the default *widens* what the child may do. That is the
+    exact widening `session_fork`'s docstring argues against and `test_the_fork_is_owned_by_the_
+    caller_and_keeps_the_parent_s_profile` pins one layer down, at a function the route could stop
+    calling correctly without anything noticing.
+
+    Driven through the real app with a durable store, because the seam under test *is* the handler.
+    """
+    from fastapi.testclient import TestClient
+
+    from chemclaw.agent.session_store import SessionOwnerStore
+    from chemclaw.api.auth import Principal, require_principal
+    from tests.test_service import _app
+
+    async def _prepare() -> str:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        parent = "fork-route-parent"
+        await _seed(parent)
+        await SessionOwnerStore().record(parent, "alice", "safety")
+        return parent
+
+    parent = asyncio.run(_prepare())
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(settings, "session_store", "postgres")
+        app = _app()
+        app.dependency_overrides[require_principal] = lambda: Principal(
+            oid="alice", upn="a@corp", roles=frozenset()
+        )
+        client = TestClient(app)
+        response = client.post(f"/sessions/{parent}/fork")
+
+    assert response.status_code == 200, response.text
+    child = response.json()["session_id"]
+
+    found, owner, profile = asyncio.run(SessionOwnerStore().lookup(child))
+    assert found
+    assert owner == "alice", f"the fork landed under {owner!r} rather than the caller"
+    assert profile == "safety", (
+        f"the fork dropped the parent's profile (got {profile!r}) — a profile only ever narrows, "
+        "so the child can now do more than the session it was forked from"
+    )
+
+
+def test_forking_a_session_with_no_state_is_a_409_not_a_500() -> None:
+    """A caller error is reported as one — the mapping `SessionForkError` exists to produce.
+
+    Untested until now: dropping the `except SessionForkError` clause turns this into an unhandled
+    exception and a 500, which tells a chemist "the service broke" about a request that was simply
+    made too early. 409 says *this session has taken no turn yet*, which is actionable.
+    """
+    from fastapi.testclient import TestClient
+
+    from chemclaw.agent.session_store import SessionOwnerStore
+    from chemclaw.api.auth import Principal, require_principal
+    from tests.test_service import _app
+
+    async def _prepare() -> str:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        empty = "fork-route-empty"
+        await SessionOwnerStore().record(empty, "alice", None)
+        return empty
+
+    empty = asyncio.run(_prepare())
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(settings, "session_store", "postgres")
+        app = _app()
+        app.dependency_overrides[require_principal] = lambda: Principal(
+            oid="alice", upn="a@corp", roles=frozenset()
+        )
+        client = TestClient(app)
+        response = client.post(f"/sessions/{empty}/fork")
+
+    assert response.status_code == 409, f"expected a caller error, got {response.status_code}"
+    assert "no saved state" in response.json()["detail"]
+
+
+def test_a_forks_transcript_is_as_young_as_the_fork_and_survives_the_sweep() -> None:
+    """The other half of the fork's clock, and the half fixing the first half nearly hid.
+
+    `_RESTAMP_NEWEST` gives the fork's *checkpoints* their own age. `session_messages.created_at`
+    was still copied verbatim, and two readers date a session from it: `_OWNER_LIST` derives
+    `updated_at` from `max(created_at)`, so a fork of an old conversation sorted to the bottom of
+    the sidebar stamped a year ago — and `durable/retention.py` prunes that table per row, so with
+    a message window configured the fork's **whole transcript** went on the first sweep. A session
+    with no messages then drops out of `GET /sessions` entirely, which is failure 2 in
+    `session_fork`'s own list reached from the other direction: the fix had moved "lists but has no
+    history" to "has history but does not list".
+
+    **The first version of the aged-fork test above set `retention_session_messages_days = 0`**,
+    which disables exactly the window that exposes this. That is worth naming: a test that switches
+    off the sweep it is standing next to will pass over the defect it was written to catch.
+    """
+
+    async def _run() -> tuple[float, dict[str, int]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 30)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        try:
+            await _seed("fork-transcript-age")
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE checkpoints SET checkpoint = jsonb_set(checkpoint, '{ts}', "
+                        "to_jsonb((now() - interval '400 days')::text)) WHERE thread_id = %s",
+                        ("fork-transcript-age",),
+                    )
+                    await cur.execute(
+                        "UPDATE session_messages SET created_at = now() - interval '400 days' "
+                        "WHERE session_id = %s",
+                        ("fork-transcript-age",),
+                    )
+                await conn.commit()
+
+            child = await fork_session("fork-transcript-age", "owner-1", None)
+
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT EXTRACT(EPOCH FROM (now() - max(created_at))) / 86400 "
+                    "FROM session_messages WHERE session_id = %s",
+                    (child,),
+                )
+                row = await cur.fetchone()
+                age = float(row[0]) if row and row[0] is not None else -1.0
+
+            from chemclaw.durable.retention import prune_expired_rows
+
+            await prune_expired_rows()
+            return age, await _counts(child)
+        finally:
+            monkeypatch.undo()
+
+    age, after = asyncio.run(_run())
+
+    assert age < 1.0, (
+        f"the fork's newest message is {age:.0f} days old — it kept the parent's clock"
+    )
+    assert after["session_messages"] > 0, (
+        "the sweep deleted the fork's transcript, so the session no longer appears in "
+        "GET /sessions at all — the fork exists and the chemist cannot find it"
+    )
+    assert after["checkpoints"] > 0, "the checkpoint half regressed"
+
+
+def test_deleting_a_fork_and_its_parent_reclaims_the_shared_blob() -> None:
+    """A fork must not make its parent's stored results immortal.
+
+    The blob delete spares content any *other* session links — correct, or deleting one
+    conversation would unlink another's result. But it counted links from sessions that no longer
+    exist, and `tool_result_links` has no DELETE grant (a link may only disappear behind its blob),
+    so a deleted session leaves an orphan row that blocks the blob for ever. Two sessions sharing
+    bytes, both deleted: the first spares the blob for the second, the second spares it for the
+    first's orphan, and nothing can reach it again. The only collector left is
+    `retention_tool_results_days`, which ships at 0.
+
+    Coincidental sharing made that rare. A fork copies the parent's links by design, so it made it
+    certain — every forked conversation left its parent's results unreclaimable. The predicate now
+    counts only links whose session still exists, which fixes the older case too.
+    """
+
+    async def _run() -> tuple[int, int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        from chemclaw.agent.session_store import SessionOwnerStore
+
+        owners = SessionOwnerStore()
+
+        parent = "fork-blob-parent"
+        await _seed(parent)
+        await owners.record(parent, "owner-1", None)
+        await _seed_tool_result(parent, "the full tool output for the blob test")
+
+        child = await fork_session(parent, "owner-1", None)
+        await owners.delete_session(child)
+        await owners.delete_session(parent)
+
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM tool_result_blobs WHERE content_hash IN "
+                "(SELECT content_hash FROM tool_result_links WHERE session_id IN (%s, %s))",
+                (parent, child),
+            )
+            blob_row = await cur.fetchone()
+            blobs = int(blob_row[0]) if blob_row else 0
+            await cur.execute(
+                "SELECT count(*) FROM tool_result_links WHERE session_id IN (%s, %s)",
+                (parent, child),
+            )
+            link_row = await cur.fetchone()
+            links = int(link_row[0]) if link_row else 0
+        return blobs, links
+
+    blobs, links = asyncio.run(_run())
+
+    assert (blobs, links) == (0, 0), (
+        f"{blobs} blob(s) and {links} link row(s) outlived every session that named them — a fork "
+        "made its parent's tool results permanently unreclaimable"
+    )
+
+
+def test_only_the_newest_checkpoint_is_restamped_and_the_rest_keep_the_parents_times() -> None:
+    """Both halves of the claim `_RESTAMP_NEWEST` makes in bold, neither of which was pinned.
+
+    The module says only the newest copied checkpoint is restamped, and that the older ones keep
+    "their true creation times, which are facts about when the parent wrote them and are not this
+    module's to rewrite". A mutation audit found **both** halves free: stamping the oldest row
+    instead of the newest, and stamping every row of the thread, each passed the entire suite.
+
+    The cause was the fixture rather than the assertions. Every seeded checkpoint carried the same
+    literal `ts`, so `ORDER BY ts DESC LIMIT 1` and `ASC LIMIT 1` selected interchangeably and
+    `max(ts)` came out `now()` whichever row moved — retention's question was answered correctly by
+    a fork that had rewritten the wrong row, or all of them. `_seeded_ts` now spaces them an hour
+    apart, which is what makes this test able to tell the three cases apart.
+
+    Rewriting the whole thread is the more damaging of the two: it destroys the parent-authored
+    history the fork copied in order to preserve, and does it silently.
+    """
+
+    async def _run() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _seed("fork-restamp-selection")
+
+        child = await fork_session("fork-restamp-selection", "owner-1", None)
+
+        async def _stamps(thread: str) -> list[tuple[str, str]]:
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT checkpoint_id, checkpoint->>'ts' FROM checkpoints "
+                    "WHERE thread_id = %s ORDER BY checkpoint_id",
+                    (thread,),
+                )
+                return [(str(r[0]), str(r[1])) for r in await cur.fetchall()]
+
+        return await _stamps(child), await _stamps("fork-restamp-selection")
+
+    child_stamps, parent_stamps = asyncio.run(_run())
+
+    assert len(child_stamps) == 2, f"the fixture no longer seeds two checkpoints: {child_stamps}"
+    (older_id, older_ts), (newer_id, newer_ts) = child_stamps
+    assert (older_id, newer_id) == ("ckpt-1", "ckpt-2")
+
+    # The newest moved to now...
+    assert newer_ts != dict(parent_stamps)[newer_id], (
+        "the newest checkpoint kept the parent's timestamp — retention still dates this fork from "
+        "the parent's last turn"
+    )
+    # ...and the older one did not, which is the half that fails when every row is restamped.
+    assert older_ts == dict(parent_stamps)[older_id], (
+        "the older checkpoint was rewritten too, destroying the parent-authored history the fork "
+        "copied in order to preserve"
+    )
+    # And the parent is untouched throughout.
+    assert dict(parent_stamps)[newer_id] == _seeded_ts(2)

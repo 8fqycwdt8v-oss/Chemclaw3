@@ -371,6 +371,17 @@ _OWNER_TITLE = "UPDATE session_owners SET title = %s WHERE session_id = %s AND t
 # `tool_result_links` on purpose — a link may only disappear behind its blob. What is left is a row
 # naming a session id that no longer resolves to anything, and `durable/retention.py`'s age sweep
 # collects it with the blob.
+#
+# **The `NOT EXISTS` arm counts only links whose session still exists**, and without that clause
+# those surviving orphan rows blocked the blob for ever. Two sessions sharing bytes, both deleted:
+# the first delete spares the blob (the second session still links it) and leaves an orphan link;
+# the second delete then finds *that* row and spares the blob again. Nothing owns it, nothing can
+# reach it, and the only collector left is `retention_tool_results_days`, which ships at 0.
+#
+# Coincidental sharing made this rare — two sessions had to run one tool over identical arguments
+# and get byte-identical output. `agent/session_fork.py` made it certain: a fork copies the
+# parent's links by design, so *every* forked conversation left its parent's results unreclaimable.
+# That is what surfaced it; the defect is older than the fork and the fix is not fork-specific.
 _SESSION_DELETE: dict[str, str] = {
     "tool_result_blobs": (
         "DELETE FROM tool_result_blobs b WHERE EXISTS ("
@@ -378,7 +389,8 @@ _SESSION_DELETE: dict[str, str] = {
         "   WHERE l.content_hash = b.content_hash AND l.session_id = %(session_id)s"
         ") AND NOT EXISTS ("
         "  SELECT 1 FROM tool_result_links l"
-        "   WHERE l.content_hash = b.content_hash AND l.session_id <> %(session_id)s)"
+        "   WHERE l.content_hash = b.content_hash AND l.session_id <> %(session_id)s"
+        "     AND EXISTS (SELECT 1 FROM session_owners o WHERE o.session_id = l.session_id))"
     ),
     "session_messages": "DELETE FROM session_messages WHERE session_id = %(session_id)s",
     "session_events": "DELETE FROM session_events WHERE session_id = %(session_id)s",

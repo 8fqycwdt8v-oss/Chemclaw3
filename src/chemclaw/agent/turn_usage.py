@@ -209,6 +209,29 @@ def set_turn_usage(usage: TurnUsage) -> object:
     return _ledger.set(usage)
 
 
+def metered_turn_tokens() -> int:
+    """What this turn has been metered so far, or 0 where nothing is metering.
+
+    **The turn's whole bill, which is a wider number than any one reader assembles.** The runner
+    hands one `TurnUsage` to both `set_turn_usage` and `api/graph_stream.graph_events`, so this
+    object accumulates every chunk the stream carries — including the calls a *tool body* makes
+    (`agent/condense.py` fans out one per protocol) and both attempts of a model call that
+    `model_calls.RepairInvalidToolCalls` retried. Neither of those passes through
+    `wrap_model_call`, so neither is visible to a middleware counting model responses.
+
+    `agent/spend_cap.py` reads it for exactly that reason. It is a *floor* on the turn's spend
+    rather than a live-exact figure — the stream accumulates as chunks arrive, so a call still in
+    flight is not fully counted — which is the right shape for a guard that already documents
+    itself as one call loose.
+
+    Returns:
+        The metered total, or 0 off the request path (a CLI turn, a template step, a test), where
+        there is no ledger and the caller's own accounting is all there is.
+    """
+    ledger = _ledger.get()
+    return ledger.total if ledger is not None else 0
+
+
 def reset_turn_usage(token: object) -> None:
     """Tear the turn's ledger down (mirrors every other ambient's reset)."""
     _ledger.reset(token)  # type: ignore[arg-type]

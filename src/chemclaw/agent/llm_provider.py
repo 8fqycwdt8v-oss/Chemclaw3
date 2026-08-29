@@ -68,6 +68,29 @@ def build_chat_model(task: str = "agent", *, effort: str | None = None) -> Any:
     # must narrow the fallback endpoint too, or a degraded turn would quietly think harder than
     # the profile asked for.
     chosen = effort if effort is not None else settings.llm_effort
+    # **The gate is here, at the seam, and putting it only in config was not enough.**
+    # `LlmSettings._effort_is_provider_scoped` refuses `llm_effort` on the Anthropic path at
+    # startup, which covers the *deployment* knob and nothing else: `AgentProfile.effort` is a
+    # different input, reaching this function as the `effort` argument without passing through any
+    # settings validator. Measured on the shipped code default (`llm_provider="anthropic"`,
+    # `llm_effort=None`), a profile carrying `effort: high` produced exactly the payload the
+    # validator exists to prevent — `output_config={'effort': 'high'}` plus
+    # `thinking={'type': 'adaptive'}`.
+    #
+    # So the check belongs where every path converges rather than on one of them. This is the only
+    # place that resolves the two inputs into one answer, and every client below is built from it.
+    #
+    # Raised rather than dropped. Dropping would leave a profile that says `effort: high` quietly
+    # getting default effort — a control that reads as one and is not, which this repository has a
+    # standing rule against and `agent/spend_cap.py` has its own scar from.
+    if chosen is not None and settings.llm_provider == "anthropic":
+        raise RuntimeError(
+            f"agent effort {chosen!r} was requested on llm_provider='anthropic', where "
+            "reasoning_effort enables extended thinking rather than setting an effort level "
+            "(measured: it adds thinking={'type': 'adaptive'}, which conflicts with "
+            "llm_temperature and draws from llm_max_tokens). Remove `effort:` from the profile, "
+            "or run against llm_provider='openai_compatible'."
+        )
     if settings.llm_provider == "openai_compatible":
         primary = _openai_compatible_model(model, effort=chosen)
         return _with_failover(primary, model, effort=chosen)
@@ -484,14 +507,19 @@ def _generation_options(effort: str | None = None) -> dict[str, Any]:
     `core/config/llm.py` records having broken every turn once: some OpenAI-compatible endpoints
     reject an explicit null, so "unset" has to mean *absent from the request*, not present-and-null.
 
-    **`reasoning_effort` is here rather than in a per-provider branch because both clients take
-    it**, which was measured on the installed distributions rather than assumed: the two spell
-    reasoning differently in their own APIs (`thinking` with a token budget on one side), and it
-    would have been reasonable to expect a translation layer. There is none to write. What the
-    translation *would* have cost is worth recording, since it is why the shared kwarg is a
-    relief rather than a coincidence: Anthropic's `thinking` must be budgeted under `max_tokens`
-    and refuses a set `temperature`, so a translation would have made two other settings
-    conditional on this one.
+    **`reasoning_effort` is here, and it is scoped to one provider by config rather than by a
+    branch in this function.** The first version of this said the two clients "both take it, so
+    there is no translation to write", on the strength of both *accepting* the kwarg. They accept
+    it and they do not mean the same thing by it — measured through `_get_request_payload` rather
+    than off the constructed object, which is the check that would have caught it:
+    `langchain-anthropic` folds it into `output_config.effort` and injects
+    `thinking={'type': 'adaptive'}`, i.e. extended thinking, with the `temperature` conflict and
+    the `max_tokens` draw that implies.
+
+    So `LlmSettings._effort_is_provider_scoped` refuses the setting on the Anthropic path and this
+    function stays a plain pass-through for the provider where the name means what it says. The
+    lesson is the general one: an attribute that round-trips on a client proves the constructor
+    accepted a kwarg, and nothing at all about what reaches the wire.
 
     The same absent-when-unset rule, and it binds harder here: a rejected parameter is a 400, and
     `_failover_exceptions` deliberately does not fail those over.
