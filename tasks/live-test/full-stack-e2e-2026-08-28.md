@@ -35,7 +35,7 @@ Status: `pending` · `running` · `PASS` · `FAIL` · `skipped (reason)`
 | S7 | Storm | `make live-storm` | **28/31** (3 open, see F5/F6) | `tasks/live-test/storm.md` |
 | S8 | Corpus convergence | `make live-data`, polled | **PASS 19/19** after F3, F4 | `.live/e2e-corpus-backfill.log` |
 | S9 | Degradation (Temporal down) | `make live-degradation` | blocked (F1), mock route TBD | `tasks/live-test/m12-degradation/` |
-| S10 | Soak + drift | `make live-soak`, `make live-soak-report` | pending | `.live/soak.jsonl` |
+| S10 | Soak + drift | `make live-soak`, `make live-soak-report` | **PASS** — 12 rounds, no drift | `.live/soak.jsonl` |
 
 **Sequencing that matters.** S1 starts the ORD corpus backfill, which drains for 2h+ — so S2–S7 run
 over the top of it and S8 is *polled*, never blocked on. S9 requires Temporal **stopped**, so it
@@ -353,3 +353,78 @@ reaches neither the counter nor `wrap_model_call`.
   with wildly different numbers (`FAILED 597s later` vs `FAILED 13s later`). Reproducible enough to
   be real, and **not** diagnosed here: run 1 was measuring a lane whose model was already dead, so
   only run 2's evidence counts and one run is not a root cause.
+
+## S10 — the soak: 12 rounds, and nothing drifts
+
+12 rounds, **22/23 checks in every single round**, round times 74-77 s. Fitted by
+`chemclaw.cli.soak_report`, which refuses to name a slope it cannot resolve — so these are
+measurements, not eyeballed trends. Full fit in `tasks/live-test/soak-2026-08-29.md`.
+
+The result that matters is the *shape*, not the totals. Every growing series has a **first-half
+slope equal to its second-half slope**, which is what rules out a leak: load accumulates, cost per
+unit of load does not.
+
+| series | first | last | verdict |
+| --- | ---: | ---: | --- |
+| round seconds | 77 | 75 | flat (slope **-0.1 ± 0.2** s/round) |
+| disk free | 20 GB | 20 GB | flat |
+| `chemclaw_turn_duration_seconds_sum` | 444 | 2828 | +216.2 then **+216.8** /round (± 1.3) |
+| `chemclaw_turn_duration_seconds_count` | 76 | 417 | +31.0 then **+31.0** /round |
+| `rows audit_events` | 509 | 1444 | +85.0 then **+85.0** rows/round |
+| `rows session_messages` | 1319 | 2903 | +144.0 then **+144.0** rows/round |
+| `rows calculation_results` | 6 | **6** | flat — D-011 holding across 12 rounds of repeats |
+| `chemclaw_event_streams_open` | 0 | 0 | flat — no stream leak |
+| `chemclaw_context_unreducible_total` | 0 | 0 | flat — no context-length pressure |
+
+`calculation_results` staying at **6** across twelve rounds is the strongest single line here: the
+cache is asked for the same work repeatedly and computes it once, which is D-011 measured over time
+rather than in a single collision.
+
+The one failing check per round is **F6**, the known open finding — constant at 1, never
+cascading.
+
+---
+
+# Campaign summary
+
+**Nine stages run, seven green, one at 28/31, two blocked. Six findings, four fixed.**
+
+| # | Stage | Result |
+| --- | --- | --- |
+| S0 | Baseline, four repos | **PASS** — 5753 + 1521 + 761 + 39 tests |
+| S1 | Four-repo bring-up | **PASS** after F2 |
+| S1b | Wiring check | **PASS** — `connectors_unhealthy 0` |
+| S2 | Durable path | **PASS 5/5** |
+| S3 | Template args vs live | **PASS 9/9** |
+| S4 | Real-model probes | **BLOCKED (F1)** |
+| S5 | Plan gate | **BLOCKED (F1)** |
+| S6 | UI full-stack | **BLOCKED (F1)** |
+| S7 | Storm | **28/31** — F5 fixed, F6 open |
+| S8 | Corpus by value | **PASS 19/19** after F3, F4 |
+| S9 | Degradation | **BLOCKED (F1)** |
+| S10 | Soak + drift | **PASS** — 12 rounds, no drift |
+
+| # | Finding | Status |
+| --- | --- | --- |
+| F1 | Model credential present but unfunded — blocks 4 stages | **open, user's call** |
+| F2 | Four-repo lane could not boot its front door (`pyexec` discovered, never started) | fixed |
+| F3 | Corpus backfill could never find its ground truth (off-by-one path) | fixed, 4 tests |
+| F4 | A live check asserted the opposite of a merged ADR, failing 0/12 forever | fixed |
+| F5 | The chaos primitive could destroy the lane it was testing | fixed |
+| F6 | Unparseable tool call is a silent no-op; the probe could not even reach it | **open, reported** |
+
+**Three of the six findings were checks that were wrong, not code that was wrong** (F4, F6, and
+half of F2's diagnosis). That is worth stating plainly: a campaign that assumed every red was a
+defect would have "fixed" the adapter to violate `D-2026-08-26-a-transcription-may-not-infer-a-setpoint`,
+and would have reported four storm failures that were the runner's own misconfiguration.
+
+## What this run is not evidence about
+
+- **Anything requiring a real model.** S4, S5, S6 and S9 never ran. The storm and soak used a mock
+  by design, so nothing here says how a real model behaves in this stack.
+- **The live OpenShift cluster**, `helm`/`kubeconform` render against a real API server, and the
+  browser -> Entra tenant hop. All three remain open edges in `docs/planning/BACKLOG.md`; this lane
+  cannot close them.
+- **F6's root cause.** The probe now reaches the right code path and the counter is provably never
+  incremented; why is not established.
+- **The SIGKILL-recovery and lease-race checks**, for the reasons the S7 section gives.
