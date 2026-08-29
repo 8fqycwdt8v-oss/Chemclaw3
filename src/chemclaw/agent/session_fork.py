@@ -63,7 +63,12 @@ from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
 # They are one module's private *spelling* of "the session database", not a private capability.
 # `SessionOwnerStore` is deliberately *not* used: it opens a connection of its own, and the fork's
 # ownership row has to be written on the copy's connection to share its transaction.
-from chemclaw.agent.session_store import _session_connection, _session_dsn
+# `_OWNER_INSERT` is *imported* rather than retyped. The fork needs the same statement
+# `SessionOwnerStore.record` runs — it cannot use the method, which opens a connection of its own
+# and so could not share this transaction — and a second copy of the SQL is the
+# second-declaration-nothing-checks pattern this tree forbids: the two would drift the first time
+# `session_owners` gains a column, and nothing would say so.
+from chemclaw.agent.session_store import _OWNER_INSERT, _session_connection, _session_dsn
 from chemclaw.core.errors import ChemclawError
 
 logger = logging.getLogger(__name__)
@@ -88,9 +93,28 @@ _INSERT_BACK = sql.SQL("INSERT INTO {table} SELECT * FROM {temp}")
 # The transcript, copied so the fork is visible to the owner listing and reads back as a
 # conversation. `id` is a `BIGSERIAL` and is deliberately *not* carried over — it is the table's own
 # identity, not the message's, and reusing it would collide.
+#
+# **`created_at` is shifted, and the first version of this copied it verbatim.** That is the same
+# defect `_RESTAMP_NEWEST` fixes for the checkpoint clock, one table over, and fixing only the
+# checkpoint half moved the failure rather than closing it. Two readers date a session from this
+# column: `session_store._OWNER_LIST` derives `updated_at` from `max(created_at)`, so a fork of an
+# old conversation sorted to the bottom of the sidebar stamped a year ago; and
+# `durable/retention.py` prunes `session_messages` per row, so with a message window configured the
+# fork's **entire transcript** was deleted on the first sweep. A session with no messages is then
+# dropped from `GET /sessions` altogether (`_OWNER_LIST` joins `ON m.updated_at IS NOT NULL`) —
+# which is failure 2 in this module's own list, arrived at from the other side.
+#
+# The shift is one interval applied to every row — `now() - max(created_at)` over the parent — so
+# the newest message lands at *now* and the spacing between messages is preserved. Stamping them
+# all to `now()` would have been simpler and would have flattened a conversation's timeline into a
+# single instant, which is a fact about the parent that the fork has no business rewriting.
 _COPY_MESSAGES = """
     INSERT INTO session_messages (session_id, message, created_at, message_shape, correlation_id)
-    SELECT %s, message, created_at, message_shape, correlation_id
+    SELECT %s, message,
+           created_at + (now() - (
+               SELECT max(created_at) FROM session_messages WHERE session_id = %s
+           )),
+           message_shape, correlation_id
     FROM session_messages WHERE session_id = %s
 """
 
@@ -110,14 +134,6 @@ _COPY_TOOL_RESULT_LINKS = """
     SELECT %s, content_hash, tool, correlation_id, created_at
     FROM tool_result_links WHERE session_id = %s
     ON CONFLICT DO NOTHING
-"""
-
-# The fork's ownership row, written on the **same connection and inside the same transaction** as
-# the copy — see `fork_session` for why that is not the tidier-looking alternative.
-_RECORD_OWNER = """
-    INSERT INTO session_owners (session_id, owner, profile)
-    VALUES (%s, %s, %s)
-    ON CONFLICT (session_id) DO NOTHING
 """
 
 # **What makes the fork's own clock start now.** `durable/retention.py` expires a thread on
@@ -189,7 +205,7 @@ async def fork_session(parent_id: str, owner: str | None, profile: str | None) -
                 await cur.execute(_RETHREAD.format(temp=temp), (child_id,))
                 await cur.execute(_INSERT_BACK.format(table=target, temp=temp))
             await cur.execute(_RESTAMP_NEWEST, (child_id, child_id))
-            await cur.execute(_COPY_MESSAGES, (child_id, parent_id))
+            await cur.execute(_COPY_MESSAGES, (child_id, parent_id, parent_id))
             await cur.execute(_COPY_TOOL_RESULT_LINKS, (child_id, parent_id))
             # **The ownership row is written here, inside the same transaction**, and the first
             # version of this module wrote it afterwards on a separate round trip. The reasoning
@@ -206,7 +222,7 @@ async def fork_session(parent_id: str, owner: str | None, profile: str | None) -
             # measured, a chemist's transcript survived their own erasure while the report said the
             # erasure was complete. `durable/retention.py` states the invariant this violates —
             # an ownership row absent while session-scoped rows remain "puts it beyond *erasure*".
-            await cur.execute(_RECORD_OWNER, (child_id, owner, profile))
+            await cur.execute(_OWNER_INSERT, (child_id, owner, profile))
         await conn.commit()
 
     logger.info("forked session %s onto %s", parent_id, child_id)

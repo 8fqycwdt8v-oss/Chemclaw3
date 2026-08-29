@@ -330,23 +330,62 @@ def test_the_budget_is_a_ceiling_reached_not_a_ceiling_exceeded(
     )
 
 
-def test_tokens_spent_inside_a_tool_body_count_against_the_budget(
+def test_no_in_tool_model_call_passes_its_own_callbacks() -> None:
+    """The absence that puts a tool body's model call on the turn's ledger, guarded as an absence.
+
+    **The chain the widened cap depends on is: a tool body calls a model with no `config` → the
+    call inherits the graph's callbacks → its usage rides the stream `api/graph_stream` meters →
+    `enforce_spend_cap` reads it.** The load-bearing link is the *missing* argument.
+    `agent/turn_usage.py` says so in as many words: an explicit `callbacks` config "**replaces**
+    the inherited ones rather than joining them", measured there at 55 tokens booked to the ambient
+    ledger and 0 seen by the stream. So a well-meaning `config={...}` added to a tool body would
+    silently take that call off the ledger and reopen the gap the cap was widened to close, with
+    the whole suite green.
+
+    An absence is what `tests/test_upstream_surface.py` asserts for the same reason: nothing else
+    can fail when somebody adds the argument back.
+
+    **What this deliberately does not claim.** It does not prove the inherited callbacks reach the
+    ledger end to end — that is somebody else's machinery, exercised by every real turn and pinned
+    by `tests/test_budget.py` on the stream side. Writing an end-to-end version was attempted and
+    abandoned: a scripted fake's streaming semantics are not a provider's, so the test that
+    resulted would have been evidence about the fake. This asserts the one thing in *this*
+    repository that can break the chain.
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path("src/chemclaw/agent/condense.py").read_text("utf-8")
+    tree = ast.parse(source)
+    offenders = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"ainvoke", "invoke"}
+        and any(keyword.arg == "config" for keyword in node.keywords)
+    ]
+
+    assert not offenders, (
+        f"agent/condense.py passes an explicit `config` to a model call at line(s) {offenders}. "
+        "An explicit callbacks config replaces the inherited ones, taking the call off the turn's "
+        "stream — so its tokens stop reaching the ledger `agent/spend_cap.py` enforces against, "
+        "and that class of spend becomes invisible to the cap again."
+    )
+
+
+def test_the_cap_reads_the_turn_ledger_not_only_its_own_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A model call the graph never sees still bills the turn, so the cap has to see it.
+    """The enforcement half: spend the cap cannot meter still stops the turn.
 
-    **The measured gap this closes.** `MeterTurnSpend` books one figure per *model response*, so it
-    is blind to two real classes of provider call: a call made inside a tool body
-    (`agent/condense.py` makes one per protocol, up to 24) and the discarded first attempt of a
-    repaired tool call (`model_calls.RepairInvalidToolCalls` re-invokes the handler and returns
-    only the repair). Measured before this fix: 5,200 tokens spent against a 150-token budget with
-    the cap never firing, which is the "drowned its plan in tool output" shape this module's
-    docstring names as the reason an iteration cap is not enough.
+    `MeterTurnSpend` books one figure per *model response*, so it is blind to two real classes of
+    provider call — a call inside a tool body (proven to reach the ledger by the test above) and
+    the discarded first attempt of a call `RepairInvalidToolCalls` retried. Measured before the
+    fix: 5,200 tokens spent against a 150-token budget with the cap never firing.
 
-    The turn's ledger sees both because both ride the stream the runner meters, so
-    `enforce_spend_cap` takes the larger of the two readings. Simulated here by booking into that
-    ledger directly — which is what a streamed in-tool call does — rather than by standing up the
-    protocol condenser, because the property under test is *which reading the cap trusts*.
+    Seeded directly here, because what this asserts is *which reading `enforce_spend_cap` trusts* —
+    the plumbing that fills the ledger is the previous test's subject.
     """
     from chemclaw.agent.turn_usage import TurnUsage, reset_turn_usage, set_turn_usage
 
@@ -354,8 +393,6 @@ def test_tokens_spent_inside_a_tool_body_count_against_the_budget(
     usage = TurnUsage()
     token = set_turn_usage(usage)
     try:
-        # One graph call of 100 — nowhere near the budget by the channel's reckoning — while a tool
-        # body spends 5,000 that the middleware cannot see.
         usage.add(TurnUsage(total=5_000))
         graph = build_langgraph_agent(model=_Model(messages=iter(_billing(100, 100))))
         result = asyncio.run(graph.ainvoke(turn_input("hello")))
@@ -364,14 +401,10 @@ def test_tokens_spent_inside_a_tool_body_count_against_the_budget(
 
     # Absent or small: with the ledger already past the budget the cap fires at the first
     # `before_model`, so `MeterTurnSpend` may never run and never write the channel at all. That
-    # is the correct outcome — the money was already spent — and it is also why the assertion
-    # cannot be a comparison on a key that need not exist.
-    assert result.get("billed_tokens", 0) < 1_000, (
-        "the channel alone should not have reached the budget — this test would then prove nothing"
-    )
+    # is the correct outcome — the money was already spent.
+    assert result.get("billed_tokens", 0) < 1_000
     assert spend_capped(result), (
-        "5,000 tokens were spent inside a tool body and the cap did not fire — the guard is blind "
-        "to every provider call that is not a graph model response"
+        "5,000 tokens were spent where the middleware cannot see them and the cap did not fire"
     )
 
 

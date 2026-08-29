@@ -107,6 +107,21 @@ def turn_billed_tokens() -> int:
     return watch.billed if watch is not None else 0
 
 
+def record_spend_cap(billed: int) -> None:
+    """Mark this turn as stopped by its spend cap, having billed `billed`.
+
+    The public counterpart to `agent/loop_cap.record_loop_cap`, and it exists for the same two
+    readers that one does: `api/runner._spend_cap_event` asks whether the guard fired, and a test
+    needs to say that it did without standing up a graph that genuinely overspends.
+
+    Public rather than reached for through `_mark`, which is what `tests/test_runner.py` did first.
+    The sibling module exposes a named recorder; a test file that has to know a private name to
+    exercise the front door is one a rename breaks for no reason, and the asymmetry between the two
+    caps was accidental rather than meant.
+    """
+    _mark(billed, capped=True)
+
+
 def _mark(billed: int, *, capped: bool = False) -> None:
     """Record this turn's running spend on the watch, and whether the cap has now fired.
 

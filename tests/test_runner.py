@@ -28,7 +28,7 @@ import chemclaw.api.runner_trace as runner_trace
 from chemclaw.agent.loop_cap import record_loop_cap
 from chemclaw.agent.plan_gate import PLAN_APPROVAL_PROMPT
 from chemclaw.agent.session import TurnSession
-from chemclaw.agent.spend_cap import _mark as record_spend_cap
+from chemclaw.agent.spend_cap import record_spend_cap
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
 from chemclaw.api.events import (
     AnswerEvent,
@@ -281,7 +281,7 @@ class _CappedSpendAgent(ScriptedTurn):
     """
 
     async def stream(self, message: str) -> AsyncIterator[Piece]:
-        record_spend_cap(1_234_567, capped=True)
+        record_spend_cap(1_234_567)
         yield "as much as the budget bought"
 
 

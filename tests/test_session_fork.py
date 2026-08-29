@@ -13,6 +13,7 @@ database an unqualified name resolves through `public` and passes locally while 
 """
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import psycopg
@@ -40,6 +41,10 @@ class _Model(GenericFakeChatModel):
         return self
 
 
+#: A fresh timestamp per run, so seeded threads are always young relative to the sweep.
+_NOW_ISO = datetime.now(UTC).isoformat()
+
+
 async def _seed(thread_id: str, *, versions: tuple[str, ...] = ("1", "2")) -> None:
     """A thread with two checkpoints and one blob per version — the shape a fork must preserve.
 
@@ -59,7 +64,12 @@ async def _seed(thread_id: str, *, versions: tuple[str, ...] = ("1", "2")) -> No
                     (
                         thread_id,
                         f"ckpt-{index}",
-                        Jsonb({"v": 1, "id": f"ckpt-{index}", "ts": "2026-08-29T00:00:00+00:00"}),
+                        # **Relative to now, never a literal date.** A hardcoded `ts` is a slow
+                        # fuse: every seeded thread ages in real time, so a month after it was
+                        # written the aged-fork test's `prune_expired_rows()` — which sweeps the
+                        # whole schema, not one thread — would start expiring the other tests'
+                        # fixtures and failing them for a reason none of them names.
+                        Jsonb({"v": 1, "id": f"ckpt-{index}", "ts": _NOW_ISO}),
                     ),
                 )
                 await cur.execute(
@@ -426,7 +436,7 @@ def test_a_forks_ownership_row_commits_with_its_data_or_not_at_all() -> None:
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(
             session_fork,
-            "_RECORD_OWNER",
+            "_OWNER_INSERT",
             "INSERT INTO no_such_owners (a, b, c) VALUES (%s, %s, %s)",
         )
         try:
@@ -579,3 +589,129 @@ def test_forking_a_session_with_no_state_is_a_409_not_a_500() -> None:
 
     assert response.status_code == 409, f"expected a caller error, got {response.status_code}"
     assert "no saved state" in response.json()["detail"]
+
+
+def test_a_forks_transcript_is_as_young_as_the_fork_and_survives_the_sweep() -> None:
+    """The other half of the fork's clock, and the half fixing the first half nearly hid.
+
+    `_RESTAMP_NEWEST` gives the fork's *checkpoints* their own age. `session_messages.created_at`
+    was still copied verbatim, and two readers date a session from it: `_OWNER_LIST` derives
+    `updated_at` from `max(created_at)`, so a fork of an old conversation sorted to the bottom of
+    the sidebar stamped a year ago — and `durable/retention.py` prunes that table per row, so with
+    a message window configured the fork's **whole transcript** went on the first sweep. A session
+    with no messages then drops out of `GET /sessions` entirely, which is failure 2 in
+    `session_fork`'s own list reached from the other direction: the fix had moved "lists but has no
+    history" to "has history but does not list".
+
+    **The first version of the aged-fork test above set `retention_session_messages_days = 0`**,
+    which disables exactly the window that exposes this. That is worth naming: a test that switches
+    off the sweep it is standing next to will pass over the defect it was written to catch.
+    """
+
+    async def _run() -> tuple[float, dict[str, int]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 30)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        try:
+            await _seed("fork-transcript-age")
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE checkpoints SET checkpoint = jsonb_set(checkpoint, '{ts}', "
+                        "to_jsonb((now() - interval '400 days')::text)) WHERE thread_id = %s",
+                        ("fork-transcript-age",),
+                    )
+                    await cur.execute(
+                        "UPDATE session_messages SET created_at = now() - interval '400 days' "
+                        "WHERE session_id = %s",
+                        ("fork-transcript-age",),
+                    )
+                await conn.commit()
+
+            child = await fork_session("fork-transcript-age", "owner-1", None)
+
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT EXTRACT(EPOCH FROM (now() - max(created_at))) / 86400 "
+                    "FROM session_messages WHERE session_id = %s",
+                    (child,),
+                )
+                row = await cur.fetchone()
+                age = float(row[0]) if row and row[0] is not None else -1.0
+
+            from chemclaw.durable.retention import prune_expired_rows
+
+            await prune_expired_rows()
+            return age, await _counts(child)
+        finally:
+            monkeypatch.undo()
+
+    age, after = asyncio.run(_run())
+
+    assert age < 1.0, (
+        f"the fork's newest message is {age:.0f} days old — it kept the parent's clock"
+    )
+    assert after["session_messages"] > 0, (
+        "the sweep deleted the fork's transcript, so the session no longer appears in "
+        "GET /sessions at all — the fork exists and the chemist cannot find it"
+    )
+    assert after["checkpoints"] > 0, "the checkpoint half regressed"
+
+
+def test_deleting_a_fork_and_its_parent_reclaims_the_shared_blob() -> None:
+    """A fork must not make its parent's stored results immortal.
+
+    The blob delete spares content any *other* session links — correct, or deleting one
+    conversation would unlink another's result. But it counted links from sessions that no longer
+    exist, and `tool_result_links` has no DELETE grant (a link may only disappear behind its blob),
+    so a deleted session leaves an orphan row that blocks the blob for ever. Two sessions sharing
+    bytes, both deleted: the first spares the blob for the second, the second spares it for the
+    first's orphan, and nothing can reach it again. The only collector left is
+    `retention_tool_results_days`, which ships at 0.
+
+    Coincidental sharing made that rare. A fork copies the parent's links by design, so it made it
+    certain — every forked conversation left its parent's results unreclaimable. The predicate now
+    counts only links whose session still exists, which fixes the older case too.
+    """
+
+    async def _run() -> tuple[int, int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        from chemclaw.agent.session_store import SessionOwnerStore
+
+        owners = SessionOwnerStore()
+
+        parent = "fork-blob-parent"
+        await _seed(parent)
+        await owners.record(parent, "owner-1", None)
+        await _seed_tool_result(parent, "the full tool output for the blob test")
+
+        child = await fork_session(parent, "owner-1", None)
+        await owners.delete_session(child)
+        await owners.delete_session(parent)
+
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM tool_result_blobs WHERE content_hash IN "
+                "(SELECT content_hash FROM tool_result_links WHERE session_id IN (%s, %s))",
+                (parent, child),
+            )
+            blob_row = await cur.fetchone()
+            blobs = int(blob_row[0]) if blob_row else 0
+            await cur.execute(
+                "SELECT count(*) FROM tool_result_links WHERE session_id IN (%s, %s)",
+                (parent, child),
+            )
+            link_row = await cur.fetchone()
+            links = int(link_row[0]) if link_row else 0
+        return blobs, links
+
+    blobs, links = asyncio.run(_run())
+
+    assert (blobs, links) == (0, 0), (
+        f"{blobs} blob(s) and {links} link row(s) outlived every session that named them — a fork "
+        "made its parent's tool results permanently unreclaimable"
+    )
