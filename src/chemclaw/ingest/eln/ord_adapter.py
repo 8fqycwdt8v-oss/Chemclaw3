@@ -27,7 +27,6 @@ from pydantic import ValidationError
 from rdkit import Chem
 
 from chemclaw.core.config import settings
-from chemclaw.core.errors import ChemclawError
 from chemclaw.core.reagents import resolve_compound_name
 from chemclaw.ingest.eln.adapter import (
     ElnMappingError,
@@ -114,31 +113,22 @@ class OrdJsonAdapter:
         arrival: it is filtered out here and on every later run, so it is reported in one
         aggregated WARNING (`warn_late_arrivals`) instead of vanishing silently.
 
-        **Every refusal this run makes is also recorded in the rejection ledger**, so a chemist
-        asking about a record that never arrived gets the reason instead of "I have no such
-        record" (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`). All three kinds
-        are refusals of the same sort — a file this adapter could not read, a file that arrived too
-        late to ever be fetched, and a message that cannot be mapped — and the third is why the
-        recording happens *here* rather than in `map_to_ord`: the ledger write is `await`ed, and
-        `map_to_ord` is synchronous by the `ElnAdapter` contract. So the entries this fetch is
-        about to hand over are mapped once here to find the ones that cannot be, which changes
-        nothing about what is returned: the sync maps them again, refuses the same ones, and stays
-        the sole author of the run summary. `sync.py::_replay_record_ids` already pays the same
-        cost for the same structural reason.
+        **The refusals only this fetch can see are recorded in the rejection ledger**, so a chemist
+        asking about a record that never arrived gets the reason instead of "I have no such record"
+        (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`). Those are the two above:
+        a file this adapter could not read, and a file that arrived too late to ever be fetched.
+        Neither becomes a `RawEntry`, so nothing downstream can know they existed — which is the
+        whole reason the recording happens here.
 
-        **The pre-flight is bounded by `eln_sync_batch_size`, and the bound is the whole point.**
-        The per-entry cost is right — 68 µs, re-measured over 2,000 copies of the shipped
-        `data/eln-exports/ord/ord-2026-001.json` — and the unit it was priced in was not: this
-        fetch returns *everything* past the cursor and `durable/eln_sync.py::_BoundedIngest`
-        truncates it afterwards, so mapping the whole return cost 0.136 s over 2,000 entries (29%
-        of the fetch) and a 100k-entry backfill would re-map all 100k once per chunk — roughly two
-        hours of pure re-mapping added to a drain that processes 100 entries at a time.
-
-        Bounding it to the oldest `eln_sync_batch_size` entries covers what this chunk's caller can
-        actually consume. It is a work bound rather than a contract: an entry past it is refused by
-        the chunk that reaches it (the cursor advances past a rejection, so the drain always gets
-        there), which is also why the ledger row appears when the drain reaches the record instead
-        of the whole directory's refusals being re-upserted on every chunk.
+        **A message that cannot be *mapped* is recorded by the sync instead**, and that is a fix
+        rather than a division of labour (`D-2026-08-29-a-bound-derived-twice-is-two-bounds`). This
+        fetch is handed the *floor* — `since` minus the overlap window — and knows neither the run's
+        cursor nor the chunk limit, so a pre-flight here can only guess which entries its caller
+        will actually process. It guessed `entries[:eln_sync_batch_size]` and was short by the size
+        of the overlap window on every chunk that had one, losing the ledger row for entries the
+        drain refused and whose cursor it had already advanced past. `durable/eln_sync.py` records
+        what `sync_entries` actually refused, which is the same set by construction and costs no
+        second mapping pass at all.
         """
         entries: list[RawEntry] = []
         late: list[str] = []
@@ -186,30 +176,8 @@ class OrdJsonAdapter:
                 )
         warn_late_arrivals(logger, "ORD export", late)
         entries.sort(key=lambda e: e.created_at)
-        refused.update(self._unmappable(entries[: settings.eln_sync_batch_size]))
         await record_refusals(self._source, refused)
         return entries
-
-    def _unmappable(self, entries: list[RawEntry]) -> dict[str, str]:
-        """Which of these entries cannot be mapped, and what the refusal says.
-
-        The pre-flight `fetch_new_entries` describes, over the bounded prefix it passes rather than
-        over the whole fetch: the refusal is found here so it can be recorded from an `async`
-        caller, and the entry is still returned so the sync refuses it itself and reports it in the
-        summary exactly as before.
-
-        The two caught types are the pair `sync.py`'s own reject-and-continue catches, which is the
-        definition of "deterministic bad data in one entry" this repository already uses. Anything
-        else is a bug rather than a bad record and is left to propagate, as it would from the
-        sync's loop one step later.
-        """
-        refused: dict[str, str] = {}
-        for raw in entries:
-            try:
-                self.map_to_ord(raw)
-            except (ChemclawError, ValidationError) as exc:
-                refused[raw.entry_id] = str(exc)
-        return refused
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Map one ORD message to the canonical `OrdReaction` (structured, step-linked).
