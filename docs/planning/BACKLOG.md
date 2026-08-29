@@ -133,21 +133,6 @@ topic).
       reserved for this and 068 says so; `tests/test_eln.py` fails a re-add that does not bring the
       readers.
 
-- [ ] **The `chem` enumerations and `compute_fukui_at` are served; the merge has landed and what
-      remains is a live-lane confirmation** — [S]. `Chemclaw3-mcp#18` merged 2026-08-27 (commit
-      `90e7486`): `enumerate_tautomers`, `enumerate_protonation_states`, `enumerate_stereoisomers`,
-      `enumerate_bond_cleavages` and their siblings now exist in `servers/chem/.../tools.py`, and
-      `compute_fukui_at` (which `connectors/calc/compose.py::ensemble_property` calls) exists in
-      `servers/calc/.../tools.py`, so the six templates `D-2026-08-25-the-loop-is-a-composite-not-a-template`
-      added can complete. Delete this row once the live lane has actually run one of those templates
-      end to end — `make template-validate` still cannot see the difference (`chem` is a bundle this
-      repository declares and does not run, so its tools are name-checked and argument-unchecked),
-      and `make connector-validate` against a running server is what would; no live-lane transcript
-      postdating the merge exists yet.
-      **`transform_structure` was the seventh name and is now gone from the manifest** rather than
-      implemented: it had no caller, no template, no skill reference and no documented signature in
-      either repository, so serving it would have meant inventing its contract.
-
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **A timed-out parse still runs to completion on the worker thread** — [L]. **The cheap half
