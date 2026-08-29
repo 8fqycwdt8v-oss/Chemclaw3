@@ -228,10 +228,12 @@ class ObservabilitySettings(BaseSettings):
     # *newer*, which makes a reading at most this many seconds too old: it errs toward alerting and
     # never toward silence.
     #
-    # 300 s because it has to sit comfortably above the scrape interval to do anything at all — at
-    # a 30 s scrape a 15 s window would miss on every single scrape and buy nothing — and because
-    # `ChemclawKnowledgeCorpusStale` is a `for: 15m` rule against a threshold stated in hours, so
-    # five minutes of pessimism is inside its noise. 0 restores the scan-every-scrape behaviour.
+    # 300 s for the reason `graph_cache_ttl_seconds` gives for its own number, one step further: the
+    # only out-of-process writer of this tree is the knowledge-sync sidecar, whose shipped cadence
+    # (`knowledge.sync.intervalSeconds`) is 300 s. The corpus cannot get newer more often than that,
+    # so a shorter window surfaces nothing sooner and only re-scans — and a window *below* the
+    # scrape interval buys nothing at all, since every scrape would miss. 0 restores the
+    # scan-every-scrape behaviour.
     knowledge_age_scan_ttl_seconds: float = Field(default=300.0, ge=0.0)
 
     @model_validator(mode="after")
