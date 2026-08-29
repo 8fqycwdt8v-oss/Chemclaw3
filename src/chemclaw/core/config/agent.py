@@ -314,6 +314,23 @@ class AgentSettings(BaseSettings):
     # worker's activity slots, which are both sized to that pool; 0 removes the bound.
     agent_max_parallel_tool_calls: int = Field(default=8, ge=0)
 
+    # How many of one reply's *unrunnable* tool calls are reported in full — to the model in the
+    # correction, to the operator in the WARNING, and to the chemist as `tool_failed` events
+    # (`agent/model_calls`). The bound above is a concurrency ceiling on calls that *run* and says
+    # nothing about a reply nobody can parse: nothing limits `len(AIMessage.invalid_tool_calls)`,
+    # and every one of them is quoted back to the model in a `HumanMessage` that `_retry_request`
+    # appends from the *innermost* middleware — below `context_compaction_middleware`, so the
+    # context budget is already computed and nothing reduces it. Measured with every field at its
+    # own 200-char ceiling: 8 malformed calls cost a 7.2 kB correction, 1000 cost **841 kB** and
+    # 2000 stream events. That is the failure
+    # `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` exists to prevent, reached through
+    # the one message that change could not see.
+    #
+    # 20 rather than 8: this is a *reporting* ceiling, not a concurrency one, and a real fan-out of
+    # 8 calls that all fail should be named in full rather than trimmed. What is over the line is
+    # reported as a count, never dropped silently.
+    agent_max_reported_lost_calls: int = Field(default=20, ge=1)
+
     # How many times one turn may call a tool with the *identical* arguments before the call is
     # refused (`agent.repeat_guard`). The loop cap above bounds the harness's iterations and says
     # nothing about this: a live run called `find_past_jobs` 7-8 times in a single turn, with
