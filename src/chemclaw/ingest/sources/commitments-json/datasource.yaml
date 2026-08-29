@@ -12,5 +12,9 @@ description: >-
   Committed work (programmes, activities, milestones, deliverables) mirrored from a JSON extract a
   portfolio tool writes to disk. Read-only, and stale rather than wrong when the export stops.
 commitments: chemclaw.ingest.commitments.json_export:json_commitment_export
-config:
-  path: data/commitments
+# No `config:` — the path comes from the one pydantic-settings field
+# (`CHEMCLAW_COMMITMENT_EXPORT_DIR`), the same way `eln-json` leaves its path to `eln_export_dir`.
+# It was `path: data/commitments`, which is CWD-relative and names a directory that does not exist
+# in this repository: in a container whose WORKDIR is not the repo root the adapter found nothing,
+# `mirror_freshness` returned NULL, and `review_commitments` reads that as "nothing was ever
+# mirrored" — so a wrong directory was presented to a project leader as a truthful empty portfolio.

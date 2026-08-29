@@ -16,9 +16,11 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
+from chemclaw.core.config import PG_LOOPBACK_HOSTS, settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import register_secret_env
 from chemclaw.deliver.message import Message
@@ -64,6 +66,35 @@ class FileDeliveryDriver:
         )
 
 
+def _refuse_plaintext_channel(name: str, url: str, token_env: str) -> None:
+    """Refuse a non-loopback `http://` delivery channel under the enforced posture.
+
+    The same floor `publish/drivers/http._refuse_plaintext_sink` applies to a result sink, on the
+    same terms and for a stronger reason: a delivery carries *more* human-readable content than a
+    sink record does — a chemist's standing query, note ids, an escalation body — and when
+    `token_env` is set every POST carries a bearer credential too. The sibling seam decided this and
+    this one shipped without it.
+
+    Only under `entra_required`, with loopback dev exempt, exactly as the sink and as
+    `require_pg_tls` and the Temporal-mTLS guard.
+    """
+    if not settings.entra_required:
+        return
+    parts = urlsplit(url)
+    if parts.scheme == "https" or (parts.hostname or "").lower() in PG_LOOPBACK_HOSTS:
+        return
+    carried = (
+        "every POST carries a bearer credential and the message body"
+        if token_env
+        else "the message body"
+    )
+    raise ValueError(
+        f"entra_required=true with a non-loopback http delivery channel {name!r} at {url!r}: "
+        f"{carried} would cross the wire in cleartext. Use an https:// url, or bind a loopback "
+        "address for local dev."
+    )
+
+
 class WebhookDeliveryDriver:
     """POST each message as JSON to one URL — the shape a chat or ticketing integration takes.
 
@@ -81,6 +112,7 @@ class WebhookDeliveryDriver:
 
     def __init__(self, name: str, url: str, token_env: str = "", timeout_seconds: float = 10.0):
         """Bind the destination and the environment variable its bearer token lives under."""
+        _refuse_plaintext_channel(name, url, token_env)
         self.name = name
         self.url = url
         self.token_env = token_env
@@ -88,15 +120,21 @@ class WebhookDeliveryDriver:
         register_secret_env(token_env)
 
     async def deliver(self, message: Message) -> None:
-        """POST the message, raising for any non-2xx response."""
+        """POST the message, raising for any non-2xx response.
+
+        **The recipient's view, not the model's.** `model_dump()` serialised the whole object,
+        which sent `correlation_id` to a third-party chat or ticketing host — the field whose own
+        docstring says "never rendered to the recipient", and the key that joins this fleet's
+        deliveries to the audit trail. The file driver honoured that and this one did not, which is
+        the asymmetry a shared projection removes.
+        """
         headers = {"Content-Type": "application/json"}
         token = os.environ.get(self.token_env, "")
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        payload = message.model_dump(include={"recipient", "subject", "body", "kind"})
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            response = await client.post(
-                self.url, content=json.dumps(message.model_dump()), headers=headers
-            )
+            response = await client.post(self.url, content=json.dumps(payload), headers=headers)
             response.raise_for_status()
 
 

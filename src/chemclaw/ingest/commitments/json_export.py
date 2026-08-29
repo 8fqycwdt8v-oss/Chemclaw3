@@ -18,6 +18,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from chemclaw.core.config import settings
 from chemclaw.ingest.commitments.models import Commitment
 
 logger = logging.getLogger(__name__)
@@ -46,11 +47,27 @@ class JsonCommitmentExport:
         files = sorted(self.path.glob("*.json")) if self.path.is_dir() else [self.path]
         found: list[Commitment] = []
         rejected = 0
+        unreadable = 0
         for file in files:
             if not file.is_file():
                 continue
-            payload = json.loads(file.read_text(encoding="utf-8"))
-            rows = payload if isinstance(payload, list) else payload.get("commitments", [])
+            # **Reject-and-continue applies to a *file*, not only to a row.** It was written for
+            # the row and the file was left to raise: a truncated export (a partial write, a failed
+            # extract) or one containing `null` aborted `fetch_commitments` before every file
+            # sorting after it was read, the activity failed, the cursor never advanced, and the
+            # mirror silently froze on last week's snapshot while `review_commitments` kept
+            # answering from it. One bad file must cost that file.
+            try:
+                payload = json.loads(file.read_text(encoding="utf-8"))
+                rows = payload if isinstance(payload, list) else payload.get("commitments", [])
+                if not isinstance(rows, list):
+                    raise TypeError(f"expected a list of commitments, got {type(rows).__name__}")
+            except (OSError, ValueError, TypeError, AttributeError) as exc:
+                logger.warning(
+                    "commitments.file_unreadable: %s in %s: %s", self.name, file.name, exc
+                )
+                unreadable += 1
+                continue
             for row in rows:
                 try:
                     found.append(Commitment(source=self.name, **row))
@@ -58,6 +75,13 @@ class JsonCommitmentExport:
                     # Counted and skipped, the reject-and-continue rule the ELN ingest uses: one
                     # malformed row in a thousand-row export must not cost the other 999.
                     rejected += 1
+        if unreadable:
+            logger.warning(
+                "commitments.files_unreadable: %s skipped %d unreadable file(s) of %d",
+                self.name,
+                unreadable,
+                len(files),
+            )
         if rejected:
             logger.warning(
                 "commitment_export_rejected: %s rejected %d row(s) that did not validate",
@@ -67,6 +91,11 @@ class JsonCommitmentExport:
         return found
 
 
-def json_commitment_export(name: str, path: str) -> JsonCommitmentExport:
-    """Build a `JsonCommitmentExport` — the `module:callable` a manifest names."""
-    return JsonCommitmentExport(name=name, path=path)
+def json_commitment_export(name: str, path: str = "") -> JsonCommitmentExport:
+    """Build a `JsonCommitmentExport` — the `module:callable` a manifest names.
+
+    `path` defaults to the configured `commitment_export_dir` rather than being required in the
+    manifest, the same way `eln-json` leaves its directory to `eln_export_dir`: a path in a manifest
+    is CWD-relative and a deployment cannot override it without editing a shipped file.
+    """
+    return JsonCommitmentExport(name=name, path=path or settings.commitment_export_dir)

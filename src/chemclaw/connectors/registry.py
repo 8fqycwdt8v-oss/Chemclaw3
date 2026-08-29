@@ -155,6 +155,30 @@ def discovered() -> dict[str, tuple[Path, ConnectorManifest]]:
     return {bundle.name: (bundle, _load_manifest(bundle)) for bundle in _bundle_dirs()}
 
 
+def bearer_token_env_names() -> tuple[str, ...]:
+    """Every environment variable holding an enabled connector's bearer token.
+
+    **One definition, because two things scrub with it and a scrub that covers one is worse than
+    none.** `core.logging.SecretRedactingFilter` resolves these so a token cannot reach a log line,
+    and `deliver.message.Message.redacted` needs the same set so a token cannot reach a *webhook* —
+    which is the more consequential of the two, since a log line stays inside the cluster and a
+    delivery does not. `message.py` claimed the same filter ran on it and it did not: the default
+    `redact_secrets` path covers `_SECRET_SETTINGS` and the structural patterns, and an opaque
+    site-issued connector token matches none of them.
+
+    Returns:
+        The variable names, or `()` when discovery fails — the caller decides how loudly to say so.
+    """
+    from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
+
+    return tuple(
+        manifest.endpoint.auth.token_env
+        for manifest in enabled()
+        if isinstance(manifest.endpoint, HttpEndpoint)
+        and isinstance(manifest.endpoint.auth, BearerAuth)
+    )
+
+
 def enabled() -> list[ConnectorManifest]:
     """The manifests this deployment turns on, in the order the enable-list (or discovery) gives.
 

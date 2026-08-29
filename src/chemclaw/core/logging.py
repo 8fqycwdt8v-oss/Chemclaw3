@@ -1096,15 +1096,9 @@ class SecretRedactingFilter(logging.Filter):
         super().__init__()
         self._connector_token_envs: tuple[str, ...] = ()
         try:
-            from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
-            from chemclaw.connectors.registry import enabled
+            from chemclaw.connectors.registry import bearer_token_env_names
 
-            self._connector_token_envs = tuple(
-                manifest.endpoint.auth.token_env
-                for manifest in enabled()
-                if isinstance(manifest.endpoint, HttpEndpoint)
-                and isinstance(manifest.endpoint.auth, BearerAuth)
-            )
+            self._connector_token_envs = bearer_token_env_names()
         except Exception:
             # ERROR and counted, and the one degradation in this file that is a *security*
             # degradation rather than a functional one: the process keeps logging, and keeps
