@@ -1,141 +1,67 @@
-# Anthropic Agent SDK features worth having here — implementation
+# A refusal is not a failure — the third pass over the unparseable-tool-call change
 
-Four items came out of an audit of the Claude Agent SDK against this repository's LangGraph
-stack. Three are implemented here; the fourth is a design pass, because it touches the
-middleware chain and the ADR has to come before the edit.
+Four fresh reviewers over `4a657ad` (#282) + `4859748` (#284), each running the code. The
+announcement rule and the `Counter` arithmetic came back sound; everything below is what they found
+beside it. Every item is verified in this session before it is fixed.
 
-## 1. A turn's *spend* cap, beside its *iteration* cap — DONE
+## Code
 
-**The gap, corrected against the code rather than the prose.** The proposal said "Chemclaw only
-caps by call count". That was half wrong: `api/budget.py` already meters tokens. What it does
-with them is the gap — `check()` runs *before* a turn against usage already booked, and
-`record()` books the turn *after* it finished. Nothing bounds spend **inside** a turn, and
-`api/budget.py`'s own docstring states the belief that leaves the hole: "A single agent turn is
-already iteration-capped, so one turn cannot loop forever." That caps *iterations*, not tokens.
-A turn inside its 25-call ceiling can bill unboundedly — a wide fan-out of large tool results
-against a 200k context is ~25 calls and millions of tokens — and the session budget finds out
-one turn too late.
+- [ ] **C1 `_empty_answer_event` calls a gate refusal a failure.** `lost = tool_failures +
+      tool_refusals` rendered as "N tool call(s) failed". Contradicts
+      `D-2026-08-28-a-refusal-the-wire-cannot-name-is-a-fault-to-everyone-downstream` and
+      `_TurnLedger.tool_refusals`' own comment ("the control working, which must not be read as a
+      failure"). Fix: count them separately and give the refusal its own next step.
+- [ ] **C2 the log and the message disagree.** The WARNING logs `tool_failures`, the sentence used
+      `failures + refusals` — one turn says `0 failed` and `3 tool call(s) failed`. Fix: one source.
+- [ ] **C3 the remedy replaces rather than adds.** One failure among 29 calls deletes the
+      narrower-question advice on the exact du-03 shape the docstring cites. Fix: state the counts
+      always; let the remedy name failures, refusals or neither.
+- [ ] **C4 `error` is head-truncated and not repr'd.** The head duplicates `arguments` verbatim
+      (upstream folds the document into the exception text), so bounding head-only drops the
+      `JSONDecodeError` reason — the only part not already printed beside it. Not repr'd means raw
+      newlines reach the WARNING (forgeable log line when `log_json=false`, the default) and the
+      chemist's message. Fix: repr, keep the tail.
+- [ ] **C5 nothing caps the *number* of lost calls.** 1000 → an 841 kB corrective `HumanMessage`,
+      appended below `context_compaction_middleware` where nothing can reduce it — the failure
+      `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` exists to prevent, in the same
+      function. Fix: a configured ceiling with a "and N more" notice.
+- [ ] **C6 a raising repair loses the announcement.** `_count_invalid` runs before the retry and
+      `_announce_unrun` after it, so a 429 on the second call books the counter and tells the
+      chemist nothing. Fix: announce the first reply's losses on the way out.
+- [ ] **C7 the dangling parenthetical and the no-op f-string** in the new remedy.
 
-- [x] `agent/spend_cap.py`: meter in `wrap_model_call`, enforce in `before_model`
-- [x] `billed_tokens` (`TurnTotal`) and `spend_capped` (`TurnFlag`) channels on `ChemclawState`
-- [x] `agent_max_turn_billed_tokens` setting (0 = off, matching `_over`'s convention)
-- [x] wire into `_middleware()` beside the loop cap
-- [x] `spend_cap_reached` error code + `chemclaw_turn_spend_caps_total` + runner event
-- [x] tests on a **compiled graph**, not on the hook
+## Prose
 
-**Two design points, both measured rather than assumed.**
+- [ ] **P1 the `RepairInvalidToolCalls` class docstring is the pre-#284 rule**, present tense,
+      naming `_report_lost_calls` (deleted) and asserting a `tool_failed` on a repair that works —
+      which the test added in the same commit asserts does not happen.
+- [ ] **P2 `tests/test_langgraph_stream.py`'s docstring** carries the same dead name, "no id to
+      give", and "every turn that survives an unparseable emission now writes `\"\"`".
+- [ ] **P3 ADR2's "published to Phoenix as a 1.0" is false.** `evals/phoenix.py` guards that yield
+      on `error_code or transport_error`; the measured turn answered, so no annotation is published.
+- [ ] **P4 the boundedness claim is misattributed** — it is `invalid_tool_calls`' docstring, not
+      `BrokenCall.error`'s. In ADR2 and in `lessons.md`.
+- [ ] **P5 `core/metrics.py` HELP** still reads as though the counter and the stream count the same
+      thing; they answer different questions by design.
+- [ ] **P6 `_empty_answer_event`'s docstring says "the two `tool_failed` events"** — after #284 the
+      unrepaired case emits one.
+- [ ] **P7 `lessons.md` says "three defects introduced"** where one was.
 
-*Why `before_model` enforces.* `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`
-— an `after_model` counter is short-circuited by any middleware that jumps from `after_model`.
-`before_model` cannot be skipped. This is the same slot `loop_cap` occupies, for the same reason.
+## Tests (each of these is a claim no test can see)
 
-*Why the count is a state channel and not the ambient.* The turn's spend has to cross the
-subagent boundary or a fan-out gets one budget each — regression 3 in `agent/loop_cap.py`'s
-list. `TurnTotal` already folds concurrent writes additively. Probed on a compiled graph before
-committing to it: `wrap_model_call` returning `ExtendedModelResponse(command=Command(update=…))`
-reaches the channel and `before_model` reads it back — `[0, 100, 200]`, final `300`. The first
-probe wrote a channel `ChemclawState` did not declare and LangGraph dropped it in silence,
-which is the failure `tests/test_state_channels.py` exists to catch and is why the probe came
-before the design.
+- [ ] **T1 `_empty_answer_event` has no test at all** — `grep "reason to start from" tests/` is
+      empty. Both branches, the refusal case, the count.
+- [ ] **T2 the `Counter` multiplicity rule** `_announce_unrun`'s docstring argues for in a
+      paragraph: two calls to one tool, one re-issued. A set difference passes every current test.
+- [ ] **T3 the parse error reaching the chemist** — deleting `{error}` from the sentence survives.
+- [ ] **T4 a repaired reply breaking a *different* tool** than the first.
+- [ ] **T5 the sync path's announcement** — only the async path is ever driven.
+- [ ] **T6 end to end**: the middleware behind `graph_events`, signal → real `ToolFailedEvent`.
+- [ ] **T7 the bound on what is actually sent** — `ToolFailedEvent.message` and the corrective
+      `HumanMessage`, not only `BrokenCall`.
 
-## 2. Session fork — DONE
+## Verification
 
-Branch a thread at its current checkpoint without mutating the original.
-
-- [x] `agent/session_fork.py` — the copy, as SQL
-- [x] `POST /sessions/{session_id}/fork`, authorized by the existing `resolve_session`
-- [x] tests against a real Postgres schema
-
-**Three things the research turned up that a naive fork gets wrong:**
-- Every checkpoint PK leads with `thread_id`, so the fork is an `INSERT … SELECT` with the id
-  swapped — no LangGraph API needed, and none exists (`adelete_thread` is the only thread-level verb).
-- `checkpoint_blobs` is keyed `(thread_id, ns, channel, version)` and is **shared across a
-  thread's checkpoints**, so copying only the tip loses channel values written at an earlier
-  version. The whole thread is copied.
-- A fork with no `session_messages` rows is **invisible** to `GET /sessions`: the owner listing
-  `LATERAL`-joins `max(created_at)` and drops sessions with none. The transcript is copied too.
-- The fork inherits the parent's **profile**, because a profile is attenuation-only and
-  restoring the default would silently widen the tool surface.
-
-## 3. Per-profile effort — DONE
-
-- [x] `effort` on `AgentProfile` and `llm_effort` in settings
-- [x] per-provider translation, gated the way `prompt_caching_middleware` is
-- [x] tests asserting the constructed client, and asserting absence when unset
-
-**Why this is not one shared kwarg.** The shipped chart runs `openai_compatible` against
-`gpt-oss`, where `reasoning_effort` is a real parameter; `ChatAnthropic` has no such parameter
-and spells the same idea `thinking={"type": "enabled", "budget_tokens": N}`, which additionally
-must be under `max_tokens` and refuses a set `temperature`. So it cannot join
-`_generation_options()`, whose contract is "caps both providers accept". An unset effort stays
-**absent** from the request, which is that module's existing rule and matters more here than
-elsewhere: a 400 from a rejected parameter is deliberately *not* failed over
-(`_failover_exceptions`), so a bad value fails every turn rather than degrading.
-
-## 4. Deferred connector tool schemas — DESIGN ONLY, NOT IMPLEMENTED
-
-The most valuable of the four and the only one that needs an ADR before an edit, which is what
-this item delivers. `docs/decisions/D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for.md`
-states the measurement, the design, the three rejected alternatives and the restart condition.
-No code in `agent/` is touched.
-
-## Review
-
-**What shipped.** Three guards (`agent/spend_cap.py`, `agent/session_fork.py` +
-`POST /sessions/{id}/fork`, `AgentProfile.effort`), two ADRs, 21 new tests, and one design document
-for the fourth item. `make lint` and `make type` green.
-
-**Four things found while building that were not the task.** Each is the same shape — a claim in
-prose that the code did not support — which is why they are listed rather than quietly fixed:
-
-1. **My own first finding was wrong in the reassuring direction.** "Chemclaw only caps by call
-   count" — `api/budget.py` meters tokens and has done all along. The real gap was narrower and
-   more interesting: both its halves sit *outside* the turn. Writing the proposal from the
-   architecture docs rather than the code produced a finding that was true in outline and wrong in
-   the part that decides the design.
-2. **`tests/pg.py::create_checkpoint_tables` ran `MIGRATIONS[1:4]`** — three `CREATE TABLE`s, none
-   of the `ALTER`s — while its docstring claimed "the shape under test is the shape production
-   has". Invisible to every test that only `INSERT`s named columns; immediate for the first one
-   driving a real saver. Fixed here, since a fork test cannot exist without it.
-3. **`tests/test_context_floor.py` undercounts by 7,799 tokens (~24%)**, in a file whose docstring
-   argues its number "is the payload rather than an approximation of it". `@tool` is identity, so it
-   measures raw callables while `create_agent` binds larger wrapped objects (all 49 differ), and it
-   never sees the 7 `FilesystemMiddleware`/`SubAgentMiddleware` tools. **Not fixed here** — the
-   corrected floor (~39,983) exceeds the ceiling it would have to be measured against, and this
-   repository's rule is that raising a ceiling is its own deliberate commit. `BACKLOG.md` row added.
-4. **`events.py` said `loop_cap_reached` was the *only* error sharing its turn with an answer.**
-   True until this change, false after it; corrected in the same commit rather than left to rot.
-
-**One thing deliberately not done.** Item 2 is designed and unbuilt. It changes what the model can
-see, inside the chain that authorizes tool calls, and its failure mode is a wrong answer that never
-names the capability it needed — not a slow turn. The ADR carries the measurement, three rejected
-alternatives, and an explicit **stop**: if the eval corpus cannot separate the deferred arm from the
-bound arm on *tool selection*, the schemas stay bound. That is the D-2026-08-12/13 precedent applied
-before the work rather than after it.
-
-**A false alarm I raised and then disproved, kept because the reasoning error is the lesson.**
-Five `tests/test_api_sessions.py` tests failed with `psycopg.errors.UndefinedObject: operator class
-"bit_jaccard_ops" does not exist`, and I called them pre-existing and environmental on the strength
-of reproducing them on a stashed clean tree. That check was **confounded**: the full suite was
-running in the background at the time, so both arms ran two pytest sessions against one Postgres.
-With the suite finished the same five pass. The cause was concurrency, not the database.
-"Reproduces without my change" is not the same claim as "reproduces in isolation", and only the
-second one was worth making.
-
-**One genuinely pre-existing failure, established the second way.**
-`tests/test_message_migration.py::test_erasure_still_works_where_the_checkpointer_has_never_run`
-fails with the same error *in isolation, on a stashed clean tree, with nothing else running* —
-which is the test the paragraph above should have been. Root cause is the sandbox database rather
-than the code: the `chemclaw` database has only `plpgsql` installed (`pg_extension` lists no
-`vector`, and `pg_am` has no `hnsw`), so the migration that builds a bit-vector index has no
-operator class to name. Untouched by this change and left alone.
-
-**What the full suite caught that nothing smaller did — six declaration registries.** Every one is
-a place this repository makes you say out loud what you just added: a new turn outcome must be
-reachable (`test_api_observability`), a new setting must be in `.env.example` (`test_config`), a new
-`degraded()` subsystem must be declared (`test_degraded`), a new error code is mirrored by the UI
-and mock repos (`test_event_contract`), a new metric needs a dashboard panel (`test_deploy_chart`),
-a new `ChemclawError` subclass must be classified retryable or not (`test_publish`), and a new
-session-scoped route must be in the ownership inventory (`test_service`). None of these is
-reachable by running the tests for the thing you changed, which is the argument for running the
-whole suite before believing any of it.
+- [ ] `make lint type test` green, with Postgres and Temporal up, skips named.
+- [ ] Live lane: storm C+F, and one hand-driven turn of each shape.
+- [ ] ADR + ledger row + `lessons.md`.

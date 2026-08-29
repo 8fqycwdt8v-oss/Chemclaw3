@@ -15,7 +15,10 @@ constructs them. A test that classified a stand-in class would prove only that `
 
 import asyncio
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, cast
+from unittest.mock import patch
 
 import httpx2
 import pytest
@@ -33,6 +36,7 @@ from chemclaw.agent.model_calls import (
     invalid_tool_calls,
     model_call_middleware,
 )
+from chemclaw.core import turn_signals
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.turn_signals import _KEY as SIGNAL_KEY
@@ -222,15 +226,17 @@ def test_an_unparseable_tool_call_is_found_where_nothing_looked() -> None:
         ],
     )
     found = invalid_tool_calls(ModelResponse(result=[broken]))
+    # The parse error is quoted, unlike the name beside it: it carries the model's own document
+    # and reaches a log line the default formatter does not escape (`_bounded_reason`).
     assert [(call.name, call.error) for call in found] == [
-        ("compute_xtb_energy", "Unterminated string")
+        ("compute_xtb_energy", "'Unterminated string'")
     ]
     # The malformed document itself is carried, because on the streaming path it is the only field
     # that survives — see `test_the_correction_carries_the_arguments_because_the_error_does_not`.
     assert found[0].arguments == repr('{"smiles": "CC')
     # The bare-`AIMessage` return shape a `wrap_model_call` handler is also allowed to use.
     assert [(call.name, call.error) for call in invalid_tool_calls(broken)] == [
-        ("compute_xtb_energy", "Unterminated string")
+        ("compute_xtb_energy", "'Unterminated string'")
     ]
     assert invalid_tool_calls(ModelResponse(result=[AIMessage(content="fine")])) == []
 
@@ -876,3 +882,237 @@ def test_the_parse_error_is_bounded_before_it_reaches_the_chemist() -> None:
     )
     assert len(broken[0].error) <= budget + 1
     assert len(broken[0].arguments) <= budget + 1
+
+
+@contextmanager
+def _capturing_signals(sink: list[Any]) -> Iterator[None]:
+    """Collect what `record_tool_failure` publishes when no graph is there to publish into.
+
+    `core/turn_signals._emit` resolves LangGraph's writer off the ambient config and **drops the
+    signal in silence** where there is none — which is right (the same tools run in a Temporal
+    activity) and is exactly why a hook called directly proves nothing about the announcement. The
+    graph-driven tests above go through a real compiled graph; these three need the shapes a graph
+    cannot script — a raising second model call, the synchronous hook, a thousand broken calls — so
+    they stand a writer up instead.
+    """
+    with patch.object(
+        turn_signals, "get_stream_writer", lambda: lambda payload: sink.append(payload[SIGNAL_KEY])
+    ):
+        yield
+
+
+def _broken(name: str = "predict_pka", error: str | None = None) -> AIMessage:
+    """One reply carrying a single unparseable call, in the shape LangChain produces."""
+    return AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {
+                "name": name,
+                "args": '{"smiles": }',
+                "id": "c1",
+                "error": error,
+                "type": "invalid_tool_call",
+            }
+        ],
+    )
+
+
+def test_two_calls_to_one_tool_with_one_reissued_loses_exactly_one() -> None:
+    """The multiplicity rule `_announce_unrun` imports `Counter` for, which nothing could see.
+
+    Its docstring argues the case at length — "a model that emitted two calls to one tool and
+    re-issued one of them has lost the other, and a set difference would call that even" — and
+    every test drove one call per tool, so swapping the `Counter` for a set difference passed the
+    whole suite. That is a claim that a control exists, which is the shape this repository's own
+    lessons flag.
+    """
+    _streamed, _recorded, ran, announced = asyncio.run(
+        _drive(
+            [
+                {
+                    "text": "",
+                    "calls": [("predict_pka", '{"smiles": }'), ("predict_pka", '{"smiles": }')],
+                },
+                {"text": "", "calls": [("predict_pka", '{"smiles": "CC(=O)O"}')]},
+                {"text": "The pKa is 4.76."},
+            ]
+        )
+    )
+    assert [call["name"] for call in ran] == ["predict_pka"], "one of the two was re-issued"
+    assert [signal.tool for signal in announced] == ["predict_pka"], (
+        "the other was lost, and a set difference would have called the two even"
+    )
+
+
+def test_a_repair_that_breaks_a_different_tool_announces_both() -> None:
+    """The first reply's loss and the second's are distinct calls, and every test conflated them.
+
+    Both existing scripts drove the *same* broken document twice, so "announce the repaired reply's
+    failure" and "announce the first reply's failure" produced byte-identical output and no test
+    could tell which rule was implemented.
+    """
+    _streamed, _recorded, ran, announced = asyncio.run(
+        _drive(
+            [
+                {"text": "", "calls": [("predict_pka", '{"smiles": }')]},
+                {"text": "", "calls": [("find_notes", '{"text": }')]},
+                {"text": "I could not read either call."},
+            ]
+        )
+    )
+    assert ran == []
+    assert sorted(signal.tool for signal in announced) == ["find_notes", "predict_pka"]
+
+
+def test_the_parse_error_keeps_its_reason_and_reaches_the_chemist() -> None:
+    """Two defects in one field: the reason was truncated away, and nothing asserted it arrived.
+
+    Deleting `{error}` from `_UNPARSEABLE_FAILURE` survived the whole suite, because every
+    graph-driven test takes the *streamed* shape where the provider reports `error=None`. And the
+    bound was head-only, so on the non-streaming shape what survived was the argument document a
+    second time — LangChain folds it into the exception message — while the `JSONDecodeError`
+    reason at the tail, the only part not already printed beside it, was cut off.
+    """
+    from langchain_openai.chat_models.base import _convert_dict_to_message
+
+    document = '{"smiles": "CC(=O)Oc1ccccc1C(=O)O", solvent: "water", "note": "several fields"}'
+    converted = _convert_dict_to_message(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "predict_pka", "arguments": document},
+                }
+            ],
+        }
+    )
+    assert isinstance(converted, AIMessage)
+    broken = invalid_tool_calls(
+        AIMessage(content="", invalid_tool_calls=converted.invalid_tool_calls)
+    )[0]
+    # The reason itself, not the exception's class name — upstream puts the class first and the
+    # sentence last, and the tail is deliberately what survives. Upstream's "For troubleshooting,
+    # visit: …" boilerplate rides between them and eats about half the budget, which is why the
+    # assertion is on the reason rather than on the whole tail.
+    assert "Expecting property name" in broken.error, "the reason is what this field adds"
+    assert len(broken.error) <= settings.agent_audit_max_arg_chars + 2
+
+    signals: list[Any] = []
+    replies = [ModelResponse(result=[converted]), ModelResponse(result=[AIMessage(content="ok")])]
+
+    async def _handler(request: ModelRequest[Any]) -> Any:
+        return replies.pop(0)
+
+    with _capturing_signals(signals):
+        asyncio.run(
+            RepairInvalidToolCalls().awrap_model_call(_request([HumanMessage("pKa?")]), _handler)
+        )
+    assert signals and "Expecting property name" in signals[0].message
+
+
+def test_the_parse_error_is_escaped_so_it_cannot_forge_a_log_line() -> None:
+    """`_bounded_text` deliberately does not `repr`, and extending that to `error` was a defect.
+
+    The reason not to quote is about the *name*: `_metric_label` compares it against the bound
+    tools, and a quoted name matches none of them. The parse error is different — it embeds the
+    model's own document, which is attacker-influenceable through every retrieved corpus this tree
+    frames as untrusted, and `log_json` defaults to **false**, so an embedded newline forged a
+    second log line under the default formatter.
+    """
+    forged = "oops\n2026-08-29 ERROR chemclaw.audit: actor=admin action=approve result=granted"
+    broken = invalid_tool_calls(_broken(error=forged))[0]
+    assert "\n" not in broken.error, "a raw newline in the parse error reaches the WARNING"
+    assert "\\n" in broken.error, "the newline is escaped rather than deleted"
+
+
+def test_a_reply_full_of_broken_calls_is_bounded_at_every_sink() -> None:
+    """Nothing capped how many unrunnable calls one reply could hold.
+
+    `agent_max_parallel_tool_calls` bounds calls that *run*. Measured with every field at its own
+    ceiling, 1000 malformed calls produced an **841 kB** corrective `HumanMessage` — appended by
+    `_retry_request` from the innermost middleware, below `context_compaction_middleware`, so the
+    budget is already computed and nothing reduces it — plus 2000 stream events. The remainder is
+    counted rather than dropped, because a bound that says nothing is the truncation this module
+    exists to end one level up.
+    """
+    limit = settings.agent_max_reported_lost_calls
+    flood = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {
+                "name": "predict_pka",
+                "args": '{"smiles": }',
+                "id": f"c{index}",
+                "error": None,
+                "type": "invalid_tool_call",
+            }
+            for index in range(limit * 5)
+        ],
+    )
+    signals: list[Any] = []
+    prompts: list[list[Any]] = []
+    replies = [ModelResponse(result=[flood]), ModelResponse(result=[AIMessage(content="ok")])]
+
+    async def _handler(request: ModelRequest[Any]) -> Any:
+        prompts.append(list(request.messages))
+        return replies.pop(0)
+
+    with _capturing_signals(signals):
+        asyncio.run(
+            RepairInvalidToolCalls().awrap_model_call(_request([HumanMessage("pKa?")]), _handler)
+        )
+    assert len(signals) == limit + 1, "the listed calls, plus one notice for the remainder"
+    assert f"{limit * 4} further tool call(s)" in signals[-1].message
+    correction = prompts[1][-1].text
+    assert f"and {limit * 4} more not listed here" in correction
+    assert len(correction) < 20_000, f"the correction ran to {len(correction)} characters"
+
+
+def test_a_repair_call_that_raises_still_tells_the_chemist_what_was_lost() -> None:
+    """The counter fired and the chemist heard nothing — the asymmetry this module exists to end.
+
+    `_count_invalid` runs before the retry and `_announce_unrun` after it, so a 429, a timeout or a
+    context-length refusal on the *second* model call booked the operator's record and left the
+    person who asked with no `tool_failed` at all. The turn still ends in a visible `ErrorEvent`,
+    so this is not the silent death — but it is the operator/chemist split the change was written
+    to remove, reachable through the one path the ordering did not cover.
+    """
+    signals: list[Any] = []
+    calls = 0
+
+    async def _handler(request: ModelRequest[Any]) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(result=[_broken()])
+        raise RuntimeError("the endpoint went away")
+
+    with _capturing_signals(signals), pytest.raises(RuntimeError):
+        asyncio.run(
+            RepairInvalidToolCalls().awrap_model_call(_request([HumanMessage("pKa?")]), _handler)
+        )
+    assert [signal.tool for signal in signals] == ["predict_pka"]
+
+
+def test_the_sync_path_announces_what_the_async_path_announces() -> None:
+    """Both hooks are declared, and only one was ever driven.
+
+    `create_agent` puts a middleware declaring either into *both* chains, so the synchronous half
+    is live for every `graph.invoke()` caller — `cli/chat.py` and the template activities among
+    them — and no test reached its announcement.
+    """
+    replies = [
+        ModelResponse(result=[_broken()]),
+        ModelResponse(result=[AIMessage(content="ok")]),
+    ]
+    signals: list[Any] = []
+
+    def _handler(request: ModelRequest[Any]) -> Any:
+        return replies.pop(0)
+
+    with _capturing_signals(signals):
+        RepairInvalidToolCalls().wrap_model_call(_request([HumanMessage("pKa?")]), _handler)
+    assert [signal.tool for signal in signals] == ["predict_pka"]
