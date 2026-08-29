@@ -1,4 +1,4 @@
-"""Postgres backing for the wait: `infra/sql/073_pending_requests.sql`.
+"""Postgres backing for the wait: `infra/sql/076_pending_requests.sql`.
 
 The workflow in `durable/awaiting.py` is the authority on whether a wait is still open; this table
 is its projection, written by that workflow's own activities and read by the front door and the

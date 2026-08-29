@@ -298,7 +298,7 @@ def test_the_migration_refuses_an_unattributed_answer() -> None:
     already applies to a decision.
     """
     sql = (
-        Path(__file__).resolve().parents[1] / "infra" / "sql" / "073_pending_requests.sql"
+        Path(__file__).resolve().parents[1] / "infra" / "sql" / "076_pending_requests.sql"
     ).read_text(encoding="utf-8")
     assert "pending_requests_answer_is_attributed" in sql
     assert "answered_at IS NOT NULL AND answered_by <> ''" in sql
