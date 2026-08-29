@@ -100,6 +100,7 @@ _EXPECTED_SUBSYSTEMS = {
     # alerts on cannot tell that apart from one unreadable legacy row.
     "session_transcript",
     "skill_manifest",
+    "spend_cap",
     # `science/calc/geometry.check_server_address`, added with the geometry store
     # (D-2026-08-21-a-geometry-is-an-address-not-a-payload). It is the one degradation in this
     # system that is *only* visible as a counter: a `structure_id` the calculation server and this

@@ -57,6 +57,12 @@ from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.scratchpad import memory_store
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_events import claim_unconsumed
+from chemclaw.agent.spend_cap import (
+    begin_spend_watch,
+    end_spend_watch,
+    spend_hit_cap,
+    turn_billed_tokens,
+)
 from chemclaw.agent.state import turn_config
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
@@ -127,6 +133,7 @@ _DURABLE_SUBSYSTEM = "durable-jobs (Temporal)"
 _OUTCOMES = (
     "answered",
     "loop_capped",
+    "spend_capped",
     "empty_answer",
     "errored",
     "timed_out",
@@ -377,11 +384,14 @@ async def run_turn(
             capped = _loop_cap_event(session, ledger)
             if capped is not None:
                 yield capped
+            overspent = _spend_cap_event(session, ledger)
+            if overspent is not None:
+                yield overspent
             silent = _empty_answer_event(session, tool_trace, ledger)
             if silent is not None:
                 yield silent
-                # **`return`, not fall through**, which is what this did. `events.py` names
-                # `loop_cap_reached` as the *only* error that shares its turn with an answer, and
+                # **`return`, not fall through**, which is what this did. `events.py` names the
+                # two cap errors as the ones that share their turn with an answer, and
                 # falling through broke that for `empty_answer` in three ways at once: the client
                 # got an `AnswerEvent` whose text is `""` (the reference page renders it as an empty
                 # assistant bubble), `build_answer_event` spent a judge call under
@@ -505,6 +515,11 @@ class _TurnLedger:
     # Set by the runaway guard as it emits its event, so the teardown does not have to re-ask a
     # contextvar whose watch is torn down one frame later.
     loop_capped: bool = False
+    # The same, for the spend guard. Two flags rather than one "capped" with a reason, because
+    # `_OUTCOMES` is what a turn record stores and an operator groups by: a deployment whose turns
+    # are too *expensive* and one whose turns are too *long* need different fixes, and one value
+    # covering both would need the reason as a second column to be actionable at all.
+    spend_capped: bool = False
     # Set by the cancellation clause. Distinguishing the two cancellations is what `deadline` is
     # for; without it a wall-clock kill and a stop are the same ending.
     cancelled: bool = False
@@ -645,6 +660,7 @@ def _turn_ambient(
     # whether the policy touched the turn at all (`agent/context_budget.py`).
     context_token = begin_context_watch()
     loop_token = begin_loop_watch()
+    spend_token = begin_spend_watch()
     usage_token = set_turn_usage(usage)
     dry_run_token = set_dry_run(dry_run)
     try:
@@ -653,6 +669,7 @@ def _turn_ambient(
         _unstamp(session_id, end_call_watch, calls_token)
         _unstamp(session_id, end_context_watch, context_token)
         _unstamp(session_id, end_loop_watch, loop_token)
+        _unstamp(session_id, end_spend_watch, spend_token)
         _unstamp(session_id, reset_turn_usage, usage_token)
         _unstamp(session_id, reset_dry_run, dry_run_token)
         _unstamp(session_id, reset_current_session_id, session_token)
@@ -811,8 +828,8 @@ def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | N
     finished work.
 
     The turn is not failed by this: the answer still goes out, and the ledger still bills it as
-    completed. `loop_cap_reached` is the one error `events.py` names as sharing its turn with an
-    answer.
+    completed. `loop_cap_reached` is one of the two errors `events.py` names as sharing its turn
+    with an answer; `_spend_cap_event` is the other.
     """
     if not loop_hit_cap():
         return None
@@ -839,6 +856,48 @@ def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | N
     )
 
 
+def _spend_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | None:
+    """Say out loud that the turn ran out of budget mid-flight, or `None` if it did not.
+
+    `_loop_cap_event`'s sibling in the unit that costs money, and it is a separate event rather
+    than a second reason for that one because the two are different things for a chemist to do. A
+    turn that hit its iteration cap was *planning* more work than a turn can close, and the useful
+    next step is a narrower request. A turn that hit its spend cap may have had a perfectly small
+    plan and drowned it in tool output, and the useful next step may instead be a narrower corpus,
+    a smaller result, or an operator raising `agent_max_turn_billed_tokens`. Collapsing them would
+    tell a surface "a guard fired" and leave it unable to say which.
+
+    The number is in the message because "the turn stopped" and "the turn stopped after 1.2 million
+    tokens against a 1 million budget" are different messages, and only the second one lets a
+    chemist judge whether the request or the ceiling was wrong.
+
+    Not retryable unchanged, for `_loop_cap_event`'s reason: the same request spends the same way.
+    """
+    if not spend_hit_cap():
+        return None
+    # Marked on the ledger as well as counted, because the teardown reads it after `_turn_ambient`
+    # has torn the watch down — `spend_hit_cap()` would answer False by then.
+    ledger.spend_capped = True
+    billed = turn_billed_tokens()
+    METRICS.increment("chemclaw_turn_spend_caps_total")
+    logger.warning(
+        "the turn for session %s hit its %d billed-token cap after %d tokens",
+        session.session_id,
+        settings.agent_max_turn_billed_tokens,
+        billed,
+    )
+    return ErrorEvent(
+        message=(
+            f"The turn reached its {settings.agent_max_turn_billed_tokens:,}-token budget "
+            f"after billing {billed:,} and stopped with work still open, so the answer below "
+            f"is partial (session {session.session_id})."
+        ),
+        code="spend_cap_reached",
+        retryable=False,
+        correlation_id=ledger.correlation_id,
+    )
+
+
 def _empty_answer_event(
     session: TurnSession, trace: ToolCallTrace, ledger: _TurnLedger
 ) -> ErrorEvent | None:
@@ -857,21 +916,39 @@ def _empty_answer_event(
     An `ErrorEvent` rather than inventing an answer: the system genuinely has nothing to say, and
     saying so is the honest outcome. Retryable, unlike the loop cap — a turn that spent its budget
     circling retrieval may well succeed on a narrower question, and the message says so.
+
+    **"A narrower question" is the wrong advice when a tool failed, and the turn used to give it
+    anyway.** `trace.called_tools` counts calls that were *announced*, and a call whose arguments
+    the model could not write never is — so a turn in which the model asked for exactly the right
+    tool and got the JSON wrong twice read "after 0 tool call(s) … a narrower or more specific
+    question is the useful next step", directly beneath the two `tool_failed` events naming that
+    tool (`D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce`
+    added the events and left this sentence alone, so the turn contradicted itself). The count of
+    failures comes from the ledger rather than the trace precisely because those two disagree: the
+    ledger counts what the turn *reported*, which is the set this sentence has to be consistent
+    with.
     """
     if ledger.answer_text.strip():
         return None
     METRICS.increment("chemclaw_turn_empty_answers_total")
     logger.warning(
-        "turn for session %s ended with no answer text after %d tool call(s)",
+        "turn for session %s ended with no answer text after %d tool call(s), %d failed",
         session.session_id,
         len(trace.called_tools),
+        ledger.tool_failures,
+    )
+    lost = ledger.tool_failures + ledger.tool_refusals
+    remedy = (
+        f"{lost} tool call(s) failed and are reported above, which is the reason to start from. "
+        if lost
+        else "A narrower or more specific question is the useful next step "
     )
     return ErrorEvent(
         message=(
             "The turn ended without producing an answer, after "
             f"{len(trace.called_tools)} tool call(s). Nothing was written, so "
             "there is nothing below to read — this is a failure, not an empty result. "
-            "A narrower or more specific question is the useful next step "
+            f"{remedy}"
             f"(session {session.session_id})."
         ),
         code="empty_answer",
@@ -1066,9 +1143,9 @@ def _settle_outcome(ledger: _TurnLedger) -> str:
     death nothing explained — the shape `_empty_answer_event`'s docstring is about, measured with
     the harness off, 29 tool calls, no cap fired and 197 seconds of nothing.
 
-    `loop_capped` also comes before `answered`, even though a capped turn does deliver its partial
-    answer and `events.py` names `loop_cap_reached` as the one error that shares its turn with one.
-    Ranking `answered` first would make `loop_capped` unreachable, which is the same collapse
+    Both caps also come before `answered`, even though a capped turn does deliver its partial
+    answer and `events.py` names the two cap errors as the ones that share their turn with one.
+    Ranking `answered` first would make them unreachable, which is the same collapse
     `turn_costs.completed` already performed.
 
     `empty_answer` is the floor, not `abandoned`: every route to `abandoned` passes through the
@@ -1088,6 +1165,12 @@ def _settle_outcome(ledger: _TurnLedger) -> str:
         return "timed_out"
     if ledger.loop_capped:
         return "loop_capped"
+    # After `loop_capped` and for a structural reason rather than a preference: both guards are
+    # `before_model` hooks and the iteration cap is attached first, so when a turn is over both
+    # ceilings the iteration cap is the one that jumps and the spend cap never runs. Ranking them
+    # the other way would name an ending that cannot happen while the other is reachable.
+    if ledger.spend_capped:
+        return "spend_capped"
     # **`ledger.answered`, not "some prose was emitted", and the difference is a billing fact.**
     # The flag is set at exactly one place — immediately before `yield answer` — so it means an
     # `AnswerEvent` was built and delivered. Testing `answer_text` instead is strictly weaker: a
@@ -1240,8 +1323,8 @@ def _book_turn_spend(
             duration_seconds=elapsed,
             # **`ledger.answered`, which is what it has always been, not `outcome == "answered"`.**
             # The two agree on most rows and disagree on the ones that matter: a loop-capped turn
-            # *does* deliver its partial answer (`events.py` names `loop_cap_reached` as the one
-            # error that shares its turn with one), and a turn that raised after answering has an
+            # *does* deliver its partial answer (`events.py` names the two cap errors as the
+            # ones that share their turn with one), and a turn that raised after answering has an
             # answer too. Deriving the boolean from the enum booked both as `completed=False`, so
             # the field every existing dashboard and eval reads would have quietly changed meaning
             # under them — while this migration's own header claimed it "stays exactly where it

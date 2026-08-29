@@ -520,6 +520,11 @@
           "refId": "B"
         },
         {
+          "expr": "sum(rate(chemclaw_turn_spend_caps_total[5m]))",
+          "legendFormat": "spend cap",
+          "refId": "J"
+        },
+        {
           "expr": "sum(rate(chemclaw_turn_empty_answers_total[5m]))",
           "legendFormat": "empty answer",
           "refId": "C"

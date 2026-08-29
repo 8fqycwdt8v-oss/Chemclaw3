@@ -148,9 +148,11 @@ async def graph_events(
         elif mode == "custom":
             if isinstance(signal := (payload or {}).get(_SIGNAL_KEY), ToolFailureSignal):
                 # **Only an attributed id.** `ToolFailureSignal.call_id` documents `""` as "not
-                # attributed", never "the call with no id" — and a failure that never reached the
-                # tool chain has none to give (`agent/model_calls` announces the calls a reply
-                # will never run, and there is no `tool_call` event for them). Adding the empty
+                # attributed", never "the call with no id" — and a failure that never reached
+                # the tool chain has nothing to be matched *to*: `agent/model_calls` announces the
+                # calls a turn will not run, and no `tool_call` event is ever emitted for them.
+                # (The upstream entries do carry an id; `BrokenCall` drops it as unusable
+                # here.) Adding the empty
                 # string here would put it in the suppression set, so any `ToolMessage` arriving
                 # with an empty `tool_call_id` would have its result silently dropped for a
                 # failure that was not its own.

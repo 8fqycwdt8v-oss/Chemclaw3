@@ -665,6 +665,28 @@ only holds defects can only ever restore the system to what it already intended 
       `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
       `science/bo/problem.py`.
 
+- [ ] **The static-prefix ratchet gates a number 24% below what the deployment pays** — [S], found
+      2026-08-29 while measuring for `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`.
+      `tests/test_context_floor.py` counts `convert_to_openai_tool` over `_capability_tools`, and
+      its docstring claims that is "the payload rather than an approximation of it". Measured
+      against the tools actually bound on the compiled graph, it is short by **7,799 tokens**:
+      25,511 over 49 counted, 33,310 over 56 sent. Two causes, both structural rather than a drift
+      — `core/tool_registry`'s `@tool` is identity, so the file measures *raw callables* while
+      `create_agent` binds wrapped objects with larger derived schemas (**all 49** differ;
+      `get_durable_job_status` 274 → 662, `gather_evidence` 490 → 878), and 7 tools registered by
+      `FilesystemMiddleware`/`SubAgentMiddleware` (`ls`, `read_file`, `write_file`, `edit_file`,
+      `glob`, `grep`, `task`) are bound every turn and counted never. The file already records the
+      same trap one layer deeper, in the other direction (reading `.name` off a callable measured
+      ~11 tokens per tool).
+
+      **Why it is a row and not a fix in that commit.** The corrected floor is ~39,983 against a
+      ceiling of 33,000 that today reads 32,184 and passes. Fixing the basis therefore *requires*
+      raising the ceiling, and this file's own rule is that raising one "belongs in a commit that
+      says why" — riding it along in an ADR about something else is how a ratchet turns freely.
+      The fix is: measure the bound surface (spy on `bind_tools`, as `tests/test_middleware_order.py`
+      already spies on `create_agent`), re-baseline every ceiling in one commit, and say in it that
+      the number grew because the measurement got honest rather than because the surface did.
+
 - [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
       what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
       carry design arguments in their class docstrings — *"One `objectives` field rather than a lead
@@ -995,3 +1017,26 @@ interceptor skips plain string arguments by design, so it binds nothing there an
 the only producer on the calc job path.
 
 Found resolving the merge of #256's branch with #258.
+
+## A truncated argument document is completed by upstream and the tool runs on the guess
+
+`D-2026-08-27-an-unparseable-tool-call-is-a-visible-failure` §3 recorded this as open and named the
+order to close it in: change the storm's document, **then** decide the `finish_reason` question.
+Only the first half happened. The 2026-08-28 campaign replaced `'{"text": "unterminated'` with the
+unclosable `'{"text": }'` — correct, and the only payload that reaches `invalid_tool_calls` — and
+`D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce` then closed
+F6 against that payload. The truncation hazard went with the old payload and is now asserted by no
+check and no row anywhere.
+
+What is still true, and is not the same defect: LangChain runs a streamed call's argument fragments
+through `parse_partial_json`, which closes an unterminated string and an unclosed brace. So
+`'{"smiles": "CC'` — a stream cut mid-document — arrives as a **valid** `tool_calls` entry reading
+`{"smiles": "CC"}` and the tool runs on a truncated molecule, with nothing anywhere saying the
+document was incomplete. `tests/test_invalid_tool_calls.py::test_a_streamed_truncation_is_completed_by_upstream_and_never_becomes_invalid`
+pins that this is what happens; nothing decides whether it *should*.
+
+The signal upstream leaves is `finish_reason` (`length` when the provider stopped mid-emission),
+which is on the response and not on the call, so telling "the model finished this document" from
+"the transport cut it" is a response-level question this middleware does not currently ask. Closing
+it means deciding what a `length` finish with tool calls means — refuse the reply and re-ask, or
+run the completion and say so — and that decision is what §3 asked for and did not get.

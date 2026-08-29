@@ -20,6 +20,7 @@ from chemclaw.agent.attachments import (
 )
 from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.agent.session import TurnSession
+from chemclaw.agent.session_fork import SessionForkError, fork_session
 from chemclaw.agent.session_store import SessionOwnerStore, encode_session_cursor
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentSession, CurrentUser, resolve_session
@@ -100,6 +101,53 @@ async def create_session(
         await front.session_owners.record(session_id, principal.oid, profile)
     front.live_sessions.add(session_id, TurnSession(session_id=session_id), principal.oid, profile)
     return SessionOut(session_id=session_id)
+
+
+async def fork_session_route(
+    request: Request,
+    session_id: str,
+    principal: CurrentUser,
+    live: CurrentSession,
+) -> SessionOut:
+    """Branch this session onto a new one carrying its whole history, and return the new id.
+
+    **The authorization is the `CurrentSession` dependency and nothing else here.** A fork reads
+    every message of the parent and hands it to the caller under a new id, so it is exactly as
+    sensitive as `GET /sessions/{id}/messages` — and `resolve_session` is the check that route
+    already uses. Doing it that way rather than re-deriving ownership in the body is the point:
+    `chemclaw.api.deps` refuses with 404 rather than 403, so a caller cannot use this endpoint to
+    discover that a session id exists.
+
+    **The fork inherits the parent's profile**, taken from the resolved live session rather than
+    from the request. A profile only ever narrows, so accepting one from the caller would let a
+    fork *widen* what the parent could do, and defaulting it would do the same silently — the
+    argument `_rehydrate_session` makes for the same field.
+
+    Durable only. With no session store there is no thread to copy and no ownership row to write, so
+    the honest answer is that the deployment does not have the feature rather than a new empty
+    session that looks like a fork.
+    """
+    front = state(request)
+    if front.session_owners is None:
+        raise HTTPException(
+            status_code=501,
+            detail="forking needs a durable session store; this deployment has none configured",
+        )
+    try:
+        child_id = await fork_session(session_id, principal.oid, live.profile)
+    except SessionForkError as exc:  # a caller error: nothing to fork from yet
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    front.live_sessions.add(child_id, TurnSession(session_id=child_id), principal.oid, live.profile)
+    log_event(
+        logger,
+        "session.forked",
+        "session %s forked onto %s",
+        session_id,
+        child_id,
+        session_id=session_id,
+        forked_session_id=child_id,
+    )
+    return SessionOut(session_id=child_id)
 
 
 async def list_sessions(
@@ -395,6 +443,7 @@ def register(app: FastAPI) -> None:
     app.delete("/sessions/{session_id}", status_code=204, dependencies=[Depends(resolve_session)])(
         delete_session
     )
+    app.post("/sessions/{session_id}/fork")(fork_session_route)
     app.post("/sessions/{session_id}/attachments", dependencies=[Depends(resolve_session)])(
         upload_attachment
     )

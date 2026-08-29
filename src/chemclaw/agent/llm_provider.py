@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 _KEYLESS_PLACEHOLDER = "not-required"
 
 
-def build_chat_model(task: str = "agent") -> Any:
+def build_chat_model(task: str = "agent", *, effort: str | None = None) -> Any:
     """Build the configured LangChain chat model — the whole of this seam.
 
     Everything that is actually about *the provider* is decided here and only here: which endpoint,
@@ -50,6 +50,10 @@ def build_chat_model(task: str = "agent") -> Any:
 
     Args:
         task: The routing key for per-task model selection (F10-E).
+        effort: How hard to ask the model to think, overriding `llm_effort` for this build.
+            `None` takes the deployment's setting — which is itself usually `None`, meaning the
+            parameter is absent from the request. Keyword-only, because `build_chat_model("agent",
+            "high")` reads as a second routing key and this is not one.
 
     Returns:
         A LangChain `BaseChatModel` ready for `create_agent(model=...)`. Construction only, no
@@ -59,13 +63,18 @@ def build_chat_model(task: str = "agent") -> Any:
         RuntimeError: When the selected provider's credential is absent, naming what to set.
     """
     model = settings.model_routes.get(task)
+    # Resolved here rather than inside `_generation_options`, so that both provider branches and
+    # the failover instance below are built from the same answer. A profile that narrows effort
+    # must narrow the fallback endpoint too, or a degraded turn would quietly think harder than
+    # the profile asked for.
+    chosen = effort if effort is not None else settings.llm_effort
     if settings.llm_provider == "openai_compatible":
-        primary = _openai_compatible_model(model)
-        return _with_failover(primary, model)
-    return _anthropic_model(model)
+        primary = _openai_compatible_model(model, effort=chosen)
+        return _with_failover(primary, model, effort=chosen)
+    return _anthropic_model(model, effort=chosen)
 
 
-def _with_failover(primary: Any, model: str | None) -> Any:
+def _with_failover(primary: Any, model: str | None, *, effort: str | None = None) -> Any:
     """`primary`, or a runnable that tries a second endpoint when the first one is *down* (AG-12).
 
     Returns `primary` unchanged when no fallback is configured, which is the default — so this is
@@ -89,7 +98,11 @@ def _with_failover(primary: Any, model: str | None) -> Any:
     if not settings.llm_fallback_base_url:
         return primary
     return primary.with_fallbacks(
-        [_openai_compatible_model(model, fallback=True, observer=_FallbackObserved())],
+        [
+            _openai_compatible_model(
+                model, fallback=True, observer=_FallbackObserved(), effort=effort
+            )
+        ],
         exceptions_to_handle=_failover_exceptions(),
     )
 
@@ -377,7 +390,11 @@ def prompt_caching_middleware() -> list[Any]:
 
 
 def _openai_compatible_model(
-    model: str | None = None, *, fallback: bool = False, observer: Any = None
+    model: str | None = None,
+    *,
+    fallback: bool = False,
+    observer: Any = None,
+    effort: str | None = None,
 ) -> Any:
     """`ChatOpenAI` against the internal endpoint — same base URL, credential and transport.
 
@@ -431,11 +448,11 @@ def _openai_compatible_model(
         max_retries=settings.llm_max_retries,
         http_async_client=_tls_http_client(),
         stream_usage=settings.llm_stream_usage,
-        **_generation_options(),
+        **_generation_options(effort),
     )
 
 
-def _anthropic_model(model: str | None = None) -> Any:
+def _anthropic_model(model: str | None = None, *, effort: str | None = None) -> Any:
     """`ChatAnthropic` on the dev path, with the same eager credential preflight.
 
     The preflight is kept for the reason `_anthropic_client` gives: a missing key should fail here,
@@ -450,11 +467,11 @@ def _anthropic_model(model: str | None = None) -> Any:
         timeout=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
         stop=None,
-        **_generation_options(),
+        **_generation_options(effort),
     )
 
 
-def _generation_options() -> dict[str, Any]:
+def _generation_options(effort: str | None = None) -> dict[str, Any]:
     """The deployment's generation caps, as constructor kwargs both providers accept.
 
     **Shared because a per-response cap that applies on one provider and not the other is not a
@@ -466,10 +483,32 @@ def _generation_options() -> dict[str, Any]:
     `temperature` is omitted rather than sent as `None` when unset. That is the rule
     `core/config/llm.py` records having broken every turn once: some OpenAI-compatible endpoints
     reject an explicit null, so "unset" has to mean *absent from the request*, not present-and-null.
+
+    **`reasoning_effort` is here rather than in a per-provider branch because both clients take
+    it**, which was measured on the installed distributions rather than assumed: the two spell
+    reasoning differently in their own APIs (`thinking` with a token budget on one side), and it
+    would have been reasonable to expect a translation layer. There is none to write. What the
+    translation *would* have cost is worth recording, since it is why the shared kwarg is a
+    relief rather than a coincidence: Anthropic's `thinking` must be budgeted under `max_tokens`
+    and refuses a set `temperature`, so a translation would have made two other settings
+    conditional on this one.
+
+    The same absent-when-unset rule, and it binds harder here: a rejected parameter is a 400, and
+    `_failover_exceptions` deliberately does not fail those over.
+
+    Args:
+        effort: The resolved reasoning effort, or `None` to send none. Resolved by the caller —
+            a profile's answer beats the deployment's, and this function is not where that is
+            decided.
+
+    Returns:
+        The constructor kwargs shared by both providers.
     """
     options: dict[str, Any] = {"max_tokens": settings.llm_max_tokens}
     if settings.llm_temperature is not None:
         options["temperature"] = settings.llm_temperature
+    if effort is not None:
+        options["reasoning_effort"] = effort
     return options
 
 

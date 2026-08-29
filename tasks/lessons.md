@@ -1486,3 +1486,36 @@ reason to accept a loss. So:
    `lint`, `format:check`, `test`, `check:contrast`, `build`; the e2e job adds **both directions**
    of `check:no-dev-auth` (a default build must not carry the dev provider, an `ALLOW_DEV_AUTH=true`
    build must) and `test:e2e`. Same `grep -n 'run: ' .github/workflows/*.yml`, different repository.
+
+## 2026-08-29 (second entry) — I shipped, then a review found four defects in what I shipped
+
+PR #282 merged green: `make lint type test`, a live storm family going 7/8 → 8/8, and a live
+measurement of the exact behaviour. Four adversarial reviewers over the merged commit then found
+four real defects, three of them *introduced by the change* and one it made reachable.
+
+What the green gate could not see, and why:
+
+- **The new event fired on turns that succeeded.** Every test I wrote asked "is the lost call
+  announced?" and none asked "is anything announced when nothing was lost?" — so `evals/live`
+  scoring a clean turn `failed_loudly=True`, `turn_costs` booking failures against successful
+  calls, and `Chemclaw3_ui` painting two red rows above a good answer were all invisible to a suite
+  that only tested the failure case.
+- **I never enumerated the consumers.** `ToolFailedEvent` had exactly one producer before this;
+  adding a second changed the meaning of every reader of it, and I read none of them. Two of the
+  three broken readers are named in the event's own docstring.
+- **My ADR asserted a mitigation I had not checked.** I wrote that `reason` distinguished a
+  repaired step from a broken tool. `reason` names five gates and both cases carry `None` — one
+  grep would have shown it. That is the same class as the handover measurement I had corrected in
+  this very session, committed by me, in the document recording the correction.
+- **A field documented as bounded was not.** `BrokenCall.error`'s own docstring said every field
+  was bounded on the way out; I read the docstring instead of the constructor three lines below it.
+
+**The rule: when a change adds a second producer of an existing event, record, or metric, list
+every consumer of it and say what each now sees.** Not "does my new case work" — "what does the
+*old* reader make of my new case". The cheap version is one grep for the type name across `src/`
+and the sibling repos, then one sentence per hit.
+
+**And the corollary: a test suite that only exercises the failure path proves nothing about the
+success path.** For any change that fires on a condition, write the test where the condition is
+absent first. `test_a_repair_that_works_announces_nothing_because_nothing_was_lost` is the test
+that should have existed before the feature did.

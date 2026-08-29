@@ -33,6 +33,7 @@ from chemclaw.agent.model_calls import (
     invalid_tool_calls,
     model_call_middleware,
 )
+from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.turn_signals import _KEY as SIGNAL_KEY
 from chemclaw.core.turn_signals import ToolFailureSignal
@@ -689,9 +690,12 @@ def test_an_unparseable_call_reaches_the_chemists_stream_as_tool_failed() -> Non
     that tells a chemist their question was too broad about a turn in which the model asked for
     exactly the right tool, twice.
 
-    Two announcements, not one: the repair asks again, the second reply is broken too, and neither
-    call ran. Booking one would under-report by exactly the attempt this middleware adds.
+    **One announcement for one lost call, though the model emitted it twice.** The chemist asked
+    for one thing and did not get it; two red rows for one unmet intent is noise. The operator's
+    counter still reads 2, because "how often did the model emit malformed output" is a different
+    question — `test_the_counter_counts_attempts_while_the_stream_counts_losses` pins the pair.
     """
+    before = METRICS.value("chemclaw_invalid_tool_calls_total")
     _streamed, _recorded, ran, announced = asyncio.run(
         _drive(
             [
@@ -701,7 +705,8 @@ def test_an_unparseable_call_reaches_the_chemists_stream_as_tool_failed() -> Non
         )
     )
     assert ran == [], "a call whose arguments do not parse never runs"
-    assert [signal.tool for signal in announced] == ["predict_pka", "predict_pka"]
+    assert [signal.tool for signal in announced] == ["predict_pka"]
+    assert METRICS.value("chemclaw_invalid_tool_calls_total") == before + 2
     assert '{"smiles": }' in announced[0].message
     assert "did not run" in announced[0].message
     # No id and no reason, and both are load-bearing. `call_id` means "match this to the
@@ -740,25 +745,134 @@ def test_a_valid_call_discarded_with_a_broken_one_is_announced_to_the_chemist_to
     assert "did not run either" in announced[1].message
 
 
-def test_a_repaired_reply_announces_the_first_attempt_and_then_runs_the_second() -> None:
-    """The shape a working repair takes, and the reason announcing it is not noise.
+def test_a_repair_that_works_announces_nothing_because_nothing_was_lost() -> None:
+    """The regression this middleware's first version shipped, measured on all three readers.
 
-    `ToolFailedEvent` is declared as "a step that did not work, not a failure" — the turn
-    continues. So a repaired turn shows the discarded attempt's failure and then the call
-    succeeding, which is what happened, and is the same rule `_carrying_prose` follows for the
-    discarded attempt's *prose*: it reached the chemist, so the record says so.
+    Announcing at the moment of discard read "a discarded call did not run", which is false when
+    the repair works: the model re-issues it and it runs. Measured on this exact graph before the
+    fix — a turn that **answered**, with every tool succeeding — `evals/live` recorded
+    `tools_failed=['predict_pka', 'find_notes']` and `failed_loudly=True`, `_TurnLedger` booked two
+    `tool_failures` beside two successful `tool_calls`, and `Chemclaw3_ui` renders a `reason`-less
+    failure in the danger red with a `failed` badge, so the chemist read two red rows above a good
+    answer. `find_notes` was never invoked at all.
 
-    The second attempt announces nothing, which is the half that would break if the announcement
-    were moved to "every reply this middleware inspects" rather than "every call it discards".
+    The valid call discarded with the broken one is the sharp end: it is announced only if the
+    repaired reply does not ask for it again, which here it does.
     """
     _streamed, _recorded, ran, announced = asyncio.run(
         _drive(
             [
-                {"text": "", "calls": [("predict_pka", '{"smiles": }')]},
+                {
+                    "text": "",
+                    "calls": [
+                        ("predict_pka", '{"smiles": }'),
+                        ("find_notes", '{"text": "acetic acid"}'),
+                    ],
+                },
+                {
+                    "text": "",
+                    "calls": [
+                        ("predict_pka", '{"smiles": "CC(=O)O"}'),
+                        ("find_notes", '{"text": "acetic acid"}'),
+                    ],
+                },
+                {"text": "The pKa is 4.76."},
+            ]
+        )
+    )
+    assert sorted(call["name"] for call in ran) == ["find_notes", "predict_pka"]
+    assert announced == [], "a call the model re-issued and ran is not a call that failed"
+
+
+def test_a_valid_call_the_repair_does_not_reissue_is_still_announced() -> None:
+    """The other direction, and the reason the rule is not simply "announce the second attempt".
+
+    A parseable call thrown away with a broken reply is lost for good if the model does not ask for
+    it again — and unlike the model, which is told about it in the correction, the chemist has no
+    way to ask. So the repair succeeding does not by itself clear the first reply: what clears a
+    call is the repaired reply asking for it.
+    """
+    _streamed, _recorded, ran, announced = asyncio.run(
+        _drive(
+            [
+                {
+                    "text": "",
+                    "calls": [
+                        ("predict_pka", '{"smiles": }'),
+                        ("find_notes", '{"text": "acetic acid"}'),
+                    ],
+                },
                 {"text": "", "calls": [("predict_pka", '{"smiles": "CC(=O)O"}')]},
                 {"text": "The pKa is 4.76."},
             ]
         )
     )
     assert [call["name"] for call in ran] == ["predict_pka"]
-    assert [signal.tool for signal in announced] == ["predict_pka"]
+    assert [signal.tool for signal in announced] == ["find_notes"]
+    assert "did not run either" in announced[0].message
+
+
+def test_the_counter_counts_attempts_while_the_stream_counts_losses() -> None:
+    """The two records answer different questions, and an earlier ADR claimed they could not differ.
+
+    `D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce` closed
+    with "an operator's count and a chemist's stream cannot disagree about how many calls were
+    lost". They do disagree, by design: the counter is per malformed *emission* — what an operator
+    alerts on and pays for — and the stream is per *unmet intent*. Pinned here so neither can be
+    quietly changed into the other.
+    """
+    before = METRICS.value("chemclaw_invalid_tool_calls_total")
+    _streamed, _recorded, _ran, announced = asyncio.run(
+        _drive(
+            [
+                {"text": "", "calls": [("predict_pka", '{"smiles": }')]},
+                {"text": "", "calls": [("predict_pka", '{"smiles": }')]},
+                {"text": "I could not read my own call."},
+            ]
+        )
+    )
+    assert METRICS.value("chemclaw_invalid_tool_calls_total") == before + 2
+    assert len(announced) == 1
+
+
+def test_the_parse_error_is_bounded_before_it_reaches_the_chemist() -> None:
+    """`error` was the one field `invalid_tool_calls` claimed to bound and did not.
+
+    It is not merely unbounded but reliably *large*: LangChain's `parse_tool_call` folds the entire
+    raw argument document into the exception message, which `langchain_openai` stores verbatim — so
+    a 100 kB malformed document arrived twice, once truncated in `arguments` and once whole in
+    `error`. Measured before the fix with the budget at 200 chars: `arguments` 201, `error`
+    100,260, and that error reached a 100,587-char `ToolFailedEvent.message` and a 100,861-char
+    corrective `HumanMessage` — the latter appended below `context_compaction_middleware`, where
+    nothing can reduce it.
+
+    Driven through the real `langchain_openai` converter rather than a hand-built entry, because
+    the size comes from upstream's exception text and a fixture would just be this test asserting
+    its own string.
+    """
+    from langchain_openai.chat_models.base import _convert_dict_to_message
+
+    document = '{"smiles": "' + "C" * 100_000 + '" '
+    converted = _convert_dict_to_message(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "predict_pka", "arguments": document},
+                }
+            ],
+        }
+    )
+    assert isinstance(converted, AIMessage)
+    assert len(converted.invalid_tool_calls[0]["error"] or "") > 100_000, (
+        "upstream stopped embedding the document in the error; this test's premise is gone"
+    )
+    budget = settings.agent_audit_max_arg_chars
+    broken = invalid_tool_calls(
+        AIMessage(content="", invalid_tool_calls=converted.invalid_tool_calls)
+    )
+    assert len(broken[0].error) <= budget + 1
+    assert len(broken[0].arguments) <= budget + 1

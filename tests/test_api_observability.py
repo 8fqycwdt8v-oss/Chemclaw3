@@ -435,6 +435,7 @@ def test_every_outcome_is_reachable_and_none_is_invented() -> None:
         return {
             _settle_outcome(_ledger(answered=True, answer_parts=["ok"])),
             _settle_outcome(_ledger(answer_parts=["partial"], loop_capped=True, answered=True)),
+            _settle_outcome(_ledger(answer_parts=["partial"], spend_capped=True, answered=True)),
             _settle_outcome(_ledger(answered=False)),
             _settle_outcome(_ledger(error_code="storage_unavailable")),
             _settle_outcome(_ledger(cancelled=True, timed_out=True)),

@@ -35,7 +35,9 @@ from chemclaw.evals.metrics import precision_recall_f1
 # Error codes that mean the turn was cut off rather than finished: it ran out of wall clock, out
 # of budget, or out of loop iterations. The rest of the taxonomy describes failures that are not
 # runaways (a storage outage is not the agent looping).
-_EXHAUSTION_CODES = frozenset({"turn_timeout", "budget_exhausted", "loop_cap_reached"})
+_EXHAUSTION_CODES = frozenset(
+    {"turn_timeout", "budget_exhausted", "loop_cap_reached", "spend_cap_reached"}
+)
 
 _TRANSCRIPT = TypeAdapter(list[Event])
 
@@ -141,7 +143,8 @@ def runaway_rate(case: EvalCase) -> MetricResult:
     Reads `output.transcripts` — a list of transcripts, because a rate over one turn is a coin flip
     and the name would be a lie. A turn counts as a runaway when it carries an `ErrorEvent` whose
     code is one of `_EXHAUSTION_CODES`: `turn_timeout` (out of wall clock), `budget_exhausted` (out
-    of budget) or `loop_cap_reached` (out of loop iterations). One rule, and the transcript states
+    of budget), `loop_cap_reached` (out of loop iterations) or `spend_cap_reached` (out of tokens
+    inside the turn). One rule, and the transcript states
     the outcome rather than the metric guessing at it.
 
     **This used to infer the loop cap from residue — an answer sent while the plan still held
