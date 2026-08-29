@@ -241,6 +241,33 @@ class DataRun:
 # --- the published tables -------------------------------------------------------------------
 
 
+def _default_real_data(ord_export_dir: Path) -> Path | None:
+    """Where the mock's published factor tables sit, given its ORD export directory.
+
+    A function rather than an expression inside `main` because the arithmetic is off-by-one-able
+    and was: it walked up **three** levels and derived `<mock repo>/data/app/eln/real_data`, a path
+    that has never existed. Inline, nothing could reach it without running the whole lane, so the
+    bring-up's corpus backfill failed at argparse and the ORD half of the corpus stayed invisible —
+    while `up.sh` reported only a warning pointing at a log.
+
+    The two ends are both facts about `Chemclaw3_mock`'s layout, fixed by its own `start.sh` and by
+    this lane's `up.sh`: exports at `<repo>/data/eln/exports/ord` — four levels down — and the
+    tables at `<repo>/app/eln/real_data`. Hence `parents[3]`.
+
+    `None` when the export directory is too shallow to derive from, which is the *shipped default*
+    (`ord_export_dir = "data/eln-exports/ord"`, relative, three parts) and therefore the common
+    case outside this lane — not an edge. Returning it rather than indexing blindly is what keeps
+    `main` free to print the message that names the flag to pass; the first version of this fix
+    raised a bare `IndexError: 3` from inside `pathlib` instead, which tells a reader nothing about
+    what to do next.
+    """
+    try:
+        root = ord_export_dir.parents[3]
+    except IndexError:
+        return None
+    return root / "app" / "eln" / "real_data"
+
+
 def _published_rows(real_data: Path, dataset: Dataset) -> list[dict[str, str]]:
     """Every row of one published factor table, verbatim."""
     path = real_data / dataset.csv_name
@@ -527,9 +554,12 @@ _PROSE_TIME = re.compile(r"for\s+(\d+(?:\.\d+)?)\s*h\b")
 async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
     """A condition stated only in prose reaches the record — as a **step**, not as a setpoint.
 
-    **The one place in this corpus where a value is *derived* rather than copied**, which is why it
-    is worth a check of its own: everything else here asserts that a number survived a hop, and
-    this asserts that a number was recovered from a sentence at all.
+    Both halves, because they are the two ways this can go wrong and they fail in opposite
+    directions. `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` forbids deriving a headline
+    `temperature_c`/`time_h` from a procedure: the first regex match in a procedure is the
+    *addition* temperature far more often than the reaction's, and a transcription nobody reviews
+    may not present a derived number as a recorded one. Segmentation is a different claim — a step
+    says what its own sentence says — so `_segment_steps` does extract per-step values, losslessly.
 
     Which field it may be recovered *into* is decided, and the decision is the whole point.
     `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` removed the headline prose fallback
@@ -892,7 +922,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     configure_logging()
     export_dir = Path(settings.ord_export_dir)
-    real_data = args.real_data or export_dir.parent.parent.parent / "app" / "eln" / "real_data"
+    real_data = args.real_data or _default_real_data(export_dir)
+    if real_data is None:
+        parser.error(
+            f"cannot derive the factor tables from ord_export_dir={str(export_dir)!r} — it is not "
+            "inside a Chemclaw3_mock checkout. Pass --real-data pointing at "
+            "Chemclaw3_mock/app/eln/real_data (this lane has no ground truth without them)"
+        )
     if not real_data.is_dir():
         parser.error(
             f"no published factor tables at {real_data} — pass --real-data pointing at "
