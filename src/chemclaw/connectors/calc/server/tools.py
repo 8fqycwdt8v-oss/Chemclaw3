@@ -188,7 +188,13 @@ async def report_measurement(
     # passed one — so every measurement this system has ever stored carried an empty unit and a
     # chemist reporting 0.5 mg/mL was indistinguishable from one reporting log S = 0.5
     # (D-2026-08-29-a-quantity-without-a-unit-is-a-number).
-    _tool, ledger_unit = _CALIBRATED.get(property_name, ("", ""))
+    # **Normalised, because the new refusal below is gated on this lookup.** `property_name` is a
+    # model-supplied string this tool never validated, and an exact-match `get` meant `"PKA"` or a
+    # trailing space fell straight through the refusal *and* through `reconcile` — stored with the
+    # empty unit this whole control exists to eliminate, and unreadable afterwards because
+    # `calculator_trust` does validate the name. A bypass reachable by one capital letter is not a
+    # control.
+    _tool, ledger_unit = _CALIBRATED.get(property_name.strip().lower(), ("", ""))
     if ledger_unit and not unit.strip():
         # Refuse rather than assume. The assumption is invisible in the data afterwards, and it is
         # wrong exactly when a chemist reports in the unit they measure in rather than the one this

@@ -115,7 +115,7 @@ performance figures are corrected here and its documented-but-unchecked bound is
 
 ## Consequences
 
-- Two migrations (`077`, `078`), a new setting (`effect_approval_role`), and one behaviour change a
+- Two migrations (`078`, `079`), a new setting (`effect_approval_role`), and one behaviour change a
   deployment must act on: **a job declaring an irreversible effect refuses to run until
   `CHEMCLAW_EFFECT_APPROVAL_ROLE` names an approver.** Nothing in this repository declares one, so
   nothing breaks today; the refusal is the point.

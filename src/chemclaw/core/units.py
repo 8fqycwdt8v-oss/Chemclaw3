@@ -125,14 +125,19 @@ _register(
     "% w/w",
     "%w/w",
     "w/w%",
-    "% w/v",
-    "%w/v",
     "area%",
     "% area",
     "%area",
     "mol%",
     "% mol",
 )
+# **`% w/v` is not a fraction and was registered as one.** It is grams per 100 mL *by definition*,
+# so it belongs in `mass_concentration` where the conversion is exact and needs no density —
+# 1 % w/v is 10 mg/mL. As a `fraction` with factor 0.01 it silently asserted rho = 1.000 g/mL:
+# a 2 % w/v stock read 20000 ppm and compared equal to a bare 2 %, when in ethanol it is 2.53 % w/w
+# and in DMSO 1.82 %. `origin/main` refused the spelling as unknown; this branch introduced the
+# alias and the error with it.
+_register(Unit("% w/v", "mass_concentration", 10.0), "%w/v", "w/v%")
 
 #: Spellings that state their own basis. **A percent is one unit and several facts**, and these are
 #: the spellings in which a chemist says which: an HPLC area percent, a weight percent, a molar
@@ -142,12 +147,14 @@ _register(
 #:
 #: Mapping the spelling to the basis is what makes the distinction survive parsing: the caller no
 #: longer has to know to pass `basis=` by hand for a string that already said it.
+#: **Keyed lowercase and looked up lowercased**, because `parse_unit` is case-insensitive and this
+#: was not: `Area%` — the ordinary capitalisation on a chromatography printout — parsed fine, lost
+#: its basis, and compared **equal** to a `% w/w` assay. The guard this map exists to arm never
+#: fired for the spelling a chemist is most likely to type.
 _BASIS_SPELLINGS: dict[str, str] = {
     "% w/w": "w/w",
     "%w/w": "w/w",
     "w/w%": "w/w",
-    "% w/v": "w/v",
-    "%w/v": "w/v",
     "area%": "area",
     "% area": "area",
     "%area": "area",
@@ -199,9 +206,13 @@ _register(Unit("eV", "energy_per_amount", 96.485_332), "electronvolt")
 # refusing, while `same_dimension("nM", "uM")` was False and a legitimate 50 nM against a 0.1 µM
 # limit was refused with "cannot compare length with concentration".
 #
-# So every rung either exists on both sides or on neither. `pM` has no length twin and is therefore
-# unambiguous; it is registered because picomolar is ordinary in potency work and being unknown is
-# its own failure.
+# So every rung either exists on both sides or on neither — and "or on neither" is not a figure of
+# speech. The first version of this fix registered `pM` with the note that it "has no length twin and
+# is therefore unambiguous", which had it exactly backwards: the missing twin left the fold `"pm"`
+# unpoisoned, so **picometre — the unit of a bond length — resolved to picomolar**, and
+# `reconcile(154, "pm", "M")` returned 1.54e-10 where `origin/main` had refused it as unknown. A
+# fix that converts a safe refusal into a silent wrong dimension is worse than the defect it
+# replaces, and it is the same defect: one rung further down, made while fixing the rung above.
 _register(Unit("M", "concentration"), "mol/L", "molar")
 _register(Unit("mM", "concentration", 1e-3), "mmol/l", "millimolar")
 # `µM`/`μM` are registered as *exact* spellings (both the micro sign and the Greek mu), because
@@ -231,6 +242,7 @@ _register(Unit("mm", "length", 1e-3), "millimetre", "millimeter")
 # ever needed for.
 _register(Unit("um", "length", 1e-6), "µm", "μm", "micrometre", "micrometer", "micron")
 _register(Unit("nm", "length", 1e-9), "nanometre", "nanometer")
+_register(Unit("pm", "length", 1e-12), "picometre", "picometer")
 _register(Unit("angstrom", "length", 1e-10), "å", "ang")
 
 
@@ -300,7 +312,7 @@ class Measurement:
             value=value,
             unit=parse_unit(unit),
             uncertainty=uncertainty,
-            basis=basis or _BASIS_SPELLINGS.get(unit.strip(), ""),
+            basis=basis or _BASIS_SPELLINGS.get(unit.strip().lower(), ""),
         )
 
     def to(self, symbol: str) -> "Measurement":

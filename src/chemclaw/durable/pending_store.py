@@ -51,16 +51,27 @@ def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]
     return db.connection(settings.session_store_dsn or settings.postgres_dsn)
 
 
-# **Two cases, and telling them apart is the whole point of `run_id`.** A retry of the opening
+# **Three cases, and telling them apart is the whole point of `run_id`.** A retry of the opening
 # activity carries the *same* Temporal run and must update in place without disturbing a state the
-# workflow may already have settled. A re-ask carries a *different* run — `request_id_for` is
-# deterministic and `ALLOW_DUPLICATE` is set precisely so a lapsed question can be asked again — and
-# must reopen the row, clearing the previous cycle's answer so the new wait is visible and
-# answerable.
+# workflow may already have settled. A re-ask after a **lapsed** deadline carries a different run —
+# `request_id_for` is deterministic and `ALLOW_DUPLICATE` is set precisely so a lapsed question can
+# be asked again — and must reopen the row, so the new wait is visible and answerable.
 #
-# Guarding on `state = 'waiting'` alone did the first and silently dropped the second: the row kept
-# the old cycle's `expired` state and deadline, so the new wait appeared in no inbox and the answer
-# route refused it with 409 forever while the workflow ran on.
+# The third case is the one the first version of this fix got wrong. Guarding on
+# `run_id <> EXCLUDED.run_id` alone admitted an **answered** row, and the reopen NULLs
+# `answered_at`/`answered_by`/`answer` — so re-asking a question somebody had already answered
+# destroyed their attribution and their payload. This table is in `retention._NOT_PRUNED`, justified
+# there as "the attribution for an answer that released a durable workflow", and the answer route
+# writes no audit event: the row is the only record there is. A row that can never be deleted must
+# not be silently overwritten either.
+#
+# So a reopen is scoped to the terminal states in which **nobody answered**. A genuinely new ask of
+# an already-answered question differs in its `subject`, which is what `request_id_for` keys on, and
+# therefore gets its own row rather than overwriting somebody's answer.
+#
+# Guarding on `state = 'waiting'` alone — the version before either fix — did the retry case and
+# silently dropped the re-ask: the row kept the old cycle's `expired` state and deadline, so the new
+# wait appeared in no inbox and the answer route refused it with 409 forever while the workflow ran.
 _OPEN = """
     INSERT INTO pending_requests
         (request_id, kind, subject, rationale, asked_of, requested_by, session_id,
@@ -73,6 +84,15 @@ _OPEN = """
         asked_of = EXCLUDED.asked_of,
         due_at = EXCLUDED.due_at,
         run_id = EXCLUDED.run_id,
+        -- **Refreshed, because they legitimately differ between cycles and a gate reads one of
+        -- them.** `request_id_for` keys on (kind, subject, asked_of) and deliberately *not* on the
+        -- requester, so a re-ask is routinely a different person in a different session. Leaving
+        -- these stale meant `_may_answer`'s separation-of-duties check read the *previous* cycle's
+        -- requester: bob re-launches alice's irreversible job, the approval row reopens still
+        -- naming alice, and bob passes a check whose entire purpose is to refuse him.
+        requested_by = EXCLUDED.requested_by,
+        session_id = EXCLUDED.session_id,
+        correlation_id = EXCLUDED.correlation_id,
         state = 'waiting',
         answered_at = NULL,
         answered_by = '',
@@ -85,7 +105,10 @@ _OPEN = """
             ELSE NULL
         END
     WHERE pending_requests.state = 'waiting'
-       OR pending_requests.run_id <> EXCLUDED.run_id
+       OR (
+            pending_requests.run_id <> EXCLUDED.run_id
+            AND pending_requests.state IN ('expired', 'cancelled')
+          )
 """
 
 # `answered_at` only where somebody answered. It was stamped unconditionally, so an `expired` or

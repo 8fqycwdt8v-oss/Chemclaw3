@@ -77,7 +77,7 @@ it skipped.
 
 ## Review
 
-All of it landed, in five commits. Two migrations (`077_pending_request_run.sql`,
+All of it landed, in five commits. Two migrations (`079_pending_request_run.sql`,
 `078_effects_session_index.sql`), one new setting (`effect_approval_role`), one new module
 (`agent/tool_modules.py`), and one behaviour change a deployment must know about: **a job declaring
 an irreversible effect refuses to run until `CHEMCLAW_EFFECT_APPROVAL_ROLE` names an approver.**
@@ -104,3 +104,52 @@ the module docstrings.
 **One thing was audited hardest and found sound**: the tool-schema cache, added late under CI
 pressure and the change most likely to be wrong. Its stale performance figures are corrected and its
 documented-but-unchecked cache bound is now a test.
+
+---
+
+# Second review (fresh context) — the fixes themselves
+
+Six reviewers read the *fix* branch. What they found matters more than the individual defects:
+
+**Two of them mutation-tested the fixes — reverted each and re-ran the suites.** 4 of 5 operations
+changes and 6 of 7 deliver/commitments changes survived with the suite green. Most of what this
+branch fixed is not pinned by anything. `tests/test_delivery.py` and `tests/test_commitments.py` are
+byte-identical to `origin/main`.
+
+**Three regressions were introduced by the fixes themselves**, all in `core/units.py`: `pm`
+(picometre) resolved to picomolar because `pM` was added without its twin — turning a safe refusal
+into a silent wrong dimension, the *same* defect one rung down, made while fixing the rung above;
+`Area%` lost its basis because the basis map was case-sensitive while `parse_unit` is not; and
+`% w/v` was registered as a fraction, hard-coding rho = 1.0 g/mL.
+
+**Three of the prose corrections are themselves false.**
+
+## Fixed in this pass
+
+- [x] `pm`/picometre registered; the ladder test now derives from the registry
+- [x] `_BASIS_SPELLINGS` looked up case-insensitively
+- [x] `% w/v` moved to `mass_concentration` (10 mg/mL, exact by definition)
+- [x] `report_measurement` normalises `property_name` — `"PKA"` walked around the new refusal
+- [x] the re-ask no longer overwrites an **answered** row's attribution, and refreshes
+      `requested_by` — the stale value let a *different* person pass the separation-of-duties gate
+- [x] migration renumbered 077 → 079 (main landed its own 077)
+
+## Still open
+
+- [ ] `get_durable_job_status` is advertised on the face and discloses what `find_past_jobs` was
+      withheld for; job ids are a pure function of connector+job+payload
+- [ ] the `WITHHELD` partition test is tautological — it cannot fail for the case it names
+- [ ] the ownership gate (`_may_read`) has no test at all
+- [ ] `applied` → `compensated` is now unreachable; the shipped test asserts `failed` → `compensated`
+      and passes either way
+- [ ] the deadline clamp reached two of three launch sites; the BO path is unclamped and two
+      comments claim otherwise
+- [ ] `_SAFE_TOOL_NAME` allows `.` and `-`, which no served tool uses and which carry readable
+      injection text; the cardinality claim beside it is false (bucketing runs after the GROUP BY)
+- [ ] the `failed` split counts argument-sets, not runs (`job_records` upserts on `job_id`)
+- [ ] the redaction-failure path logs without a counter, unlike the sibling it was extracted from
+- [ ] the plaintext-channel refusal can only raise on the delivery path, where it is swallowed
+- [ ] a wrong `CHEMCLAW_COMMITMENT_EXPORT_DIR` is still silent
+- [ ] false prose: "point lookup", "unindexed-range aggregate", "five tables", `Coverage`'s
+      retention sentence, `bearer_token_env_names`' return contract
+- [ ] tests for every fix that survived mutation

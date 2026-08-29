@@ -359,6 +359,14 @@ def test_a_measurement_with_no_stated_unit_is_refused_rather_than_stamped() -> N
     """
     with pytest.raises(ValueError, match="state the unit"):
         asyncio.run(calc_tools.report_measurement("solubility", "CCO", 0.5))
-    # A property this ledger does not calibrate has no unit to disagree with, and is unaffected.
     with pytest.raises(ValueError, match="state the unit"):
         asyncio.run(calc_tools.report_measurement("pka", "CCO", 15.9))
+
+    # **And the spellings that used to walk around it.** The lookup was exact-match on a
+    # model-supplied string, so one capital letter or a trailing space skipped the refusal and stored
+    # the row with the empty unit the control exists to prevent. (The first version of this test
+    # asserted this case with `"pka"`, which *is* calibrated — so it covered the same branch twice
+    # and its comment described coverage that did not exist.)
+    for spelling in ("PKA", "pka ", " Solubility"):
+        with pytest.raises(ValueError, match="state the unit"):
+            asyncio.run(calc_tools.report_measurement(spelling, "CCO", 15.9))
