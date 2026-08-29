@@ -937,3 +937,26 @@ interceptor skips plain string arguments by design, so it binds nothing there an
 the only producer on the calc job path.
 
 Found resolving the merge of #256's branch with #258.
+
+## A truncated argument document is completed by upstream and the tool runs on the guess
+
+`D-2026-08-27-an-unparseable-tool-call-is-a-visible-failure` §3 recorded this as open and named the
+order to close it in: change the storm's document, **then** decide the `finish_reason` question.
+Only the first half happened. The 2026-08-28 campaign replaced `'{"text": "unterminated'` with the
+unclosable `'{"text": }'` — correct, and the only payload that reaches `invalid_tool_calls` — and
+`D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce` then closed
+F6 against that payload. The truncation hazard went with the old payload and is now asserted by no
+check and no row anywhere.
+
+What is still true, and is not the same defect: LangChain runs a streamed call's argument fragments
+through `parse_partial_json`, which closes an unterminated string and an unclosed brace. So
+`'{"smiles": "CC'` — a stream cut mid-document — arrives as a **valid** `tool_calls` entry reading
+`{"smiles": "CC"}` and the tool runs on a truncated molecule, with nothing anywhere saying the
+document was incomplete. `tests/test_invalid_tool_calls.py::test_a_streamed_truncation_is_completed_by_upstream_and_never_becomes_invalid`
+pins that this is what happens; nothing decides whether it *should*.
+
+The signal upstream leaves is `finish_reason` (`length` when the provider stopped mid-emission),
+which is on the response and not on the call, so telling "the model finished this document" from
+"the transport cut it" is a response-level question this middleware does not currently ask. Closing
+it means deciding what a `length` finish with tool calls means — refuse the reply and re-ask, or
+run the completion and say so — and that decision is what §3 asked for and did not get.

@@ -857,21 +857,39 @@ def _empty_answer_event(
     An `ErrorEvent` rather than inventing an answer: the system genuinely has nothing to say, and
     saying so is the honest outcome. Retryable, unlike the loop cap — a turn that spent its budget
     circling retrieval may well succeed on a narrower question, and the message says so.
+
+    **"A narrower question" is the wrong advice when a tool failed, and the turn used to give it
+    anyway.** `trace.called_tools` counts calls that were *announced*, and a call whose arguments
+    the model could not write never is — so a turn in which the model asked for exactly the right
+    tool and got the JSON wrong twice read "after 0 tool call(s) … a narrower or more specific
+    question is the useful next step", directly beneath the two `tool_failed` events naming that
+    tool (`D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce`
+    added the events and left this sentence alone, so the turn contradicted itself). The count of
+    failures comes from the ledger rather than the trace precisely because those two disagree: the
+    ledger counts what the turn *reported*, which is the set this sentence has to be consistent
+    with.
     """
     if ledger.answer_text.strip():
         return None
     METRICS.increment("chemclaw_turn_empty_answers_total")
     logger.warning(
-        "turn for session %s ended with no answer text after %d tool call(s)",
+        "turn for session %s ended with no answer text after %d tool call(s), %d failed",
         session.session_id,
         len(trace.called_tools),
+        ledger.tool_failures,
+    )
+    lost = ledger.tool_failures + ledger.tool_refusals
+    remedy = (
+        f"{lost} tool call(s) failed and are reported above, which is the reason to start from. "
+        if lost
+        else "A narrower or more specific question is the useful next step "
     )
     return ErrorEvent(
         message=(
             "The turn ended without producing an answer, after "
             f"{len(trace.called_tools)} tool call(s). Nothing was written, so "
             "there is nothing below to read — this is a failure, not an empty result. "
-            "A narrower or more specific question is the useful next step "
+            f"{remedy}"
             f"(session {session.session_id})."
         ),
         code="empty_answer",
