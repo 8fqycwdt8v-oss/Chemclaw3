@@ -1281,3 +1281,38 @@ build`, which names the cause exactly. **Rule 12 again — read the failure befo
 and one specific to build artefacts: when a test harness consumes a build directory, the build flags
 are part of the fixture.** Rebuild the way the harness does, and check `.github/workflows/` for
 which flags that is rather than guessing.
+
+## 2026-08-29 — a red check is a claim about the system *or* about the check, and the odds are even
+
+A four-repo e2e campaign produced six findings. **Three of them were the check being wrong, not the
+code.** That ratio is the lesson: walking in, I treated every red as a defect report, and on this
+tree that assumption is close to a coin flip.
+
+- `prose yields its numbers` failed **0/12** and read exactly like a broken extraction. It was
+  asserting the opposite of `D-2026-08-26-a-transcription-may-not-infer-a-setpoint`, so it could
+  only ever fail. Its stated premise — "the condition is simply gone" — was false, and one
+  measurement showed the value sitting on step 2 with its sentence verbatim. Had I "fixed" the
+  adapter to satisfy the check, I would have made the system violate a merged ADR.
+- `f-malformed-json` sent a *truncated* argument document and demanded it be reported. LangChain
+  repairs truncation through `parse_partial_json` before anything first-party sees it — a fact the
+  module under test already documents, having once corrected its own docstring for the same
+  confusion. Unsatisfiable by construction, and it left the genuinely reachable case untested.
+- Four of the storm's failures were my own missing `CHEMCLAW_MCP_REPO`, which made its chaos
+  primitive kill a process it then could not restart. The damage surfaced two families later as
+  unrelated red checks, and was invisible from every one of them.
+
+**The rule: before fixing what a red check points at, ask what the check asserts and whether the
+system is documented to do that.** Read the module's own docstring and grep `docs/decisions/` for
+the behaviour before touching code. A check that has never passed is evidence about the check.
+
+**And the corollary, which cost the most here: re-run once with the environment fully set before
+believing any failure.** A lane failure and a real failure look identical in a report — both are a
+red row with a plausible observation. Only the re-run separates them, and on this campaign it
+changed the verdict on three of four storm failures. The re-run is cheap; a fix aimed at the wrong
+target is not.
+
+Related, from the same run: my *own* fix's first version was wrong in a way my own two new tests
+could not see, because I wrote them from the same understanding of the layout that produced the
+off-by-one. `parents[3]` raised a bare `IndexError` on the shipped default. That is the 2026-08-28
+lesson repeating one day later, so the enumeration habit is not yet automatic: **when a change adds
+an index or a predicate, write down the inputs it cannot read before writing the test.**
