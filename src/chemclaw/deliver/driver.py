@@ -34,6 +34,49 @@ class DeliveryDriver(Protocol):
         ...
 
 
+def _refuse_impossible_directory(name: str, directory: Path) -> None:
+    """Raise when `directory` can never *be* a directory — a permanent configuration fault.
+
+    **This is where the config-versus-outage split had a hole.** `registry.deliver` separates a
+    channel that cannot be *built* (`degraded(subsystem="delivery_channel_config")`, an alert) from
+    a destination that would not answer (`chemclaw_delivery_failures_total`, a graph an operator
+    skims) — and the file driver's constructor touched no filesystem, so `build()` succeeded for
+    *any* string. A mistyped `directory:` or a path whose parent is a regular file surfaced later,
+    at `mkdir` time inside `deliver()`, on the outage counter: a fault that will be identical on
+    every message for the life of the process, reported as the share having a bad afternoon.
+
+    **Only the provable half is claimed.** A path that does not exist yet is not a
+    misconfiguration — creating it is what a first delivery to a fresh mount does — so this
+    *creates* it and says nothing. What it refuses is the two cases no remount fixes: something
+    that is not a directory already sits there, or a component of the path is a regular file
+    (`NotADirectoryError`). Every other `OSError` — a permission, a read-only mount, a share that
+    is not mounted yet — is deliberately left to the outage path, because a validator cannot tell
+    those from a destination that is temporarily down, and guessing wrong here moves a real outage
+    onto the alert that means "a human must edit a manifest".
+
+    Raised as `ValueError` for the reason the plaintext refusal is: `registry.deliver` builds inside
+    a `try` and routes anything raised there to the config counter.
+    """
+    if directory.exists() and not directory.is_dir():
+        raise ValueError(
+            f"delivery channel {name!r} writes into {str(directory)!r}, which exists and is not a "
+            "directory. No message can ever be written there; fix the channel's `directory:`."
+        )
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except (NotADirectoryError, FileExistsError) as exc:
+        raise ValueError(
+            f"delivery channel {name!r} writes into {str(directory)!r}, which cannot be a "
+            f"directory: {exc}. A component of that path is a regular file, so no message can ever "
+            "be written there; fix the channel's `directory:`."
+        ) from exc
+    except OSError:
+        # Ambiguous, and deliberately not claimed. A permission or an unmounted share may be gone
+        # tomorrow; `deliver()` will try the same `mkdir` and report the failure as the outage it
+        # may well be.
+        return
+
+
 class FileDeliveryDriver:
     """Write each message as a file into a directory — a mounted share, in practice.
 
@@ -44,16 +87,26 @@ class FileDeliveryDriver:
 
     One file per message, named by a hash of the message rather than by a timestamp, so a retried
     activity overwrites its own file instead of leaving two copies of one digest.
+
+    **The destination is judged at construction**, not on the first write — see
+    `_refuse_impossible_directory` for which half of "bad path" is claimed and why the rest is not.
     """
 
     def __init__(self, name: str, directory: str, suffix: str = ".md") -> None:
-        """Bind the channel's name and the directory it writes into."""
+        """Bind the channel's name and the directory it writes into, refusing an impossible path."""
         self.name = name
         self.directory = Path(directory)
         self.suffix = suffix
+        _refuse_impossible_directory(name, self.directory)
 
     async def deliver(self, message: Message) -> None:
-        """Write the message, creating the directory if the mount allows it."""
+        """Write the message, creating the directory if the mount allows it.
+
+        The `mkdir` stays here as well as in the constructor, and is not the redundancy it looks
+        like: the constructor's runs when the driver is *built*, and a share can be unmounted or a
+        directory removed between that and any later message. What moved to construction is the
+        *verdict* — a path that can never be a directory — not the creation.
+        """
         self.directory.mkdir(parents=True, exist_ok=True)
         identity = stable_hash(
             {"to": message.recipient, "subject": message.subject, "body": message.body}
@@ -66,7 +119,7 @@ class FileDeliveryDriver:
         )
 
 
-def plaintext_channel_refusal(name: str, url: str, token_env: str = "") -> str:
+def plaintext_channel_refusal(name: str, url: str, token_env: str = "", *, enforced: bool) -> str:
     """Why `url` may not be delivered to under the enforced posture, or `""` when it may.
 
     The same floor `publish/drivers/http._refuse_plaintext_sink` applies to a result sink, on the
@@ -75,8 +128,19 @@ def plaintext_channel_refusal(name: str, url: str, token_env: str = "") -> str:
     `token_env` is set every POST carries a bearer credential too. The sibling seam decided this and
     this one shipped without it.
 
-    Only under `entra_required`, with loopback dev exempt, exactly as the sink and as
-    `require_pg_tls` and the Temporal-mTLS guard.
+    Loopback dev is exempt, exactly as the sink and as `require_pg_tls` and the Temporal-mTLS guard.
+
+    **`enforced` is a parameter rather than a read of `settings.entra_required`, and that is the
+    whole difference between a gate and a claim.** The first version read the setting here, which
+    made this function answer `""` for every channel whenever enforcement was off — and enforcement
+    is off by default and off in CI, where the *validator* runs. So `make channel-validate`'s rule 4
+    could only ever fire on a deployment that had already flipped the setting on, which is precisely
+    the deployment it exists to catch *before*. That is the same CI-blindness rules 2 and 3 already
+    work around by iterating the discovered set rather than the enabled one, and this rule shipped
+    without the equivalent. The validator now passes `enforced=True` unconditionally — it asks
+    "would this channel be legal under the posture this deployment is heading for?", which is a
+    question about a manifest and not about today's environment — while the construction site passes
+    `settings.entra_required`, because there the question really is about today's environment.
 
     **The reason is returned rather than raised, because the raise happens in the wrong place to be
     a refusal.** A driver is constructed inside `registry.deliver`'s per-channel `try`, which
@@ -88,7 +152,7 @@ def plaintext_channel_refusal(name: str, url: str, token_env: str = "") -> str:
     `cli/validate_channels.py` ask the same question of a *manifest* — before anything is
     delivered, which is where "refuse" can mean refuse — from this one definition.
     """
-    if not settings.entra_required:
+    if not enforced:
         return ""
     parts = urlsplit(url)
     if parts.scheme == "https" or (parts.hostname or "").lower() in PG_LOOPBACK_HOSTS:
@@ -110,8 +174,12 @@ def _refuse_plaintext_channel(name: str, url: str, token_env: str) -> None:
 
     Kept at the construction site as well as in the validator: the validator is a gate an operator
     runs, and a driver built by a path that skipped it must still not open a cleartext destination.
+
+    Here — and only here — the posture is this process's own: refusing to *open* a destination is a
+    statement about what this deployment is doing right now, so it reads `settings.entra_required`.
+    The validator asks the other question and passes `enforced=True`; see the docstring above.
     """
-    reason = plaintext_channel_refusal(name, url, token_env)
+    reason = plaintext_channel_refusal(name, url, token_env, enforced=settings.entra_required)
     if reason:
         raise ValueError(reason)
 
