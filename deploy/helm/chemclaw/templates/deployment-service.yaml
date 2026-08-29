@@ -70,14 +70,26 @@ spec:
           {{- /* `/readyz` sweeps the connectors and then asks Postgres, so it is the one probe in
                  this chart whose *own* work has a budget — and Kubernetes' unstated default is
                  `timeoutSeconds: 1`, which a blackholed broker exceeds on the queue leg alone.
-                 The numbers and the arithmetic behind them are in `values.yaml`. */}}
+
+                 So the timeout is *derived* from the two budgets the route actually spends, the
+                 same shape as `terminationGracePeriodSeconds` above and for the same reason: a
+                 literal `5` beside two configurable budgets is a number that only has to agree,
+                 and eventually does not. An operator raising
+                 `CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS` (the honest response to a slow
+                 connector fleet) rendered an unchanged probe timeout and got a kubelet that gives
+                 up before the route has to answer — draining a front door that was serving.
+
+                 `required` on both, because `float64 nil` is 0: without it an absent key renders a
+                 plausible-looking timeout that is a whole budget short. `ceil` because these are
+                 seconds-as-float settings and `timeoutSeconds` is an integer — round the kubelet's
+                 patience up, never down, or the derivation reintroduces the gap it closes. */}}
           readinessProbe:
             httpGet:
               path: /readyz
               port: {{ .Values.service.port }}
             initialDelaySeconds: 5
             periodSeconds: {{ .Values.probes.service.readiness.periodSeconds }}
-            timeoutSeconds: {{ .Values.probes.service.readiness.timeoutSeconds }}
+            timeoutSeconds: {{ ceil (addf (float64 (required "config.CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS must be set: the front door readinessProbe timeoutSeconds is derived from it" .Values.config.CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS)) (float64 (required "config.CHEMCLAW_SERVICE_READINESS_DB_TIMEOUT_SECONDS must be set: the front door readinessProbe timeoutSeconds is derived from it" .Values.config.CHEMCLAW_SERVICE_READINESS_DB_TIMEOUT_SECONDS)) (float64 .Values.probes.service.readiness.marginSeconds)) }}
             failureThreshold: {{ .Values.probes.service.readiness.failureThreshold }}
           livenessProbe:
             httpGet:
