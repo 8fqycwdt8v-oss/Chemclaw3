@@ -498,3 +498,53 @@ def neighborhood(graph: nx.DiGraph, note_id: str, hops: int = 1) -> set[str]:
     undirected = graph.to_undirected(as_view=True)
     lengths = nx.single_source_shortest_path_length(undirected, note_id, cutoff=hops)
     return set(lengths) - {note_id}
+
+
+#: What `knowledge_sync_age_seconds` reports for a tree that holds no note at all. Negative so it
+#: can never be read as an age — the direction matters, because the fabricated alternative (0) is
+#: indistinguishable from a corpus that has just been refreshed, which is the reassuring lie. A
+#: pod whose knowledge volume never got populated is the worst form of the failure this gauge is
+#: for, and this is what makes it visible rather than absent.
+NO_NOTES = -1.0
+
+
+def knowledge_sync_age_seconds() -> float:
+    """Seconds since the newest note on *this pod's* knowledge tree was last written.
+
+    **The reader's half of a signal that only had a writer's half.** `deploy/knowledge-sync.sh`'s
+    `loop` catches a failed refresh so a dead remote cannot kill the pod, and the pod then serves a
+    frozen corpus indefinitely while logging one WARNING per interval into a stream nobody tails.
+    The sidecar stamps a heartbeat and its liveness probe reads the age of it — but that heartbeat
+    is per-container state in `/tmp` by design, so it is unreachable from here, and a container
+    restart is not a metric anyway: alerting on one needs kube-state-metrics, whose series are not
+    in the user-workload Prometheus that evaluates this chart's rules. This is a first-party series
+    read from the volume itself, so it works on any cluster.
+
+    **What it measures, stated exactly, because the two are not the same question.** The publish is
+    `rsync -a` from a `git reset --hard` checkout, so a note's mtime is when its *content* last
+    reached this pod — not when the sync last ran. So this is the age of the newest thing this pod
+    knows, and a corpus nobody has added to for a fortnight reads as a fortnight old. That is the
+    number's meaning rather than a defect in it: it is exactly "the graph stopped moving and every
+    answer keeps citing it", and it cannot distinguish a wedged sync from a quiet one. Which is why
+    the threshold is a deployment's to state (`monitoring.alerts.knowledgeCorpusStaleSeconds`, off
+    by default) and the sidecar's own probe stays as the sync-side half.
+
+    Costs one `stat` per note, the same scan `_dir_fingerprint` pays on a cold graph read — ~76 ms
+    at 10k notes, once per scrape rather than once per query.
+    """
+    newest = max(
+        (stat.st_mtime for _, stat in scan_notes_dir(settings.knowledge_path)), default=None
+    )
+    if newest is None:
+        return NO_NOTES
+    # Clamped at zero: a note written by a sidecar whose clock is a second ahead of this container's
+    # would otherwise publish a negative age, which is the value that means "no notes".
+    return max(0.0, time.time() - newest)
+
+
+# Bound at import, for the reason `ingest/eln/cursor.py` binds its cursor lag there: the reading
+# lives in this module — it is the tree this module resolves — so a process that reads the graph is
+# exactly a process that can report its age, and there is no second place to remember it in.
+record_metric(
+    lambda m: m.bind_gauge("chemclaw_knowledge_sync_age_seconds", knowledge_sync_age_seconds)
+)

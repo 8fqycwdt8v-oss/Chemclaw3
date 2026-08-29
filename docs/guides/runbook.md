@@ -1049,6 +1049,18 @@ fail a finished calculation. Usual causes are a dead git remote, an expired push
 processes sharing one `note_repo_dir`. §(ix) is the PR-gate queue; the notes lost here never reached
 it.
 
+#### ChemclawKnowledgeCorpusStale
+`warning`, and **only rendered when `monitoring.alerts.knowledgeCorpusStaleSeconds` is non-zero** —
+the chart ships it at 0 because the threshold is how often *your* chemists merge notes. The same
+failure as the alert above in the other direction: notes reach the PR-gate and stop reaching the
+pods. `knowledge-sync.sh`'s `loop` swallows a failed refresh on purpose (a dead remote must not kill
+the pod), so the pod serves the frozen snapshot indefinitely and every answer keeps citing it.
+`chemclaw_knowledge_sync_age_seconds` is the age of the newest note on that pod's tree; **-1 means
+the tree holds no note at all**, which is a volume that was never populated rather than a stale one.
+Read the sync sidecar's log and its restart count (its `staleness` liveness probe is the sync-side
+half of this signal) before concluding the corpus is merely quiet — this gauge cannot tell those
+two apart, which is why its threshold is yours to state.
+
 ### chemclaw.correctness — an invariant is at risk
 
 #### ChemclawTurnLeaseFailing

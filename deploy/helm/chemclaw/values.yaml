@@ -1002,6 +1002,19 @@ monitoring:
     # genuinely quiet source also does — the lag gauge is the only thing that separates them. 24
     # hours, because the shipped sources are nightly.
     ingestLagSeconds: 86400
+    # How old this pod's newest note may be before `ChemclawKnowledgeCorpusStale` fires, in
+    # seconds. **0 renders no rule, and that is the shipped state**, because this is the one
+    # threshold in this block the chart cannot derive: `chemclaw_knowledge_sync_age_seconds` reads
+    # the age of the newest note on the volume — the publish is `rsync -a` off a `git reset --hard`
+    # checkout, so an mtime is when a note's *content* reached this pod — and it therefore cannot
+    # tell a sync wedged on an expired credential from a fortnight in which nobody wrote a note.
+    # A default here would be this chart guessing how often somebody else's chemists publish, and
+    # guessing high pages for the quiet weeks while guessing low never fires. Set it to a few times
+    # your corpus's real merge interval; the gauge is on the "Knowledge corpus age on each pod"
+    # panel in `dashboards/chemclaw-data.json` and reading that for a fortnight is how to pick the
+    # number. The sync sidecar's own `staleness` liveness probe is the other half of this signal
+    # and needs no threshold from here, because it reads when the refresh last *ran*.
+    knowledgeCorpusStaleSeconds: 0
     # **When a periodic producer's series is simply absent.** Four gauge families here
     # (`chemclaw_outbox_pending`, `chemclaw_outbox_oldest_pending_seconds`,
     # `chemclaw_outbox_dead_lettered`, `chemclaw_ingest_cursor_lag_seconds`) are written by a

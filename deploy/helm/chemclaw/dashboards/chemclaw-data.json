@@ -850,6 +850,56 @@
           "refId": "F"
         }
       ]
+    },
+    {
+      "id": 18,
+      "type": "graph",
+      "title": "Knowledge corpus age on each pod",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "span": 12,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "description": "How old the newest note on each pod's knowledge tree is. The sync sidecar swallows a failed refresh on purpose, so a pod with an expired credential keeps serving a frozen graph and citing it; this is what makes that visible. A line that is flat and rising is a pod whose corpus has stopped arriving. -1 means the tree holds no note at all, which is a volume that was never populated. A quiet corpus rises too -- this measures what the pod knows, not when the sync last ran.",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "s",
+          "show": true
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "max by (pod) (chemclaw_knowledge_sync_age_seconds)",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",

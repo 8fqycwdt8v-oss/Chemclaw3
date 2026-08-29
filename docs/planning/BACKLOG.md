@@ -484,25 +484,6 @@ topic).
       commit the index was built from, so a pod whose checkout predates it declines to prune — or
       pinning the reindex to one pod. That is the single change gating `replicas > 1`.
 
-- [ ] **The knowledge graph coming *in* has no signal, only the graph going *out*** — [S].
-      `ChemclawKnowledgeNotesLost` alerts on a note that failed to reach the PR-gate. Nothing covers
-      the other direction: `deploy/knowledge-sync.sh`'s `loop` catches a failed refresh so a dead
-      remote cannot kill the pod (correct), and the pod then serves a frozen corpus indefinitely
-      while logging one WARNING per interval into a stream nobody tails. On an expired push
-      credential — the exact cause `templates/prometheusrule.yaml` names for the notes alert — the
-      graph silently stops moving and every answer keeps citing it.
-      **The deploy half shipped**: the script stamps a heartbeat on each successful refresh and the
-      sidecar has an `exec` liveness probe reading its age, so a wedged loop becomes a restarting
-      container instead of a quiet one (`tests/test_deploy_chart.py`). That is a degraded
-      substitute and says so — a container restart is not a metric, it needs kube-state-metrics to
-      alert on, and those series are not in the user-workload Prometheus that evaluates our rules.
-      **What is left is in `src/`**: a `chemclaw_knowledge_sync_age_seconds` gauge bound through
-      `Metrics.bind_gauge_family` on the process that *reads* the tree — it already resolves
-      `settings.knowledge_path`, so the age of the newest note there is one `stat()` — plus its
-      rule, which then works on any cluster because it reads a first-party series. The sidecar's
-      heartbeat and that gauge answer the same question from the two sides of one volume; ship the
-      gauge and the probe becomes belt-and-braces rather than the only signal.
-
 - [ ] **The background worker is a singleton with no PDB, and the PDB is not the fix** — [M].
       `poddisruptionbudget.yaml` covers the front door alone and argues that correctly in the
       template: `minAvailable: 1` over a one-replica Deployment makes the pod un-evictable and
