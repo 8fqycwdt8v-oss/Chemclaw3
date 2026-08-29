@@ -178,8 +178,15 @@ spec:
                in every process that imports `kg.graph` — workers included — and a deployment that
                does not use the knowledge graph at all has an empty tree by design. An alert that
                such a site cannot turn off is one it would silence permanently, which costs the
-               stale arm too. `for: 15m` is what keeps a rollout quiet: a pod whose sync sidecar has
-               not finished its first pull is legitimately at -1. */}}
+               stale arm too.
+
+               What -1 is *not*, on a release with `knowledge.sync.enabled`: a pod still starting.
+               The `knowledge-sync-init` init container runs `chemclaw-knowledge-sync once` and
+               fails the pod rather than let it serve a half-published tree, so the app container
+               does not start — and is not scraped — until the tree is filled. On such a release a
+               -1 from a running pod means the publish itself produced nothing. `for: 15m` is the
+               margin for the configurations where that is not true (sync disabled, an externally
+               mounted volume) rather than the thing holding a rollout quiet. */}}
         - alert: ChemclawKnowledgeCorpusStale
           expr: >-
             max by (pod) (chemclaw_knowledge_sync_age_seconds)
