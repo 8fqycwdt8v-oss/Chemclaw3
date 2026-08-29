@@ -101,6 +101,29 @@ cost // 2) == cost` makes identical. Both have been rewritten to say what they a
    measurement showed — the ADR record and the code comment disagreeing is how the next reader
    inherits the mistake.
 
+## The fix for the effort defect was itself incomplete, which is the same lesson again
+
+The first version of that fix put the guard in `LlmSettings._effort_is_provider_scoped` — a
+`@model_validator` refusing `llm_effort` on the Anthropic path. That covers the *deployment* knob
+and nothing else. `AgentProfile.effort` is a second input: a YAML field resolved per agent, reaching
+`build_chat_model` as an argument without passing through any settings validator.
+
+Measured against the shipped code default (`llm_provider="anthropic"`, `llm_effort=None`, so the
+validator was satisfied), a profile carrying `effort: high` built a `ChatAnthropic` whose payload
+was `output_config={'effort': 'high'}` plus `thinking={'type': 'adaptive'}` — precisely what the
+validator exists to prevent, reached through the other door.
+
+So the gate moved to `build_chat_model`, the one place where the deployment setting and the profile
+override are resolved into a single answer and every client below is built from it. The settings
+validator stays, because failing at startup is better than failing at the first turn for the input
+that *can* be checked at startup; it is now the early warning rather than the control.
+
+The general form, and the reason this paragraph exists rather than a quiet second commit: **a guard
+placed on one of several inputs is not a guard on the invariant.** Ask what the invariant is —
+here, "effort never reaches an Anthropic client" — and put the check where every path converges. The
+first version answered a narrower question ("is this setting valid?") and looked complete because
+the setting was the input the author had been thinking about.
+
 ## Consequences
 
 - `llm_effort` is refused on the Anthropic path. That narrows a knob the previous ADR advertised as

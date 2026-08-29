@@ -196,3 +196,45 @@ def test_a_misspelled_effort_value_is_refused(monkeypatch: pytest.MonkeyPatch) -
     """
     with pytest.raises(ValueError, match="effort"):
         AgentProfile(name="typo", effort="hihg")  # type: ignore[arg-type]
+
+
+def test_a_profile_cannot_smuggle_effort_onto_the_anthropic_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bypass the config validator alone left open.
+
+    **A settings validator guards one of two inputs.** `LlmSettings._effort_is_provider_scoped`
+    refuses `CHEMCLAW_LLM_EFFORT` on the Anthropic path at construction — and `AgentProfile.effort`
+    never passes through it, because a profile is a YAML file resolved per agent rather than a
+    settings field. Measured against the shipped code default (`llm_provider="anthropic"`,
+    `llm_effort=None`, so the validator is satisfied), a profile carrying `effort: high` built a
+    `ChatAnthropic` whose payload was `output_config={'effort': 'high'}` plus
+    `thinking={'type': 'adaptive', 'display': 'summarized'}` — exactly what the validator exists to
+    prevent, reached by the other door.
+
+    So the gate moved to `build_chat_model`, where the deployment setting and the profile override
+    are resolved into one answer and every client is built from it.
+    """
+    monkeypatch.setattr(settings, "llm_provider", "anthropic")
+    monkeypatch.setattr(settings, "llm_effort", None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    with pytest.raises(RuntimeError, match="extended thinking"):
+        build_chat_model(effort="high")
+
+
+def test_the_anthropic_path_is_untouched_when_no_effort_is_asked_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard bites only on the combination — the dev path is otherwise exactly as it was.
+
+    A refusal that also broke every ordinary Anthropic turn would be a worse defect than the one it
+    closes, and `pytest.raises` on the line above cannot show that it does not.
+    """
+    monkeypatch.setattr(settings, "llm_provider", "anthropic")
+    monkeypatch.setattr(settings, "llm_effort", None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    model = build_chat_model()
+
+    assert getattr(model, "reasoning_effort", None) is None
