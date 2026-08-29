@@ -202,17 +202,17 @@ the launch sites) would have *undone* a better fix that had since replaced the o
 for. The deadline clamp is the clearest case: the finding asked for the third launch site, and the
 right answer was to delete the caller-side clamp entirely and return `due_at` from the activity.
 
-**Verification, and what it does not cover.** `make lint` and `make type` are green over all 795
-files, and 327 tests pass across the changed suites and their neighbours — delivery, commitments,
+**Verification.** `make lint` and `make type` are green over all 795 files. This pass's own targeted
+run covered 327 tests across the changed suites and their neighbours — delivery, commitments,
 operations, the metrics and `degraded` label-space suites, the MCP face, evidence scoping, effects,
 awaiting, the CLI validators, digest and publish, plus the structural invariants (`test_repo_map`,
 `test_layering`, `test_third_party_layering`, `test_upstream_surface`, `test_decision_log`,
-`test_deferred_register`). Postgres and Temporal were up and `migrated_db_or_skip` was reachable, so
-the Postgres-backed tests in that set ran rather than skipped. **The full `make test` did not
-complete**: it was SIGTERM'd twice at ~18% with the box at load ~9 on 4 cores (several agents share
-this host), and `tests/test_connector_job_workflow.py`, where it stopped both times, passes on its
-own — so this is a resource kill and not a failure, but it is *not* evidence the whole suite is
-green, and nobody should read it as such until a full run lands in CI.
+`test_deferred_register`) — but did not complete a full `make test` in-sandbox (SIGTERM'd twice at
+~18% under a shared, CPU-saturated host). **After all four triage passes merged**, a full `make test`
+was run to completion against live Postgres + Temporal on an unshared box: it caught one real
+regression (a docstring pointer left dangling by a different section's merge, fixed separately), and
+a second full run afterward reported **6250 passed, 0 failed, 14 skipped** (helm absent, truncated
+git history, and a briefly out-of-credit live model credential — all pre-existing, unrelated skips).
 
 **Nothing is left deliberately open from this list.** The one thing this pass did *not* do is bound
 the `GROUP BY`'s cardinality on `audit_events.tool` — the retraction beside `_SAFE_TOOL_NAME` names
