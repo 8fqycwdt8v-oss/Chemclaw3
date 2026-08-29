@@ -189,6 +189,15 @@ _UNPARSEABLE_FAILURE = (
     "The model asked for this tool with arguments that are not valid JSON, so the call did not "
     "run. The arguments received were {arguments}{error}."
 )
+# Said once when a reply held more unrunnable calls than `agent_max_reported_lost_calls`. A count
+# rather than silence: a bound that drops the remainder without saying so is the truncation this
+# module exists to end, one level up. It rides the `unknown` bucket rather than inventing a tool
+# name, because it is about the reply rather than about any one call.
+_OVER_THE_LINE = (
+    "{count} further tool call(s) in the same reply also could not run and are not listed "
+    "individually."
+)
+
 _DISCARDED_FAILURE = (
     "This call's own arguments were valid, but another tool call in the same reply had arguments "
     "that could not be parsed, so the whole reply was discarded and this call did not run either."
@@ -336,6 +345,44 @@ def _bounded_text(value: object) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def _bounded_reason(value: object) -> str:
+    r"""The provider's parse error, escaped and bounded from the **tail**.
+
+    Two departures from `_bounded_text`, and each is a defect this had before it was written.
+
+    **The tail, because the head is a copy of a field printed beside it.** LangChain builds the
+    message as `Function {name} arguments:\n\n{document}\n\nare not valid JSON. Received
+    JSONDecodeError {reason}` (upstream's `parse_tool_call`), so the head is the
+    tool name and a verbatim second copy of `BrokenCall.arguments` — and the only thing in the
+    field that is *not* already in the record beside it is the reason, at the very end. Measured
+    against the 200-char budget: the reason survived a 102-char argument document and was gone from
+    122 upward, so a chemist read the same document twice and never learned why it would not parse.
+    `agent/tool_result_size.py` states the general rule this broke — "head and tail, never head
+    alone… a head-truncated result reads as complete and silently drops the outcome"; here the head
+    is pure duplication, so the tail alone is what carries information. Upstream's "For
+    troubleshooting, visit: …" boilerplate sits between the two and spends about half the budget,
+    which is worth knowing when reading a truncated one.
+
+    **Escaped, because this string reaches a log line unquoted.** `_bounded_text` deliberately does
+    not `repr`, for a reason about the *name* — `_metric_label` compares it against the bound tools
+    and a quoted name matches none of them. That reason does not extend to this field, and
+    extending it silently was the defect: the provider's text embeds the model's own document,
+    which is attacker-influenceable through every retrieved corpus this tree frames as untrusted,
+    and `log_json` defaults to **false**, so an embedded newline forged a second log line
+    (`… ERROR chemclaw.audit: actor=admin action=approve_plan result=granted`). `bounded_repr`
+    already escapes `arguments` for the same reason; this closes the half beside it.
+
+    An empty error stays empty rather than becoming `"''"`, because `_because` tests it for
+    truthiness to decide whether the clause exists at all — and on the streamed shape it always is.
+    """
+    text = str(value)
+    if not text:
+        return ""
+    quoted = repr(text)
+    limit = settings.agent_audit_max_arg_chars
+    return quoted if len(quoted) <= limit else "…" + quoted[-limit:]
+
+
 @dataclass(frozen=True, slots=True)
 class BrokenCall:
     """One tool call the model emitted whose arguments could not be parsed.
@@ -349,7 +396,7 @@ class BrokenCall:
     """The tool the model named, bounded — it is the model's own string and may be anything."""
 
     error: str
-    """The SDK's sentence about the JSON, bounded — empty on the streamed shape, 100 kB off it."""
+    """The SDK's reason, escaped and tail-bounded — empty on the streamed shape, 100 kB off it."""
 
     arguments: str
     """The malformed argument document, bounded. The one field the streamed shape populates."""
@@ -370,7 +417,7 @@ def invalid_tool_calls(response: Any) -> list[BrokenCall]:
     return [
         BrokenCall(
             name=_bounded_text(call.get("name") or UNKNOWN_TOOL),
-            error=_bounded_text(call.get("error") or ""),
+            error=_bounded_reason(call.get("error") or ""),
             arguments=bounded_repr(call.get("args")),
         )
         for message in _messages_of(response)
@@ -421,11 +468,16 @@ class RepairInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
     already concatenated it into the answer left two records of one turn that disagreed. The module
     docstring has the measurement and why suppressing the first attempt's stream is not available.
 
-    **So do its failures**, for the same reason and by the same rule: a call this middleware
-    discards is a call that did not run, and the chemist is told so on the turn's own event stream
-    (`_report_lost_calls`). A repair that works therefore shows a `tool_failed` followed by the
-    call succeeding, which is what happened — `ToolFailedEvent` is documented as "a step that did
-    not work, not a failure" precisely for that shape.
+    **Its failures reach them only when they are still failures**, which is the correction
+    `D-2026-08-29-a-discarded-call-is-not-a-lost-call` made to the paragraph that stood here. This
+    used to say a discarded call is a call that did not run and the chemist is told so; that is
+    false whenever the repair works, and it made three readers report failures on turns where
+    nothing failed. `_announce_unrun` asks after the repair instead, so a turn that recovers is
+    silent to the chemist and fully recorded for the operator.
+
+    That paragraph outlived its own change by a day, naming a function this module no longer has —
+    the prose failure this repository's own rule exists to catch, committed in the file the
+    correction touched.
     """
 
     def wrap_model_call(
@@ -440,7 +492,16 @@ class RepairInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
             return response
         discarded = valid_tool_calls(response)
         _count_invalid(request, failures, discarded, attempt="first")
-        repaired = handler(_retry_request(request, failures, discarded))
+        try:
+            repaired = handler(_retry_request(request, failures, discarded))
+        except Exception:
+            # The retry is the only window in which the operator's record exists and the chemist's
+            # does not: `_count_invalid` has already fired and `_announce_unrun` has not. A 429 or
+            # a context-length refusal on the second call would otherwise book the counter and say
+            # nothing to the person who asked. `Exception`, not `BaseException`: a cancelled turn
+            # is not a lost call and has its own outcome.
+            _announce_unrun(failures, discarded, None)
+            raise
         _report_repair(request, repaired)
         _announce_unrun(failures, discarded, repaired)
         return _carrying_prose(response, repaired)
@@ -457,7 +518,16 @@ class RepairInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
             return response
         discarded = valid_tool_calls(response)
         _count_invalid(request, failures, discarded, attempt="first")
-        repaired = await handler(_retry_request(request, failures, discarded))
+        try:
+            repaired = await handler(_retry_request(request, failures, discarded))
+        except Exception:
+            # The retry is the only window in which the operator's record exists and the chemist's
+            # does not: `_count_invalid` has already fired and `_announce_unrun` has not. A 429 or
+            # a context-length refusal on the second call would otherwise book the counter and say
+            # nothing to the person who asked. `Exception`, not `BaseException`: a cancelled turn
+            # is not a lost call and has its own outcome.
+            _announce_unrun(failures, discarded, None)
+            raise
         _report_repair(request, repaired)
         _announce_unrun(failures, discarded, repaired)
         return _carrying_prose(response, repaired)
@@ -503,12 +573,17 @@ def _retry_request(
     request: ModelRequest[Any], failures: list[BrokenCall], discarded: list[str]
 ) -> ModelRequest[Any]:
     """The same request with the correction appended — `override`, so nothing is mutated."""
+    named, over = _reportable(failures)
     described = "; ".join(
         f"{call.name} (the arguments received were {call.arguments}{_because(call)})"
-        for call in failures
-    )
+        for call in named
+    ) + (f"; and {over} more not listed here" if over else "")
+    shown, also_over = _reportable(discarded)
     also = (
-        _DISCARDED_VALID.format(count=len(discarded), names=", ".join(discarded))
+        _DISCARDED_VALID.format(
+            count=len(discarded),
+            names=", ".join(shown) + (f", and {also_over} more" if also_over else ""),
+        )
         if discarded
         else ""
     )
@@ -591,13 +666,18 @@ def _count_invalid(
     """
     for call in failures:
         record_metric(partial(_bump_invalid, _metric_label(request, call.name)))
+    # The counter takes every call; the *line* takes a bounded prefix, for `_reportable`'s reason.
+    # An operator alerting on the rate reads the counter, and a WARNING that can reach 400 kB is
+    # not a better record of the same event.
+    listed, over = _reportable(failures)
     log_event(
         logger,
         "model.invalid_tool_calls",
         "the model emitted %d tool call(s) with unparseable arguments (%s attempt): %s%s",
         len(failures),
         attempt,
-        ", ".join(f"{call.name}: {call.error or call.arguments}" for call in failures),
+        ", ".join(f"{call.name}: {call.error or call.arguments}" for call in listed)
+        + (f", and {over} more" if over else ""),
         f"; {len(discarded)} valid call(s) in the same reply were discarded with it"
         if discarded
         else "",
@@ -607,7 +687,7 @@ def _count_invalid(
         discarded_valid=len(discarded),
         # A comma-joined string rather than a list, because a log stack indexes scalars — the same
         # rule `log_event` states for every field it takes.
-        tools=", ".join(sorted({call.name for call in failures})),
+        tools=", ".join(sorted({call.name for call in listed})),
     )
 
 
@@ -660,8 +740,31 @@ def _announce_unrun(failures: list[BrokenCall], discarded: list[str], repaired: 
             asked_again[name] -= 1
         else:
             lost.append((name, message))
-    for name, message in lost:
+    reported, over = _reportable(lost)
+    for name, message in reported:
         record_tool_failure(name, message)
+    if over:
+        record_tool_failure(UNKNOWN_TOOL, _OVER_THE_LINE.format(count=over))
+
+
+def _reportable(entries: list[Any]) -> tuple[list[Any], int]:
+    """The prefix of `entries` this reply may report in full, and how many are over the line.
+
+    **Nothing bounded how many unrunnable calls one reply could hold.**
+    `agent_max_parallel_tool_calls` is a concurrency ceiling on calls that *run*;
+    `len(AIMessage.invalid_tool_calls)` had no bound at all, and every entry is quoted back to the
+    model by `_retry_request` in a `HumanMessage` appended from the innermost middleware — below
+    `context_compaction_middleware`, so the budget is already computed and nothing reduces it.
+    Measured with every field at its own 200-char ceiling: 8 malformed calls cost a 7.2 kB
+    correction, 1000 cost **841 kB** and 2000 stream events.
+    `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` is the decision this reaches through
+    the one message it could not see.
+
+    The remainder is **counted, never dropped in silence** — that is the difference between a bound
+    and a truncation, and it is the rule this module enforces about tool calls in the first place.
+    """
+    limit = settings.agent_max_reported_lost_calls
+    return entries[:limit], max(0, len(entries) - limit)
 
 
 def _because(call: BrokenCall) -> str:
