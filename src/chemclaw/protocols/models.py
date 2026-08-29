@@ -110,7 +110,8 @@ class RequestField(BaseModel):
     value: str = ""
     basis: FieldBasis = "absent"
     # The verbatim span. Checked against the supplied text rather than trusted — see
-    # `request.require_quotes_are_verbatim`. A paraphrase is the failure this field exists to catch.
+    # `agent.protocol_design_tools.require_quotes_are_verbatim`. A paraphrase is the failure
+    # this field exists to catch.
     quote: str = ""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -425,15 +426,62 @@ class ExperimentDesign(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     @model_validator(mode="after")
-    def _arms_are_distinct_and_ordered(self) -> ExperimentDesign:
-        """Arm ids are unique and steps are numbered 1..n in order."""
+    def _names_resolve_and_steps_are_ordered(self) -> ExperimentDesign:
+        """Ids are unique, `replicate_of` names a real arm, and steps are numbered 1..n."""
+        # The last two are here rather than in `checks` because they are not judgments about a
+        # design — they are the difference between a document that means something and one that
+        # does not, and both were measured *defeating* a check. A `replicate_of` naming an arm that
+        # does not exist exempted its arm from `arms_are_distinct`, and two factors sharing a name
+        # collapsed in `factor_levels_declared`'s `declared` dict, so the first factor's levels
+        # left the *blocker* and the diff at once.
         ids = [arm.arm_id for arm in self.arms]
         if len(set(ids)) != len(ids):
             raise ValueError("arm_id repeats; each arm needs its own id")
+        names = [factor.name for factor in self.factors]
+        if len(set(names)) != len(names):
+            raise ValueError("a factor name repeats; each factor needs its own name")
+        dangling = sorted({arm.replicate_of for arm in self.arms if arm.replicate_of} - set(ids))
+        if dangling:
+            raise ValueError(f"replicate_of names no arm in this design: {', '.join(dangling)}")
+        # **A replicate has to run the same conditions**, which is the second half of the same
+        # hole. `replicate_of` naming a *real* arm with different levels was accepted, and it
+        # defeated the same two readers a dangling one did: `arms_are_distinct` skips every arm
+        # carrying `replicate_of`, and `coverage_is_stated` counts none of them towards the grid —
+        # so two mislabelled arms turned a full grid into "reduced design: 2 of 4" while the run
+        # sheet told a chemist A2 was a repeat of A1. Averaging a replicate pair is how the noise
+        # of an assay is estimated; averaging two different conditions reports that noise as the
+        # answer. An arm that varies something is not a replicate, and clearing `replicate_of` is
+        # what says so.
+        by_id = {arm.arm_id: arm for arm in self.arms}
+        differing = [
+            arm.arm_id
+            for arm in self.arms
+            if arm.replicate_of
+            and (arm.levels, arm.setpoints)
+            != (by_id[arm.replicate_of].levels, by_id[arm.replicate_of].setpoints)
+        ]
+        if differing:
+            raise ValueError(
+                "these arms are marked as replicates but run different conditions from the arm "
+                f"they name: {', '.join(differing)}. Clear `replicate_of` on an arm that varies "
+                "something — a replicate is the same conditions run again"
+            )
         expected = list(range(1, len(self.base.steps) + 1))
         if [step.index for step in self.base.steps] != expected:
             raise ValueError("steps must be numbered 1..n in order")
         return self
+
+    @property
+    def has_protocol(self) -> bool:
+        """Whether this design says what to do, rather than only what is being asked for.
+
+        The one definition, read by `checks.is_a_protocol`, by the intake (which must not replace a
+        drafted design with an empty ask), by the edit route (which must not grade a correction to
+        the *ask* at the protocol stage) and by `render.summarise`. Callers deciding it separately
+        is how the second and third got it wrong — and `summarise` was still spelling the condition
+        out when that sentence was written, which is how the fourth nearly did.
+        """
+        return bool(self.arms or self.base.steps or self.base.charge)
 
     def arm(self, arm_id: str) -> ProtocolArm | None:
         """The arm with this id, or `None`."""
@@ -469,6 +517,27 @@ class DesignRevision(BaseModel):
     def blockers(self) -> list[ProtocolCheck]:
         """The checks that failed at `blocker` severity."""
         return [c for c in self.checks if c.severity == "blocker" and not c.passed]
+
+
+class StatusEvent(BaseModel):
+    """One recorded lifecycle move: which revision somebody signed off on, and why.
+
+    The header's `status` describes the *head*, and `store.advanced` moves it back to `draft` when
+    a new revision lands on an approved or executed design — correctly, because an approval is a
+    statement about a document and the document changed. That leaves exactly one question with no
+    answer on the header row, and this is it: which revision a person actually approved, executed
+    or abandoned. Only a deliberate move is recorded; an automatic demotion has no actor and no
+    reason, and the revision that carries it is already in the history.
+    """
+
+    status: DesignStatus
+    #: The head revision at the instant of the move — the document that was signed off on.
+    revision: int = Field(ge=0)
+    actor: str = ""
+    reason: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
 
 class DesignSummary(BaseModel):

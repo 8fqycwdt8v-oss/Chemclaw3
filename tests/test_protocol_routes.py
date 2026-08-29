@@ -310,6 +310,114 @@ def test_an_edit_that_names_no_parent_revision_is_refused(
         assert client.post(f"/protocols/{_DESIGN_ID}/revisions", json=body).status_code == 422
 
 
+def test_correcting_the_ask_is_stored_as_a_request_and_graded_as_one(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """The `kind` and the check stage come from the document, not from which route was called.
+
+    This route is the artefact a chemist corrects *before* the expensive work, so a design holding
+    only the ask reaches it — and hard-coding `kind="protocol"` recorded the correction as a
+    protocol revision, flipped a design with no procedure in it to `draft`, and reported
+    `is_a_protocol` and `evidence_present` as blockers on the normal path. A blocker that fires
+    where nothing is wrong is a blocker a reader learns to ignore, which is the property the one
+    real blocker depends on.
+    """
+    ask = _design(arms=0, cited=False)
+    _seed(store, ask, kind="request", status="requested")
+
+    response = client.post(
+        f"/protocols/{_DESIGN_ID}/revisions",
+        json={
+            "document": _design(
+                arms=0, cited=False, request=_request(notes="100 mg, not 5 g")
+            ).model_dump(mode="json"),
+            "parent_revision": 1,
+            "change_note": "corrected what I had read as the scale",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["revision"] == 2
+    assert body["changed_paths"] == ["request.notes"]
+
+    graded = {check["check_id"]: check for check in body["checks"]}
+    # Graded at the request stage: the protocol-only checks say what they are waiting for rather
+    # than failing about a procedure that does not exist yet.
+    assert graded["is_a_protocol"]["severity"] == "note"
+    assert "not checked yet" in graded["is_a_protocol"]["detail"]
+    assert graded["evidence_present"]["severity"] == "note"
+    assert [
+        check["check_id"]
+        for check in body["checks"]
+        if check["severity"] == "blocker" and not check["passed"]
+    ] == []
+
+    stored = asyncio.run(store.read(_DESIGN_ID))
+    assert stored is not None and stored.kind == "request"
+    summary = asyncio.run(store.summary(_DESIGN_ID))
+    # Correcting an ask does not make the design a draft; only a procedure does.
+    assert summary is not None and summary.status == "requested"
+
+
+def test_editing_a_design_that_has_a_procedure_is_stored_and_graded_as_a_protocol(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """The other direction of the same derivation, so it cannot pass by always saying "request"."""
+    _seed(store, _design(), status="draft")
+
+    response = client.post(
+        f"/protocols/{_DESIGN_ID}/revisions",
+        json={
+            "document": _design(arms=2).model_dump(mode="json"),
+            "parent_revision": 1,
+            "change_note": "added the second arm",
+        },
+    )
+    assert response.status_code == 200
+
+    graded = {check["check_id"]: check for check in response.json()["checks"]}
+    assert graded["is_a_protocol"]["severity"] == "blocker"
+    assert graded["is_a_protocol"]["passed"] is True
+    assert "2 arm(s)" in graded["is_a_protocol"]["detail"]
+    assert graded["evidence_present"]["severity"] == "blocker"
+    assert "not checked yet" not in graded["evidence_present"]["detail"]
+
+    stored = asyncio.run(store.read(_DESIGN_ID))
+    assert stored is not None and stored.kind == "protocol"
+    # And the history now reads as the two kinds it holds, which is what a document view renders.
+    assert [item["kind"] for item in client.get(f"/protocols/{_DESIGN_ID}").json()["history"]] == [
+        "protocol",
+        "protocol",
+    ]
+
+
+def test_drafting_a_procedure_onto_a_requested_design_advances_it(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """A chemist who writes the procedure themselves moves the design, exactly as an agent would.
+
+    The `requested` → `draft` transition belongs to the *document*, so it has to happen on the human
+    path too — and it is the transition the hard-coded `kind="protocol"` used to fire on an edit
+    that added no procedure at all.
+    """
+    _seed(store, _design(arms=0, cited=False), kind="request", status="requested")
+
+    response = client.post(
+        f"/protocols/{_DESIGN_ID}/revisions",
+        json={
+            "document": _design(arms=1).model_dump(mode="json"),
+            "parent_revision": 1,
+            "change_note": "wrote the first arm myself",
+        },
+    )
+    assert response.status_code == 200
+
+    stored = asyncio.run(store.read(_DESIGN_ID))
+    assert stored is not None and stored.kind == "protocol"
+    summary = asyncio.run(store.summary(_DESIGN_ID))
+    assert summary is not None and summary.status == "draft"
+
+
 # --- the lifecycle move ---------------------------------------------------------------------
 
 
@@ -325,6 +433,49 @@ def test_moving_a_designs_status_answers_204(
 
     summary = asyncio.run(store.summary(_DESIGN_ID))
     assert summary is not None and summary.status == "approved"
+
+
+def test_the_reason_the_ui_makes_mandatory_is_actually_recorded(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """The reason the UI makes mandatory reaches the record.
+
+    `Chemclaw3_ui` disables every status button until a reason is typed and confirms the move is
+    "recorded against you with the reason you wrote" — and `set_status` took no `reason` at all, so
+    a field validated to 2,000 characters was dropped on the way to a 204. The test above sent one
+    and asserted only the status, which is how it stayed invisible.
+    """
+    _seed(store, _design(), status="draft")
+    client.post(
+        f"/protocols/{_DESIGN_ID}/status",
+        json={"status": "abandoned", "reason": "the SM decomposes above 40 C"},
+    )
+
+    events = asyncio.run(store.status_history(_DESIGN_ID))
+    assert len(events) == 1
+    assert events[0].reason == "the SM decomposes above 40 C"
+    assert events[0].actor == _OID
+    assert events[0].revision == 1
+
+
+def test_reading_a_design_carries_who_signed_off_on_which_revision(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """Stored is not read.
+
+    A record nothing can reach answers no question, so the sign-off comes back beside the document
+    — the same round trip the revision history already takes.
+    """
+    _seed(store, _design(), status="draft")
+    client.post(
+        f"/protocols/{_DESIGN_ID}/status", json={"status": "approved", "reason": "80 C is right"}
+    )
+
+    body = client.get(f"/protocols/{_DESIGN_ID}").json()
+    assert [event["status"] for event in body["status_history"]] == ["approved"]
+    assert body["status_history"][0]["revision"] == 1
+    assert body["status_history"][0]["reason"] == "80 C is right"
+    assert body["status_history"][0]["actor"] == _OID
 
 
 def test_moving_an_unknown_designs_status_is_a_404(client: TestClient) -> None:

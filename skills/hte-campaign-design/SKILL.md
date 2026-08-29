@@ -184,3 +184,15 @@ edit; that refusal names the revision to start from.
 When a chemist drops one level from a factor, the arms that used it go too — re-send the arm list
 you actually want rather than the old one minus a row, because the coverage and distinctness checks
 read the arms as given.
+
+**Pass `plate_format` again whenever the arms change.** Omitting it carries the previous plate
+forward untouched, which is what you want for a revision that only moves a temperature — a
+randomised run order cannot be recreated, so re-laying out with a fresh seed would hand the chemist
+a different plate. It is the wrong thing when the arm list has moved: the carried plate names arms
+that no longer exist, and `layout_fits` refuses the revision rather than storing a plate that does
+not match its own design.
+
+**A replicate is the same conditions run again**, and `replicate_of` is refused on an arm that sets
+anything different from the arm it names. Two arms that vary something are two arms; mark them as
+replicates and the plate reports a smaller grid than it runs, while the run sheet tells a chemist to
+average two experiments that are not comparable.

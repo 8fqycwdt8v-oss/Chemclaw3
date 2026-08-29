@@ -32,7 +32,7 @@ Status: `pending` · `running` · `PASS` · `FAIL` · `skipped (reason)`
 | S4 | Real-model probes | `make live-probes` | **blocked (F1)** | `tasks/live-test/transcripts/` |
 | S5 | Plan gate | `make live-plan-gate` | blocked (F1), mock route TBD | `tasks/live-test/m12-plan-gate/` |
 | S6 | UI full-stack | `npm run test:e2e:full-stack` | **blocked (F1)** | — |
-| S7 | Storm | `make live-storm` | **28/31** (3 open, see F5/F6) | `tasks/live-test/storm.md` |
+| S7 | Storm | `make live-storm` | **28/31** as run (3 open; F5 fixed then, F6 closed 2026-08-29) | `tasks/live-test/storm.md` |
 | S8 | Corpus convergence | `make live-data`, polled | **PASS 19/19** after F3, F4 | `.live/e2e-corpus-backfill.log` |
 | S9 | Degradation (Temporal down) | `make live-degradation` | blocked (F1), mock route TBD | `tasks/live-test/m12-degradation/` |
 | S10 | Soak + drift | `make live-soak`, `make live-soak-report` | **PASS** — 12 rounds, no drift | `.live/soak.jsonl` |
@@ -389,8 +389,8 @@ unit of load does not.
 cache is asked for the same work repeatedly and computes it once, which is D-011 measured over time
 rather than in a single collision.
 
-The one failing check per round is **F6**, the known open finding — constant at 1, never
-cascading.
+The one failing check per round is **F6**, open at the time of this run — constant at 1, never
+cascading. (Closed 2026-08-29; a soak has not been re-run since.)
 
 ---
 
@@ -408,7 +408,7 @@ cascading.
 | S4 | Real-model probes | **BLOCKED (F1)** |
 | S5 | Plan gate | **BLOCKED (F1)** |
 | S6 | UI full-stack | **BLOCKED (F1)** |
-| S7 | Storm | **28/31** — F5 fixed, F6 open |
+| S7 | Storm | **28/31** — F5 fixed, F6 open at the time of this run (closed 2026-08-29) |
 | S8 | Corpus by value | **PASS 19/19** after F3, F4 |
 | S9 | Degradation | **BLOCKED (F1)** |
 | S10 | Soak + drift | **PASS** — 12 rounds, no drift |
@@ -420,7 +420,7 @@ cascading.
 | F3 | Corpus backfill could never find its ground truth (off-by-one path) | fixed, 4 tests |
 | F4 | A live check asserted the opposite of a merged ADR, failing 0/12 forever | fixed |
 | F5 | The chaos primitive could destroy the lane it was testing | fixed |
-| F6 | Unparseable tool call is a silent no-op; the probe could not even reach it | **open, reported** |
+| F6 | Unparseable tool call is a silent no-op; the probe could not even reach it | open then; **closed 2026-08-29** |
 
 **Three of the six findings were checks that were wrong, not code that was wrong** (F4, F6, and
 half of F2's diagnosis). That is worth stating plainly: a campaign that assumed every red was a
@@ -434,6 +434,9 @@ and would have reported four storm failures that were the runner's own misconfig
 - **The live OpenShift cluster**, `helm`/`kubeconform` render against a real API server, and the
   browser -> Entra tenant hop. All three remain open edges in `docs/planning/BACKLOG.md`; this lane
   cannot close them.
-- **F6's root cause.** The probe now reaches the right code path and the counter is provably never
-  incremented; why is not established.
+- ~~**F6's root cause.**~~ **Closed 2026-08-29, and this row was wrong about the code.** The
+  counter is not "provably never incremented" — it increments twice per turn, once per repair
+  attempt, measured on this lane. What was missing was the `tool_failed` event; see the F6 section
+  above and
+  `D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce`.
 - **The SIGKILL-recovery and lease-race checks**, for the reasons the S7 section gives.

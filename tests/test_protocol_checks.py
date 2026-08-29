@@ -554,11 +554,44 @@ def test_evidence_present_counts_every_grounding_kind_as_precedent(kind: str) ->
     """Four kinds ground a design; a fifth (`tool`) is the computation beside them."""
     design = _design(
         evidence=[
-            EvidenceRef.model_validate({"kind": kind, "summary": "the record says so"}),
+            EvidenceRef.model_validate(
+                {"kind": kind, "ref": "reaction-9", "summary": "the record says so"}
+            ),
             EvidenceRef(kind="tool", tool="predict_pka", summary="computed"),
         ]
     )
     assert evidence_present(design).passed
+
+
+def test_a_citation_that_names_nothing_to_open_does_not_count() -> None:
+    """Two sentences are not two citations, and the blocker is what proves it.
+
+    The one that matters: a grounding kind with no `ref` and a `tool` kind with no `tool` name are
+    both prose a model can write about work it did not do. Before this they cleared the blocker
+    between them — measured — which made the ADR's central claim ("use the record and the tools is
+    a property of the code") false on the only turn it has to hold, the one where the model has an
+    answer it likes.
+    """
+    verdict = evidence_present(
+        _design(
+            evidence=[
+                EvidenceRef(kind="precedent", summary="prior work supports 80 C"),
+                EvidenceRef(kind="tool", summary="I computed the pKa"),
+            ]
+        )
+    )
+    assert not verdict.passed and verdict.severity == "blocker"
+    assert "cites nothing" in verdict.detail
+
+
+def test_an_unfollowable_citation_is_named_beside_the_ones_that_counted() -> None:
+    """A dropped citation is reported rather than silently uncounted."""
+    verdict = evidence_present(
+        _design(evidence=[*_cited(), EvidenceRef(kind="tool", summary="a bare sentence")])
+    )
+    assert verdict.passed
+    assert "nothing names what to open" in verdict.detail
+    assert "a bare sentence" in verdict.detail
 
 
 # --- hazard_screen_ran --------------------------------------------------------------------------
