@@ -1284,12 +1284,11 @@ def test_every_declared_tool_composite_is_published_by_a_real_tool_call(
 
 
 def test_asking_the_same_composite_twice_is_one_record(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A tool composite has no cache key, so its identity is the request that produced it.
+    """A tool composite has no cache key, so its identity is the result it produced.
 
-    The job hook answers this with the workflow id, which is itself derived from the job and its
-    arguments; without a workflow the same derivation is the route plus a hash of the validated
-    arguments. Two identical questions must therefore collapse to one row on the outbox's
-    `ON CONFLICT DO NOTHING`, while a second temperature must not — it is a second measurement.
+    The route plus a hash of the payload: two identical questions collapse to one row on the
+    outbox's `ON CONFLICT DO NOTHING`, while a second temperature must not — it is a second
+    measurement. The two tests below are the halves the *request* hash got wrong in each direction.
     """
     calc_tools = _calc_stack(monkeypatch)
     queued = _publishing(monkeypatch)
@@ -1308,6 +1307,97 @@ def test_asking_the_same_composite_twice_is_one_record(monkeypatch: pytest.Monke
     assert len(refs) == 3
     assert refs[0] == refs[1], "the same question twice must address one record"
     assert refs[2] != refs[0], "a second temperature is a second measurement, not a duplicate"
+
+
+def test_an_unstated_default_and_the_value_it_resolves_to_are_one_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both tool composites take a **sentinel** default, and a request hash cannot see through one.
+
+    `ph=None` resolves to `settings.logd_default_ph` and `temperature_k=0.0` to
+    `settings.xtb_thermo_temperature_k`, so the caller who omits the parameter and the caller who
+    passes exactly the value it resolves to send different arguments and get the identical answer.
+    Measured on the request hash, that was two rows for one measurement in a store nobody can
+    de-duplicate afterwards. The result restates the parameter it actually used, which is why the
+    identity is taken from there.
+
+    Both composites are exercised because the sentinel is a different type in each (`None` against
+    `0.0`) and a fix that only understood one of them would pass on the other.
+    """
+    from chemclaw.core.config import settings
+
+    calc_tools = _calc_stack(monkeypatch)
+    queued = _publishing(monkeypatch)
+
+    async def _four_calls() -> None:
+        manager = calc_tools.server._tool_manager
+        await manager.call_tool("predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1"})
+        await manager.call_tool(
+            "predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1", "ph": settings.logd_default_ph}
+        )
+        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+        await manager.call_tool(
+            "compute_thermochemistry",
+            {"smiles": "CCO", "temperature_k": settings.xtb_thermo_temperature_k},
+        )
+
+    asyncio.run(_four_calls())
+
+    for kind in ("LogdResult", "ThermochemistryResult"):
+        refs = [record.calc_ref for record in queued if record.payload_kind == kind]
+        assert len(refs) == 2, f"both {kind} calls must reach the hook"
+        assert refs[0] == refs[1], (
+            f"{kind}: omitting the default and passing it are one measurement, so one record"
+        )
+
+
+def test_a_composite_recomputed_after_the_calculator_moved_is_not_dropped_as_a_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other direction: a ref that cannot move pins the record to its first computation.
+
+    A delivered `result_publications` row is kept forever and the outbox's identity is
+    `(sink, calc_ref, schema_version)`, so re-running the same question after a calculator or epoch
+    change queued a genuinely different result and `ON CONFLICT DO NOTHING` dropped it. The two
+    older hooks carry a version in the ref (the cache key's `calc_version` and epoch-folded
+    `params_hash`; the job's workflow id); a composite has none to carry, and `publish` may not
+    import `science` to reach its parts' versions. What it has is the numbers, and here they moved.
+    """
+    from tests.calc_server_fake import FakeCalcServer, install
+
+    class _MovedCalculator(FakeCalcServer):
+        """The same server after its pKa model was refit — one number, everything else identical."""
+
+        def _predict_pka(self, arguments: dict[str, Any]) -> dict[str, Any]:
+            payload = super()._predict_pka(arguments)
+            return {**payload, "pka": payload["pka"] + 0.7}
+
+    calc_tools = _calc_stack(monkeypatch)
+    queued = _publishing(monkeypatch)
+    arguments = {"smiles": "CC(=O)Nc1ccc(O)cc1"}
+
+    async def _before() -> None:
+        await calc_tools.server._tool_manager.call_tool("predict_logd", arguments)
+
+    asyncio.run(_before())
+    install(monkeypatch, _MovedCalculator())
+
+    async def _after() -> None:
+        await calc_tools.server._tool_manager.call_tool("predict_logd", arguments)
+
+    asyncio.run(_after())
+
+    records = [record for record in queued if record.payload_kind == "LogdResult"]
+    assert len(records) == 2, "both calls must reach the hook"
+    assert records[0].payload["pka"] != records[1].payload["pka"], (
+        "the fixture has to actually change the science, or this proves nothing"
+    )
+    assert records[0].calc_ref != records[1].calc_ref, (
+        "the re-run's different result would be dropped as a duplicate of the first computation"
+    )
+    assert records[0].input_hash == records[1].input_hash, (
+        "the request did not change, and `input_hash` is the request"
+    )
 
 
 def test_a_results_store_that_cannot_be_reached_fails_neither_the_tool_nor_the_calculation(

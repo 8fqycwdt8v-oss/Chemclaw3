@@ -80,23 +80,40 @@ logger = logging.getLogger(__name__)
 TOOL_COMPOSITES: frozenset[str] = frozenset({"ThermochemistryResult", "LogdResult"})
 
 
-def _composite_ref(connector: str, tool: str, arguments: dict[str, Any]) -> str:
-    """The identity of one tool composite: the request that produced it.
+def _composite_ref(connector: str, tool: str, payload: dict[str, Any]) -> str:
+    """The identity of one tool composite: the route it came from, plus what it produced.
 
-    A composite has no cache key — that is the definition of one here — so it has no
-    content-addressed identity to borrow. The job hook answers the same question the same way and
-    says so: `calc_ref` is the workflow id, "because a composite has no cache key: its identity is
-    the run. That is also what makes it idempotent, since the workflow id is itself derived
-    deterministically from the job and its arguments." This is that sentence without a workflow.
+    A composite has no cache key — that is the definition of one here — so it has no key to
+    borrow. **It is content-addressed on its own result instead of on its request**, and the two
+    are not interchangeable; hashing the request was wrong in both directions and both were
+    measured (`D-2026-08-27-a-composite-needs-a-hook-not-a-projector`'s hook, audited after it
+    shipped):
 
-    So the same question asked twice is one record — the outbox's `ON CONFLICT DO NOTHING` on
-    `(sink, calc_ref, schema_version)` collapses the repeat — while the same molecule asked at a
-    second temperature is a second record, which is right: it is a second measurement.
+    - *Two requests, one measurement.* Both tool composites take a **sentinel** default — `ph=None`
+      resolved to `settings.logd_default_ph`, `temperature_k=0.0` to `settings.xtb_thermo_
+      temperature_k` — so the caller who omits the parameter and the caller who passes the value it
+      resolves to send different arguments and get the identical answer. On the request hash that
+      is two rows for one measurement. The result restates the parameter it actually used
+      (`LogdResult.ph`, `ThermochemistryResult.temperature_k`), so on the payload it is one.
+    - *One request, two measurements.* The outbox's identity is `(sink, calc_ref, schema_version)`
+      and a delivered row is kept forever, so a ref that does not move when the science moves makes
+      the **first** computation permanent: re-running the same question after a calculator or epoch
+      change queued a genuinely different result and `ON CONFLICT DO NOTHING` dropped it. The two
+      older hooks do not have this problem because their refs carry a version — the cache key's
+      `calc_version` and epoch-folded `params_hash`, and the job's workflow id. A composite has no
+      version of its own to carry: its parts each have one, they are not visible at this seam, and
+      `publish` may not import `science` to reach them (`tests/test_layering.py`). What *is*
+      visible is that the numbers came out different, which is the same fact one step later.
 
-    The arguments are the *validated* keyword arguments the tool body ran on, so a default the
-    caller omitted and a default the caller passed explicitly derive one ref rather than two.
+    So the same question asked twice is one record — the payload is deterministic for both shapes
+    (a `structure_id` is a content address, and neither model carries a timing or a timestamp) —
+    while the same molecule at a second temperature, or the same temperature after the calculator
+    moved, is a second record. Both are second measurements.
+
+    The route stays in front of the hash rather than being folded into it, so a `calc_ref` still
+    says where it came from when it is read by a person.
     """
-    return f"{connector}.{tool}#{stable_hash(arguments)}"
+    return f"{connector}.{tool}#{stable_hash(payload)}"
 
 
 async def publish_tool_result(
@@ -126,13 +143,18 @@ async def publish_tool_result(
     if kind not in TOOL_COMPOSITES:
         return 0
     try:
+        payload = result.model_dump(mode="json")
         return await enqueue_payload(
-            calc_ref=_composite_ref(connector, tool, arguments),
+            calc_ref=_composite_ref(connector, tool, payload),
             # A route, exactly as the job hook builds one. It identifies where this came from; the
             # `payload_kind` beside it is what identifies the shape.
             calc_type=f"{connector}.{tool}",
-            payload=result.model_dump(mode="json"),
+            payload=payload,
             payload_kind=kind,
+            # The request, which is a different fact from the identity above: `input_hash` is what
+            # was asked for and `calc_ref` is what came back. It is deliberately still the raw
+            # validated arguments — an unstated default reads as unstated here, which is what the
+            # caller actually sent.
             input_hash=stable_hash(arguments),
         )
     except Exception:

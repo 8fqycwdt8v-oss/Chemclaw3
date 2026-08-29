@@ -248,17 +248,6 @@ topic).
       the drain. `record_refusals` is likewise handed the whole directory's refusals every chunk and
       issues one upsert round trip per row in a Python loop.
 
-- [ ] **A tool composite publishes twice and pins to its first computation** — [S].
-      `publish/hooks.py::_composite_ref` hashes the raw validated kwargs, and its docstring claims a
-      default omitted and a default passed explicitly derive one ref. True for literal defaults,
-      false for the sentinel defaults both tool composites use: measured, `predict_logd` with
-      `ph=None` and `ph=7.4` produce different refs for the same measurement, as do
-      `compute_thermochemistry` at `temperature_k=0.0` and `298.15`. Conversely `publish_tool_result`
-      passes no `calc_version` or `params_hash`, while the outbox's identity is
-      `(sink, calc_ref, schema_version)` — so after a calculator or epoch change the re-run's
-      *different* result is silently dropped as a duplicate. Both older hooks supply a
-      version-bearing ref.
-
 - [ ] **The session list advertises a cursor it then refuses** — [S]. `list_sessions` emits
       `X-Next-Cursor` on a full page outside the branch that checks the registry can resume, so a
       deployment with a custom non-durable registry gets a `200` with a cursor and a `422` when it
