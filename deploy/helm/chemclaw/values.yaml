@@ -642,6 +642,22 @@ config:
   # real chemist, finite against a loop — and the load run that validated this system ran with
   # budgets on, so "on" is the configuration that was actually measured.
   CHEMCLAW_BUDGET_ENABLED: "true"
+  # The *within-turn* half of the same guard, and it ships **off** where the one above ships on.
+  # `BUDGET_ENABLED` meters whole turns — `check()` before one, `record()` after it — so the case
+  # neither half sees is a single turn spending without a bound while it runs
+  # (`agent/spend_cap.py`). This is that ceiling, in billed tokens across every model call of a
+  # turn, the subagent's included.
+  #
+  # 0 (no cap) is deliberate rather than an omission, and it is the one guard in this block that
+  # ships inert. The others refuse a *request*; this one **ends a turn that is already running**,
+  # so a number set too low loses work a chemist has waited for, and no number this chart could
+  # ship would be right for a corpus it has never seen. Size it from this deployment's own
+  # `turn_costs.total_tokens` rows — the p99 of a turn that answered, with headroom — and set it
+  # then. `chemclaw_turn_spend_caps_total` is what says whether the number you chose is biting.
+  #
+  # Turning it on is not what makes the deployment guarded: `harness_max_loop_iterations` still
+  # bounds the loop, and that cap is on in every configuration.
+  CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS: "0"
   # On in production, off in code, for the same reason `BUDGET_ENABLED` is (REV-16): a CLI, a test
   # and a single-user dev run have no reason to be throttled, and a deployment serving real users
   # over a shared endpoint has no reason not to be. The turn guards above bound what reaches the

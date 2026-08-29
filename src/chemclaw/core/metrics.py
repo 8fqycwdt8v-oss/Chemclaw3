@@ -109,6 +109,14 @@ _COUNTERS: dict[str, str] = {
     # firing was invisible to everything outside the process. A rising rate here is an agent that
     # keeps planning more work than a turn can close — a prompt or skill problem, not an outage.
     "chemclaw_turn_loop_caps_total": "Turns stopped by the harness loop's iteration cap.",
+    # The same guard in the unit that costs money. The iteration cap above bounds how many times a
+    # turn thinks; this bounds what it bills, and the two move independently — a turn that fans out
+    # wide over large results reaches this one inside a handful of iterations, and a turn that
+    # plans in circles reaches that one having billed almost nothing. A rising rate here is a
+    # deployment whose turns are too expensive rather than too long, which is a retrieval or
+    # tool-result-size problem; flat at zero while `turn_costs` shows large turns means the cap is
+    # unset (`agent_max_turn_billed_tokens` ships at 0) rather than never reached.
+    "chemclaw_turn_spend_caps_total": "Turns stopped by the per-turn billed-token cap.",
     # The detach/stop split (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop). A disconnect no
     # longer cancels a turn, so these two are what tell an operator how often clients drop away
     # mid-turn (the turn completed unwatched, billed whole) versus how often someone actually

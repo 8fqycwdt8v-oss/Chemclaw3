@@ -414,6 +414,12 @@ ErrorCode = Literal[
     "turn_timeout",
     "budget_exhausted",
     "loop_cap_reached",
+    # `loop_cap_reached`'s sibling in the other unit: the turn was inside its iteration ceiling and
+    # reached its billed-token ceiling instead. Its own code rather than `budget_exhausted`,
+    # because the two say different things to a surface — `budget_exhausted` is a *session* or
+    # *user* refused before the turn started and has no answer with it, while this one stops a turn
+    # mid-flight and its partial answer still arrives.
+    "spend_cap_reached",
     "bad_tool_arguments",
     # The turn ran to completion and wrote nothing. Its own code rather than `internal`, because
     # nothing broke: the model simply never produced prose, and a surface should offer "ask
@@ -427,13 +433,15 @@ ErrorCode = Literal[
 class ErrorEvent(BaseModel):
     """The turn failed; the message is safe to show the user (no stack traces).
 
-    Three of the codes say the turn was *cut off* rather than broken — `turn_timeout`,
-    `budget_exhausted` and `loop_cap_reached` — and they are one family: the turn ran into a
-    guard, so whatever it had said is all it is going to say. `loop_cap_reached` is the only
-    member that shares its turn with an answer: the loop's runaway guard stops a turn that has
-    been streaming text all along, so it arrives after those tokens and *before* the `AnswerEvent`
-    they add up to — the same "mark the answer partial while it is still arriving" ordering
-    `CapabilityDegradedEvent` uses (see `chemclaw.api.runner`).
+    Four of the codes say the turn was *cut off* rather than broken — `turn_timeout`,
+    `budget_exhausted`, `loop_cap_reached` and `spend_cap_reached` — and they are one family: the
+    turn ran into a guard, so whatever it had said is all it is going to say. The last two are the
+    members that share their turn with an answer: a runaway guard — of iterations or of spend —
+    stops a turn that has been streaming text all along, so it arrives after those tokens and
+    *before* the `AnswerEvent` they add up to, the same "mark the answer partial while it is still
+    arriving" ordering `CapabilityDegradedEvent` uses (see `chemclaw.api.runner`).
+    `budget_exhausted` is not one of them despite naming a budget: it refuses a turn *before* it
+    starts, so there is nothing to mark partial.
 
     `code` and `retryable` exist because the message alone made every failure the same failure. A
     surface could not tell a connector being down from an LLM timeout from a database outage from

@@ -104,10 +104,25 @@ async def create_checkpoint_tables() -> None:
     own against `settings.postgres_dsn` and would land outside the isolation schema. They are
     `CREATE TABLE IF NOT EXISTS`, so this is safe beside any other test that needs them, and the
     shape under test is the shape production has.
+
+    **"The shape production has" means every migration, not only the three that create the
+    tables** — and for a while this ran `MIGRATIONS[1:4]` alone, which is three `CREATE TABLE`s
+    and none of the `ALTER`s after them. A test that only ever `INSERT`s named columns cannot see
+    the difference, which is why it went unnoticed; a test that drives a **real saver** fails at
+    once, because `aput_writes` writes `task_path` and migration 9 is what adds it. Measured:
+    `psycopg.errors.UndefinedColumn: column "task_path" of relation "checkpoint_writes" does not
+    exist`.
+
+    The `CREATE INDEX CONCURRENTLY` statements are skipped, and that is the one deliberate
+    departure: `CONCURRENTLY` cannot run inside a transaction block, and an index is a property of
+    how fast the table answers rather than of what it can hold. Nothing about a shape a test
+    asserts depends on them.
     """
     from langgraph.checkpoint.postgres import base
 
     async with await connect(settings.postgres_dsn) as conn:
-        for statement in base.MIGRATIONS[1:4]:
+        for statement in base.MIGRATIONS[1:]:
+            if "CONCURRENTLY" in statement:
+                continue
             await conn.execute(statement)
         await conn.commit()

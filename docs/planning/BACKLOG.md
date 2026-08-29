@@ -636,6 +636,28 @@ only holds defects can only ever restore the system to what it already intended 
       Anchors: `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
       `science/bo/problem.py`.
 
+- [ ] **The static-prefix ratchet gates a number 24% below what the deployment pays** — [S], found
+      2026-08-29 while measuring for `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`.
+      `tests/test_context_floor.py` counts `convert_to_openai_tool` over `_capability_tools`, and
+      its docstring claims that is "the payload rather than an approximation of it". Measured
+      against the tools actually bound on the compiled graph, it is short by **7,799 tokens**:
+      25,511 over 49 counted, 33,310 over 56 sent. Two causes, both structural rather than a drift
+      — `core/tool_registry`'s `@tool` is identity, so the file measures *raw callables* while
+      `create_agent` binds wrapped objects with larger derived schemas (**all 49** differ;
+      `get_durable_job_status` 274 → 662, `gather_evidence` 490 → 878), and 7 tools registered by
+      `FilesystemMiddleware`/`SubAgentMiddleware` (`ls`, `read_file`, `write_file`, `edit_file`,
+      `glob`, `grep`, `task`) are bound every turn and counted never. The file already records the
+      same trap one layer deeper, in the other direction (reading `.name` off a callable measured
+      ~11 tokens per tool).
+
+      **Why it is a row and not a fix in that commit.** The corrected floor is ~39,983 against a
+      ceiling of 33,000 that today reads 32,184 and passes. Fixing the basis therefore *requires*
+      raising the ceiling, and this file's own rule is that raising one "belongs in a commit that
+      says why" — riding it along in an ADR about something else is how a ratchet turns freely.
+      The fix is: measure the bound surface (spy on `bind_tools`, as `tests/test_middleware_order.py`
+      already spies on `create_agent`), re-baseline every ceiling in one commit, and say in it that
+      the number grew because the measurement got honest rather than because the surface did.
+
 - [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
       what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
       carry design arguments in their class docstrings — *"One `objectives` field rather than a lead

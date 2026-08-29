@@ -61,12 +61,23 @@ from tests.fakes import scripted
 #   (`D-2026-08-27-the-cap-is-a-property-of-the-loop-not-of-the-mode`): the runaway it bounds is
 #   the model-call loop itself, which exists in both modes. Its position carries no nesting
 #   argument — it is a model-call hook, not a tool gate.
+# - `enforce_spend_cap` and `MeterTurnSpend` are the same guard in the unit that costs money, and
+#   they travel with it for the same reason. The pair is split because the two halves cannot live
+#   in one hook: only the *response* carries the bill, so metering is a `wrap_model_call`, while
+#   enforcement must be a `before_model` — an `after_model` counter is short-circuited by any
+#   middleware that jumps from there
+#   (`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`). `MeterTurnSpend`'s
+#   position among the `wrap_model_call` middlewares carries no argument either: it reads
+#   `usage_metadata` off the response and passes it through, so nothing it does depends on what is
+#   nested inside it.
 _EXPECTED_ORDER = (
     "FilesystemMiddleware",
     "SubAgentMiddleware",
     "SummarizationMiddleware",
     "PatchToolCallsMiddleware",
     "enforce_loop_cap",
+    "enforce_spend_cap",
+    "MeterTurnSpend",
     "ReloadingSkillsMiddleware",
     "surface_authorization_denials",
     "surface_domain_errors",
