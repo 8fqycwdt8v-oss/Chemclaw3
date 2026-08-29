@@ -348,6 +348,30 @@ probes:
       periodSeconds: 10
       failureThreshold: 30
       timeoutSeconds: 5
+    # **`/readyz` does work, so its probe needs a timeout that says how much.** It sweeps every
+    # enabled connector and then asks Postgres — bounded by `connector_health_timeout_seconds`
+    # (2 s) and `service_readiness_db_timeout_seconds` (2 s) respectively, which is 4 s of budget
+    # against Kubernetes' **default `timeoutSeconds: 1`**. That default is what this block exists
+    # to replace: a jobs-only bundle routes to a `DescribeTaskQueue` RPC, so a blackholed broker
+    # took ~2 s and `failureThreshold: 3` then removed a perfectly serving front door from its
+    # Service after ~30 s of somebody else's outage. The connector sweep never gates readiness by
+    # design (`api/routes/ops.py`); this is the latency it introduces one layer down.
+    #
+    # 5 s rather than 4 leaves the request itself a margin, and
+    # `tests/test_deploy_chart.py::test_the_readiness_probe_outlasts_the_work_readyz_does` derives
+    # the floor from those two settings so raising either one without raising this fails.
+    readiness:
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    # Liveness asks `/healthz`, which does no work at all — so its budget is about a wedged event
+    # loop rather than about a dependency, and it stays the slower of the two: readiness drains a
+    # struggling pod from the Route, and only a pod that has stopped answering anything is worth
+    # restarting.
+    liveness:
+      periodSeconds: 20
+      timeoutSeconds: 5
+      failureThreshold: 3
   worker:
     # The same 30 x 10 s budget, and it is the same measurement: core's worker and every bundle's
     # worker run the *same image* and import the same tree — `chemclaw.durable.serve` pulls the
@@ -978,6 +1002,19 @@ monitoring:
     # genuinely quiet source also does — the lag gauge is the only thing that separates them. 24
     # hours, because the shipped sources are nightly.
     ingestLagSeconds: 86400
+    # How old this pod's newest note may be before `ChemclawKnowledgeCorpusStale` fires, in
+    # seconds. **0 renders no rule, and that is the shipped state**, because this is the one
+    # threshold in this block the chart cannot derive: `chemclaw_knowledge_sync_age_seconds` reads
+    # the age of the newest note on the volume — the publish is `rsync -a` off a `git reset --hard`
+    # checkout, so an mtime is when a note's *content* reached this pod — and it therefore cannot
+    # tell a sync wedged on an expired credential from a fortnight in which nobody wrote a note.
+    # A default here would be this chart guessing how often somebody else's chemists publish, and
+    # guessing high pages for the quiet weeks while guessing low never fires. Set it to a few times
+    # your corpus's real merge interval; the gauge is on the "Knowledge corpus age on each pod"
+    # panel in `dashboards/chemclaw-data.json` and reading that for a fortnight is how to pick the
+    # number. The sync sidecar's own `staleness` liveness probe is the other half of this signal
+    # and needs no threshold from here, because it reads when the refresh last *ran*.
+    knowledgeCorpusStaleSeconds: 0
     # **When a periodic producer's series is simply absent.** Four gauge families here
     # (`chemclaw_outbox_pending`, `chemclaw_outbox_oldest_pending_seconds`,
     # `chemclaw_outbox_dead_lettered`, `chemclaw_ingest_cursor_lag_seconds`) are written by a

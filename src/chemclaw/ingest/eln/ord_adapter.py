@@ -42,14 +42,17 @@ from chemclaw.ingest.rejections import record_refusals
 
 logger = logging.getLogger(__name__)
 
-# The source name a refusal by this adapter is filed under in the rejection ledger. It is the
-# registry source name, not a label invented here, because the ledger's `source` is what tells a
-# reader whose data quality a row is a statement about — the same rule
-# `registry._build_retrieve_half` states for a retrieve half's name. The ingest half is built with
-# the manifest's `config` only and is never told its own name, so this constant is the one place
-# the two can disagree, and `tests/test_ingest_rejections.py` reads every manifest that names this
-# adapter and fails if they do.
-LEDGER_SOURCE = "eln-ord"
+# The source name a refusal is filed under when nobody says otherwise — a *fallback* for an
+# adapter built by hand (the CLI's one-shot import, and tests), not this adapter's identity.
+#
+# **Every deployment path is told its name.** The ledger's `source` says whose data quality a row
+# is a statement about, and the eviction cap is per source, so two ORD sources filing under one
+# name would share a bucket and mis-attribute each other's refusals. This used to be a constant
+# with no way in: the ingest half was built from `manifest.config` alone and never told which
+# source it was, which made a hardcoded string the only thing that could be right — and only while
+# exactly one manifest named this adapter. `registry._build_ingest_half` now passes the manifest's
+# name, the same rule it already stated for a retrieve half and for a commitments half.
+DEFAULT_LEDGER_SOURCE = "eln-ord"
 
 # ORD reaction-role -> our Role subset. Roles outside the subset (WORKUP,
 # INTERNAL_STANDARD, AUTHENTIC_STANDARD) collapse to REAGENT: they are auxiliary species,
@@ -88,9 +91,15 @@ class OrdFormatError(ElnMappingError):
 class OrdJsonAdapter:
     """Map a directory of ORD `Reaction` JSON files to `OrdReaction` records (an ELN adapter)."""
 
-    def __init__(self, export_dir: str | None = None) -> None:
-        """Read from the given directory, or the configured `ord_export_dir`."""
+    def __init__(self, export_dir: str | None = None, name: str | None = None) -> None:
+        """Read from the given directory, or the configured `ord_export_dir`.
+
+        `name` is the data source this adapter *is*, passed by the registry from the manifest and
+        used as the rejection ledger's `source`. See `DEFAULT_LEDGER_SOURCE` for what an omitted
+        one means.
+        """
         self._dir = Path(export_dir if export_dir is not None else settings.ord_export_dir)
+        self._source = name or DEFAULT_LEDGER_SOURCE
 
     async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
         """Return ORD messages created at or after `since`, oldest first.
@@ -112,13 +121,24 @@ class OrdJsonAdapter:
         late to ever be fetched, and a message that cannot be mapped — and the third is why the
         recording happens *here* rather than in `map_to_ord`: the ledger write is `await`ed, and
         `map_to_ord` is synchronous by the `ElnAdapter` contract. So the entries this fetch is
-        about to hand over are mapped once here to find the ones that cannot be, which costs one
-        pure-function call per entry — **measured at 65 µs** over the shipped
-        `data/eln-exports/ord/ord-2026-001.json`, so ~6.5 ms on a full 100-entry
-        `eln_sync_batch_size` chunk —
-        and changes nothing about what is returned: the sync maps them again, refuses the same
-        ones, and stays the sole author of the run summary. `sync.py::_replay_record_ids` already
-        pays the same cost for the same structural reason.
+        about to hand over are mapped once here to find the ones that cannot be, which changes
+        nothing about what is returned: the sync maps them again, refuses the same ones, and stays
+        the sole author of the run summary. `sync.py::_replay_record_ids` already pays the same
+        cost for the same structural reason.
+
+        **The pre-flight is bounded by `eln_sync_batch_size`, and the bound is the whole point.**
+        The per-entry cost is right — 68 µs, re-measured over 2,000 copies of the shipped
+        `data/eln-exports/ord/ord-2026-001.json` — and the unit it was priced in was not: this
+        fetch returns *everything* past the cursor and `durable/eln_sync.py::_BoundedIngest`
+        truncates it afterwards, so mapping the whole return cost 0.136 s over 2,000 entries (29%
+        of the fetch) and a 100k-entry backfill would re-map all 100k once per chunk — roughly two
+        hours of pure re-mapping added to a drain that processes 100 entries at a time.
+
+        Bounding it to the oldest `eln_sync_batch_size` entries covers what this chunk's caller can
+        actually consume. It is a work bound rather than a contract: an entry past it is refused by
+        the chunk that reaches it (the cursor advances past a rejection, so the drain always gets
+        there), which is also why the ledger row appears when the drain reaches the record instead
+        of the whole directory's refusals being re-upserted on every chunk.
         """
         entries: list[RawEntry] = []
         late: list[str] = []
@@ -166,16 +186,17 @@ class OrdJsonAdapter:
                 )
         warn_late_arrivals(logger, "ORD export", late)
         entries.sort(key=lambda e: e.created_at)
-        refused.update(self._unmappable(entries))
-        await record_refusals(LEDGER_SOURCE, refused)
+        refused.update(self._unmappable(entries[: settings.eln_sync_batch_size]))
+        await record_refusals(self._source, refused)
         return entries
 
     def _unmappable(self, entries: list[RawEntry]) -> dict[str, str]:
         """Which of these entries cannot be mapped, and what the refusal says.
 
-        The pre-flight `fetch_new_entries` describes: the refusal is found here so it can be
-        recorded from an `async` caller, and the entry is still returned so the sync refuses it
-        itself and reports it in the summary exactly as before.
+        The pre-flight `fetch_new_entries` describes, over the bounded prefix it passes rather than
+        over the whole fetch: the refusal is found here so it can be recorded from an `async`
+        caller, and the entry is still returned so the sync refuses it itself and reports it in the
+        summary exactly as before.
 
         The two caught types are the pair `sync.py`'s own reject-and-continue catches, which is the
         definition of "deterministic bad data in one entry" this repository already uses. Anything

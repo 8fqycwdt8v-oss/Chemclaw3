@@ -155,6 +155,12 @@ def test_no_deployment_wide_read_reaches_the_face() -> None:
         "review_activity",
         "review_commitments",
         "find_past_jobs",
+        # The same disclosure as `find_past_jobs` through the other door, and it reached `WITHHELD`
+        # a review later than the rest — which is exactly the drift this second list exists to
+        # catch. It applies no actor check and returns the run's summary, result and free-text
+        # rationale, and a job id is `job_workflow_id(connector, job, payload)`: a pure function of
+        # its arguments, so an external caller guesses rather than discovers them.
+        "get_durable_job_status",
     }
     leaked = sorted(people_not_chemistry & set(advertised_tools()))
     assert leaked == [], (

@@ -2593,6 +2593,36 @@ def test_the_front_door_gets_the_same_head_start() -> None:
     assert budget >= 60, f"a {budget}s cold-start budget is inside the front door's import time"
 
 
+def test_the_readiness_probe_outlasts_the_work_readyz_does() -> None:
+    """`/readyz` is the one probe in this chart whose own answer has a budget, and it had none.
+
+    Kubernetes' unstated default is `timeoutSeconds: 1`. That route sweeps every enabled connector
+    — which for a jobs-only bundle is a `DescribeTaskQueue` RPC — and then asks Postgres, so its
+    cost is `connector_health_timeout_seconds` plus `service_readiness_db_timeout_seconds`, 4 s at
+    the shipped defaults. Under the default timeout a blackholed broker took ~2 s per poll and
+    `failureThreshold: 3` removed a perfectly serving front door from its Service after ~30 s of
+    somebody else's outage.
+
+    The floor is **derived from the settings** rather than restated, so raising either budget
+    without raising the probe fails here rather than in a cluster. Read off `Settings` itself
+    because that is what the pod runs; the chart does not override them.
+    """
+    from chemclaw.core.config import settings
+
+    text = (CHART / "templates" / "deployment-service.yaml").read_text()
+    readiness = _values()["probes"]["service"]["readiness"]
+    for probe in ("readinessProbe", "livenessProbe"):
+        body = text.split(f"{probe}:", 1)[1].split("Probe:", 1)[0]
+        assert "timeoutSeconds:" in body and "failureThreshold:" in body, (
+            f"the front door's {probe} leaves a threshold to a Kubernetes default"
+        )
+    work = settings.connector_health_timeout_seconds + settings.service_readiness_db_timeout_seconds
+    assert float(readiness["timeoutSeconds"]) >= work, (
+        f"/readyz may spend {work}s answering (the connector sweep plus the database probe) and "
+        f"the probe gives up after {readiness['timeoutSeconds']}s"
+    )
+
+
 def test_a_connector_pod_drains_before_it_dies() -> None:
     """The half of D-121's drain the connector pods never got.
 

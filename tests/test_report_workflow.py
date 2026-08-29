@@ -17,6 +17,7 @@ import chemclaw.durable.report_workflow as report_workflow
 from chemclaw.agent.durable_tools import _report_id
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_roles
+from chemclaw.durable.interceptor import activity_context
 from chemclaw.durable.orchestrator import resolve_fan_out_limit
 from chemclaw.durable.report_workflow import (
     DevelopmentReportWorkflow,
@@ -423,3 +424,70 @@ def test_forged_payload_roles_do_not_reach_the_gate() -> None:
 
     asyncio.run(_run())
     assert seen == [frozenset()], "a payload-declared privileged role reached the gate"
+
+
+def test_a_report_run_carries_the_turn_that_asked_for_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The correlation id reaches both activity boundaries a report is read through.
+
+    `ReportRequest` and `SectionRequest` carried `requested_by` and no correlation id, so
+    `retrieve_section`'s log lines and the PR-gated draft `propose_report` opens both booked an
+    empty one — a durable run a chemist launched from a turn, joinable to the person but not to the
+    question. `durable/interceptor.py` binds the three ids from an activity's *own* arguments, by
+    field name off a model and by parameter name off the signature, so what this asserts is the
+    whole wiring: the id is on the payload the fan-out hands each child, and on the argument list
+    `propose_report` is invoked with.
+
+    Asserted through `activity_context` rather than by reading the fields, because the field being
+    present is not the property — the property is that the worker's ambient context ends up holding
+    it, and that is the function the interceptor uses to decide.
+    """
+    launched: list[SectionRequest] = []
+
+    async def _capture_fan_out(_workflow: object, requests: Any, **_: object) -> list[Any]:
+        launched.extend(requests)
+        return [
+            SynthesizedSection(heading=r.section.heading, memory_layer="evidence", evidence=[])
+            for r in requests
+        ]
+
+    published: list[list[Any]] = []
+
+    async def _capture_publish(*args: Any, **kwargs: Any) -> str:
+        published.append(list(args[1]))
+        return "pr://note/report-x"
+
+    monkeypatch.setattr(report_workflow, "fan_out", _capture_fan_out)
+    monkeypatch.setattr(report_workflow, "publish_note", _capture_publish)
+
+    asyncio.run(
+        report_workflow.DevelopmentReportWorkflow().run(
+            ReportRequest(
+                title="Widget development",
+                requested_by="chemist@corp",
+                correlation_id="corr-42",
+                sections=[
+                    ReportSection(heading="Yield", query="yield trend", memory_layer="evidence")
+                ],
+            )
+        )
+    )
+
+    # The child's payload — a model, so the interceptor reads it by field name.
+    assert activity_context(list(launched), fn=retrieve_section).correlation_id == "corr-42"
+    # The draft's activity — bare strings beside a model-authored payload, so the interceptor reads
+    # it by parameter name off the signature. Positional, which is how Temporal invokes it.
+    assert activity_context(published[0], fn=propose_report).correlation_id == "corr-42"
+    assert activity_context(published[0], fn=propose_report).actor == "chemist@corp"
+
+
+def test_a_report_launched_outside_a_turn_stays_unjoined() -> None:
+    """Absent means absent: no correlation id is invented for a run that has no turn.
+
+    The counterweight, and the reason `request_development_report` spells `or ""` rather than
+    minting one — an unjoined run that carries a fabricated id looks joined to every reader of the
+    log, which is worse than the empty field it replaced.
+    """
+    request = SectionRequest(
+        section=ReportSection(heading="Scope", query="what is known", memory_layer="evidence")
+    )
+    assert activity_context([request], fn=retrieve_section).correlation_id == ""

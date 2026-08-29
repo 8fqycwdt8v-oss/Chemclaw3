@@ -63,6 +63,16 @@ class ReportRequest(BaseModel):
     # in a contextvar for the turn. A background run has no turn, so if the roles do not travel on
     # the request they do not exist by the time an entitlement is checked.
     requested_roles: list[str] = Field(default_factory=list)
+    # The turn that asked, so the run's log lines and its PR-gated draft join back to it. Same
+    # shape and same default as `ConnectorJobInput.correlation_id`: `durable/interceptor.py` binds
+    # it into the ambient context by *field name*, so carrying it here is the whole wiring — no
+    # activity has to remember. Optional because a caller outside a turn (a test, a CLI) has no id
+    # to carry, and inventing one would make an unjoined run look joined.
+    #
+    # Deliberately **not** part of `agent/durable_tools._report_id`: that key is idempotency plus
+    # entitlement, and folding the turn into it would give the same chemist a second full research
+    # run for every turn they re-ask in.
+    correlation_id: str = ""
 
 
 class SectionRequest(BaseModel):
@@ -104,6 +114,12 @@ class SectionRequest(BaseModel):
     section: "ReportSection"
     requested_by: str = ""
     requested_roles: list[str] = Field(default_factory=list)
+    # Relayed from `ReportRequest.correlation_id` by the fan-out, for the reason the actor is:
+    # a child workflow's activity is addressed by its argument, so an id that stops at the parent
+    # never reaches `retrieve_section` — which is where the log lines a run is read through are
+    # written. Lax for the same reason `requested_by` is lax here: a replayed payload that fails
+    # validation is a wedge, and the absent case degrades to the unjoined line it already was.
+    correlation_id: str = ""
 
 
 class SynthesizedSection(BaseModel):

@@ -152,6 +152,34 @@ spec:
               A note could not be opened on a branch and the failure was swallowed so the job could
               complete. The knowledge is lost. Usual causes are a dead git remote, an expired push
               credential, or two processes sharing one `note_repo_dir` (the submit lock).
+{{- if gt (int .Values.monitoring.alerts.knowledgeCorpusStaleSeconds) 0 }}
+
+        {{- /* The same failure in the other direction, and the rule this series exists for. The
+               alert above covers a note failing to reach the PR-gate; nothing covered the merged
+               corpus failing to reach a *pod*, because `knowledge-sync.sh`'s loop swallows a
+               refresh failure on purpose (a dead remote must not kill the pod) and then serves the
+               frozen snapshot indefinitely while every answer keeps citing it.
+
+               Rendered only when a deployment states its threshold, because this gauge cannot tell
+               a wedged sync from a corpus nobody is adding to — see `values.yaml`. A shipped
+               default would be this chart inventing how often somebody else's chemists write
+               notes, and it would page for the quiet weeks. */}}
+        - alert: ChemclawKnowledgeCorpusStale
+          expr: >-
+            max by (pod) (chemclaw_knowledge_sync_age_seconds)
+            > {{ .Values.monitoring.alerts.knowledgeCorpusStaleSeconds }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawknowledgecorpusstale
+            summary: A pod's knowledge corpus has stopped moving
+            description: >-
+              The newest note on this pod's knowledge tree is older than the deployment's budget, so
+              it is answering from a corpus that has stopped arriving. -1 is the sharper case: the
+              tree holds no note at all, which is a volume that was never populated. Check the
+              sync sidecar's restart count and its log before assuming the corpus is merely quiet.
+{{- end }}
 
     - name: chemclaw.correctness
       rules:

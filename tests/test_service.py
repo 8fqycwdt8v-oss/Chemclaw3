@@ -890,6 +890,45 @@ def test_session_list_omits_a_session_nobody_ever_spoke_in() -> None:
     assert warmed not in listed
 
 
+def test_a_registry_that_cannot_resume_advertises_no_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The route must not tell a caller to do the one thing it refuses.
+
+    `X-Next-Cursor` used to be emitted on any full page, while `after=` is honoured only by a
+    `SessionOwnerStore` — so a deployment whose `create_app(owner_store=...)` registry is some
+    other implementation answered `200` with a cursor and `422` to the client that followed it.
+    Only reachable through that constructor, which is exactly what this fake registry is.
+
+    The page ceiling is lowered rather than 25 sessions being created: what makes a page "full" is
+    `service_max_listed_sessions`, and driving it from the setting is what keeps this test about
+    the branch rather than about a number.
+    """
+    from chemclaw.api.auth import Principal, require_principal
+    from chemclaw.core.config import settings
+
+    monkeypatch.setattr(settings, "service_max_listed_sessions", 1)
+    app = _app(owner_store=_FakeOwnerStore())
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="alice", upn="a@corp", roles=frozenset()
+    )
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["session_id"]
+    _turn(client, session_id, "A real question.")
+
+    page = client.get("/sessions")
+
+    assert page.status_code == 200
+    assert [row["session_id"] for row in page.json()] == [session_id], "the page is full"
+    assert "X-Next-Cursor" not in page.headers, (
+        "this registry refuses `after=` with a 422, so a cursor it hands out is an instruction to "
+        "make a request it will reject"
+    )
+    # And the refusal it would have run into, so the two halves are asserted together rather than
+    # one of them being taken on trust.
+    assert client.get("/sessions", params={"after": "anything"}).status_code == 422
+
+
 def test_session_list_is_empty_without_a_durable_registry() -> None:
     """Under the in-memory store there is no durable registry, so the list is honestly empty.
 

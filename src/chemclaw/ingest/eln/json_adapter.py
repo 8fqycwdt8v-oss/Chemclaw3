@@ -131,9 +131,16 @@ class ElnFormatError(ElnMappingError):
 class JsonExportAdapter:
     """Read a JSON-export ELN directory and map entries to `OrdReaction`. An `ElnAdapter`."""
 
-    def __init__(self, export_dir: str | None = None) -> None:
-        """Read from the given directory, or the configured `eln_export_dir`."""
+    def __init__(self, export_dir: str | None = None, name: str | None = None) -> None:
+        """Read from the given directory, or the configured `eln_export_dir`.
+
+        `name` is the data source this adapter *is*, passed by the registry from the manifest
+        (`ingest/sources/registry.py::_build_ingest_half`). It reaches the two WARNINGs below,
+        which are the only signal an admin gets that a specific export file was dropped — and a
+        deployment running two JSON drop directories got two identical lines naming neither.
+        """
         self._dir = Path(export_dir if export_dir is not None else settings.eln_export_dir)
+        self._source = name or "eln-json"
 
     async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
         """Return entries whose `timestamp` is at or after `since`, oldest first.
@@ -155,14 +162,18 @@ class JsonExportAdapter:
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(payload, dict):
-                    logger.warning("skipping ELN export %s: not a JSON object", path.name)
+                    logger.warning(
+                        "%s: skipping ELN export %s: not a JSON object", self._source, path.name
+                    )
                     continue
                 created = _parse_timestamp(payload.get("timestamp"), path)
                 # An in-place amendment keeps `timestamp` and moves this one, so filtering on
                 # creation alone would never re-fetch a corrected entry.
                 modified = _optional_timestamp(payload.get("modified"), path)
             except (OSError, json.JSONDecodeError, ElnFormatError) as exc:
-                logger.warning("skipping unreadable ELN export %s: %s", path.name, exc)
+                logger.warning(
+                    "%s: skipping unreadable ELN export %s: %s", self._source, path.name, exc
+                )
                 continue
             if entry_window(created, modified) >= since:
                 entries.append(

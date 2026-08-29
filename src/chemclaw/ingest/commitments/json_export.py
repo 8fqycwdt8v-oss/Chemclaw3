@@ -19,6 +19,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.ingest.commitments.models import Commitment
 
 logger = logging.getLogger(__name__)
@@ -51,10 +52,22 @@ class JsonCommitmentExport:
             # `review_commitments` presents that to a project leader as "nothing was ever mirrored".
             # Creating the shipped default directory does not help a deployment that points the knob
             # somewhere else, which is the only reason the knob exists.
-            logger.warning(
-                "commitments.export_dir_missing: %s reads %s, which does not exist",
+            #
+            # Through `degraded()` rather than a bare `logger.warning`, for the reason
+            # `deliver/message.py` states about the sibling it was extracted from: a WARNING with no
+            # counter is invisible to everything except a person already reading the log of the pod
+            # they already suspect. This failure lasts as long as the misconfiguration and its whole
+            # symptom is *silence*, so `chemclaw_degraded_total{subsystem="commitment_mirror"}` is
+            # the only place it can be seen from outside. `exc_info=False` because this is a
+            # configuration fact rather than a caught exception.
+            degraded(
+                logger,
+                "commitment_mirror",
+                "commitments.export_dir_missing: %s reads %s, which does not exist; nothing will "
+                "be mirrored and the portfolio will read as empty",
                 self.name,
                 self.path,
+                exc_info=False,
             )
             return []
         files = sorted(self.path.glob("*.json")) if self.path.is_dir() else [self.path]
