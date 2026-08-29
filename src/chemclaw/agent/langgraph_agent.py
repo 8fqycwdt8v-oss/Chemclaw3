@@ -465,12 +465,18 @@ def _subagents(
 
     Three things the helper does *not* inherit, each for its own reason:
 
-    - **No connector tools**, which is a concurrency bound rather than a narrowing. A helper is
-      concurrent with its caller by construction, and two concurrent turns over one MCP tool object
-      deadlock — the measurement this module's own docstring gives as the reason a graph is compiled
-      per turn at all. It is expressed by omitting `connectors=` below, and asserted against the two
-      *compiled* graphs in `tests/test_subagents.py`, because under a one-name roster any build-time
-      comparison of the caller's profile with the helper's would compare a value with itself.
+    - **No connector tools**, which is a lifecycle bound rather than a narrowing — and *not* the
+      concurrency bound this said until
+      `D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock`. The
+      deadlock measurement above is about two turns **sharing one** MCP tool object; a helper with
+      sessions of its own shares nothing, so it never reached this case. What binds is that
+      connectors are opened by the async caller into an exit stack *before* this synchronous
+      function runs, and the roster is frozen per compiled graph — so a helper cannot open sessions
+      at spawn time, and giving it its own set means opening a second full set eagerly on every
+      turn, spawned or not. It is expressed by omitting `connectors=` below, and asserted against
+      the two *compiled* graphs in `tests/test_subagents.py`, because under a one-name roster any
+      build-time comparison of the caller's profile with the helper's would compare a value with
+      itself.
     - **No checkpointer.** Upstream's contract is that a helper sees the prompt it was given and
       returns one report; a thread to resume would be a second conversation nobody addresses.
     - **No durable memory and no store.** `store=` is not forwarded, so the helper's backend has no

@@ -31,12 +31,29 @@ has measured against real work. Fan-out needs no partition: `task` already tells
 several agents concurrently when their tasks are independent, so a parallel evidence sweep is N
 invocations of one name. A second name gets added when a measurement asks for one.
 
-**What a helper does not inherit, and where each bound is enforced.** No connector tools — a helper
-is concurrent with its caller by construction, and two concurrent turns over one MCP tool object
-deadlock, which is the measurement `langgraph_agent.build_langgraph_agent` gives as the reason a
-graph is compiled per turn at all. No checkpointer, because upstream's contract is that a helper
-sees only the prompt it was given and returns one report. No helpers of its own, which is the
-recursion guard `build_langgraph_agent(helper=…)` carries.
+**What a helper does not inherit, and where each bound is enforced.** No connector tools, for the
+reason below. No checkpointer, because upstream's contract is that a helper sees only the prompt it
+was given and returns one report. No helpers of its own, which is the recursion guard
+`build_langgraph_agent(helper=…)` carries.
+
+**Why a helper reaches no connector, corrected**
+(`D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock`). This used
+to be given as a concurrency bound: two concurrent turns over one MCP tool object deadlock, which is
+the measurement `build_langgraph_agent` gives as why a graph is compiled per turn at all. That
+measurement is real and it is about **sharing one session object** — a helper holding sessions of
+its own shares nothing, and `open_connector_specs` already opens a whole fleet concurrently by
+design, so the bound as stated did not reach the case it was quoted for.
+
+What actually binds is the **lifecycle**, and it is the stronger argument. Connectors are opened by
+the *caller* — the front-door runner, the CLI, a template activity — into an `AsyncExitStack`
+**before** the graph is compiled, and `build_langgraph_agent` is synchronous and receives them
+already open. The roster is fixed per compiled graph (`SubAgentMiddleware` sets `_subagents` once
+and freezes `subagent_names`), so a helper cannot open sessions at spawn time even in principle.
+Giving it its own set therefore means opening a second full set **eagerly, on every turn**, whether
+or not a helper is ever spawned: twice the sockets, handshakes and server-side session state, on a
+path whose tail already cost six sequential connect timeouts the day a fleet went dark, bought
+against a spawn rate nobody has measured. `docs/planning/BACKLOG.md` holds what would change that,
+and it is a number rather than an argument.
 
 **And, since `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`, nothing that changes
 anything.** `helper_profile` is what made that true, and it was written because the surface and the
