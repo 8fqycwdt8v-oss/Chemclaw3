@@ -352,7 +352,7 @@ def _bounded_reason(value: object) -> str:
 
     **The tail, because the head is a copy of a field printed beside it.** LangChain builds the
     message as `Function {name} arguments:\n\n{document}\n\nare not valid JSON. Received
-    JSONDecodeError {reason}` (`langchain_core/output_parsers/openai_tools.py`), so the head is the
+    JSONDecodeError {reason}` (upstream's `parse_tool_call`), so the head is the
     tool name and a verbatim second copy of `BrokenCall.arguments` — and the only thing in the
     field that is *not* already in the record beside it is the reason, at the very end. Measured
     against the 200-char budget: the reason survived a 102-char argument document and was gone from

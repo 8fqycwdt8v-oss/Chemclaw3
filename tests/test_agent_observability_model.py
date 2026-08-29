@@ -1071,7 +1071,10 @@ def test_a_reply_full_of_broken_calls_is_bounded_at_every_sink() -> None:
     assert len(correction) < 20_000, f"the correction ran to {len(correction)} characters"
 
 
-def test_a_repair_call_that_raises_still_tells_the_chemist_what_was_lost() -> None:
+@pytest.mark.parametrize("synchronous", [False, True], ids=["async", "sync"])
+def test_a_repair_call_that_raises_still_tells_the_chemist_what_was_lost(
+    synchronous: bool,
+) -> None:
     """The counter fired and the chemist heard nothing — the asymmetry this module exists to end.
 
     `_count_invalid` runs before the retry and `_announce_unrun` after it, so a 429, a timeout or a
@@ -1079,21 +1082,33 @@ def test_a_repair_call_that_raises_still_tells_the_chemist_what_was_lost() -> No
     person who asked with no `tool_failed` at all. The turn still ends in a visible `ErrorEvent`,
     so this is not the silent death — but it is the operator/chemist split the change was written
     to remove, reachable through the one path the ordering did not cover.
+
+    Both hooks, because the guard is written twice — once per path — and a mutation of either one
+    alone left the whole suite green until this was parametrized.
     """
     signals: list[Any] = []
     calls = 0
 
-    async def _handler(request: ModelRequest[Any]) -> Any:
+    def _reply() -> Any:
         nonlocal calls
         calls += 1
         if calls == 1:
             return ModelResponse(result=[_broken()])
         raise RuntimeError("the endpoint went away")
 
+    def _sync_handler(request: ModelRequest[Any]) -> Any:
+        return _reply()
+
+    async def _async_handler(request: ModelRequest[Any]) -> Any:
+        return _reply()
+
+    middleware = RepairInvalidToolCalls()
+    request = _request([HumanMessage("pKa?")])
     with _capturing_signals(signals), pytest.raises(RuntimeError):
-        asyncio.run(
-            RepairInvalidToolCalls().awrap_model_call(_request([HumanMessage("pKa?")]), _handler)
-        )
+        if synchronous:
+            middleware.wrap_model_call(request, _sync_handler)
+        else:
+            asyncio.run(middleware.awrap_model_call(request, _async_handler))
     assert [signal.tool for signal in signals] == ["predict_pka"]
 
 
