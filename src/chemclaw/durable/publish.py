@@ -120,6 +120,20 @@ _BAD_DATA_TYPES = [
     # that one is a `SubsystemUnavailableError` and must stay retryable, since the identical call
     # succeeds once the store is back. No retry installs a package.
     "VectorStoreConfigError",
+    # The prescriptive-design tier (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`).
+    # All three are facts about the request rather than about the attempt, so the identical call
+    # fails identically: a plate that cannot hold the arms holds no more of them on a retry, a
+    # design id nothing answers to answers to nothing on a retry, and a revision derived from a
+    # stale head is *still* stale — the fix there is a re-read and a re-apply by whoever wrote it,
+    # which is the one thing a retry does not do. `RevisionConflict` is the entry worth pausing on:
+    # a conflict looks transient and is not, because retrying it would resolve the race by
+    # discarding the revision it did not see, which is the whole thing the parent check prevents.
+    # Listed even though no workflow writes a design today — the list is keyed by class *name*, so
+    # an entry that never matches costs nothing while a missing one is a silent retry storm the day
+    # somebody schedules a drafting job.
+    "LayoutError",
+    "RevisionConflict",
+    "UnknownDesign",
     "TemplateError",
     "UnresolvedReference",
     "ProfileError",

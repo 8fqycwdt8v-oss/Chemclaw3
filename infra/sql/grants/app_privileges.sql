@@ -66,7 +66,7 @@ BEGIN
         'GRANT INSERT, UPDATE ON '
         'calculation_results, calculation_artifacts, job_records, '
         'bo_campaigns, measurements, predictions, note_proposals, observations, '
-        'reaction_records, '
+        'reaction_records, experiment_protocols, '
         'plan_approvals, sync_cursors, turn_costs, '
         'molecule_fingerprints, reaction_fingerprints, reaction_labels, corpus_molecules, '
         'corpus_reactions, corpus_cursors, '
@@ -86,7 +86,14 @@ BEGIN
     -- `make db-migrate` under the owning principal, and granting a chat turn those verbs for the
     -- life of the deployment is exactly what the withholding above is for.
     -- `tests/test_database_privileges.py` names the module and this reason.
-    EXECUTE format('GRANT INSERT ON bo_suggestions, structures TO %I', app_role);
+    -- `experiment_protocol_revisions` joins them for the same reason and it is load-bearing rather
+    -- than tidy: a revision is what an expert's edit to a generated protocol *is*, so a credential
+    -- that could UPDATE one could rewrite the correction it exists to record. The header row
+    -- (`experiment_protocols`) is upsertable above because its `head_revision`/`status` genuinely
+    -- move; the revisions themselves never do.
+    EXECUTE format(
+        'GRANT INSERT ON bo_suggestions, structures, experiment_protocol_revisions TO %I', app_role
+    );
 
     -- Insert, delete, and now a narrow update. The row is still written once by its creator
     -- (`ON CONFLICT DO NOTHING`, first writer wins), and offboarding removes a departed person's
