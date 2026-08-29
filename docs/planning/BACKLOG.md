@@ -150,18 +150,6 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **A development report's durable run has no correlation id to stamp** — [S].
-      `ReportRequest` and `SectionRequest` (`retrieval/harness.py:38,68`) carry `requested_by` and
-      `requested_roles` and no correlation id, so `report_workflow.retrieve_section` and
-      `propose_report` stamp an actor and nothing that joins the run to the turn that asked for it —
-      the log lines and the PR-gated draft both book an empty one. `ConnectorJobInput.correlation_id`
-      (`durable/connector_job.py:142`) is the shape to copy, and `request_development_report` runs
-      inside a turn where `get_current_correlation_id()` is bound, so the id exists at the launch.
-      Left out of `D-2026-08-27-a-step-runs-under-the-correlation-id-it-was-launched-with`
-      deliberately: that ADR fixed the sites that already carried an id, and inventing one here
-      would make an unjoined run look joined. `durable/memory_jobs.py:178` is the same shape and is
-      *not* this row — a synthesis job is system-triggered, so there is genuinely no turn.
-
 - [ ] **A timed-out parse still runs to completion on the worker thread** — [L]. **The cheap half
       is closed**: `ingest/documents/sync.py::_parse_changed` now bounds its `asyncio.to_thread`
       with the front door's own `attachment_parse_timeout_seconds` and counts the outcome as

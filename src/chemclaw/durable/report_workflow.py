@@ -91,8 +91,15 @@ async def retrieve_section(request: SectionRequest) -> SynthesizedSection:
 
 @durable_activity("background")
 @activity.defn
-async def propose_report(report: Report, requested_by: str = "") -> str:
+async def propose_report(report: Report, requested_by: str = "", correlation_id: str = "") -> str:
     """Render the gathered report as a PR-gated `report` note; return the reference.
+
+    `correlation_id` is never read in this body, and that is the shape rather than an oversight:
+    `durable/interceptor.py` binds an activity's ids from its *own* arguments, reading the four
+    activities that carry them as bare strings off the function signature, so declaring the
+    parameter is the whole wiring. What it buys is that `kg/proposal.py`'s `ambient_provenance()`
+    stamps the turn on the `NoteProposal` — a draft that could otherwise be joined to the chemist
+    but not to the question they asked.
 
     `requested_by` stamps the ambient identity for the gate, for the same reason
     `publish_memory_note_activity` takes one: `propose_note` records a durable `NoteProposal` whose
@@ -234,6 +241,7 @@ class DevelopmentReportWorkflow:
                     section=section,
                     requested_by=request.requested_by,
                     requested_roles=request.requested_roles,
+                    correlation_id=request.correlation_id,
                 )
                 for section in request.sections
             ],
@@ -242,7 +250,9 @@ class DevelopmentReportWorkflow:
         report = Report(title=request.title, sections=_reconcile(request.sections, sections))
         # The note reference *is* this workflow's result, so the publish is not
         # best-effort — but it shares the bounded-attempts discipline (G4).
-        note_ref = await publish_note(propose_report, [report, request.requested_by])
+        note_ref = await publish_note(
+            propose_report, [report, request.requested_by, request.correlation_id]
+        )
         return ConnectorJobResult(
             summary=(
                 # `report.sections`, not the fan-out's return: after reconciliation that is one
