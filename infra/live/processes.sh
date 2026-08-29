@@ -241,14 +241,18 @@ print(re.search(r":(\d+)/mcp", url).group(1))
 PY
 }
 
-start_fleet_bundles() {
-  local python="$1"
-  [ -d "$MCP_REPO" ] || die "chem and safety are served by Chemclaw3-mcp, which is not at $MCP_REPO.
+# Resolve the fleet checkout and its interpreter once, for every server this lane takes from it.
+# One call, because `fleet_python_bin` runs `uv sync` and because two resolutions are two chances
+# to disagree about which interpreter the fleet's servers run on.
+fleet_checkout_python() {
+  [ -d "$MCP_REPO" ] || die "chem, safety and the calc backend are served by Chemclaw3-mcp, which is not at $MCP_REPO.
 Clone it beside this checkout, or set CHEMCLAW_MCP_REPO. Relaxing CHEMCLAW_CONNECTORS_REQUIRED is
 not the fix: it is the posture the chart ships and the one this lane exists to exercise."
+  fleet_python_bin || die "could not resolve an interpreter in $MCP_REPO"
+}
 
-  local fleet_python
-  fleet_python="$(fleet_python_bin)" || die "could not resolve an interpreter in $MCP_REPO"
+start_fleet_bundles() {
+  local python="$1" fleet_python="$2"
 
   local name port
   for name in chem safety; do
@@ -279,6 +283,62 @@ PY
 )"
   done
   export CHEMCLAW_CONNECTOR_URLS
+}
+
+# The `calc` backend, which is **not** a connector and must never enter `CHEMCLAW_CONNECTOR_URLS`.
+#
+# Chemclaw3 keeps its own `calc` bundle and all fifteen tools; what moved to the fleet is the
+# *physics* behind them (D-2026-08-16-the-physics-leaves-the-cache-stays), which
+# `connectors/calc/remote.py::calc_session` dials at `calc_server_url` on a cache miss. So it is
+# invisible to `check_connectors_at_startup`, `/readyz` is green with it down, and the front door
+# boots happily — while every durable calculation job fails at run time with `CalcServerError: the
+# calculation service is not answering`. That is what `make live-jobs` did on this lane for as long
+# as it existed: 0 of 5 checks, on the target the runbook calls the load-bearing one.
+#
+# It is started here for D-2026-08-27's own reason: the lane that cannot do its work without a
+# server is the lane that owns it. That ADR asked the question of the front door and answered it
+# for `chem` and `safety`; the durable half asks it of `calc` and gets the same answer. See
+# D-2026-08-28-the-durable-half-has-a-backend-too.
+#
+# The port comes from `calc_server_url` rather than from the fleet's manifest, and the difference
+# is load-bearing: this is the address the *client* dials, so reading it from anywhere else would
+# let the two drift and turn a misconfiguration into a connection refused. (The manifest also lives
+# in `manifests-internal/`, which `fleet_port` above deliberately cannot read.)
+calc_backend_port() {
+  "$1" - <<'PYEOF'
+import sys
+from urllib.parse import urlsplit
+
+from chemclaw.core.config import settings
+
+port = urlsplit(settings.calc_server_url).port
+if port is None:
+    sys.exit(f"calc_server_url names no port: {settings.calc_server_url}")
+print(port)
+PYEOF
+}
+
+start_calc_backend() {
+  local python="$1" fleet_python="$2"
+  local port
+  port="$(calc_backend_port "$python")" || die "could not read a port from calc_server_url"
+
+  # Both halves of the credential, as for `chem` and `safety`: core reads this to send, the server
+  # reads the same variable name to verify. Without it the server answers `/healthz` and refuses
+  # every `/mcp` call, which reaches the reader as a 401 from a server that looks healthy.
+  export CHEMCLAW_CALC_TOKEN="${CHEMCLAW_CALC_TOKEN:-dev-token}"
+
+  # The same address guard `start_fleet_bundles` uses, for the same reason: a pidfile is a per-lane
+  # record of a machine-wide port, so ask the address itself before launching onto it.
+  if ! running calc && curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$port/healthz"; then
+    die "calc: 127.0.0.1:$port is already served, and not by a process this lane started.
+This lane owns the calc backend; the four-repo lane reaches it by calling this script, so nothing
+should be starting it twice. Stop the other server, or run \`make live-e2e-full-stack\`."
+  fi
+
+  ( cd "$MCP_REPO" && start calc "$fleet_python" -m "uvicorn" "chemclaw_mcp_calc.app:app" \
+      --host 127.0.0.1 --port "$port" )
+  wait_for calc "http://127.0.0.1:$port/healthz"
 }
 
 
@@ -335,8 +395,14 @@ up() {
   # `chem` and `safety` come from the fleet checkout, and they come up *before* the front door for
   # the reason `connectors_required=true` exists: an unreachable enabled bundle is a boot failure,
   # not a degraded turn.
-  start_fleet_bundles "$python"
+  local fleet_python
+  fleet_python="$(fleet_checkout_python)"
+  start_fleet_bundles "$python" "$fleet_python"
   log "connector urls (with the fleet): $CHEMCLAW_CONNECTOR_URLS"
+
+  # The calc backend is not a connector and so is not in that map — and is needed all the same, by
+  # the durable half rather than by the front door. See `start_calc_backend`.
+  start_calc_backend "$python" "$fleet_python"
 
   # Now every address and credential is known, so the file a second shell reads can be complete.
   # `connector_env`'s own exports, then the fleet's two tokens and the URL map it rewrote.
@@ -345,6 +411,7 @@ up() {
     printf 'export CHEMCLAW_CONNECTOR_URLS=%q\n' "$CHEMCLAW_CONNECTOR_URLS"
     printf 'export CHEMCLAW_CHEM_TOKEN=%q\n' "$CHEMCLAW_CHEM_TOKEN"
     printf 'export CHEMCLAW_SAFETY_TOKEN=%q\n' "$CHEMCLAW_SAFETY_TOKEN"
+    printf 'export CHEMCLAW_CALC_TOKEN=%q\n' "$CHEMCLAW_CALC_TOKEN"
   ) > "$RUN_DIR/connector-env.sh"
   if [ "${CHEMCLAW_LIVE_PROBE_TOKEN:-}" != "" ]; then
     ( umask 077; printf 'export CHEMCLAW_LIVE_PROBE_TOKEN=%q\n' "$CHEMCLAW_LIVE_PROBE_TOKEN" \
