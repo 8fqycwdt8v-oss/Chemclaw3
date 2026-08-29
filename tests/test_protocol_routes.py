@@ -530,7 +530,6 @@ def test_the_diff_route_takes_both_endpoints_explicitly(
         "arms.A3.control",
         "arms.A3.note",
         "arms.A3.replicate_of",
-        "arms.A3.setpoints",
     }
 
 

@@ -171,6 +171,22 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
         if head is not None
         else ExperimentDesign(request=request)
     )
+    # **An identical document is not a revision, and appending one un-approved designs.** The id is
+    # derived from the ask, so re-stating the same ask reaches the same design and carries its
+    # protocol forward unchanged — and `advanced()` retires an `approved` or `executed` status on
+    # any revision landing, justified by "the document has changed". Measured: a chemist approved a
+    # plate, the ask was restated in a later session, and the header came back `draft` over a head
+    # that compared equal to the approved one. Nothing changed, so nothing is stored.
+    if head is not None and design == head.design:
+        header = await store.summary(design_id)
+        return receipt(
+            design,
+            head.checks,
+            design_id=design_id,
+            revision=head.revision,
+            status=header.status if header else "requested",
+        ).model_dump_json()
+
     checks = run_checks(design, stage="protocol" if design.has_protocol else "request")
     revision = await store.append(
         design_id,

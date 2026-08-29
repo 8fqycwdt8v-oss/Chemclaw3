@@ -49,6 +49,7 @@ from chemclaw.protocols.models import (
     DesignStatus,
     DesignSummary,
     ExperimentDesign,
+    ExperimentRequest,
     ProtocolCheck,
     StatusEvent,
 )
@@ -58,6 +59,13 @@ logger = logging.getLogger(__name__)
 _REVISION_COLUMNS = (
     "revision, kind, author_kind, author, parent_revision, change_note, "
     "document, checks, created_at"
+)
+
+#: The same row without the document, for `history()`. A revision's `document` is kilobytes of
+#: JSONB and a pydantic validation each; the history list renders seven scalars and a blocker
+#: count, and touches none of it.
+_HEADER_COLUMNS = (
+    "revision, kind, author_kind, author, parent_revision, change_note, checks, created_at"
 )
 
 _UPSERT_DESIGN = """
@@ -71,8 +79,14 @@ ON CONFLICT (design_id) DO UPDATE SET
     title = EXCLUDED.title,
     mode = EXCLUDED.mode,
     -- Safe to take from the insert because the caller computed it from *this* row a moment ago,
-    -- inside the same transaction, through `advanced()`. It is the one transition a write makes on
-    -- its own — `requested` becoming `draft` — and every other status move is `set_status`.
+    -- inside the same transaction, through `advanced()` — and under `FOR UPDATE`, which is what
+    -- makes "a moment ago" mean anything. Without the lock a concurrent `set_status` committing in
+    -- that window was overwritten by this transaction's stale value, 20 times out of 20.
+    --
+    -- `advanced()` makes **five** self-transitions, not the one this comment used to name:
+    -- `requested` becoming `draft`, and the four demotions that retire an `approved` or `executed`
+    -- status when any revision lands. Those ride through this very line, so a reader told the
+    -- upsert can only promote was being told the opposite of what it does.
     status = EXCLUDED.status,
     project = EXCLUDED.project,
     head_revision = EXCLUDED.head_revision,
@@ -332,6 +346,11 @@ class InMemoryDesignStore:
         limit: int = 50,
     ) -> list[DesignSummary]:
         """Designs, newest first."""
+        # Clamped exactly as Postgres clamps it. `[:limit]` and `max(1, min(limit, 500))` disagree
+        # on `limit=0` (memory returns nothing, Postgres one row) and on a negative (memory returns
+        # all but the last, Postgres one row) — a divergence in a `Protocol` method whose two
+        # implementations are documented as interchangeable.
+        bounded = max(1, min(limit, 500))
         summaries = [
             DesignSummary(
                 design_id=design_id,
@@ -351,7 +370,7 @@ class InMemoryDesignStore:
             and (not project or meta.get("project") == project)
             and (not session_id or meta.get("session_id") == session_id)
         ]
-        return sorted(summaries, key=lambda s: s.updated_at, reverse=True)[:limit]
+        return sorted(summaries, key=lambda s: s.updated_at, reverse=True)[:bounded]
 
     async def set_status(
         self, design_id: str, status: DesignStatus, actor: str = "", reason: str = ""
@@ -421,7 +440,13 @@ class PostgresDesignStore:
                 await cur.execute(_SELECT_HEAD, (design_id,))
                 row = await cur.fetchone()
                 head = int(row[0]) if row else 0
-                current_status: DesignStatus = advanced(row[1], kind) if row else status
+                # `advanced()` on the create too, which is what the in-memory backend has always
+                # done. The two disagreed on a design's *first* revision — memory applied the
+                # transition, Postgres did not — and they agreed by accident only because the one
+                # creator in `src/` passes `kind="request", status="requested"`, for which the
+                # transition is the identity. A second creator would have made the header's status
+                # depend on which backend a deployment configured.
+                current_status: DesignStatus = advanced(row[1] if row else status, kind)
                 _require_head(design_id, head, parent_revision)
                 revision = DesignRevision(
                     design_id=design_id,
@@ -497,16 +522,27 @@ class PostgresDesignStore:
         return _summary(row) if row else None
 
     async def history(self, design_id: str) -> list[DesignRevision]:
-        """Every revision, oldest first."""
+        """Every revision, oldest first.
+
+        **Reads the checks and not the documents.** `GET /protocols/{id}` renders seven scalars per
+        revision and `len(blockers)`; it never touches `item.design`. Selecting `document` anyway
+        cost a JSONB read and an `ExperimentDesign.model_validate` per row — measured at **39x** the
+        rest of the query over 40 revisions of a 24-arm plate (90.6 ms against 2.3 ms), on the
+        event loop, unbounded because the table is append-only and has no revision cap.
+
+        The `design` on each row is therefore the empty design rather than the stored one, which is
+        why this returns headers and the docstring says so: `read()` is how a caller gets a
+        document, and it is the only caller that needs one.
+        """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    f"SELECT {_REVISION_COLUMNS} FROM experiment_protocol_revisions "
+                    f"SELECT {_HEADER_COLUMNS} FROM experiment_protocol_revisions "
                     "WHERE design_id = %s ORDER BY revision",
                     (design_id,),
                 )
                 rows = await cur.fetchall()
-        return [_revision(design_id, row) for row in rows]
+        return [_revision_header(design_id, row) for row in rows]
 
     async def listing(
         self,
@@ -692,6 +728,26 @@ def _summary(row: tuple[Any, ...]) -> DesignSummary:
         blockers=row[8],
         created_at=row[9],
         updated_at=row[10],
+    )
+
+
+def _revision_header(design_id: str, row: tuple[Any, ...]) -> DesignRevision:
+    """Build a `DesignRevision` from a `_HEADER_COLUMNS` row, with no document in it.
+
+    `design` is the empty design rather than the stored one — see `history()`. Every reader of this
+    shape wants the scalars and `blockers`; the one reader that wants a document calls `read()`.
+    """
+    return DesignRevision(
+        design_id=design_id,
+        revision=row[0],
+        kind=row[1],
+        author_kind=row[2],
+        author=row[3],
+        parent_revision=row[4],
+        change_note=row[5],
+        design=ExperimentDesign(request=ExperimentRequest(title="(not read)", goal="(not read)")),
+        checks=[ProtocolCheck.model_validate(c) for c in row[6]],
+        created_at=row[7],
     )
 
 

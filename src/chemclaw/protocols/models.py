@@ -445,6 +445,17 @@ class ExperimentDesign(BaseModel):
         dangling = sorted({arm.replicate_of for arm in self.arms if arm.replicate_of} - set(ids))
         if dangling:
             raise ValueError(f"replicate_of names no arm in this design: {', '.join(dangling)}")
+        # **An arm cannot be a replicate of itself**, which the two guards around this one could not
+        # see: the name is not dangling, and the conditions trivially match. It silenced both
+        # readers at once — `arms_are_distinct` skips every arm carrying `replicate_of`, and
+        # `coverage_is_stated` counts none of them — so three identical arms reported "no unmarked
+        # duplicate conditions" and a grid coverage of zero.
+        itself = sorted(arm.arm_id for arm in self.arms if arm.replicate_of == arm.arm_id)
+        if itself:
+            raise ValueError(
+                f"these arms name themselves in replicate_of: {', '.join(itself)}. A replicate "
+                "names the arm it repeats, which is a different arm"
+            )
         # **A replicate has to run the same conditions**, which is the second half of the same
         # hole. `replicate_of` naming a *real* arm with different levels was accepted, and it
         # defeated the same two readers a dangling one did: `arms_are_distinct` skips every arm

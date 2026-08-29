@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from chemclaw.core.errors import ChemclawError
 from chemclaw.protocols.models import PlateLayout, ProtocolArm, Well
 
-#: `plate_format -> (rows, columns)`. The five SBS-standard densities plus 48, which is the one a
+#: `plate_format -> (rows, columns)`. Five formats: the SBS densities plus 48, which is the one a
 #: bench chemist actually reaches for when 24 is too few. A format not in this map is refused
 #: rather than guessed at: a 60-well plate would otherwise be laid out as 6x10 or 10x6 and the two
 #: are different plates.

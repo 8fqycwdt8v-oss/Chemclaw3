@@ -78,10 +78,20 @@ def flatten(document: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     rather than by position, so reordering a plate is not read as rewriting it. Every other list is
     keyed by index, which is right where position *is* the identity — `base.steps.0.text` is the
     first instruction and stays the first instruction.
+
+    **`None` is an absent path, not a leaf holding `None`, and the difference inverted a word on
+    the product surface.** An optional sub-model stored as a scalar leaf meant `layout: None`
+    produced the path `layout`, while a populated one produced `layout.rows`, `layout.wells.A1.…`
+    and no `layout` at all — so the set difference reported *adding* a plate as `layout removed`
+    and removing one as `layout added`. It also filled a diff with rows carrying no information:
+    87% of the paths for a per-arm setpoint were `'' -> ''`, which a miner asking "how often does a
+    chemist change this field" counts as changes that never happened.
     """
     flat: dict[str, Any] = {}
     for key, value in document.items():
         path = f"{prefix}{key}"
+        if value is None:
+            continue
         if isinstance(value, dict):
             flat.update(flatten(value, f"{path}."))
         elif isinstance(value, list):

@@ -234,13 +234,22 @@ def test_a_structured_request_returns_json_the_front_end_can_parse(
 def test_structuring_the_same_ask_twice_revises_rather_than_forking(
     store: InMemoryDesignStore,
 ) -> None:
-    """The id is derived from the ask, which is what stops a re-reading opening a second design."""
+    """The id is derived from the ask, which is what stops a re-reading opening a second design.
+
+    **And an identical re-reading writes nothing**, which this test used to assert the opposite of.
+    `advanced()` retires an `approved` or `executed` status on any revision landing, justified by
+    "the document has changed" — so a second revision carrying a document that compares equal to
+    the first un-approved a plate nobody had touched. Measured: a chemist approved a design, the
+    ask was restated, and the header came back `draft` over a head identical to the approved one.
+    The design is still reached (same id, same head); there is simply nothing to record.
+    """
 
     async def _body() -> None:
         first = await _open()
         second = await _open()
         assert second.design_id == first.design_id
-        assert (first.revision, second.revision) == (1, 2)
+        assert (first.revision, second.revision) == (1, 1)
+        assert len(await store.history(first.design_id)) == 1
 
     asyncio.run(_body())
 

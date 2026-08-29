@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Iterable
+from typing import Any
 
 from chemclaw.core.chem import InvalidSmilesError, element_counts
 from chemclaw.core.reagents import resolve_compound_name
@@ -61,8 +62,15 @@ def _all_charge_lines(design: ExperimentDesign) -> list[ChargeLine]:
     """Every charge line in the design.
 
     A function rather than `design.base.charge` inline, because there is exactly one charge table
-    today and four checks read it: if a per-arm override is ever argued for, it lands here and none
-    of them changes.
+    today and four checks read it through this seam.
+
+    **It is a seam, not a guarantee, and the docstring used to claim the second.** It said a
+    per-arm override "lands here and none of them changes" — while `charge_is_consistent` (the
+    blocker whose whole subject is the charge table) and `is_a_protocol` both read
+    `design.base.charge` directly. Either could still be blind to an override this function
+    started returning. The two are left as they are, because `charge_is_consistent` needs the
+    per-arm question answered deliberately rather than inherited, and this sentence is now what a
+    reader is told instead of a promise nothing kept.
     """
     return list(design.base.charge)
 
@@ -117,7 +125,11 @@ def components_resolve(design: ExperimentDesign) -> ProtocolCheck:
         )
     named_without_structure = [c.name_as_written for c in design.request.components if not c.smiles]
     if named_without_structure:
-        return _ok(
+        # A *failed* warning: this is a finding, and `render_markdown` and `summarise` both list
+        # only failed checks, so an `_ok` here put "checked and fine" in front of a reader about a
+        # species nobody resolved. That is the defect `_unreadable`'s docstring describes as fixed,
+        # in four other places in this file.
+        return _fail(
             "components_resolve",
             "warning",
             "no structure resolved for: " + ", ".join(named_without_structure),
@@ -161,7 +173,7 @@ def charge_is_consistent(design: ExperimentDesign) -> ProtocolCheck:
     # reading "limiting reagent 'SM' at 0 mmol". Zero is the same fact as absent for this check:
     # there is no scale to turn an equivalent into a weight against.
     if not reference.amount_mmol:
-        return _ok(
+        return _fail(
             "charge_is_consistent",
             "warning",
             f"the limiting reagent {reference.component!r} has no usable amount "
@@ -207,11 +219,9 @@ def atom_balance(design: ExperimentDesign) -> ProtocolCheck:
     reaction = design.request.reaction_smiles.strip()
     parts = reaction.split(">")
     if len(parts) != 3:
-        return _ok(
-            "atom_balance",
-            "warning",
-            "no reaction SMILES to balance" if not reaction else f"not a reaction: {reaction!r}",
-        )
+        if not reaction:
+            return _ok("atom_balance", "warning", "no reaction SMILES to balance")
+        return _fail("atom_balance", "warning", f"not a reaction: {reaction!r}")
     reactant_side, agent_side, product_side = parts
     supplied: set[str] = set()
     inputs = (
@@ -278,9 +288,23 @@ def _reaction_species(reaction: str) -> list[tuple[str, str]]:
 
 def factor_levels_declared(design: ExperimentDesign) -> ProtocolCheck:
     """Every arm sets levels its factors declare, and sets all of them."""
-    if not design.factors:
-        return _ok("factor_levels_declared", "blocker", "no factors")
     declared = {f.name: {level.label for level in f.levels} for f in design.factors}
+    if not design.factors:
+        # **Not an early return, because "no factors" is the case where every level an arm sets is
+        # undeclared.** The exit came first and exempted exactly that: two arms setting `solvent`
+        # and `ligand` with no factor declared passed a blocker whose subject is "an arm setting a
+        # level the factor does not declare", and `render`'s run sheet — which builds its columns
+        # from `design.factors` — then dropped those values from the sheet the chemist runs from.
+        stray = sorted({name for arm in design.arms for name in arm.levels if not arm.control})
+        if stray:
+            return _fail(
+                "factor_levels_declared",
+                "blocker",
+                "arms set levels for factors this design does not declare: "
+                + ", ".join(stray)
+                + " — declare them as factors, or the run sheet will not show them",
+            )
+        return _ok("factor_levels_declared", "blocker", "no factors")
     problems: list[str] = []
     for arm in design.arms:
         if arm.control:
@@ -307,12 +331,17 @@ def factor_levels_declared(design: ExperimentDesign) -> ProtocolCheck:
 
 def arms_are_distinct(design: ExperimentDesign) -> ProtocolCheck:
     """No two non-replicate arms set the same conditions."""
-    seen: dict[tuple[tuple[str, str], ...], str] = {}
+    # **The setpoints are part of the conditions, and leaving them out made the remedy impossible.**
+    # Keyed on `levels` alone, three arms differing only in temperature collided, and the message
+    # told the chemist to mark one `replicate_of` the other — which the model validator refuses,
+    # because they run different conditions. The advice and the refusal were each right about a
+    # different definition of "the same conditions"; this is the one both now use.
+    seen: dict[tuple[Any, ...], str] = {}
     duplicates: list[str] = []
     for arm in design.arms:
         if arm.replicate_of or arm.control:
             continue
-        key = tuple(sorted(arm.levels.items()))
+        key = (tuple(sorted(arm.levels.items())), design.setpoints_for(arm))
         if key in seen:
             duplicates.append(f"{arm.arm_id} repeats {seen[key]}")
         else:
@@ -614,7 +643,10 @@ def coverage_is_stated(design: ExperimentDesign) -> ProtocolCheck:
     real = len([a for a in design.arms if not a.control and not a.replicate_of])
     if real >= full:
         return _ok("coverage_is_stated", "note", f"full grid: {real} of {full} combinations")
-    return _ok(
+    # Failed, so it reaches the page. This was the extreme case of the same defect: the check had
+    # no `_fail` in any branch, so its only substantive sentence — the one naming the confounding a
+    # reduced design buys — could not reach a reader through any rendering path.
+    return _fail(
         "coverage_is_stated",
         "note",
         f"reduced design: {real} of {full} combinations. Say which combinations were given up and "

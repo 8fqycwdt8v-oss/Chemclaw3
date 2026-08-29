@@ -53,7 +53,8 @@ wells = controls + replicates + (levels of factor 1 × levels of factor 2 × …
 ```
 
 Four factors at three levels is 81 wells and leaves 15 for controls and replicates on a 96 — which
-is a real design. Five at three is 243 and does not fit any plate you own. Do that arithmetic
+is a real design. Five at three is 243, which fits a 384 but is three plates' worth of work and a week of
+analysis. Do that arithmetic
 *before* you choose the factors, not after, because the alternative is proposing a plate and then
 quietly deleting levels to make it fit.
 
