@@ -286,6 +286,13 @@ def test_the_bound_admits_no_punctuation_a_served_name_does_not_use() -> None:
         assert safe_tool_name(ordinary) == ordinary
 
 
+#: How much room the tool-name cap must keep above the longest name actually served. Small on
+#: purpose: this is an early warning, not a second cap. Three characters is enough that a rename or
+#: a slightly longer sibling of an existing tool does not silently consume the last of the margin,
+#: and loose enough that an ordinary new tool name does not fail the suite for no reason.
+_HEADROOM = 3
+
+
 def test_every_name_this_system_serves_survives_the_bound() -> None:
     """The other direction, and the one that makes tightening the pattern safe rather than lossy.
 
@@ -327,9 +334,10 @@ def test_every_name_this_system_serves_survives_the_bound() -> None:
     )
 
     longest = max(names, key=len)
-    assert len(longest) <= MAX_TOOL_NAME - 5, (
+    assert len(longest) + _HEADROOM <= MAX_TOOL_NAME, (
         f"the longest served tool name is {longest!r} at {len(longest)} characters, against a "
-        f"MAX_TOOL_NAME of {MAX_TOOL_NAME}. The cap is a measurement with room above it; with the "
-        "room gone it is a trap, and the next slightly longer name disappears into "
-        "'(unrecognised)'. Re-measure and raise it deliberately, in this commit."
+        f"MAX_TOOL_NAME of {MAX_TOOL_NAME}: fewer than {_HEADROOM} characters of room left. The "
+        "cap is a measurement, and a measurement with no room above it is a trap — the next "
+        "slightly longer name disappears into '(unrecognised)' with no error anywhere. Re-measure "
+        "the served surface and raise the cap deliberately, in the commit that adds the name."
     )
