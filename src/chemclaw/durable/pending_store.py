@@ -51,18 +51,41 @@ def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]
     return db.connection(settings.session_store_dsn or settings.postgres_dsn)
 
 
+# **Two cases, and telling them apart is the whole point of `run_id`.** A retry of the opening
+# activity carries the *same* Temporal run and must update in place without disturbing a state the
+# workflow may already have settled. A re-ask carries a *different* run — `request_id_for` is
+# deterministic and `ALLOW_DUPLICATE` is set precisely so a lapsed question can be asked again — and
+# must reopen the row, clearing the previous cycle's answer so the new wait is visible and
+# answerable.
+#
+# Guarding on `state = 'waiting'` alone did the first and silently dropped the second: the row kept
+# the old cycle's `expired` state and deadline, so the new wait appeared in no inbox and the answer
+# route refused it with 409 forever while the workflow ran on.
 _OPEN = """
     INSERT INTO pending_requests
         (request_id, kind, subject, rationale, asked_of, requested_by, session_id,
-         correlation_id, due_at)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+         correlation_id, due_at, run_id)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (request_id) DO UPDATE SET
         kind = EXCLUDED.kind,
         subject = EXCLUDED.subject,
         rationale = EXCLUDED.rationale,
         asked_of = EXCLUDED.asked_of,
-        due_at = EXCLUDED.due_at
+        due_at = EXCLUDED.due_at,
+        run_id = EXCLUDED.run_id,
+        state = 'waiting',
+        answered_at = NULL,
+        answered_by = '',
+        answer = '{}'::jsonb,
+        reminders = CASE
+            WHEN pending_requests.run_id = EXCLUDED.run_id THEN pending_requests.reminders ELSE 0
+        END,
+        reminded_at = CASE
+            WHEN pending_requests.run_id = EXCLUDED.run_id THEN pending_requests.reminded_at
+            ELSE NULL
+        END
     WHERE pending_requests.state = 'waiting'
+       OR pending_requests.run_id <> EXCLUDED.run_id
 """
 
 _SETTLE = """
@@ -94,8 +117,14 @@ async def open_request(
     session_id: str,
     correlation_id: str,
     due_at: datetime,
+    run_id: str = "",
 ) -> None:
-    """Record a wait as open. Idempotent, and never reopens one that has settled."""
+    """Record a wait as open.
+
+    Idempotent within one Temporal run, and **reopening across runs** — see `_OPEN` for why those
+    are different cases and what it cost to treat them as one. `run_id` defaults to empty so a
+    caller with no run to name (a test, a backfill) keeps the old within-run behaviour.
+    """
     async with _connect() as conn:
         await conn.execute(
             _OPEN,
@@ -109,6 +138,7 @@ async def open_request(
                 session_id,
                 correlation_id,
                 due_at,
+                run_id,
             ),
         )
 

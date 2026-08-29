@@ -158,3 +158,65 @@ def test_str_reads_the_way_a_chemist_writes_it() -> None:
     assert str(Measurement.of(0.15, "%", basis="area")) == "0.15 % (area)"
     # A dimensionless value prints as a bare number rather than with an empty unit appended.
     assert str(Measurement.of(4.7, "")) == "4.7"
+
+
+def test_every_rung_of_the_concentration_ladder_is_a_concentration() -> None:
+    """The defect this file's original tests could not see, because they stopped at `mM`.
+
+    Case is what separates molarity from length here, and that only works where both families
+    register the same prefix — a fold claimed by two units is poisoned and the ambiguous spelling is
+    refused. `M`/`m` and `mM`/`mm` were both present, so the mechanism looked proven; `nM` was not,
+    so nanomolar resolved to the *nanometre* sitting alone on that rung. Nanomolar is the working
+    unit of potency, so this was not an edge case: an IC50 could be ordered against a particle size.
+
+    Asserted over the whole ladder rather than one more example, since one more example is exactly
+    what the original test was.
+    """
+    for spelling, factor in (("M", 1.0), ("mM", 1e-3), ("uM", 1e-6), ("nM", 1e-9), ("pM", 1e-12)):
+        unit = parse_unit(spelling)
+        assert unit.dimension == "concentration", f"{spelling} resolved to {unit.dimension}"
+        assert unit.factor == pytest.approx(factor)
+
+
+def test_every_rung_of_the_length_ladder_is_a_length_including_the_micro_signs() -> None:
+    """The same in the other direction — and `µm` is where it went wrong.
+
+    `µm` was registered as an *exact* alias of micromolar, so it did not even reach the ambiguity
+    guard: micrometre was absent from the length family, nothing poisoned the fold, and a 50 µm
+    particle size was accepted as a concentration. Both micro signs are checked, because the micro
+    sign (U+00B5) and the Greek mu (U+03BC) are different code points a chemist may type either of.
+    """
+    for spelling in ("m", "cm", "mm", "um", "µm", "μm", "nm"):
+        assert parse_unit(spelling).dimension == "length", f"{spelling} is not a length"
+    # And the correctly-spelled micromolar still reaches micromolar, which is all those aliases
+    # were ever needed for.
+    for spelling in ("uM", "µM", "μM"):
+        assert parse_unit(spelling).dimension == "concentration"
+
+
+def test_a_potency_cannot_be_ordered_against_a_particle_size() -> None:
+    """The failure the ladders exist to prevent, stated as the outcome rather than as a lookup."""
+    with pytest.raises(UnitError):
+        Measurement.of(50, "nM").compare(Measurement.of(1, "mm"))
+    with pytest.raises(UnitError):
+        reconcile(50, "µm", "mM")
+    # And the comparison that must *work* — two concentrations two rungs apart.
+    assert Measurement.of(50, "nM").compare(Measurement.of(0.1, "uM")) == -1
+
+
+def test_a_percent_that_states_its_basis_carries_it_and_will_not_compare_across_bases() -> None:
+    """An area percent and a weight percent are one unit and two facts.
+
+    The module docstring says a system that dropped the distinction would compare them; `area%` and
+    `% w/w` were bare aliases of `%`, so `basis` was empty and they compared **equal**. A spelling
+    that states the basis now fills it, and two *stated* bases that disagree refuse.
+    """
+    area = Measurement.of(0.15, "area%")
+    weight = Measurement.of(0.15, "% w/w")
+    assert (area.basis, weight.basis) == ("area", "w/w")
+    with pytest.raises(UnitError):
+        area.compare(weight)
+    # An unstated basis is "nobody said" and must not block an ordinary comparison.
+    assert Measurement.of(0.15, "%").compare(area) == 0
+    # An explicit basis always wins over the spelling's.
+    assert Measurement.of(0.15, "area%", basis="w/w").basis == "w/w"

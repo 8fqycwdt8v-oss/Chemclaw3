@@ -118,7 +118,42 @@ def _register(unit: Unit, *aliases: str) -> None:
 # makes "0.15% versus 1500 ppm" answerable rather than a coin toss.
 _register(Unit("", "dimensionless"), "none", "unitless", "-")
 _register(Unit("fraction", "fraction"), "frac")
-_register(Unit("%", "fraction", 0.01), "percent", "pct", "% w/w", "%w/w", "area%", "% area")
+_register(
+    Unit("%", "fraction", 0.01),
+    "percent",
+    "pct",
+    "% w/w",
+    "%w/w",
+    "w/w%",
+    "% w/v",
+    "%w/v",
+    "area%",
+    "% area",
+    "%area",
+    "mol%",
+    "% mol",
+)
+
+#: Spellings that state their own basis. **A percent is one unit and several facts**, and these are
+#: the spellings in which a chemist says which: an HPLC area percent, a weight percent, a molar
+#: percent. They were registered as bare aliases of `%`, so `Measurement.of(0.15, "area%").basis`
+#: was `""` and an area percent compared **equal** to a weight percent — the exact thing this
+#: module's docstring says a system must not do, in the field that exists to prevent it.
+#:
+#: Mapping the spelling to the basis is what makes the distinction survive parsing: the caller no
+#: longer has to know to pass `basis=` by hand for a string that already said it.
+_BASIS_SPELLINGS: dict[str, str] = {
+    "% w/w": "w/w",
+    "%w/w": "w/w",
+    "w/w%": "w/w",
+    "% w/v": "w/v",
+    "%w/v": "w/v",
+    "area%": "area",
+    "% area": "area",
+    "%area": "area",
+    "mol%": "mol",
+    "% mol": "mol",
+}
 _register(Unit("ppm", "fraction", 1e-6))
 _register(Unit("ppb", "fraction", 1e-9))
 
@@ -155,9 +190,26 @@ _register(Unit("kcal/mol", "energy_per_amount", 4.184), "kcalmol", "kcal mol-1")
 _register(Unit("hartree", "energy_per_amount", 2625.4996), "eh", "ha", "au")
 _register(Unit("eV", "energy_per_amount", 96.485_332), "electronvolt")
 
+# **The concentration and length ladders are registered in step, deliberately.** Case is what
+# separates molarity from length here (`M` molar, `m` metre), and a fold claimed by both is poisoned
+# to `None` so the ambiguous spelling is refused rather than silently resolved. That only works
+# where *both* families register the prefix: `M`/`m` and `mM`/`mm` were both present and correct,
+# and the very next rung down was not — `nM` was absent, so nanomolar folded to the *nanometre*
+# already there and `Measurement.of(50, "nM").compare(Measurement.of(1, "mm"))` answered instead of
+# refusing, while `same_dimension("nM", "uM")` was False and a legitimate 50 nM against a 0.1 µM
+# limit was refused with "cannot compare length with concentration".
+#
+# So every rung either exists on both sides or on neither. `pM` has no length twin and is therefore
+# unambiguous; it is registered because picomolar is ordinary in potency work and being unknown is
+# its own failure.
 _register(Unit("M", "concentration"), "mol/L", "molar")
 _register(Unit("mM", "concentration", 1e-3), "mmol/l", "millimolar")
-_register(Unit("uM", "concentration", 1e-6), "µm", "μm", "umol/l", "micromolar")
+# `µM`/`μM` are registered as *exact* spellings (both the micro sign and the Greek mu), because
+# exact lookup runs before the case fold and the fold of "µm" is claimed by micrometre below.
+# Without them the correct spelling of micromolar resolved to a length.
+_register(Unit("uM", "concentration", 1e-6), "µM", "μM", "umol/l", "micromolar")
+_register(Unit("nM", "concentration", 1e-9), "nmol/l", "nanomolar")
+_register(Unit("pM", "concentration", 1e-12), "pmol/l", "picomolar")
 _register(Unit("mg/mL", "mass_concentration"), "g/L")
 _register(Unit("ug/mL", "mass_concentration", 1e-3), "µg/mL", "μg/mL", "mg/L")
 
@@ -169,9 +221,15 @@ _register(Unit("g/mol", "molar_mass"), "g mol-1", "da", "dalton")
 _register(Unit("log S", "log_solubility"), "logs", "log10(mol/l)")
 _register(Unit("pKa", "acidity"))
 
-_register(Unit("m", "length"), "metre", "meter")  # `mm`/`cm`/`nm` follow below
+_register(Unit("m", "length"), "metre", "meter")  # `mm`/`cm`/`um`/`nm` follow below
 _register(Unit("cm", "length", 1e-2), "centimetre", "centimeter")
 _register(Unit("mm", "length", 1e-3), "millimetre", "millimeter")
+# **`µm` is a micrometre.** It was registered as an exact alias of micromolar, which did not even
+# reach the ambiguity guard — micrometre was absent from this family, so nothing poisoned the fold
+# and `reconcile(50, "µm", "mM")` accepted a particle size as a concentration and returned 0.05.
+# The correct spelling `µM` still reaches micromolar through the fold, which is all that alias was
+# ever needed for.
+_register(Unit("um", "length", 1e-6), "µm", "μm", "micrometre", "micrometer", "micron")
 _register(Unit("nm", "length", 1e-9), "nanometre", "nanometer")
 _register(Unit("angstrom", "length", 1e-10), "å", "ang")
 
@@ -217,8 +275,10 @@ class Measurement:
 
     `basis` is free text and exists for the one thing a unit cannot carry: 0.15% of *what*. An area
     percent, a weight percent and a molar percent are the same unit and different facts, and a
-    system that dropped the distinction would compare them. It is never parsed and never compared —
-    it travels so a reader can see it.
+    system that dropped the distinction would compare them. A spelling that states it — `area%`,
+    `% w/w`, `mol%` — fills it at parse time, and `compare` refuses two quantities whose stated
+    bases disagree. An *unstated* basis is "nobody said" and never blocks a comparison, so this
+    narrows what can be compared without making ordinary percentages unusable.
     """
 
     value: float
@@ -230,8 +290,18 @@ class Measurement:
     def of(
         cls, value: float, unit: str, *, uncertainty: float | None = None, basis: str = ""
     ) -> "Measurement":
-        """Build one from a unit spelling, refusing an unknown unit."""
-        return cls(value=value, unit=parse_unit(unit), uncertainty=uncertainty, basis=basis)
+        """Build one from a unit spelling, refusing an unknown unit.
+
+        A spelling that states its basis (`area%`, `% w/w`, `mol%`) fills `basis` when the caller
+        did not pass one — see `_BASIS_SPELLINGS`. An explicit `basis=` always wins, so a caller who
+        knows more than the spelling does is never overridden.
+        """
+        return cls(
+            value=value,
+            unit=parse_unit(unit),
+            uncertainty=uncertainty,
+            basis=basis or _BASIS_SPELLINGS.get(unit.strip(), ""),
+        )
 
     def to(self, symbol: str) -> "Measurement":
         """This quantity in another unit of the same dimension, or refuse.
@@ -266,6 +336,15 @@ class Measurement:
             raise UnitError(
                 f"cannot compare {self.unit.dimension} with {other.unit.dimension}: "
                 f"{self} and {other} are not the same kind of quantity"
+            )
+        # **Two stated bases that disagree are not comparable**, and this is the case a dimension
+        # check cannot see: an area percent and a weight percent are the same dimension, the same
+        # unit and different facts. Only refused when *both* are stated — an unstated basis is
+        # "nobody said", and refusing on it would make every ordinary percent incomparable.
+        if self.basis and other.basis and self.basis != other.basis:
+            raise UnitError(
+                f"cannot compare {self.basis} with {other.basis}: {self} and {other} are the same "
+                "unit measured against different things"
             )
         converted = other.to(self.unit.symbol)
         if self.value < converted.value:

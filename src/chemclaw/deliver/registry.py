@@ -13,6 +13,7 @@ something out of the building*, and turning that on by finding a folder is the s
 """
 
 import importlib
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ import yaml
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.metrics import METRICS
 from chemclaw.deliver.driver import DeliveryDriver
 from chemclaw.deliver.manifest import DeliveryChannelManifest
 from chemclaw.deliver.message import Message
@@ -30,6 +32,9 @@ _MANIFEST = "channel.yaml"
 
 class DeliveryChannelError(ChemclawError):
     """A channel could not be discovered, enabled or built."""
+
+
+logger = logging.getLogger(__name__)
 
 
 def _channel_dirs() -> list[Path]:
@@ -153,10 +158,19 @@ async def deliver(message: Message) -> list[str]:
         try:
             driver = build(manifest)
             await driver.deliver(scrubbed)
-        except Exception:
-            # Logged by the caller with its own context; swallowed here so one channel's outage is
-            # one channel's outage. Re-raising would make a message undeliverable to everyone
-            # because it was undeliverable to one.
+        except Exception as exc:
+            # **Swallowed for the other channels' sake, and never silently.** Re-raising would make
+            # a message undeliverable to everyone because it was undeliverable to one. But the
+            # comment here used to say "logged by the caller with its own context" and there was no
+            # such caller: nothing in this package held a logger or a metric, and the one caller
+            # discarded the return value — so every digest being dropped and every digest being
+            # delivered were the same observation from outside. That is the failure this seam was
+            # built to end, one layer further in.
+            logger.warning(
+                "deliver.channel_failed: %s (%s): %s", manifest.name, manifest.driver, exc
+            )
+            METRICS.increment("chemclaw_delivery_failures_total", labels={"channel": manifest.name})
             continue
         delivered.append(manifest.name)
+        METRICS.increment("chemclaw_deliveries_total", labels={"channel": manifest.name})
     return delivered

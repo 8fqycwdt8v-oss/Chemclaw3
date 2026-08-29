@@ -403,6 +403,12 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     # from this value, and a config read inside workflow code would change the
                     # scheduled child on replay.
                     effect_approver=settings.effect_approval_role,
+                    # Clamped here for the same reason `effect_approver` is read here: the approval
+                    # wait's deadline decides how many timers it schedules.
+                    effect_approval_days=max(
+                        0.0,
+                        min(settings.effect_approval_deadline_days, settings.awaiting_max_days),
+                    ),
                 ),
                 id=workflow_id,
                 task_queue=settings.background_task_queue,

@@ -78,7 +78,10 @@ async def request_external_input(
         # The core rule (F4-T3): refuse durable work with no user behind it.
         requested_by=require_actor(),
         session_id=get_current_session_id() or "",
-        deadline_days=deadline_days,
+        # Clamped here rather than in the workflow: `due_at` decides how many timers the wait
+        # schedules, so a config read inside workflow code would change the *command count* on a
+        # replay that crossed a settings change. See `AwaitAnswerWorkflow.run`.
+        deadline_days=max(0.0, min(deadline_days, settings.awaiting_max_days)),
     )
     request_id = request_id_for(request)
     client = await connect()

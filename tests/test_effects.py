@@ -221,3 +221,90 @@ def test_no_job_in_this_repository_declares_an_effect() -> None:
         f"{declaring} declare an effect. Every job in this repository writes this system's own "
         "stores; an effect names a system this deployment does not own."
     )
+
+
+async def _clear(effect_id: str) -> None:
+    """Drop one effect row, so a rerun of these tests starts from no row rather than a stale one."""
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM effects WHERE effect_id = %s", (effect_id,))
+        await conn.commit()
+
+
+def test_a_failure_after_the_change_landed_cannot_rewrite_the_applied_row() -> None:
+    """The one write that must not be believed: `failed` over an effect that already applied.
+
+    `ConnectorJobWorkflow` settles `applied` and then runs `_finish` **inside the same `try`**,
+    whose `except BaseException` settles `failed`. So a `ValidationError` out of the note write, or
+    the documented cancellation path, arrived at the ledger as "this did not happen" about a
+    deviation standing in somebody's QMS — and an operator reading the only record of what this
+    system changed outside itself would file it a second time. `unsettled()` could not surface it
+    either, because that reads `attempting`.
+
+    Asserted as the *second* settle being refused rather than as the first succeeding, because the
+    first always worked; it was the overwrite that lied.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        effect_id = "eff-applied-then-failed"
+        await _clear(effect_id)
+        await begin_effect(
+            EffectRecord(
+                effect_id=effect_id,
+                connector="qms",
+                job="file_deviation",
+                system="the QMS",
+                reversal="irreversible",
+                requested_by="u-1",
+                session_id="s-1",
+                approved_by="u-qa",
+            )
+        )
+        await settle_effect(effect_id, state="applied", external_ref="DEV-2291", detail="filed")
+        # Everything after the child returns runs inside the same `try`; this is what its handler
+        # would write.
+        await settle_effect(effect_id, state="failed", detail="Cancelled")
+
+        stored = await get_effect(effect_id)
+        assert stored is not None
+        assert stored.state == "applied", (
+            "a failure after the change landed rewrote the ledger to 'failed'; an operator would "
+            "be told the irreversible change did not happen and would repeat it"
+        )
+        assert stored.external_ref == "DEV-2291", (
+            "the far side's handle was erased by the later settle — it is the only string an "
+            "operator can undo the change by"
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_settle_without_a_handle_does_not_erase_the_one_already_recorded() -> None:
+    """`external_ref` is coalesced, not assigned.
+
+    A compensating settle that knows the state but not a new reference must leave the reference
+    alone; assigning would blank the field precisely when an operator most needs it.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        effect_id = "eff-handle-kept"
+        await _clear(effect_id)
+        await begin_effect(
+            EffectRecord(
+                effect_id=effect_id,
+                connector="qms",
+                job="file_deviation",
+                system="the QMS",
+                reversal="compensating",
+                requested_by="u-1",
+                session_id="s-1",
+            )
+        )
+        await settle_effect(effect_id, state="failed", external_ref="DEV-7", detail="partial")
+        await settle_effect(effect_id, state="compensated", detail="rolled back")
+        stored = await get_effect(effect_id)
+        assert stored is not None
+        assert (stored.state, stored.external_ref) == ("compensated", "DEV-7")
+
+    asyncio.run(_run())
