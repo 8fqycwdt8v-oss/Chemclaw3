@@ -1317,6 +1317,33 @@ off-by-one. `parents[3]` raised a bare `IndexError` on the shipped default. That
 lesson repeating one day later, so the enumeration habit is not yet automatic: **when a change adds
 an index or a predicate, write down the inputs it cannot read before writing the test.**
 
+## 2026-08-29 — a handed-over measurement is a claim, not a fact
+
+The 2026-08-28 campaign handed over F6 with two symptoms and a named next step. One symptom was
+false and the next step pointed at the wrong seam:
+
+- `chemclaw_invalid_tool_calls_total` was reported as carrying **no samples**. It carries two per
+  turn. The same lane, the same behaviour, the same probe — `curl /metrics | grep` says
+  `chemclaw_invalid_tool_calls_total{tool="find_notes"} 2`.
+- The step named was "enter LangChain's streaming tool-call assembly", flagged as this system's
+  most defect-prone seam. That seam is sound at every step, and each step was measurable in
+  minutes: the aggregated chunk carries `invalid_tool_calls`, `message_chunk_to_message` preserves
+  it, and the middleware receives it. Roughly an hour of work sat behind a warning about a seam
+  that turned out to be innocent.
+
+The real cause was one layer away and had nothing to do with streaming: `tool_failed` is raised by
+a `wrap_tool_call` middleware, and a call whose arguments never parsed never enters the tool chain.
+
+**The rule: re-run the handed-over measurement first, before reading the diagnosis attached to
+it.** A previous session's finding has exactly the standing of a docstring — evidence about what
+its author believed. This repository already says prose is never evidence about what the code does;
+a measurement written into prose becomes prose the moment the run ends. Reproducing this one cost
+two commands against a lane that was going up anyway, and it inverted both halves of the handover.
+
+**And the corollary about scary labels:** "this system's most defect-prone seam" is a reason to
+measure that seam *first and cheaply*, not a reason to treat entering it as the cost of the task.
+Four print statements settled it.
+
 ## 2026-08-29 — a precedent on disk is not the rule that governs it
 
 Merging `origin/main` into the eight-findings branch put two files on `073`: `main`'s merged
