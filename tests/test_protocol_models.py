@@ -22,6 +22,7 @@ from chemclaw.protocols.models import (
     ProtocolStep,
     ProtocolStepKind,
     RequestField,
+    Setpoints,
     design_id_for,
 )
 
@@ -219,3 +220,66 @@ def test_a_design_refuses_a_field_it_does_not_declare() -> None:
     """`extra="forbid"` is what makes a misspelt key a refusal rather than silent data loss."""
     with pytest.raises(ValidationError):
         ExperimentDesign.model_validate({"request": _request().model_dump(), "armz": []})
+
+
+def test_a_replicate_that_runs_different_conditions_is_refused() -> None:
+    """`replicate_of` naming a *real* arm with other conditions defeated two readers at once.
+
+    `arms_are_distinct` skips every arm carrying `replicate_of` and `coverage_is_stated` counts
+    none of them towards the grid, so two mislabelled arms turned a full 2-level grid into
+    "reduced design: 2 of 4" while the run sheet told a chemist A2 was a repeat of A1. Averaging a
+    replicate pair is how an assay's noise is estimated; averaging two different conditions reports
+    that noise as the answer.
+    """
+    factor = Factor(
+        name="solvent",
+        kind="categorical",
+        levels=[FactorLevel(label="THF"), FactorLevel(label="DMSO")],
+    )
+    request = ExperimentRequest(title="t", goal="g", mode="screen")
+
+    with pytest.raises(ValidationError, match="run different conditions"):
+        ExperimentDesign(
+            request=request,
+            factors=[factor],
+            arms=[
+                ProtocolArm(arm_id="A1", levels={"solvent": "THF"}),
+                ProtocolArm(arm_id="A2", levels={"solvent": "DMSO"}, replicate_of="A1"),
+            ],
+        )
+
+    # The same levels but a different setpoint is the same mislabelling: a per-arm setpoint *is* a
+    # condition, and the arm that carries one is not running the arm it names.
+    with pytest.raises(ValidationError, match="run different conditions"):
+        ExperimentDesign(
+            request=request,
+            factors=[factor],
+            arms=[
+                ProtocolArm(arm_id="A1", levels={"solvent": "THF"}),
+                ProtocolArm(
+                    arm_id="A2",
+                    levels={"solvent": "THF"},
+                    setpoints=Setpoints(temperature_c=120.0),
+                    replicate_of="A1",
+                ),
+            ],
+        )
+
+
+def test_a_genuine_replicate_is_accepted() -> None:
+    """The direction that makes the refusal above mean something rather than ban the feature."""
+    design = ExperimentDesign(
+        request=ExperimentRequest(title="t", goal="g", mode="screen"),
+        factors=[
+            Factor(
+                name="solvent",
+                kind="categorical",
+                levels=[FactorLevel(label="THF"), FactorLevel(label="DMSO")],
+            )
+        ],
+        arms=[
+            ProtocolArm(arm_id="A1", levels={"solvent": "THF"}),
+            ProtocolArm(arm_id="A2", levels={"solvent": "THF"}, replicate_of="A1"),
+        ],
+    )
+    assert design.arms[1].replicate_of == "A1"

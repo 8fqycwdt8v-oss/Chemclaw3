@@ -121,11 +121,26 @@ async def structure_experiment_request(
         ChemclawError: a `stated` slot whose quote is not in `source_text`.
     """
     require_quotes_are_verbatim(request, source_text)
-    design = ExperimentDesign(request=request)
-    checks = run_checks(design, stage="request")
     design_id = design_id_for(request, salt=salt)
     store = _store()
     head = await store.read(design_id)
+    # **The protocol survives a re-structured ask**, which the first version did not do. The id is
+    # derived from the ask, so re-structuring the same one reaches the same design — and building a
+    # bare `ExperimentDesign(request=…)` then appended a head with no base, no arms and no layout
+    # over a drafted plate. Measured: `arm_count` reset to 0, the header stayed `draft`, and every
+    # default read — the listing, `GET /protocols/{id}`, `read_experiment_protocol` — served the
+    # empty ask. The history kept the plate and no consumer reads a non-head revision.
+    #
+    # Correcting the ask is the point of this tool, so the correction lands and the procedure is
+    # carried forward untouched; the checks are then graded at the stage the *design* is at, not at
+    # the stage this tool usually runs in, because a protocol that now contradicts a corrected ask
+    # is exactly what a chemist needs to see.
+    design = (
+        head.design.model_copy(update={"request": request})
+        if head is not None
+        else ExperimentDesign(request=request)
+    )
+    checks = run_checks(design, stage="protocol" if design.has_protocol else "request")
     revision = await store.append(
         design_id,
         design,
@@ -134,7 +149,7 @@ async def structure_experiment_request(
         author_kind="agent",
         author=require_actor(),
         parent_revision=head.revision if head else 0,
-        change_note="structured the request",
+        change_note="structured the request" if head is None else "restructured the ask",
         session_id=get_current_session_id() or "",
         correlation_id=get_current_correlation_id() or "",
         status="requested",
@@ -220,6 +235,13 @@ async def draft_experiment_protocol(
         factors=list(factors or []),
         arms=list(arms or []),
         evidence=list(evidence),
+        # **The previous plate is carried forward when no format is passed**, because `plate_format`
+        # defaults to 0 and a revision that only changes a temperature was silently deleting the
+        # well assignments and the run order. A randomised order is not recoverable — a fresh
+        # `place()` with another seed is a different plate — and `layout_fits` degraded to a
+        # *passing* warning reading "no plate layout", so nothing said it had happened. Re-laying
+        # out is what passing a `plate_format` asks for; not passing one asks for nothing.
+        layout=previous.design.layout,
     )
     if plate_format:
         design = design.model_copy(

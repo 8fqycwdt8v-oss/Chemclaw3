@@ -84,13 +84,7 @@ def flatten(document: dict[str, Any], prefix: str = "") -> dict[str, Any]:
         if isinstance(value, dict):
             flat.update(flatten(value, f"{path}."))
         elif isinstance(value, list):
-            identifier = _KEYED_LISTS.get(path)
-            for index, item in enumerate(value):
-                label = (
-                    str(item.get(identifier, index))
-                    if identifier and isinstance(item, dict)
-                    else str(index)
-                )
+            for label, item in _labelled(value, _KEYED_LISTS.get(path)):
                 if isinstance(item, dict):
                     flat.update(flatten(item, f"{path}.{label}."))
                 else:
@@ -98,6 +92,35 @@ def flatten(document: dict[str, Any], prefix: str = "") -> dict[str, Any]:
         else:
             flat[path] = value
     return flat
+
+
+def _labelled(items: list[Any], identifier: str | None) -> list[tuple[str, Any]]:
+    """Each member with the key it is flattened under, falling back to its index on a repeat.
+
+    **The fallback is the whole of this function, and it is a data-loss fix rather than a tidy-up.**
+    Keying by a member's own identifier is what makes a reordered plate diff as no change, but
+    nothing guarantees the identifier is unique: `base.charge` is keyed by `component`, and a
+    solvent charged in two portions — an addition and a rinse — is entirely ordinary. Measured, the
+    second line silently overwrote the first, so a chemist editing the *first* toluene charge from
+    5 mL to 9 mL was recorded as the *second* moving 2 mL to 9 mL: not a lost row but a
+    misattributed edit, in the one table this system keeps precisely to learn from those edits.
+
+    A repeated key falls back to `<label>#<index>` for **every** member sharing it, not only the
+    later ones, so the two lines are `toluene#0` and `toluene#1` rather than `toluene` and
+    `toluene#1` — a reorder of an unambiguous list still diffs as nothing, and an ambiguous one
+    diffs by position, which is the only identity it has.
+    """
+    if identifier is None:
+        return [(str(index), item) for index, item in enumerate(items)]
+    labels = [
+        str(item.get(identifier, index)) if isinstance(item, dict) else str(index)
+        for index, item in enumerate(items)
+    ]
+    repeated = {label for label in labels if labels.count(label) > 1}
+    return [
+        (f"{label}#{index}" if label in repeated else label, item)
+        for index, (label, item) in enumerate(zip(labels, items, strict=True))
+    ]
 
 
 def diff_designs(

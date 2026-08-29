@@ -9,25 +9,31 @@ a prompt can ask for a hazard screen and a prompt can be ignored, while
 Each check is a pure `ExperimentDesign -> ProtocolCheck` and they are run as a set by `run_checks`,
 so a new one is a function plus a row in `_CHECKS` and nothing else moves.
 
-**Severity is the design decision in this file, and it is not uniform.** A `blocker` refuses the
-draft, so it is reserved for the cases where storing the design would be storing something
-misleading: a structure nobody can read, a charge table with no limiting reagent, a plate that does
-not fit, an arm setting a level the factor does not declare, a reagent the chemist forbade, and a
-design with no evidence at all. Everything else is a `warning` a chemist reads and overrules — a
-missing control, an unmeasured objective, a hazard screen nobody ran — because those are judgments
-about a specific piece of work and this file is not entitled to make them.
+**Severity is per case, not per check**, which is the thing to read before adding one.
+`charge_is_consistent` is a `blocker` when the table names no limiting reagent or its equivalents
+contradict its amounts, and a `warning` when there is no table yet — the same function, two
+severities, because the question "is this misleading" has different answers on its branches.
+
+A `blocker` is for the cases where storing the design would be storing something misleading: a
+structure nobody can read, a charge table nobody can weigh out, an arm setting a level the factor
+does not declare, a plate that does not fit, a reagent the chemist forbade, no followable evidence
+at all. A `warning` is a judgment about a specific piece of work that this file is not entitled to
+make: a missing control, an unmeasured objective, an unscreened hazard, a temperature outside the
+band a unit mistake leaves.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 
-from chemclaw.core.chem import InvalidSmilesError, canonical_smiles, element_counts
-from chemclaw.protocols.layout import PLATE_SHAPES, capacity
+from chemclaw.core.chem import InvalidSmilesError, element_counts
+from chemclaw.core.reagents import resolve_compound_name
+from chemclaw.protocols.layout import PLATE_SHAPES, capacity, plate_shape, well_label
 from chemclaw.protocols.models import (
     ChargeLine,
     CheckSeverity,
     CheckStage,
+    EvidenceRef,
     ExperimentDesign,
     ProtocolCheck,
     Setpoints,
@@ -78,17 +84,21 @@ def _structures(design: ExperimentDesign) -> list[tuple[str, str]]:
 
 def components_resolve(design: ExperimentDesign) -> ProtocolCheck:
     """Every structure the design names parses whole."""
-    bad = []
-    for where, smiles in _structures(design):
-        try:
-            canonical = canonical_smiles(smiles)
-        except InvalidSmilesError as exc:  # pragma: no cover - canonical_smiles is lenient
-            bad.append(f"{where}: {exc}")
-            continue
-        # `canonical_smiles` is deliberately lenient — it hands back the input unchanged when RDKit
-        # cannot read it — so an unchanged string that RDKit would not re-read is the tell.
-        if canonical == smiles and not _parses(smiles):
-            bad.append(f"{where}: {smiles!r}")
+    # **`_parses` alone, and the `canonical == smiles` conjunction this replaced is the defect
+    # worth remembering.** `canonical_smiles` is lenient in a way that is not "returns the input
+    # unchanged": RDKit stops at whitespace and at a non-ASCII edge, so `"CCO junk"` canonicalises
+    # to `"CCO"` — a *different, smaller molecule*, successfully. The old test asked whether the
+    # string came back unchanged, which is false for exactly that class, so the blocker never
+    # consulted the strict parser on the inputs it was written for and reported `'1 structures
+    # parse'` about a structure that does not. Measured: `"CCO junk"`, `"CCO 1"`, `"CC°"` and
+    # `"°C"` all passed. It is the same silent truncation `require_molecule`'s docstring records
+    # for `screen_hazards("CCO junk")`, one layer up.
+    #
+    # Asking `require_molecule` directly instead cannot fail open, and measurement says it does not
+    # fail *closed* either: the only inputs where the lenient and strict parsers disagree in the
+    # other direction are over `molecule_max_atoms`/`molecule_max_smiles_length`, which both
+    # already reject.
+    bad = [where + f": {smiles!r}" for where, smiles in _structures(design) if not _parses(smiles)]
     if bad:
         return _fail(
             "components_resolve",
@@ -134,12 +144,19 @@ def charge_is_consistent(design: ExperimentDesign) -> ProtocolCheck:
             f"the limiting reagent {reference.component!r} is listed at "
             f"{reference.equivalents} equivalents; by definition it is 1.0",
         )
-    if reference.amount_mmol is None:
+    # `not` rather than `is None`, and that is the fix for a measured hole: `amount_mmol` is
+    # `ge=0.0`, so a limiting reagent at exactly `0.0` was neither `None` nor caught below — the
+    # `reference.amount_mmol > 0` guard inside the comprehension emptied the disagreement list, and
+    # a table where every mmol figure contradicted its equivalents returned a *passing* blocker
+    # reading "limiting reagent 'SM' at 0 mmol". Zero is the same fact as absent for this check:
+    # there is no scale to turn an equivalent into a weight against.
+    if not reference.amount_mmol:
         return _ok(
             "charge_is_consistent",
             "warning",
-            f"the limiting reagent {reference.component!r} has no amount, so no other line's "
-            "equivalents can be turned into a weight",
+            f"the limiting reagent {reference.component!r} has no usable amount "
+            f"({reference.amount_mmol!r}), so no other line's equivalents can be turned into a "
+            "weight",
         )
     # Equivalents and amounts are two statements of the same fact, and a table where they disagree
     # is one a chemist will weigh out wrong. Checked to 2%: a charge table is rounded to sensible
@@ -150,7 +167,6 @@ def charge_is_consistent(design: ExperimentDesign) -> ProtocolCheck:
         for line in lines
         if line.equivalents is not None
         and line.amount_mmol is not None
-        and reference.amount_mmol > 0
         and abs(line.equivalents * reference.amount_mmol - line.amount_mmol)
         > 0.02 * max(line.amount_mmol, 1e-9)
     ]
@@ -172,26 +188,40 @@ def atom_balance(design: ExperimentDesign) -> ProtocolCheck:
     # The same rule `ingest.eln.validate.validate_ord` applies to a recorded reaction, asked of a
     # proposed one. Counts are deliberately not compared, for that function's reason: there are no
     # stoichiometric coefficients here either, so a dimerization would fail a per-molecule count.
+    # **Both forms, because this tree emits both.** `ingest.eln.ord.reaction_smiles()` produces the
+    # record form `reactants>agents>products`, so an agent copying a precedent's reaction across
+    # brings a three-part string whenever that run had a solvent or a catalyst — and a `">>" not
+    # in reaction` guard skipped the check silently on exactly those. Splitting on `>` handles both:
+    # `a>>c` is three parts with an empty middle, `a>b>c` is three parts with agents in it. Agents
+    # supply elements (they are in the flask), so they join the input side.
     reaction = design.request.reaction_smiles.strip()
-    if ">>" not in reaction:
-        return _ok("atom_balance", "warning", "no reaction SMILES to balance")
-    reactant_side, _, product_side = reaction.partition(">>")
+    parts = reaction.split(">")
+    if len(parts) != 3:
+        return _ok(
+            "atom_balance",
+            "warning",
+            "no reaction SMILES to balance" if not reaction else f"not a reaction: {reaction!r}",
+        )
+    reactant_side, agent_side, product_side = parts
     supplied: set[str] = set()
-    for smiles in _split_species(reactant_side) + [
-        line.smiles for line in _all_charge_lines(design)
-    ]:
+    inputs = (
+        _split_species(reactant_side)
+        + _split_species(agent_side)
+        + [line.smiles for line in _all_charge_lines(design)]
+    )
+    for smiles in inputs:
         if not smiles:
             continue
         try:
             supplied.update(element_counts(smiles))
         except InvalidSmilesError:
-            return _ok("atom_balance", "warning", f"could not read {smiles!r}; balance not checked")
+            return _unreadable(smiles)
     missing: set[str] = set()
     for smiles in _split_species(product_side):
         try:
             missing.update(set(element_counts(smiles)) - supplied)
         except InvalidSmilesError:
-            return _ok("atom_balance", "warning", f"could not read {smiles!r}; balance not checked")
+            return _unreadable(smiles)
     if missing:
         return _fail(
             "atom_balance",
@@ -203,9 +233,21 @@ def atom_balance(design: ExperimentDesign) -> ProtocolCheck:
     return _ok("atom_balance", "warning", "every product element is supplied")
 
 
+def _unreadable(smiles: str) -> ProtocolCheck:
+    """The verdict when a species in the reaction cannot be read.
+
+    A **failed** warning rather than a passing one, which is the second half of the same defect as
+    `components_resolve`'s: returning `_ok` here put "checked and fine" in front of a reader about a
+    balance nobody could compute, and `render_markdown` lists only failed checks — so the sentence
+    naming the unreadable species never reached the page. The severity stays a warning, because a
+    structure this check cannot read is `components_resolve`'s blocker to raise, not this one's.
+    """
+    return _fail("atom_balance", "warning", f"could not read {smiles!r}; balance not checked")
+
+
 def _split_species(side: str) -> list[str]:
-    """The species on one side of a reaction SMILES, agents included."""
-    return [part for chunk in side.split(">") for part in chunk.split(".") if part]
+    """The species in one block of a reaction SMILES."""
+    return [part for part in side.split(".") if part]
 
 
 def factor_levels_declared(design: ExperimentDesign) -> ProtocolCheck:
@@ -292,6 +334,35 @@ def layout_fits(design: ExperimentDesign) -> ProtocolCheck:
     orders = sorted(w.run_order for w in layout.wells)
     if orders != list(range(1, len(orders) + 1)):
         return _fail("layout_fits", "blocker", "run order is not 1..n over the wells")
+    # **The plate's own shape and each well's position, because only `place()` is trusted.**
+    # `POST /protocols/{id}/revisions` accepts a whole `PlateLayout` from a browser, so nothing
+    # guarantees the layout came from `place()` at all. Measured before this: a layout declaring
+    # `plate_format=96` with `rows=1, columns=2` and wells at row 98 labelled `ZZ99` passed a
+    # *blocker* whose docstring says "the plate holds every arm, once, in a known format".
+    rows, columns = plate_shape(layout.plate_format)
+    if (layout.rows, layout.columns) != (rows, columns):
+        return _fail(
+            "layout_fits",
+            "blocker",
+            f"a {layout.plate_format}-well plate is {rows}x{columns}, and this layout declares "
+            f"{layout.rows}x{layout.columns}",
+        )
+    off_plate = [
+        f"{w.label} at row {w.row}, column {w.column}"
+        for w in layout.wells
+        if not (0 <= w.row < rows and 0 <= w.column < columns)
+    ]
+    if off_plate:
+        return _fail(
+            "layout_fits", "blocker", "these wells are not on the plate: " + "; ".join(off_plate)
+        )
+    mislabelled = [
+        f"{w.label} is row {w.row}, column {w.column}, which is {well_label(w.row, w.column)}"
+        for w in layout.wells
+        if w.label != well_label(w.row, w.column)
+    ]
+    if mislabelled:
+        return _fail("layout_fits", "blocker", "; ".join(mislabelled))
     return _ok(
         "layout_fits",
         "blocker",
@@ -319,7 +390,15 @@ def evidence_present(design: ExperimentDesign) -> ProtocolCheck:
     # The blocker that makes "use the record and the tools" a property of the code. A protocol
     # citing neither is a guess, and storing it would put a guess in the same table, with the same
     # shape and the same UI treatment, as one argued from 40 runs and a hazard screen.
-    kinds = {ref.kind for ref in design.evidence}
+    # **A citation counts only when it is followable**, which is the difference between this check
+    # and a word count. `kind="tool"` without a `tool` name and `kind="precedent"` without a `ref`
+    # are two sentences a model can write about work it did not do — measured, they cleared this
+    # blocker between them — and neither gives a chemist anything to open. `hazard_screen_ran` was
+    # already written this way (it reads `ref.tool` against three named tools); this is the same
+    # rule one level up.
+    cited = {ref.kind for ref in design.evidence if _is_followable(ref)}
+    unfollowable = [ref.summary for ref in design.evidence if not _is_followable(ref)]
+    kinds = cited
     grounded = kinds & {"precedent", "record", "note", "observation"}
     if not grounded and "tool" not in kinds:
         return _fail(
@@ -345,11 +424,18 @@ def evidence_present(design: ExperimentDesign) -> ProtocolCheck:
             "precedent is cited but nothing was computed. Anything the record does not state — a "
             "pKa, a solubility, a solvent ranking, a hazard — is a tool call, not an assumption",
         )
-    return _ok(
-        "evidence_present",
-        "blocker",
-        f"{len(design.evidence)} citations across {', '.join(sorted(kinds))}",
-    )
+    counted = len(design.evidence) - len(unfollowable)
+    detail = f"{counted} citations across {', '.join(sorted(kinds))}"
+    if unfollowable:
+        detail += "; not counted, because nothing names what to open: " + "; ".join(
+            unfollowable[:3]
+        )
+    return _ok("evidence_present", "blocker", detail)
+
+
+def _is_followable(ref: EvidenceRef) -> bool:
+    """A citation a reader can act on: a tool call names its tool, everything else names its ref."""
+    return bool(ref.tool.strip()) if ref.kind == "tool" else bool(ref.ref.strip())
 
 
 def hazard_screen_ran(design: ExperimentDesign) -> ProtocolCheck:
@@ -416,15 +502,23 @@ def forbidden_absent(design: ExperimentDesign) -> ProtocolCheck:
     forbidden = [f.strip() for f in design.request.forbidden if f.strip()]
     if not forbidden:
         return _ok("forbidden_absent", "blocker", "nothing forbidden")
-    # Matched on both the written name and the canonical structure, because a chemist writes
-    # "DMF" and a design writes `CN(C)C=O`, and refusing to look at the structure would let the
-    # exclusion be defeated by spelling.
-    names = {n.lower() for n in _named_species(design)}
-    structures = {_canonical_or_input(s) for _, s in _structures(design)}
+    # **Both sides go through the reagent table, and that is the fix rather than a refinement.**
+    # The first version compared `canonical_smiles(term)` against the design's canonical SMILES —
+    # but `canonical_smiles("DMF")` is the string `"DMF"`, because RDKit cannot read a name, so the
+    # structure half could never fire for a reagent a chemist named. It worked only when the
+    # exclusion was itself written as a SMILES, which is not how anybody writes an exclusion.
+    # Measured: forbidding "DMF" let a design charging `N,N-dimethylformamide` — the same molecule,
+    # same structure — through a *blocker*.
+    #
+    # `core.reagents.resolve_compound_name` is the one entry point this tree already has for
+    # "give me the canonical form of whatever was typed", name or SMILES, and it returns `None`
+    # rather than guessing. So both the exclusion and every species the design names are reduced to
+    # a structure where one is known, and the written names are still compared beside it for the
+    # reagents the table does not carry.
+    names = {n.strip().lower() for n in _named_species(design) if n.strip()}
+    structures = {_identity(value) for value in (*names, *(s for _, s in _structures(design)))}
     hits = [
-        term
-        for term in forbidden
-        if term.lower() in names or _canonical_or_input(term) in structures
+        term for term in forbidden if term.strip().lower() in names or _identity(term) in structures
     ]
     if hits:
         return _fail(
@@ -435,11 +529,16 @@ def forbidden_absent(design: ExperimentDesign) -> ProtocolCheck:
     return _ok("forbidden_absent", "blocker", f"{len(forbidden)} exclusions honoured")
 
 
-def _canonical_or_input(value: str) -> str:
-    try:
-        return canonical_smiles(value)
-    except InvalidSmilesError:  # pragma: no cover - canonical_smiles is lenient
-        return value
+def _identity(value: str) -> str:
+    """The canonical structure behind a name or a SMILES, or the lower-cased text when neither.
+
+    The falling-back branch is what keeps this usable for the reagents the curated table does not
+    carry — a site's internal code name, a fragment nobody has drawn — where the written spelling
+    is the only identity there is. `resolve_compound_name` never guesses, so an unrecognised name
+    reaching this branch is a miss rather than a fabricated structure.
+    """
+    resolved = resolve_compound_name(value.strip())
+    return resolved.smiles if resolved is not None else value.strip().lower()
 
 
 def _named_species(design: ExperimentDesign) -> list[str]:
@@ -470,12 +569,13 @@ def coverage_is_stated(design: ExperimentDesign) -> ProtocolCheck:
 
 
 def is_a_protocol(design: ExperimentDesign) -> ProtocolCheck:
-    """The design says what to do — it has at least one arm or one step."""
-    if design.arms or design.base.steps or design.base.charge:
+    """The design says what to do — it has at least one arm, one step or one charge line."""
+    if design.has_protocol:
         return _ok(
             "is_a_protocol",
             "blocker",
-            f"{len(design.arms)} arm(s), {len(design.base.steps)} step(s)",
+            f"{len(design.arms)} arm(s), {len(design.base.steps)} step(s), "
+            f"{len(design.base.charge)} charge line(s)",
         )
     return _fail(
         "is_a_protocol",
