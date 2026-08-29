@@ -45,8 +45,16 @@ from tests.pg import migrated_db_or_skip
 # tier with this test green. It is added rather than argued away; the table it belongs to is
 # unreachable to the sweep for a privilege reason, which `_BEYOND_REACH` now records and which this
 # test accepts as a third answer — a *stated* one, unlike the silence it replaces.
+#
+# **`author` is the same failure recurring one migration later**, which is worth recording because
+# it is the second instance and so says something about the shape rather than about one omission.
+# `experiment_protocol_revisions.author` (073) names who wrote each revision of an experiment
+# design, and it landed in `_RETAINED` because its author happened to think of it — not because
+# anything here would have failed if they had not. It is added for the same reason `reseal_by` was:
+# a spelling the schema uses for a person that this set does not know is a column the completeness
+# check silently does not check, and the whole value of a derived set is that it cannot be silent.
 _ACTOR_COLUMN_NAMES = frozenset(
-    {"actor", "owner", "holder", "requested_by", "decided_by", "opened_by", "reseal_by"}
+    {"actor", "author", "owner", "holder", "requested_by", "decided_by", "opened_by", "reseal_by"}
 )
 
 _ANNA = "oid-anna"

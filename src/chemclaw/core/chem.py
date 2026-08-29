@@ -382,6 +382,33 @@ def require_molecule(smiles: str) -> Chem.Mol:
     return mol
 
 
+def element_counts(smiles: str) -> dict[str, int]:
+    """How many atoms of each element the molecule has, hydrogens included.
+
+    Hydrogens are made explicit first, because they are the element a mass balance most often
+    turns on and RDKit's implicit-H model leaves them out of `GetAtoms()` entirely — so a balance
+    computed without `AddHs` silently never checks H at all.
+
+    Here rather than beside its caller because it is the same kind of fact as `canonical_smiles` —
+    a property of a structure that any layer may need — and because it is the strict half of a
+    question this tree already asks leniently. `ingest.eln.validate._elements` balances a *recorded*
+    reaction and deliberately keeps its own bare `Chem.MolFromSmiles`: it runs on the ingest path,
+    where a molecule over `molecule_max_atoms` is a legitimate entry to transcribe rather than one
+    to reject, and moving it onto this stricter parse would change what gets ingested. That is a
+    measurement to take on its own, not a side effect of adding a caller
+    (`protocols.checks.atom_balance`, which balances a *proposed* reaction and wants the strict
+    parse, because a proposal is written rather than received).
+
+    Raises:
+        InvalidSmilesError: `smiles` is not a molecule RDKit reads whole (see `require_molecule`).
+    """
+    counts: dict[str, int] = {}
+    for atom in Chem.AddHs(require_molecule(smiles)).GetAtoms():
+        symbol = str(atom.GetSymbol())
+        counts[symbol] = counts.get(symbol, 0) + 1
+    return counts
+
+
 def require_canonical_smiles(smiles: str) -> str:
     """RDKit canonical SMILES, raising `InvalidSmilesError` if it does not parse.
 

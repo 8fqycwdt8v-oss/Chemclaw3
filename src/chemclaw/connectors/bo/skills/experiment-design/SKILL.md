@@ -300,3 +300,22 @@ refused, not quietly crossed in full — pick the two levels that matter, or run
 Both `n_center` and `n_repetitions` need at least one continuous factor and are refused on an
 all-categorical problem, because BoFire ignores them there. If the chemist wants replicates of an
 all-categorical screen, say that they should run the returned list twice.
+
+## A design space is not a protocol
+
+Everything above answers *which conditions*. It does not answer what a chemist weighs out, in what
+order, under what atmosphere, quenched how, or measured with what — and a list of condition tuples
+handed to a laboratory is a list somebody has to turn into a procedure by hand.
+
+When the chemist wants the runnable thing, hand the design over rather than describing it:
+
+- one experiment → `protocol-generation`
+- a plate → `hte-campaign-design`, which owns factor and level choice, controls, replication and
+  the plate layout, and which calls `generate_screening_design` for exactly the reasons this
+  section gives
+
+Both store the result as an editable design with its checks and its revision history, so the
+suggestion stops being a message in a transcript. The reverse direction matters too: the factor
+names and levels a screen declares are the vocabulary a follow-up campaign inherits, so a plate
+designed under `hte-campaign-design` is one whose results come back to `suggest_next_experiment`
+without a translation step.

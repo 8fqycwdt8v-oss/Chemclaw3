@@ -563,6 +563,42 @@ repository now has a **measured** better answer to a problem this repository sol
 not revisited. That is a different kind of debt and it needs its own section, because a queue that
 only holds defects can only ever restore the system to what it already intended to be.
 
+- [ ] **`predict_reaction_conditions` is built in the fleet and unreachable from any deployment
+      here** — [M], and it is now the biggest single gap in the protocol pipeline
+      (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`). `Chemclaw3-mcp`'s
+      `servers/rxnpredict` is **built** and serves six read-only tools — among them
+      `predict_reaction_conditions`, an ensemble of open predictors with the per-model spread
+      returned beside the consensus — and `grep -rn rxnpredict src/` in this tree finds nothing: no
+      bundle under `src/chemclaw/connectors/`, no `connectors:` entry in
+      `deploy/helm/chemclaw/values.yaml`, no token obligation. So
+      `skills/protocol-generation` routes a chemist's "how would people run this" question entirely
+      through precedent (`conditions_for_similar_reaction`, `reagent_frequency`), which answers from
+      what *this* corpus holds and is silent on a transformation nobody here has run.
+
+      **It is a default-surface decision before it is a diff**, and the `pyexec` row below is the
+      worked precedent: `registry.enabled()` is "discovery is enablement until you say otherwise",
+      so a manifest stub turns six tools on in every fresh checkout, needs six probes
+      (`tests/test_probe_coverage.py`), and raises the context floor. Unlike `pyexec` the capability
+      is uncontroversial — six read-only predictors, no code execution — so the argument is about
+      the enablement default rather than about the tool. Whichever way it goes it also owes a
+      `values.yaml` entry, an `egressPorts` entry for 8857, and the `CHEMCLAW_RXNPREDICT_TOKEN`
+      obligation `chem` already models.
+
+- [ ] **Nothing mines the edit a chemist makes to a generated protocol** — [M], and the data for it
+      starts accumulating now. `experiment_protocol_revisions` is append-only and carries
+      `author_kind`, so `protocols.diff.diff_designs` between an `agent` revision and the `human`
+      revision derived from it is a *labelled correction*: the field a chemist changed, from what to
+      what, made by the person with the most context at the moment they had it. That is the
+      highest-quality supervision this system can collect about its own suggestions and it is
+      currently written and never read.
+
+      **Deliberately not built yet, and the reason is the one `reject_widening` was deleted for**: a
+      miner over an empty table is a mechanism whose only caller is its own test. What is owed first
+      is a count — over the designs on disk, how many carry a human revision at all, and do the
+      changed paths concentrate anywhere — and that count needs a deployment that has been used.
+      The anchor when it does: `protocols/diff.py` and
+      `experiment_protocol_revisions.author_kind`.
+
 - [ ] **The `default` profile carries eleven names it could narrow, worth 5,787 tokens** — [M], and
       it is what the eighteen-tools row became once measured
       (`D-2026-08-27-eighteen-names-for-a-primitive-set`). **The probe half is closed**: seventeen
@@ -581,6 +617,24 @@ only holds defects can only ever restore the system to what it already intended 
       stays listed after every tool it routes to is gone. So this needs the profile allow-list *and*
       the skill gate. The two single-job wrapper templates (681 tokens) are the other candidate, and
       deleting a named protocol the shipped skill routes to is its own decision.
+
+- [ ] **Four `KNOWN_OVERSIZED` tools are one defect wearing four names** — [M], and the honest
+      trigger is upstream rather than here. All four take a **domain document** as their argument —
+      a BoFire campaign declaration, the note frontmatter contract, a structured ask, a laboratory
+      procedure — and `convert_to_openai_tool` inlines every nested pydantic model in full rather
+      than emitting `$defs` and `$ref`. Measured 2026-08-28 while narrowing the protocol pair from
+      6,231 tokens to 3,380: `SpeciesRole`'s class docstring shipped **three times** in one schema
+      and `RequestField`'s **four times**, purely because the same model appears at several fields.
+      A `$ref`-emitting conversion would cut all four entries at once and touch no first-party code.
+
+      **So the row is a measurement, not a rewrite.** What is owed first: does the installed
+      `langchain_core` have a switch for it, and do the providers this deployment targets accept a
+      `$defs`/`$ref` parameter schema? Both are one script. The alternative fix — taking the payload
+      as a JSON string or a scratchpad path — is **rejected on the record** in
+      `tests/test_context_floor.py`: it drops the schema to ~150 tokens and takes constrained
+      generation with it, on exactly the calls where a malformed argument is most expensive.
+      Anchors: `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
+      `science/bo/problem.py`.
 
 - [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
       what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
