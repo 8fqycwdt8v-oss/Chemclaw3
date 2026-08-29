@@ -134,22 +134,76 @@ into a silent wrong dimension, the *same* defect one rung down, made while fixin
       `requested_by` — the stale value let a *different* person pass the separation-of-duties gate
 - [x] migration renumbered 077 → 079 (main landed its own 077)
 
-## Still open
+## Third pass — the "Still open" list, verified against HEAD
 
-- [ ] `get_durable_job_status` is advertised on the face and discloses what `find_past_jobs` was
-      withheld for; job ids are a pure function of connector+job+payload
-- [ ] the `WITHHELD` partition test is tautological — it cannot fail for the case it names
-- [ ] the ownership gate (`_may_read`) has no test at all
-- [ ] `applied` → `compensated` is now unreachable; the shipped test asserts `failed` → `compensated`
-      and passes either way
-- [ ] the deadline clamp reached two of three launch sites; the BO path is unclamped and two
-      comments claim otherwise
-- [ ] `_SAFE_TOOL_NAME` allows `.` and `-`, which no served tool uses and which carry readable
-      injection text; the cardinality claim beside it is false (bucketing runs after the GROUP BY)
-- [ ] the `failed` split counts argument-sets, not runs (`job_records` upserts on `job_id`)
-- [ ] the redaction-failure path logs without a counter, unlike the sibling it was extracted from
-- [ ] the plaintext-channel refusal can only raise on the delivery path, where it is swallowed
-- [ ] a wrong `CHEMCLAW_COMMITMENT_EXPORT_DIR` is still silent
-- [ ] false prose: "point lookup", "unindexed-range aggregate", "five tables", `Coverage`'s
-      retention sentence, `bearer_token_env_names`' return contract
-- [ ] tests for every fix that survived mutation
+Every item below was checked against the current source rather than taken from the list, because
+the list was written against an earlier tree and **nine of the twelve had already landed**. That is
+worth naming: a checklist of open findings is state, and state that outlives its closure reads as
+live — the same failure `DEFERRED.md` has a test for.
+
+- [x] `get_durable_job_status` — **already fixed**. It is in `WITHHELD` with its reason, and
+      `advertised_tools()` measures 8 names, none of them this one. *One residual fixed*: it was
+      never added to `test_no_deployment_wide_read_reaches_the_face`'s named set, the second list
+      that exists so dropping an entry from the deny-list fails a test saying why it was there.
+- [x] the tautological partition test — **already fixed**. `_ADVERTISED` is a golden set and
+      `test_the_face_serves_exactly_the_tools_this_list_names` fails on arrival *and* departure.
+- [x] `_may_read` has no test — **stale**. `tests/test_evidence_scoping.py` drives it in both
+      directions and guards the "return True on a missing row" refactor by name.
+- [x] `applied` → `compensated` — **already fixed**. `_SETTLE` carries
+      `(state <> 'applied' OR %s = 'compensated')`, and `test_an_applied_effect_can_still_be_compensated`
+      asserts the transition the old test could not fail on.
+- [x] the deadline clamp — **already fixed, and better than the finding asked for**. The clamp moved
+      *into* `open_pending_request_activity` and `due_at` comes back through history, so no launch
+      site can skip it and no caller-side copy can drift. The BO comment now points at the activity.
+- [x] `_SAFE_TOOL_NAME` — **already fixed** (`^[a-z_][a-z0-9_]{0,63}$`) and the cardinality claim is
+      explicitly retracted beside it. *Tests added*, because it had none: the bound had only the
+      Postgres-backed injection test, which seeds angle brackets and passes under the loose pattern.
+- [x] the `failed` split — **already fixed in prose**. Both `runs` and `failed` now say
+      "argument-sets", with `job_records`' upsert-on-`job_id` as the reason.
+- [x] the redaction-failure counter — **already fixed**. `_connector_secret_envs` goes through
+      `degraded(…, "deliver_redaction", …)`.
+- [x] the plaintext-channel refusal — **real, and fixed here.** Measured first: with
+      `entra_required=true` and an enabled `http://` channel, `enabled()` returns it, `deliver()`
+      returns `[]`, and `make channel-validate` reports **no problems at all**. See the review below.
+- [x] a wrong `CHEMCLAW_COMMITMENT_EXPORT_DIR` — **half fixed; the other half done here.** It logs a
+      WARNING, so it is not silent in a log; it had no counter, on a failure whose entire symptom is
+      silence. Moved onto `degraded(…, "commitment_mirror", …)`.
+- [x] the five false-prose claims — **all already corrected**, each as a retraction rather than an
+      edit: `window.py`'s "unindexed-range aggregate" (third attempt, and honest — three of four
+      tables *are* indexed on the range column), `Coverage`'s retention sentence, `operations/__init__`'s
+      "five tables", and `bearer_token_env_names`' `Raises:` block replacing the promised `()`.
+- [x] tests for the fixes that survived mutation — the three test files are no longer
+      byte-identical to `origin/main`; the gaps that remained were `safe_tool_name` (none at all)
+      and the two behaviours this pass changed. Each new test was checked by reverting its fix.
+
+## Review (third pass)
+
+**What was actually broken: one finding of twelve.** `_refuse_plaintext_channel` raises from driver
+construction, and construction happens inside `registry.deliver`'s per-channel `try` — the swallow
+that keeps one broken channel from costing every other recipient their message, which is correct and
+which the digest activity swallows again above it. So the refusal had nowhere to be heard: the
+deployment started, looked healthy, and dropped every message with one WARNING each, indistinguishable
+from the destination being down. The fix puts the question where it can be answered before anything
+is delivered — `plaintext_channel_refusal` returns the reason, the construction site still raises it,
+and `make channel-validate` gains it as rule 4, asking every string in the free-form `config:` block
+rather than a key spelled `url` (the driver's signature is the schema, so a site's driver may call
+its destination `endpoint`). Beside it, `deliver()` now separates *build* from *send*: a channel that
+cannot be built fails identically on every message until a manifest is edited, so it belongs on
+`chemclaw_degraded_total{subsystem="delivery_channel_config"}` and not inside the outage counter.
+
+**One and a half more were real in the smaller way**: the commitment mirror's missing export
+directory had a log line and no counter, and `get_durable_job_status` never reached the second list
+naming the deployment-wide reads.
+
+**Nine were stale.** The list was written against the fix branch mid-flight and most of it landed
+before this pass began. Verifying rather than trusting cost one measurement each and would have cost
+nine unnecessary changes otherwise — several of which (re-tightening a regex, re-adding a clamp at
+the launch sites) would have *undone* a better fix that had since replaced the one the finding asked
+for. The deadline clamp is the clearest case: the finding asked for the third launch site, and the
+right answer was to delete the caller-side clamp entirely and return `due_at` from the activity.
+
+**Nothing is left deliberately open from this list.** The one thing this pass did *not* do is bound
+the `GROUP BY`'s cardinality on `audit_events.tool` — the retraction beside `_SAFE_TOOL_NAME` names
+it, says it needs a predicate in the SQL, and says it is a separate change. That judgement stands:
+it is a schema-and-query decision about a poisoning burst, not a bounded fix, and the bucketing that
+protects the *reader* is in place either way.
