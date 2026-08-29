@@ -228,15 +228,6 @@ topic).
 
 
 
-- [ ] **The ORD pre-flight maps the whole fetch, once per drain chunk** — [M]. `_unmappable` maps
-      every entry `fetch_new_entries` returns, and `eln_sync_batch_size` is applied by
-      `_BoundedIngest` *after* the adapter returns. The docstring prices this as "~6.5 ms on a full
-      100-entry chunk"; the per-entry figure is right and the unit is not. Measured: **0.374 s over
-      5,000 entries** (75 µs each), ~26% of the whole fetch. A 100k-entry backfill drains in ~1,000
-      activity attempts each re-mapping all 100k — roughly two hours of pure re-mapping added to
-      the drain. `record_refusals` is likewise handed the whole directory's refusals every chunk and
-      issues one upsert round trip per row in a Python loop.
-
 - [ ] **`delete_session` and the owner prune take two rows in opposite orders** — [S], not
       reproduced. `_session_delete_statements` deletes `session_turns` then `session_owners`;
       `retention._DELETE_SESSIONS` takes `session_owners` then `session_turns`. The window is narrow
@@ -261,13 +252,6 @@ topic).
       correctness bug, and the deadlock is one statement wide, self-healing on the retention side
       (a Temporal activity retries) and has not been reproduced. **Keep both orders; the row stays
       open only as the record that the obvious fix was tried and rejected.**
-
-- [ ] **`LEDGER_SOURCE` is a constant where the schema documents a registry source name** — [S].
-      `ord_adapter.LEDGER_SOURCE = "eln-ord"` is hardcoded while `ingest_rejections.source` is
-      documented as the registry source name and the eviction cap is per-source, so two ORD data
-      sources would share one bucket and mis-attribute each other's refusals. The guarding test
-      reads this repository's manifests, so a site adding a second ORD source fails the test rather
-      than the code taking the name as an argument.
 
 - [ ] **The corpus drain is the one ingest pass with no metric** — [S].
       `chemclaw_ingest_records_total{source,outcome}` is emitted by the ELN sync
