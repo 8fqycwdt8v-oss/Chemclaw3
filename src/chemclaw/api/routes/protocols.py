@@ -205,7 +205,18 @@ async def post_revision(
         raise HTTPException(
             status_code=404, detail=f"no design {design_id!r} at revision {body.parent_revision}"
         )
-    checks = run_checks(body.document)
+    # **The kind and the stage are derived from the document, not assumed.** This route serves the
+    # ADR's second hole — an artefact the chemist can correct *before* the expensive work — and the
+    # first version hard-coded `kind="protocol"` and graded at the protocol stage, so correcting an
+    # ask recorded a protocol revision, flipped a design with no procedure in it to `draft`, and
+    # reported `is_a_protocol` and `evidence_present` as blockers on it. That is exactly the failure
+    # `_REQUEST_STAGE` was introduced to prevent, reintroduced on the human path: a blocker that
+    # fires on the normal path is a blocker a reader learns to ignore, which is the property the one
+    # real blocker depends on. `has_protocol` is the single definition all three callers now read.
+    kind = "protocol" if body.document.has_protocol else "request"
+    checks = run_checks(
+        body.document, stage="protocol" if body.document.has_protocol else "request"
+    )
     changed = diff_designs(
         previous.design,
         body.document,
@@ -217,7 +228,7 @@ async def post_revision(
             design_id,
             body.document,
             checks,
-            kind="protocol",
+            kind=kind,
             author_kind="human",
             author=principal.oid or "",
             parent_revision=body.parent_revision,
@@ -225,7 +236,10 @@ async def post_revision(
         )
     except RevisionConflict as exc:
         # 409 with a machine-readable code, because the caller's next move is to re-read and
-        # re-apply rather than to retry — the same contract `plan_changed` has.
+        # re-apply rather than to retry. Deliberately *not* the shape `POST
+        # /sessions/{id}/plan/decision` uses — that one answers a 409 with a plain string, and a
+        # caller has to match on prose to tell it from the other 409 the front door serves. This
+        # comment used to claim it mirrored a `plan_changed` code, which exists nowhere in `src/`.
         raise HTTPException(
             status_code=409, detail={"code": "revision_conflict", "message": str(exc)}
         ) from exc

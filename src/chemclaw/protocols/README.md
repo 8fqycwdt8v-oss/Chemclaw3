@@ -33,7 +33,7 @@ written once. A second "HTE campaign" type would have duplicated all five.
 | Module | What it is |
 | --- | --- |
 | `models.py` | The shape. Short docstrings on purpose — pydantic ships a class docstring as the JSON-schema `description` on every turn, so rationale lives in `#` comments. |
-| `checks.py` | The deterministic verdicts, computed from the design and never asked of a model. `check_ids()` is the list; a number here would be a second one that goes stale. |
+| `checks.py` | The deterministic verdicts, computed from the design and never asked of a model. `check_ids()` is the list; a number here would be a second one that goes stale. A check answers about the *design*, so what a document has to be well-formed at all — unique ids, a `replicate_of` that names a real arm — is a `models.py` validator instead. |
 | `layout.py` | Plate arithmetic: formats, well labels, placement, run order. No chemistry. |
 | `diff.py` | What changed between two revisions, as dotted paths. |
 | `render.py` | The receipt a tool returns, the run sheet, and the Markdown a chemist reads. |
@@ -63,7 +63,8 @@ written.
 ## The rule about inference
 
 `RequestField` carries `basis: stated | inferred | absent`, and `stated` obliges a verbatim quote
-that `protocols.request` checks against the chemist's own text. Inference is *allowed* here, which
+that `agent.protocol_design_tools.require_quotes_are_verbatim` checks against the chemist's own
+text. Inference is *allowed* here, which
 is the opposite of the transcription rule
 (`D-2026-08-26-a-transcription-may-not-infer-a-setpoint`) and for a consistent reason: a record must
 not gain a number nobody measured, and a proposal is nothing but numbers nobody has measured yet.

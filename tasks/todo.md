@@ -268,3 +268,26 @@ malformed argument is most expensive.
 `test_durable_observability.py` twice; both were the docker daemon dying mid-run, and both pass with
 Postgres up. Eight `e2e/protocols.spec.ts` failures were a `dist/` I had rebuilt without
 `ALLOW_DEV_AUTH=true`, which is what that harness serves; all eight pass on the build it expects.
+
+## 6 — Review cycle (2026-08-29)
+
+An adversarial pass over the merged tier found **fifteen** defects, all under a green 231-test
+suite, all now fixed — `D-2026-08-29-the-review-of-the-prescriptive-tier-found-fifteen-defects`.
+
+**Four of the five worst were a blocker that could not fail**, each under a passing test written
+from the same misunderstanding as the code: `components_resolve` never consulted the strict parser
+on the silent-truncation class it exists for (`"CCO junk"` passed as `1 structures parse`);
+`forbidden_absent`'s structure half could never fire for a named reagent (forbidding DMF let
+`N,N-dimethylformamide` through); a limiting reagent at `0.0` mmol emptied the equivalents
+comparison; and `layout_fits` accepted a 96-well plate declared as 1x2 with wells at row 98.
+
+**Three fixes supersede the merged ADR**, and one of them is the only path in this tier to somebody
+running the wrong conditions: an approval now returns to `draft` on any revision, because a chemist
+approving 80 °C and an agent then drafting 200 °C left the header reading `approved` over the head
+that `GET /protocols/{id}` serves. The other two: the loser of a real READ COMMITTED race gets a
+`RevisionConflict` (and so a 409) instead of a raw `UniqueViolation` and a **500**; and a citation
+counts only when it names something to open, because two bare sentences cleared the load-bearing
+blocker.
+
+Each fix was verified against the review's own reproduction rather than against a new test alone.
+The remaining open items are unchanged and are in `docs/planning/BACKLOG.md`.

@@ -14,6 +14,7 @@ import asyncio
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
+import psycopg
 import pytest
 
 from chemclaw.core.config import settings
@@ -338,10 +339,15 @@ def test_set_status_moves_a_design_a_write_never_would(backend: str) -> None:
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_the_one_automatic_status_transition_and_the_two_that_are_not(backend: str) -> None:
-    """One transition happens on a write, and the rest are a human's.
+    """Two transitions happen on a write, and the rest are a human's.
 
-    A structured ask stays `requested`; the first protocol revision makes it a `draft`; a later
-    protocol revision must not silently un-approve an approved design.
+    A structured ask stays `requested`; the first protocol revision makes it a `draft`; and a
+    revision landing on an **approved** design takes it back to `draft`, because an approval is a
+    statement about a document and the document has changed. That last one is a correction: holding
+    the status let a chemist approve revision 1 at 80 °C, an agent draft revision 2 at 200 °C, and
+    the header keep reading `approved` over conditions nobody had read — with `GET /protocols/{id}`
+    serving the head. `abandoned` is deliberately held, because a design somebody decided not to run
+    does not come back because an agent wrote to it.
     """
 
     async def _body() -> None:
@@ -378,7 +384,24 @@ def test_the_one_automatic_status_transition_and_the_two_that_are_not(backend: s
             status="draft",
         )
         third = await store.summary(design_id)
-        assert third is not None and third.status == "approved"
+        assert third is not None and third.status == "draft", (
+            "a revision landing on an approved design leaves it approved, so the header vouches "
+            "for a document nobody signed off"
+        )
+
+        await store.set_status(design_id, "abandoned")
+        await store.append(
+            design_id,
+            _design(),
+            [],
+            kind="protocol",
+            author_kind="agent",
+            parent_revision=3,
+            change_note="an agent wrote to it anyway",
+            status="draft",
+        )
+        fourth = await store.summary(design_id)
+        assert fourth is not None and fourth.status == "abandoned"
 
     _run(_body)
 
@@ -387,7 +410,13 @@ def test_advanced_states_the_rule_the_stores_both_implement() -> None:
     """The one function both backends read, so the transition cannot differ between them."""
     assert advanced("requested", "protocol") == "draft"
     assert advanced("requested", "request") == "requested"
-    for status in ("draft", "approved", "executed", "abandoned"):
+    # An approval names a document, and any revision replaces the document — including a `request`
+    # one, since correcting the ask a protocol was approved against un-approves it just as surely.
+    assert advanced("approved", "protocol") == "draft"
+    assert advanced("approved", "request") == "draft"
+    # The three that are held. `abandoned` is the one worth stating: it must not be revived by a
+    # write, only by a person.
+    for status in ("draft", "executed", "abandoned"):
         assert advanced(status, "protocol") == status
         assert advanced(status, "request") == status
 
@@ -411,3 +440,117 @@ def test_both_backends_satisfy_the_declared_protocol() -> None:
     """`DesignStore` is `runtime_checkable`, so the two implementations answer to one name."""
     assert isinstance(InMemoryDesignStore(), DesignStore)
     assert isinstance(PostgresDesignStore(), DesignStore)
+
+
+def test_two_writers_racing_on_one_head_lose_as_a_revision_conflict() -> None:
+    """The loser of a real race is told the same thing a stale `parent_revision` is told.
+
+    Postgres only, because the race is one `core.db`'s READ COMMITTED connections make possible and
+    a single-threaded dict cannot: both writers read `head=1`, both build revision 2, and what
+    actually decided between them was the `(design_id, revision)` primary key. That surfaced as a
+    raw `psycopg.errors.UniqueViolation` nothing translated, so the second of "two chemists editing
+    one plate" got a **500 with no `revision_conflict` code** from `POST
+    /protocols/{id}/revisions` — precisely the case the 409 exists for. No artificial barrier is
+    needed and none is used: `asyncio.gather` over two real appends reproduces it, which is how it
+    was found.
+    """
+
+    async def _body() -> None:
+        await migrated_db_or_skip()
+        store = PostgresDesignStore()
+        design_id = _id("postgres", "race")
+        await store.append(design_id, _design(), [], kind="protocol", author_kind="agent")
+
+        outcomes = await asyncio.gather(
+            store.append(
+                design_id,
+                _design(arms=2),
+                [],
+                kind="protocol",
+                author_kind="human",
+                parent_revision=1,
+                change_note="alice, from revision 1",
+            ),
+            store.append(
+                design_id,
+                _design(arms=3),
+                [],
+                kind="protocol",
+                author_kind="human",
+                parent_revision=1,
+                change_note="bob, from the same revision 1",
+            ),
+            return_exceptions=True,
+        )
+        refusals = [item for item in outcomes if isinstance(item, BaseException)]
+        winners = [item for item in outcomes if not isinstance(item, BaseException)]
+        assert len(refusals) == 1 and len(winners) == 1, (
+            "both writers built revision 2 from head 1; exactly one of them has to be refused"
+        )
+
+        loser = refusals[0]
+        assert isinstance(loser, RevisionConflict)
+        # The whole defect, stated as its own assertion: a `UniqueViolation` escaping here is what
+        # the route turns into a 500, and `RevisionConflict` is not one, so this cannot pass by
+        # inheritance.
+        assert not isinstance(loser, psycopg.errors.UniqueViolation)
+        assert "revision 2" in str(loser)
+
+        # And exactly one revision 2 exists — the winner's, whichever it was.
+        history = await store.history(design_id)
+        assert [item.revision for item in history] == [1, 2]
+        assert history[-1].change_note == winners[0].change_note
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_the_session_that_created_a_design_is_the_one_the_listing_filters_on(
+    backend: str,
+) -> None:
+    """`session_id` is set once, by the write that opened the design, on **both** backends.
+
+    They disagreed: `InMemoryDesignStore` overwrote it on every append while `_UPSERT_DESIGN` omits
+    it from its `DO UPDATE SET` and keeps the creator's — so `listing(session_id=…)` returned
+    different designs depending on which backend was configured. The in-memory store is "a real
+    backend, not a test double", which is exactly why that is a wrong answer on one of them rather
+    than a harmless difference. `opened_by` is asserted beside it because it is the same rule and
+    the same omission.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design_id = _id(backend, "session-owner")
+        await store.append(
+            design_id,
+            _design(),
+            [],
+            kind="request",
+            author_kind="agent",
+            author="chemist-a",
+            session_id="one",
+            status="requested",
+        )
+        await store.append(
+            design_id,
+            _design(arms=2),
+            [],
+            kind="protocol",
+            author_kind="human",
+            author="chemist-b",
+            parent_revision=1,
+            change_note="a second session opened the same design",
+            session_id="two",
+        )
+
+        summary = await store.summary(design_id)
+        assert summary is not None
+        assert summary.head_revision == 2
+        assert summary.opened_by == "chemist-a"
+
+        # `session_id` is not on the summary row, so the listing filter is where it is observable —
+        # and it is also the caller that got the wrong answer.
+        assert design_id in {row.design_id for row in await store.listing(session_id="one")}
+        assert design_id not in {row.design_id for row in await store.listing(session_id="two")}
+
+    _run(_body)

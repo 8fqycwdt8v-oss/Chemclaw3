@@ -187,15 +187,28 @@ class InMemoryDesignStore:
         )
         self._revisions.setdefault(design_id, []).append(revision)
         meta = self._meta.setdefault(
-            design_id, {"status": status, "created_at": revision.created_at, "opened_by": author}
+            design_id,
+            {
+                "status": status,
+                "created_at": revision.created_at,
+                "opened_by": author,
+                "session_id": session_id,
+                "correlation_id": correlation_id,
+            },
         )
+        # `session_id`, `correlation_id` and `opened_by` are set once, by the write that created
+        # the design, and are deliberately absent from this update — which is what `_UPSERT_DESIGN`
+        # does on the Postgres side by omitting them from its `DO UPDATE SET`. They disagreed
+        # before: this store overwrote `session_id` on every append while Postgres kept the
+        # creator's, so `listing(session_id=…)` returned different designs on the two backends.
+        # That is not a difference a store is allowed to have — this one is "a real backend, not a
+        # test double", so an answer that depends on which is configured is a wrong answer on one
+        # of them.
         meta.update(
             {
                 "title": design.request.title,
                 "mode": design.request.mode,
                 "project": design.request.project,
-                "session_id": session_id,
-                "correlation_id": correlation_id,
                 "status": advanced(meta["status"], kind),
                 "updated_at": revision.created_at,
                 "arm_count": len(design.arms),
@@ -300,9 +313,19 @@ class PostgresDesignStore:
     ) -> DesignRevision:
         """Store the next revision, refusing when `parent_revision` is not the head.
 
-        The head read and both writes are one transaction, so two concurrent appends cannot both
-        see the same head and both insert — the second loses the primary key on
-        `(design_id, revision)` even if it wins the race on the read.
+        **Two writers *can* both read the same head, and the primary key is what actually decides
+        between them.** The first version of this docstring claimed the transaction prevented it;
+        `core.db`'s connections are READ COMMITTED, so both readers see `head=1` and both build
+        revision 2 — measured against a real database, with no artificial barrier. What stopped the
+        second was `(design_id, revision)`, and it surfaced as a raw
+        `psycopg.errors.UniqueViolation` that nothing translated: the second chemist in "two
+        chemists editing one plate is the ordinary case" got a **500 with no `revision_conflict`
+        code**, which is precisely the case the 409 was built for.
+
+        So the violation is caught and re-raised as the same `RevisionConflict` a stale
+        `parent_revision` raises. The two are the same fact reaching the writer by different routes
+        — the revision you built on is not the head any more — and a caller that had to tell them
+        apart would be a caller with two ways to do one thing.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -338,20 +361,27 @@ class PostgresDesignStore:
                         "blocker_count": len(revision.blockers),
                     },
                 )
-                await cur.execute(
-                    _INSERT_REVISION,
-                    {
-                        "design_id": design_id,
-                        "revision": revision.revision,
-                        "kind": kind,
-                        "author_kind": author_kind,
-                        "author": author,
-                        "parent_revision": head,
-                        "change_note": change_note,
-                        "document": Jsonb(design.model_dump(mode="json")),
-                        "checks": Jsonb([c.model_dump() for c in checks]),
-                    },
-                )
+                try:
+                    await cur.execute(
+                        _INSERT_REVISION,
+                        {
+                            "design_id": design_id,
+                            "revision": revision.revision,
+                            "kind": kind,
+                            "author_kind": author_kind,
+                            "author": author,
+                            "parent_revision": head,
+                            "change_note": change_note,
+                            "document": Jsonb(design.model_dump(mode="json")),
+                            "checks": Jsonb([c.model_dump() for c in checks]),
+                        },
+                    )
+                except psycopg.errors.UniqueViolation as exc:
+                    raise RevisionConflict(
+                        f"{design_id} gained revision {revision.revision} while this write was "
+                        "being prepared. Re-read the design and apply the change to the current "
+                        "revision."
+                    ) from exc
             await conn.commit()
         return revision
 
@@ -436,12 +466,24 @@ class PostgresDesignStore:
 def advanced(current: DesignStatus, kind: str) -> DesignStatus:
     """The status a design has after a revision of `kind` lands on it.
 
-    Exactly one automatic transition: a design that held only a structured ask becomes a `draft`
-    the moment a protocol revision arrives. Everything after that is a human's decision and moves
-    only through `set_status` — a re-draft of an `approved` design must not silently un-approve it,
-    and a re-draft of an `abandoned` one must not quietly bring it back.
+    Two automatic transitions, and the second is a correction. A design that held only a structured
+    ask becomes a `draft` the moment a protocol revision arrives — that one was always here.
+
+    **An `approved` design becomes a `draft` again when a new revision lands**, because an approval
+    is a statement about a *document* and the document has changed. The first version held the
+    status instead, reasoning that a re-draft must not silently un-approve — which is true of the
+    word and false of the thing: measured, a chemist approving revision 1 at 80 °C and an agent then
+    drafting revision 2 at 200 °C left a header reading `approved` over a protocol nobody had read,
+    and `GET /protocols/{id}` serves the head. That is the one path in this tier to somebody running
+    conditions no one signed off. Which revision *was* approved stays recoverable: `set_status`
+    records it, and the revision history is append-only.
+
+    `abandoned` is deliberately not in that shape and is held: a design somebody decided not to run
+    does not come back because an agent wrote to it, and the way back is a person's `set_status`.
     """
-    return "draft" if current == "requested" and kind == "protocol" else current
+    if current == "requested" and kind == "protocol":
+        return "draft"
+    return "draft" if current == "approved" else current
 
 
 def _require_head(design_id: str, head: int, parent_revision: int) -> None:

@@ -1281,3 +1281,41 @@ build`, which names the cause exactly. **Rule 12 again — read the failure befo
 and one specific to build artefacts: when a test harness consumes a build directory, the build flags
 are part of the fixture.** Rebuild the way the harness does, and check `.github/workflows/` for
 which flags that is rather than guessing.
+
+## 2026-08-29 — four of my five worst defects were a check that could not fail
+
+An adversarial review of a tier I had just merged found **fifteen** defects under a green 231-test
+suite. Four of the five worst were the same shape: a **blocker that could not fail**, each sitting
+under a passing test I had written from the same misunderstanding as the code.
+
+- `components_resolve` tested `canonical == smiles and not _parses(smiles)`. I believed
+  `canonical_smiles` returns its input unchanged on a bad input. It does not — RDKit stops at
+  whitespace, so `"CCO junk"` canonicalises *successfully* to `"CCO"`, a smaller molecule. The first
+  clause is false for exactly the class the check exists for, so the second was never reached and the
+  detail read `1 structures parse` about a structure that does not.
+- `forbidden_absent` compared `canonical_smiles("DMF")` — the literal string `"DMF"` — against a set
+  of canonical SMILES. The comment beside it explained at length why looking at the structure
+  matters. It could never match.
+- `charge_is_consistent` put `reference.amount_mmol > 0` inside the comprehension that finds
+  disagreements, so a limiting reagent at `0.0` emptied the list and passed.
+- `layout_fits` never compared `rows`/`columns` to `plate_format`.
+
+**What each has in common is that my test asserted the same wrong model of the world as the code.**
+`test_components_resolve_blocks_a_structure_rdkit_cannot_read` passes `"not-a-smiles"` — which
+RDKit rejects outright, the one case the conjunction handles. I never tried `"CCO junk"`, because
+the code and the test came out of one belief.
+
+The rules I am taking:
+
+1. **For a check, enumerate the input *classes* before writing either the code or the test**, and
+   name the one the check exists for. Here it was "a string RDKit accepts as a different, smaller
+   molecule" — the class `require_molecule`'s own docstring is entirely about, in a function I had
+   read that morning. A both-directions test is not enough when both directions come from one idea.
+2. **A test I write beside my own code is a consistency check, not a search.** The searching has to
+   be done by something that did not write the code. This one cost 15 findings; commissioning it
+   was the highest-value hour of the task and it should not have been the last hour.
+3. **When a comment argues for a behaviour, run the behaviour.** Three of the four announced
+   themselves in their own prose — `forbidden_absent`'s comment describes the DMF/`CN(C)C=O` case as
+   the reason for code that cannot do it. I wrote the comment and the code in one pass and checked
+   neither against the other. The existing rule 14 says the docstring is the best bug detector;
+   the corollary is that it is useless on prose *I* wrote in the same breath as the code.

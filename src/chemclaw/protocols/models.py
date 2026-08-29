@@ -110,7 +110,8 @@ class RequestField(BaseModel):
     value: str = ""
     basis: FieldBasis = "absent"
     # The verbatim span. Checked against the supplied text rather than trusted — see
-    # `request.require_quotes_are_verbatim`. A paraphrase is the failure this field exists to catch.
+    # `agent.protocol_design_tools.require_quotes_are_verbatim`. A paraphrase is the failure
+    # this field exists to catch.
     quote: str = ""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -425,15 +426,38 @@ class ExperimentDesign(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     @model_validator(mode="after")
-    def _arms_are_distinct_and_ordered(self) -> ExperimentDesign:
-        """Arm ids are unique and steps are numbered 1..n in order."""
+    def _names_resolve_and_steps_are_ordered(self) -> ExperimentDesign:
+        """Ids are unique, `replicate_of` names a real arm, and steps are numbered 1..n."""
+        # The last two are here rather than in `checks` because they are not judgments about a
+        # design — they are the difference between a document that means something and one that
+        # does not, and both were measured *defeating* a check. A `replicate_of` naming an arm that
+        # does not exist exempted its arm from `arms_are_distinct`, and two factors sharing a name
+        # collapsed in `factor_levels_declared`'s `declared` dict, so the first factor's levels
+        # left the *blocker* and the diff at once.
         ids = [arm.arm_id for arm in self.arms]
         if len(set(ids)) != len(ids):
             raise ValueError("arm_id repeats; each arm needs its own id")
+        names = [factor.name for factor in self.factors]
+        if len(set(names)) != len(names):
+            raise ValueError("a factor name repeats; each factor needs its own name")
+        dangling = sorted({arm.replicate_of for arm in self.arms if arm.replicate_of} - set(ids))
+        if dangling:
+            raise ValueError(f"replicate_of names no arm in this design: {', '.join(dangling)}")
         expected = list(range(1, len(self.base.steps) + 1))
         if [step.index for step in self.base.steps] != expected:
             raise ValueError("steps must be numbered 1..n in order")
         return self
+
+    @property
+    def has_protocol(self) -> bool:
+        """Whether this design says what to do, rather than only what is being asked for.
+
+        The one definition, read by `checks.is_a_protocol`, by the intake (which must not replace a
+        drafted design with an empty ask) and by the edit route (which must not grade a correction
+        to the *ask* at the protocol stage). Three callers deciding it separately is how the second
+        and third got it wrong.
+        """
+        return bool(self.arms or self.base.steps or self.base.charge)
 
     def arm(self, arm_id: str) -> ProtocolArm | None:
         """The arm with this id, or `None`."""
