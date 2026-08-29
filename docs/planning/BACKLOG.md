@@ -619,7 +619,7 @@ only holds defects can only ever restore the system to what it already intended 
       **Every absolute above is a lower bound, and the case is stronger rather than weaker for it.**
       All of them were measured on a basis the 2026-08-29 re-baseline corrected: the ratchet counted
       the registry's callables, not the tools the graph binds, and under-measured `default` by
-      **8,059 tokens (23%)** — 34,399 reported against 42,458 paid, ceiling now 43,500. So 28,114
+      **8,126 tokens (24%)** — 34,379 reported against 42,505 paid, ceiling now 43,500. So 28,114
       and −5,787 both understate what this narrowing is worth, and the eleven names should be
       re-measured on the bound basis when the row is worked. What does not change is why it is
       blocked: the saving is still partly in endpoint tools no offline floor can see, and it still
