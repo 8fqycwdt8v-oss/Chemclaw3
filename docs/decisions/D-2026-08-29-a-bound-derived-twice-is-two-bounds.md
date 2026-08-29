@@ -108,4 +108,11 @@ unreadable file and a late arrival never become a `RawEntry` at all.
 - Five ledger tests that drove a hand-built adapter now drive the real activity over a manifest, via
   `_ord_source`/`_drain`. That is a cost of this decision and worth stating: a ledger row is a
   property of the *drain* now, so a test about one has to run the drain.
-- `settings.eln_sync_batch_size` has one reader again, in the layer that owns the bound.
+- No adapter reads `settings.eln_sync_batch_size` to guess at its caller's chunk any more. The two
+  remaining readers are `_BoundedIngest`, which owns the bound, and the warehouse adapter's startup
+  check that its own `fetch_limit` is not below it — a warning about its own page size, not a slice
+  of somebody else's.
+- **One asymmetry is left standing and is not this decision's to close**: `OrdJsonAdapter` records a
+  file it could not read, and `JsonExportAdapter` still only logs one. Both are outside
+  `IngestSummary` by construction, so closing it means a second `record_refusals` call in the second
+  adapter, which is a change to that adapter rather than to where a bound lives.
