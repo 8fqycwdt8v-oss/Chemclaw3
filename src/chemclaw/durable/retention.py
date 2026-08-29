@@ -271,6 +271,41 @@ _NOT_PRUNED: dict[str, str] = {
     # Records. Deleting a row does not reclaim a cache, it ends the ability to answer a question
     # about the past — so disposal belongs to whoever owns the record, never to a clock.
     "audit_events": "refused: the record of who ran what — see the docstring above",
+    # The record of what this system changed in a system it does *not* own, and who approved
+    # it when it could not be undone. Deleting one does not reclaim a cache; it ends the
+    # ability to answer "did we file that, and on whose authority" about a change that is
+    # still standing on the far side — which may outlive this deployment entirely. Bounded by
+    # how often this system acts outside itself, which no job in this repository does at all.
+    "effects": (
+        "refused: what this system changed outside itself and who approved it. The change on "
+        "the far side outlives any window this could be pruned on"
+    ),
+    # Not a record and not a cache: a *mirror*, upserted on `(source, external_id)` so it
+    # converges on the source's snapshot instead of accumulating. What bounds it is the
+    # portfolio it reflects — a programme has as many milestones as it has, and a row for a
+    # finished one is what makes "what did we deliver last quarter" answerable. A clock
+    # cutoff here would delete the delivered half of the very question this table was added
+    # for. A source that stops exporting leaves stale rows, and `observed_at` is how a
+    # reading says so rather than how a sweep decides.
+    "commitments": (
+        "refused: a mirror that converges rather than accumulating, bounded by the size of "
+        "the portfolio it reflects. Staleness is reported by `observed_at`, not pruned"
+    ),
+    # Considered for pruning and refused, because the two registers disagreed and one of them
+    # had to be wrong. A settled request names who asked somebody to run, review or deliver
+    # something and who answered — the attribution for an answer that released a durable
+    # workflow, which is the standing `plan_approvals` has and for the same reason. A table
+    # retained through a data-subject erasure cannot also be swept on a clock, and
+    # `tests/test_retention.py` is what caught the draft that claimed both.
+    #
+    # Growth is bounded by how often a person is *asked* something, which is human-paced and
+    # orders below the session tables: this is not `session_events`, where one turn writes
+    # many rows.
+    "pending_requests": (
+        "refused: the attribution for an answer that released a durable workflow, retained "
+        "for the reason `plan_approvals` is. Bounded by how often a person is asked "
+        "something, which is human-paced"
+    ),
     "job_records": "refused: a durable run's evaluation record, which used to expire with "
     "Temporal's history and take a campaign's results with it (D-157)",
     "calculation_results": "refused: evicting a cached result converts a hit into a "

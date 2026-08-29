@@ -272,22 +272,26 @@ def test_the_runtime_counter_is_declared_on_the_process_registry() -> None:
     assert "chemclaw_job_runtime_seconds_total" in METRICS.render()
 
 
-def test_nothing_in_the_tree_reads_the_turn_cost_ledger() -> None:
-    """An absence pinned, so re-adding a reader without a surface turns this red.
+def test_the_turn_cost_ledger_has_exactly_one_reader_and_it_has_a_surface() -> None:
+    """The ledger's reader is `operations/activity.py`, and `review_activity` is what asks it.
 
-    `turn_costs` had two readers and neither had a caller. `turn_cost_store.read_spend_by_actor`
-    described itself as "the whole point of the table" and was reached by no route, CLI or ops
-    endpoint; `evals/live.session_tokens` was the only producer of `ProbeOutcome.tokens` and was
-    called by nothing at all, so every probe of every live run recorded `None`. Both were deleted
-    on 2026-08-27 for the reason
+    This began as an *absence* pin. `turn_costs` had two readers and neither had a caller:
+    `turn_cost_store.read_spend_by_actor` described itself as "the whole point of the table" and was
+    reached by no route, CLI or ops endpoint; `evals/live.session_tokens` was the only producer of
+    `ProbeOutcome.tokens` and was called by nothing at all, so every probe of every live run
+    recorded `None`. Both were deleted on 2026-08-27 for the reason
     `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` gives: a function that
     only its own test calls is a claim that a capability exists.
 
-    The ledger is still **written** every turn, and that is deliberate — it is the cost record an
-    operator queries directly, the same standing `audit_events` has. What must not come back is a
-    reader with no way to reach it: a query function needs the route, command or report that asks
-    it, in the same change. `tests/test_postgres_turn_cost_store.py` reads the table with its own
-    SQL, which is where a test's read-back belongs.
+    The rule that absence enforced was never "no reader" — it was *a query function needs the route,
+    command or report that asks it, in the same change*
+    (`D-2026-08-29-a-trail-nobody-can-read-answers-no-question`). So the pin now states the rule
+    directly: exactly one module reads the table, and a registered agent tool reaches it. Both
+    halves matter. Drop the tool and this is the 2026-08-27 shape again; add a second reader and the
+    single-reader property this package was built to have is gone.
+
+    `tests/test_postgres_turn_cost_store.py` reads the table with its own SQL, which is where a
+    test's read-back belongs.
     """
     src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     readers = sorted(
@@ -295,7 +299,14 @@ def test_nothing_in_the_tree_reads_the_turn_cost_ledger() -> None:
         for path in src.rglob("*.py")
         if "FROM turn_costs" in path.read_text(encoding="utf-8")
     )
-    assert readers == [], (
-        f"{readers} reads `turn_costs` again. The last two readers had no caller; a new one needs "
-        "the route, command or report that asks it, added in the same change."
+    assert readers == ["operations/activity.py"], (
+        f"{readers} reads `turn_costs`. Exactly one module may: `chemclaw.operations.activity`, "
+        "which `review_activity` reaches. A reader with no surface is the 2026-08-27 defect."
+    )
+    import chemclaw.agent.operations_tools  # noqa: F401  (registers the tool)
+    from chemclaw.core.tool_registry import registered_tool_names
+
+    assert "review_activity" in registered_tool_names(), (
+        "`operations.spend` reads the ledger and nothing advertises it — which is exactly the "
+        "shape the two deleted readers had."
     )

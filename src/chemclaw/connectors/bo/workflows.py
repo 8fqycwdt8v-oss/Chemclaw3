@@ -30,7 +30,9 @@ with workflow.unsafe.imports_passed_through():
     )
     from chemclaw.connectors.bo.knowledge import note_from_campaign_result
     from chemclaw.core.config import settings
+    from chemclaw.durable.awaiting import AwaitAnswerWorkflow, AwaitOutcome, AwaitRequest
     from chemclaw.durable.connector_job import ConnectorJobResult
+    from chemclaw.science.bo.objectives import is_measured
     from chemclaw.science.bo.problem import (
         CampaignCarryOver,
         CampaignResult,
@@ -95,6 +97,67 @@ def _carry_on_if_history_is_filling_up(
     )
 
 
+async def _measure(
+    spec: CampaignSpec,
+    candidates: list[Candidate],
+    round_label: str,
+    actor: str,
+    correlation_id: str,
+    session_id: str,
+) -> list[Observation]:
+    """Suspend this campaign until somebody reports what these candidates actually did.
+
+    **This is what makes a real screening campaign expressible.** Every registered objective is a
+    function, which is what a *simulated* campaign needs and exactly what a chemist's campaign is
+    not: BO's value at the bench is proposing a batch, waiting a week for the plates, and proposing
+    the next. Before the durable wait existed there was nothing to suspend on, so `objective_name`
+    could only ever name something computable and the loop ran to completion in seconds over
+    numbers no chemist produced.
+
+    A **child** workflow rather than an activity, and the distinction is the whole point: an
+    activity has a start-to-close budget and a heartbeat, and a week is neither. The child holds the
+    question, escalates on its own timer, and returns an outcome; this loop simply awaits it.
+
+    The child's id carries the round, so two rounds of one campaign are two waits. That is a
+    deliberate departure from `request_id_for`'s "asking twice is one wait" — round 4 of a campaign
+    is not round 3, even when the conditions repeat, because the answer settles a different batch.
+
+    An **expired** wait ends the campaign rather than continuing with a short history: proceeding
+    would fit a surrogate to a batch nobody ran and propose round 5 from it, which is the inverted
+    campaign in a different costume. `space_exhausted` already teaches this loop to stop early, so
+    the caller sees a campaign that ended with what it had.
+    """
+    request = AwaitRequest(
+        kind="measurement",
+        subject=(
+            f"Run and report {len(candidates)} condition(s) for objective "
+            f"{spec.problem.objective.name!r} ({round_label})"
+        ),
+        rationale=(
+            "A Bayesian-optimization campaign is suspended on this batch: the next proposal is "
+            "computed from these values and nothing else."
+        ),
+        requested_by=actor,
+        session_id=session_id,
+        correlation_id=correlation_id,
+        deadline_days=settings.bo_measurement_deadline_days,
+    )
+    outcome = AwaitOutcome.model_validate(
+        await workflow.execute_child_workflow(
+            AwaitAnswerWorkflow.run,
+            request.model_dump(mode="json"),
+            id=f"{workflow.info().workflow_id}:await:{round_label}",
+            task_queue=settings.background_task_queue,
+        )
+    )
+    if outcome.state != "answered":
+        return []
+    # The answer is opaque to the wait and typed here, by the caller that asked — so a malformed
+    # one fails this campaign with a message naming the batch, rather than being coerced into
+    # plausible numbers somewhere no reviewer would look.
+    return [Observation.model_validate(row) for row in outcome.payload.get("observations", [])]
+
+
 @durable_workflow(bundle_queue("bo"))
 # Its failures must be able to *be* failures: without this the SDK parks a plain exception raised
 # in workflow code in an unbounded workflow-task-failure loop, so the parent
@@ -104,6 +167,39 @@ def _carry_on_if_history_is_filling_up(
 @workflow.defn(failure_exception_types=[Exception])
 class BoCampaignWorkflow:
     """Run a BO campaign durably and return the best point, the history, and the note to gate."""
+
+    async def _evaluate(
+        self,
+        spec: CampaignSpec,
+        candidates: list[Candidate],
+        round_label: str,
+        timeout: timedelta,
+        heartbeat_timeout: timedelta,
+    ) -> list[Observation]:
+        """Turn candidates into observations, by computing them or by asking for them.
+
+        The one branch a measured campaign needs, in one place, so the seed and every round take it
+        identically — the alternative is the same `if` written twice with the second one eventually
+        forgetting something the first learned.
+        """
+        if is_measured(spec.objective_name):
+            return await _measure(
+                spec,
+                candidates,
+                round_label,
+                workflow.memo_value("requested_by", settings.service_actor_id),
+                workflow.memo_value("correlation_id", ""),
+                workflow.memo_value("session_id", ""),
+            )
+        return list(
+            await workflow.execute_activity(
+                evaluate_candidates,
+                args=[spec.objective_name, candidates],
+                start_to_close_timeout=timeout,
+                heartbeat_timeout=heartbeat_timeout,
+                retry_policy=BAD_DATA_RETRY,
+            )
+        )
 
     @workflow.run
     async def run(
@@ -137,13 +233,7 @@ class BoCampaignWorkflow:
                 heartbeat_timeout=heartbeat_timeout,
                 retry_policy=BAD_DATA_RETRY,
             )
-            history: list[Observation] = await workflow.execute_activity(
-                evaluate_candidates,
-                args=[spec.objective_name, seed],
-                start_to_close_timeout=timeout,
-                heartbeat_timeout=heartbeat_timeout,
-                retry_policy=BAD_DATA_RETRY,
-            )
+            history = await self._evaluate(spec, seed, "seed", timeout, heartbeat_timeout)
             rounds_remaining = spec.n_rounds
             rounds_done = 0
         else:
@@ -167,13 +257,14 @@ class BoCampaignWorkflow:
                 heartbeat_timeout=heartbeat_timeout,
                 retry_policy=BAD_DATA_RETRY,
             )
-            history += await workflow.execute_activity(
-                evaluate_candidates,
-                args=[spec.objective_name, proposed],
-                start_to_close_timeout=timeout,
-                heartbeat_timeout=heartbeat_timeout,
-                retry_policy=BAD_DATA_RETRY,
+            measured = await self._evaluate(
+                spec, proposed, f"r{rounds_done + 1}", timeout, heartbeat_timeout
             )
+            if not measured:
+                # A measured campaign whose batch nobody reported. Stop with what is in hand rather
+                # than proposing round n+1 from a surrogate that never saw round n.
+                break
+            history += measured
             rounds_done += 1
             rounds_remaining -= 1
             # Record the round *as it completes*, not only when the campaign does.

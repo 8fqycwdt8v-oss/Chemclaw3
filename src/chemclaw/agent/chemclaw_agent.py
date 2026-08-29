@@ -35,10 +35,14 @@ from langchain.agents.middleware import TodoListMiddleware
 # it instead of from a hand-maintained list — so adding a tool is a `@tool` at its definition
 # site, not an edit here.
 from chemclaw.agent import attachments as _attachments  # noqa: F401
+from chemclaw.agent import commitment_tools as _commitment_tools  # noqa: F401
 from chemclaw.agent import dialogue_tools as _dialogue_tools  # noqa: F401
 from chemclaw.agent import durable_tools as _durable_tools  # noqa: F401
+from chemclaw.agent import evidence_tools as _evidence_tools  # noqa: F401
 from chemclaw.agent import graph_tools as _graph_tools  # noqa: F401
 from chemclaw.agent import memory_tools as _memory_tools  # noqa: F401
+from chemclaw.agent import operations_tools as _operations_tools  # noqa: F401
+from chemclaw.agent import pending_tools as _pending_tools  # noqa: F401
 from chemclaw.agent import preferences as _preferences  # noqa: F401
 from chemclaw.agent import protocol_design_tools as _protocol_design_tools  # noqa: F401
 from chemclaw.agent import protocol_tools as _protocol_tools  # noqa: F401

@@ -36,6 +36,7 @@ from chemclaw.connectors.calc.remote import cached_remote, remote_version
 from chemclaw.core.chem import canonical_smiles, require_canonical_smiles, substructure_pattern
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.units import reconcile
 from chemclaw.science.calc.calibration import (
     Calibration,
     PredictionRecord,
@@ -102,6 +103,16 @@ def _version_of(payload: ResultPayload, tool: str) -> str:
     return version
 
 
+# Which properties this ledger scores, and the unit each is stored in. Above its readers
+# rather than beside `_calibrated()` because `report_measurement` needs the unit to check
+# a chemist's reported value against it, and a constant used at line 174 and defined at
+# line 515 resolves fine and reads as an accident.
+_CALIBRATED: dict[str, tuple[str, str]] = {
+    "solubility": ("predict_solubility", "log S"),
+    "pka": ("predict_pka", "pKa"),
+}
+
+
 async def _log_prediction(
     calc_type: str,
     calc_version: str,
@@ -138,7 +149,9 @@ async def _log_prediction(
 
 
 @server.tool()
-async def report_measurement(property_name: str, smiles: str, measured_value: float) -> str:
+async def report_measurement(
+    property_name: str, smiles: str, measured_value: float, unit: str = ""
+) -> str:
     """Record a *measured* property value, so predictions can be scored against reality.
 
     Call this when a chemist reports an experimental measurement for a property the system also
@@ -149,7 +162,12 @@ async def report_measurement(property_name: str, smiles: str, measured_value: fl
     Args:
         property_name: Which predicted property was measured — "solubility" or "pka".
         smiles: The molecule measured, as SMILES.
-        measured_value: The experimental value, in the property's own unit (log S, or pKa).
+        measured_value: The experimental value.
+        unit: The unit the chemist reported it in. Leave empty when they gave the value in the
+            property's own unit ("log S" for solubility, "pKa"). State it when they did not —
+            "mg/mL", "%", "uM" — and the call is **refused** rather than converted, because a
+            solubility in mg/mL cannot become a log S without the molar mass. Reporting the wrong
+            unit silently is the failure this argument exists to prevent.
 
     Returns:
         Whether the measurement matched an existing prediction. "No prediction on file" is a normal
@@ -158,12 +176,24 @@ async def report_measurement(property_name: str, smiles: str, measured_value: fl
         call will not help.
     """
     canonical = canonical_smiles(smiles)
+    # The ledger's own unit for this property, and the check that the reported value is in it.
+    # Before this the column existed, `record_observation` took the argument, and no caller ever
+    # passed one — so every measurement this system has ever stored carried an empty unit and a
+    # chemist reporting 0.5 mg/mL was indistinguishable from one reporting log S = 0.5
+    # (D-2026-08-29-a-quantity-without-a-unit-is-a-number).
+    _tool, ledger_unit = _CALIBRATED.get(property_name, ("", ""))
+    if ledger_unit:
+        # Raises `UnitError` (a `ValueError`) on a mismatch, which the server's error sanitiser
+        # passes through verbatim — so the chemist is told what unit the ledger holds rather than
+        # being told the measurement was recorded.
+        measured_value = reconcile(measured_value, unit, ledger_unit)
     matched = await record_observation(
         property_name,
         stable_hash(canonical),
         measured_value,
         source="chemist-reported",
         subject=canonical,
+        unit=ledger_unit,
     )
     if matched is None:
         # Not a failure to report as an error — the deployment turned the ledger off on purpose —
@@ -492,10 +522,6 @@ async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactConte
 # about the wrong calculator, in the wrong unit, and the model had no way to tell. Adding a
 # calibrated calculator is now one row, and asking about an uncalibrated one is an error that
 # names what does exist.
-_CALIBRATED: dict[str, tuple[str, str]] = {
-    "solubility": ("predict_solubility", "log S"),
-    "pka": ("predict_pka", "pKa"),
-}
 
 
 async def _calibrated(property_name: str) -> tuple[str, str]:

@@ -74,6 +74,17 @@ class DataSourceManifest(BaseModel):
             "this source cannot be retrieved from."
         ),
     )
+    commitments: str | None = Field(
+        default=None,
+        description=(
+            "`module:callable` building the commitments half (a `CommitmentAdapter`), or absent "
+            "if this source holds no committed work. The third half (F4): a source that supplies "
+            "*entities* — a programme, an activity, a milestone — rather than a corpus. Mirrored "
+            "read-only, like the other two: `ingest/sources/README.md`'s rule that a source "
+            "'cannot acquire a write path by declaring one' is unchanged, so mirroring a milestone "
+            "in does not confer the ability to move one."
+        ),
+    )
     labels: LabelPolicy | None = Field(
         default=None,
         description=(
@@ -103,10 +114,10 @@ class DataSourceManifest(BaseModel):
         reached independently: a manifest is validated before anything is built, and `SourceSpec`
         is also constructed directly in tests.
         """
-        if self.ingest is None and self.retrieve is None:
+        if self.ingest is None and self.retrieve is None and self.commitments is None:
             raise ValueError(
-                f"data source {self.name!r} declares neither `ingest:` nor `retrieve:`; "
-                "a source that can be neither ingested from nor retrieved from is not a source"
+                f"data source {self.name!r} declares no `ingest:`, `retrieve:` or `commitments:` "
+                "half; a source nothing can read from is not a source"
             )
         return self
 
@@ -118,7 +129,12 @@ class DataSourceManifest(BaseModel):
         bare `JsonExportAdapter` would otherwise surface as an opaque `ValueError: not enough
         values to unpack` from the resolver, in whichever process happened to need that half first.
         """
-        for field, value in (("ingest", self.ingest), ("retrieve", self.retrieve)):
+        halves = (
+            ("ingest", self.ingest),
+            ("retrieve", self.retrieve),
+            ("commitments", self.commitments),
+        )
+        for field, value in halves:
             if value is None:
                 continue
             module, _, attribute = value.partition(":")

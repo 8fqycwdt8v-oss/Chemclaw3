@@ -71,7 +71,15 @@ class AuthorizationError(Exception):
 # every ingest source and opens pull requests in the knowledge repository, so it is both unbounded
 # in the corpus and outward-facing in its effect.
 CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset(
-    {"request_development_report", "synthesize_memory"}
+    {
+        "request_development_report",
+        "synthesize_memory",
+        # Raising a durable wait (D-2026-08-29-a-decision-that-waits-is-a-workflow). The resource
+        # it spends is not this deployment's — it is a person's week, or a lab's queue — which is a
+        # stronger argument for the gate rather than a weaker one: a report nobody wanted costs
+        # tokens, and four reactions nobody wanted costs four reactions.
+        "request_external_input",
+    }
 )
 
 # The write/side-effect tools gated to `entra_privileged_role_set` when the operator has NOT
@@ -117,6 +125,10 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
             "stop_watching",  # deletes from subscriptions
             "request_development_report",  # starts a durable report workflow
             "synthesize_memory",  # starts a corpus scan that opens knowledge PRs
+            # Starts a durable wait, and spends somebody else's day: asking the lab to run four
+            # conditions is a resource commitment the plan gate should see, even though nothing is
+            # written here beyond a row and a workflow run.
+            "request_external_input",
             # Both write `experiment_protocols` and its append-only revision table. State-changing
             # rather than write-gated: a design is a working document a chemist owns, not a
             # knowledge claim, so the plan gate is the right control and a privileged-role default
@@ -159,6 +171,23 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         # mining job writes, and its whole purpose is to point at evidence worth gathering
         # *before* anything is authorized.
         "recall_observations",
+        # The inbox over the durable wait (D-2026-08-29-a-decision-that-waits-is-a-workflow).
+        # A read of the projection. Its *sibling* `request_external_input` starts a workflow and is
+        # classified below — asking somebody to run four reactions spends real resources, and the
+        # plan gate is exactly the control that should see it.
+        "check_pending_requests",
+        # The commitment mirror (D-2026-08-29-a-mirror-is-not-a-plan). A read of rows a
+        # portfolio export wrote. There is deliberately no writing counterpart: moving a
+        # milestone belongs to the system that owns it.
+        "review_commitments",
+        # The evidence pack (D-2026-08-29-an-evidence-pack-is-assembly-not-capture). Five
+        # SELECTs scoped to one conversation. It returns free text where the other
+        # operational readings do not, and the session scoping is what makes that safe.
+        "assemble_evidence_pack",
+        # The operational read model (D-2026-08-29). Four `GROUP BY`s over tables this system
+        # itself wrote, returning counts and bounded vocabularies. It is a read in the strongest
+        # sense available here: it cannot even reach a caller's free text, let alone write one.
+        "review_activity",
         # Reading back a stored design and listing what exists. Reads, and ones the agent should
         # make *before* revising anything — a revision derived from a remembered document rather
         # than from the current head is the write this pair exists to prevent.

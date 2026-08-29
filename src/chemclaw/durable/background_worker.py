@@ -46,6 +46,8 @@ from chemclaw.core.temporal_client import connect
 # populated, the sets this worker serves come from it — so adding a durable capability
 # to one of these modules is a decorator at its definition site, not an edit here.
 from chemclaw.durable import artifact_eviction as _artifact_eviction  # noqa: F401
+from chemclaw.durable import awaiting as _awaiting  # noqa: F401
+from chemclaw.durable import commitment_sync as _commitment_sync  # noqa: F401
 from chemclaw.durable import connector_job as _connector_job  # noqa: F401
 from chemclaw.durable import corpus_sync as _corpus_sync  # noqa: F401
 from chemclaw.durable import digest as _digest  # noqa: F401
