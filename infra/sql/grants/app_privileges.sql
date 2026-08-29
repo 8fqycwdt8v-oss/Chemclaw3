@@ -67,7 +67,6 @@ BEGIN
         'calculation_results, calculation_artifacts, job_records, '
         'bo_campaigns, measurements, predictions, note_proposals, observations, '
         'pending_requests, commitments, effects, '
-        'reaction_records, '
         'reaction_records, experiment_protocols, '
         'plan_approvals, sync_cursors, turn_costs, '
         'molecule_fingerprints, reaction_fingerprints, reaction_labels, corpus_molecules, '

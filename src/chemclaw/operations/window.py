@@ -18,10 +18,22 @@ and the one row that lands between the first and the last would be in some secti
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-#: How far back a window may be asked to reach. Not a performance bound — the indexes carry far
-#: more than this — but an honesty bound: `audit_events` and `turn_costs` are pruned by
-#: `durable/retention.py`, so a window older than any retained row would answer "nothing happened"
-#: about a period whose rows were deleted. Two years is longer than any configured retention.
+#: How far back a window may be asked to reach.
+#:
+#: **The reason first written here was false, and the number outlived it.** It said `audit_events`
+#: and `turn_costs` "are pruned by `durable/retention.py`, so a window older than any retained row
+#: would answer 'nothing happened' about a period whose rows were deleted". Both tables are in
+#: `retention._NOT_PRUNED`, explicitly *refused* — as are `job_records`, `note_proposals`,
+#: `plan_approvals` and `effects`. **None of the five tables this package reads has any configured
+#: retention**, so the honesty bound it claimed to be was guarding against a deletion that does not
+#: happen, and the clamp silently truncated a legitimate three-year question against rows that are
+#: still there.
+#:
+#: It stays, for the reason that is actually true: these tables only grow, every read here is an
+#: unindexed-range aggregate over them, and `db.connection` applies a statement timeout — so an
+#: unbounded window fails rather than answers. Two years is a bound on *cost*, and a caller who
+#: needs more than that is asking for a report rather than a reading. `Coverage` carries the
+#: clamped window into the answer, so a truncated question is visible in its own result.
 MAX_WINDOW_DAYS = 730
 
 

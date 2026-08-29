@@ -69,6 +69,26 @@ spec:
               trail is incomplete. Tool calls keep succeeding, which is why this is invisible
               without an alert. Check the `audit_sink_failure` log marker for the affected trail.
 
+        {{- /* Outbound delivery, which shipped with no signal at all: no logger and no metric
+               anywhere in `chemclaw.deliver`, a per-channel failure swallowed so one broken
+               webhook is not everyone's outage, and a caller that discarded the return value. A
+               channel that stopped taking messages and a channel that took every message produced
+               identical observations, which is the failure the seam was built to end. */}}
+        - alert: ChemclawDeliveryChannelFailing
+          expr: increase(chemclaw_delivery_failures_total[30m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawdeliverychannelfailing
+            summary: An outbound delivery channel is refusing messages
+            description: >-
+              At least one message could not be delivered on the `channel` label's channel in the
+              last 30 minutes. The failure is swallowed by design so one channel's outage is not
+              every recipient's, which is exactly why it is invisible without this rule — the
+              digest that could not be sent was still acknowledged, so nothing retries it. Check
+              the `deliver.channel_failed` log marker.
+
         {{- /* The three counters D-2026-08-08-a-degraded-check-must-not-clear-the-gate added. All
                three share one shape: a working-as-designed fallback that produced no signal, so
                the failing state and the healthy state were byte-identical on every dashboard.

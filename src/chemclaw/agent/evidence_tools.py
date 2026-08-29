@@ -90,5 +90,11 @@ async def assemble_evidence_pack(session_id: str = "") -> dict[str, object]:
         job["rationale"] = defang(str(job.get("rationale", "")))
         job["summary"] = defang(str(job.get("summary", "")))
     payload["empty"] = pack.is_empty
+    # A lower bound when the section was truncated, and said so rather than implied: a count of
+    # refusals over a prefix reads as "there were none" to anyone who does not know about the cap,
+    # which is exactly how a session whose refusals all fell after row 200 reported zero to an
+    # auditor.
     payload["refusals"] = len(pack.refusals)
+    if "tool_calls" in pack.truncated:
+        payload["refusals_are_a_lower_bound"] = True
     return payload

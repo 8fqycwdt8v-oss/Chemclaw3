@@ -1,11 +1,19 @@
 """What this system did, read back out of the record it already keeps.
 
-Every table read here has been written since the system was built, and none of them had a reader.
-`PostgresAuditStore` exposes `record` and `flush` and nothing else; the grant matrix hands the
-runtime principal `SELECT` on every table and no code used it on this one. So the trail proved what
-happened and could not answer a question about it — which is why "who else has used this playbook",
-"how many hazard flags did the group raise last quarter" and "how much of that note was
+Every table read here has been written since the system was built, and none of them could be read
+*across*. `PostgresAuditStore` exposes `record` and `flush` and nothing else; the grant matrix hands
+the runtime principal `SELECT` on every table and nothing aggregated with it. So the trail proved
+what happened and could not answer a question about it — which is why "who else has used this
+playbook", "how many hazard flags did the group raise last quarter" and "how much of that note was
 agent-written" were all unanswerable from data the system had already stamped.
+
+**Stated precisely, because it was first stated too strongly.** These tables were not readerless:
+`cli/explain.py`, `publish/backfill.py`, `durable/job_record_store.py`, `kg/proposal_store.py` and
+`agent/plan_approval_store.py` all read one or another of them, and only `turn_costs` had no reader
+at all. Every one of those is a *point lookup* — this session, this proposal, this approval — and
+the missing thing was the aggregate, not the read. `chemclaw.operations.__init__` carries the same
+correction; the merged ADR that made the stronger claim is not edited, per the rule on merged ADRs,
+and a later one records the retraction.
 
 **This is a projection, not a claim, and that is what makes it ungated.** The same argument
 `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` makes one level down: a deterministic
@@ -28,6 +36,7 @@ decide. Nothing here is proposed, nothing reaches the knowledge graph, and nothi
    over it.
 """
 
+import re
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from typing import Any
@@ -89,9 +98,16 @@ class ToolUse(BaseModel):
     refused: int = 0
     error: int = 0
     cancelled: int = 0
-    #: Distinct actors who invoked it. A count, never the ids: "who has used this" is answered by
-    #: how many, because naming colleagues in an aggregate is a different disclosure from naming
-    #: the actor on a row that person can already see.
+    #: Distinct actors seen invoking it, and a **lower bound** rather than a count. A count, never
+    #: the ids: "who has used this" is answered by how many, because naming colleagues in an
+    #: aggregate is a different disclosure from naming the actor on a row that person can already
+    #: see.
+    #:
+    #: Lower bound because the SQL groups by `(tool, outcome)` and the same person appears under
+    #: two outcomes, so the per-group counts cannot be summed; the maximum is taken instead. A tool
+    #: Alice called once successfully and Bob called once and was refused reports **1**. The code
+    #: comment conceded this and said "the field says 'distinct actors seen', not 'distinct
+    #: actors'" — and the field said "Distinct actors who invoked it. A count". It says so now.
     distinct_actors: int = 0
     first_used: str = ""
     last_used: str = ""
@@ -110,6 +126,12 @@ class JobRun(BaseModel):
     connector: str
     job: str
     runs: int = 0
+    #: Runs that ended in a failure. **Split out because the total alone answers the question
+    #: wrongly**: `tool_usage` splits by outcome three functions above, and this did not, so twenty
+    #: consecutive failures read as `runs=20, last_completed=<today>` — a healthy number to a group
+    #: leader asking whether the calc connector works. Migration 061 added the column precisely
+    #: because "all my CREST jobs are failing" and "nobody is running jobs" were one picture.
+    failed: int = 0
     distinct_requesters: int = 0
     #: Runs that proposed a note through the PR-gate. The join between a computation and the
     #: knowledge it was allowed to suggest.
@@ -133,6 +155,16 @@ class ProposalOutcome(BaseModel):
     rejected: int = 0
     open: int = 0
     failed: int = 0
+    #: Replaced by a newer proposal for the same knowledge. A real state since
+    #: `058_note_proposal_superseded.sql` and written by `kg/proposal_store.py`, and it had no
+    #: bucket here — so `hasattr` dropped it silently and `proposed=5, merged=1, open=0` said both
+    #: that nothing awaited review and that four things did. The `OUTCOMES` constant one module up
+    #: carries a four-line comment about exactly this ("a reader of history must not be bounded by
+    #: today's producer"); it was applied to `audit_events` and not to this table.
+    superseded: int = 0
+    #: Anything this model does not name, so a state added later is *visible* rather than absent.
+    #: The arithmetic must always close: `proposed` equals the sum of the buckets.
+    other: int = 0
 
 
 class Authorship(BaseModel):
@@ -189,6 +221,27 @@ def _stamp(value: Any) -> str:
     return value.isoformat() if value is not None else ""
 
 
+#: A tool name shaped like one this system could actually have served. Anything else is bucketed
+#: under `_UNRECOGNISED` rather than returned.
+#:
+#: **`audit_events.tool` is the model's raw string, not a registered name**, and this reading is the
+#: one place it reaches another person's context. `agent/audit.py` says so as measured fact: a
+#: single hallucinated call minted a metric series for 230 characters of arbitrary text, and "model
+#: output is attacker-influenceable here". The column is bare `TEXT`. So a poisoned document in the
+#: shared corpus could put instruction-shaped text into Alice's trail and have Bob's
+#: `review_activity` read it back — through the one projection whose docstring promises "counts and
+#: identifiers only, nothing a caller typed".
+#:
+#: Every tool this system serves is a Python identifier, so this pattern is exact for legitimate
+#: names and rejects every payload that needs punctuation or whitespace to be effective. It also
+#: bounds the `GROUP BY`'s cardinality, which was unbounded for the same reason.
+_SAFE_TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+
+#: Where a name that is not identifier-shaped is counted. Counted rather than dropped: a burst of
+#: hallucinated calls is a real signal, and the *number* of them is safe to report where the strings
+#: are not.
+_UNRECOGNISED = "(unrecognised)"
+
 _TOOL_USAGE = """
     SELECT tool, outcome, count(*), count(DISTINCT actor), min(ts), max(ts)
     FROM audit_events
@@ -218,7 +271,8 @@ async def tool_usage(window: Window, *, tool: str | None = None) -> ToolUsage:
     actors: dict[str, int] = {}
     scanned = 0
     for name, outcome, calls, distinct_actors, first, last in await _rows(sql, params):
-        use = per_tool.setdefault(str(name), ToolUse(tool=str(name)))
+        safe = str(name) if _SAFE_TOOL_NAME.match(str(name)) else _UNRECOGNISED
+        use = per_tool.setdefault(safe, ToolUse(tool=safe))
         use.calls += int(calls)
         scanned += int(calls)
         if str(outcome) in OUTCOMES:
@@ -226,7 +280,7 @@ async def tool_usage(window: Window, *, tool: str | None = None) -> ToolUsage:
         # The per-(tool, outcome) distinct count cannot be summed into a per-tool one — the same
         # person appears under two outcomes — so the maximum is taken as the honest lower bound and
         # the field says "distinct actors seen", not "distinct actors".
-        actors[str(name)] = max(actors.get(str(name), 0), int(distinct_actors))
+        actors[safe] = max(actors.get(safe, 0), int(distinct_actors))
         earliest, latest = _stamp(first), _stamp(last)
         if earliest and (not use.first_used or earliest < use.first_used):
             use.first_used = earliest
@@ -242,8 +296,10 @@ async def tool_usage(window: Window, *, tool: str | None = None) -> ToolUsage:
 
 
 _JOB_ACTIVITY = """
-    SELECT connector, job, count(*), count(DISTINCT requested_by),
-           count(*) FILTER (WHERE note_id <> ''), max(completed_at)
+    SELECT connector, job, count(*), count(*) FILTER (WHERE state = 'failed'),
+           count(DISTINCT requested_by),
+           count(*) FILTER (WHERE note_id <> ''),
+           max(completed_at) FILTER (WHERE state <> 'failed')
     FROM job_records
     WHERE completed_at >= %s AND completed_at < %s
     GROUP BY connector, job
@@ -257,11 +313,14 @@ async def job_activity(window: Window) -> JobActivity:
             connector=str(connector),
             job=str(job),
             runs=int(runs),
+            failed=int(failed),
             distinct_requesters=int(requesters),
             proposed_notes=int(notes),
+            # The last run that *succeeded*, not the last row written: a `max(completed_at)` over
+            # failures too reports a job as recently working when every recent run died.
             last_completed=_stamp(last),
         )
-        for connector, job, runs, requesters, notes, last in await _rows(
+        for connector, job, runs, failed, requesters, notes, last in await _rows(
             _JOB_ACTIVITY, [window.since, window.until]
         )
     ]
@@ -270,6 +329,10 @@ async def job_activity(window: Window) -> JobActivity:
         jobs=sorted(jobs, key=lambda job: (-job.runs, job.connector, job.job)),
     )
 
+
+#: The states `ProposalOutcome` names. Anything else is counted under `other`, so this is a
+#: presentation choice rather than a claim about what the table may hold.
+_PROPOSAL_BUCKETS = frozenset({"merged", "rejected", "open", "failed", "superseded"})
 
 _AUTHORSHIP = """
     SELECT note_type, state, count(*)
@@ -285,8 +348,11 @@ async def authorship(window: Window) -> Authorship:
     for note_type, state, count in await _rows(_AUTHORSHIP, [window.since, window.until]):
         outcome = per_type.setdefault(str(note_type), ProposalOutcome(note_type=str(note_type)))
         outcome.proposed += int(count)
-        if hasattr(outcome, str(state)):
-            setattr(outcome, str(state), getattr(outcome, str(state)) + int(count))
+        # A state with no bucket lands in `other` rather than nowhere. Silently dropping it is what
+        # made the arithmetic disagree with itself, and a reader cannot tell an undercount from a
+        # genuine zero.
+        bucket = str(state) if str(state) in _PROPOSAL_BUCKETS else "other"
+        setattr(outcome, bucket, getattr(outcome, bucket) + int(count))
 
     types = sorted(per_type.values(), key=lambda row: (-row.proposed, row.note_type))
     return Authorship(
