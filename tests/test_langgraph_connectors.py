@@ -332,10 +332,9 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
     """Per-turn compilation is what M7 costs; this measures it against D-123's ~90 ms baseline.
 
     LangGraph binds tools at construction, so a turn's connectors force a fresh compile — where
-    The framework this replaced built one agent per process and appended run-scoped tools. D-123
-    measured that build at
-    ~90 ms and called it "not expensive enough to fear"; this asserts the graph is no worse, since
-    that is the number the decision to compile per turn was taken against.
+    the framework this replaced built one agent per process and appended run-scoped tools. D-123
+    measured that build at ~90 ms and called it "not expensive enough to fear"; this asserts the
+    graph is no worse, since that is the number the decision to compile per turn was taken against.
 
     The bound is deliberately loose because a CI box is not a benchmark rig and a flaky
     performance test is worse than none. It is here to catch an order-of-magnitude regression — a
@@ -343,33 +342,40 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
     milliseconds. The measured figure is printed so a reader sees the real number, not only the
     bound.
 
-    **The bound was 270 ms, the `create_deep_agent` swap ate the headroom, and the merge with `main`
-    gave most of it back.** The swap showed up as this test failing inside a full-suite run and
-    passing alone — the shape that is usually contention and that time was only half contention. It
-    measured 160 ms unloaded, 205 ms contended, 59 ms of it a *second compiled graph* for the helper
-    behind `task`. Then `main` landed two changes on exactly that path: `labelled` computed once per
-    build and passed to both the backend and the middleware, and `@cache` on
-    `skill_manifest._declared_tools`. Re-measured on the merged tree:
+    **The history is worth keeping, because each step was found the same way: by measuring rather
+    than by reading.** The bound was 270 ms; the `create_deep_agent` swap ate the headroom (160 ms
+    unloaded, 205 ms contended, 59 ms of it a *second compiled graph* for the helper behind `task`)
+    and the bound went to 400. Then `main` landed two fixes on that path — `labelled` computed once
+    per build and shared, and `@cache` on `skill_manifest._declared_tools` — taking it to 130 ms
+    unloaded and 140 ms contended, of which ~61 ms was still the helper.
 
-    - **130 ms** unloaded, from 160.
-    - **140 ms** with four cores saturated, from 205 — the contended figure improved most, which is
-      what caching a synchronous `open()` + YAML parse across 28 skills would predict.
-    - **61 ms** of that 130 is still the helper.
+    **What was left is the finding this bound now rests on: the largest cost was not compilation at
+    all, it was re-deriving schemas that cannot change.** `ToolNode.__init__` calls
+    `langchain_core.tools.tool` on every plain callable it is handed, building a pydantic model from
+    the signature and docstring — ~2 ms each, and it was handed the whole in-process registry twice
+    per turn (once for the parent graph, once for the helper `_subagents` compiles). Profiled: **108
+    conversions per build, about four fifths of the total**. Compiling per turn is not negotiable —
+    a connector session belongs to exactly one turn — but *that* work is per-process, because a
+    first-party tool's schema is a function of its signature and docstring, both fixed at import.
+    `agent/tool_schema.py` derives each one once and hands `ToolNode` the object it would have
+    built. Re-measured on the same sandbox, 25 rounds, interleaved against `origin/main`:
 
-    So the parent graph is now **~69 ms — below the ~90 ms baseline this test was written against**,
-    while carrying more middleware than the agent that set it. The helper is unchanged, and the
-    reason is worth stating because it is the remaining lever: `@cache` is process-wide so the
-    helper pays nothing for skill manifests, but `labelled` is shared only *within* one build, and
-    `_subagents` calls this function again — so `_labelled(_skill_dirs())` runs twice per turn.
-    Passing the parent's value down would remove the second walk. That is left undone deliberately:
-    61 ms against a median turn of 17-142 s is ~0.3%, and the helper is not negotiable anyway —
-    `SubAgentMiddleware` cannot be excluded, so the choice is a helper this repository compiled or
-    upstream's ungoverned one.
+    - **33 ms** unloaded, from ~205 ms measured on `main` the same hour — **6x**.
+    - **35 ms** with four cores saturated, from 140 ms. The gap between loaded and unloaded almost
+      vanished, which is what removing an allocation-heavy pass would predict and is the strongest
+      evidence the diagnosis was right.
+    - **14 ms** of the 33 is the helper graph, down from ~61 ms.
 
-    The bound was 400 ms: ~3x the unloaded figure and ~2.9x the contended one, which is the same
-    ratio the original 270 held against its ~90 ms baseline. Tightening it to match the improvement
-    would buy nothing this test is for and would spend the margin that made the last regression show
-    up as a *failure* rather than as a flake.
+    It also removed the lever the previous version of this docstring named as the remaining one:
+    `_labelled(_skill_dirs())` still runs twice per turn, and at 14 ms for the entire helper it is
+    no longer worth passing down.
+
+    **The bound moves 400 → 250, and the number is an estimate rather than a measurement, which is
+    the honest way to say it.** This sandbox is not the CI runner: the same code measured ~130 ms
+    here and 340 ms there, so the conservative transfer factor is ~2.6x and the expected CI figure
+    is ~90 ms. 250 is ~2.7x that — the same ratio the 270 bound held against its ~90 ms baseline and
+    the 400 held against 130. Leaving it at 400 would have made this test near-useless as a ratchet:
+    a regression could put twelve times the measured cost back before anything went red.
 
     **550 ms as of 2026-08-29, and the +150 is a measured regression rather than a flake.** The
     prescriptive-protocol tier (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`) added
@@ -406,10 +412,9 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
     weight, so a single noisy round could fail a batch whose other four were nowhere near the
     bound; the CI runner class this suite runs on measured that shape directly (two failures, 516
     and 498 ms, against a same-sandbox *unmodified* `main` baseline of 340 ms single-round with no
-    contention at all — the margin this test relies on is thinner on that hardware than the
-    docstring above assumes). A regression that raises the *floor* — the build doing more work
-    every time — still fails the median exactly as it would the mean; only a one-off spike stops
-    dominating the verdict.
+    contention at all). A regression that raises the *floor* — the build doing more work every time
+    — still fails the median exactly as it would the mean; only a one-off spike stops dominating the
+    verdict.
     """
     model = ScriptedChatModel(["ok"])
     build_langgraph_agent(model, audit_sink=NullAuditSink())  # warm discovery, as a live pod is
@@ -423,10 +428,10 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
     samples_ms.sort()
     per_compile_ms = samples_ms[len(samples_ms) // 2]
 
-    assert per_compile_ms < 550, (
+    assert per_compile_ms < 250, (
         f"per-turn graph compile took {per_compile_ms:.0f} ms (median of {samples_ms})"
     )
     print(
         f"\nper-turn graph compile: {per_compile_ms:.0f} ms median, {samples_ms} raw "
-        "(~130 ms unloaded, of which ~61 ms is the helper graph; prior agent build baseline ~90 ms)"
+        "(~33 ms unloaded, of which ~14 ms is the helper graph; prior agent build baseline ~90 ms)"
     )

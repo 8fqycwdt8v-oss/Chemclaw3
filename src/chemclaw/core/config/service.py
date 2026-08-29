@@ -319,3 +319,9 @@ class ServiceSettings(BaseSettings):
                     "origins that may call this API."
                 )
         return value
+
+    # The read-only MCP face's bearer token variable (F7). A name rather than the value, like
+    # every other credential seam here — and required rather than defaulted to empty *at the
+    # middleware*, which fails closed when the variable is unset: a face serving the corpus
+    # anonymously is the one outcome this surface must not have.
+    mcp_face_token_env: str = "CHEMCLAW_MCP_FACE_TOKEN"

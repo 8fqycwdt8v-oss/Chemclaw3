@@ -1,0 +1,16 @@
+# A programme's committed work, read from a JSON export on disk.
+#
+# The commitments half only: this source carries no corpus and no evidence, which is exactly what
+# the third half exists to express — a portfolio extract is a set of typed entities with
+# lifecycles, not records to chunk.
+#
+# **A mirror, not a plan.** Nothing here schedules, levels or forecasts; the system that produced
+# the export is the truth. What this system adds is the join between a slipping milestone and the
+# chemistry slipping it, which the export states as `note_ids`, `job_ids` and `compounds`.
+name: commitments-json
+description: >-
+  Committed work (programmes, activities, milestones, deliverables) mirrored from a JSON extract a
+  portfolio tool writes to disk. Read-only, and stale rather than wrong when the export stops.
+commitments: chemclaw.ingest.commitments.json_export:json_commitment_export
+config:
+  path: data/commitments

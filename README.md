@@ -24,7 +24,7 @@ make check              # fast inner loop: lint + mypy --strict + tests
 
 `make check` is the inner loop, not the gate: it skips coverage and the validators
 (`kg-validate`, `eln-validate`, `skill-validate`, `connector-validate`, `datasource-validate`,
-`sink-validate`, `template-validate`, `prose-validate`, `helm-validate` — no count, because the one
+`sink-validate`, `channel-validate`, `template-validate`, `prose-validate`, `helm-validate` — no count, because the one
 written here said eight while `make ci` ran nine, and `tests/test_repo_map.py` now derives the list
 from the `ci` target). Run `make ci` before
 pushing — it is exactly what CI runs and is what `pre-commit` does not cover.

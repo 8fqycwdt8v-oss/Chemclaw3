@@ -242,6 +242,11 @@ _MUST_FAIL = frozenset(
         "OptimizationCampaignWorkflow",
         "ObservationPromotionWorkflow",
         "DevelopmentReportWorkflow",
+        # The durable wait (D-2026-08-29). Somebody is holding a question open and somebody else is
+        # waiting on the answer, so a bug in it must surface as a failed wait rather than park: a
+        # parked wait is a request that stays in an inbox forever with nothing listening, which is
+        # indistinguishable from one nobody has got to yet — the worst state this primitive has.
+        "AwaitAnswerWorkflow",
         # Fan-out children of those. A parked child is dropped only when its execution timeout
         # expires, and that hour is spent by the parent the chemist is polling.
         "PublishNoteWorkflow",
@@ -274,6 +279,11 @@ _MAY_PARK = frozenset(
         "DocumentShareSyncWorkflow",
         "ObservationSynthesisWorkflow",
         "PublishResultsWorkflow",
+        # The commitment mirror. A periodic job over an export nobody is waiting on: a bug in it
+        # should park until somebody ships a fix rather than fail, because a mirror that stops
+        # refreshing reports its own staleness through `observed_at` and every reading leads with
+        # it — so the failure is visible without the workflow having to fail.
+        "CommitmentSyncWorkflow",
         "RetentionWorkflow",
     }
 )

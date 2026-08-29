@@ -794,3 +794,28 @@ probes:
       score or a headline multiple. Where the records are silent on hindrance it says not recorded.
       The genuinely useful output is a statement of what each set does support, plus the one
       experiment that would actually decide it — the same hindered amine run under both.
+
+  - id: op-33
+    section: 4
+    persona: lab_technician
+    bucket: A
+    question: >-
+      I want to actually run a BO screen at the bench, not a simulation. Propose the first eight
+      Suzuki conditions, and when we've run them and I give you the yields, propose the next eight.
+    expects_tools: [start_optimization_campaign, request_external_input, check_pending_requests]
+    forbids_claims:
+      - "a yield, conversion or selectivity for any condition nobody has reported"
+      - "that the campaign has proposed a second round before the first was answered"
+      - "that the system will run, schedule or perform the reactions itself"
+    direction: >-
+      This is the case a registry of computable objectives could not express, and the answer should
+      make the loop visible rather than describing an optimisation in the abstract. A campaign whose
+      objective is measured suspends after each proposal on a durable wait: the eight conditions go
+      out as a request with a deadline, the campaign stops, and it resumes only when somebody
+      reports the numbers. So a good answer proposes the batch, says plainly that nothing further
+      will be computed until the values come back, states the deadline and where the request will be
+      seen, and names how the answer is given. It must not invent a value for any condition, and it
+      must not present the next round as already available. Saying what happens if nobody reports —
+      the round expires and the campaign ends with what it has, rather than guessing — is the mark
+      of an answer that understands the mechanism instead of paraphrasing it.
+

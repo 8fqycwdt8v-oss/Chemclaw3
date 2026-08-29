@@ -270,6 +270,23 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("bo_suggestions", ("actor",), "who a campaign's recommendation was made for"),
     ("bo_campaigns", ("opened_by",), "who framed an optimization campaign's decision space"),
     ("job_records", ("requested_by",), "who requested a durable calculation"),
+    (
+        "effects",
+        ("requested_by", "approved_by"),
+        "who asked this system to change something in a system it does not own, and who "
+        "approved it when the change could not be undone — the strongest case in this tier, "
+        "because the change is still standing on the far side and somebody there may need "
+        "to know on whose authority it was made",
+    ),
+    (
+        "pending_requests",
+        ("requested_by", "answered_by"),
+        "who asked somebody else to run, review or deliver something, and who answered — the "
+        "standing a plan approval has, and for the same reason: an answer that released a "
+        "durable workflow is only as good as the ability to say later who gave it. `asked_of` "
+        "is deliberately not here — it is advisory routing rather than an act, and it may hold "
+        "an entitlement rather than a person",
+    ),
     ("turn_costs", ("actor",), "what a person's turns cost, the record an operator bills against"),
     # The two prescriptive-tier columns, retained on `bo_campaigns.opened_by`'s line: a design is a
     # shared scientific artifact and who framed it is part of its provenance, not an incidental
@@ -353,6 +370,15 @@ _RETAINED_IN_PAYLOAD: tuple[tuple[str, str, str, str], ...] = (
 # build may still hold rows naming that operator, and an erasure that silently ignored them would
 # be reporting a completeness it has not got.
 _BEYOND_REACH: dict[str, str] = {
+    "commitments": (
+        "`owner` is a name in the *portfolio system's* namespace, not an Entra oid, and this "
+        "deployment holds no mapping between the two — one it invented would be a second "
+        "directory, "
+        "and a wrong entry would erase somebody else's work while reporting a success. The row is "
+        "also not this system's to delete: it is a mirror, and the next sync would restore it. "
+        "Erasure belongs to the system that owns the export, and this command says so rather than "
+        "matching on a string that may not be the person"
+    ),
     "audit_anchors": "the runtime role holds no privilege on it and its writer was removed with "
     "the audit hash chain, so this deployment's copy is empty; a schema is forward-only, so a "
     "database that ran the pre-removal build needs an operator with owner rights to check",

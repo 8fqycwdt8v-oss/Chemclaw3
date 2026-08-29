@@ -11,8 +11,9 @@ config source (the pydantic `Settings`) fed from a `ConfigMap` + a small set of 
 | Background worker | `background-worker` | `python -m chemclaw.durable.background_worker` — `background-jobs` (light) |
 | Connector worker | `connector-worker-<name>` | `python -m chemclaw.connectors.<name>.worker` — that bundle's own queue |
 | Connector server | `connector-<name>` | `uvicorn chemclaw.connectors.<name>.server.app:app` — that bundle's MCP tools |
+| Read-only MCP face | `mcp-face` | `python -m chemclaw.api.mcp_face` — this system's read-only tools, served to another agent |
 
-All four are the **same image** (`deploy/Containerfile`), rootless (UID 1001, arbitrary-UID safe for
+All five are the **same image** (`deploy/Containerfile`), rootless (UID 1001, arbitrary-UID safe for
 OpenShift SCC), no secret baked in. `deploy/entrypoint.sh` dispatches on `CHEMCLAW_COMPONENT`.
 
 The last two are *patterns*, not a fixed list — that is the connector seam (D-109) working: adding a

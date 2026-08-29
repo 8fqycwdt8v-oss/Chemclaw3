@@ -206,6 +206,12 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     # api: layer 1's front door (F2).
     ("chemclaw.api", "http"): "api/ IS the FastAPI + SSE front door",
     ("chemclaw.api", "postgres"): "routes/ops.py reads readiness straight off the pool",
+    ("chemclaw.api", "mcp"): (
+        "`api/mcp_face.py` serves core's read-only tools over MCP — this system reachable "
+        "as a tool by another agent. The transport is `connectors/server.py`'s, reused "
+        "rather than rebuilt, and building the `FastMCP` it wraps is what needs the "
+        "import (D-2026-08-29-a-digest-nobody-receives-is-not-delivered)"
+    ),
     ("chemclaw.api", "token"): (
         "api/auth.py is the one place an inbound bearer token is validated — F4's 'one "
         "authorization gate'. Every other layer receives an already-resolved actor"
@@ -258,6 +264,14 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.ingest", "postgres"): "the document chunk index",
     ("chemclaw.ingest", "rdkit"): "an ELN row's structure is canonicalised on the way in",
     ("chemclaw.memory", "postgres"): "the memory layers are tables",
+    ("chemclaw.deliver", "httpx"): (
+        "the webhook channel POSTs a message to one URL. The only outbound HTTP in this "
+        "seam, and the reason the channel is opt-in and owes the chart an egress rule; "
+        "the `share` channel writes to a mounted directory and holds no client"
+    ),
+    ("chemclaw.operations", "postgres"): (
+        "the operational read model is five SELECTs over this system's own tables"
+    ),
     ("chemclaw.retrieval", "postgres"): "the vector index is pgvector",
     ("chemclaw.evals", "httpx"): "the live probe drives the real front door over HTTP",
     ("chemclaw.evals", "temporal"): "the live probe polls real durable jobs",
@@ -318,6 +332,15 @@ _KNOWN_LEAKS: dict[Site, str] = {
         "single shared reuse policy: 'closed with a decision' and 'closed without one' need "
         "different ones, and an earlier attempt to unify them had to be reverted. Tracked in "
         "BACKLOG.md; until the helper exists this edge is debt, not design"
+    ),
+    ("src/chemclaw/agent/pending_tools.py", "temporal"): (
+        "the fourth instance of the same leak, and it arrived for the same reason: raising a "
+        "durable wait needs the launch idiom — a workflow id, a reuse policy, and the "
+        "already-started catch — and there is still no `start_job()` in `durable/` to call. The "
+        "reuse policy here is not the one `durable_tools.py` uses and could not be: a wait that "
+        "expires *completes*, so both `REJECT_DUPLICATE` and `ALLOW_DUPLICATE_FAILED_ONLY` would "
+        "make a lapsed question unaskable forever, which is the third distinct policy the shared "
+        "helper would have to carry. Debt on the same BACKLOG row, not design"
     ),
     ("src/chemclaw/templates/registry.py", "temporal"): (
         "the last copy of the launch idiom. `templates/` is core's own sequencer, so starting a "

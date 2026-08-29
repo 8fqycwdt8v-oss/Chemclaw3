@@ -618,6 +618,16 @@ only holds defects can only ever restore the system to what it already intended 
       the skill gate. The two single-job wrapper templates (681 tokens) are the other candidate, and
       deleting a named protocol the shipped skill routes to is its own decision.
 
+      **Two independent surfaces raised the ceiling within two days, which is the argument for this
+      row rather than against it.** `D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`
+      added the prescriptive protocol tools (29,500 → 33,000, measuring 32,184), and the eight
+      infrastructure findings of 2026-08-29 added five more to `default` — `review_activity`,
+      `request_external_input`, `check_pending_requests`, `review_commitments`,
+      `assemble_evidence_pack` — measured at **2,170 tokens** after a trimming pass. Four of those
+      five are what makes the manager persona answerable at all, so both are capability rather than
+      drift. The allow-list's **-5,787** is larger than either surface cost and larger than the
+      headroom now left. Still blocked on the live lane for the reason above.
+
 - [ ] **Four `KNOWN_OVERSIZED` tools are one defect wearing four names** — [M], and the honest
       trigger is upstream rather than here. All four take a **domain document** as their argument —
       a BoFire campaign declaration, the note frontmatter contract, a structured ask, a laboratory
@@ -802,7 +812,7 @@ Pinned at the time of writing: `temporalio` 1.31.0 · `langchain` 1.3.15 · `lan
 
 | Upstream ships | We | Standing |
 | --- | --- | --- |
-| `temporalio.contrib.langgraph.LangGraphPlugin` — graph nodes as activities, durable `interrupt()` | run two durability layers | **declined**, `D-2026-08-25-the-plugin-solves-an-interrupt-we-do-not-use` — we use no `interrupt()`; the human gate is already a Temporal workflow |
+| `temporalio.contrib.langgraph.LangGraphPlugin` — graph nodes as activities, durable `interrupt()` | run two durability layers | **declined**, `D-2026-08-25-the-plugin-solves-an-interrupt-we-do-not-use` — we use no `interrupt()`. **Its second reason was false and is retracted**: that ADR wrote that "the human gate is already a Temporal workflow" via `agent/interaction_tools.py::start_approval`, and neither that module nor that function has ever existed in `src/` — the plan gate is a Postgres row and a refusal. See `D-2026-08-29-a-decision-that-waits-is-a-workflow`, which supplies the durable wait the claim described |
 | `langchain.agents.middleware.ContextEditingMiddleware` / `ClearToolUsesEdit` | use it, on its own trigger since 2026-08-25 | **adopted** |
 | `SummarizationMiddleware` | construct it switched off (`disabled_summarizer`) | **declined** — a summary is new model prose over content `agent/framing.py` marked untrusted, and the envelope does not survive it |
 | `ModelCallLimitMiddleware` | subclass our own cap | **reverted**, `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped` — measured, a cap of 2 ran 4 model calls |
@@ -811,6 +821,35 @@ Pinned at the time of writing: `temporalio` 1.31.0 · `langchain` 1.3.15 · `lan
 | `deepagents.SkillsMiddleware` | use it, narrowed at the backend | **adopted**, with the narrowing on the backend because deepagents publishes skill *paths* into the prompt |
 | `deepagents` `execute` filesystem verb | withhold it | **declined**, and answered elsewhere — `D-2026-08-25-a-sandbox-is-a-server-not-a-verb` puts the capability in the fleet instead |
 | LangSmith tracing | first-party OTel + OpenInference | **declined** — proprietary, no OSS self-host, and its core value is prompt/response content in a third party |
+
+#### MCP — the protocol under every tool, job and skill
+
+*Added 2026-08-29 by the infrastructure audit (F6).* The table above watches four Python
+distributions and had no row for **MCP**, which is the wire every connector, every endpoint tool and
+every fleet server speaks. That is the register's own stated failure mode — *"a capability upstream
+ships that this table does not mention is the gap this register exists to catch"* — one layer below
+where it was looking.
+
+Pinned: `mcp>=1.2.0,<2` here and in `Chemclaw3-mcp`, deliberately (`CLAUDE.md`: matching
+`mcp.server.fastmcp` keeps `connector_app` line-for-line comparable with `connectors/server.py`).
+The **2026-07-28 specification** and the roadmap dated 2026-08-22 have moved several things that
+answer problems open in this file.
+
+| Upstream ships | We | Standing |
+| --- | --- | --- |
+| **Progressive discovery** (roadmap, Core Primitives WG) — a client learns a server's tools as it needs them instead of ingesting the catalogue | ship every endpoint tool's schema on every turn, and pay 28,114 tokens for it | **watch, and it changes the shape of two open rows.** § 5's profile allow-list saves a measured 5,787 tokens (-21%) by narrowing *our* side; this narrows the *server's*. The allow-list is still worth doing — it is available now and it is ours — but a design that assumes the full catalogue arrives up front is the thing to avoid building on top of. Note what an offline floor cannot see either way: the saving is flat in the six `enumerate_*` endpoint tools |
+| **Tasks** (`io.modelcontextprotocol/tasks`, SEP-2663) — poll-based `tasks/get`/`tasks/update`, moving toward core | run durable work as Temporal jobs behind a synchronous tool call, with our own push-back | **declined for durability, watch for the wire.** Durability stays Temporal's (D-002, and D-2026-08-10 §3 made that stricter, not looser). What Tasks would replace is narrower: the `request_timeout` a slow fleet server is called under, and `D-2026-08-26-a-request-timeout-bounds-the-wait-not-the-work`'s split between bounding the wait and bounding the work. Worth reading before F2's durable wait is designed, not after |
+| **Server-initiated events / webhooks** (Triggers & Events WG) — servers tell clients work finished, without client polling | `durable/notify.py` → `session_events` → the front door's tailer | **declined.** The push-back is between *our* workflow and *our* front door; a fleet server is stateless by contract and has nothing to push. Reconsider only if a server ever holds state, which `Chemclaw3-mcp`'s own rule forbids |
+| **Agent identity and delegation** — Workload Identity Federation (SEP-1933), ID-JAG, RFC 8693 token exchange, DPoP | a static bearer per server (`token_env`), with `X-Chemclaw-Actor` logged and explicitly never trusted | **the row that matters, and it is open.** D-2026-08-15 deleted our workload-identity federation, OBO and HPC identity bridge as 254 LOC whose only callers were their own tests — correct then, and the ADRs that designed them stand. What has changed is that the caller-side need is arriving (F1's effector seam is a write path that needs an on-behalf-of identity) *and* the standard now exists. Re-adding one is still a new decision; this row is where the trigger is recorded |
+| **`ttlMs` / `cacheScope` on list results** (SEP-2549), ETags on tool calls (roadmap) | `tool_result_store` addresses results by content, and re-lists a connector's tools per turn | **watch.** The connector-side half is measured already (`chemclaw_connector_tool_schema_tokens`), and a TTL on the list is the cheap half of the context-floor problem |
+| **MRTR** — `resultType: "input_required"` replaces server-initiated `elicitation/create` | `ask_clarifying_question`, a first-party tool | **declined.** Ours asks the *chemist* a question the model composed, through a surface that renders choices; MRTR is a server asking its client for input. Different question, same words |
+| **Deprecated:** legacy HTTP+SSE transport, Dynamic Client Registration, `sampling`, `roots`, `logging` | streamable HTTP already; no sampling, roots or DCR anywhere | **already clear, on a dated clock.** The 12-month deprecation window is a migration obligation across both repositories and neither uses the removed surfaces. Confirm on the 2.x move rather than assuming |
+| **Stateless protocol + `Mcp-Method`/`Mcp-Name` header routing** — no `initialize` handshake, no `Mcp-Session-Id` | `mcp.server.fastmcp`'s session manager, and `connectors/server.py`'s five documented traps around it | **the 2.x migration, and three of our five traps are its subject.** "The parent app must run the MCP session manager" and "the caller must be re-bound per tool call" are both artefacts of a stateful handshake. A stateless protocol does not make them safe; it makes them obsolete. Do not fix them twice |
+
+**How to use this block.** Same rule as the table above — on a spec revision, ask *does upstream now
+do this, and better?* — with one addition that is specific to a protocol rather than a library: a
+row here binds **both repositories**, and `Chemclaw3-mcp` cannot see this file. A row that changes
+answer needs an ADR here and an issue there, in the same change.
 
 **How to use this.** On a dependency bump, read the release notes against the middle column and ask
 one question per row: *does upstream now do this, and better?* A row that changes answer needs an

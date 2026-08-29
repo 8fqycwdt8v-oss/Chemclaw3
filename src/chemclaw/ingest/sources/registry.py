@@ -205,6 +205,17 @@ def _build_retrieve_half(manifest: DataSourceManifest) -> Any:
     return _build_half(manifest, manifest.retrieve or "", name=manifest.name)
 
 
+def _build_commitments_half(manifest: DataSourceManifest) -> Any:
+    """Build the commitments half, telling it which source it is.
+
+    Named for the same reason a retrieve half is: `commitments` is keyed on `(source, external_id)`
+    precisely because two portfolio systems may both call something `PRJ-14`, and a half that
+    guessed its own source would let a parameterised engine serving two exports collapse them —
+    which is the `sharedrive` failure that argument was written about, one seam over.
+    """
+    return _build_half(manifest, manifest.commitments or "", name=manifest.name)
+
+
 def make_data_source(name: str) -> DataSource:
     """Build the fully-formed `DataSource` for `name` (every declared half), or raise.
 
@@ -221,6 +232,7 @@ def make_data_source(name: str) -> DataSource:
         name=manifest.name,
         ingest=_build_ingest_half(manifest) if manifest.ingest else None,
         retrieve=_build_retrieve_half(manifest) if manifest.retrieve else None,
+        commitments=_build_commitments_half(manifest) if manifest.commitments else None,
     )
 
 
@@ -276,3 +288,13 @@ def active_retrieve_sources() -> list[RetrieveHalf]:
         for manifest in active_manifests()
         if manifest.retrieve is not None
     ]
+
+
+def active_commitment_sources() -> list[str]:
+    """The names of enabled sources holding committed work, importing nothing.
+
+    Names rather than halves, the shape `active_ingest_source_names` takes and for the same reason:
+    the durable sync enumerates what it must mirror without constructing a single adapter, and keys
+    one cursor per name so two portfolio exports advance independently.
+    """
+    return [manifest.name for manifest in active_manifests() if manifest.commitments is not None]

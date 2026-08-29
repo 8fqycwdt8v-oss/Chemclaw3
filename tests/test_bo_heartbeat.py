@@ -99,31 +99,40 @@ def test_propose_next_heartbeats_through_the_shared_timer(
 
 
 def test_every_bo_activity_call_declares_a_heartbeat_timeout() -> None:
-    """`BoCampaignWorkflow.run` passes `heartbeat_timeout` to every `execute_activity` call.
+    """`BoCampaignWorkflow` passes `heartbeat_timeout` to every `execute_activity` call.
 
     Checked over the AST rather than by running the workflow: the property under test is a keyword
     argument at a call site, which a live (Temporal-server-requiring, offline-skipped) workflow
     test cannot see any more directly than a parse can, and the parse runs everywhere.
+
+    **Walked over the whole class rather than over `run`**, and that widening is the correction a
+    real change forced. D-2026-08-29 moved the evaluate call out of `run` into `_evaluate`, which
+    is where the measured/computed branch lives — and a walk scoped to `run` would have gone from
+    six calls to four and reported the *count* as the failure while the call it stopped watching
+    was the one that had moved. A helper is exactly where an unbounded activity call would appear
+    next; the count is a floor, and the keyword is the rule.
     """
     tree = ast.parse(inspect.getsource(workflows))
-    run_method = next(
+    campaign = next(
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "run"
+        if isinstance(node, ast.ClassDef) and node.name == "BoCampaignWorkflow"
     )
     calls = [
         node
-        for node in ast.walk(run_method)
+        for node in ast.walk(campaign)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "execute_activity"
     ]
-    # Seed, propose, evaluate (twice — the seed round and the loop), and *two* campaign-record
+    # Seed propose, loop propose, the one evaluate in `_evaluate`, and *two* campaign-record
     # writes: one per completed round, and the terminal one. The per-round write is what stops a
     # cancelled or killed campaign from answering `resume_campaign` with nothing about hours of
     # evaluation it already paid for, and it needs a heartbeat timeout for the same reason every
-    # other call here does.
-    assert len(calls) == 6, f"expected 6 execute_activity calls, found {len(calls)}"
+    # other call here does. Five rather than the earlier six because the seed and the loop now
+    # share one evaluate call site — the branch a measured campaign takes must be identical for
+    # both, and writing it twice is how the second one eventually forgets what the first learned.
+    assert len(calls) == 5, f"expected 5 execute_activity calls, found {len(calls)}"
     for call in calls:
         heartbeat_kwarg = next((kw for kw in call.keywords if kw.arg == "heartbeat_timeout"), None)
         assert heartbeat_kwarg is not None, (

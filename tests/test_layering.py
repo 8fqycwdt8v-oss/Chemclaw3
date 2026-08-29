@@ -289,6 +289,10 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # `kg -> agent` is gone from the graph and from this policy — kg may no longer import agent.
     ("chemclaw.agent", "chemclaw.kg"),
     ("chemclaw.agent", "chemclaw.memory"),
+    # The operational read model (F3). `agent/operations_tools.py` is the tool over it, in the
+    # same relationship `agent/memory_tools.py` has to `memory/`: the store is below, the
+    # conversation plumbing is here.
+    ("chemclaw.agent", "chemclaw.operations"),
     # The prescriptive-design layer. `agent` writes designs through it, `api` serves them.
     ("chemclaw.agent", "chemclaw.protocols"),
     ("chemclaw.agent", "chemclaw.retrieval"),
@@ -361,12 +365,21 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.memory", "chemclaw.ingest"),
     ("chemclaw.memory", "chemclaw.kg"),
     ("chemclaw.memory", "chemclaw.science"),
+    # `operations` reads five of this system's own tables and nothing else. It is a leaf on
+    # the kernel by construction: a reading of the record must not be able to reach the
+    # capability that wrote it, or the trail would be able to describe itself.
+    ("chemclaw.operations", "chemclaw.core"),
     # The result-publication seam (D-2026-08-25). It is a leaf that consumes what the system
     # produced: it reads the kernel and, for its SQL driver, the warehouse connection Protocol that
     # `ingest` already defines — reusing that rather than defining a second `module:callable`
     # driver seam with the same shape and the same credential discipline. Nothing imports back:
     # `publish` is imported *by* `durable` (the drain) and lazily by `science` (the enqueue hook),
     # and imports neither.
+    # The outbound delivery seam (F7). A leaf on the kernel, like `publish`: it reads config
+    # and the log redaction filter and nothing else. `durable` imports it (the digest job
+    # is the caller); it imports nothing back, and nothing reads *from* a channel.
+    ("chemclaw.deliver", "chemclaw.core"),
+    ("chemclaw.durable", "chemclaw.deliver"),
     # The prescriptive-design layer (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`).
     # A leaf like `publish`, and narrower: it reads the kernel for SMILES arithmetic, ids and the
     # connection pool, and `science.labels.vocabulary` for the *one* species-role vocabulary the
@@ -381,6 +394,10 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.publish", "chemclaw.ingest"),
     ("chemclaw.durable", "chemclaw.publish"),
     ("chemclaw.cli", "chemclaw.publish"),
+    # `cli/validate_channels.py` is `make channel-validate`, the same shape every other
+    # validator entrypoint has: a terminal command that reads one seam's manifests and
+    # binds each driver's signature. Nothing in `deliver` imports back.
+    ("chemclaw.cli", "chemclaw.deliver"),
     # The `results` bundle's job re-queues stored calculations, and the walk it runs is
     # `publish.backfill`. That module is in the publish layer rather than in `cli/` *because* of
     # this edge: the walk began in the CLI, which made this a connector importing a terminal

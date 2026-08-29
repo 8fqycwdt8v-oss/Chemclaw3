@@ -83,7 +83,7 @@ def test_a_source_may_provide_either_half_or_both() -> None:
 
 def test_a_source_with_neither_half_is_rejected() -> None:
     """A source that can be neither ingested from nor retrieved from is a build-time error."""
-    with pytest.raises(ValueError, match="must provide an ingest or retrieve half"):
+    with pytest.raises(ValueError, match="must provide an ingest, retrieve or commitments half"):
         SourceSpec(name="empty")
 
 
@@ -301,7 +301,7 @@ def test_a_source_declaring_neither_half_is_rejected_at_the_manifest(
     )
     monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path))
 
-    with pytest.raises(ValueError, match="declares neither"):
+    with pytest.raises(ValueError, match="declares no `ingest:`"):
         registry.discovered()
 
 
