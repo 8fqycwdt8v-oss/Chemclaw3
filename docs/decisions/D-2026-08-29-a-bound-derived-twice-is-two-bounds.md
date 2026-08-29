@@ -88,10 +88,18 @@ not offering records to be refused.
 Nothing is lost for the ORD corpus itself: the drain reaches every entry eventually — the cursor
 advances chunk by chunk — and each chunk files its own refusals when it gets there.
 
-**It also generalises.** Every ingest source now files its refusals, not only the ORD adapter:
-`eln-json` and the warehouse adapter had no ledger rows at all, because a first-party `record_refusals`
-call in one adapter is a rule the next adapter falls outside of. The one that recorded refusals is
-the one that had a defect worth writing an ADR about, which is the usual shape of that argument.
+**It also generalises, and that half was already written down.** `docs/planning/BACKLOG.md` carried a
+row — "carry the rejection ledger to the site that covers every source" — naming
+`durable/eln_sync.py` as the one site that would cover every adapter at once, "which already holds
+`IngestSummary.rejected` (id, reason, timestamp) in an async activity needing no pre-flight: one
+call, and the per-adapter writers become redundant rather than multiplied". That is this change,
+reached from the opposite direction: the defect made the move necessary rather than merely tidier.
+The row is deleted in the same commit.
+
+So `eln-json`, the warehouse adapter, `sync.py`'s future-timestamp refusal and `ingest.py`'s
+`IngestError` — none of which had a ledger row before, all of which refuse records a chemist can ask
+about — are covered now. What stays in the ORD adapter is only what `IngestSummary` cannot see: an
+unreadable file and a late arrival never become a `RawEntry` at all.
 
 ## Consequences
 

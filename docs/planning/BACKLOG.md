@@ -943,20 +943,6 @@ Both change what a `Component` is, so this wants its own ADR and its own measure
 partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
 by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
 
-## Carry the rejection ledger to the site that covers every source
-
-`ingest_rejections` ships (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`): the
-119.43% well now lands in the ledger with its reason, `gather_evidence` answers the question that
-used to return "I have no such record", and the shape is unmistakably a rejection rather than a
-result. Three refusal sites in `ingest/eln/ord_adapter.py` write to it.
-
-What is not covered is every *other* source. `ingest/eln/json_adapter.py::map_to_ord` — the adapter
-the live 119.43% record actually arrives through — plus `sync.py`'s future-timestamp refusal and
-`ingest.py`'s `IngestError` still refuse into a log line only. The one site that would cover every
-adapter and every source at once is `durable/eln_sync.py`, which already holds `IngestSummary.rejected`
-(id, reason, timestamp) in an async activity needing no pre-flight: one call, and the per-adapter
-writers become redundant rather than multiplied.
-
 ## The PR-gate costs 1.81 s per proposed note, and a backfill is one note per record
 
 Measured over the ORD backfill: 103 records per 3.1 minutes, steady, with the cost in the PR-gate's
