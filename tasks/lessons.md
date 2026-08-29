@@ -1380,3 +1380,28 @@ The rules I am taking:
    the reason for code that cannot do it. I wrote the comment and the code in one pass and checked
    neither against the other. The existing rule 14 says the docstring is the best bug detector;
    the corollary is that it is useless on prose *I* wrote in the same breath as the code.
+
+## 2026-08-29 — I verified `make test` and CI runs `make cov`
+
+I ran `make lint type test` five times across a change, called it green, and CI failed — on a test
+`make test` runs too, but in a job I had never reproduced. The `ci` target is
+`lint type cov kg-validate … deps-audit`, and **`cov` is not `test`**: it is
+`pytest --cov --cov-report=term-missing`, which adds a coverage floor and, more to the point here,
+changes the timing profile of every performance-budget test in the suite. The failure was a
+per-turn graph-compile budget at 408 ms against a 400 ms bound.
+
+Rule 5 already says "run the gate's own command, at the gate's own scope, unpiped", and I read the
+`Makefile`'s `cov` line the day I started. What I did not do was ask **which target CI actually
+invokes** — I inferred it from `CLAUDE.md`'s prose ("the gate: `make lint` · `make type` ·
+`make test`"), which describes the developer loop rather than the CI job. The authority is
+`.github/workflows/`, and it costs one `grep`.
+
+**Before claiming a change is green: `grep -n 'make ' .github/workflows/*.yml` and run exactly
+those.** For this repository that is `make ci`, and the two targets it has that the prose does not
+are `cov` and `deps-audit`.
+
+The finding underneath was worth having, so the cost was not wasted: four new tools raised the
+per-turn compile 30 ms (209 → 239, isolated by deleting their registration import), and profiling
+put **79% of the whole build** in `langchain_core.tools.convert` re-deriving a pydantic model from
+every tool's signature on every build. Build time is proportional to schema size exactly as prompt
+cost is — a second cost of an oversized tool schema that nobody here had measured.

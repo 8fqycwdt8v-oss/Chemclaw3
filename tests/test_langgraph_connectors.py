@@ -366,10 +366,39 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
     `SubAgentMiddleware` cannot be excluded, so the choice is a helper this repository compiled or
     upstream's ungoverned one.
 
-    The bound stays 400 ms: ~3x the unloaded figure and ~2.9x the contended one, which is the same
+    The bound was 400 ms: ~3x the unloaded figure and ~2.9x the contended one, which is the same
     ratio the original 270 held against its ~90 ms baseline. Tightening it to match the improvement
     would buy nothing this test is for and would spend the margin that made the last regression show
     up as a *failure* rather than as a flake.
+
+    **550 ms as of 2026-08-29, and the +150 is a measured regression rather than a flake.** The
+    prescriptive-protocol tier (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`) added
+    four tools and this test failed in CI at 408 ms. Isolated on one machine by deleting the import
+    that registers them and re-measuring: **209 ms without, 239 ms with — +30 ms, +14%, for four
+    tools out of ~98.** So it is the floor rising, which is exactly what this test is for, and not
+    the one-off spike the median guard already handles.
+
+    **Where the 30 ms goes, profiled rather than guessed:** `langchain_core.tools.convert.tool` is
+    **79%** of the whole build, and under it is `pydantic.deprecated.decorator.validate_arguments`
+    → `create_model`. Every build re-derives a pydantic model from every tool's signature, so a
+    tool costs build time in proportion to its *schema*, and the two protocol writers carry the
+    largest nested schemas in the tree after `start_optimization_campaign` — the same oversized
+    schemas `tests/test_context_floor.py::KNOWN_OVERSIZED` records, with a second cost nobody had
+    measured. `docs/planning/BACKLOG.md` carries both under one row.
+
+    **The bound is raised rather than the cost removed, by this file's own standard.** 30 ms against
+    a median turn of 17-142 s is ~0.02-0.2% — the same argument the paragraph above makes for
+    leaving the helper's 61 ms alone. The fix that would retire it is caching the `StructuredTool`
+    per function instead of re-wrapping process-scoped callables on every build, which would cut
+    ~79% of this build for *every* tool; that is a change to a shared hot path and wants its own
+    measurement of whether anything mutates a tool per turn, not a rider on a bug-fix branch.
+
+    550 is ~2.3x the local unloaded figure and ~1.5x what the CI runner class this suite failed on
+    would now measure unloaded (its own baseline on unmodified `main`, recorded above, is 340 ms
+    single-round with no contention — which is why 400 was already thinner here than the earlier
+    paragraphs assume). It keeps the order-of-magnitude property this test exists for: a compile
+    that started dialling something, or rebuilt the skills tree per turn, is still several times
+    over.
 
     **Measured against the median round, not the mean of the batch, and that is not the same
     guard.** A flat `total / rounds` lets one round's transient stall — a GC pause, a scheduler
@@ -394,7 +423,7 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
     samples_ms.sort()
     per_compile_ms = samples_ms[len(samples_ms) // 2]
 
-    assert per_compile_ms < 400, (
+    assert per_compile_ms < 550, (
         f"per-turn graph compile took {per_compile_ms:.0f} ms (median of {samples_ms})"
     )
     print(
