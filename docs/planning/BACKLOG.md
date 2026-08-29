@@ -85,10 +85,10 @@ topic).
 - [ ] **The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution** — [M], and
       **narrower than this row used to claim**. It does not reach `job_records` or the audit trail:
       the durable path takes the actor as an argument sourced from core's validated front-door
-      principal (`ConnectorJobInput.requested_by`, `durable/connector_job.py:126` — the row named a
+      principal (`ConnectorJobInput.requested_by`, `durable/connector_job.py:160` — the row named a
       field called `actor`, which does not exist), and never reads the header. The real reach is two
       columns on the synchronous MCP path — `bo_campaigns.opened_by` and `bo_suggestions.actor`, via
-      `connectors/bo/server/tools.py:393`. The `unverified:<id>` marking is in place (D-2026-08-13),
+      `connectors/bo/server/tools.py::_recorded_provenance` (:374). The `unverified:<id>` marking is in place (D-2026-08-13),
       so what is open is that a caller still chooses the string. A bearer on the row above proves
       *core called*, not *which chemist*, so full closure needs an actor assertion bound to the call
       (OBO or a signed memo) — which is the `DEFERRED.md` warehouse row's blocker too.
@@ -161,7 +161,7 @@ topic).
       new child-OOM failure mode to classify (~150-250 lines).
 
 - [ ] **A schedule whose every run is killed by the ceiling reads as healthy on
-      `describe_schedules`** — [M]. `durable/schedules.py:364` — `ScheduleHealth` carries `paused`,
+      `describe_schedules`** — [M]. `durable/schedules.py:399` — `ScheduleHealth` carries `paused`,
       `last_run`, `runs_total`, `skipped_overlap`, `running_now` and `note`, and no run outcome;
       `_describe` reads none either, because `ScheduleInfo.recent_actions` names the workflow and
       when it started and nothing more. Measured against a live broker: a schedule built like
@@ -174,7 +174,7 @@ topic).
       here; `config/temporal.py` no longer claims otherwise, but
       `D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait.md` still does and wants a
       superseding ADR — as do three further claims in the pair of 2026-08-27 ADRs that the tree has
-      since falsified or fixed: that "the ELN and corpus syncs are cursored" — `document_sync.py:213`
+      since falsified or fixed: that "the ELN and corpus syncs are cursored" — `document_sync.py:238`
       says in its own words that it keeps no `sync_cursors` row, and `corpus_sync.py` keeps one only
       for a source whose binding sets `append_only`
       (`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`), never in the release mode this claim
