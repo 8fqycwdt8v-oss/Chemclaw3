@@ -604,6 +604,35 @@ class PostgresHistoryProvider:
             await conn.commit()
 
 
+def owner_permits(owner: str | None, actor: str | None) -> bool:
+    """Whether a stored session owner lets `actor` reach that session — the one ownership rule.
+
+    **One definition, because there are now two callers and they must not drift.** The HTTP layer
+    resolves ownership for `/sessions/{id}/…` (`api/deps._owner_authorizes`, which delegates here)
+    and the agent resolves it for a tool handed an explicit session id
+    (`agent/evidence_tools.assemble_evidence_pack`). A second copy of this predicate is how one
+    surface ends up stricter than the other, and the loose one is the one that matters.
+
+    The dev/enforced split is deliberate and is `_is_reviewer`'s, applied to ownership: with
+    `entra_required` off there is no real actor, so an owner-less row degrades open exactly as
+    every other route does. Once identity is enforced a *recorded* absence of an owner is no longer
+    "everyone's" — enforcement never mints an owner-less row, so one surviving into it is a
+    leftover from a dev-mode write, and treating it as anyone's would hand it to every
+    authenticated principal instead of to nobody. `owner` is falsy for both `None` and `""`, so a
+    row written without one and one holding the empty-string sentinel are refused alike.
+
+    Args:
+        owner: The session's recorded owner, or `None`/`""` when it has none.
+        actor: The reader's Entra object id, or `None`/`""` when there is no authenticated actor.
+
+    Returns:
+        Whether the read is permitted.
+    """
+    if not owner:
+        return not settings.entra_required
+    return bool(actor) and owner == actor
+
+
 class SessionOwnerStore:
     """Durable session-ownership registry, so a restarted front door can reattach a client (F3).
 

@@ -76,3 +76,36 @@ def test_two_compiles_hand_the_executor_the_same_tool_objects() -> None:
         f"{rebuilt} were re-derived on the second compile — `agent/tool_schema.py`'s cache is not "
         "on the path build_langgraph_agent hands to the executor"
     )
+
+
+def test_the_cache_does_not_grow_with_the_number_of_turns() -> None:
+    """The bound on the cache was documented and not checked, which is this repo's own failure mode.
+
+    `functools.cache` is unbounded, and the only thing between it and a leak is the docstring's
+    claim that every caller passes a module-level function out of `chemclaw.core.tool_registry`.
+    That claim is true today and is one edit from false: `connectors.registry.job_tools()` and
+    `templates.registry.template_tools()` mint **fresh closures on every call**, so relaxing the
+    by-name guard in `_register_generated_tools` — to re-read manifests on a config reload, say,
+    which looks harmless — would grow this cache by one entry per generated tool per build, forever,
+    in a long-lived pod. Nothing would turn red.
+
+    **Asserted as "does not grow", not as "equals the registry".** The first version compared
+    `currsize` against `len(_capability_tools())` and failed in a full run at 56 against 54: other
+    files register their own probe tools, so the registry is not the same size at assertion time as
+    it was when those entries were cached. That comparison was never the invariant — the invariant
+    is that a *turn* adds nothing, which is what this measures and what the leak would violate.
+    """
+    model = _model()
+    for _ in range(2):
+        build_langgraph_agent(model, audit_sink=NullAuditSink())
+    settled = as_structured_tool.cache_info()
+
+    for _ in range(3):
+        build_langgraph_agent(model, audit_sink=NullAuditSink())
+    after = as_structured_tool.cache_info()
+
+    assert after.currsize == settled.currsize, (
+        f"three more builds added {after.currsize - settled.currsize} cache entries; something is "
+        "minting a fresh callable per build and the cache grows without bound"
+    )
+    assert after.hits > settled.hits, "nothing reused the cache; every build re-derives schemas"

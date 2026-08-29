@@ -1,360 +1,155 @@
-# Anthropic Agent SDK features worth having here — implementation
+# Review of the eight-findings change (#280), and the fixes
 
-Four items came out of an audit of the Claude Agent SDK against this repository's LangGraph
-stack. Three are implemented here; the fourth is a design pass, because it touches the
-middleware chain and the ADR has to come before the edit.
+Seven independent reviewers with fresh context read the merged diff. What they found is below,
+in the order it will be fixed. Every item marked **verified** was reproduced by reading the code
+or by executing it, not taken on the reviewer's word.
 
-## 1. A turn's *spend* cap, beside its *iteration* cap — DONE
+The pattern worth naming before the list: **in almost every case the docstring states the correct
+control and the code does not implement it.** That is the exact failure this repository's culture
+is built to catch, and one change reproduced it about a dozen times.
 
-**The gap, corrected against the code rather than the prose.** The proposal said "Chemclaw only
-caps by call count". That was half wrong: `api/budget.py` already meters tokens. What it does
-with them is the gap — `check()` runs *before* a turn against usage already booked, and
-`record()` books the turn *after* it finished. Nothing bounds spend **inside** a turn, and
-`api/budget.py`'s own docstring states the belief that leaves the hole: "A single agent turn is
-already iteration-capped, so one turn cannot loop forever." That caps *iterations*, not tokens.
-A turn inside its 25-call ceiling can bill unboundedly — a wide fan-out of large tool results
-against a 200k context is ~25 calls and millions of tokens — and the session budget finds out
-one turn too late.
+## Critical — a control that is claimed and absent
 
-- [x] `agent/spend_cap.py`: meter in `wrap_model_call`, enforce in `before_model`
-- [x] `billed_tokens` (`TurnTotal`) and `spend_capped` (`TurnFlag`) channels on `ChemclawState`
-- [x] `agent_max_turn_billed_tokens` setting (0 = off, matching `_over`'s convention)
-- [x] wire into `_middleware()` beside the loop cap
-- [x] `spend_cap_reached` error code + `chemclaw_turn_spend_caps_total` + runner event
-- [x] tests on a **compiled graph**, not on the hook
+- [x] **C1** `api/mcp_face.py` serves **zero** tools in production. The registry is populated only as
+      an import side effect of `agent/chemclaw_agent.py`, which the face never imports; the five
+      tests pass because `tests/test_mcp_face.py` imports it itself. *(verified: `advertised_tools()`
+      → `[]` on the production path, 14 with the seeder)*
+- [x] **C2** Irreversible-effect approval is **self-approvable**: `_approve_effect` builds its
+      `AwaitRequest` without `asked_of`, so it defaults to `""`, and `_may_answer` returns `True` for
+      any authenticated caller including the requester. *(verified)*
+- [x] **C3** `assemble_evidence_pack(session_id=…)` reads **any** session with no ownership check,
+      while its docstring claims the check exists. `check_pending_requests` supplies the ids.
+      *(verified)*
+- [x] **C4** The `mcp-face` pod has no Service, no Route and is selected by no ingress
+      NetworkPolicy — unrestricted ingress under Kubernetes semantics.
 
-**Two design points, both measured rather than assumed.**
+## High — corruption, wedges, wrong numbers
 
-*Why `before_model` enforces.* `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`
-— an `after_model` counter is short-circuited by any middleware that jumps from `after_model`.
-`before_model` cannot be skipped. This is the same slot `loop_cap` occupies, for the same reason.
+- [x] **H5** `effect_ledger._SETTLE` has no state guard where `_BEGIN` has one, and `_finish()` sits
+      inside the `try` after the `applied` settle — so any raise in `_finish` rewrites an applied
+      irreversible effect to `failed`. *(verified)*
+- [x] **H6** A re-asked expired question is invisible and permanently unanswerable: `ALLOW_DUPLICATE`
+      against an upsert guarded `WHERE state='waiting'` that never resets `state`. *(verified, and
+      independently on a live Postgres)*
+- [x] **H7** `external_ref` has **no producer** — `SettleEffectInput` has no such field, so every
+      settle writes `""` — while three readers call it the operator's only handle. This is the
+      `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` shape. *(verified)*
+- [x] **H8** The unit registry is wrong one prefix past the tests: `nM` → nanometre, `µm`/`um` →
+      micromolar, `pM` unknown. `area%` and `% w/w` are bare aliases of `%`, so `basis` is empty and
+      they compare **equal**. *(verified by execution)*
+- [x] **H9** Delivery failure is silent (no logger, no metric in `deliver/`) and the activity is
+      ordered **before** `acknowledge_digest`, so a non-retryable channel error wedges the watermark
+      — contradicting the comment directly above it. *(verified)*
+- [x] **H10** `settings` is read inside workflow bodies (`awaiting.py`, `digest.py`), deciding how
+      many commands are emitted — the replay hazard `commitment_sync.py` states the rule against in
+      the same commit. *(verified)*
 
-*Why the count is a state channel and not the ambient.* The turn's spend has to cross the
-subagent boundary or a fan-out gets one budget each — regression 3 in `agent/loop_cap.py`'s
-list. `TurnTotal` already folds concurrent writes additively. Probed on a compiled graph before
-committing to it: `wrap_model_call` returning `ExtendedModelResponse(command=Command(update=…))`
-reaches the channel and `before_model` reads it back — `[0, 100, 200]`, final `300`. The first
-probe wrote a channel `ChemclawState` did not declare and LangGraph dropped it in silence,
-which is the failure `tests/test_state_channels.py` exists to catch and is why the probe came
-before the design.
+## Medium
 
-## 2. Session fork — DONE
+- [x] Evidence pack: silent 200-row truncation with `refusals` counted over the truncated list;
+      `state`/`failure_reason` unselected so a failed job reads as a successful one; `is_empty`
+      ignores `approvals`; no index on `effects(session_id)`.
+- [x] Operations: `authorship` silently drops `superseded`; `job_activity` counts failures as runs;
+      `audit_events.tool` is the model's raw string and reaches a reader undefanged; `distinct_actors`
+      is a lower bound described as a count.
+- [x] Deliver/commitments: `Message.kind` is unvalidated and used as a path component;
+      `correlation_id` is sent to the webhook host; redaction misses connector bearer tokens;
+      one malformed file aborts the whole mirror pass; the commitment cursor shares a row with the
+      ELN sync; `commitments-json` hardcodes a CWD-relative path.
+- [x] Pending: `answered_at` is stamped on expiry and cancellation; the losing concurrent answerer
+      gets 204; a request routed to an entitlement appears in nobody's inbox.
+- [x] `report_measurement` stamps the ledger's unit on a value the caller never gave one for —
+      worse than the empty string it replaced, because the bad rows are no longer identifiable.
 
-Branch a thread at its current checkpoint without mutating the original.
+## Prose that is false
 
-- [x] `agent/session_fork.py` — the copy, as SQL
-- [x] `POST /sessions/{session_id}/fork`, authorized by the existing `resolve_session`
-- [x] tests against a real Postgres schema
+- [x] `window.py` justifies the 730-day clamp because those tables "are pruned by
+      `durable/retention.py`". Both are in `_NOT_PRUNED`, **"refused"**. *(verified)*
+- [x] "Five tables recorded this system's own work and none had a reader" is false for **four of
+      five** — only `turn_costs` had none. Repeated in the ADR, three docstrings, the README and the
+      merged PR body. *(verified)*
+- [x] `grants/app_privileges.sql` lists `reaction_records` twice.
 
-**Three things the research turned up that a naive fork gets wrong:**
-- Every checkpoint PK leads with `thread_id`, so the fork is an `INSERT … SELECT` with the id
-  swapped — no LangGraph API needed, and none exists (`adelete_thread` is the only thread-level verb).
-- `checkpoint_blobs` is keyed `(thread_id, ns, channel, version)` and is **shared across a
-  thread's checkpoints**, so copying only the tip loses channel values written at an earlier
-  version. The whole thread is copied.
-- A fork with no `session_messages` rows is **invisible** to `GET /sessions`: the owner listing
-  `LATERAL`-joins `max(created_at)` and drops sessions with none. The transcript is copied too.
-- The fork inherits the parent's **profile**, because a profile is attenuation-only and
-  restoring the default would silently widen the tool surface.
+## Verification
 
-## 3. Per-profile effort — DONE
-
-- [x] `effort` on `AgentProfile` and `llm_effort` in settings
-- [x] per-provider translation, gated the way `prompt_caching_middleware` is
-- [x] tests asserting the constructed client, and asserting absence when unset
-
-**Why this is not one shared kwarg.** The shipped chart runs `openai_compatible` against
-`gpt-oss`, where `reasoning_effort` is a real parameter; `ChatAnthropic` has no such parameter
-and spells the same idea `thinking={"type": "enabled", "budget_tokens": N}`, which additionally
-must be under `max_tokens` and refuses a set `temperature`. So it cannot join
-`_generation_options()`, whose contract is "caps both providers accept". An unset effort stays
-**absent** from the request, which is that module's existing rule and matters more here than
-elsewhere: a 400 from a rejected parameter is deliberately *not* failed over
-(`_failover_exceptions`), so a bad value fails every turn rather than degrading.
-
-## 4. Deferred connector tool schemas — DESIGN ONLY, NOT IMPLEMENTED
-
-The most valuable of the four and the only one that needs an ADR before an edit, which is what
-this item delivers. `docs/decisions/D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for.md`
-states the measurement, the design, the three rejected alternatives and the restart condition.
-No code in `agent/` is touched.
+`make lint type test` green with Docker/Postgres/Temporal up, and the full suite reported with what
+it skipped.
 
 ## Review
 
-**What shipped.** Three guards (`agent/spend_cap.py`, `agent/session_fork.py` +
-`POST /sessions/{id}/fork`, `AgentProfile.effort`), two ADRs, 21 new tests, and one design document
-for the fourth item. `make lint` and `make type` green.
+All of it landed, in five commits. Two migrations (`079_pending_request_run.sql`,
+`078_effects_session_index.sql`), one new setting (`effect_approval_role`), one new module
+(`agent/tool_modules.py`), and one behaviour change a deployment must know about: **a job declaring
+an irreversible effect refuses to run until `CHEMCLAW_EFFECT_APPROVAL_ROLE` names an approver.**
+Nothing in this repository declares such a job, so nothing breaks today — the refusal is the point,
+because the alternative is the self-approval the seam shipped with.
 
-**Four things found while building that were not the task.** Each is the same shape — a claim in
-prose that the code did not support — which is why they are listed rather than quietly fixed:
+Three fixes were verified by reverting them and watching the new test go red, rather than by
+reading: the empty tool registry, the applied-effect overwrite, and the re-asked question. The unit
+ladders were verified by execution, in both directions, at every rung.
 
-1. **My own first finding was wrong in the reassuring direction.** "Chemclaw only caps by call
-   count" — `api/budget.py` meters tokens and has done all along. The real gap was narrower and
-   more interesting: both its halves sit *outside* the turn. Writing the proposal from the
-   architecture docs rather than the code produced a finding that was true in outline and wrong in
-   the part that decides the design.
-2. **`tests/pg.py::create_checkpoint_tables` ran `MIGRATIONS[1:4]`** — three `CREATE TABLE`s, none
-   of the `ALTER`s — while its docstring claimed "the shape under test is the shape production
-   has". Invisible to every test that only `INSERT`s named columns; immediate for the first one
-   driving a real saver. Fixed here, since a fork test cannot exist without it.
-3. **`tests/test_context_floor.py` undercounts by 7,799 tokens (~24%)**, in a file whose docstring
-   argues its number "is the payload rather than an approximation of it". `@tool` is identity, so it
-   measures raw callables while `create_agent` binds larger wrapped objects (all 49 differ), and it
-   never sees the 7 `FilesystemMiddleware`/`SubAgentMiddleware` tools. **Not fixed here** — the
-   corrected floor (~39,983) exceeds the ceiling it would have to be measured against, and this
-   repository's rule is that raising a ceiling is its own deliberate commit. `BACKLOG.md` row added.
-4. **`events.py` said `loop_cap_reached` was the *only* error sharing its turn with an answer.**
-   True until this change, false after it; corrected in the same commit rather than left to rot.
+**What the audit found beyond the individual defects** is recorded in
+`D-2026-08-29-a-review-with-fresh-context-is-a-different-instrument` and in `tasks/lessons.md`:
+almost every finding was a docstring stating the correct control beside code that did not implement
+it, and the tests that should have caught them were written by the same author and inherited the
+same belief — importing the seeder the production path lacked, seeding a marker into columns the
+read never selects, checking the two prefixes that happened to work.
 
-**One thing deliberately not done.** Item 2 is designed and unbuilt. It changes what the model can
-see, inside the chain that authorizes tool calls, and its failure mode is a wrong answer that never
-names the capability it needed — not a slow turn. The ADR carries the measurement, three rejected
-alternatives, and an explicit **stop**: if the eval corpus cannot separate the deferred arm from the
-bound arm on *tool selection*, the schemas stay bound. That is the D-2026-08-12/13 precedent applied
-before the work rather than after it.
+**Two claims of my own are retracted** rather than quietly edited: "five tables had writers and no
+readers" (false for four of five — each had a point lookup; the *aggregate* was missing) and
+`MAX_WINDOW_DAYS`'s justification (it cited a retention that `_NOT_PRUNED` explicitly refuses). The
+merged ADRs are untouched, per the rule on merged ADRs; the correction lives in the new one and in
+the module docstrings.
 
-**A false alarm I raised and then disproved, kept because the reasoning error is the lesson.**
-Five `tests/test_api_sessions.py` tests failed with `psycopg.errors.UndefinedObject: operator class
-"bit_jaccard_ops" does not exist`, and I called them pre-existing and environmental on the strength
-of reproducing them on a stashed clean tree. That check was **confounded**: the full suite was
-running in the background at the time, so both arms ran two pytest sessions against one Postgres.
-With the suite finished the same five pass. The cause was concurrency, not the database.
-"Reproduces without my change" is not the same claim as "reproduces in isolation", and only the
-second one was worth making.
-
-**One genuinely pre-existing failure, established the second way.**
-`tests/test_message_migration.py::test_erasure_still_works_where_the_checkpointer_has_never_run`
-fails with the same error *in isolation, on a stashed clean tree, with nothing else running* —
-which is the test the paragraph above should have been. Root cause is the sandbox database rather
-than the code: the `chemclaw` database has only `plpgsql` installed (`pg_extension` lists no
-`vector`, and `pg_am` has no `hnsw`), so the migration that builds a bit-vector index has no
-operator class to name. Untouched by this change and left alone.
-
-`draft_experiment_protocol` **refuses a design with no precedent citation and no tool citation.** A
-protocol with neither is a guess, and the refusal is what makes "use the tools massively" a property
-of the code rather than a hope about the prompt.
-
-### 2.4 Evidence is a citation, not a sentence
-
-```
-EvidenceRef{ kind: precedent | tool | note | record | observation,
-             ref, tool: str, summary: str, supports: list[str] }
-```
-`supports` names the design paths the citation is offered for (`base.temperature_c`,
-`factors[0].levels`), so the UI can put the reason next to the number and a reader can check it.
-
-### 2.5 The checks are code
-
-Deterministic verdicts, each `blocker | warning | note`, computed at draft time and stored with the
-revision — never the model's opinion about its own work:
-
-components resolve · charge table consistent with the limiting reagent · atom balance ·
-factor levels declared · arms distinct · layout fits the plate · every arm placed · controls present ·
-evidence present · hazard screen ran · quantities bounded · forbidden reagents absent.
-
-### 2.6 Persistence and tailoring
-
-`experiment_protocols` (identity, status, head revision) + `experiment_protocol_revisions`
-(immutable, `parent_revision`, `author_kind agent|human`, `document JSONB`, `checks JSONB`).
-
-- **Editing is a new revision**, never an update. Optimistic concurrency on `parent_revision`.
-- **The diff between revisions is the product**, not a debug aid: it is exactly "what did the expert
-  change about the first shot", and it is stored where a later miner can read it.
-- The agent revises through `draft_experiment_protocol(design_id=…, parent_revision=…)`; a human
-  revises through `POST /protocols/{id}/revisions`. Same table, `author_kind` tells them apart.
-
-### 2.7 The UI
-
-Three surfaces from two pieces of work:
-- a `protocol` entry in `src/results/renderers.tsx` → in-answer card + `ResultSheet` + `TracePanel`
-  full-result, free, because all three read the one registry;
-- a `/protocols` route and a `/protocols/:id` document view (the `/review` + `/jobs` shape), with the
-  checks strip, the factor table, the **plate map**, the run sheet with CSV, the evidence panel and
-  the revision history with a field-level diff;
-- field-level editing that posts a human revision, gated on `parent_revision` with a 409 the way
-  `decidePlan` is gated on `plan_hash`.
+**One thing was audited hardest and found sound**: the tool-schema cache, added late under CI
+pressure and the change most likely to be wrong. Its stale performance figures are corrected and its
+documented-but-unchecked cache bound is now a test.
 
 ---
 
-## 3 — Tasks
+# Second review (fresh context) — the fixes themselves
 
-### P1 — `src/chemclaw/protocols/` (the shape)
-- [ ] `models.py` — `ExperimentRequest`, `RequestField`, `Factor`, `ProtocolArm`, `ProtocolBody`,
-      `ProtocolStep`, `ChargeLine`, `Analytic`, `EvidenceRef`, `PlateLayout`, `ExperimentDesign`,
-      `ProtocolCheck`, `DesignRevision`. Reuse `ingest.eln.ord.StepKind`/`Role` and
-      `kg.note.ProcessConditions`; do not restate them.
-- [ ] `layout.py` — plate formats (24/48/96/384/1536), well labels, `place(arms, controls, …)`,
-      row-major and seeded-random order.
-- [ ] `checks.py` — the checks, each a pure function over a design.
-- [ ] `diff.py` — field-level diff between two documents.
-- [ ] `render.py` — the Markdown a reader gets; the JSON payload the model + UI get.
-- [ ] `store.py` — `DesignStore` Protocol, in-memory + Postgres backends, `default_design_store()`.
-- [ ] `README.md`.
+Six reviewers read the *fix* branch. What they found matters more than the individual defects:
 
-### P2 — persistence
-- [ ] `infra/sql/073_experiment_protocols.sql` (additive only).
-- [ ] `agent/leaver.py` — declare `experiment_protocols.opened_by` /
-      `experiment_protocol_revisions.author` in the **retain** tier with the reason
-      (a protocol is a shared scientific artifact, like `bo_campaigns.opened_by`).
-- [ ] `durable/retention.py` — a position on the two tables.
+**Two of them mutation-tested the fixes — reverted each and re-ran the suites.** 4 of 5 operations
+changes and 6 of 7 deliver/commitments changes survived with the suite green. Most of what this
+branch fixed is not pinned by anything. `tests/test_delivery.py` and `tests/test_commitments.py` are
+byte-identical to `origin/main`.
 
-### P3 — the agent surface
-- [ ] `agent/protocol_design_tools.py` — the four tools; register the module in
-      `agent/chemclaw_agent.py`'s import block.
-- [ ] `agent/authz.py` — `structure_experiment_request` and `draft_experiment_protocol` are
-      state-changing (they write rows), the two reads are not.
+**Three regressions were introduced by the fixes themselves**, all in `core/units.py`: `pm`
+(picometre) resolved to picomolar because `pM` was added without its twin — turning a safe refusal
+into a silent wrong dimension, the *same* defect one rung down, made while fixing the rung above;
+`Area%` lost its basis because the basis map was case-sensitive while `parse_unit` is not; and
+`% w/v` was registered as a fraction, hard-coding rho = 1.0 g/mL.
 
-### P4 — judgment
-- [ ] `skills/protocol-generation/SKILL.md` — the single-experiment judgment.
-- [ ] `skills/hte-campaign-design/SKILL.md` — factors, levels, design type, controls, replicates,
-      plate constraints, analytics.
-- [ ] cross-reference from `connectors/bo/skills/experiment-design`.
+**Three of the prose corrections are themselves false.**
 
-### P5 — the front door
-- [ ] `api/routes/protocols.py` + `api/schemas.py` shapes + `create_app` registration.
+## Fixed in this pass
 
-### P6 — the gates
-- [ ] `tests/test_layering.py` — `protocols → {core, kg, ingest}`, `{agent, api} → protocols`.
-- [ ] `ARCHITECTURE.md` row (`tests/test_repo_map.py` fails otherwise).
-- [ ] `data/evals/probes/protocol-generation.yaml` — one probe per new tool
-      (`tests/test_probe_coverage.py`).
-- [ ] `tests/test_context_floor.py` — measure, then raise the ceiling with the number in the commit.
-- [ ] tests: `test_protocol_models.py`, `test_protocol_checks.py`, `test_protocol_layout.py`,
-      `test_protocol_store.py`, `test_protocol_tools.py`, `test_protocol_routes.py`,
-      `test_protocol_diff.py`.
+- [x] `pm`/picometre registered; the ladder test now derives from the registry
+- [x] `_BASIS_SPELLINGS` looked up case-insensitively
+- [x] `% w/v` moved to `mass_concentration` (10 mg/mL, exact by definition)
+- [x] `report_measurement` normalises `property_name` — `"PKA"` walked around the new refusal
+- [x] the re-ask no longer overwrites an **answered** row's attribution, and refreshes
+      `requested_by` — the stale value let a *different* person pass the separation-of-duties gate
+- [x] migration renumbered 077 → 079 (main landed its own 077)
 
-### P7 — the record
-- [ ] ADR `D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not.md` + ledger row.
-- [ ] `docs/planning/BACKLOG.md` — the follow-ups this deliberately does not do, each with its cost.
+## Still open
 
-### P8 — `Chemclaw3_ui`
-- [ ] `shared/events.ts` — nothing new needed for the renderer; add the API types.
-- [ ] `server/routes.ts` — whitelist the six protocol routes (+ `tests/routes.test.ts`).
-- [ ] `src/api/client.ts` — the methods.
-- [ ] `src/results/renderers.tsx` — the `protocol` renderer (card + sheet).
-- [ ] `src/routes.tsx` + `src/components/ProtocolPanel.tsx` + `ProtocolDocument.tsx` + `PlateMap.tsx`
-      + `RevisionDiff.tsx`; sidebar link.
-- [ ] vitest specs + an e2e spec.
-
-### P9 — ship
-- [ ] `make lint type test` green in `Chemclaw3` (with Postgres up — report what skipped).
-- [ ] `npm run lint typecheck test` green in `Chemclaw3_ui`.
-- [ ] PR per repo, auto-merge, then review→fix cycles until clean.
-
-## 4 — Deliberately not in this change
-
-- **Wiring `rxnpredict`** (`predict_reaction_conditions`) as a connector. It is the highest-value
-  addition to this pipeline and it is a *default-surface* decision, not a wiring change — the same
-  argument the `pyexec` backlog row makes: discovery is enablement, so a manifest here turns six new
-  tools on in every fresh checkout, needs six probes and moves the context floor. Backlog row, own PR.
-- **A durable `ProtocolDraftWorkflow`.** The composition is a turn's work today; a workflow becomes
-  right when a draft fans out durable calc jobs, and that is a measurement to take first.
-- **Mining the human-edit diffs into playbooks.** The diffs are stored from day one so the
-  measurement is possible; the miner needs a corpus that does not exist yet.
-
-## 5 — Review
-
-**Shipped.** `chemclaw.protocols` (models, checks, layout, diff, render, store), migration 073 with
-its grants, four agent tools, five HTTP routes, two skills, the ADR, and the whole `Chemclaw3_ui`
-surface (contract, BFF routes, client, result renderer, `/protocols` list, document view, plate map,
-revision diff, field-level editor).
-
-**Four things the work changed about its own plan, each because a measurement said so:**
-
-1. **`draft_experiment_protocol` does not take the ask back.** It first took a whole
-   `ExperimentDesign`; `tests/test_context_floor.py` refused that at 4,645 tokens and narrowing it
-   produced a better contract than the prose had — the tool takes `design_id` plus the protocol half
-   only, so `structure_experiment_request` is a prerequisite structurally rather than by advice, and
-   the ask exists in exactly one place. Measured: the two writing tools went 6,231 → 3,380 tokens
-   (−46%), the `default` prefix 35,035 → 32,184, and the ceiling moved 29,500 → 33,000 rather than
-   to the 36,000 an unnarrowed version would have needed.
-2. **A `request` revision is checked at its own stage.** The first version ran every check
-   on the structured ask, so `evidence_present` failed at *blocker* severity on every intake — a
-   blocker that fires on the normal path is one a reader learns to ignore, which would have hollowed
-   out the one blocker the design depends on. Found by running the tool end to end, not by a test.
-3. **`ProtocolArm.charge_overrides` is deleted.** No producer, and it inlined the whole `ChargeLine`
-   model into every schema; an arm that varies an amount declares it as a continuous factor.
-4. **`SpeciesRole`'s docstring shipped three times in one schema**, `RequestField`'s four times —
-   pydantic publishes a referenced model's class docstring as a JSON-schema description and
-   `convert_to_openai_tool` inlines rather than `$ref`s. Fifteen model docstrings moved into `#`
-   comments. The general finding is filed as a `BACKLOG.md` row, because the real fix is upstream
-   and would cut all four `KNOWN_OVERSIZED` entries at once.
-
-**One thing recorded rather than resolved.** Both writing tools stay over `MAX_SINGLE_TOOL_TOKENS`
-and are in `KNOWN_OVERSIZED` with their measurements: `base: ProtocolBody` is 922 tokens with every
-description already one line, so a typed laboratory procedure cannot meet a 900-token bound. The
-alternatives were measured against and rejected in that file — a JSON-string or scratchpad payload
-drops the schema to ~150 tokens and takes schema-guided generation with it, on the call where a
-malformed argument is most expensive.
-
-**Two things looked like defects and were not.** A full-suite run failed
-`test_durable_observability.py` twice; both were the docker daemon dying mid-run, and both pass with
-Postgres up. Eight `e2e/protocols.spec.ts` failures were a `dist/` I had rebuilt without
-`ALLOW_DEV_AUTH=true`, which is what that harness serves; all eight pass on the build it expects.
-
-## 6 — Review cycle (2026-08-29)
-
-An adversarial pass over the merged tier found **fifteen** defects, all under a green 231-test
-suite, all now fixed — `D-2026-08-29-the-review-of-the-prescriptive-tier-found-fifteen-defects`.
-
-**Four of the five worst were a blocker that could not fail**, each under a passing test written
-from the same misunderstanding as the code: `components_resolve` never consulted the strict parser
-on the silent-truncation class it exists for (`"CCO junk"` passed as `1 structures parse`);
-`forbidden_absent`'s structure half could never fire for a named reagent (forbidding DMF let
-`N,N-dimethylformamide` through); a limiting reagent at `0.0` mmol emptied the equivalents
-comparison; and `layout_fits` accepted a 96-well plate declared as 1x2 with wells at row 98.
-
-**Three fixes supersede the merged ADR**, and one of them is the only path in this tier to somebody
-running the wrong conditions: an approval now returns to `draft` on any revision, because a chemist
-approving 80 °C and an agent then drafting 200 °C left the header reading `approved` over the head
-that `GET /protocols/{id}` serves. The other two: the loser of a real READ COMMITTED race gets a
-`RevisionConflict` (and so a 409) instead of a raw `UniqueViolation` and a **500**; and a citation
-counts only when it names something to open, because two bare sentences cleared the load-bearing
-blocker.
-
-Each fix was verified against the review's own reproduction rather than against a new test alone.
-The remaining open items are unchanged and are in `docs/planning/BACKLOG.md`.
-
-## 7 — Second review cycle (2026-08-29)
-
-A second adversarial pass, over the code the first cycle's fifteen fixes left behind, found **six**
-more — `D-2026-08-29-a-sign-off-names-a-revision-or-it-names-nothing`. All fixed, in this repository
-and in `Chemclaw3_ui`.
-
-**The largest is a fix whose stated cost was paid by a record that did not exist.** `advanced()`
-retires an `approved` status when a revision lands, correctly; the docstring paying for that said
-"which revision *was* approved stays recoverable: `set_status` records it", and `set_status` wrote
-one header column and logged a line without the revision in it. `experiment_protocol_status_events`
-(077) is that record now — revision, actor, reason, append-only by grant, and returned on
-`GET /protocols/{id}` so it can be read rather than merely stored.
-
-**The `reason` was worse than latent.** The route validated it to 2,000 characters and dropped it,
-while `Chemclaw3_ui` labels its box "recorded with the move", disables every status button until it
-is filled in, and confirms "recorded against you with the reason you wrote" — a control an
-interface *tells a person* is operating. `executed` joins `approved` as a status a revision retires
-(a header saying a design was run, over a document that was not).
-
-**And the UI could not render a protocol at all.** `ProtocolView` declared
-`{ revision: DesignRevision }` where the service returns the revision flat, so `revision.design` was
-`undefined` and the document page threw on `design.request.title` — under 808 unit tests and 8
-browser tests, every stub and the e2e fixture emitting the same invented shape. Settled by dumping
-`DesignOut.model_json_schema()`; fixed in `Chemclaw3_ui#55`, where re-nesting a stub now fails six
-tests.
-
-The rest: a `replicate_of` naming a real arm with different conditions (measured, a full 2-level
-grid reported as "reduced design: 2 of 4" with zero checks failing); `render.summarise` as a fourth
-caller re-spelling `has_protocol`; a duplicated `reaction_records` in the grant matrix; and one
-merge that committed conflict markers into the ADR ledger, dropping eight of `origin/main`'s rows.
-
-Each behaviour fix was proven non-vacuous by mutation — five mutations, each failing only its
-intended test.
-
-**What the full suite caught that nothing smaller did — six declaration registries.** Every one is
-a place this repository makes you say out loud what you just added: a new turn outcome must be
-reachable (`test_api_observability`), a new setting must be in `.env.example` (`test_config`), a new
-`degraded()` subsystem must be declared (`test_degraded`), a new error code is mirrored by the UI
-and mock repos (`test_event_contract`), a new metric needs a dashboard panel (`test_deploy_chart`),
-a new `ChemclawError` subclass must be classified retryable or not (`test_publish`), and a new
-session-scoped route must be in the ownership inventory (`test_service`). None of these is
-reachable by running the tests for the thing you changed, which is the argument for running the
-whole suite before believing any of it.
+- [ ] `get_durable_job_status` is advertised on the face and discloses what `find_past_jobs` was
+      withheld for; job ids are a pure function of connector+job+payload
+- [ ] the `WITHHELD` partition test is tautological — it cannot fail for the case it names
+- [ ] the ownership gate (`_may_read`) has no test at all
+- [ ] `applied` → `compensated` is now unreachable; the shipped test asserts `failed` → `compensated`
+      and passes either way
+- [ ] the deadline clamp reached two of three launch sites; the BO path is unclamped and two
+      comments claim otherwise
+- [ ] `_SAFE_TOOL_NAME` allows `.` and `-`, which no served tool uses and which carry readable
+      injection text; the cardinality claim beside it is false (bucketing runs after the GROUP BY)
+- [ ] the `failed` split counts argument-sets, not runs (`job_records` upserts on `job_id`)
+- [ ] the redaction-failure path logs without a counter, unlike the sibling it was extracted from
+- [ ] the plaintext-channel refusal can only raise on the delivery path, where it is swallowed
+- [ ] a wrong `CHEMCLAW_COMMITMENT_EXPORT_DIR` is still silent
+- [ ] false prose: "point lookup", "unindexed-range aggregate", "five tables", `Coverage`'s
+      retention sentence, `bearer_token_env_names`' return contract
+- [ ] tests for every fix that survived mutation

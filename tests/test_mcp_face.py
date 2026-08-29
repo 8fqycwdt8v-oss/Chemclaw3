@@ -5,7 +5,7 @@ ask the system that holds the chemistry anything. This surface exports that valu
 effector's blast radius — provided two things hold, which is what this file asserts.
 
 The advertised set is a **partition**, not an allow-list. Every read-only tool is either advertised
-or named in `TURN_SCOPED` with its reason, in both directions, so a tool cannot join this surface by
+or named in `WITHHELD` with its reason, in both directions, so a tool cannot join this surface by
 being forgotten and cannot silently leave it either.
 """
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import chemclaw.agent.chemclaw_agent  # noqa: F401  (populates the capability-tool registry)
 from chemclaw.agent.authz import READ_ONLY_TOOLS, STATE_CHANGING_TOOLS
-from chemclaw.api.mcp_face import TURN_SCOPED, advertised_tools, build_face, face_token_env
+from chemclaw.api.mcp_face import WITHHELD, advertised_tools, build_face, face_token_env
 from chemclaw.core.tool_registry import registered_tool_names
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
@@ -28,13 +28,13 @@ def test_every_read_only_tool_is_advertised_or_named_as_turn_scoped() -> None:
     """
     registered = set(registered_tool_names())
     read_only = registered & set(READ_ONLY_TOOLS)
-    assert read_only == set(advertised_tools()) | (set(TURN_SCOPED) & registered), (
-        "a read-only tool is neither advertised on the MCP face nor named in TURN_SCOPED. "
+    assert read_only == set(advertised_tools()) | (set(WITHHELD) & registered), (
+        "a read-only tool is neither advertised on the MCP face nor named in WITHHELD. "
         "Decide which, and say why beside its entry — deciding by omission is what this prevents."
     )
     # And a name in the deny-list that no longer exists is stale state, which reads as live.
-    assert set(TURN_SCOPED) <= registered, (
-        f"TURN_SCOPED names {sorted(set(TURN_SCOPED) - registered)}, which nothing registers"
+    assert set(WITHHELD) <= registered, (
+        f"WITHHELD names {sorted(set(WITHHELD) - registered)}, which nothing registers"
     )
 
 
@@ -51,13 +51,13 @@ def test_no_state_changing_tool_can_reach_the_face() -> None:
 
 
 def test_an_attachment_is_not_readable_through_the_face() -> None:
-    """The one `TURN_SCOPED` entry that is a disclosure surface rather than an empty answer.
+    """The one `WITHHELD` entry that is a disclosure surface rather than an empty answer.
 
     `read_attachment` returns the contents of a file somebody uploaded to a conversation. It is
     classified read-only and correctly so; serving it to whatever holds the face's token would hand
     out one person's upload. Named on its own because the others merely answer emptily.
     """
-    assert "read_attachment" in TURN_SCOPED
+    assert "read_attachment" in WITHHELD
     assert "read_attachment" not in advertised_tools()
 
 
@@ -96,3 +96,80 @@ def test_the_face_is_not_addressable_as_a_connector() -> None:
     """
     manifests = [path.read_text(encoding="utf-8") for path in SRC.rglob("connector.yaml")]
     assert not [text for text in manifests if "chemclaw-read" in text]
+
+
+#: Exactly what this face serves. **A golden set, because the partition test cannot fail for the
+#: case it exists to catch.** `advertised_tools()` is *derived* as
+#: `(registry ∩ READ_ONLY_TOOLS) − WITHHELD`, so "every read-only tool is advertised or withheld" is
+#: true by construction and stays true when a new read-only tool joins this surface by being
+#: forgotten — which is precisely how four deployment-wide reads were being served. Only an explicit
+#: list makes adding one a decision somebody has to take.
+_ADVERTISED = {
+    "expand_note",
+    "find_experiment_protocols",
+    "find_knowledge_gaps",
+    "find_notes",
+    "gather_evidence",
+    "read_experiment_protocol",
+    "recall_observations",
+    "condense_protocols",
+}
+
+
+def test_the_face_serves_exactly_the_tools_this_list_names() -> None:
+    """A new read-only tool must be classified here or in `WITHHELD` — it cannot arrive by default.
+
+    The failure this replaces: the derived partition assertion passes whether or not a new tool
+    should be on this surface, because the surface *is* the derivation. Dropping a name from
+    `WITHHELD` re-advertises it and every existing assertion stays green.
+
+    When this fails, do not just add the name. Ask the question `WITHHELD` is organised around —
+    does this tool answer something about this deployment's *people* or about its *chemistry* — and
+    put it on whichever side the answer says.
+    """
+    advertised = set(advertised_tools())
+    arrived = advertised - _ADVERTISED
+    vanished = _ADVERTISED - advertised
+    assert not arrived, (
+        f"{sorted(arrived)} joined the read-only MCP face without anyone deciding they should be "
+        "exported. Classify each in WITHHELD or add it here deliberately"
+    )
+    assert not vanished, (
+        f"{sorted(vanished)} no longer reach the face; if that is intended, remove them here"
+    )
+
+
+def test_no_deployment_wide_read_reaches_the_face() -> None:
+    """Read-only is not the predicate; "about chemistry rather than about people" is.
+
+    Named individually rather than derived, because nothing in the tree classifies this property —
+    but named *here* as well as in `WITHHELD` so that removing one from the deny-list fails a test
+    that says why it was there, rather than quietly widening the surface. Each of these was
+    advertised at one point, and each answers a question about this deployment's people: what the
+    programme committed to, who is waiting on whom, what a named employee's turns cost, what
+    somebody else's run was for, and one conversation's entire record.
+    """
+    people_not_chemistry = {
+        "assemble_evidence_pack",
+        "check_pending_requests",
+        "review_activity",
+        "review_commitments",
+        "find_past_jobs",
+    }
+    leaked = sorted(people_not_chemistry & set(advertised_tools()))
+    assert leaked == [], (
+        f"{leaked} are served to anything holding the face's bearer token; they answer questions "
+        "about this deployment's people rather than about its chemistry"
+    )
+
+
+def test_the_evidence_pack_is_withheld_because_it_has_no_actor_to_authorize_against() -> None:
+    """The reason matters as much as the exclusion, and is asserted so it cannot be lost.
+
+    `assemble_evidence_pack` gained a session-ownership gate, which is the right control in a
+    conversation and is *unavailable* here: the face has no authenticated actor at all, so the gate
+    could only ever refuse — and the tool's `session_id` argument means a caller would be naming
+    somebody else's session by construction.
+    """
+    assert "assemble_evidence_pack" in WITHHELD
+    assert "ownership" in WITHHELD["assemble_evidence_pack"]

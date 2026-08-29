@@ -78,6 +78,8 @@ async def request_external_input(
         # The core rule (F4-T3): refuse durable work with no user behind it.
         requested_by=require_actor(),
         session_id=get_current_session_id() or "",
+        # Not clamped here: `open_pending_request_activity` owns the ceiling, so every caller gets
+        # it rather than the two that remembered. See `AwaitAnswerWorkflow.run`.
         deadline_days=deadline_days,
     )
     request_id = request_id_for(request)

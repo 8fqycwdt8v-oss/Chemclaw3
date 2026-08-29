@@ -380,6 +380,62 @@
           "refId": "D"
         }
       ]
+    },
+    {
+      "id": 11,
+      "type": "graph",
+      "title": "Outbound delivery, by channel",
+      "description": "Taken versus refused, per channel. A channel flat at zero while another climbs is a broken destination; both flat with delivery configured is an outage of the seam. Neither series existed at first, so a total delivery failure and a healthy one looked identical.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (channel) (rate(chemclaw_deliveries_total[30m]))",
+          "legendFormat": "{{channel}} taken",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (channel) (rate(chemclaw_delivery_failures_total[30m]))",
+          "legendFormat": "{{channel}} refused",
+          "refId": "B"
+        }
+      ]
     }
   ],
   "refresh": "30s",

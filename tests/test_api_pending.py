@@ -73,6 +73,22 @@ async def _open(request_id: str, *, asked_of: str = "") -> None:
     )
 
 
+def _routed(
+    asked_of: str, *, kind: str = "measurement", requested_by: str = "u-someone-else"
+) -> pending_store.PendingRequest:
+    """A stored request with just the three fields the gate reads, so the gate is what is tested."""
+    return pending_store.PendingRequest(
+        request_id="r-gate",
+        kind=kind,
+        subject="s",
+        rationale="r",
+        asked_of=asked_of,
+        requested_by=requested_by,
+        session_id="s-1",
+        state="waiting",
+    )
+
+
 def test_routing_decides_who_may_answer_and_the_requester_is_not_automatic() -> None:
     """`_may_answer` is the gate; `asked_of` is only where the question was pointed.
 
@@ -80,15 +96,33 @@ def test_routing_decides_who_may_answer_and_the_requester_is_not_automatic() -> 
     also mean "and I may approve it myself", which is the shape every self-approval hole has.
     """
     # Unrouted: open to anyone authenticated, which is the same posture every read here has.
-    assert _may_answer(_ALICE, "") is True
+    assert _may_answer(_ALICE, _routed("")) is True
     # Routed to an actor, by object id or by user principal name.
-    assert _may_answer(_ALICE, "u-alice") is True
-    assert _may_answer(_ALICE, "alice@example.com") is True
-    assert _may_answer(_BOB, "u-alice") is False
+    assert _may_answer(_ALICE, _routed("u-alice")) is True
+    assert _may_answer(_ALICE, _routed("alice@example.com")) is True
+    assert _may_answer(_BOB, _routed("u-alice")) is False
     # Routed to an entitlement, spelled bare — a security group reaches the role set prefixed, and
     # a deployment routes to whichever spelling it has.
-    assert _may_answer(_QC_LEAD, "qc-team") is True
-    assert _may_answer(_ALICE, "qc-team") is False
+    assert _may_answer(_QC_LEAD, _routed("qc-team")) is True
+    assert _may_answer(_ALICE, _routed("qc-team")) is False
+
+
+def test_the_requester_can_never_approve_their_own_irreversible_change() -> None:
+    """Separation of duties, asserted against the routing that used to defeat it.
+
+    The seam shipped raising every approval with `asked_of` unset, which took the "anyone
+    authenticated" branch and let the requester sign off their own unrecoverable change. Both halves
+    are pinned: an unrouted approval no longer admits its requester, and neither does one routed to
+    a group the requester belongs to — because routing a control to a team the requester is on is
+    exactly how a separation-of-duties rule gets quietly lost again.
+    """
+    assert _may_answer(_ALICE, _routed("", kind="approval", requested_by="u-alice")) is False
+    assert _may_answer(_ALICE, _routed("qc-team", kind="approval", requested_by="u-alice")) is False
+    qc_asked = _routed("qc-team", kind="approval", requested_by="u-alice")
+    assert _may_answer(_QC_LEAD, qc_asked) is True
+    # A measurement is ordinary work: a chemist answering their own lab's request is not a breach,
+    # so the rule is scoped to the kind rather than applied to every request.
+    assert _may_answer(_ALICE, _routed("", kind="measurement", requested_by="u-alice")) is True
 
 
 def test_answering_a_request_routed_to_somebody_else_is_refused() -> None:

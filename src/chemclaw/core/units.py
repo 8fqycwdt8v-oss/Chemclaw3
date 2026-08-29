@@ -118,7 +118,49 @@ def _register(unit: Unit, *aliases: str) -> None:
 # makes "0.15% versus 1500 ppm" answerable rather than a coin toss.
 _register(Unit("", "dimensionless"), "none", "unitless", "-")
 _register(Unit("fraction", "fraction"), "frac")
-_register(Unit("%", "fraction", 0.01), "percent", "pct", "% w/w", "%w/w", "area%", "% area")
+_register(
+    Unit("%", "fraction", 0.01),
+    "percent",
+    "pct",
+    "% w/w",
+    "%w/w",
+    "w/w%",
+    "area%",
+    "% area",
+    "%area",
+    "mol%",
+    "% mol",
+)
+# **`% w/v` is not a fraction and was registered as one.** It is grams per 100 mL *by definition*,
+# so it belongs in `mass_concentration` where the conversion is exact and needs no density —
+# 1 % w/v is 10 mg/mL. As a `fraction` with factor 0.01 it silently asserted rho = 1.000 g/mL:
+# a 2 % w/v stock read 20000 ppm and compared equal to a bare 2 %, when in ethanol it is 2.53 % w/w
+# and in DMSO 1.82 %. `origin/main` refused the spelling as unknown; this branch introduced the
+# alias and the error with it.
+_register(Unit("% w/v", "mass_concentration", 10.0), "%w/v", "w/v%")
+
+#: Spellings that state their own basis. **A percent is one unit and several facts**, and these are
+#: the spellings in which a chemist says which: an HPLC area percent, a weight percent, a molar
+#: percent. They were registered as bare aliases of `%`, so `Measurement.of(0.15, "area%").basis`
+#: was `""` and an area percent compared **equal** to a weight percent — the exact thing this
+#: module's docstring says a system must not do, in the field that exists to prevent it.
+#:
+#: Mapping the spelling to the basis is what makes the distinction survive parsing: the caller no
+#: longer has to know to pass `basis=` by hand for a string that already said it.
+#: **Keyed lowercase and looked up lowercased**, because `parse_unit` is case-insensitive and this
+#: was not: `Area%` — the ordinary capitalisation on a chromatography printout — parsed fine, lost
+#: its basis, and compared **equal** to a `% w/w` assay. The guard this map exists to arm never
+#: fired for the spelling a chemist is most likely to type.
+_BASIS_SPELLINGS: dict[str, str] = {
+    "% w/w": "w/w",
+    "%w/w": "w/w",
+    "w/w%": "w/w",
+    "area%": "area",
+    "% area": "area",
+    "%area": "area",
+    "mol%": "mol",
+    "% mol": "mol",
+}
 _register(Unit("ppm", "fraction", 1e-6))
 _register(Unit("ppb", "fraction", 1e-9))
 
@@ -155,9 +197,31 @@ _register(Unit("kcal/mol", "energy_per_amount", 4.184), "kcalmol", "kcal mol-1")
 _register(Unit("hartree", "energy_per_amount", 2625.4996), "eh", "ha", "au")
 _register(Unit("eV", "energy_per_amount", 96.485_332), "electronvolt")
 
+# **The concentration and length ladders are registered in step, deliberately.** Case is what
+# separates molarity from length here (`M` molar, `m` metre), and a fold claimed by both is poisoned
+# to `None` so the ambiguous spelling is refused rather than silently resolved. That only works
+# where *both* families register the prefix: `M`/`m` and `mM`/`mm` were both present and correct,
+# and the very next rung down was not — `nM` was absent, so nanomolar folded to the *nanometre*
+# already there and `Measurement.of(50, "nM").compare(Measurement.of(1, "mm"))` answered instead of
+# refusing, while `same_dimension("nM", "uM")` was False and a legitimate 50 nM against a 0.1 µM
+# limit was refused with "cannot compare length with concentration".
+#
+# So every rung either exists on both sides or on neither — and "or on neither" is not a figure of
+# speech. The first version of this fix registered `pM` with the note that it "has no length twin
+# and
+# is therefore unambiguous", which had it exactly backwards: the missing twin left the fold `"pm"`
+# unpoisoned, so **picometre — the unit of a bond length — resolved to picomolar**, and
+# `reconcile(154, "pm", "M")` returned 1.54e-10 where `origin/main` had refused it as unknown. A
+# fix that converts a safe refusal into a silent wrong dimension is worse than the defect it
+# replaces, and it is the same defect: one rung further down, made while fixing the rung above.
 _register(Unit("M", "concentration"), "mol/L", "molar")
 _register(Unit("mM", "concentration", 1e-3), "mmol/l", "millimolar")
-_register(Unit("uM", "concentration", 1e-6), "µm", "μm", "umol/l", "micromolar")
+# `µM`/`μM` are registered as *exact* spellings (both the micro sign and the Greek mu), because
+# exact lookup runs before the case fold and the fold of "µm" is claimed by micrometre below.
+# Without them the correct spelling of micromolar resolved to a length.
+_register(Unit("uM", "concentration", 1e-6), "µM", "μM", "umol/l", "micromolar")
+_register(Unit("nM", "concentration", 1e-9), "nmol/l", "nanomolar")
+_register(Unit("pM", "concentration", 1e-12), "pmol/l", "picomolar")
 _register(Unit("mg/mL", "mass_concentration"), "g/L")
 _register(Unit("ug/mL", "mass_concentration", 1e-3), "µg/mL", "μg/mL", "mg/L")
 
@@ -169,10 +233,17 @@ _register(Unit("g/mol", "molar_mass"), "g mol-1", "da", "dalton")
 _register(Unit("log S", "log_solubility"), "logs", "log10(mol/l)")
 _register(Unit("pKa", "acidity"))
 
-_register(Unit("m", "length"), "metre", "meter")  # `mm`/`cm`/`nm` follow below
+_register(Unit("m", "length"), "metre", "meter")  # `mm`/`cm`/`um`/`nm` follow below
 _register(Unit("cm", "length", 1e-2), "centimetre", "centimeter")
 _register(Unit("mm", "length", 1e-3), "millimetre", "millimeter")
+# **`µm` is a micrometre.** It was registered as an exact alias of micromolar, which did not even
+# reach the ambiguity guard — micrometre was absent from this family, so nothing poisoned the fold
+# and `reconcile(50, "µm", "mM")` accepted a particle size as a concentration and returned 0.05.
+# The correct spelling `µM` still reaches micromolar through the fold, which is all that alias was
+# ever needed for.
+_register(Unit("um", "length", 1e-6), "µm", "μm", "micrometre", "micrometer", "micron")
 _register(Unit("nm", "length", 1e-9), "nanometre", "nanometer")
+_register(Unit("pm", "length", 1e-12), "picometre", "picometer")
 _register(Unit("angstrom", "length", 1e-10), "å", "ang")
 
 
@@ -217,8 +288,10 @@ class Measurement:
 
     `basis` is free text and exists for the one thing a unit cannot carry: 0.15% of *what*. An area
     percent, a weight percent and a molar percent are the same unit and different facts, and a
-    system that dropped the distinction would compare them. It is never parsed and never compared —
-    it travels so a reader can see it.
+    system that dropped the distinction would compare them. A spelling that states it — `area%`,
+    `% w/w`, `mol%` — fills it at parse time, and `compare` refuses two quantities whose stated
+    bases disagree. An *unstated* basis is "nobody said" and never blocks a comparison, so this
+    narrows what can be compared without making ordinary percentages unusable.
     """
 
     value: float
@@ -230,8 +303,18 @@ class Measurement:
     def of(
         cls, value: float, unit: str, *, uncertainty: float | None = None, basis: str = ""
     ) -> "Measurement":
-        """Build one from a unit spelling, refusing an unknown unit."""
-        return cls(value=value, unit=parse_unit(unit), uncertainty=uncertainty, basis=basis)
+        """Build one from a unit spelling, refusing an unknown unit.
+
+        A spelling that states its basis (`area%`, `% w/w`, `mol%`) fills `basis` when the caller
+        did not pass one — see `_BASIS_SPELLINGS`. An explicit `basis=` always wins, so a caller who
+        knows more than the spelling does is never overridden.
+        """
+        return cls(
+            value=value,
+            unit=parse_unit(unit),
+            uncertainty=uncertainty,
+            basis=basis or _BASIS_SPELLINGS.get(unit.strip().lower(), ""),
+        )
 
     def to(self, symbol: str) -> "Measurement":
         """This quantity in another unit of the same dimension, or refuse.
@@ -267,6 +350,15 @@ class Measurement:
                 f"cannot compare {self.unit.dimension} with {other.unit.dimension}: "
                 f"{self} and {other} are not the same kind of quantity"
             )
+        # **Two stated bases that disagree are not comparable**, and this is the case a dimension
+        # check cannot see: an area percent and a weight percent are the same dimension, the same
+        # unit and different facts. Only refused when *both* are stated — an unstated basis is
+        # "nobody said", and refusing on it would make every ordinary percent incomparable.
+        if self.basis and other.basis and self.basis != other.basis:
+            raise UnitError(
+                f"cannot compare {self.basis} with {other.basis}: {self} and {other} are the same "
+                "unit measured against different things"
+            )
         converted = other.to(self.unit.symbol)
         if self.value < converted.value:
             return -1
@@ -290,17 +382,33 @@ def same_dimension(first: str, second: str) -> bool:
 def reconcile(value: float, reported: str, expected: str) -> float:
     """`value`, reported in `reported`, expressed in `expected` — or refuse.
 
-    The one call a ledger makes. `reported` empty means the caller stated no unit, which is
-    accepted as "the ledger's own unit" rather than refused: every measurement stored before this
-    existed carries an empty unit, and refusing the unstated case would make the common path fail
-    while the *wrong* path (a number in the wrong unit, silently stored) is the one this exists to
-    catch.
+    The one call a ledger makes.
+
+    `reported` empty means the caller stated no unit. This still accepts it as "the ledger's own
+    unit", and the branch is now **unreachable from production**: `report_measurement` refuses an
+    unstated unit for a calibrated property before it gets here. It is kept because the refusal
+    belongs to the caller that knows which properties are calibrated, and because every measurement
+    stored before that control existed carries an empty unit — a backfill reading those rows is the
+    second caller this branch is for.
+
+    **The basis is checked here too, not only in `compare`.** They are the two public comparison
+    entry points and this is the one a ledger actually calls; fixing one and leaving the other is
+    how an area percent reaches a weight-percent column. Only two *stated* bases that disagree are
+    refused — an unstated one is "nobody said" and must not block an ordinary conversion.
 
     Raises:
-        UnitError: When `reported` is unknown, or measures something `expected` does not. A pKa
-            reported into the solubility ledger, or a `mg/mL` where the column holds log S, is
-            refused here rather than becoming a residual nobody can explain.
+        UnitError: When `reported` is unknown, measures something `expected` does not, or states a
+            basis that disagrees with `expected`'s. A pKa reported into the solubility ledger, a
+            `mg/mL` where the column holds log S, or an `area%` into a `% w/w` column is refused
+            here rather than becoming a residual nobody can explain.
     """
     if not reported.strip():
         return value
-    return Measurement.of(value, reported).to(expected).value
+    measured = Measurement.of(value, reported)
+    target = Measurement.of(0.0, expected)
+    if measured.basis and target.basis and measured.basis != target.basis:
+        raise UnitError(
+            f"cannot record a {measured.basis} value in a {target.basis} column: {reported!r} and "
+            f"{expected!r} are the same unit measured against different things"
+        )
+    return measured.to(expected).value

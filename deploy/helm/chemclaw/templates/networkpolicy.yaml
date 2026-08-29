@@ -159,6 +159,48 @@ spec:
           port: {{ .Values.service.port }}
 ---
 {{- end }}
+{{- /* **The face is the one component that is *meant* to be reached from outside**, and it was
+       the one component no ingress policy selected — which under Kubernetes semantics means
+       unrestricted ingress: any pod in any namespace of the cluster could reach it. That also made
+       `/metrics` and `/healthz`, which are unauthenticated by design, cluster-wide reads, and the
+       justification written next to that decision ("the NetworkPolicy keeps the port inside the
+       cluster") was simply false for this pod.
+
+       So it gets the same shape as the front door rather than the connectors': its own pods, plus
+       whatever namespaces a deployment names. `mcpFace.ingressNamespaces` is separate from
+       `networkPolicy.ingressNamespaces` deliberately — the router namespace that may reach the chat
+       front door and the namespace a partner's agent runs in are different answers, and collapsing
+       them would widen one to grant the other. Empty means "this release's own pods only", which is
+       the useful default: a face reachable by nothing outside is a face nobody has published yet. */ -}}
+{{- if .Values.mcpFace.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "chemclaw.name" . }}-mcp-face-ingress
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mcp-face
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "chemclaw.selectorLabels" . | nindent 14 }}
+        {{- range .Values.mcpFace.ingressNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+---
+{{- end }}
 {{- /* Connectors accept traffic only from Chemclaw's own pods. This is the boundary that makes the
        advisory X-Chemclaw-* identity headers safe: they are not authorization, so a connector must
        not be reachable by anything that could forge them. Authorization itself stays in core

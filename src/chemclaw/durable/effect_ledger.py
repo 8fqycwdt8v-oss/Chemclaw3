@@ -59,10 +59,32 @@ _BEGIN = """
     WHERE effects.state <> 'applied'
 """
 
+# `WHERE effects.state <> 'applied'` for the same reason `_BEGIN` carries it, and its absence here
+# was the more consequential of the two. `ConnectorJobWorkflow` settles `applied` and then calls
+# `_finish` **inside the same `try`**, whose `except BaseException` settles `failed` — so a
+# `ValidationError` out of the note write, or the cancellation path the workflow documents,
+# overwrote a landed irreversible change with `failed` and blanked its `external_ref`. An operator
+# reading the one ledger of what this system changed outside itself was told the deviation was not
+# filed, and would file it again. `unsettled()` could not surface it either, since that reads
+# `attempting`.
+#
+# `external_ref` is coalesced rather than assigned: a settle that does not carry one must not erase
+# the handle an earlier one recorded, which is the only string an operator can undo the far side by.
+# **`compensated` is the one transition out of `applied` that must still work**, and the first
+# version of this guard blocked it. `075_effects.sql` permits the state, `settle_effect`'s own
+# docstring names it, and `ConnectorManifest` models `reversal: compensating` as "undone by another
+# declared job" — so applied -> compensated is not an edge case, it is the *only* way that state is
+# ever reached. Blocking it left the ledger saying a change was still standing after it had been
+# rolled back: the same lie the guard was added to prevent, told in the other direction. The shipped
+# test asserted failed -> compensated, which the guard always allowed, so it passed either way.
 _SETTLE = """
     UPDATE effects
-    SET state = %s, external_ref = %s, detail = %s, settled_at = now()
+    SET state = %s,
+        external_ref = CASE WHEN %s = '' THEN effects.external_ref ELSE %s END,
+        detail = %s,
+        settled_at = now()
     WHERE effect_id = %s
+      AND (effects.state <> 'applied' OR %s = 'compensated')
 """
 
 _COLUMNS = (
@@ -106,7 +128,7 @@ async def settle_effect(
     call failed *after* creating the record is the worst possible time to lose it.
     """
     async with _connect() as conn:
-        await conn.execute(_SETTLE, (state, external_ref, detail, effect_id))
+        await conn.execute(_SETTLE, (state, external_ref, external_ref, detail, effect_id, state))
 
 
 def _row(values: tuple[Any, ...]) -> EffectRecord:

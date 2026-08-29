@@ -29,7 +29,9 @@ async def _clean() -> None:
         await conn.commit()
 
 
-async def _open(request_id: str, *, asked_of: str = "", days: float = 7.0) -> None:
+async def _open(
+    request_id: str, *, asked_of: str = "", days: float = 7.0, run_id: str = "run-1"
+) -> None:
     """Open one wait with this file's requester."""
     await pending_store.open_request(
         request_id=request_id,
@@ -41,6 +43,7 @@ async def _open(request_id: str, *, asked_of: str = "", days: float = 7.0) -> No
         session_id="s-1",
         correlation_id="c-1",
         due_at=datetime.now(UTC) + timedelta(days=days),
+        run_id=run_id,
     )
 
 
@@ -172,5 +175,104 @@ def test_a_reminder_counts_only_while_the_request_is_open() -> None:
         stored = await pending_store.get_request("pending-chase")
         assert stored is not None
         assert stored.reminders == 2
+
+    asyncio.run(_run())
+
+
+def test_asking_again_after_a_deadline_lapsed_reopens_the_row() -> None:
+    """The case `ALLOW_DUPLICATE` exists for, which the projection used to drop on the floor.
+
+    `request_id_for` is deterministic, so a re-ask reuses the workflow id; `request_external_input`
+    sets `WorkflowIDReusePolicy.ALLOW_DUPLICATE` precisely so a lapsed question can be asked again.
+    The projection guarded its upsert on `state = 'waiting'` and never reset the state, so the new
+    wait inherited the old cycle's `expired` row: invisible to `open_requests`, frozen for
+    `record_reminder`, and refused 409 by the answer route — forever, while the workflow ran on.
+
+    The run id is what separates a retry from a re-ask, so both halves are asserted here.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        request_id = "req-reask"
+        await _clean()
+        await _open(request_id, days=1, run_id="run-1")
+        await pending_store.record_reminder(request_id)
+        await pending_store.settle_request(request_id, state="expired", answered_by="", answer={})
+
+        stored = await pending_store.get_request(request_id)
+        assert stored is not None and stored.state == "expired"
+
+        # The same question, asked again: a new Temporal run under the same workflow id.
+        await _open(request_id, days=7, run_id="run-2")
+
+        stored = await pending_store.get_request(request_id)
+        assert stored is not None
+        assert stored.state == "waiting", (
+            "the re-asked question kept the lapsed cycle's state, so nobody can see or answer it"
+        )
+        assert not stored.answered_at and stored.answered_by == ""
+        assert stored.reminders == 0, "the new cycle inherited the old one's chase count"
+        # Membership, not equality: these tables are shared by the whole suite and another file's
+        # open request is not this test's business. Asserting the whole list is what made an
+        # unrelated file fail this one in a full run and pass it alone.
+        assert request_id in [r.request_id for r in await pending_store.open_requests()]
+
+    asyncio.run(_run())
+
+
+def test_a_retry_of_the_opening_activity_does_not_disturb_a_settled_row() -> None:
+    """The case the original guard was written for, which must survive the fix.
+
+    An activity retry carries the *same* run. If that reopened a settled row, an at-least-once
+    delivery could resurrect a wait the workflow had already answered — which is why the reopen is
+    keyed on the run id changing rather than on the state alone.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        request_id = "req-retry"
+        await _clean()
+        await _open(request_id, days=1, run_id="run-1")
+        await pending_store.settle_request(
+            request_id, state="answered", answered_by="u-2", answer={"ok": True}
+        )
+        await _open(request_id, days=1, run_id="run-1")
+
+        stored = await pending_store.get_request(request_id)
+        assert stored is not None
+        assert (stored.state, stored.answered_by) == ("answered", "u-2"), (
+            "a retry of the opening activity resurrected a wait that was already answered"
+        )
+
+    asyncio.run(_run())
+
+
+def test_an_expiry_does_not_claim_somebody_answered() -> None:
+    """`answered_at` is a fact about a person, not about a state transition.
+
+    It was stamped on every settle, so an `expired` row carried a timestamp beside an empty
+    `answered_by` — the front door and the agent both read that as "somebody answered at some
+    point". Migration 076's `pending_requests_answer_is_attributed` exists to prevent exactly that
+    claim and only fires on `state = 'answered'`; the write walked around it from the other side.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clean()
+        await _open("req-expiry-stamp", days=1)
+        await pending_store.settle_request(
+            "req-expiry-stamp", state="expired", answered_by="", answer={}
+        )
+        stored = await pending_store.get_request("req-expiry-stamp")
+        assert stored is not None
+        assert stored.state == "expired"
+        assert not stored.answered_at, "an unanswered request carries an answered-at timestamp"
+
+        await _open("req-answered-stamp", days=1)
+        await pending_store.settle_request(
+            "req-answered-stamp", state="answered", answered_by="u-2", answer={"ok": True}
+        )
+        answered = await pending_store.get_request("req-answered-stamp")
+        assert answered is not None and answered.answered_at, "a real answer lost its timestamp"
 
     asyncio.run(_run())

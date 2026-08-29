@@ -49,6 +49,14 @@ class SourcesSettings(BaseSettings):
     # any other pinned dependency, and read from disk at runtime. D-089's "no external data
     # sources" is about a runtime dependency on somebody else's service, and there is none here.
     vendored_dataset_dir: str = "data/vendored"
+    #: Where the `commitments-json` source reads a portfolio extract from.
+    #:
+    #: A setting rather than a `config:` block in the manifest, matching `eln_export_dir` — the
+    #: manifest carried `path: data/commitments` and nothing created that directory, so in a
+    #: container whose WORKDIR is not the repo root the adapter silently found nothing,
+    #: `mirror_freshness` returned NULL, and `review_commitments` presents that as "nothing was ever
+    #: mirrored". A wrong directory reached a project leader as a truthful empty portfolio.
+    commitment_export_dir: str = "data/commitments"
     # Check `records.csv` against the checksum in its manifest on load. On by default: the whole
     # value of vendoring is that the shipped data is provably what was reviewed, and a corpus that
     # silently drifted from its manifest is worth less than none.

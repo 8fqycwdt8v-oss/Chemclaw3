@@ -9,7 +9,12 @@ the turns and tokens went.
 
 ## Why it exists
 
-The tables it reads have all been written since the system was built and none of them had a reader.
+The tables it reads have all been written since the system was built and none of them could be read
+*across*. (First written here as "none of them had a reader", which is false — `cli/explain.py`,
+`publish/backfill.py`, `durable/job_record_store.py`, `kg/proposal_store.py` and
+`agent/plan_approval_store.py` all read one, and only `turn_costs` had none. The second attempt
+called them all point lookups, which is false too: two are searches and one is a full sweep. What
+none of them does is **aggregate**, and that is the whole of it.)
 `chemclaw.agent.audit_store.PostgresAuditStore` exposes `record` and `flush`; the grant matrix hands
 the runtime principal `SELECT` on every table and no code used it on this one. So the trail proved
 *that* something happened and could not answer a question *about* it — and a set of questions a
@@ -45,7 +50,10 @@ proposed, nothing reaches the knowledge graph, and nothing is remembered.
 | --- | --- |
 | `window.py` | `Window` — a half-open span and the phrase that asked for it. |
 | `activity.py` | The four readings and the models they return. |
+| `evidence_pack.py` | `assemble` — one conversation's whole record, from the five stores that hold it. |
 
-The agent-facing surface is one tool, `review_activity`, in `chemclaw.agent.operations_tools`.
+The agent-facing surface is two tools: `review_activity` in `chemclaw.agent.operations_tools` and
+`assemble_evidence_pack` in `chemclaw.agent.evidence_tools`. The second is gated on session
+ownership and is withheld from the read-only MCP face, which has no actor to own anything.
 The store lives here and the tool lives there for the same reason `memory/` and
 `agent/memory_tools.py` are separate: a tool is conversation plumbing, and a store is not.

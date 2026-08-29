@@ -9,9 +9,47 @@ from a tool result is exactly as capable of carrying one as a log line is, and a
 stays inside the cluster.
 """
 
+import logging
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from chemclaw.core.logging import redact_secrets
+from chemclaw.core.metrics_bridge import degraded
+
+logger = logging.getLogger(__name__)
+
+
+def _connector_secret_envs() -> tuple[str, ...]:
+    """The connector bearer-token variable names, or `()` if they cannot be resolved.
+
+    Imported lazily and shared with `core.logging.SecretRedactingFilter` through
+    `connectors.registry.bearer_token_env_names`, so the log scrub and the delivery scrub cannot
+    cover different sets. This file used to claim they were already the same ("the same filter runs
+    here") — they were not: `redact_secrets` reaches connector tokens only through its
+    `extra_secrets` argument, which nothing here passed. A tool error quoting its own
+    `Authorization` header was scrubbed from the log line and shipped verbatim to the webhook host.
+
+    Failure degrades to redacting nothing *extra* rather than blocking a delivery, matching the
+    filter — but unlike the filter this is on a path that leaves the cluster, so the caller logs it.
+    """
+    try:
+        from chemclaw.connectors.registry import bearer_token_env_names
+
+        return bearer_token_env_names()
+    except Exception:
+        # `degraded()` rather than a bare `logger.error`, matching the sibling this was extracted
+        # from: it increments `chemclaw_degraded_total{subsystem}`, which is alerted and
+        # dashboarded. A bare log line here would have made this the *only* security degradation in
+        # the tree with no counter — on the half that leaves the cluster, which this module's own
+        # docstring calls the more consequential of the two.
+        degraded(
+            logger,
+            "deliver_redaction",
+            "connector bearer-token names could not be resolved; connector credentials will NOT "
+            "be scrubbed from outbound messages",
+        )
+        return ()
 
 
 class Message(BaseModel):
@@ -25,9 +63,16 @@ class Message(BaseModel):
     recipient: str = Field(min_length=1)
     subject: str = Field(min_length=1)
     body: str = ""
-    #: What produced this, so a delivery can be joined back to the run that caused it. A bounded
-    #: vocabulary: `digest`, `awaiting`, `job-result`, `report`.
-    kind: str = "digest"
+    #: What produced this, so a delivery can be joined back to the run that caused it.
+    #:
+    #: **A `Literal` rather than a documented convention, because the file driver builds a filename
+    #: out of it.** This said "a bounded vocabulary" in prose and was a bare `str`, while
+    #: `FileDeliveryDriver` does `self.directory / f"{message.kind}-{identity}{self.suffix}"` — and
+    #: an absolute or `../`-bearing value escapes the outbox entirely, with `mkdir(parents=True)`
+    #: creating whatever it traverses to. Inert while the single caller passes a literal, and an
+    #: arbitrary file write with the pod's uid the moment a `kind` is ever derived from a payload.
+    #: The type is the bound; the prose was not.
+    kind: Literal["digest", "awaiting", "job-result", "report"] = "digest"
     #: The turn or job this came from, for the same join. Never rendered to the recipient.
     correlation_id: str = ""
 
@@ -40,7 +85,7 @@ class Message(BaseModel):
         """
         return self.model_copy(
             update={
-                "subject": redact_secrets(self.subject),
-                "body": redact_secrets(self.body),
+                "subject": redact_secrets(self.subject, extra_secrets=_connector_secret_envs()),
+                "body": redact_secrets(self.body, extra_secrets=_connector_secret_envs()),
             }
         )

@@ -42,6 +42,7 @@ from pydantic import BaseModel, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.operations.activity import safe_tool_name
 
 #: The sentences the pack refuses to let a reader supply for themselves. Carried on every pack.
 LIMITS: tuple[str, ...] = (
@@ -52,6 +53,8 @@ LIMITS: tuple[str, ...] = (
     "and a person's own judgement leave nothing here.",
     "An empty section means this system recorded nothing for it, which is not the same as nothing "
     "having happened — a window outside retention reads identically.",
+    "A section named in `truncated` is a prefix, not the whole of it: this pack reads a bounded "
+    "number of rows per store, oldest first. Read the counts as lower bounds there.",
 )
 
 
@@ -68,7 +71,16 @@ class ToolCall(BaseModel):
 
 
 class PackJob(BaseModel):
-    """One durable run this conversation launched, and why it was asked for."""
+    """One durable run this conversation launched, why it was asked for, and how it ended.
+
+    **`state` and `failure_reason` are here because a pack that omitted them presented a failed
+    computation as evidence.** `connector_job.py` leaves `summary` empty on failure and puts the
+    reason in `failure_reason`, so a run that died on an unknown solvent appeared as a job that ran,
+    returned nothing, and completed — indistinguishable from a successful run with no summary, in
+    the one document whose stated purpose is "what evidence it used". Migration 061 exists because
+    "all my CREST jobs are failing" and "nobody is running jobs" were the same picture in this
+    table; the pack reproduced that.
+    """
 
     job_id: str
     connector: str
@@ -76,6 +88,8 @@ class PackJob(BaseModel):
     rationale: str
     requested_by: str
     summary: str
+    state: str = ""
+    failure_reason: str = ""
     note_id: str = ""
     completed_at: str = ""
 
@@ -129,6 +143,13 @@ class EvidencePack(BaseModel):
     effects: list[PackEffect] = Field(default_factory=list)
     approvals: list[PackApproval] = Field(default_factory=list)
     limits: tuple[str, ...] = LIMITS
+    #: Sections that hit the per-store row cap, so what is shown is a prefix rather than the whole
+    #: record. **Silence here was the defect**: every read is `ORDER BY <ts> LIMIT 200` and nothing
+    #: said so, while `limits` trains a reader to treat a *non-empty* section as complete. A session
+    #: with 260 calls whose refusals all came after #200 reported zero refusals to an auditor, and
+    #: because effects are ordered oldest-first the rows dropped were the most recent — the ones an
+    #: incident is actually about.
+    truncated: tuple[str, ...] = ()
 
     @property
     def refusals(self) -> list[ToolCall]:
@@ -146,8 +167,14 @@ class EvidencePack(BaseModel):
 
         The one thing a caller must check before presenting a pack: an empty pack is a statement
         about the record, not about the work.
+
+        `approvals` counts, and its omission was a real hole: a chemist who approved a plan and then
+        abandoned the turn left a row in `plan_approvals` and nothing in the other four, so the pack
+        reported "nothing recorded" for a session in which a human authorized spending.
         """
-        return not (self.tool_calls or self.jobs or self.proposals or self.effects)
+        return not (
+            self.tool_calls or self.jobs or self.proposals or self.effects or self.approvals
+        )
 
 
 async def _rows(sql: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
@@ -173,7 +200,12 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
     """
     calls = [
         ToolCall(
-            tool=str(tool),
+            # Bounded the same way `activity.tool_usage` bounds it, and for the same reason:
+            # `audit_events.tool` is the model's raw string, not a registered name. The
+            # sanitisation went into one reader of this column and not its sibling in the same
+            # package — the ownership gate narrows this to same-session replay rather than
+            # cross-session, but the pack is also the artefact a person reads.
+            tool=safe_tool_name(str(tool)),
             outcome=str(outcome),
             actor=str(actor),
             at=_stamp(ts),
@@ -194,13 +226,26 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
             rationale=str(rationale),
             requested_by=str(requested_by),
             summary=str(summary),
+            state=str(state or ""),
+            failure_reason=str(failure_reason or ""),
             note_id=str(note_id or ""),
             completed_at=_stamp(completed_at),
         )
-        for job_id, connector, job, rationale, requested_by, summary, note_id, completed_at in (
+        for (
+            job_id,
+            connector,
+            job,
+            rationale,
+            requested_by,
+            summary,
+            state,
+            failure_reason,
+            note_id,
+            completed_at,
+        ) in (
             await _rows(
-                "SELECT job_id, connector, job, rationale, requested_by, summary, note_id, "
-                "completed_at FROM job_records WHERE session_id = %s "
+                "SELECT job_id, connector, job, rationale, requested_by, summary, state, "
+                "failure_reason, note_id, completed_at FROM job_records WHERE session_id = %s "
                 "ORDER BY completed_at LIMIT %s",
                 (session_id, limit),
             )
@@ -250,6 +295,15 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
             (session_id, limit),
         )
     ]
+    # A section that came back exactly full is a section that may have more behind it. Reported
+    # rather than inferred by the caller, because the caller cannot see `limit`.
+    sections: list[tuple[str, int]] = [
+        ("tool_calls", len(calls)),
+        ("jobs", len(jobs)),
+        ("proposals", len(proposals)),
+        ("effects", len(effects)),
+        ("approvals", len(approvals)),
+    ]
     return EvidencePack(
         session_id=session_id,
         tool_calls=calls,
@@ -257,4 +311,5 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
         proposals=proposals,
         effects=effects,
         approvals=approvals,
+        truncated=tuple(name for name, count in sections if count >= limit),
     )

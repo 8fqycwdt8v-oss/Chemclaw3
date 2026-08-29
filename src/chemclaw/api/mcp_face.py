@@ -34,6 +34,11 @@ import logging
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 
+# Seeds the capability-tool registry this module reads. **Load-bearing, not incidental**: the
+# registry is populated by import side effect, and without this the face advertised nothing
+# at all in production while every test passed — `agent/tool_modules.py` records what that
+# cost and why the seeding is a module.
+from chemclaw.agent import tool_modules as _tool_modules  # noqa: F401
 from chemclaw.agent.authz import READ_ONLY_TOOLS
 from chemclaw.connectors.server import connector_app
 from chemclaw.core.config import settings
@@ -46,20 +51,27 @@ FACE_NAME = "chemclaw-read"
 
 #: Read-only tools that are nonetheless **not** advertised here, each with the reason.
 #:
-#: **Read-only is necessary and not sufficient, and this is the second predicate.** Every name below
-#: reads the *turn's own* state — an attachment uploaded to a session, a watch a person set, a
-#: preference they stated, a question put back to the chemist in front of the model. An external
-#: caller has no turn, so most of them would answer emptily and one of them would not:
-#: `read_attachment` reads a file somebody uploaded to a conversation, and serving it to whatever
-#: holds a bearer token is a disclosure surface rather than a capability.
+#: **Read-only is necessary and nowhere near sufficient, and getting the second predicate wrong is
+#: what this list is really about.** It was first written as "turn-scoped": an external caller has
+#: no turn, so a tool reading the turn's own state would answer emptily and `read_attachment` would
+#: answer worse. That reasoning is sound and it covers the wrong set. It says nothing about a tool
+#: that is read-only *and* deployment-wide — and four of those were being advertised. A partner
+#: agent given a token to look up melting points could enumerate every open lab request with the
+#: reasoning a chemist typed into it, the whole mirrored portfolio with owners and due dates, every
+#: named employee's token spend, and other people's job rationales.
 #:
-#: A deny-list rather than a derivation, because nothing in the tree classifies "turn-scoped" and
+#: So the predicate is not "does this need a turn". It is **"is this about this deployment's people
+#: or about its chemistry"** — the face exports the second and none of the first. A tool that
+#: answers "what does the programme know" belongs here; one that answers "who is doing what, and
+#: what did it cost" does not, however read-only it is.
+#:
+#: A deny-list rather than a derivation, because nothing in the tree classifies this property and
 #: inventing a marker to derive it would be a second classification to keep in step with the first.
-#: What makes a hand-kept list safe here is that it is a **partition**:
-#: `tests/test_mcp_face.py` asserts every read-only tool is either advertised or named here, so a
-#: new one cannot join this surface by being forgotten — the same discipline `agent.authz` uses for
-#: read versus write.
-TURN_SCOPED: dict[str, str] = {
+#: What makes a hand-kept list safe is that it is a **partition**: `tests/test_mcp_face.py` asserts
+#: every read-only tool is either advertised or named here, so a new one cannot join this surface by
+#: being forgotten — the same discipline `agent.authz` uses for read versus write.
+WITHHELD: dict[str, str] = {
+    # Scoped to a turn this caller does not have.
     "ask_clarifying_question": "puts a question to the chemist in the conversation; there is none",
     "list_attachments": "files uploaded to a session, which an external caller does not have",
     "read_attachment": (
@@ -68,6 +80,29 @@ TURN_SCOPED: dict[str, str] = {
     ),
     "list_watches": "one person's standing queries, addressed by the turn's own actor",
     "recall_preferences": "how one chemist likes to work, addressed by the turn's own actor",
+    # About this deployment's people rather than its chemistry.
+    "assemble_evidence_pack": (
+        "one conversation's whole record, and the gate on it is session ownership — there is no "
+        "actor here to own anything, so the caller could only ever name somebody else's session"
+    ),
+    "check_pending_requests": (
+        "every open request in the deployment with the reasoning a chemist typed, who asked and "
+        "which session it belongs to — also the discovery path for the session ids above"
+    ),
+    "review_activity": (
+        "per-actor turns, tokens and refusals: a named employee's usage, which `leaver.py` "
+        "classifies as a retained personal identifier"
+    ),
+    "review_commitments": (
+        "what the programme has committed to, who owns it and when it is due — the portfolio, not "
+        "the chemistry"
+    ),
+    "find_past_jobs": "runs from other people's conversations, each with its free-text rationale",
+    "get_durable_job_status": (
+        "the same disclosure as `find_past_jobs` through the other door — it applies no actor "
+        "check, returns the run's summary, result and free-text rationale, and its job ids are a "
+        "pure function of connector, job name and payload, so they are guessable rather than secret"
+    ),
 }
 
 
@@ -77,13 +112,13 @@ def advertised_tools() -> list[str]:
     The first half is derived rather than declared — a tool's classification in `agent.authz` is
     the single statement of whether it writes, and this asks that statement rather than restating
     it, so a tool that changes side never has to be remembered in two places. The second half is
-    `TURN_SCOPED`, which is a list because nothing classifies that property; it is held honest by
+    `WITHHELD`, which is a list because nothing classifies that property; it is held honest by
     being a partition rather than an allow-list.
     """
     return sorted(
         name
         for fn in registered_tools()
-        if (name := getattr(fn, "__name__", "")) in READ_ONLY_TOOLS and name not in TURN_SCOPED
+        if (name := getattr(fn, "__name__", "")) in READ_ONLY_TOOLS and name not in WITHHELD
     )
 
 
