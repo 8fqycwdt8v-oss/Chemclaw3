@@ -33,7 +33,7 @@ Status: `pending` · `running` · `PASS` · `FAIL` · `skipped (reason)`
 | S5 | Plan gate | `make live-plan-gate` | blocked (F1), mock route TBD | `tasks/live-test/m12-plan-gate/` |
 | S6 | UI full-stack | `npm run test:e2e:full-stack` | **blocked (F1)** | — |
 | S7 | Storm | `make live-storm` | pending | `tasks/live-test/storm.md` |
-| S8 | Corpus convergence | `make live-data`, polled | draining after F3 | `.live/e2e-corpus-backfill.log` |
+| S8 | Corpus convergence | `make live-data`, polled | **PASS 19/19** after F3, F4 | `.live/e2e-corpus-backfill.log` |
 | S9 | Degradation (Temporal down) | `make live-degradation` | blocked (F1), mock route TBD | `tasks/live-test/m12-degradation/` |
 | S10 | Soak + drift | `make live-soak`, `make live-soak-report` | pending | `.live/soak.jsonl` |
 
@@ -214,3 +214,59 @@ right on its own.
 reaction_records = 2783    (of ~4251 ingestible; ~1.8s each)
 corpus_reactions = 0
 ```
+
+## S8 — the corpus, converged and checked by value
+
+The backfill finished before the container reclaim. **4,282 `reaction_records`**, and the check that
+matters reads **`corpus is reachable | PASS | 4251/4251`** — the README documents this same line
+failing at `1936/4251`, so the ORD half is now complete rather than partially invisible.
+
+| dataset | published | seeded | mapped | refused |
+| --- | ---: | ---: | ---: | ---: |
+| bh_amination_hte | 3955 | 3955 | 3955 | 0 |
+| suzuki_miyaura_flow_hte | 5760 | 5760 | 0 | **5760** |
+| santanilla_amidation_screen | 96 | 96 | 96 | 0 |
+| santanilla_sulfonamidation_screen | 96 | 96 | 96 | 0 |
+| nielsen_deoxyfluorination | 80 | 80 | 80 | 0 |
+
+The 5,760 refusals are **declared, not discovered**: Perera, *Science* 2018, 359, 429 publishes the
+second coupling partner only as `2a, Boronic Acid`, so no structure exists to map and the adapter
+refuses rather than inventing one. A dataset declared unreachable that *started* ingesting would be
+red here too — the check is bidirectional, which is what makes it a regression detector.
+
+Also passing on real values, not counts: 644 published zero-yields survive seeding as exactly 0.00%
+(a truthiness test would read them as missing), and every mapped dataset carries its published
+factors *and* yield row by row.
+
+### F4 — a live check asserted the opposite of a merged ADR, and failed 0/12 forever
+
+The first run was **18/19**. The failure: `prose yields its numbers`, `0/12`, first miss
+`uspto-suzuki-biphenyl-1: prose says (82.0, 4.0), record carries (None, None)`.
+
+That reads like a broken extraction. It is the opposite. `ingest/eln/json_adapter.py` states, and
+`D-2026-08-26-a-transcription-may-not-infer-a-setpoint` decides, that a headline setpoint the entry
+does not state is **left absent rather than read out of the prose** — because the first regex match
+in a procedure is the *addition* temperature far more often than the reaction's, and a transcription
+nobody reviews may not present a derived number as a recorded one. The check asserted precisely the
+behaviour the ADR forbids, so it could only ever fail, and it made `make live-data` exit 1 forever
+for a reason that was correct.
+
+**Its stated premise was also false, and one measurement settles it.** The docstring justified the
+check by claiming that without the extraction "the condition is simply gone, and nothing downstream
+can tell the difference between 'ran at 82 °C' and 'temperature unrecorded'". Measured on that exact
+record:
+
+```
+headline temperature_c = None   time_h = None
+  step 2  kind=TEMPERATURE  temperature_c=82.0  duration_h=4.0
+          :: "The mixture was stirred at 82 °C for 4.0 h under nitrog..."
+```
+
+Nothing is lost. The condition is recorded on the step that actually states it, verbatim, with both
+numbers — which is `_segment_steps` working exactly as its own docstring describes.
+
+**Fix**: the check now asserts what the ADR requires, in *both* directions — the prose's numbers
+must reach a step, **and** the headline must stay absent unless the entry stated it as a structured
+field. That is strictly stronger than what it replaced: the old form could not have caught an
+inferred headline at all, because it demanded one. Now `12/12`, with the denominator reported so a
+check that stops matching anything cannot pass quietly. `make live-data` exits 0.
