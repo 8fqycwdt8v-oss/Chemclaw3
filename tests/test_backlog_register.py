@@ -98,7 +98,11 @@ def test_no_section_below_the_header_states_a_live_row_count() -> None:
     the evidence the rule rests on. A body section has no such reason: a count written beside a
     register that grows and shrinks is a live claim, and it is wrong on the next commit.
     """
-    body = _BACKLOG.read_text(encoding="utf-8").split("\n## ", 1)[-1]
+    # `split(maxsplit=1)` returns one element when the file has no section heading at all, and
+    # taking [-1] there would hand the *header* to a check written to exempt it — a false positive
+    # on the very prose the docstring above says must stay. Two elements or no body.
+    sections = _BACKLOG.read_text(encoding="utf-8").split("\n## ", 1)
+    body = sections[1] if len(sections) == 2 else ""
     stated = _LIVE_COUNT.findall(body)
     assert not stated, (
         f"BACKLOG.md states a live row count below its header: {stated}. Cite the `grep -c` and "
