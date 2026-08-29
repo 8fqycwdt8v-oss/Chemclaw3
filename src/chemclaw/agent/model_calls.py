@@ -41,6 +41,32 @@ nothing in `src/` read that field. The agent iterates `tool_calls`, so the call 
 `empty_answer`; **with prose it proceeded as though no tool had been needed**, which is
 `D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` exactly.
 
+**It stayed silent to the one reader who matters, and that half was fixed two days later**
+(`D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce`). The
+counter and the WARNING above are an operator's record; a chemist reads the turn's event stream,
+and `tool_failed` is put on it by `agent/tool_authz.announce_tool_failures` — a `wrap_tool_call`
+middleware. A call whose arguments never parsed never reaches the tool chain, because `ToolNode`
+iterates `tool_calls`, so the one failure class that cannot reach the announcer is the one class
+this middleware exists for. Measured against the live stack on the mock model, on two behaviours
+that differ only in whether the argument document is *parseable*:
+
+    '{"query": "benzene"}'  ->  tool_call, tool_failed, error/empty_answer
+    '{"text": }'            ->  error/empty_answer, "after 0 tool call(s)"
+
+Same silence, one wire shape apart — and the second sentence is worse than nothing, because it
+tells a chemist their question was too broad about a turn in which the model asked for exactly the
+right tool twice. So every call this middleware knows will not run is now announced on the turn's
+own side-channel (`core/turn_signals.record_tool_failure`), which is what `graph_stream` turns into
+a `ToolFailedEvent`. The **audit row and the span are still absent, deliberately**: both record a
+tool *invocation*, and there was none — synthesising one would put a call that never ran into the
+trail that says what ran.
+
+**The set announced is "what this reply will never run", which is not the same as "what failed".**
+A first attempt is discarded whole, so its parseable calls did not run either and are announced
+beside the broken ones; a second attempt is *kept*, so only its still-broken calls are. That is
+exactly the pair `_report_lost_calls` already receives at both call sites, which is why the
+announcement lives there rather than in a third place that would have to re-derive it.
+
 **What reaches that field is genuinely malformed JSON, and not — as this said — a truncated
 document.** LangChain runs a streamed tool call's argument fragments through `parse_partial_json`,
 which closes an unterminated string and an unclosed brace, so the cut stream this docstring named
@@ -100,6 +126,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import Metrics
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.turn_signals import record_tool_failure
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +165,25 @@ _CORRECTION = (
 _DISCARDED_VALID = (
     " The {count} call(s) in that same reply whose arguments were valid were discarded with it and "
     "did not run either: {names}."
+)
+
+
+# What the *chemist* is told about the same two events, on the turn's event stream. Separate text
+# from `_CORRECTION` above rather than the same string reused, because the two are addressed to
+# different readers and only one of them can act: the model is asked to re-emit the call, and the
+# person is told which step of their answer is missing and why. `ToolFailedEvent.message` is what
+# `Chemclaw3_ui` renders beside the tool's name, so each of these is a sentence rather than a code.
+#
+# The argument document is quoted for the reason the correction quotes it — on the streaming path
+# `error` is `None`, so the document is the only thing either record holds that says what broke —
+# and it arrives already bounded by `bounded_repr`.
+_UNPARSEABLE_FAILURE = (
+    "The model asked for this tool with arguments that are not valid JSON, so the call did not "
+    "run. The arguments received were {arguments}{error}."
+)
+_DISCARDED_FAILURE = (
+    "This call's own arguments were valid, but another tool call in the same reply had arguments "
+    "that could not be parsed, so the whole reply was discarded and this call did not run either."
 )
 
 
@@ -351,6 +397,12 @@ class RepairInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
     recalled, so discarding the first attempt's text from the record while the front door had
     already concatenated it into the answer left two records of one turn that disagreed. The module
     docstring has the measurement and why suppressing the first attempt's stream is not available.
+
+    **So do its failures**, for the same reason and by the same rule: a call this middleware
+    discards is a call that did not run, and the chemist is told so on the turn's own event stream
+    (`_report_lost_calls`). A repair that works therefore shows a `tool_failed` followed by the
+    call succeeding, which is what happened — `ToolFailedEvent` is documented as "a step that did
+    not work, not a failure" precisely for that shape.
     """
 
     def wrap_model_call(
@@ -364,7 +416,7 @@ class RepairInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
         if not failures:
             return response
         discarded = valid_tool_calls(response)
-        _count_invalid(request, failures, discarded, attempt="first")
+        _report_lost_calls(request, failures, discarded, attempt="first")
         repaired = handler(_retry_request(request, failures, discarded))
         _report_repair(request, repaired)
         return _carrying_prose(response, repaired)
@@ -380,7 +432,7 @@ class RepairInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
         if not failures:
             return response
         discarded = valid_tool_calls(response)
-        _count_invalid(request, failures, discarded, attempt="first")
+        _report_lost_calls(request, failures, discarded, attempt="first")
         repaired = await handler(_retry_request(request, failures, discarded))
         _report_repair(request, repaired)
         return _carrying_prose(response, repaired)
@@ -489,25 +541,53 @@ def _bump_invalid(tool: str, metrics: Metrics) -> None:
     metrics.increment("chemclaw_invalid_tool_calls_total", labels={"tool": tool})
 
 
-def _count_invalid(
+def _report_lost_calls(
     request: ModelRequest[Any],
     failures: list[BrokenCall],
     discarded: list[str],
     *,
     attempt: str,
 ) -> None:
-    """Count each unparseable call under its tool, and say once what the reply cost.
+    """Report every call this reply will not run — to the operator, to the chemist, once each.
+
+    Three records for three readers, and the third is why this function is not called
+    `_count_invalid` any more. The **counter** is what an operator alerts on. The **WARNING** is
+    what they grep. The **`tool_failed` signal** is what the person who asked the question sees,
+    and it was the missing one: `agent/tool_authz.announce_tool_failures` puts every other failure
+    on that stream from inside the tool chain, and a call whose arguments never parsed is the one
+    kind that never reaches the tool chain to be announced (the module docstring has the
+    measurement, and the two behaviours that differ only in whether the document parses).
 
     The counter takes the *clamped* name (`_metric_label`) and the log line takes the model's own
     bounded string, which is the split `audit.metric_tool_name` states: what the model asked for is
     the forensic fact and belongs in the record, and only the unbounded metric *label* is refused.
+    The signal takes the bounded name too, and deliberately not the clamped one — a
+    `ToolFailedEvent` already carries model-authored names (`f-unknown-tool` puts
+    `tool_that_does_not_exist` on it), it goes to the one person who asked rather than to an
+    unauthenticated scrape, and clamping it would tell that person a tool they never saw named
+    `unknown` had failed.
 
-    `discarded` — the parseable calls thrown away with the reply — is named here as well as in the
-    correction, because a record that shows only the failures reads as though nothing else was
-    lost.
+    No `call_id`: the field means "match this to the `tool_call` event", and there is no such event
+    to match — measured on the live stack, an unparseable call announces nothing at all, so an id
+    here would point at something that was never emitted. Empty is exactly what
+    `ToolFailureSignal.call_id` documents as "not attributed". No `reason` either: `RefusalReason`
+    names the five *gates*, and a document that will not parse is an ordinary fault, not a control
+    working.
+
+    `discarded` — the parseable calls thrown away with the reply — is named to both readers as well
+    as in the correction, because a record that shows only the failures reads as though nothing
+    else was lost.
     """
     for call in failures:
         record_metric(partial(_bump_invalid, _metric_label(request, call.name)))
+        record_tool_failure(
+            call.name,
+            _UNPARSEABLE_FAILURE.format(
+                arguments=call.arguments, error=f"; {call.error}" if call.error else ""
+            ),
+        )
+    for name in discarded:
+        record_tool_failure(name, _DISCARDED_FAILURE)
     log_event(
         logger,
         "model.invalid_tool_calls",
@@ -540,7 +620,7 @@ def _report_repair(request: ModelRequest[Any], repaired: Any) -> None:
     failures = invalid_tool_calls(repaired)
     if not failures:
         return
-    _count_invalid(request, failures, [], attempt="second")
+    _report_lost_calls(request, failures, [], attempt="second")
     log_event(
         logger,
         "model.invalid_tool_calls_unrepaired",

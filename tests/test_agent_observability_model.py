@@ -34,6 +34,8 @@ from chemclaw.agent.model_calls import (
     model_call_middleware,
 )
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.turn_signals import _KEY as SIGNAL_KEY
+from chemclaw.core.turn_signals import ToolFailureSignal
 
 
 def _openai_error(kind: str, status: int, message: str, code: str | None = None) -> Exception:
@@ -55,6 +57,12 @@ def _openai_error(kind: str, status: int, message: str, code: str | None = None)
 def predict_pka(smiles: str) -> str:
     """Stand in for the tool surface a request was made with — its *name* is what matters here."""
     return "4.2"
+
+
+@tool
+def find_notes(text: str) -> str:
+    """A second bound tool, so a reply can carry a valid call beside a broken one."""
+    return "no notes"
 
 
 class _NamedTool:
@@ -366,21 +374,26 @@ class _StreamingModel(GenericFakeChatModel):
         return self
 
     def _stream(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any):  # type: ignore[no-untyped-def]
-        """Stream the next scripted reply: its prose, then its tool-call fragment if it has one."""
+        """Stream the next scripted reply: its prose, then one fragment per scripted call.
+
+        `calls` is a list of `(tool name, argument document)` because a reply carrying a broken
+        call *beside* a valid one is a case with its own outcome — the whole reply is discarded —
+        and it cannot be scripted at all if a reply may hold only one call.
+        """
         step = object.__getattribute__(self, "_step")
         object.__setattr__(self, "_step", step + 1)
         reply = self.script[step]
         yield ChatGenerationChunk(message=AIMessageChunk(content=reply["text"]))
-        if "args" in reply:
+        for index, (name, args) in enumerate(reply.get("calls", ())):
             yield ChatGenerationChunk(
                 message=AIMessageChunk(
                     content="",
                     tool_call_chunks=[
                         {
-                            "name": "predict_pka",
-                            "args": reply["args"],
-                            "id": f"call-{step}",
-                            "index": 0,
+                            "name": name,
+                            "args": args,
+                            "id": f"call-{step}-{index}",
+                            "index": index,
                             "type": "tool_call_chunk",
                         }
                     ],
@@ -388,27 +401,39 @@ class _StreamingModel(GenericFakeChatModel):
             )
 
 
-async def _drive(script: list[dict[str, Any]]) -> tuple[str, str, list[dict[str, Any]]]:
+async def _drive(
+    script: list[dict[str, Any]],
+) -> tuple[str, str, list[dict[str, Any]], list[ToolFailureSignal]]:
     """Run one turn of a compiled graph over `script`.
 
-    Returns `(streamed text, recorded assistant text, the tool calls the graph actually ran)`.
+    Returns `(streamed text, recorded assistant text, the tool calls the graph actually ran, the
+    tool failures the turn announced)`.
 
     A **compiled** graph, because the divergence this exists to catch is invisible to a direct
     hook call: `RepairInvalidToolCalls` returns one message, and the middleware's unit tests
     therefore all passed while the stream carried two replies. Only `graph.astream` sees what the
     front door sees.
+
+    The `custom` mode is read for the same reason, one gap later. `record_tool_failure` resolves
+    LangGraph's writer off the ambient config and drops the signal in silence where there is none
+    (`core/turn_signals._emit`), so a unit test calling the hook directly would pass over a
+    middleware whose announcements go nowhere. Draining the channel a compiled graph publishes on
+    is the only assertion that the chemist would actually have seen them.
     """
     from langchain.agents import create_agent
 
     graph = create_agent(
-        model=_StreamingModel(script), tools=[predict_pka], middleware=[RepairInvalidToolCalls()]
+        model=_StreamingModel(script),
+        tools=[predict_pka, find_notes],
+        middleware=[RepairInvalidToolCalls()],
     )
     streamed: list[str] = []
     recorded: list[str] = []
     ran: list[dict[str, Any]] = []
+    announced: list[ToolFailureSignal] = []
     stream = graph.astream(
         {"messages": [HumanMessage(content="what is the pKa of acetic acid")]},
-        stream_mode=["messages", "updates"],
+        stream_mode=["messages", "updates", "custom"],
     )
     async for emitted in stream:
         # `astream` with a list of modes yields `(mode, payload)`; the tuple arity is the coupling
@@ -418,13 +443,17 @@ async def _drive(script: list[dict[str, Any]]) -> tuple[str, str, list[dict[str,
             chunk, _metadata = payload
             if isinstance(chunk, AIMessageChunk) and chunk.text:
                 streamed.append(chunk.text)
+        elif mode == "custom":
+            signal = (payload or {}).get(SIGNAL_KEY)
+            if isinstance(signal, ToolFailureSignal):
+                announced.append(signal)
         else:
             for update in (payload or {}).values():
                 for message in (update or {}).get("messages", []) or []:
                     if isinstance(message, AIMessage):
                         recorded.append(message.text)
                         ran.extend(dict(call) for call in message.tool_calls or [])
-    return "".join(streamed), "".join(recorded), ran
+    return "".join(streamed), "".join(recorded), ran, announced
 
 
 def test_the_recorded_message_is_the_text_the_turn_streamed() -> None:
@@ -442,10 +471,10 @@ def test_the_recorded_message_is_the_text_the_turn_streamed() -> None:
     discarded attempt — and no stream mode retracts a token already emitted. So the record carries
     the prose instead, and this asserts the equality rather than either half of it.
     """
-    streamed, recorded, _ran = asyncio.run(
+    streamed, recorded, _ran, _announced = asyncio.run(
         _drive(
             [
-                {"text": "Let me compute that. ", "args": '{"smiles": }'},
+                {"text": "Let me compute that. ", "calls": [("predict_pka", '{"smiles": }')]},
                 {"text": "Here it is: pKa 4.2."},
             ]
         )
@@ -456,8 +485,9 @@ def test_the_recorded_message_is_the_text_the_turn_streamed() -> None:
 
 def test_a_reply_needing_no_repair_streams_once_and_is_recorded_once() -> None:
     """The negative case, and the guard on the fix: no prose is duplicated on an ordinary turn."""
-    streamed, recorded, ran = asyncio.run(_drive([{"text": "The pKa is 4.76."}]))
+    streamed, recorded, ran, announced = asyncio.run(_drive([{"text": "The pKa is 4.76."}]))
     assert streamed == "The pKa is 4.76." and recorded == streamed and ran == []
+    assert announced == []
 
 
 def test_a_truncated_argument_document_repairs_itself_and_never_reaches_this_middleware() -> None:
@@ -469,8 +499,13 @@ def test_a_truncated_argument_document_repairs_itself_and_never_reaches_this_mid
     case never arrives: it lands on `tool_calls`, parsed, with `invalid_tool_calls` empty. What
     does arrive is output that partial parsing cannot close.
     """
-    streamed, _recorded, ran = asyncio.run(
-        _drive([{"text": "computing. ", "args": '{"smiles": "CC'}, {"text": "pKa 4.2."}])
+    streamed, _recorded, ran, _announced = asyncio.run(
+        _drive(
+            [
+                {"text": "computing. ", "calls": [("predict_pka", '{"smiles": "CC')]},
+                {"text": "pKa 4.2."},
+            ]
+        )
     )
     # The call ran, with the document closed for it: no repair, no second attempt's prose.
     assert [call["args"] for call in ran] == [{"smiles": "CC"}]
@@ -640,3 +675,90 @@ def test_an_unbound_tool_name_is_clamped_off_the_metric(caplog: pytest.LogCaptur
     rendered = METRICS.render()
     assert exfil not in rendered, "a model-invented tool name reached /metrics verbatim"
     assert 'chemclaw_invalid_tool_calls_total{tool="unknown"}' in rendered
+
+
+def test_an_unparseable_call_reaches_the_chemists_stream_as_tool_failed() -> None:
+    """The half the counter could not cover: what the person who asked the question is told.
+
+    `D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce`.
+    `agent/tool_authz.announce_tool_failures` raises `tool_failed` from inside the *tool* chain,
+    and a call whose arguments never parsed never enters it — `ToolNode` iterates `tool_calls`.
+    Measured against the live stack on two behaviours differing only in whether the argument
+    document parses: `'{"query": "benzene"}'` produced `tool_call` + `tool_failed`, and
+    `'{"text": }'` produced one `error/empty_answer` saying "after 0 tool call(s)" — a sentence
+    that tells a chemist their question was too broad about a turn in which the model asked for
+    exactly the right tool, twice.
+
+    Two announcements, not one: the repair asks again, the second reply is broken too, and neither
+    call ran. Booking one would under-report by exactly the attempt this middleware adds.
+    """
+    _streamed, _recorded, ran, announced = asyncio.run(
+        _drive(
+            [
+                {"text": "", "calls": [("predict_pka", '{"smiles": }')]},
+                {"text": "", "calls": [("predict_pka", '{"smiles": }')]},
+            ]
+        )
+    )
+    assert ran == [], "a call whose arguments do not parse never runs"
+    assert [signal.tool for signal in announced] == ["predict_pka", "predict_pka"]
+    assert '{"smiles": }' in announced[0].message
+    assert "did not run" in announced[0].message
+    # No id and no reason, and both are load-bearing. `call_id` means "match this to the
+    # `tool_call` event", and there is none — measured, an unparseable call announces nothing at
+    # all — so an id here would point at something never emitted. `reason` names the five *gates*;
+    # a document that will not parse is an ordinary fault, not a control working.
+    assert announced[0].call_id == ""
+    assert announced[0].reason is None
+
+
+def test_a_valid_call_discarded_with_a_broken_one_is_announced_to_the_chemist_too() -> None:
+    """The silent drop the correction already named to the model, said to the person as well.
+
+    A reply carrying one unparseable call and one valid one is discarded whole, so the valid call
+    does not run either. The model is told (`_DISCARDED_VALID`) and can re-issue it; the chemist
+    could not be told by anything, because that call never reached the tool chain either — and
+    unlike the model, they have no way to ask for it again.
+    """
+    _streamed, _recorded, ran, announced = asyncio.run(
+        _drive(
+            [
+                {
+                    "text": "",
+                    "calls": [
+                        ("predict_pka", '{"smiles": }'),
+                        ("find_notes", '{"text": "acetic acid"}'),
+                    ],
+                },
+                {"text": "I could not read my own call."},
+            ]
+        )
+    )
+    assert ran == [], "the whole reply is discarded, valid call included"
+    assert [signal.tool for signal in announced] == ["predict_pka", "find_notes"]
+    assert "not valid JSON" in announced[0].message
+    assert "did not run either" in announced[1].message
+
+
+def test_a_repaired_reply_announces_the_first_attempt_and_then_runs_the_second() -> None:
+    """The shape a working repair takes, and the reason announcing it is not noise.
+
+    `ToolFailedEvent` is declared as "a step that did not work, not a failure" — the turn
+    continues. So a repaired turn shows the discarded attempt's failure and then the call
+    succeeding, which is what happened, and is the same rule `_carrying_prose` follows for the
+    discarded attempt's *prose*: it reached the chemist, so the record says so.
+
+    The second attempt announces nothing, which is the half that would break if the announcement
+    were moved to "every reply this middleware inspects" rather than "every call it discards".
+    """
+    _streamed, _recorded, ran, announced = asyncio.run(
+        _drive(
+            [
+                {"text": "", "calls": [("predict_pka", '{"smiles": }')]},
+                {"text": "", "calls": [("predict_pka", '{"smiles": "CC(=O)O"}')]},
+                {"text": "The pKa is 4.76."},
+            ]
+        )
+    )
+    assert [call["name"] for call in ran] == ["predict_pka"]
+    assert [signal.tool for signal in announced] == ["predict_pka"]
