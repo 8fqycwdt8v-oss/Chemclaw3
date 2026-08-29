@@ -309,8 +309,13 @@ def test_the_posture_check_reads_the_destination_whatever_the_driver_calls_it(
     The driver's own signature is the schema, so a site's driver may name its destination
     `endpoint`, `hook` or `webhook_url`. A check that knew one spelling would pass every channel it
     was written to catch — and would do so silently, which is the shape of the defect it exists to
-    end. Every string in the block is asked instead; a mounted path and a `.md` suffix are not URLs
-    and cost nothing, which the `share` half asserts.
+    end. Every value that *is* a URL is asked instead.
+
+    The `mounted` half is the one that would rot quietly: a mounted share's `directory` and `suffix`
+    are not URLs, and the first version of this check passed them only because
+    `PG_LOOPBACK_HOSTS` contains `''` for a Postgres DSN with no host. Asserted here so that
+    depending on somebody else's constant cannot come back — if it did, every file channel in every
+    enforced deployment would fail validation as a cleartext destination.
     """
     from chemclaw.cli.validate_channels import problems
 

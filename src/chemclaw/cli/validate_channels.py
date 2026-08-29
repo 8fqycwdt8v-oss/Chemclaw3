@@ -33,6 +33,7 @@ import argparse
 import inspect
 import logging
 import sys
+from urllib.parse import urlsplit
 
 from chemclaw.core.config import settings
 from chemclaw.core.connect import ENV_SUFFIX, check_env_name
@@ -88,22 +89,29 @@ def _driver_problems(manifest: DeliveryChannelManifest) -> list[str]:
 def _posture_problems(manifest: DeliveryChannelManifest) -> list[str]:
     """A destination this deployment's posture forbids (rule 4).
 
-    Every string in the `config:` block is asked, rather than a key named `url`. The block is
-    free-form by design — the driver's own signature is the schema — so a site's driver may call its
-    destination `endpoint`, `webhook_url` or `hook`, and a check that only knew one spelling would
-    pass every channel it was written to catch. `plaintext_channel_refusal` answers `""` for
-    anything that is not a non-loopback `http://` URL, so a `.md` suffix and a mounted path are
-    simply not URLs and cost nothing.
+    Every value in the `config:` block that *is* a URL is asked, rather than a key named `url`. The
+    block is free-form by design — the driver's own signature is the schema — so a site's driver may
+    call its destination `endpoint`, `webhook_url` or `hook`, and a check that only knew one
+    spelling would pass every channel it was written to catch.
 
-    The reason comes from `deliver.driver`, not from a second copy of the rule here: one definition,
+    **The scheme test is what makes that safe, and leaving it out only worked by accident.**
+    `plaintext_channel_refusal` exempts a loopback host, and `PG_LOOPBACK_HOSTS` contains `''` — so
+    a value with no host at all (`/var/chemclaw/outbox`, `.md`) was already answered `""`, and the
+    shipped `share` channel passed for a reason that has nothing to do with delivery: that empty
+    string is there so a Postgres DSN with no host reads as local. Depending on it would mean a
+    change to a Postgres constant silently refusing every file channel as a cleartext destination.
+    So this asks only about `http`/`https` values, and says so.
+
+    The rule itself comes from `deliver.driver` rather than a second copy here: one definition,
     asked at construction *and* at validation.
     """
     token_env = str(manifest.config.get("token_env", "") or "")
-    reasons = (
-        plaintext_channel_refusal(manifest.name, value, token_env)
+    urls = [
+        value
         for value in manifest.config.values()
-        if isinstance(value, str)
-    )
+        if isinstance(value, str) and urlsplit(value).scheme in ("http", "https")
+    ]
+    reasons = (plaintext_channel_refusal(manifest.name, url, token_env) for url in urls)
     return [reason for reason in reasons if reason]
 
 
