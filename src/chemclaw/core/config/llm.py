@@ -88,6 +88,31 @@ class LlmSettings(BaseSettings):
     # `build_langgraph_agent`, which omits the key entirely when this is None (F0.3).
     llm_temperature: float | None = Field(default=None, ge=0)
     llm_max_tokens: int = Field(default=4096, gt=0)
+
+    # How hard the model is asked to think before answering — the deployment's default, which a
+    # profile may override per agent (`AgentProfile.effort`).
+    #
+    # **`low | medium | high` is the intersection, and the intersection is the point.** Both
+    # clients this repository constructs take a `reasoning_effort` kwarg — measured on the
+    # installed distributions rather than read off the documentation, because the two spell the
+    # idea differently in their own APIs and it was not obvious they had converged. `ChatAnthropic`
+    # types it `Literal["max","xhigh","high","medium","low"]` and `ChatOpenAI` types it `str |
+    # None`. Publishing the union would make `max` a value that works on the dev path and is
+    # meaningless on the shipped one; publishing the intersection keeps the promise
+    # `_generation_options` already makes, that a generation setting means the same thing on both.
+    #
+    # **`None` means the key is absent from the request**, not present-and-null — the rule this
+    # module records having broken every turn once, and it binds harder here than for
+    # `temperature`: a 400 from a rejected parameter is deliberately *not* failed over
+    # (`llm_provider._failover_exceptions`), so a parameter an endpoint dislikes fails every turn
+    # rather than degrading to the fallback. Unset is therefore the shipped default, and a
+    # deployment turns it on against an endpoint it has checked.
+    #
+    # Both clients are `extra="ignore"`, so a client that stopped accepting this kwarg would drop
+    # it in silence rather than raise. `tests/test_llm_provider.py` asserts the attribute on the
+    # constructed object for exactly that reason — the value has to be observably *on* the model,
+    # not merely passed toward it.
+    llm_effort: Literal["low", "medium", "high"] | None = None
     # **The model's context window, and until this existed no number anywhere in this tree was
     # one.** `agent_context_token_budget` is 100,000 by fiat, the ~28,000-token static prefix sits
     # *outside* it, and neither was ever compared to what the endpoint will actually accept: the

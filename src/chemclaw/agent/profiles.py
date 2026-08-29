@@ -30,6 +30,8 @@ raises with the valid keys), and `AgentProfile` is a small pydantic spec like ev
 in the tree. No new pattern is introduced.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config.agent import HarnessAutonomy
@@ -58,6 +60,17 @@ class AgentProfile(BaseModel):
     # this rejects a misspelled *value*. Without it a profile saying `plan-only` loaded silently and
     # took the plan gate off — see the alias's own note for why that is worse than not adding one.
     harness_autonomy: HarnessAutonomy | None = None
+    # How hard this agent is asked to think, overriding `llm_effort` for builds on this profile.
+    # A `Literal` rather than `str` for the reason the field above is one: `extra="forbid"` catches
+    # a misspelled field *name*, and only the type catches a misspelled *value*. That matters more
+    # here than for most settings — the value is sent to the endpoint as a parameter, and both
+    # clients are `extra="ignore"`, so a rejected value is either dropped in silence or comes back
+    # as a 400 that `llm_provider._failover_exceptions` deliberately does not fail over.
+    #
+    # Typed here as a literal rather than imported from `LlmSettings` because this module
+    # deliberately imports no settings (see the module docstring); the two are pinned against each
+    # other by `tests/test_profiles.py` instead, the way `harness_autonomy` already is.
+    effort: Literal["low", "medium", "high"] | None = None
 
 
 # The one profile that exists today: every field unset, so it resolves to the global agent verbatim.

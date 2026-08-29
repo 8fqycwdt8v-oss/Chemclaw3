@@ -241,6 +241,34 @@ class AgentSettings(BaseSettings):
     harness_autonomy: HarnessAutonomy = "plan_only"
     harness_max_loop_iterations: int = Field(default=25, ge=1)
 
+    # What one turn may **bill** before the runaway guard stops it, counting every dimension the
+    # provider reports (input, output and cache) across every model call of the turn, the
+    # subagent's included.
+    #
+    # **The cap above counts the wrong thing to be the only cap.** It counts model *calls*, and a
+    # call is not a unit of cost: the same 25 iterations bill a few thousand tokens on a prose
+    # turn and millions on one that fans out wide over large tool results against a long context.
+    # Nothing else closes that, and it is easy to believe something does. `api/budget.py` meters
+    # tokens — and its `check()` runs *before* a turn against usage already booked while
+    # `record()` books the turn *after* it ended, so a single turn's runaway is precisely what it
+    # cannot see. Its own docstring carries the belief that leaves the hole: "A single agent turn
+    # is already iteration-capped, so one turn cannot loop forever." One turn cannot *loop*
+    # forever; one turn can *spend* without a bound.
+    #
+    # **0 means no cap**, the convention `budget.py::_over` and `llm_context_window_tokens`
+    # already use, and it is the shipped default for the reason a wrong number here is worse than
+    # no number: the cap ends the turn, and a turn ended early on a corpus this setting was never
+    # sized against loses a chemist's work. A deployment sets it from what its own
+    # `turn_costs.total_tokens` rows actually show, which is the number `chemclaw.evals` and the
+    # cost ledger exist to give it. The iteration cap stays on regardless, so switching this off
+    # is not switching the runaway guard off.
+    #
+    # Billed rather than estimated tokens, because this is a *cost* ceiling and the estimator is
+    # measured at 0.45x on exactly the payload class a runaway turn is made of
+    # (`agent/context_budget.py`). No conversion is needed here and none is done: the number the
+    # provider reports is the number this compares.
+    agent_max_turn_billed_tokens: int = Field(default=0, ge=0)
+
     # Supersteps one model call costs, for deriving the graph's own step ceiling below.
     #
     # **Why the graph needs a ceiling at all.** `create_agent` bakes `recursion_limit=9999`, and

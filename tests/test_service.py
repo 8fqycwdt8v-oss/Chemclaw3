@@ -1605,6 +1605,12 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
         # through the *same* gate reading it is, deliberately: a caller who cannot read a session
         # must not be able to delete it, and one gate cannot drift from itself. 404 either way, so
         # a stranger cannot use it to learn which ids exist.
+        # Branching the conversation (`D-2026-08-29-an-iteration-cap-is-not-a-cost-cap`).
+        # Owner-scoped through the same gate reading it is, and for a stronger reason than the
+        # others: a fork *copies the parent's whole transcript* under a new id the caller then
+        # owns, so an ungated fork would be an unauthenticated read of somebody's entire session
+        # wearing the clothes of a create. 404 either way, like every route above it.
+        ("/sessions/{session_id}/fork", "POST"),
         ("/sessions/{session_id}", "DELETE"),
     }, (
         "new session-scoped route detected — it MUST resolve ownership via _resolve_session, "

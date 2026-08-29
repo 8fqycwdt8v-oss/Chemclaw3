@@ -111,6 +111,7 @@ from chemclaw.agent.scratchpad import (
 from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_backend import NarrowedSkillsBackend
 from chemclaw.agent.skill_manifest import declared_tools
+from chemclaw.agent.spend_cap import MeterTurnSpend, enforce_spend_cap
 from chemclaw.agent.state import ChemclawState
 from chemclaw.agent.subagents import general_purpose_helper, governed_roster
 from chemclaw.agent.tool_authz import (
@@ -229,7 +230,11 @@ def build_langgraph_agent(
     # the filesystem tools must read the *same* backend object, or the role narrowing computed for
     # one would not apply to the other.
     backend = scratchpad_backend(skills, store)
-    chat_model = model if model is not None else build_chat_model()
+    # The profile's effort, falling back to `llm_effort` inside `build_chat_model`. Resolved from
+    # the profile here rather than read from settings there, because effort is a property of *this
+    # agent* — a property-lookup profile and a campaign-design profile want different answers from
+    # the same deployment, which is the whole reason the field is on the profile.
+    chat_model = model if model is not None else build_chat_model(effort=prof.effort)
     # The connectors are already narrowed by the profile and already open: `connector_specs` applies
     # `mcp_server_names`, the manifest allow-list bounds each surviving bundle, and
     # `open_connector_specs` returns only what a reachable server actually advertised. An
@@ -509,10 +514,21 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     record. One counter for one number — and it counts in `before_model` deliberately: see
     `agent/loop_cap.py` for the four regressions that delegating it to `ModelCallLimitMiddleware`
     produced, the first of which is that an `after_model` counter is skippable by a jump.
+
+    **The spend cap travels with it, unconditionally, for the reason above rather than beside it.**
+    A runaway is a property of the model/tool cycle in whichever unit it runs away in, and the
+    iteration cap only bounds one of the two: inside 25 calls a turn bills a few thousand tokens or
+    millions, depending on how wide it fans out and how large the results are, and nothing in the
+    turn could tell those apart (`agent/spend_cap.py` says what `api/budget.py` does and does not
+    close). The pair is a `before_model` hook that enforces and a `wrap_model_call` middleware that
+    meters, because only the response carries the bill; both are inert until a deployment sets
+    `agent_max_turn_billed_tokens`, so attaching them unconditionally costs a turn nothing until it
+    is asked for.
     """
+    caps = [enforce_loop_cap, enforce_spend_cap, MeterTurnSpend()]
     if not harness_enabled_for(profile):
-        return [enforce_loop_cap]
-    return [TodoListMiddleware(), enforce_loop_cap]
+        return caps
+    return [TodoListMiddleware(), *caps]
 
 
 def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]]) -> Any:

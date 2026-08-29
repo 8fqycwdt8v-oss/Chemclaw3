@@ -179,6 +179,30 @@ class ChemclawState(PlanningState):
     # which is where every reader already looks.
     loop_capped: NotRequired[Annotated[bool, TurnFlag(bool)]]
 
+    # What this turn has **billed** so far, across every model call it has made — the spend guard's
+    # counter (`agent/spend_cap.py`), the cost-denominated sibling of `model_calls` above.
+    #
+    # The same three properties, for the same three reasons, and none of them is incidental:
+    # untracked so the count is the *turn's* rather than the session's; not private so one budget
+    # spans a turn that delegates, which is regression 3 in `agent/loop_cap.py`'s list; and
+    # `TurnTotal` so a fan-out's concurrent writes fold additively instead of raising
+    # `InvalidUpdateError` or silently keeping only the last branch's spend.
+    #
+    # Written from `wrap_model_call` rather than `after_model`, because only the response carries
+    # the bill and an `after_model` write is skippable by any middleware that jumps from there
+    # (`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`). The write is an
+    # **absolute** total rather than a delta, which is what `TurnTotal`'s fold is defined against:
+    # it stores `base + (value - base)`, so a delta would be read as a walk backwards and
+    # contribute 0.
+    billed_tokens: NotRequired[Annotated[int, TurnTotal(int)]]
+
+    # Whether the spend guard stopped this turn — the fact beside the count, exactly as
+    # `loop_capped` sits beside `model_calls`, and written on the one branch that stops the loop so
+    # the two cannot disagree. A comparison on the count could not answer it: the stopping branch
+    # does not bill, so a capped turn and a turn that spent its last allowed token and then
+    # finished both end at the same number.
+    spend_capped: NotRequired[Annotated[bool, TurnFlag(bool)]]
+
 
 def turn_input(message: str) -> dict[str, Any]:
     """The graph input that starts one turn: the user's message.

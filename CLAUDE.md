@@ -128,6 +128,33 @@ records whether the policy acted; and `chemclaw_connector_tool_schema_tokens` me
 the prefix `tests/test_context_floor.py` cannot ratchet, because an endpoint tool's schema comes
 from a server this repository does not build.
 
+**An audit against the Claude Agent SDK then added three guards and designed a fourth**
+(`D-2026-08-29-an-iteration-cap-is-not-a-cost-cap`). Most of that SDK's surface is already here and
+narrower — its file memory against `memory/`'s knowledge-graph tiers, its allow/deny/ask modes
+against the authorization chain, its skills against the role-narrowed backend — and two features
+stay declined for reasons already on record (a `Bash` tool, `scratchpad.py` withholds `execute`;
+`WebSearch`/`WebFetch`, the no-egress posture). What was genuinely missing: **nothing bounded a
+turn's *spend*.** The audit's own first finding was half wrong in the reassuring direction —
+`api/budget.py` does meter tokens, but `check()` runs before a turn and `record()` after it, so a
+single turn's runaway is exactly what neither half can see, and that module's docstring carries the
+belief that leaves the hole ("one turn cannot loop forever" — it cannot *loop*; it can *spend*).
+`agent/spend_cap.py` is the ceiling: enforced in `before_model` (D-2026-08-15's skippability),
+counted in a `TurnTotal` channel so a fan-out shares one budget instead of getting one each, metered
+in `wrap_model_call` because only the response carries the bill — and the first probe of that write
+went straight into `tests/test_state_channels.py`'s failure, a channel `ChemclawState` did not
+declare, dropped in silence. It ships at 0. Beside it: `agent/session_fork.py` branches a thread as
+a whole-thread SQL copy (every checkpoint PK leads with `thread_id`; the tip alone loses shared
+`checkpoint_blobs` versions, and a fork without `session_messages` rows is invisible to
+`GET /sessions`), and `AgentProfile.effort` reaches both providers through one `reasoning_effort`
+kwarg — the per-provider translation everyone expects turned out not to exist to write.
+**The fourth is designed and deliberately unbuilt**
+(`D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`): deferring connector tool schemas.
+Measuring for it found the prefix is **33,310 tokens over 56 bound tools**, re-sent every model
+call and uncached on the shipped `openai_compatible` stack — and that
+`tests/test_context_floor.py`, the ratchet that exists to bound this, counts **7,799 fewer** than
+the model is sent, because `@tool` is identity so it measures raw callables rather than the bound
+objects, and never sees the seven `FilesystemMiddleware`/`SubAgentMiddleware` tools at all.
+
 M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is
 green with it uninstalled, which is how that was verified. Taking it out is also what exposed
 readers that only knew the *old* stored message shape — `chemclaw.cli.explain` was rendering every
