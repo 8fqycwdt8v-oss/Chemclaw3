@@ -746,11 +746,14 @@ def test_coverage_is_stated_reports_a_reduced_design_and_asks_what_is_confounded
         arms=[ProtocolArm(arm_id="A1", levels={"ligand": "XPhos", "base": "K3PO4"})],
     )
     verdict = coverage_is_stated(design)
-    # A **failed** note, so the sentence reaches the page. This check had no `_fail` in any branch,
-    # which made it the extreme case of the passing-finding defect: its only substantive output —
-    # the one naming what a reduced design confounds — could not reach a reader through any
-    # rendering path, because both of them list failed checks only.
-    assert verdict.severity == "note" and not verdict.passed
+    # **Passing, and the sentence reaches the page anyway.** This check had no `_fail` in any
+    # branch, and the first fix for that made it fail — which was the wrong half. A fractional
+    # factorial is a deliberate, textbook design that `generate_screening_design` emits, and
+    # nothing in `ExperimentDesign` records the confounding statement this asks for, so every
+    # correct reduced plate would have carried a failed check it could not clear. The half that
+    # was right is in `render_markdown`, which now lists every `note` rather than failed checks
+    # only: the sentence reaches the reader, and the check stays a check a reader believes.
+    assert verdict.severity == "note" and verdict.passed
     assert "reduced design: 1 of 4" in verdict.detail
     assert "confounded" in verdict.detail
 
