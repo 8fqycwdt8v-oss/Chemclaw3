@@ -201,43 +201,6 @@ topic).
 
 
 
-- [ ] **`/readyz` now waits on Temporal inside a 1-second kubelet probe** — [M], found by the
-      correctness review of the branch that added the queue probe. `readyz` calls
-      `probe_connectors()` on every poll, and a jobs-only bundle now routes to a
-      `DescribeTaskQueue` RPC. Measured: 0.013 s with the broker reachable, **2.001 s with it
-      blackholed**. `deployment-service.yaml`'s `readinessProbe` sets no `timeoutSeconds`, so
-      Kubernetes uses 1 s with `failureThreshold` 3 — about 30 s of an unreachable broker takes the
-      front door out of its Service. The ADR is careful that `unknown` never *gates*; the latency
-      it introduces gates one layer down. Note `/readyz` could already exceed 1 s on a blackholed
-      connector endpoint, so the fix is probably an explicit `timeoutSeconds` plus a bound on the
-      sweep, not reverting the probe.
-
-- [ ] **The ORD pre-flight maps the whole fetch, once per drain chunk** — [M]. `_unmappable` maps
-      every entry `fetch_new_entries` returns, and `eln_sync_batch_size` is applied by
-      `_BoundedIngest` *after* the adapter returns. The docstring prices this as "~6.5 ms on a full
-      100-entry chunk"; the per-entry figure is right and the unit is not. Measured: **0.374 s over
-      5,000 entries** (75 µs each), ~26% of the whole fetch. A 100k-entry backfill drains in ~1,000
-      activity attempts each re-mapping all 100k — roughly two hours of pure re-mapping added to
-      the drain. `record_refusals` is likewise handed the whole directory's refusals every chunk and
-      issues one upsert round trip per row in a Python loop.
-
-- [ ] **A tool composite publishes twice and pins to its first computation** — [S].
-      `publish/hooks.py::_composite_ref` hashes the raw validated kwargs, and its docstring claims a
-      default omitted and a default passed explicitly derive one ref. True for literal defaults,
-      false for the sentinel defaults both tool composites use: measured, `predict_logd` with
-      `ph=None` and `ph=7.4` produce different refs for the same measurement, as do
-      `compute_thermochemistry` at `temperature_k=0.0` and `298.15`. Conversely `publish_tool_result`
-      passes no `calc_version` or `params_hash`, while the outbox's identity is
-      `(sink, calc_ref, schema_version)` — so after a calculator or epoch change the re-run's
-      *different* result is silently dropped as a duplicate. Both older hooks supply a
-      version-bearing ref.
-
-- [ ] **The session list advertises a cursor it then refuses** — [S]. `list_sessions` emits
-      `X-Next-Cursor` on a full page outside the branch that checks the registry can resume, so a
-      deployment with a custom non-durable registry gets a `200` with a cursor and a `422` when it
-      follows it. Only reachable through `create_app(owner_store=...)`, so the blast radius is
-      small; the route is nonetheless internally inconsistent.
-
 - [ ] **`delete_session` and the owner prune take two rows in opposite orders** — [S], not
       reproduced. `_session_delete_statements` deletes `session_turns` then `session_owners`;
       `retention._DELETE_SESSIONS` takes `session_owners` then `session_turns`. The window is narrow
@@ -263,24 +226,11 @@ topic).
       (a Temporal activity retries) and has not been reproduced. **Keep both orders; the row stays
       open only as the record that the obvious fix was tried and rejected.**
 
-- [ ] **`LEDGER_SOURCE` is a constant where the schema documents a registry source name** — [S].
-      `ord_adapter.LEDGER_SOURCE = "eln-ord"` is hardcoded while `ingest_rejections.source` is
-      documented as the registry source name and the eviction cap is per-source, so two ORD data
-      sources would share one bucket and mis-attribute each other's refusals. The guarding test
-      reads this repository's manifests, so a site adding a second ORD source fails the test rather
-      than the code taking the name as an argument.
-
-- [ ] **Two suite runs against one database corrupt each other's turn claims** — [S], environmental
-      but real. `tests/test_api_sessions.py` uses a fixed session id, and a concurrent run's
-      `SessionTurnClaims().release(...)` clears this run's claim — observed once as a spurious 204
-      where 409 was expected, never reproduced serially. Harmless today because CI runs one job per
-      database; it becomes a flake generator the day that stops being true. Fixture ids should carry
-      the pid suffix `tests/pg.py` already uses for the schema.
-
 - [ ] **The corpus drain is the one ingest pass with no metric** — [S].
       `chemclaw_ingest_records_total{source,outcome}` is emitted by the ELN sync
-      (`ingest/eln/sync.py:319`), the document sync (`ingest/documents/sync.py:312`) and the
-      labelling pass (`ingest/labels/enrich.py:195`, under `source="labels"`). `ReactionCorpusWorkflow`
+      (`ingest/eln/sync.py::_count_records`), the document sync
+      (`ingest/documents/sync.py::_count_records`) and the labelling pass
+      (`ingest/labels/enrich.py::_count_records`, under `source="labels"`). `ReactionCorpusWorkflow`
       emits none: `CorpusReport`'s `read`/`recorded`/`skipped` reach the activity's log line and
       Temporal's history, and nothing else. So a dashboard built on `chemclaw_ingest_*` shows a flat
       line for a healthy corpus feed, and `skipped` — the count of rows dropped for no usable SMILES
@@ -289,7 +239,7 @@ topic).
       prose because the metric they would otherwise reach for does not exist.
       **The fix is the wrapper the ELN sync already uses**, one call site, with `source` naming the
       data source rather than the pass — the three outcomes partition the rows the pass saw, exactly
-      as `ingest/documents/sync.py:332` documents for its own. Do it when a deployment actually runs
+      as `ingest/documents/sync.py::_record_pass` documents for its own. Do it when a deployment actually runs
       a corpus feeder; until then the gap costs nobody anything, which is why it is [S] and here
       rather than done.
 
@@ -335,8 +285,9 @@ topic).
       `main`-only too.
 
 - [ ] **`read_corpus` re-reads the entire ELN from `datetime.min` on every call** — [M].
-      `durable/memory_jobs.py:82-86` calls `fetch_new_entries(datetime.min.replace(tzinfo=UTC))` on
-      every ingest half inside `read_corpus`, so each of the three memory jobs (`build_campaign_notes_activity`,
+      `durable/memory_jobs.py::read_corpus` calls
+      `fetch_new_entries(datetime.min.replace(tzinfo=UTC))` on
+      every ingest half, so each of the three memory jobs (`build_campaign_notes_activity`,
       `build_playbook_notes_activity`, `build_optimization_notes_activity`) walks the whole record
       from the beginning of time, once per activity. (This sentence also named `all_reactions()`,
       which exists nowhere in `src/` — a reader following the anchor found nothing and had no way to
@@ -381,12 +332,12 @@ topic).
 
 - [ ] **A stalled append-only feed has no first-party signal** — [S]. `corpus_cursors`
       (`infra/sql/063`) records where each feed's drain stopped, and nothing reads `updated_at`:
-      `ingest/labels/cursor.py:23` selects `after` only. The module declines a lag gauge for a
+      `ingest/labels/cursor.py::load_corpus_cursor` selects `after` only. The module declines a lag gauge for a
       stated reason — a keyset position is opaque, so "how far behind" would have to be invented,
       unlike `sync_cursors`' datetime twin which exports `chemclaw_ingest_cursor_lag_seconds`. What
-      was offered instead does not hold, and `cursor.py:17-22` now says so: `ReactionCorpusWorkflow`
+      was offered instead does not hold, and `cursor.py`'s module docstring now says so: `ReactionCorpusWorkflow`
       returns **one** report aggregated over every source at the end of the whole `continue_as_new`
-      chain (`durable/corpus_sync.py:252`), not one per pass, and builds it without `has_more` — so
+      chain (`durable/corpus_sync.py::ReactionCorpusWorkflow`), not one per pass, and builds it without `has_more` — so
       a feed whose source stopped exporting looks exactly like a feed with nothing new. Two shapes
       would close it and they are not equivalent: a per-source outcome (fixes
       `CorpusSyncOutcome`'s own docstring, which claims "per source" and aggregates), or a staleness
@@ -491,25 +442,6 @@ topic).
       guards refuse an *empty* scan, not a *lagging* one. Closing it means keying the prune on the
       commit the index was built from, so a pod whose checkout predates it declines to prune — or
       pinning the reindex to one pod. That is the single change gating `replicas > 1`.
-
-- [ ] **The knowledge graph coming *in* has no signal, only the graph going *out*** — [S].
-      `ChemclawKnowledgeNotesLost` alerts on a note that failed to reach the PR-gate. Nothing covers
-      the other direction: `deploy/knowledge-sync.sh`'s `loop` catches a failed refresh so a dead
-      remote cannot kill the pod (correct), and the pod then serves a frozen corpus indefinitely
-      while logging one WARNING per interval into a stream nobody tails. On an expired push
-      credential — the exact cause `templates/prometheusrule.yaml` names for the notes alert — the
-      graph silently stops moving and every answer keeps citing it.
-      **The deploy half shipped**: the script stamps a heartbeat on each successful refresh and the
-      sidecar has an `exec` liveness probe reading its age, so a wedged loop becomes a restarting
-      container instead of a quiet one (`tests/test_deploy_chart.py`). That is a degraded
-      substitute and says so — a container restart is not a metric, it needs kube-state-metrics to
-      alert on, and those series are not in the user-workload Prometheus that evaluates our rules.
-      **What is left is in `src/`**: a `chemclaw_knowledge_sync_age_seconds` gauge bound through
-      `Metrics.bind_gauge_family` on the process that *reads* the tree — it already resolves
-      `settings.knowledge_path`, so the age of the newest note there is one `stat()` — plus its
-      rule, which then works on any cluster because it reads a first-party series. The sidecar's
-      heartbeat and that gauge answer the same question from the two sides of one volume; ship the
-      gauge and the probe becomes belt-and-braces rather than the only signal.
 
 - [ ] **The background worker is a singleton with no PDB, and the PDB is not the fix** — [M].
       `poddisruptionbudget.yaml` covers the front door alone and argues that correctly in the

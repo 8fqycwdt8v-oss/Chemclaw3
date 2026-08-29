@@ -185,33 +185,57 @@ async def _probe_endpoints(targets: list[tuple[str, str]]) -> list[ConnectorHeal
         return list(await asyncio.gather(*(_probe(client, name, url) for name, url in targets)))
 
 
-async def _probe_queues(targets: list[tuple[str, str]]) -> list[ConnectorHealth]:
-    """Probe every durable bundle's queue, or report them all `unknown` if the broker is not there.
+async def _describe_queues(targets: list[tuple[str, str]]) -> list[ConnectorHealth]:
+    """Connect once, then ask every queue concurrently.
 
     One client for the whole sweep, from the same process-wide `connect()` every durable caller
     uses — so a front door that already holds a Temporal channel does not open a second one, and a
     front door that does not gets one channel rather than one per bundle.
+    """
+    client = await connect()
+    return list(await asyncio.gather(*(_probe_queue(client, n, q) for n, q in targets)))
 
-    The connect is bounded by the same `connector_health_timeout_seconds` the HTTP half uses: a
-    broker that refuses fails in milliseconds, but one that blackholes the SYN would otherwise hold
+
+async def _probe_queues(targets: list[tuple[str, str]]) -> list[ConnectorHealth]:
+    """Probe every durable bundle's queue, or report them all `unknown` if the broker is not there.
+
+    **`connector_health_timeout_seconds` is the budget for this half, not for each step in it.**
+    The connect and the RPC used to carry that bound one each, so a broker reachable enough to
+    accept a connection and then blackhole the RPC cost twice it — and the whole sweep is what
+    `/readyz` waits on, inside a kubelet probe whose *default* timeout is one second. A budget
+    stated once and spent twice is what makes a probe's cost unstatable, which is the property this
+    route needs: the deployment's `timeoutSeconds` is derived from this number
+    (`deploy/helm/chemclaw/values.yaml`, `probes.service.readiness`), and a derivation is only
+    honest if the number bounds the whole answer.
+
+    A broker that refuses fails in milliseconds; one that blackholes the SYN would otherwise hold
     the readiness route — and startup — for the SDK's own connect timeout. `connect()` caches only
     successful clients, so a bounded failure here does not poison the singleton for the job tools.
     """
     if not targets:
         return []
     try:
-        client = await asyncio.wait_for(connect(), settings.connector_health_timeout_seconds)
+        return await asyncio.wait_for(
+            _describe_queues(targets), settings.connector_health_timeout_seconds
+        )
     except (SubsystemUnavailableError, TimeoutError) as exc:
-        # Every bundle gets the same verdict because they share the one dependency that failed.
+        # Every bundle gets the same verdict because they share the one dependency that failed —
+        # whether it failed at the connect or ran the budget out on the RPC. Both are "we could not
+        # measure", which is what `unknown` says and why neither counts nor gates.
         return [
             ConnectorHealth(
                 name=name,
                 state="unknown",
-                detail=f"the durable backend could not be reached to ask about {queue!r}: {exc}",
+                # The type is named because a `TimeoutError` renders as the empty string, and "the
+                # durable backend could not be reached to ask about 'connector-x': " is a detail
+                # that stops exactly where the reason should start.
+                detail=(
+                    f"the durable backend could not be reached to ask about {queue!r}: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
             )
             for name, queue in targets
         ]
-    return list(await asyncio.gather(*(_probe_queue(client, n, q) for n, q in targets)))
 
 
 async def probe_connectors() -> list[ConnectorHealth]:

@@ -922,6 +922,16 @@ _GAUGES: dict[str, str] = {
     # Out-of-process capability can fail independently of the chat service, so its reachability
     # is a first-class signal rather than something to find in a log (`connectors.health`).
     "chemclaw_connectors_unhealthy": "Enabled connectors that could not be reached (0 = all up).",
+    # The knowledge graph coming *in*, which had no signal at all: `chemclaw_notes_publish_failures
+    # _total` covers a note failing to reach the PR-gate and nothing covered the corpus failing to
+    # reach a pod. `deploy/knowledge-sync.sh`'s loop swallows a failed refresh on purpose, so the
+    # pod serves a frozen graph and keeps citing it. Read from the volume by the process that
+    # answers from it (`kg/graph.py::knowledge_sync_age_seconds`), so it needs no sidecar and no
+    # kube-state-metrics.
+    "chemclaw_knowledge_sync_age_seconds": (
+        "Age of the newest note on this pod's knowledge tree, in seconds (-1 = the tree holds no "
+        "note at all). Measures what this pod knows, not when the sync last ran."
+    ),
     # Pool saturation (D-119). `requests_waiting` above zero is the signal that `pg_pool_max_size`
     # is too small for the offered load — the thing that used to show up as a connect timeout with
     # an idle database, which is unreadable from any other metric.

@@ -18,6 +18,7 @@ time-skipping test server cannot stand in here — measured, it answers `Describ
 import asyncio
 import inspect
 import logging
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -314,3 +315,44 @@ def test_the_unhealthy_gauge_counts_an_unpolled_bundle_and_not_an_unknown_one(
 
     # Exactly one: `unpolled` counts, and `healthy`, `unprobed` and `unknown` do not.
     assert "\nchemclaw_connectors_unhealthy 1\n" in exposition, exposition
+
+
+def test_the_queue_half_spends_one_budget_rather_than_one_per_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/readyz` runs this sweep, and a kubelet probe's default timeout is one second.
+
+    The connect and the RPC each used to carry `connector_health_timeout_seconds`, so a broker
+    reachable enough to accept a connection and then blackhole the call cost *twice* the number the
+    deployment's `timeoutSeconds` is derived from. Measured here rather than reasoned about: both
+    steps hang, and the sweep still has to come back inside one budget with every bundle `unknown`.
+
+    The budget is squeezed to a tenth of a second so the assertion is about the bound rather than
+    about how fast this machine is; the fakes hang for ten times it, in both places at once.
+    """
+    _bundles(tmp_path, monkeypatch, durable=_jobs_only("durable"), other=_jobs_only("other"))
+    budget = 0.1
+    monkeypatch.setattr(settings, "connector_health_timeout_seconds", budget)
+
+    class _HangingService:
+        async def describe_task_queue(self, request: Any, timeout: Any = None) -> Any:
+            await asyncio.sleep(budget * 10)
+            raise AssertionError("the RPC outlived the sweep's budget")
+
+    async def _slow_connect() -> Any:
+        await asyncio.sleep(budget)  # reachable, but only just
+        return type("_Client", (), {"workflow_service": _HangingService()})()
+
+    monkeypatch.setattr("chemclaw.connectors.health.connect", _slow_connect)
+
+    started = time.monotonic()
+    result = asyncio.run(probe_connectors())
+    elapsed = time.monotonic() - started
+
+    assert _states(result) == {"durable": "unknown", "other": "unknown"}
+    assert elapsed < budget * 2, (
+        f"the sweep took {elapsed:.3f}s against a {budget}s budget: the connect and the RPC are "
+        "spending one each, so a probe timeout derived from that number cannot bound it"
+    )
+    # The reason has to reach the operator: a bare `TimeoutError` renders as the empty string.
+    assert "TimeoutError" in result[0].detail and "connector-durable" in result[0].detail

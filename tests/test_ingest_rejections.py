@@ -24,21 +24,22 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
-import yaml
 
 from chemclaw.agent import research_tools
 from chemclaw.agent.framing import ENVELOPE_TAG, defang
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.ingest import rejections
-from chemclaw.ingest.eln.ord_adapter import LEDGER_SOURCE, OrdJsonAdapter
+from chemclaw.ingest.eln.ord_adapter import DEFAULT_LEDGER_SOURCE as LEDGER_SOURCE
+from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
 from chemclaw.ingest.rejections import IngestRejection, record_refusals, refusals_matching
+from chemclaw.ingest.sources import registry
 from chemclaw.retrieval.evidence import EvidenceChunk
 from tests.pg import migrated_db_or_skip
 
-_ROOT = Path(__file__).resolve().parents[1]
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # The real entry, spelled as ORD would export it: the 119.43% well from the seeded HTE corpus.
@@ -344,23 +345,95 @@ def test_the_reader_matches_the_words_that_carry_the_question() -> None:
     asyncio.run(_run())
 
 
-def test_the_adapter_files_its_refusals_under_the_registry_source_name() -> None:
-    """`LEDGER_SOURCE` is a constant beside a manifest, so the manifest is what checks it.
+def test_two_ord_sources_file_their_refusals_under_their_own_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal is filed under the manifest's name, so two ORD sources are two ledgers.
 
-    The ingest half is constructed from `manifest.config` alone and is never told its own name, so
-    nothing but this test can notice the two drifting apart — and a drifted name files a refusal
-    under a source no operator can join to anything.
+    The ledger is keyed `(source, entry_id)` and its eviction cap is per source, so a name that is
+    not the manifest's is a bucket two deployments share.
+
+    This used to be a hardcoded constant with no way in — the ingest half was built from
+    `manifest.config` alone and never told which source it was, so a site adding a second ORD drop
+    directory got both filing under `eln-ord`, each evicting the other's rows and each answering a
+    chemist's question about the other's corpus. The guard was a test reading every shipped
+    manifest and asserting exactly one named this adapter, which fails the site rather than the
+    code. Driven through the registry, because the registry is the half that was missing.
     """
-    declaring = [
-        manifest["name"]
-        for path in (_ROOT / "src" / "chemclaw" / "ingest" / "sources").glob("*/datasource.yaml")
-        if isinstance(manifest := yaml.safe_load(path.read_text(encoding="utf-8")), dict)
-        and "OrdJsonAdapter" in str(manifest.get("ingest", ""))
-    ]
-    assert declaring == [LEDGER_SOURCE], (
-        f"the ORD adapter files rejections under {LEDGER_SOURCE!r}, but the manifests naming it "
-        f"are {declaring}"
-    )
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        manifests = tmp_path / "manifests"
+        for name in ("ord-site-a", "ord-site-b"):
+            drop = tmp_path / name
+            drop.mkdir()
+            folder = manifests / name
+            folder.mkdir(parents=True)
+            (folder / "datasource.yaml").write_text(
+                f"name: {name}\n"
+                f"description: An ORD drop directory belonging to {name}.\n"
+                "ingest: chemclaw.ingest.eln.ord_adapter:OrdJsonAdapter\n"
+                "config:\n"
+                f"  export_dir: {drop}\n",
+                encoding="utf-8",
+            )
+            _write(drop, f"{name}-well", 119.43)
+            await _clear(name)
+
+        monkeypatch.setattr(settings, "data_sources_dir", str(manifests))
+        for name in ("ord-site-a", "ord-site-b"):
+            ingest = registry.make_data_source(name).ingest
+            assert ingest is not None
+            await ingest.fetch_new_entries(_EPOCH)
+
+        for name in ("ord-site-a", "ord-site-b"):
+            assert [row[0] for row in await _rows(name)] == [f"{name}-well"], (
+                f"{name}'s refusal did not land under its own manifest name"
+            )
+            await _clear(name)
+
+    asyncio.run(_run())
+
+
+def test_the_pre_flight_maps_the_chunk_rather_than_the_whole_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal pre-flight is priced per entry and was paid per *directory*, once per chunk.
+
+    `fetch_new_entries` returns everything past the cursor and `durable/eln_sync.py::_BoundedIngest`
+    truncates it afterwards, so mapping the whole return meant a 100k-entry backfill re-mapped all
+    100k once per 100-entry chunk. Measured at 68 us an entry, that is hours of pure re-mapping
+    added to a drain.
+
+    Asserted by counting `map_to_ord` calls rather than by timing one, so it is a statement about
+    the bound and not about how fast this machine is. Every entry is still *returned*: the bound is
+    on the pre-flight's work, and an entry past it is refused by the chunk that reaches it.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear(LEDGER_SOURCE)
+        monkeypatch.setattr(settings, "eln_sync_batch_size", 3)
+        for index in range(10):
+            _write(tmp_path, f"well-{index}", 42.0)
+
+        adapter = OrdJsonAdapter(str(tmp_path))
+        mapped: list[str] = []
+        real = adapter.map_to_ord
+
+        def _counting(raw: Any) -> Any:
+            mapped.append(raw.entry_id)
+            return real(raw)
+
+        monkeypatch.setattr(adapter, "map_to_ord", _counting)
+        entries = await adapter.fetch_new_entries(_EPOCH)
+
+        assert len(entries) == 10, "the fetch still returns everything past the cursor"
+        assert len(mapped) == 3, (
+            f"the pre-flight mapped {len(mapped)} of 10 entries against a batch size of 3"
+        )
+
+    asyncio.run(_run())
 
 
 def test_an_injected_refusal_reason_reaches_the_model_inside_the_data_envelope(
