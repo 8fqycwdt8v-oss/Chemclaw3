@@ -21,17 +21,21 @@ a note body. It is not what a tool returns.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import NamedTuple
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.protocols.models import (
     DesignStatus,
     DesignSummary,
     ExperimentDesign,
+    Factor,
     FactorLevel,
     ProtocolArm,
     ProtocolCheck,
     ProtocolStep,
-    Setpoints,
+    Well,
 )
 
 #: How many arms a receipt lists before it stops and says how many are left. A 384-well design's
@@ -50,6 +54,16 @@ class ArmRow(BaseModel):
     temperature_c: float | None = None
     time_h: float | None = None
     solvent: str = ""
+    # **The four an arm could override with nothing on the page saying so.** `## Conditions` renders
+    # the *body* whenever there is more than one arm, and the run sheet carried only temperature,
+    # time and solvent — so an arm overriding the atmosphere and the pressure rendered byte for byte
+    # like one that did not. Measured: a design running arm A2 at 50 bar H2 printed a page saying
+    # 1 bar N2, with `H2` and `50` appearing nowhere on it and no check firing. This is a document a
+    # chemist runs from.
+    atmosphere: str = ""
+    pressure_bar: float | None = None
+    concentration_molar: float | None = None
+    ph: float | None = None
     control: str = ""
     replicate_of: str = ""
     note: str = ""
@@ -105,28 +119,59 @@ class DesignListing(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
-def _points(design: ExperimentDesign, arm: ProtocolArm) -> Setpoints:
-    return design.setpoints_for(arm)
+class _Column(NamedTuple):
+    """One run-sheet condition column: its heading, and how to read it off a row."""
+
+    heading: str
+    value: Callable[[ArmRow], str]
+
+
+#: The three a bench sheet always carries, whether or not they vary: a chemist setting up a run
+#: reads the temperature, the time and the solvent off the row in front of them.
+_RUN_SHEET_ALWAYS: tuple[_Column, ...] = (
+    _Column("T /°C", lambda row: _number(row.temperature_c)),
+    _Column("t /h", lambda row: _number(row.time_h)),
+    _Column("Solvent", lambda row: row.solvent),
+)
+
+#: The four that appear only when the arms disagree about them. They had no column at all, so an arm
+#: overriding the atmosphere or the pressure rendered byte for byte like one that did not; giving
+#: them a permanent column instead would bury the varying one among three constant columns on a
+#: 96-row plate. What every arm shares is stated once under `## Conditions`.
+_RUN_SHEET_WHEN_VARYING: tuple[_Column, ...] = (
+    _Column("c /M", lambda row: _number(row.concentration_molar)),
+    _Column("Atmosphere", lambda row: row.atmosphere),
+    _Column("p /bar", lambda row: _number(row.pressure_bar)),
+    _Column("pH", lambda row: _number(row.ph)),
+)
+
+
+def _arm_row(design: ExperimentDesign, arm: ProtocolArm, wells: dict[str, Well]) -> ArmRow:
+    """One arm as a row, with its conditions resolved against the shared body."""
+    well = wells.get(arm.arm_id)
+    points = design.setpoints_for(arm)
+    return ArmRow(
+        arm_id=arm.arm_id,
+        well=well.label if well else "",
+        run_order=well.run_order if well else 0,
+        levels=dict(arm.levels),
+        temperature_c=points.temperature_c,
+        time_h=points.time_h,
+        solvent=points.solvent,
+        atmosphere=points.atmosphere,
+        pressure_bar=points.pressure_bar,
+        concentration_molar=points.concentration_molar,
+        ph=points.ph,
+        control=arm.control,
+        replicate_of=arm.replicate_of,
+        note=arm.note,
+    )
 
 
 def run_sheet_rows(design: ExperimentDesign) -> list[ArmRow]:
     """Every arm as a row, in run order when there is a layout and in arm order otherwise."""
     wells = {well.arm_id: well for well in (design.layout.wells if design.layout else [])}
-    rows = [
-        ArmRow(
-            arm_id=arm.arm_id,
-            well=wells[arm.arm_id].label if arm.arm_id in wells else "",
-            run_order=wells[arm.arm_id].run_order if arm.arm_id in wells else 0,
-            levels=dict(arm.levels),
-            temperature_c=_points(design, arm).temperature_c,
-            time_h=_points(design, arm).time_h,
-            solvent=_points(design, arm).solvent,
-            control=arm.control,
-            replicate_of=arm.replicate_of,
-            note=arm.note,
-        )
-        for arm in design.arms
-    ]
+    rows = [_arm_row(design, arm, wells) for arm in design.arms]
     # A randomised design's whole point is that it is *run* in an order the plate does not show, so
     # the run sheet is sorted by that order and the plate map is what shows position.
     return sorted(rows, key=lambda r: (r.run_order == 0, r.run_order)) if wells else rows
@@ -156,11 +201,18 @@ def summarise(design: ExperimentDesign, checks: list[ProtocolCheck]) -> str:
             shape += f" plus {controls} control(s)"
         if design.layout:
             shape += f" on a {design.layout.plate_format}-well plate"
-    verdict = (
-        f"{len(blocking)} blocking check(s)"
-        if blocking
-        else f"no blocking checks, {len(failed)} warning(s)"
-    )
+    # **Every failed check that is not a blocker was called a "warning", and the count vanished the
+    # moment a blocker existed.** A failed `note` is not a warning, and a design with one blocker
+    # and four warnings reported only the blocker — on the one sentence `ProtocolReceipt.summary`
+    # exists so a model can quote it without re-reading the design.
+    warnings = [c for c in failed if c.severity == "warning"]
+    notes = [c for c in failed if c.severity == "note"]
+    counts = [
+        f"{len(blocking)} blocking check(s)" if blocking else "no blocking checks",
+        f"{len(warnings)} warning(s)" if warnings else "",
+        f"{len(notes)} note(s)" if notes else "",
+    ]
+    verdict = ", ".join(part for part in counts if part)
     return f"{design.request.title}: {shape}; {verdict}; {len(design.evidence)} citations."
 
 
@@ -205,6 +257,36 @@ def _cell(text: str) -> str:
     return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
 
+def _code(value: str) -> str:
+    """One identifier as an inline code span a backtick inside it cannot close.
+
+    An `EvidenceRef.ref` is free text and a backtick in it closed the span early, so the rest of the
+    citation rendered as prose. A doubled fence with padding spaces is the GFM form that carries a
+    literal backtick.
+    """
+    flat = " ".join(value.split())
+    return f"`` {flat} ``" if "`" in flat else f"`{flat}`"
+
+
+def _text(value: str) -> str:
+    r"""One piece of a chemist's free text, safe to place in the document's block flow.
+
+    `_cell` keeps free text from restructuring a *table*; nothing protected the block context, and
+    the fields outside tables are the same browser-supplied strings. Measured: a hazard line reading
+    `## Waste\n\nQuench into water.` rendered a second `## Waste` section, so the page carried two
+    waste headings with conflicting disposal instructions — one of them forged from a hazard string.
+    A blank line inside a step ejected the rest of that step into an orphan paragraph between the
+    numbered ones.
+
+    Both come from the same two characters: a newline that ends the block, and a leading marker that
+    starts a new one. Line breaks collapse to spaces (a bullet or a numbered step is one line by
+    construction), and a leading `#`, `>`, `|`, `-`, `*`, `+` or `=` is escaped so it renders as
+    itself. The text a chemist typed is preserved; only its power to open a section is not.
+    """
+    flat = " ".join(value.split())
+    return f"\\{flat}" if flat[:1] in {"#", ">", "|", "-", "*", "+", "="} else flat
+
+
 def _table(headers: list[str], rows: list[list[str]]) -> str:
     """A GitHub-flavoured Markdown table, or an empty string when there are no rows."""
     if not rows:
@@ -228,12 +310,37 @@ def _number(value: float | None) -> str:
         return ""
     if value == int(value) and abs(value) < 1e15:
         return str(int(value))
-    return f"{value:g}"
+    text = f"{value:.6g}"
+    if "e" not in text and "E" not in text:
+        return text
+    # **`%g`'s exponent is unreadable on a bench sheet, and it collides.** The docstring's own
+    # example still reproduced: a kilogram-scale charge printed `1.23457e+06` mg, and — worse —
+    # 999999.5 and 1000000.5 mg both printed `1e+06`, two different weigh-outs shown as one number
+    # on a document a chemist weighs from. Inside the range a laboratory quantity actually occupies,
+    # print it out; outside it an exponent is the honest form (1e-05 mmol is how that is written).
+    if 1e-4 <= abs(value) < 1e15:
+        return f"{value:.4f}".rstrip("0").rstrip(".")
+    return text
+
+
+def _common_unit(factor: Factor) -> str:
+    """The unit every level of this factor agrees on, when the factor itself declares none."""
+    units = {level.unit for level in factor.levels if level.unit}
+    return units.pop() if len(units) == 1 else ""
 
 
 def _level(level: FactorLevel) -> str:
-    """One level as the Factors table shows it — its label, and its value when it has one."""
-    return level.label if level.value is None else f"{level.label} ({_number(level.value)})"
+    """One level as the Factors table shows it — its label, its value, and the value's own unit.
+
+    `FactorLevel.unit` was dropped entirely while the `Unit` column showed `Factor.unit`, so levels
+    of `0` and `100` °C under a factor declaring no unit rendered as bare numbers beside a column
+    truthfully reporting "no unit" — which is exactly the bare-number-reads-as-an-equivalent failure
+    that column was added to prevent.
+    """
+    if level.value is None:
+        return level.label
+    unit = f" {level.unit}" if level.unit else ""
+    return f"{level.label} ({_number(level.value)}{unit})"
 
 
 def _step_conditions(step: ProtocolStep) -> str:
@@ -331,7 +438,7 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
         # A step's own temperature and hold time were dropped, which is the pair a step most often
         # carries and the pair a chemist reads off the page while running it.
         parts += [
-            f"{step.index}. *({step.kind})* {step.text}" + _step_conditions(step)
+            f"{step.index}. *({step.kind})* {_text(step.text)}" + _step_conditions(step)
             for step in design.base.steps
         ]
         parts += [""]
@@ -351,7 +458,7 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
                         f.name,
                         f.kind,
                         str(f.role),
-                        f.unit,
+                        f.unit or _common_unit(f),
                         ", ".join(_level(level) for level in f.levels),
                         "; ".join(level.rationale for level in f.levels if level.rationale),
                     ]
@@ -368,20 +475,30 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
     # the page. `if rows:` is what the sentence claimed.
     if rows:
         factor_names = [f.name for f in design.factors]
+        # Always the three a bench sheet carries, plus any of the other four the arms disagree
+        # about — see the two constants for what that closed.
+        conditions = [
+            *_RUN_SHEET_ALWAYS,
+            *[
+                column
+                for column in _RUN_SHEET_WHEN_VARYING
+                if len({column.value(row) for row in rows}) > 1
+            ],
+        ]
         parts += [
             "## Run sheet",
             "",
             _table(
-                ["Run", "Well", "Arm", *factor_names, "T /°C", "t /h", "Solvent", "Note"],
+                ["Run", "Well", "Arm", *factor_names, *[c.heading for c in conditions], "Note"],
                 [
                     [
                         str(row.run_order or ""),
                         row.well,
-                        row.arm_id + (f" *({row.control})*" if row.control else ""),
+                        row.arm_id
+                        + (f" *({row.control})*" if row.control else "")
+                        + (f" *(replicate of {row.replicate_of})*" if row.replicate_of else ""),
                         *[row.levels.get(name, "") for name in factor_names],
-                        _number(row.temperature_c),
-                        _number(row.time_h),
-                        row.solvent,
+                        *[column.value(row) for column in conditions],
                         row.note,
                     ]
                     for row in rows
@@ -389,6 +506,14 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
             ),
             "",
         ]
+        if design.layout and design.layout.randomized:
+            # The run order is a shuffle, and a sheet that does not say so reads as the plate's own
+            # order — with nothing recording that it is reproducible.
+            parts += [
+                f"*Run order randomised, seed {design.layout.seed}. "
+                "Run in the order given, not in plate order.*",
+                "",
+            ]
 
     if design.base.analytics:
         parts += [
@@ -407,20 +532,20 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
         parts += [
             "## In-process controls",
             "",
-            *[f"- {c}" for c in design.base.in_process_controls],
+            *[f"- {_text(c)}" for c in design.base.in_process_controls],
             "",
         ]
     if design.base.waste.strip():
         # A `ProtocolBody` field with no reader anywhere: waste-disposal instructions were absent
         # from the bench document.
-        parts += ["## Waste", "", design.base.waste, ""]
+        parts += ["## Waste", "", _text(design.base.waste), ""]
     if design.base.hazards:
         parts += [
             "## Hazards",
             "",
             "*Flags, not a clearance — this system screens and never certifies.*",
             "",
-            *[f"- {h}" for h in design.base.hazards],
+            *[f"- {_text(h)}" for h in design.base.hazards],
             "",
         ]
 
@@ -437,7 +562,7 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
             )
             if part
         )
-        parts += ["## Expected", "", f"{detail} — *{expected.basis}*", ""]
+        parts += ["## Expected", "", f"{_text(detail)} — *{expected.basis}*", ""]
 
     if design.evidence:
         parts += [
@@ -445,9 +570,11 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
             "",
             *[
                 f"- **{ref.kind}**"
-                + (f" `{ref.ref}`" if ref.ref else "")
-                + (f" via `{ref.tool}`" if ref.tool else "")
-                + f" — {ref.summary}"
+                # A backtick inside the id closes the code span it is written into, so the rest of
+                # the reference renders as prose — `_code` keeps the span whole.
+                + (f" {_code(ref.ref)}" if ref.ref else "")
+                + (f" via {_code(ref.tool)}" if ref.tool else "")
+                + f" — {_text(ref.summary)}"
                 + (f" (supports {', '.join(ref.supports)})" if ref.supports else "")
                 for ref in design.evidence
             ],
