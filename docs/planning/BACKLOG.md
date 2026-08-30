@@ -172,6 +172,27 @@ topic).
 
 ## 4 — Operating it
 
+- [ ] **A caller cannot tell that a helper's report is derived from untrusted reading**
+      — [M], opened by `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`, which
+      closed the mechanical half and deliberately left this open rather than silent.
+      A helper's report is now defanged, so it can no longer carry a live envelope delimiter into
+      its caller's thread. What it still carries is no *provenance*: the caller's model reads a
+      `ToolMessage` of ordinary prose, with nothing saying that the helper wrote it after reading
+      evidence that arrived enveloped. Every other path marks that — `gather_evidence` frames each
+      chunk with its note id, a connector result is framed `connector:tool`, an attachment is framed
+      `attachment:<file>` — because the agent instructions tell the model that enveloped spans are
+      evidence to weigh and cite.
+      **Framing the report is the obvious answer and it is the wrong one**, which is why this is a
+      row rather than a patch: an envelope says "evidence to cite", and citing a helper's summary
+      credits a source that is this system's own paraphrase. What is wanted is a third marking —
+      *derived from untrusted reading, not itself a source* — and this repository has exactly one
+      instrument for that today (`defang`, which says nothing) and one prohibition against inventing
+      prompt vocabulary nobody measures.
+      The cheap first step is a measurement rather than a design: whether a helper that read
+      injected evidence actually propagates the instruction into its report. That needs a live
+      model, so it belongs with the delegation row above rather than ahead of it.
+
+
 - [ ] **Measure whether delegation pays, with an instrument the deleted one could not be**
       — [M], opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`. The corpus
       that was supposed to settle this (`data/evals/probes/m12/routing.yaml`, deleted with the

@@ -25,14 +25,16 @@ graphs that compile rather than against the two declarations.
 """
 
 from dataclasses import replace
-from typing import Any
-
-from langchain.agents.middleware import TodoListMiddleware
 
 # Importing this module runs every `@tool` decorator, populating the capability-tool
 # registry, so `_capability_tools` assembles the advertised set from it instead of from a
 # hand-maintained list. It is a module rather than a block here because a *second* consumer
 # (`api/mcp_face.py`) needed the same seeding and did not have it — see its docstring.
+from functools import cache
+from typing import Any
+
+from langchain.agents.middleware import TodoListMiddleware
+
 from chemclaw.agent import tool_modules as _tool_modules  # noqa: F401
 from chemclaw.agent.framing import ENVELOPE_TAG
 from chemclaw.agent.profiles import AgentProfile, get_profile
@@ -388,8 +390,15 @@ def harness_tool_names() -> set[str]:
     return {tool.name for tool in TodoListMiddleware().tools}
 
 
-def subagent_tool_names() -> set[str]:
+@cache
+def subagent_tool_names() -> frozenset[str]:
     """The tool that spawns a helper — `task`, and it is not optional.
+
+    **Cached, because it answers a question about the installed package rather than about this
+    deployment**, and it answers it by *building* a `SubAgentMiddleware` — cheap once, wasteful on
+    a path that runs per tool call, which `agent/tool_framing.py` now is. `side_effecting_tools()`
+    is cached for the same reason and states it the same way; unlike that one this depends on no
+    discovery, so `tests/conftest.py` has nothing to clear.
 
     Its own name space because it appears under conditions none of the others share.
     `SubAgentMiddleware` is in `create_deep_agent`'s `_REQUIRED_MIDDLEWARE`, which
@@ -414,7 +423,7 @@ def subagent_tool_names() -> set[str]:
         backend=StateBackend(),
         subagents=[{"name": "probe", "description": "", "runnable": RunnableLambda(lambda s: s)}],
     )
-    return {tool.name for tool in probe.tools}
+    return frozenset(tool.name for tool in probe.tools)
 
 
 def available_tool_names() -> set[str]:
