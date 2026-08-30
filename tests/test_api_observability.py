@@ -13,6 +13,7 @@ headers only if the frame that answers it is inside the one that stamps them.
 """
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -30,7 +31,13 @@ from chemclaw.api.events import (
     ToolCallEvent,
     ToolFailedEvent,
 )
-from chemclaw.api.middleware import _CORRELATION_ID, _UNMATCHED_ROUTE, _request_correlation_id
+from chemclaw.api.middleware import (
+    _CORRELATION_ID,
+    _MAX_ERROR_DEPTH,
+    _UNMATCHED_ROUTE,
+    _json_safe,
+    _request_correlation_id,
+)
 from chemclaw.api.runner import _OUTCOMES, _deadline_passed, _settle_outcome, _TurnLedger
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
@@ -258,6 +265,55 @@ def test_a_validation_failure_is_logged_and_counted(
     assert _field(record, "route") == "/sessions"
     assert _field(record, "error_count") >= 1
     assert record.levelno == logging.WARNING
+
+
+def test_a_non_finite_number_is_a_422_rather_than_a_500(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`NaN` is a literal `json.loads` accepts and `json.dumps` refuses — so the 422 raised.
+
+    Measured before `_json_safe`: a body carrying `NaN` in a float field was answered **500 "The
+    request could not be completed due to an internal error"**, because the offending value rode
+    into the response as pydantic's verbatim `input` and `JSONResponse.render` raised inside the
+    handler. The counter and the WARNING had already booked a 422 nobody was ever sent — an
+    observability record of a response that did not happen, which is worse than no record.
+
+    Asserted for `nan` and both infinities, because all three are `json.loads` literals and all
+    three are refused by `json.dumps`; only the first was found by hand.
+    """
+    for literal, name in (("NaN", "nan"), ("Infinity", "inf"), ("-Infinity", "-inf")):
+        before = METRICS.value("chemclaw_request_validation_failures_total")
+        response = client.post(
+            "/sessions",
+            content=f'{{"profile": {literal}}}'.encode(),
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 422, literal
+        # The value is *named* rather than dropped: `input` is what tells the client what to fix,
+        # and `null` would say the field was empty when it was not.
+        assert name in json.dumps(response.json()), literal
+        assert METRICS.value("chemclaw_request_validation_failures_total") == before + 1
+
+
+def test_the_sanitiser_names_what_it_stopped_at_rather_than_walking_to_the_stack_floor() -> None:
+    """Driven directly, because through a route the clip bounds the depth before the walk starts.
+
+    That is the honest statement of what this floor is for: `input` past `_MAX_LOGGED_CHARS`
+    characters is already a string by the time `_json_safe` sees it, and a nested container costs
+    two characters a level — so nothing a caller posts reaches here through `input`. It floors the
+    keys the clip does not cover, and it is set *at* the clip rather than below it so that a
+    caller's legitimate 25-deep, 51-character list is still shown to them rather than replaced.
+    """
+    depth = _MAX_ERROR_DEPTH + 5
+    nested: Any = 1.0
+    for _ in range(depth):
+        nested = [nested]
+
+    walked = _json_safe(nested)
+    for _ in range(_MAX_ERROR_DEPTH):
+        assert isinstance(walked, list)
+        walked = walked[0]
+    assert walked == f"…(nested past {_MAX_ERROR_DEPTH})"
 
 
 # --------------------------------------------------------------------------------------------

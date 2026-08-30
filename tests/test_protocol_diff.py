@@ -197,7 +197,11 @@ def test_flatten_keys_a_keyed_list_by_the_member_identifier_and_not_by_index() -
     flat = flatten(_design(arms=[_arm("A1"), _arm("A2")]).model_dump(mode="json"))
     assert "arms.A1.arm_id" in flat and "arms.A2.arm_id" in flat
     assert not any(path.startswith("arms.0") for path in flat)
-    assert "base.setpoints.temperature_c" in flat
+    # A stated field has a path; an unstated one has none. `None` used to be stored as a leaf,
+    # which is what inverted `added`/`removed` for every optional sub-model — adding a plate
+    # layout was reported as `layout removed`.
+    assert "base.setpoints.solvent" in flat
+    assert "base.setpoints.temperature_c" not in flat
 
 
 def test_an_identical_design_diffs_to_nothing() -> None:

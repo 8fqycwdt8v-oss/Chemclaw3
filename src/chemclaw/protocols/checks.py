@@ -24,7 +24,9 @@ band a unit mistake leaves.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterable
+from typing import Any
 
 from chemclaw.core.chem import InvalidSmilesError, element_counts
 from chemclaw.core.reagents import resolve_compound_name
@@ -60,14 +62,37 @@ def _all_charge_lines(design: ExperimentDesign) -> list[ChargeLine]:
     """Every charge line in the design.
 
     A function rather than `design.base.charge` inline, because there is exactly one charge table
-    today and four checks read it: if a per-arm override is ever argued for, it lands here and none
-    of them changes.
+    today and four checks read it through this seam.
+
+    **It is a seam, not a guarantee, and the docstring used to claim the second.** It said a
+    per-arm override "lands here and none of them changes" — while `charge_is_consistent` (the
+    blocker whose whole subject is the charge table) and `is_a_protocol` both read
+    `design.base.charge` directly. Either could still be blind to an override this function
+    started returning. The two are left as they are, because `charge_is_consistent` needs the
+    per-arm question answered deliberately rather than inherited, and this sentence is now what a
+    reader is told instead of a promise nothing kept.
     """
     return list(design.base.charge)
 
 
 def _structures(design: ExperimentDesign) -> list[tuple[str, str]]:
-    """Every `(where, smiles)` the design names, so one pass can check them all."""
+    """Every `(where, smiles)` the design names, so one pass can check them all.
+
+    **The reaction SMILES is deliberately NOT in here, and putting it in was a measured mistake.**
+    It reads like the one structure a design always has, so it was added to close a hole in
+    `components_resolve`. Two things broke at once. `forbidden_absent` reads this same set, and a
+    precedent's record form carries the *old* solvent in its agent slot — so the canonical
+    "get me out of DMF" design, whose own solvent is 2-MeTHF, was refused at intake with "the
+    design uses reagents the request forbids: DMF", permanently and with no way to state both the
+    precedent and the exclusion. And an agent block is routinely written as a *name* rather than a
+    structure, so `CCO.CC(=O)Cl>DMF>CCOC(C)=O` became a blocker while `A>B>C>D` and
+    `Suzuki coupling` passed, because the gate was triggered by counting `>`.
+
+    The distinction the hole and the fix both missed: `reaction_smiles` says what is being *asked
+    for*; this set says what the design *does*. `atom_balance` reads the reaction on its own terms
+    and reports an unreadable species as a failed warning, which is the right severity for a field
+    that is free text by declaration (`models.py`: "Empty for an ask that is not one").
+    """
     found: list[tuple[str, str]] = []
     for component in design.request.components:
         if component.smiles:
@@ -107,7 +132,11 @@ def components_resolve(design: ExperimentDesign) -> ProtocolCheck:
         )
     named_without_structure = [c.name_as_written for c in design.request.components if not c.smiles]
     if named_without_structure:
-        return _ok(
+        # A *failed* warning: this is a finding, and `render_markdown` and `summarise` both list
+        # only failed checks, so an `_ok` here put "checked and fine" in front of a reader about a
+        # species nobody resolved. That is the defect `_unreadable`'s docstring describes as fixed,
+        # in four other places in this file.
+        return _fail(
             "components_resolve",
             "warning",
             "no structure resolved for: " + ", ".join(named_without_structure),
@@ -151,7 +180,7 @@ def charge_is_consistent(design: ExperimentDesign) -> ProtocolCheck:
     # reading "limiting reagent 'SM' at 0 mmol". Zero is the same fact as absent for this check:
     # there is no scale to turn an equivalent into a weight against.
     if not reference.amount_mmol:
-        return _ok(
+        return _fail(
             "charge_is_consistent",
             "warning",
             f"the limiting reagent {reference.component!r} has no usable amount "
@@ -197,11 +226,9 @@ def atom_balance(design: ExperimentDesign) -> ProtocolCheck:
     reaction = design.request.reaction_smiles.strip()
     parts = reaction.split(">")
     if len(parts) != 3:
-        return _ok(
-            "atom_balance",
-            "warning",
-            "no reaction SMILES to balance" if not reaction else f"not a reaction: {reaction!r}",
-        )
+        if not reaction:
+            return _ok("atom_balance", "warning", "no reaction SMILES to balance")
+        return _fail("atom_balance", "warning", f"not a reaction: {reaction!r}")
     reactant_side, agent_side, product_side = parts
     supplied: set[str] = set()
     inputs = (
@@ -252,9 +279,23 @@ def _split_species(side: str) -> list[str]:
 
 def factor_levels_declared(design: ExperimentDesign) -> ProtocolCheck:
     """Every arm sets levels its factors declare, and sets all of them."""
-    if not design.factors:
-        return _ok("factor_levels_declared", "blocker", "no factors")
     declared = {f.name: {level.label for level in f.levels} for f in design.factors}
+    if not design.factors:
+        # **Not an early return, because "no factors" is the case where every level an arm sets is
+        # undeclared.** The exit came first and exempted exactly that: two arms setting `solvent`
+        # and `ligand` with no factor declared passed a blocker whose subject is "an arm setting a
+        # level the factor does not declare", and `render`'s run sheet — which builds its columns
+        # from `design.factors` — then dropped those values from the sheet the chemist runs from.
+        stray = sorted({name for arm in design.arms for name in arm.levels if not arm.control})
+        if stray:
+            return _fail(
+                "factor_levels_declared",
+                "blocker",
+                "arms set levels for factors this design does not declare: "
+                + ", ".join(stray)
+                + " — declare them as factors, or the run sheet will not show them",
+            )
+        return _ok("factor_levels_declared", "blocker", "no factors")
     problems: list[str] = []
     for arm in design.arms:
         if arm.control:
@@ -281,12 +322,17 @@ def factor_levels_declared(design: ExperimentDesign) -> ProtocolCheck:
 
 def arms_are_distinct(design: ExperimentDesign) -> ProtocolCheck:
     """No two non-replicate arms set the same conditions."""
-    seen: dict[tuple[tuple[str, str], ...], str] = {}
+    # **The setpoints are part of the conditions, and leaving them out made the remedy impossible.**
+    # Keyed on `levels` alone, three arms differing only in temperature collided, and the message
+    # told the chemist to mark one `replicate_of` the other — which the model validator refuses,
+    # because they run different conditions. The advice and the refusal were each right about a
+    # different definition of "the same conditions"; this is the one both now use.
+    seen: dict[tuple[Any, ...], str] = {}
     duplicates: list[str] = []
     for arm in design.arms:
         if arm.replicate_of or arm.control:
             continue
-        key = tuple(sorted(arm.levels.items()))
+        key = (tuple(sorted(arm.levels.items())), design.setpoints_for(arm))
         if key in seen:
             duplicates.append(f"{arm.arm_id} repeats {seen[key]}")
         else:
@@ -320,7 +366,24 @@ def layout_fits(design: ExperimentDesign) -> ProtocolCheck:
     labels = [w.label for w in layout.wells]
     if len(set(labels)) != len(labels):
         return _fail("layout_fits", "blocker", "two arms are placed in the same well")
-    placed = {w.arm_id for w in layout.wells}
+    # **Counted, not set-compared, because "once" is half of what this blocker claims.** The
+    # docstring says the plate holds every arm *once*; a set could only ever see an arm that is
+    # missing, never one placed twice. Measured: three wells over two arms with A1 in two of them
+    # passed as `3 of 96 wells used`, and `run_sheet_rows` — which keys wells by arm — then dropped
+    # a well, so the chemist's run sheet started at run 2 and put A1 at the wrong position.
+    # `Counter` rather than `list.count` in a comprehension — the O(n²) shape `diff._labelled`
+    # carried, kept out of a second place for the same reason and with the same honest weight: at
+    # this list's ceiling (1536 wells) that scan is 22 ms, not the 46 s measured before the
+    # ceilings existed.
+    occupants = Counter(w.arm_id for w in layout.wells)
+    twice = sorted(arm for arm, n in occupants.items() if n > 1)
+    if twice:
+        return _fail(
+            "layout_fits",
+            "blocker",
+            "these arms are placed in more than one well: " + ", ".join(twice),
+        )
+    placed = set(occupants)
     arm_ids = {a.arm_id for a in design.arms}
     if placed != arm_ids:
         unplaced = sorted(arm_ids - placed)
@@ -542,10 +605,24 @@ def _identity(value: str) -> str:
 
 
 def _named_species(design: ExperimentDesign) -> list[str]:
-    """Every human-readable species name the design mentions."""
+    """Every human-readable species name the design mentions.
+
+    **The solvent is in here, and its absence made the blocker unable to catch the commonest
+    exclusion there is.** A process chemist's hard exclusion is nearly always a solvent — an ICH
+    class-2 solvent, or one the plant cannot handle — and `Setpoints.solvent` was the one field
+    this function did not read. Measured: a design forbidding DMF and *running in DMF* reported
+    `1 exclusions honoured`, while the rendered protocol printed `- **Solvent:** DMF`. The per-arm
+    override is the same hole one level down.
+
+    A step's `components` are here for the same reason: a procedure reading "charge SM and DMF"
+    names a reagent, whether or not the charge table lists it.
+    """
     names = [c.name_as_written for c in design.request.components]
     names += [line.component for line in _all_charge_lines(design)]
     names += [level.label for factor in design.factors for level in factor.levels]
+    names += [points.solvent for _, points in _all_setpoints(design)]
+    names += [points.atmosphere for _, points in _all_setpoints(design)]
+    names += [component for step in design.base.steps for component in step.components]
     return names
 
 
@@ -559,6 +636,13 @@ def coverage_is_stated(design: ExperimentDesign) -> ProtocolCheck:
     real = len([a for a in design.arms if not a.control and not a.replicate_of])
     if real >= full:
         return _ok("coverage_is_stated", "note", f"full grid: {real} of {full} combinations")
+    # **Passing, and the sentence reaches the page anyway** — `render_markdown` now lists every
+    # `note`, not only failed checks. Flipping this to `_fail` was the wrong half of the fix: a
+    # fractional factorial is a deliberate, textbook design and `generate_screening_design` emits
+    # them, so every correct reduced plate reported a failed check it could not clear — the check
+    # reads only factors and arms, and nothing in `ExperimentDesign` records the confounding
+    # statement it asks for. That is this file's own `_REQUEST_STAGE` warning, one severity down:
+    # a check that fires on the normal path is one a reader learns to ignore.
     return _ok(
         "coverage_is_stated",
         "note",

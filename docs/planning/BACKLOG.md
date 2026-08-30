@@ -648,7 +648,7 @@ only holds defects can only ever restore the system to what it already intended 
       **Every absolute above is a lower bound, and the case is stronger rather than weaker for it.**
       All of them were measured on a basis the 2026-08-29 re-baseline corrected: the ratchet counted
       the registry's callables, not the tools the graph binds, and under-measured `default` by
-      **8,059 tokens (23%)** — 34,399 reported against 42,458 paid, ceiling now 43,500. So 28,114
+      **8,126 tokens (24%)** — 34,379 reported against 42,505 paid, ceiling now 43,500. So 28,114
       and −5,787 both understate what this narrowing is worth, and the eleven names should be
       re-measured on the bound basis when the row is worked. What does not change is why it is
       blocked: the saving is still partly in endpoint tools no offline floor can see, and it still
@@ -701,6 +701,22 @@ only holds defects can only ever restore the system to what it already intended 
       and the *prompt* cost above is unchanged and paid every turn. Anchors:
       `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
       `science/bo/problem.py`.
+
+- [ ] **The module a chemist actually reads has no test file** — [M], found 2026-08-29 by the
+      fresh-context review that took `render.py` apart
+      (`D-2026-08-29-a-check-a-reader-never-sees-is-not-a-check`). No test anywhere imports
+      `render_markdown`, `run_sheet_rows` or `summarise`: the whole assertion surface across the
+      suite is two lines in `tests/test_protocol_design_tools.py` (`startswith("# SM-3 Suzuki")`
+      and `"## Evidence" in readout.markdown`). Coverage over the protocol test files is **76%**,
+      and the uncovered block is `summarise`'s screen/campaign branch — the sentence a chemist reads
+      about a plate is executed by no test.
+
+      That is why every one of that module's defects was found by reading rather than by running:
+      a document that printed the body's conditions over the arm's, a partial setpoint override
+      blanking a row, fifteen dropped leaf fields including `base.waste` and every unit, and
+      `summarise` branching on the ask rather than the design. Each is fixed and each was verified
+      by hand; none has a regression test, because writing thirty of them is its own change with its
+      own argument about what a rendering test should assert. Anchor: `protocols/render.py`.
 
 - [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
       what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
@@ -971,20 +987,6 @@ and (b) a separate lower-tier record type that retrieval can cite but similarity
 Both change what a `Component` is, so this wants its own ADR and its own measurement of what a
 partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
 by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
-
-## Carry the rejection ledger to the site that covers every source
-
-`ingest_rejections` ships (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`): the
-119.43% well now lands in the ledger with its reason, `gather_evidence` answers the question that
-used to return "I have no such record", and the shape is unmistakably a rejection rather than a
-result. Three refusal sites in `ingest/eln/ord_adapter.py` write to it.
-
-What is not covered is every *other* source. `ingest/eln/json_adapter.py::map_to_ord` — the adapter
-the live 119.43% record actually arrives through — plus `sync.py`'s future-timestamp refusal and
-`ingest.py`'s `IngestError` still refuse into a log line only. The one site that would cover every
-adapter and every source at once is `durable/eln_sync.py`, which already holds `IngestSummary.rejected`
-(id, reason, timestamp) in an async activity needing no pre-flight: one call, and the per-adapter
-writers become redundant rather than multiplied.
 
 ## The PR-gate costs 1.81 s per proposed note, and a backfill is one note per record
 

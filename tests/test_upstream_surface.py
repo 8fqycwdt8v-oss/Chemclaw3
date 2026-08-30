@@ -346,8 +346,8 @@ def test_the_tool_node_still_holds_its_bound_tools_under_tools_by_name() -> None
 
     That ratchet exists to bound what every turn pays before the user speaks, and it can only do
     that if it measures the tools the graph *binds* rather than the callables the registry holds —
-    the two differ by 8,059 tokens, and re-deriving the second was how the file under-measured by
-    23% for eleven weeks (`_bound_tools` records the two causes). `ToolNode` publishes no accessor
+    the two differ by 8,126 tokens, and re-deriving the second was how the file under-measured by
+    24% for eleven weeks (`_bound_tools` records the two causes). `ToolNode` publishes no accessor
     for what it holds, so `_tools_by_name` is the seam, and a rename upstream must be a red build
     rather than a `KeyError` somebody edits around.
 
@@ -367,6 +367,62 @@ def test_the_tool_node_still_holds_its_bound_tools_under_tools_by_name() -> None
         "ToolNode no longer holds its bound tools under `_tools_by_name`; "
         "tests/test_context_floor.py::_bound_tools reads the static prefix off exactly that "
         "attribute and would silently measure nothing"
+    )
+
+
+def test_a_compiled_agent_still_reaches_its_tool_node_at_nodes_tools_dot_bound() -> None:
+    """The other two thirds of the same read, which the pin above did not cover.
+
+    `_bound_tools` navigates `graph.nodes["tools"].bound._tools_by_name`, and that is **three**
+    upstream shapes rather than one: the node *key* `create_agent` gives its `ToolNode`, the
+    `PregelNode.bound` accessor that unwraps it, and the private mapping the test above pins. Only
+    the third was asserted, so a rename of either of the first two left this file green while the
+    ratchet died — loudly, with a `KeyError` or an `AttributeError` at measurement time rather than
+    a wrong number, but in a file whose failure message would say nothing about upstream. This
+    file's whole purpose is that a bump is one conversation instead of six surprises, and two of
+    the three seams behind the repository's only context ratchet were not in the conversation.
+
+    Asserted over upstream's own `create_agent` rather than `build_langgraph_agent`, because the
+    shape belongs to upstream: routing it through the first-party builder would drag the whole
+    middleware chain into an upstream-surface assertion and make a first-party regression look
+    like a dependency bump. `tests/test_langgraph_agent.py`, `test_middleware_order.py`,
+    `test_subagents.py` and `test_tool_schema.py` read the same path and break with it.
+    """
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import tool as create_tool
+    from langgraph.prebuilt.tool_node import ToolNode
+
+    @create_tool
+    def probe(value: str) -> str:
+        """A tool whose only job is to be bound."""
+        return value
+
+    graph = create_agent(
+        model=GenericFakeChatModel(messages=iter([AIMessage(content="")])), tools=[probe]
+    )
+
+    assert "tools" in graph.nodes, (
+        f"a compiled agent no longer names its tool node `tools` (it has {sorted(graph.nodes)}); "
+        "tests/test_context_floor.py::_bound_tools looks the node up by that literal key and "
+        "would raise KeyError instead of measuring the static prefix"
+    )
+    node = graph.nodes["tools"]
+    assert hasattr(node, "bound"), (
+        "a compiled agent's PregelNode no longer exposes the node it wraps as `.bound`; "
+        "tests/test_context_floor.py::_bound_tools unwraps the ToolNode through exactly that "
+        "attribute"
+    )
+    assert isinstance(node.bound, ToolNode), (
+        f"`nodes['tools'].bound` is now {type(node.bound).__name__} rather than a ToolNode; "
+        "tests/test_context_floor.py::_bound_tools reads `_tools_by_name` off it and the "
+        "assertion above this one no longer says anything about what it will find"
+    )
+    assert node.bound._tools_by_name == {"probe": probe}, (
+        "the full path tests/test_context_floor.py::_bound_tools walks — "
+        "`nodes['tools'].bound._tools_by_name` — no longer yields the tools the graph was built "
+        "with, so the context ratchet would measure the wrong surface"
     )
 
 

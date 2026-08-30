@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.eln.ord import OrdReaction
     from chemclaw.ingest.eln.records import default_record_store
     from chemclaw.ingest.eln.sync import IngestSummary, sync_entries
+    from chemclaw.ingest.rejections import record_refusals
     from chemclaw.ingest.sources.base import IngestHalf
     from chemclaw.ingest.sources.registry import active_ingest_source_names, make_data_source
     from chemclaw.science.fingerprints.store import default_molecule_store, default_reaction_store
@@ -208,6 +209,22 @@ async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = T
     `apply_overlap` is True only for a run's first chunk: the late-file overlap window is a
     per-run re-check, so subsequent chunks of the same drain fetch from the advancing cursor
     instead of replaying the whole window once per chunk (quadratic during a backlog drain).
+
+    **Every record this chunk refused reaches the rejection ledger, and this is where that set is
+    known** (`D-2026-08-29-a-bound-derived-twice-is-two-bounds`). It used to be found by a
+    pre-flight inside `OrdJsonAdapter.fetch_new_entries`, which is handed the fetch *floor* and
+    knows neither `since` nor `eln_sync_batch_size` — so it re-derived its caller's chunk from
+    strictly less information than its caller had, and got it wrong in the direction nothing can
+    recover from: the overlap window sorts first, so its flat `entries[:batch_size]` slice fell
+    short of `_BoundedIngest`'s overlap-plus-batch composition by exactly the overlap count, and
+    the entries past it were refused with the cursor already advanced beyond them. A missed row is
+    therefore permanent — no later fetch offers that entry again.
+
+    Here there is nothing to derive: `summary.rejected` *is* what this chunk processed and refused,
+    with the reason the sync reported, so the two sets are one by construction and no entry is
+    mapped a second time to find them. The set is also wider in the way the ledger wants — an entry
+    whose record or fingerprint failed, and one stamped implausibly far in the future, are records
+    this system was offered and would not take, exactly like a message it could not map.
     """
     data_source = make_data_source(source)
     ingest = data_source.ingest
@@ -231,6 +248,11 @@ async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = T
         f"eln sync {source}",
         settings.eln_sync_heartbeat_timeout_seconds,
     )
+    # Never raises, and deliberately not folded into `sync_entries`: that loop is backend-agnostic
+    # core with every dependency injected, and a database write it did not take as a parameter would
+    # end that property. The ledger is a side record about the run, so the durable layer that owns
+    # the run's I/O writes it.
+    await record_refusals(source, {entry.entry_id: entry.reason for entry in summary.rejected})
     return SyncChunk(summary=summary, has_more=bounded.truncated)
 
 

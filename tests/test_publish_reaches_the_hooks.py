@@ -1351,6 +1351,45 @@ def test_an_unstated_default_and_the_value_it_resolves_to_are_one_record(
         )
 
 
+def test_a_presentational_argument_does_not_fork_a_composite_s_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Moving the identity onto the result put a *presentational* argument inside it.
+
+    `compute_thermochemistry` takes `top_bands`, and it changes no thermodynamic value: it truncates
+    `modes` to `strongest_bands(limit)` on the way out, for a caller's context budget. Everything
+    that is a measurement — `structure_id`, the frequencies that survive truncation by contract
+    (`mode_count`, `imaginary_frequencies_cm`, `lowest_wavenumbers_cm`), and every energy — is
+    identical between the two calls below. Hashing the whole payload made them two permanent rows,
+    which is the "two requests, one measurement" defect the payload hash was adopted to fix, coming
+    back through the other seam.
+
+    The pair below is the assertion in both directions: the presentational argument collapses, and
+    a real second measurement (a second temperature, asserted in
+    `test_asking_the_same_composite_twice_is_one_record`) still does not.
+    """
+    calc_tools = _calc_stack(monkeypatch)
+    queued = _publishing(monkeypatch)
+
+    async def _two_calls() -> None:
+        manager = calc_tools.server._tool_manager
+        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO", "top_bands": 200})
+
+    asyncio.run(_two_calls())
+
+    records = [record for record in queued if record.payload_kind == "ThermochemistryResult"]
+    assert len(records) == 2, "both calls must reach the hook"
+    assert records[0].payload["modes"] != records[1].payload["modes"], (
+        "the two calls returned the same `modes` list, so this test would pass without proving "
+        "anything — pick a `top_bands` that actually truncates against this stack"
+    )
+    assert records[0].calc_ref == records[1].calc_ref, (
+        "how many IR bands the caller asked to see forked the permanent identity of the "
+        "measurement: same molecule, same temperature, same free energy, two rows kept forever"
+    )
+
+
 def test_a_composite_recomputed_after_the_calculator_moved_is_not_dropped_as_a_duplicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

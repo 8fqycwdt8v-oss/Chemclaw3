@@ -1057,9 +1057,24 @@ pods. `knowledge-sync.sh`'s `loop` swallows a failed refresh on purpose (a dead 
 the pod), so the pod serves the frozen snapshot indefinitely and every answer keeps citing it.
 `chemclaw_knowledge_sync_age_seconds` is the age of the newest note on that pod's tree; **-1 means
 the tree holds no note at all**, which is a volume that was never populated rather than a stale one.
+That sentinel fires this same alert — the rule is `age > threshold or age < 0`, because -1 is never
+greater than a positive threshold and the comparison alone could not reach the case this paragraph
+calls the sharper one. Both arms are behind the one opt-in, so a site that does not use the
+knowledge graph is not paged for an empty tree it meant to have. On a release with
+`knowledge.sync.enabled` a -1 is never a pod that is merely still starting: the `knowledge-sync-init`
+init container fills the tree before the app container starts, and fails the pod rather than let it
+serve a half-published one — so -1 there means the publish produced nothing. Read
+`kubectl logs <pod> -c knowledge-sync-init` first in that case.
+
 Read the sync sidecar's log and its restart count (its `staleness` liveness probe is the sync-side
 half of this signal) before concluding the corpus is merely quiet — this gauge cannot tell those
 two apart, which is why its threshold is yours to state.
+
+The gauge's underlying stat scan is cached for `CHEMCLAW_KNOWLEDGE_AGE_SCAN_TTL_SECONDS` (300 s),
+so a reading can lag a *refresh* by up to that window. It cannot lag a **freeze**: the age is
+recomputed from the clock on every scrape against the cached mtime, so a corpus that stopped
+arriving keeps counting up in real time. The window only ever makes the number too large, never too
+small.
 
 ### chemclaw.correctness — an invariant is at risk
 

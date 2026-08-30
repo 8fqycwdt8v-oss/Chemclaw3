@@ -11,6 +11,7 @@ import logging
 import re
 import time
 import uuid
+from math import isfinite
 from typing import Any
 
 from fastapi import FastAPI
@@ -410,6 +411,48 @@ def clip_for_log(value: str, limit: int = _MAX_LOGGED_CHARS) -> str:
     return value if len(value) <= limit else f"{value[:limit]}…(+{len(value) - limit})"
 
 
+# How deep `_json_safe` walks before it names what it stopped at rather than descending.
+#
+# **Not reachable through `input`, and the arithmetic is why it is this number rather than a small
+# one.** `json.loads` accepts nesting to the interpreter's recursion limit, but the clip above turns
+# any `input` past `_MAX_LOGGED_CHARS` characters into a string first, and a nested container costs
+# at least two characters per level — so whatever survives that clip is at most
+# `_MAX_LOGGED_CHARS // 2` deep. Set *at* the clip rather than below it for that reason: a floor of
+# 20 would fire on a caller's legitimate 25-deep, 51-character list and replace the value the 422
+# exists to show them. What it does floor is the keys the clip does not cover (`ctx`, and whatever a
+# future pydantic adds), which are shallow today and promised by nobody.
+_MAX_ERROR_DEPTH = _MAX_LOGGED_CHARS
+
+
+def _json_safe(value: Any, depth: int = 0) -> Any:
+    """`value` with every non-finite float replaced by its name, bounded in depth.
+
+    **`json.dumps` refuses NaN and `jsonable_encoder` does not convert it**, so a non-finite float
+    reaching `JSONResponse.render` raises `ValueError` *inside the 422 handler* — which the
+    observability middleware then answers as a 500. Measured: `{"temperature_c": NaN}` in a design
+    body (`NaN` is a literal Python's `json.loads` accepts) came back as
+    `500 The request could not be completed due to an internal error`, while
+    `chemclaw_request_validation_failures_total` had already booked a 422 nobody was ever sent. The
+    caller's mistake is a validation failure and must read as one.
+
+    Replaced with the float's own name rather than dropped, because `input` is what tells the client
+    which value to fix, and `null` would say the field was empty when it was `NaN`.
+    """
+    if isinstance(value, float):
+        # `isfinite` rather than `!= value`, so ±inf is caught alongside NaN — both are refused
+        # by `json.dumps`, and `Infinity` is a `json.loads` literal exactly as `NaN` is.
+        return value if isfinite(value) else repr(value)
+    if depth >= _MAX_ERROR_DEPTH:
+        # Named rather than truncated silently, for `clip_for_log`'s reason: a reader cannot tell a
+        # dropped value from an absent one.
+        return f"…(nested past {_MAX_ERROR_DEPTH})"
+    if isinstance(value, dict):
+        return {key: _json_safe(item, depth + 1) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item, depth + 1) for item in value]
+    return value
+
+
 def _render_errors(errors: list[Any]) -> list[Any]:
     """Pydantic's error objects with the caller's own bytes bounded — the 422's whole payload.
 
@@ -442,7 +485,7 @@ def _render_errors(errors: list[Any]) -> list[Any]:
             trimmed["loc"] = [
                 clip_for_log(part) if isinstance(part, str) else part for part in trimmed["loc"]
             ]
-        rendered.append(trimmed)
+        rendered.append(_json_safe(trimmed))
     return rendered
 
 
