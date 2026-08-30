@@ -469,6 +469,19 @@ class PostgresDesignStore:
         `parent_revision` raises. The two are the same fact reaching the writer by different routes
         — the revision you built on is not the head any more — and a caller that had to tell them
         apart would be a caller with two ways to do one thing.
+
+        **That is history, and the paragraph above is kept because it explains the handler rather
+        than because it still describes the race.** `_SELECT_HEAD` took `FOR UPDATE` afterwards, for
+        a different defect (a `set_status` losing to a concurrent append), and the lock serialises
+        these two writers as a side effect: the loser now waits, reads the moved head, and is
+        refused by the `parent_revision` comparison before it ever reaches the INSERT. Measured over
+        5x100 concurrent pairs, the primary key decided **none** of them, and replacing this handler
+        with a raised `AssertionError` leaves the whole suite green — no test reaches it.
+
+        It stays anyway, as a backstop rather than a control anybody relies on: it is one `except`
+        clause on a live statement, it costs nothing, and it is what keeps a future writer that
+        skips the lock from serving a 500 where a 409 belongs. What is *not* claimed is that
+        anything proves it works.
         """
         require_storable(
             design,

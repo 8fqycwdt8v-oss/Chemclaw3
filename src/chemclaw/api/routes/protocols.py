@@ -355,7 +355,12 @@ async def post_status(
         raise HTTPException(
             status_code=409, detail={"code": "revision_conflict", "message": str(exc)}
         ) from exc
-    except ChemclawError as exc:  # pragma: no cover - the store raises only the two above today
+    except ChemclawError as exc:
+        # No `pragma: no cover` and no claim that this cannot happen: the comment here said "the
+        # store raises only the two above today", and `set_status` runs `require_storable(...,
+        # reason=...)` over a reason a browser collects from a chemist — so a NUL, a C0 character
+        # or an unpaired surrogate in it reaches exactly this clause, correctly, as a 422. The
+        # pragma also suppressed coverage on a reachable branch, which is how the belief survived.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return Response(status_code=204)
 

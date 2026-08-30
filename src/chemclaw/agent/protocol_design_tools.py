@@ -20,6 +20,7 @@ where the model has an answer it likes and no reason to go looking.
 from __future__ import annotations
 
 import logging
+import re
 
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.session_store import owner_permits
@@ -60,6 +61,43 @@ _LISTING_LIMIT = 50
 
 def _store() -> DesignStore:
     return default_design_store()
+
+
+#: Digit runs, for relating a stated value to the words offered as evidence for it.
+_DIGITS = re.compile(r"\d+")
+
+
+def _quote_supports(value: str, quote: str) -> bool:
+    """Whether these words plausibly state this value.
+
+    **`stated` attests a *value*, and only the *quote* was ever checked.** Both halves passed as
+    long as the quote occurred somewhere in the message, and any substring occurs somewhere: against
+    a chemist who wrote "We need to get the Suzuki on the deactivated chloride working. Try what you
+    think.", a model stored `scale='5 g'` quoting `'working'`, `plate_format='96'` quoting `'the'`,
+    `max_runs='96'` quoting `'Suzuki'` and `deadline='2026-09-01'` quoting `'.'` — four limits the
+    chemist never named, recorded as their own words. Moving the haystack out of the model's reach
+    fixed who supplies the text and left what `stated` means untouched.
+
+    Two rules, and the second is skipped rather than guessed at:
+
+    1. **The quote is a span, not a word.** Two words, or one word the value itself contains — which
+       is what separates `'250 mg'`, `'by Friday'` and `'96-well'` from `'working'` and `'.'`.
+    2. **When the quote states figures, they have to be the value's figures.** A quote reading "no
+       more than 48 runs" cannot be the evidence for `max_runs='96'`. A quote carrying no digits at
+       all is left to rule 1, because a chemist who wrote "five grams" or "by Friday" stated the
+       thing and the model normalised it — refusing that would push a real constraint into
+       `inferred`, which is the mislabelling this check exists to prevent, running the other way.
+    """
+    words = quote.split()
+    value_text = value.lower()
+    # Overlap in either direction: the value can contain the word (`'96 well'` for `'96'`) or the
+    # word can contain the value (`'96-well'`).
+    if len(words) < 2 and not any(
+        word.lower() in value_text or value_text in word.lower() for word in words if word
+    ):
+        return False
+    quote_digits = set(_DIGITS.findall(quote))
+    return not quote_digits or set(_DIGITS.findall(value)) <= quote_digits
 
 
 def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str | None) -> None:
@@ -120,10 +158,24 @@ def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str | N
     ]
     if missing:
         raise ChemclawError(
-            "these slots are marked `stated` but their quote is not in the text you were given: "
+            "these slots are marked `stated` but their quote is not in the message that started "
+            "this turn: "
             + "; ".join(missing)
-            + ". Use basis='inferred' for your own judgment and quote the chemist verbatim when "
-            "you mark something stated."
+            + ". Only that message is checkable — a quote from an earlier turn cannot be verified "
+            "here, so ask the chemist to restate it if it matters. Use basis='inferred' for your "
+            "own judgment and quote the chemist verbatim when you mark something stated."
+        )
+    unsupported = [
+        f"{name}: value {field.value!r} is not supported by quote {field.quote!r}"
+        for name, field in slots.items()
+        if field.basis == "stated" and not _quote_supports(field.value, field.quote)
+    ]
+    if unsupported:
+        raise ChemclawError(
+            "these slots are marked `stated` but their quote does not say their value: "
+            + "; ".join(unsupported)
+            + ". The quote has to be the words that state the value, not any words from the "
+            "message. Use basis='inferred' when the value is your own reading."
         )
 
 

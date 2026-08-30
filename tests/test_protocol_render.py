@@ -264,3 +264,51 @@ def test_a_diff_reads_in_the_documents_own_order() -> None:
     assert paths[0].startswith("request.")
     arms = [path for path in paths if path.startswith("arms.")]
     assert arms[:3] == ["arms.A1.note", "arms.A2.note", "arms.A3.note"]
+
+
+def _charged(*lines: ChargeLine) -> ExperimentDesign:
+    """A design whose charge table is exactly these lines."""
+    return _design(
+        base=ProtocolBody(
+            setpoints=Setpoints(temperature_c=25, time_h=1, solvent="THF"),
+            charge=list(lines),
+        )
+    )
+
+
+def test_an_edit_to_a_repeated_charge_line_is_attributed_to_the_line_it_was_made_on() -> None:
+    """`_labelled`'s disambiguation, which nothing exercised with a duplicate key.
+
+    `base.charge` is keyed by `component`, and a solvent charged in two portions — an addition and
+    a rinse — is entirely ordinary. Without the disambiguation the second line overwrites the first,
+    so a chemist editing the *first* toluene charge from 5 mL to 9 mL diffs to nothing at all: the
+    edit vanishes from the one table this system keeps in order to learn from those edits.
+    """
+    before = _charged(
+        ChargeLine(component="toluene", limiting=True, volume_ml=5.0),
+        ChargeLine(component="toluene", volume_ml=2.0),
+    )
+    after = _charged(
+        ChargeLine(component="toluene", limiting=True, volume_ml=9.0),
+        ChargeLine(component="toluene", volume_ml=2.0),
+    )
+    changes = diff_designs(before, after).changes
+    assert [(c.path, c.before, c.after) for c in changes] == [
+        ("base.charge.toluene#0.volume_ml", "5.0", "9.0")
+    ]
+
+
+def test_deleting_an_unrelated_line_is_not_an_edit_to_the_repeated_one() -> None:
+    """The correction to the first fix: an ordinal within the list renumbers on any deletion."""
+    before = _charged(
+        ChargeLine(component="water", volume_ml=1.0),
+        ChargeLine(component="toluene", limiting=True, volume_ml=5.0),
+        ChargeLine(component="toluene", volume_ml=2.0),
+    )
+    after = _charged(
+        ChargeLine(component="toluene", limiting=True, volume_ml=5.0),
+        ChargeLine(component="toluene", volume_ml=2.0),
+    )
+    paths = diff_designs(before, after).paths
+    # Only the removed line. Neither toluene moved, so neither may appear.
+    assert all(path.startswith("base.charge.water") for path in paths), paths

@@ -15,7 +15,6 @@ from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar, get_args
 from uuid import uuid4
 
-import psycopg
 import pytest
 
 from chemclaw.core.config import settings
@@ -573,13 +572,22 @@ def test_two_writers_racing_on_one_head_lose_as_a_revision_conflict() -> None:
     """The loser of a real race is told the same thing a stale `parent_revision` is told.
 
     Postgres only, because the race is one `core.db`'s READ COMMITTED connections make possible and
-    a single-threaded dict cannot: both writers read `head=1`, both build revision 2, and what
-    actually decided between them was the `(design_id, revision)` primary key. That surfaced as a
-    raw `psycopg.errors.UniqueViolation` nothing translated, so the second of "two chemists editing
-    one plate" got a **500 with no `revision_conflict` code** from `POST
-    /protocols/{id}/revisions` — precisely the case the 409 exists for. No artificial barrier is
-    needed and none is used: `asyncio.gather` over two real appends reproduces it, which is how it
-    was found.
+    a single-threaded dict cannot. No artificial barrier is needed and none is used:
+    `asyncio.gather` over two real appends reproduces it, which is how it was found.
+
+    **What decides it is `_SELECT_HEAD`'s `FOR UPDATE`, and this docstring used to name the primary
+    key.** That was true when it was written — both writers read `head=1`, both built revision 2,
+    and `(design_id, revision)` stopped the second as a raw `psycopg.errors.UniqueViolation` nobody
+    translated, which is the 500 the 409 exists to prevent. The lock was then added for a different
+    defect and serialises these two as a side effect, so the loser is refused by the
+    `parent_revision` comparison and never reaches the INSERT: measured over 5x100 pairs, the
+    primary key decided none of them, and replacing that handler with a raised `AssertionError`
+    leaves the suite green.
+
+    So what this test proves is the contract — exactly one writer wins, the loser is told
+    `RevisionConflict`, and one revision 2 exists — and not the mechanism. The assertion that used
+    to sit below, that the loser "cannot pass by inheritance" from `UniqueViolation`, was emphatic
+    about a branch nothing reaches; it is gone rather than left looking load-bearing.
     """
 
     async def _body() -> None:
@@ -617,10 +625,6 @@ def test_two_writers_racing_on_one_head_lose_as_a_revision_conflict() -> None:
 
         loser = refusals[0]
         assert isinstance(loser, RevisionConflict)
-        # The whole defect, stated as its own assertion: a `UniqueViolation` escaping here is what
-        # the route turns into a 500, and `RevisionConflict` is not one, so this cannot pass by
-        # inheritance.
-        assert not isinstance(loser, psycopg.errors.UniqueViolation)
         assert "revision 2" in str(loser)
 
         # And exactly one revision 2 exists — the winner's, whichever it was.

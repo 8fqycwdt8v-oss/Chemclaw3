@@ -203,7 +203,11 @@ class Factor(BaseModel):
     name: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
     kind: Literal["categorical", "continuous"]
     role: SpeciesRole = _ROLE_FIELD
-    levels: list[FactorLevel] = Field(min_length=2)
+    # Bounded like every sibling collection, and it was the one that was not. A design is
+    # browser-supplied, and 1536 arms carrying 120 levels each is a legal 2.76 MB document inside
+    # `service_max_request_bytes` that costs ~1.8 s of server CPU to accept. A screen varying one
+    # factor over more than 96 levels is not a screen anybody runs on a plate.
+    levels: list[FactorLevel] = Field(min_length=2, max_length=96)
     unit: str = ""
 
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
@@ -349,8 +353,9 @@ class ProtocolArm(BaseModel):
     # reported against. Not an index, because arms get reordered by a randomised run order and a
     # positional key would then name a different experiment.
     arm_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-    # `{factor_name: level_label}`. Empty for a single experiment.
-    levels: dict[str, str] = Field(default_factory=dict)
+    # `{factor_name: level_label}`. Empty for a single experiment. Bounded for the reason
+    # `Factor.levels` is: this is the per-arm half of the same unbounded document.
+    levels: dict[str, str] = Field(default_factory=dict, max_length=64)
     # Only what differs from `ProtocolBody`. A screen whose arms each restated the whole body would
     # be N protocols rather than one design, and a reader could not see what is being varied.
     setpoints: Setpoints | None = None
@@ -442,12 +447,21 @@ class ExperimentDesign(BaseModel):
     # cap) and diffs in 0.060 s, which is the measurement that says the ceilings, not the cap, are
     # what bound the cost.
     #
-    # **What is bounded is the lists a diff keys by an identifier**, which are the six in
-    # `diff._KEYED_LISTS` and the only ones whose cost was ever superlinear. The per-item
-    # collections below them — `Factor.levels`, `ProtocolArm.levels`, `ProtocolStep.components`,
-    # `Analytic.measures`, `EvidenceRef.supports` — are index-keyed, walked linearly, and bounded
-    # by the body cap alone. That is deliberate: a ceiling with no cost behind it is a refusal a
-    # chemist meets for no reason.
+    # **Every collection in this module is bounded, and the comment here used to say otherwise.**
+    # It read "what is bounded is the lists a diff keys by an identifier, which are the six in
+    # `diff._KEYED_LISTS`" and then named `Factor.levels`, `ProtocolArm.levels`,
+    # `ProtocolStep.components`, `Analytic.measures` and `EvidenceRef.supports` as deliberately
+    # unbounded — while the same commit had in fact bounded `components`, `objectives`, `forbidden`,
+    # `steps`, `in_process_controls` and `hazards`, none of which is keyed. The rule was rewritten
+    # twice on the way to being wrong twice; what follows is the count as it stands.
+    #
+    # Keying is not the criterion, and superlinearity was never the whole cost. The two `levels`
+    # collections were genuinely unbounded until 2026-08-30, and a design carrying 1536 arms with
+    # 120 levels each is a legal 2.76 MB document inside `service_max_request_bytes` that costs
+    # ~1.8 s of server CPU to parse, check and diff — linear work, and still a browser-supplied
+    # request holding a worker for nearly two seconds. A bound belongs on anything a caller can
+    # repeat, and the number is what a chemist could plausibly mean rather than what the machine
+    # could survive.
     factors: list[Factor] = Field(default_factory=list, max_length=50)
     arms: list[ProtocolArm] = Field(default_factory=list, max_length=1536)
     layout: PlateLayout | None = None
