@@ -401,6 +401,30 @@ def test_a_promotion_cannot_execute_a_tool_that_needs_no_arguments() -> None:
     assert "not valid JSON" in str(results[0].content)
 
 
+def test_no_tool_in_the_registry_declares_the_sentinel_as_a_parameter() -> None:
+    """The sentinel's one collision risk, checked against the live registry rather than asserted.
+
+    `_UNPARSED_ARGUMENTS` is dunder-flanked so it cannot be a real parameter name, and
+    `agent/model_calls.py` says so — a claim with no producer is exactly what this repository keeps
+    finding. The consequence of a collision is not cosmetic: `refuse_unparsed_arguments` reads the
+    key off `request.tool_call["args"]` and raises before the body, so a tool that legitimately
+    declared it would have **every** call refused, on every turn, with a message about JSON that
+    parsed fine.
+    """
+    from chemclaw.agent.chemclaw_agent import _capability_tools
+    from chemclaw.agent.model_calls import _UNPARSED_ARGUMENTS
+
+    offenders = [
+        fn.__name__
+        for fn in _capability_tools()
+        if _UNPARSED_ARGUMENTS in inspect.signature(fn).parameters
+    ]
+    assert offenders == [], (
+        f"{offenders} declare {_UNPARSED_ARGUMENTS!r}, so every call to them would be refused "
+        "before the body by `refuse_unparsed_arguments`"
+    )
+
+
 def test_the_model_corrects_inside_its_own_loop_and_the_correction_runs() -> None:
     """The property the three hand-built substitutes existed to fake, obtained for free.
 

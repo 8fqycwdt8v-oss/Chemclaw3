@@ -758,11 +758,17 @@ def test_an_unparseable_tool_call_reaches_the_stream_as_a_real_tool_failed_event
     # `reason` separates a gate refusal from a fault, and this is a fault: `Chemclaw3_ui` renders
     # `None` in the failure red, which is what a call that could not run should look like.
     assert failed[0].reason is None
-    # **This is the assertion that proves the id survived**, because `ToolFailedEvent` does not
-    # carry it and the pairing is what consumes it: `_refusal_message` returns `status="success"`
-    # deliberately, so `failed_calls` matching the refusal's `tool_call_id` is the only thing that
-    # can suppress it. A promotion that dropped the id would show a failure *and* a result here,
-    # with the refusal sentence joining the grounding corpus `score_answer` reads.
+    # The pairing, which is what `failed_calls` exists for: `_refusal_message` returns
+    # `status="success"` deliberately, so matching the refusal's `tool_call_id` is the only thing
+    # that can suppress it, and without the suppression the refusal sentence joins the grounding
+    # corpus `score_answer` reads.
+    #
+    # **It does not prove the id is the model's own**, and saying so here would be wrong: the
+    # announcer and the refusal read the same `request.tool_call["id"]`, so they pair with each
+    # other whatever it is — a promotion writing `""` survives this assertion (measured). What the
+    # real id buys is the pairing with the `tool_call` *event* a consumer already rendered, and one
+    # distinct id per broken call in a reply that holds several. That is asserted at the producer,
+    # in `tests/test_invalid_tool_calls.py`, against the signal itself.
     assert not [event for event in events if event.type == "tool_result"], (
         "a call that could not run must not also produce a result the model is told to weigh"
     )

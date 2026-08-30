@@ -1602,3 +1602,53 @@ measuring nothing.
 middleware writes its guard twice — once per hook. The mutation landed on the sync path while the
 test drove the async one, so the guard read as unpinned when it was pinned. The parametrized test
 that came out of that now covers both, which is the coverage the accident found.
+
+
+## 2026-08-30 — the fourth pass, and the signal I kept ignoring
+
+The fourth review of one subject ended in a rewrite: `~180` lines of retry machinery replaced by
+`~20` lines that move a call from one field to another. What is worth carrying is not the design —
+it is that **three rounds of "found a defect, fixed the defect" was itself the finding**, and I read
+it three times as three unrelated bugs.
+
+**The rule: when consecutive fixes each introduce the next defect, stop fixing and look at the
+design.** The diagnostic is not the count. It is that every fix *rebuilt something the surrounding
+system already provides* — a loop ceiling because the loop cap could not see the extra model call,
+a reporting ceiling because nothing bounded the corrective message, an announcement rule because no
+`tool_failed` could be raised, a call-id guard because the announcement had no id. Four hand-built
+substitutes for four things a graph iteration gives away. A mechanism that needs its own version of
+what it sits next to is standing outside it.
+
+**A second-order mistake, and the one I am least comfortable with: I propagated two agent-supplied
+specifics into the permanent record without reading either source.** `"0 failures / 3 held"` was
+quoted as `Chemclaw3_ui`'s header; the component renders `` `${held} refusal${...}` `` and omits the
+failure clause entirely at zero, so the string I quoted cannot be produced. `841 kB` was
+unreproducible — 623 kB at the commit it described. Both reached four first-party files, an ADR and
+the ledger, because a subagent reported them and they sounded like measurements.
+
+**The rule: a number or a quoted string from a subagent is a claim, not a measurement, until I have
+opened the file or run the thing.** The cost of checking is one `grep`; the cost of not checking is
+a false fact in a record that outlives the session. Quoting a *file I have not read* is the specific
+act to refuse — a measurement I can at least re-run.
+
+**Third: a merge resolver that reconciles two append-only registers by key must treat a *changed*
+row as a conflict, not a duplicate.** Mine keyed the ADR ledger by id and did `rows[id] = line`
+iterating ours-then-theirs, so `main`'s copy won every collision and silently discarded a correction
+the branch had made to an existing row. It reported a clean merge. Nothing was lost that a test
+could see, which is exactly why it survived to be noticed a week later.
+
+**Fourth, on tests that pass under the defect they were written for.** The parse-error test pinned
+its 79-character fixture, which fit inside both the head window and the tail window — so the
+head-bounded implementation it was written to reject passed it. A bound is only tested by a fixture
+that *exceeds* it, and the honest form is a diff against the alternative implementation rather than
+a property both share. `test_the_parse_error_keeps_its_reason_where_head_bounding_would_lose_it`
+now asserts `"Expecting property name" not in _bounded_text(raw)` beside the positive case, so the
+two cannot silently converge again.
+
+**Fifth: assert the mutation is caught by the test written for it, not merely by the suite.** My
+first mutation run used `-x`, so a mutation was reported "CAUGHT" by whichever test ran first. Two
+of seven were caught by an older test and one — dropping the model's call id — *survived* the test
+whose comment claimed to prove it, because the announcer and the refusal read the same
+`request.tool_call["id"]` and pair with each other whatever it is. That comment was a false claim
+about a control, written by me, one commit after writing the rule against them. It is corrected in
+place and the real proof moved to the producer.

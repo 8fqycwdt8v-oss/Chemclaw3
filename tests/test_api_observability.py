@@ -703,11 +703,17 @@ def test_a_gate_refusal_is_not_reported_to_the_chemist_as_a_failure() -> None:
     """A refusal is the control working, and the first version of this sentence called it a fault.
 
     `D-2026-08-28-a-refusal-the-wire-cannot-name-is-a-fault-to-everyone-downstream` exists to stop
-    exactly this, and `_TurnLedger.tool_refusals`' own comment says a refusal is "the control
-    working, which must not be read as a failure". The first version of this sentence added the two
-    together and printed the sum as "N tool call(s) failed", so a dry run the chemist themselves
-    switched on reported three failures — while `Chemclaw3_ui`'s trace header three lines above
-    read `0 failures / 3 held`, from the same events.
+    exactly this, and `core/turn_cost.TurnCost.tool_refusals`' own comment says a refusal is "the
+    control working, which must not be read as a failure". The first version of this sentence added
+    the two together and printed the sum as "N tool call(s) failed", so a dry run the chemist
+    themselves switched on reported three failures — while `Chemclaw3_ui`'s trace header, built
+    from the same events, read `3 refusals`.
+
+    Both of those citations were wrong when this test was written, and both were checked before
+    being corrected: the comment is on `TurnCost`, not on `_TurnLedger` (which carries none), and
+    `TracePanel.troubleLabel` renders `` `${held} refusal${held === 1 ? '' : 's'}` `` and omits the
+    failure clause entirely when `problems === 0` — so `0 failures / 3 held` was a string nobody
+    could see, quoted from a file nobody had read.
 
     The remedy differs too, and that is the point of separating them: a fault is something to read,
     a refusal is something to approve.
@@ -721,7 +727,7 @@ def test_a_gate_refusal_is_not_reported_to_the_chemist_as_a_failure() -> None:
 def test_a_failure_and_a_refusal_in_one_turn_are_counted_apart() -> None:
     """Both happened, so both are named; the fault takes the remedy because it is the fault."""
     message = _silent_turn(called=["find_notes"] * 4, tool_failures=1, tool_refusals=2)
-    assert "4 tool call(s) ran, 1 failed, 2 refused by a gate" in message
+    assert "4 tool call(s) attempted, 1 failed, 2 refused by a gate" in message
     assert "The failure(s) reported above are the place to start" in message
 
 
@@ -732,8 +738,72 @@ def test_a_turn_where_nothing_failed_still_gets_the_narrower_question_advice() -
     twenty-nine calls deleted the only useful next step on the very shape the guard exists for.
     """
     message = _silent_turn(called=["find_notes"] * 29)
-    assert "29 tool call(s) ran." in message
+    assert "29 tool call(s) attempted." in message
     assert "A narrower or more specific question is the useful next step" in message
+
+
+def test_a_refused_call_is_not_reported_as_a_call_that_ran() -> None:
+    """`called_tools` counts calls *announced*, so printing it as "ran" double-counts a refusal.
+
+    A dry run in which the chemist's three calls were all held read "3 tool call(s) ran, 3 refused
+    by a gate" — six intents where there were three, and three bodies said to have executed that a
+    gate stopped before the body. The total is the attempts; the failures and refusals are subsets
+    of it, and the wording now says so.
+    """
+    message = _silent_turn(called=["find_notes"] * 3, tool_refusals=3)
+    assert "3 tool call(s) attempted, 3 refused by a gate" in message
+    assert "ran" not in message, f"a refused call is reported as one that ran: {message}"
+
+
+def test_a_turn_that_wrote_nothing_is_counted_on_the_empty_answer_metric() -> None:
+    """The counter, behaviourally — it had only a name-presence check in the metric inventory.
+
+    A name in `core/metrics.py` proves the series is declared, never that anything increments it,
+    and this repository has twice found a control whose only evidence was its own declaration. The
+    negative half is the one that would actually rot: a guard that fired on every turn would still
+    satisfy a "the counter moved" assertion.
+    """
+    from chemclaw.agent.session import TurnSession
+    from chemclaw.api.runner import _empty_answer_event
+    from chemclaw.api.runner_trace import ToolCallTrace
+
+    before = METRICS.value("chemclaw_turn_empty_answers_total")
+    answered = _ledger(answer_parts=["the pKa is 4.2"])
+    assert _empty_answer_event(TurnSession(session_id="s1"), ToolCallTrace(), answered) is None
+    assert METRICS.value("chemclaw_turn_empty_answers_total") == before, (
+        "a turn that produced prose was counted as an empty answer"
+    )
+
+    assert (
+        _empty_answer_event(TurnSession(session_id="s1"), ToolCallTrace(), _ledger(answer_parts=[]))
+        is not None
+    )
+    assert METRICS.value("chemclaw_turn_empty_answers_total") == before + 1
+
+
+def test_an_answer_of_nothing_but_whitespace_is_still_an_empty_answer() -> None:
+    """`.strip()` is what makes that true, and nothing asserted it.
+
+    A model that streams a newline, or a lone space, produces `answer_text` that is truthy and
+    empty to a reader — the exact silent failure this guard exists for, arriving through the one
+    input that would slip past a bare truthiness test. `Chemclaw3_ui` renders it as an answer
+    bubble with nothing in it.
+    """
+    from chemclaw.agent.session import TurnSession
+    from chemclaw.api.runner import _empty_answer_event
+    from chemclaw.api.runner_trace import ToolCallTrace
+
+    for blank in ("\n", " ", "\t\n  "):
+        event = _empty_answer_event(
+            TurnSession(session_id="s1"), ToolCallTrace(), _ledger(answer_parts=[blank])
+        )
+        assert event is not None, f"an answer of {blank!r} passed the guard as prose"
+        assert event.code == "empty_answer"
+
+    kept = _empty_answer_event(
+        TurnSession(session_id="s1"), ToolCallTrace(), _ledger(answer_parts=[" the pKa is 4.2 "])
+    )
+    assert kept is None, "a real answer with surrounding whitespace must not be called empty"
 
 
 def test_the_sentence_does_not_read_as_two_sentences_with_a_stray_bracket() -> None:

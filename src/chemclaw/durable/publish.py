@@ -84,6 +84,14 @@ _BAD_DATA_TYPES = [
     # its verdict, and the identical call gets the identical refusal. The retryable neighbour is
     # `CalcServerError`, which means nobody answered at all.
     "ToolReturnedFailure",
+    # A tool call the model mis-serialised, refused by `agent/model_calls.refuse_unparsed_arguments`
+    # before the body runs. It is here because `tests/test_publish.py` walks the hierarchy and every
+    # `ChemclawError` must be classified, and it is *non*-retryable for the ordinary reason: the
+    # arguments are a fact about the emission, so an identical retry re-reads the identical
+    # unparseable document. It is also unreachable across an activity boundary today — a promoted
+    # call is refused in the conversation layer's tool chain, and no activity invokes that chain —
+    # so this row is the classification rather than a live policy.
+    "UnparsedArguments",
     # A turn tried to change the skills tree (`chemclaw.agent.skill_backend`). An
     # `AuthorizationError` subclass, and registered for the same reason every other one is: Temporal
     # matches by class *name*, and `tests/test_publish.py` walks that hierarchy so a subclass cannot

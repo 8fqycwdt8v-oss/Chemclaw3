@@ -112,8 +112,9 @@ logger = logging.getLogger(__name__)
 #
 # **Dunder-flanked because it must not collide with a real parameter**, and unparseable arguments
 # are exactly the case where the model's own intent for the argument names is unknowable. No tool
-# in this tree declares a parameter of this shape, and `tests/test_tool_schema.py` scans the
-# registry so a future one fails the suite rather than silently swallowing a promotion.
+# in this tree declares a parameter of this shape, and `tests/test_invalid_tool_calls.py` scans the
+# live registry so a future one fails the suite rather than silently swallowing a promotion — a
+# tool that did declare it would have its own calls refused before the body, on every turn.
 _UNPARSED_ARGUMENTS = "__unparsed_arguments__"
 
 
