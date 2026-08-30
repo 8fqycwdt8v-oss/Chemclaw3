@@ -148,6 +148,34 @@ was real and reached `evals/live.py` and `cli/live_probes.py`.
 **The rule that leaves:** a resolver that reconciles two append-only registers by key must treat a
 *changed* row as a conflict, not as a duplicate. Ours reported a clean merge over a discarded edit.
 
+## Measured on the live stack
+
+`make live-storm --families CF` against the mock model: **11/11 checks pass**, including the one
+that had been permanently red — `an unparseable argument document is reported, not swallowed`, now
+`tools_failed=['find_notes']` where it read `tools_failed=[]`. One turn of the same behaviour driven
+by hand, with the records the storm cannot see:
+
+```
+tool_call    find_notes {"__unparsed_arguments__": "'{\"text\": }'"}
+tool_failed  find_notes "UnparsedArguments: The arguments for this call were not valid JSON, …"
+error        "…: 1 tool call(s) attempted, 1 failed. … The failure(s) reported above are the
+              place to start"
+AUDIT        tool=find_notes outcome=error
+turn_costs   outcome=empty_answer tool_calls=1 tool_failures=1 tool_refusals=0
+/metrics     chemclaw_invalid_tool_calls_total{tool="find_notes"} 2
+```
+
+No `tool_result`: the refusal pairs with the failure by the model's own id and is suppressed. The
+same behaviour before this change produced `error/empty_answer` and *"after 0 tool call(s) … a
+narrower or more specific question is the useful next step"*, with no `tool_call` and no
+`tool_failed` at all. `tasks/live-test/storm-cf-2026-08-30.md` is the record.
+
+**One consequence, stated rather than discovered.** The `tool_call` event carries the sentinel key,
+so a surface renders the arguments as `{"__unparsed_arguments__": "'{\"text\": }'"}`. That is the
+honest record — it is what the model sent — and the `tool_failed` beneath it is the readable half.
+Hiding it would make the event read as a call with no arguments, which is a different and worse
+untruth.
+
 ## The rule to carry
 
 **When three consecutive fixes each introduce the next defect, the defect is the design.** The

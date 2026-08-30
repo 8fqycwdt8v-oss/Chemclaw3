@@ -85,15 +85,22 @@ free everything the hand-rolled path had to build and kept getting wrong:
 
 ## Verification
 
-- [ ] `make lint type test` with Postgres and Temporal up, skips named. *(running)*
-- [ ] Live lane: storm C+F, and the F6 turn hand-driven — expecting a real `call_id`, an audit row,
-      and the model's own correction.
+- [x] `make lint type test` with Postgres and Temporal up: **6256 passed, 16 skipped** (helm not
+      installed ×9, one Temporal-dev-server test, three truncated-history migration checks, two
+      prompt-caching tests whose credential has no balance, one retention case a live checkpointer
+      makes unproducible). Two failures the first run found were mine and are fixed:
+      `test_profile_attenuates_but_audit_and_authz_always_attach` (the chain has one more entry)
+      and `test_every_chemclaw_error_subclass_is_listed_non_retryable` (`UnparsedArguments`).
+- [x] Live lane: storm C+F **11/11**, including the check that was permanently red, and the F6 turn
+      hand-driven — `tool_call` + `tool_failed` with the model's own id, no `tool_result`, an audit
+      row under `error`, `turn_costs` at `tool_calls=1 tool_failures=1 tool_refusals=0`, and the
+      counter at 2. Recorded in `tasks/live-test/storm-cf-2026-08-30.md`.
 - [x] ADR superseding all four + ledger row + supersession map + `lessons.md`.
 
 ## Review
 
 **Shipped.** `PromoteInvalidToolCalls` + `refuse_unparsed_arguments` replace `RepairInvalidToolCalls`
-and the ~180 lines around it. Every plan item is done except the live lane, which is noted below.
+and the ~180 lines around it. Every plan item is done, offline and on the live stack.
 
 **What the mutation runs proved** (from a committed baseline, one file at a time, and *targeted at
 the test written for each defect* rather than at the suite):
@@ -114,9 +121,13 @@ whose comment I had written asserting the opposite. The announcer and the refusa
 `request.tool_call["id"]`, so they pair with each other whatever it is. The comment is corrected in
 place and the real proof is at the producer, against the signal itself.
 
-**Deliberately not done: the live lane.** Storm C+F and a hand-driven F6 turn need the four-repo
-stack and a model credential. Everything they would show is covered offline against the *production*
-middleware chain (`tool_call_middleware`, pinned to the compiled list by `tests/test_middleware_order.py`),
-including the one thing the previous rounds could only assert in prose — the audit row, the span,
-the `tool_failed` with a real id and the tool body never entered. The live run remains the honest
-next check and is not evidence this session has.
+**The live lane ran.** `CHEMCLAW_MCP_REPO=/home/user/Chemclaw3-mcp` plus the mock-model triple
+(`CHEMCLAW_LLM_PROVIDER=openai_compatible`, `CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`,
+`CHEMCLAW_LLM_MODEL=mock`) is what `infra/live/processes.sh up` needs here; without the model
+variables it starts the durable half only and skips the front door, which the storm requires.
+
+**What is still not evidence this session has:** `make live-probes`. The environment's `API-KEY` is
+present and the provider refuses it — *"Your credit balance is too low"* — which is also why two
+`test_prompt_caching` cases skipped. Nothing in this change depends on a real model: the behaviour
+under test is a malformed emission, which is exactly what a real model will not produce on request
+and what `cli/mock_llm.py` exists to ask for by name.
