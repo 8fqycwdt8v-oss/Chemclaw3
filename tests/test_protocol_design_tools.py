@@ -23,6 +23,7 @@ from collections.abc import Iterator
 import pytest
 
 import chemclaw.agent.protocol_design_tools as tools
+from chemclaw.agent.authz import require_actor
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.turn_text import reset_current_user_text, set_current_user_text
 from chemclaw.protocols.models import (
@@ -202,7 +203,7 @@ def test_structuring_a_request_stores_revision_one_as_a_request(
         payload = await tools.structure_experiment_request(request)
 
         receipt = ProtocolReceipt.model_validate_json(payload)
-        assert receipt.design_id == design_id_for(request)
+        assert receipt.design_id == design_id_for(request, owner=require_actor())
         assert receipt.revision == 1
         assert receipt.status == "requested"
         assert receipt.title == "SM-3 Suzuki"
@@ -277,7 +278,7 @@ def test_structuring_refuses_before_it_stores_anything(
         request = _request(scale=RequestField(value="5 g", basis="stated", quote="five grams"))
         with pytest.raises(ChemclawError, match="not in the text"):
             await tools.structure_experiment_request(request)
-        assert await store.read(design_id_for(request)) is None
+        assert await store.read(design_id_for(request, owner=require_actor())) is None
 
     asyncio.run(_body())
 
@@ -505,15 +506,15 @@ def test_drafting_after_structuring_the_same_ask_stores_the_next_revision(
 ) -> None:
     """The documented workflow, which is now the only one: structure the ask, then draft for it.
 
-    `structure_experiment_request` files the ask under `design_id_for(request)` and hands back the
-    id and the revision the draft builds on — so the protocol is revision 2 of the design the
-    intake opened, and the two revisions are one document growing rather than two designs.
+    `structure_experiment_request` files the ask under the actor's own `design_id_for` and hands
+    back the id and the revision the draft builds on — so the protocol is revision 2 of the design
+    the intake opened, and the two revisions are one document growing rather than two designs.
     """
 
     async def _body() -> None:
         request = _request()
         intake = await _open(request)
-        assert intake.design_id == design_id_for(request)
+        assert intake.design_id == design_id_for(request, owner=require_actor())
 
         drafted = ProtocolReceipt.model_validate_json(
             await _draft(intake.design_id, intake.revision)

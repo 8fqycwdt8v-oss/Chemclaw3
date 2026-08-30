@@ -143,7 +143,7 @@ def summarise(design: ExperimentDesign, checks: list[ProtocolCheck]) -> str:
         # separately, in the release whose own note says that is how the second and third got it
         # wrong.
         shape = "the structured ask, no procedure yet"
-    elif len(design.arms) == 1 and not design.factors:
+    elif design.is_single_experiment:
         # **The design, not the ask.** This branched on `request.mode`, so a 4-arm 2-factor plate
         # whose ask still said `single` summarised as "1 experiment". `== 1` rather than `<= 1`:
         # the first rewrite swallowed the zero-arm case too and described a body with no arms

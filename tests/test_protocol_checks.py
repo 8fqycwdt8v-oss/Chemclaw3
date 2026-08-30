@@ -11,6 +11,7 @@ refusal — an assertion that fails whoever quietly promotes it to a blocker.
 """
 
 import pytest
+from pydantic import ValidationError
 
 from chemclaw.protocols.checks import (
     arms_are_distinct,
@@ -43,10 +44,13 @@ from chemclaw.protocols.models import (
     PlateLayout,
     ProtocolArm,
     ProtocolCheck,
+    ProtocolStep,
+    ProtocolStepKind,
     RequestedComponent,
     Setpoints,
     Well,
 )
+from chemclaw.science.labels.vocabulary import SpeciesRole
 
 # DMF written the two ways a chemist and a cheminformatics tool write it. Both canonicalise to the
 # same string, which is what `forbidden_absent` has to see through.
@@ -593,7 +597,11 @@ def test_a_citation_that_names_nothing_to_open_does_not_count() -> None:
         )
     )
     assert not verdict.passed and verdict.severity == "blocker"
-    assert "cites nothing" in verdict.detail
+    # The message names *which* of the two failures this is: citations were supplied, and none of
+    # them is followable. Saying "cites nothing" over two supplied references sent the model back to
+    # re-run five search tools when the fix was one empty field.
+    assert "none is followable" in verdict.detail
+    assert "prior work supports 80 C" in verdict.detail
 
 
 def test_an_unfollowable_citation_is_named_beside_the_ones_that_counted() -> None:
@@ -905,14 +913,166 @@ def test_an_ordinary_structured_ask_produces_no_blocker_at_the_request_stage() -
     assert blockers(run_checks(_design())) != []
 
 
-def test_the_request_stage_still_catches_an_exclusion_the_ask_contradicts() -> None:
-    """The second of the pair: a chemist who forbids DMF and names it in one sentence."""
+def test_naming_the_solvent_you_want_replaced_is_not_a_contradiction() -> None:
+    """The commonest process-chemistry ask there is, which used to be permanently unstorable.
+
+    A chemist getting out of DMF names DMF as the incumbent and forbids it in one sentence. Reading
+    the *ask's* own components as species the design uses made that a `blocker` — "the design uses
+    reagents the request forbids: DMF" — over a design whose solvent is 2-MeTHF, and
+    `draft_experiment_protocol` raises on any blocker, so there was no way to state both the
+    incumbent and the exclusion.
+    """
     ask = _design(
         request=_request(
             forbidden=["DMF"],
             components=[RequestedComponent(name_as_written="DMF", smiles=_DMF)],
-        )
+        ),
+        base={"setpoints": Setpoints(solvent="2-MeTHF", temperature_c=80, time_h=4).model_dump()},
     )
-    verdicts = {check.check_id: check for check in run_checks(ask, stage="request")}
-    assert not verdicts["forbidden_absent"].passed
-    assert verdicts["forbidden_absent"].severity == "blocker"
+    verdicts = {check.check_id: check for check in run_checks(ask)}
+    assert verdicts["forbidden_absent"].passed
+    assert blockers(run_checks(ask, stage="request")) == []
+
+
+def test_a_design_that_actually_runs_in_the_forbidden_solvent_is_still_refused() -> None:
+    """The half that has to keep working: the exclusion binds what the design *does*."""
+    design = _design(
+        request=_request(
+            forbidden=["DMF"],
+            components=[RequestedComponent(name_as_written="DMF", smiles=_DMF)],
+        ),
+        base={"setpoints": Setpoints(solvent="DMF", temperature_c=80, time_h=4).model_dump()},
+    )
+    verdict = {check.check_id: check for check in run_checks(design)}["forbidden_absent"]
+    assert not verdict.passed and verdict.severity == "blocker"
+    assert "DMF" in verdict.detail
+
+
+def test_a_rounded_catalyst_line_is_not_a_blocker() -> None:
+    """The tolerance has to allow the rounding a chemist actually writes.
+
+    250 mg of a 182 g/mol aryl halide is 1.37 mmol and 5 mol% Pd is 0.0685 mmol, which a chemist
+    writes `0.07`. A flat 2% of the line's own figure made that a *blocker* — and a blocker refuses
+    the draft outright. Swept across the usual scales and loadings, 4 of 18 correct tables were
+    refused, every one a normal catalyst or ligand line at a non-round limiting scale.
+    """
+    design = _design(
+        base={
+            "setpoints": Setpoints(temperature_c=80, time_h=16, solvent="2-MeTHF").model_dump(),
+            "charge": [
+                ChargeLine(
+                    component="aryl bromide",
+                    role=SpeciesRole.STARTING_MATERIAL,
+                    limiting=True,
+                    equivalents=1.0,
+                    amount_mmol=1.37,
+                ).model_dump(),
+                ChargeLine(
+                    component="Pd(OAc)2",
+                    role=SpeciesRole.CATALYST,
+                    equivalents=0.05,
+                    amount_mmol=0.07,
+                ).model_dump(),
+            ],
+        }
+    )
+    verdict = charge_is_consistent(design)
+    assert verdict.passed, verdict.detail
+
+
+def test_a_charge_table_that_really_disagrees_is_still_a_blocker() -> None:
+    """The half the tolerance must not swallow: a factor-of-ten slip is never close."""
+    design = _design(
+        base={
+            "setpoints": Setpoints(temperature_c=80, time_h=16, solvent="2-MeTHF").model_dump(),
+            "charge": [
+                ChargeLine(
+                    component="aryl bromide",
+                    role=SpeciesRole.STARTING_MATERIAL,
+                    limiting=True,
+                    equivalents=1.0,
+                    amount_mmol=1.37,
+                ).model_dump(),
+                ChargeLine(
+                    component="boronate",
+                    role=SpeciesRole.REAGENT,
+                    equivalents=1.2,
+                    amount_mmol=0.164,
+                ).model_dump(),
+            ],
+        }
+    )
+    verdict = charge_is_consistent(design)
+    assert not verdict.passed and verdict.severity == "blocker"
+
+
+def test_a_screen_that_misses_half_its_grid_does_not_report_a_full_one() -> None:
+    """Counting arms compared a number to a product of level counts.
+
+    Four arms covering two of four declared combinations reported "full grid: 4 of 4 combinations",
+    and `render_markdown` prints that sentence to the chemist. A declared level that is never run is
+    exactly what this check exists to make somebody say out loud.
+    """
+    solvent = Factor(
+        name="solvent",
+        kind="categorical",
+        levels=[FactorLevel(label="THF"), FactorLevel(label="toluene")],
+    )
+    ligand = Factor(
+        name="ligand",
+        kind="categorical",
+        levels=[FactorLevel(label="XPhos"), FactorLevel(label="SPhos")],
+    )
+    design = _design(
+        request=_request(mode="screen"),
+        factors=[solvent, ligand],
+        arms=[
+            # `toluene` is declared and never run; two of the four combinations are duplicated.
+            ProtocolArm(arm_id="A1", levels={"solvent": "THF", "ligand": "XPhos"}),
+            ProtocolArm(arm_id="A2", levels={"solvent": "THF", "ligand": "SPhos"}),
+            ProtocolArm(arm_id="A3", levels={"solvent": "THF", "ligand": "XPhos"}),
+            ProtocolArm(arm_id="A4", levels={"solvent": "THF", "ligand": "SPhos"}),
+        ],
+    )
+    verdict = coverage_is_stated(design)
+    assert "2 of 4 combinations" in verdict.detail
+    assert "full grid" not in verdict.detail
+
+
+def test_the_plate_checks_read_the_design_not_the_mode_field_of_the_ask() -> None:
+    """One mis-set enum on the intake used to switch off three checks on a real plate."""
+    design = _design(
+        request=_request(mode="single"),
+        arms=[ProtocolArm(arm_id=f"A{index}") for index in range(1, 97)],
+    )
+    # `layout_fits` no longer excuses itself as "a single experiment"; with no layout at all it
+    # degrades to the carry-forward warning, which is a separate deliberate behaviour.
+    assert "single experiment" not in layout_fits(design).detail
+    assert not controls_present(design).passed
+
+
+def test_a_step_states_a_temperature_and_a_duration_that_are_checked() -> None:
+    """A step at 5000 C for a million hours passed as "setpoints and amounts in range"."""
+    design = _design(
+        base={
+            "setpoints": Setpoints(temperature_c=80, time_h=16, solvent="2-MeTHF").model_dump(),
+            "steps": [
+                ProtocolStep(
+                    index=1,
+                    kind=ProtocolStepKind.TEMPERATURE,
+                    text="heat it",
+                    temperature_c=5000.0,
+                    duration_h=1_000_000.0,
+                ).model_dump()
+            ],
+        }
+    )
+    verdict = quantities_are_plausible(design)
+    assert not verdict.passed
+    assert "5000" in verdict.detail and "1000000" in verdict.detail
+
+
+def test_a_randomized_layout_without_a_seed_is_refused_by_the_model() -> None:
+    """`place()` refuses this; a browser-posted layout never goes through `place()`."""
+    with pytest.raises(ValidationError, match="needs a seed"):
+        PlateLayout(plate_format=24, rows=4, columns=6, randomized=True, seed=None)

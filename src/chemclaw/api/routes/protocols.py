@@ -28,7 +28,8 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from chemclaw.api.deps import CurrentUser
+from chemclaw.api.auth import Principal
+from chemclaw.api.deps import CurrentUser, _is_reviewer, _owner_authorizes
 from chemclaw.core.errors import ChemclawError
 from chemclaw.protocols.checks import run_checks
 from chemclaw.protocols.diff import DesignDiff, diff_designs
@@ -205,6 +206,36 @@ async def get_protocol(
     )
 
 
+async def _require_writable(design_id: str, principal: Principal) -> None:
+    """403 unless this caller may write to this design — its owner, or a reviewer.
+
+    **Nothing gated either write before this.** Both routes took `CurrentUser` and nothing else, so
+    any authenticated principal — with no role at all — could sign off on and rewrite another
+    chemist's design: measured, an unrelated principal wrote `executed` into the status trail of a
+    design opened by somebody else, then landed a revision on it as its author. A lab record saying
+    an experiment was run is the most consequential thing this table holds.
+
+    Owner **or** reviewer, rather than the reviewer-only rule `POST /proposals/{id}/decision` uses.
+    That route's subject is machine-written knowledge entering a shared graph, where the whole point
+    is that the author does not decide. A design is a chemist's own experiment: they approve their
+    own plate, and a reviewer reaches other people's for the same reason `_is_reviewer` exists.
+
+    Reads stay open on purpose. A design is a shared scientific artifact — the schema says so where
+    it keeps `opened_by` through offboarding, and `find_experiment_protocols` lists the deployment's
+    designs — so this refuses with 403 rather than the 404 the session routes use: the id's
+    existence is not the secret, the right to change it is.
+    """
+    header = await default_design_store().summary(design_id)
+    if header is None:
+        raise HTTPException(status_code=404, detail=f"no design {design_id!r}")
+    if _owner_authorizes(header.opened_by, principal) or _is_reviewer(principal):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=f"{design_id} was opened by another chemist; writing to it needs a review role",
+    )
+
+
 async def post_revision(
     design_id: str,
     body: RevisionIn,
@@ -222,6 +253,7 @@ async def post_revision(
     invalid intermediate states — half a charge table is not a reason to lose their work — and they
     can see the verdict. A model cannot, so its draft is refused.
     """
+    await _require_writable(design_id, principal)
     store = default_design_store()
     previous = await store.read(design_id, body.parent_revision)
     if previous is None:
@@ -305,6 +337,7 @@ async def post_status(
     principal: CurrentUser,
 ) -> Response:
     """Move a design's lifecycle status — approve it, mark it run, or abandon it."""
+    await _require_writable(design_id, principal)
     try:
         await default_design_store().set_status(
             design_id,

@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 
 from chemclaw.agent.authz import require_actor
+from chemclaw.agent.session_store import owner_permits
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.session_context import get_current_session_id
@@ -32,6 +33,7 @@ from chemclaw.protocols.diff import diff_designs
 from chemclaw.protocols.layout import LayoutError, place, smallest_plate_for
 from chemclaw.protocols.models import (
     DesignStatus,
+    DesignSummary,
     EvidenceRef,
     ExperimentDesign,
     ExperimentRequest,
@@ -125,6 +127,32 @@ def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str | N
         )
 
 
+async def _require_writable(store: DesignStore, design_id: str) -> DesignSummary | None:
+    """The design's header, refusing the write when this actor does not own the design.
+
+    **The one ownership rule, `owner_permits`, applied to its third caller.** The HTTP layer
+    resolves ownership for `/sessions/{id}/…` and the agent resolves it for a tool handed an
+    explicit session id; a design handed an explicit `design_id` is the same question and a second
+    copy of the predicate is how one surface ends up looser than the other.
+
+    Nothing checked this before, so a turn could name any `design-…` id and write to it: a second
+    chemist's turn demoted an `approved` header to `draft` and replaced a signed-off plate, with
+    `status_history` still naming the first chemist's sign-off. `design_id_for` now scopes the id by
+    owner so the ordinary path cannot collide, and this is the half that holds when an id is passed
+    in rather than derived.
+
+    A design nobody has opened yet (`None`) is writable — that is the create path, and the write
+    that creates it is what records the owner.
+    """
+    header = await store.summary(design_id)
+    if header is not None and not owner_permits(header.opened_by, require_actor()):
+        raise ChemclawError(
+            f"{design_id} belongs to another chemist. Open your own design for this ask with "
+            "`structure_experiment_request` rather than writing to theirs."
+        )
+    return header
+
+
 @tool
 async def structure_experiment_request(request: ExperimentRequest, salt: str = "") -> str:
     """Turn a chemist's free-text ask into the structured request a protocol is drafted from.
@@ -149,11 +177,15 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
         and let them correct it before you draft.
 
     Raises:
-        ChemclawError: a `stated` slot whose quote is not in `source_text`.
+        ChemclawError: a `stated` slot whose quote is not in the chemist's own message, or a
+            design of that ask belonging to another chemist.
     """
     require_quotes_are_verbatim(request, get_current_user_text())
-    design_id = design_id_for(request, salt=salt)
+    # Scoped by the actor, so two chemists phrasing one ask the same way get two designs rather
+    # than one they overwrite in turn.
+    design_id = design_id_for(request, owner=require_actor(), salt=salt)
     store = _store()
+    await _require_writable(store, design_id)
     head = await store.read(design_id)
     # **The protocol survives a re-structured ask**, which the first version did not do. The id is
     # derived from the ask, so re-structuring the same one reaches the same design — and building a
@@ -260,8 +292,9 @@ async def draft_experiment_protocol(
         sheet. Read the checks back — a warning is the chemist's judgment, not one to suppress.
 
     Raises:
-        ChemclawError: no such design, a blocking check failed, the plate cannot hold the arms, or
-            the revision is derived from something that is no longer the head.
+        ChemclawError: no such design, the design belongs to another chemist, a blocking check
+            failed, the plate cannot hold the arms, or the revision is derived from something that
+            is no longer the head.
     """
     if not change_note.strip():
         raise ChemclawError(
@@ -269,6 +302,7 @@ async def draft_experiment_protocol(
             "first draft, which is revision one of the protocol rather than a special case"
         )
     store = _store()
+    await _require_writable(store, design_id)
     previous = await store.read(design_id)
     if previous is None:
         raise ChemclawError(
