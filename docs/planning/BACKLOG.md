@@ -697,6 +697,35 @@ only holds defects can only ever restore the system to what it already intended 
       by hand; none has a regression test, because writing thirty of them is its own change with its
       own argument about what a rendering test should assert. Anchor: `protocols/render.py`.
 
+      **Closed 2026-08-30** by `tests/test_protocol_render.py`, written in the review-fix cycle that
+      re-took the module apart and found nine more defects — including a page that told a chemist
+      1 bar N2 for an arm running at 50 bar H2. Eleven of its thirteen tests fail on the previous
+      renderer. Keep this row only until the coverage figure above is re-measured.
+
+- [ ] **A second sign-off at the same revision overwrites the first, and both callers are told
+      204** — [M], found 2026-08-30 by the fresh-context review of `protocols/store.py`.
+      `expected_revision` is a compare-and-set on the *document*, never on the *status*, so two
+      people looking at revision 1 can approve and abandon it and both writes succeed: measured
+      **100/100** over `asyncio.gather`, with the final header 29/71 either way across runs.
+      Sequentially the same thing needs no race at all.
+
+      The evidence survives — `experiment_protocol_status_events` records both moves with their
+      actors and revisions, and the newest event agreed with the header 100/100 — so this is "nobody
+      is told at the time" rather than a lost record. What it costs is `advanced()`'s stated
+      guarantee that an `abandoned` design stays abandoned unless a *person* moves it: a second
+      person's `set_status` un-abandons it silently, and a design retired because the starting
+      material decomposes is back in the `draft` listing.
+
+      **Not fixed here because the fix is a contract change.** Closing it properly means the caller
+      stating the status it saw (`expected_status`), which is a new field on `StatusIn`, on the
+      store Protocol and on both backends, and a matching change in `Chemclaw3_ui`'s sign-off panel
+      — an optional field nobody sends would be a control that exists only in the docstring, which
+      is the failure mode `map_to_hpc_identity` is this tree's standing example of. The half that
+      needed no contract change shipped: `require_movable` refuses `approved` and `executed` on a
+      design holding only the structured ask, which was a lab record saying an experiment had been
+      run against a document with no procedure in it. Anchors: `protocols/store.py::set_status`,
+      `api/schemas.py::StatusIn`.
+
 - [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
       what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
       carry design arguments in their class docstrings — *"One `objectives` field rather than a lead

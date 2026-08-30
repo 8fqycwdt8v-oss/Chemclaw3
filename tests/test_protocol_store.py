@@ -13,6 +13,7 @@ did not know about. Two chemists editing one plate is the ordinary case.
 import asyncio
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar, get_args
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -33,6 +34,7 @@ from chemclaw.protocols.store import (
     PostgresDesignStore,
     RevisionConflict,
     UnknownDesign,
+    UnstorableDocument,
     advanced,
     default_design_store,
 )
@@ -76,6 +78,16 @@ def _design(
         if cited
         else [],
     )
+
+
+def _fresh_id(backend: str, name: str) -> str:
+    """A design id unique to this *run*, for the tests that must start from nothing.
+
+    `_id` is stable so a Postgres row can be inspected after a failure; these three assert on a
+    design's first revision, and a row left behind by an earlier run makes that assertion about
+    somebody else's history.
+    """
+    return f"design-{backend}-{name}-{uuid4().hex[:8]}"
 
 
 def _id(backend: str, name: str) -> str:
@@ -667,5 +679,112 @@ def test_the_session_that_created_a_design_is_the_one_the_listing_filters_on(
         # and it is also the caller that got the wrong answer.
         assert design_id in {row.design_id for row in await store.listing(session_id="one")}
         assert design_id not in {row.design_id for row in await store.listing(session_id="two")}
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_an_unpaired_surrogate_is_refused_rather_than_diverging(backend: str) -> None:
+    r"""Both backends refuse it, which is the only reason `require_storable` exists.
+
+    Starlette parses a request body with stdlib `json.loads`, which turns `"\\ud800"` into a lone
+    surrogate, and pydantic only refuses one on a `str` field carrying a constraint — so any
+    unconstrained string in a design reached the driver. Measured on the real app before this:
+    `POST /protocols/{id}/revisions` answered **500** on Postgres and **200** in memory. It is not
+    even counted as a database failure, because `UnicodeEncodeError` is not a `psycopg.Error`.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design = _design(arms=1)
+        broken = design.model_copy(
+            update={"base": design.base.model_copy(update={"waste": "quench \ud800"})}
+        )
+        with pytest.raises(UnstorableDocument, match="surrogate"):
+            await store.append(
+                _fresh_id(backend, "surrogate"),
+                broken,
+                run_checks(broken),
+                kind="protocol",
+                author_kind="agent",
+                author="chemist-a",
+                change_note="drafted",
+            )
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_design_holding_only_the_ask_cannot_be_marked_executed(backend: str) -> None:
+    """A lab record saying an experiment was run, over a document with no procedure in it.
+
+    Nothing tied a status to the document it is a statement about, so `set_status("executed")` on a
+    `request` revision was accepted on both backends.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        _askonly = _fresh_id(backend, "askonly")
+        design = _design(arms=0)
+        assert not design.has_protocol
+        await store.append(
+            _askonly,
+            design,
+            run_checks(design, stage="request"),
+            kind="request",
+            author_kind="agent",
+            author="chemist-a",
+            change_note="structured the request",
+            status="requested",
+        )
+        for refused in ("executed", "approved"):
+            with pytest.raises(UnstorableDocument, match="no procedure"):
+                await store.set_status(
+                    _askonly,
+                    refused,  # type: ignore[arg-type]
+                    expected_revision=1,
+                    actor="chemist-a",
+                    reason="ran it",
+                )
+        # `abandoned` says nothing about a procedure, so it stays available on an ask.
+        await store.set_status(
+            _askonly,
+            "abandoned",
+            expected_revision=1,
+            actor="chemist-a",
+            reason="not going ahead",
+        )
+        header = await store.summary(_askonly)
+        assert header is not None and header.status == "abandoned"
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_drafted_protocol_can_still_be_approved(backend: str) -> None:
+    """The guard refuses an ask, never a protocol — the ordinary sign-off path."""
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        _signoff = _fresh_id(backend, "signoff")
+        design = _design(arms=2)
+        await store.append(
+            _signoff,
+            design,
+            run_checks(design),
+            kind="protocol",
+            author_kind="agent",
+            author="chemist-a",
+            change_note="drafted",
+        )
+        await store.set_status(
+            _signoff,
+            "approved",
+            expected_revision=1,
+            actor="chemist-a",
+            reason="the precedent holds",
+        )
+        header = await store.summary(_signoff)
+        assert header is not None and header.status == "approved"
 
     _run(_body)
