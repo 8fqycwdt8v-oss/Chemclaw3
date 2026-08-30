@@ -85,12 +85,15 @@ free everything the hand-rolled path had to build and kept getting wrong:
 
 ## Verification
 
-- [x] `make lint type test` with Postgres and Temporal up: **6256 passed, 16 skipped** (helm not
-      installed ×9, one Temporal-dev-server test, three truncated-history migration checks, two
-      prompt-caching tests whose credential has no balance, one retention case a live checkpointer
-      makes unproducible). Two failures the first run found were mine and are fixed:
-      `test_profile_attenuates_but_audit_and_authz_always_attach` (the chain has one more entry)
-      and `test_every_chemclaw_error_subclass_is_listed_non_retryable` (`UnparsedArguments`).
+- [x] `make lint type test` with Postgres and Temporal up: **6260 passed, 15 skipped, 0 failed**
+      (helm not installed ×9, three truncated-history migration checks, two prompt-caching tests
+      whose credential has no balance, one retention case a live checkpointer makes unproducible).
+      Nothing in this change's subject is among the skips. An earlier run found two failures, both
+      mine and both fixed: `test_profile_attenuates_but_audit_and_authz_always_attach` (the chain
+      has one more entry) and `test_every_chemclaw_error_subclass_is_listed_non_retryable`
+      (`UnparsedArguments`). That earlier run overlapped edits to the tree it was testing and is
+      therefore not evidence about this one; the figures above are from a run started after the
+      last source change.
 - [x] Live lane: storm C+F **11/11**, including the check that was permanently red, and the F6 turn
       hand-driven — `tool_call` + `tool_failed` with the model's own id, no `tool_result`, an audit
       row under `error`, `turn_costs` at `tool_calls=1 tool_failures=1 tool_refusals=0`, and the
