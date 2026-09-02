@@ -92,7 +92,7 @@ def _driver_problems(manifest: DeliveryChannelManifest) -> list[str]:
     return problems
 
 
-def _config_strings(value: object, depth: int = 2) -> list[str]:
+def _config_strings(value: object, depth: int = 3) -> list[str]:
     """Every string a driver could read a destination out of, to a bounded depth.
 
     The `config:` block is free-form by design — the driver's own signature is the schema — so a
@@ -100,10 +100,18 @@ def _config_strings(value: object, depth: int = 2) -> list[str]:
     fan-out, or `endpoints: {primary: …, fallback: …}`; the first version of rule 4 looked only at
     top-level `str` values, so both of those shapes passed a check written to catch exactly them.
 
-    Bounded rather than fully recursive on purpose. This is not a config-schema validator: it walks
-    the three shapes a destination is realistically written in — a bare string, a list, and one
-    level of nesting inside either — and stops. A driver that buries its URL deeper than that is
-    outside what this rule claims to see, which is better stated here than believed.
+    Bounded rather than fully recursive on purpose. This is not a config-schema validator: `depth`
+    counts container hops (a list's items, a dict's values) spent *below* the `config` dict this is
+    first called on, and a plain string is always returned outright — the `depth <= 0` guard only
+    ever stops a *container*. With `depth=3` that reaches: `config`'s own values (hop 1 — a bare
+    `url: http://…`), one level of nesting inside those (hop 2 — `urls: [a, b]`,
+    `endpoints: {primary: …}`), and the strings living inside *that* nesting (hop 3 — a fan-out list
+    of per-target dicts, `targets: [{url: …}, {url: …}]`, or its dict-of-lists mirror). Three, not
+    two: a two-hop budget stops at the per-target *dict* one level short of the string inside it,
+    which is exactly the natural next step from the `urls`/`endpoints` examples above and the shape
+    this function silently dropped until this docstring's own depth was corrected to match it. A
+    driver that buries its URL deeper than that — a fourth container hop — is outside what this rule
+    claims to see, which is better stated here than believed.
     """
     if isinstance(value, str):
         return [value]

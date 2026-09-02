@@ -430,6 +430,79 @@ def test_the_posture_check_walks_into_a_list_or_a_nested_destination(
         )
 
 
+def test_the_posture_check_walks_into_a_fan_out_list_of_dicts_or_a_dict_of_lists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The natural next step from the `urls`/`endpoints` examples was silently one hop too far.
+
+    `_config_strings` shipped with `depth=2`, and its own docstring said it reached "a list, and one
+    level of nesting inside either" — but the `depth <= 0` guard fired on the *container itself*
+    before it looked inside it, one hop earlier than that prose promised. A fan-out driver pairing
+    each URL with per-target metadata (`targets: [{url: …}, {url: …}]`, headers or its own
+    `token_env` beside it) is exactly that natural next step, and it passed this security gate under
+    `entra_required=True` with **zero** problems reported — confirmed directly:
+    `_config_strings({"targets": [{"url": "http://b"}]})` returned `[]`. The gap was symmetric: a
+    dict of per-target lists (`endpoints: {primary: [url, …]}`) escaped the same way. Both are
+    asserted here, refused exactly like the shallower `urls`/`endpoints` shapes already are.
+    """
+    from chemclaw.cli.validate_channels import problems
+
+    root = tmp_path / "channels"
+    _channel(
+        root,
+        "fanout-targets",
+        "name: fanout-targets\ndescription: pairs each URL with its own per-target metadata\n"
+        "driver: chemclaw.deliver.driver:webhook_channel\n"
+        "config:\n  targets:\n    - url: https://chat.internal/a\n"
+        "    - url: http://chat.internal/b\n",
+    )
+    _channel(
+        root,
+        "grouped-endpoints",
+        "name: grouped-endpoints\ndescription: a dict of per-role URL lists\n"
+        "driver: chemclaw.deliver.driver:webhook_channel\n"
+        "config:\n  endpoints:\n    primary:\n      - https://chat.internal/a\n"
+        "    fallback:\n      - http://chat.internal/b\n",
+    )
+    monkeypatch.setattr(settings, "delivery_channels_dir", str(root))
+    monkeypatch.setattr(settings, "entra_required", True)
+
+    found = problems()
+    for name in ("fanout-targets", "grouped-endpoints"):
+        assert any(name in problem and "cleartext" in problem for problem in found), (
+            f"the plaintext destination nested two hops inside {name}'s config was never asked "
+            f"about: {found}. A list-of-dicts or dict-of-lists one level past the already-handled "
+            "list/dict shapes must not defeat the enforced posture's cleartext check"
+        )
+
+
+def test_config_strings_depth_is_bounded_not_unbounded() -> None:
+    """Correcting the depth to match its documented intent must not turn it into a free traversal.
+
+    `_config_strings` is deliberately bounded — a destination buried deeper than the three
+    documented container hops (`config`'s own values, one level of nesting, and the strings inside
+    that nesting) is outside what rule 4 claims to see, and this proves the corrected depth still
+    stops there rather than walking arbitrarily deep structures. A fourth hop
+    (`targets: [{urls: [url]}]` — list of dicts of *lists*, one level past the fan-out shape the
+    other test closes) must still be silently out of scope, and a pathologically deep structure must
+    not raise or hang.
+    """
+    from chemclaw.cli.validate_channels import _config_strings
+
+    one_hop_too_deep = {"targets": [{"urls": ["http://chat.internal/a"]}]}
+    assert _config_strings(one_hop_too_deep) == [], (
+        "a fourth container hop is past the documented and intended depth budget and must stay "
+        "unseen, or the bound is not actually bounded"
+    )
+
+    # A structure nested far past the budget must return quickly rather than recursing without
+    # limit — the whole point of a `depth` parameter is a deliberate, finite stop.
+    deeply_nested: object = "http://chat.internal/pathological"
+    for _ in range(500):
+        deeply_nested = [deeply_nested]
+    assert _config_strings(deeply_nested) == []
+
+
 def test_a_file_channel_with_an_impossible_directory_is_a_config_fault_not_an_outage(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
