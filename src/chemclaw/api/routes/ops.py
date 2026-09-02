@@ -135,13 +135,32 @@ async def _probe_database(front: FrontDoorState) -> bool:
     pool, so 50 concurrent probes requested 50 checkouts against `pg_pool_max_size` — and every
     authenticated request needing the store in that window queued behind them and, past
     `pg_pool_timeout_seconds`, was shed 503.
+
+    **`asyncio.wait_for` around the whole leg, not `statement_timeout_seconds` alone, is what makes
+    `service_readiness_db_timeout_seconds` a budget.** That kwarg becomes a Postgres-side
+    `statement_timeout` GUC (`db._merged_options`) — it bounds a query's execution *after* a
+    connection already exists, and does nothing for however long acquiring one takes. Acquisition
+    is bounded by two settings this probe does not read at all: `pg_connect_timeout_seconds` for a
+    fresh `connect()` and `pg_pool_timeout_seconds` for a pool checkout, both ten seconds by
+    default and both independent of the readiness budget. Measured against a blackholed (not
+    refused) Postgres address, the connect leg alone took ~10s while the Helm-derived
+    `readinessProbe.timeoutSeconds` assumes this whole function costs at most
+    `service_readiness_db_timeout_seconds` — the same class of defect the connector-queue sweep
+    fixed the same way (`connectors/health.py::_probe_queues`): wrap the outer awaitable, because a
+    component's own internal timeout kwarg only ever bounds the part of the work it was told about.
+    The kwarg stays, as a Postgres-side belt-and-suspenders bound on the query itself once a
+    connection is in hand.
     """
     try:
-        async with db.connection(
-            settings.session_store_dsn or settings.postgres_dsn,
-            statement_timeout_seconds=settings.service_readiness_db_timeout_seconds,
-        ) as conn:
-            await conn.execute("SELECT 1")
+
+        async def _ask() -> None:
+            async with db.connection(
+                settings.session_store_dsn or settings.postgres_dsn,
+                statement_timeout_seconds=settings.service_readiness_db_timeout_seconds,
+            ) as conn:
+                await conn.execute("SELECT 1")
+
+        await asyncio.wait_for(_ask(), timeout=settings.service_readiness_db_timeout_seconds)
         reachable = True
     except (psycopg.Error, ConnectionError, TimeoutError):
         log.warning("readiness: Postgres did not answer", exc_info=True)

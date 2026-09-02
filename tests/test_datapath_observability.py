@@ -280,6 +280,83 @@ def test_the_corpus_age_gauge_is_not_a_tree_walk_per_scrape(
     assert walks == 1, "reading the age must not need a rescan"
 
 
+def test_a_slower_earlier_scan_cannot_clobber_a_fresher_concurrent_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact race a fresh-context review found: last-writer-wins was not last-*scanner*-wins.
+
+    Two scrapes can race a cold `_NEWEST_MTIME` entry. Before this fix the write back was plain
+    last-writer-wins with no check against `scanned_at`, so whichever call happened to *finish*
+    last won — even if it *started* first and therefore looked at an older, possibly-stale view of
+    the corpus. Concretely: scan A starts, then a note is written, then scan B starts and finishes
+    (sees the new note, writes the fresh result), then scan A — slower, e.g. scheduling or disk
+    contention — finally finishes and overwrites B's fresh result with its own stale one. For up to
+    one more `knowledge_age_scan_ttl_seconds` window, `knowledge_sync_age_seconds()` would then
+    over-report staleness by however old A's view was.
+
+    Reproduced deterministically rather than with real thread timing (a timing-dependent test would
+    be flaky rather than a proof): `time.monotonic` is patched to hand out the two scans'
+    `scanned_at` values in *start* order while the two calls to `_newest_note_mtime` still happen in
+    *finish* order — B (started later) first, A (started earlier) second — which is exactly "A
+    started first but finished last" without needing real concurrency.
+    """
+    corpus = tmp_path / "knowledge" / "insight"
+    corpus.mkdir(parents=True)
+    note = corpus / "note.md"
+    note.write_text("---\nid: note\n---\nbody\n", encoding="utf-8")
+    monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "knowledge_dir", "knowledge")
+    # TTL=0 so every call below runs a fresh scan and reaches the write-back instead of being
+    # answered out of the (still-empty) cache — the race is in the write, not in the cache hit.
+    monkeypatch.setattr(settings, "knowledge_age_scan_ttl_seconds", 0)
+    kg_graph.invalidate_cache()
+
+    scan_a_started_at = 100.0  # A started first...
+    scan_b_started_at = 200.0  # ...but B started later and, in this race, finishes first.
+    stale_mtime = time.time() - 3600  # what A saw before the note below existed
+    fresh_mtime = time.time()  # what B saw after the note was (re)written
+
+    monotonic_values = iter([scan_b_started_at, scan_a_started_at])
+    monkeypatch.setattr(time, "monotonic", lambda: next(monotonic_values))
+
+    real_scan = kg_graph.scan_notes_dir
+    mtimes = iter([fresh_mtime, stale_mtime])  # B's view, then A's — in call (finish) order
+
+    def fake_scan(notes_dir: Path) -> Any:
+        real_stat = next(iter(real_scan(notes_dir)))[1]
+        fake_stat = os.stat_result(
+            (
+                real_stat.st_mode,
+                real_stat.st_ino,
+                real_stat.st_dev,
+                real_stat.st_nlink,
+                real_stat.st_uid,
+                real_stat.st_gid,
+                real_stat.st_size,
+                real_stat.st_atime,
+                next(mtimes),
+                real_stat.st_ctime,
+            )
+        )
+        return iter([(note, fake_stat)])
+
+    monkeypatch.setattr(kg_graph, "scan_notes_dir", fake_scan)
+
+    # B finishes first: scans (sees the fresh mtime), stamps scanned_at=200.0, writes.
+    b_result = kg_graph._newest_note_mtime(settings.knowledge_path)
+    assert b_result == fresh_mtime
+    # A finishes second, but it *started* first (scanned_at=100.0 < B's 200.0): its stale result
+    # must not overwrite B's fresher one.
+    a_result = kg_graph._newest_note_mtime(settings.knowledge_path)
+    assert a_result == stale_mtime, "the scan itself still reports what it saw"
+
+    cached = kg_graph._NEWEST_MTIME[str(settings.knowledge_path)]
+    assert cached == (scan_b_started_at, fresh_mtime), (
+        "A's write (scanned_at=100.0, stale) clobbered B's fresher write (scanned_at=200.0, "
+        f"fresh) — the cache must keep whichever scan started last, got {cached}"
+    )
+
+
 # --- G1: what survived the merge, and how long a source took ----------------------------------
 
 

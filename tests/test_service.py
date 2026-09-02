@@ -8,6 +8,7 @@ per turn via a spy tool.
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Callable, MutableMapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -202,6 +203,69 @@ def test_readyz_reuses_its_database_verdict_inside_the_window(
         for _ in range(5):
             assert client.get("/readyz").status_code == 200
     assert probes == 1
+
+
+def test_readyz_bounds_the_whole_database_leg_not_just_the_statement_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`service_readiness_db_timeout_seconds` must bound acquiring a connection, not only using one.
+
+    `statement_timeout_seconds` becomes a Postgres-side `statement_timeout` GUC
+    (`core.db._merged_options`) — it bounds a query's execution *after* a connection already
+    exists, and does nothing for however long acquiring one takes. Before this test,
+    `_probe_database` passed that kwarg and awaited the whole `async with db.connection(...)`
+    block with no outer bound, so a connection that hangs while being acquired (a blackholed host,
+    a saturated pool) held the probe for `pg_connect_timeout_seconds` or `pg_pool_timeout_seconds`
+    instead — both independent of the readiness budget and, by default, five times it. The Helm
+    chart derives `readinessProbe.timeoutSeconds` from `service_readiness_db_timeout_seconds`
+    (`tests/test_deploy_chart.py::test_the_readiness_probe_outlasts_the_work_readyz_does`), so a gap
+    between the two is a kubelet draining a front door that would have answered correctly.
+
+    The stand-in sleeps for `hang_seconds`, far longer than the readiness budget and comfortably
+    under the connect/pool timeouts widened below — the same shape as
+    `test_connector_health.py`'s `_slow_connect`: a regression turns into a slow, still-passing wait
+    (`hang_seconds`) rather than a genuine multi-second hang.
+    """
+    budget = 0.2
+    hang_seconds = 2.0
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+    monkeypatch.setattr(settings, "service_readiness_db_timeout_seconds", budget)
+    # Widened well past `hang_seconds` so this test cannot pass by accident of those settings'
+    # defaults being small — an unbounded `_probe_database` would hang for `hang_seconds`, not for
+    # either of these.
+    monkeypatch.setattr(settings, "pg_connect_timeout_seconds", 30)
+    monkeypatch.setattr(settings, "pg_pool_timeout_seconds", 30.0)
+
+    class _StubConn:
+        """A connection that would answer fine, if the probe ever got to ask it anything."""
+
+        async def execute(self, _sql: str) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _hanging_connection(*_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
+        # A connect or checkout that never arrives — the failure `pg_connect_timeout_seconds` and
+        # `pg_pool_timeout_seconds` bound and `service_readiness_db_timeout_seconds` cannot reach at
+        # all without the outer `wait_for`. Yields a working connection once it wakes, so an
+        # unbounded probe reports `200 ready` (wrongly, `hang_seconds` late) rather than failing for
+        # an unrelated reason — the two behaviors this test tells apart.
+        await asyncio.sleep(hang_seconds)
+        yield _StubConn()
+
+    monkeypatch.setattr("chemclaw.api.routes.ops.db.connection", _hanging_connection)
+    with _client(_FakeAgent()) as client:
+        started = time.monotonic()
+        res = client.get("/readyz")
+        elapsed = time.monotonic() - started
+
+    assert res.status_code == 503
+    assert res.json()["status"] == "database unreachable"
+    assert elapsed < hang_seconds, (
+        f"/readyz took {elapsed:.3f}s against a {budget}s database budget: acquiring a connection "
+        "is unbounded and the probe waited out pg_connect_timeout_seconds/pg_pool_timeout_seconds "
+        "instead"
+    )
 
 
 def test_concurrent_readiness_probes_cost_one_connector_sweep(
