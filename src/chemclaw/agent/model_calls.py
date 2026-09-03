@@ -99,6 +99,7 @@ from langchain.agents.middleware import AgentMiddleware, ModelRequest, wrap_tool
 from langchain_core.messages import AIMessage, BaseMessage
 
 from chemclaw.agent.audit import UNKNOWN_TOOL, bounded_repr
+from chemclaw.agent.framing import defang
 from chemclaw.agent.llm_provider import classify_model_failure
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -118,6 +119,14 @@ logger = logging.getLogger(__name__)
 # live registry so a future one fails the suite rather than silently swallowing a promotion — a
 # tool that did declare it would have its own calls refused before the body, on every turn.
 _UNPARSED_ARGUMENTS = "__unparsed_arguments__"
+
+# The prefix a promoted call is given when the provider named no id, suffixed with its index in the
+# reply. `""` was used until a reviewer measured what two of them do: `graph_stream.failed_calls`
+# and `ToolCallTrace._issued` both key on a call id and both assume it identifies one call, so two
+# id-less calls in one reply made a failure suppress an unrelated result and made an
+# `_empty_answer_event` count more refusals than attempts. Distinct from anything a provider mints,
+# and stable within the reply, which is the only scope that can collide.
+_UNPARSED_CALL_ID = "unparsed-call-"
 
 
 def model_call_middleware() -> list[Any]:
@@ -515,14 +524,38 @@ def _promote(request: ModelRequest[Any], response: Any) -> Any:
         if not isinstance(message, AIMessage) or not message.invalid_tool_calls:
             continue
         promoted: list[Any] = list(message.tool_calls or [])
-        for call in message.invalid_tool_calls:
+        # Bounded, because one reply may carry any number of these and each becomes an audit row,
+        # a stream event and a `ToolMessage` in the model's own context — see
+        # `agent_max_promoted_invalid_calls` for the measurement and for why nothing is lost past
+        # the bound. `_count_invalid` above has already counted and named every one of them.
+        ceiling = settings.agent_max_promoted_invalid_calls
+        entries = message.invalid_tool_calls[:ceiling] if ceiling else message.invalid_tool_calls
+        for index, call in enumerate(entries):
             promoted.append(
                 {
-                    "name": str(call.get("name") or UNKNOWN_TOOL),
+                    # **Bounded, because this one reaches further than the operator's WARNING.**
+                    # It becomes `request.tool_call["name"]`, and from there `audit_events.tool`,
+                    # the `chemclaw.tool` span attribute and `ToolFailedEvent.tool` on the
+                    # chemist's stream — none of which bounds it, and `agent/audit.py::_recording`
+                    # `%s`-formats it into a log line the default formatter does not escape. The
+                    # design this replaced bounded the name for exactly this reason and the
+                    # promotion dropped the bound; `_bounded_text`'s own docstring already claimed
+                    # this was happening. Escaping stays at the sinks, so `_metric_label`'s
+                    # comparison against the bound tools is untouched.
+                    "name": _bounded_text(call.get("name") or UNKNOWN_TOOL),
                     # The model's own id, kept: it is what pairs the `tool_failed` the announcer
                     # raises with the `tool_call` event the stream already emitted, and dropping it
                     # is what forced the previous design's `graph_stream` guard.
-                    "id": str(call.get("id") or ""),
+                    #
+                    # **A missing id becomes a distinct synthetic one rather than `""`.** A
+                    # provider may omit it — measured, both `_convert_dict_to_message` and the
+                    # streamed chunk merge yield `id=None` when it does — and two such calls in one
+                    # reply then shared the empty string, which two independent readers key on:
+                    # `graph_stream.failed_calls` suppressed an unrelated call's `tool_result`, and
+                    # `ToolCallTrace._issued` collapsed both into one, so `_empty_answer_event`
+                    # printed "1 tool call(s) attempted, 2 refused by a gate" — an impossible count.
+                    # The index makes it unique within the reply, which is the scope that collides.
+                    "id": str(call.get("id") or "") or f"{_UNPARSED_CALL_ID}{index}",
                     "args": {_UNPARSED_ARGUMENTS: bounded_repr(call.get("args"))},
                     "type": "tool_call",
                 }
@@ -581,6 +614,7 @@ async def refuse_unparsed_arguments(request: Any, handler: Callable[[Any], Any])
         return await handler(request)
     raise UnparsedArguments(
         f"The arguments for this call were not valid JSON, so it did not run. What was received "
-        f"was {document}. Re-issue the call with complete, valid JSON arguments; if you cannot, "
-        f"say what you were unable to do rather than answering as though the tool had returned."
+        f"was {defang(str(document))}. Re-issue the call with complete, valid JSON arguments; if "
+        f"you cannot, say what you were unable to do rather than answering as though the tool had "
+        f"returned."
     )
