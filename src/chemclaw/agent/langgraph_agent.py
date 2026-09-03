@@ -819,12 +819,25 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
         enforce_tool_authz,
         refuse_writes_on_dry_run,
         refuse_repeated_calls,
-        # **Innermost of everything, and that position is the mechanism.** A call whose arguments
-        # the model mis-serialised is promoted onto `tool_calls` by `PromoteInvalidToolCalls` so
-        # that it reaches this chain at all; being last here means the announcer, the audit trail,
-        # the authorization gate and both guards above have already seen it, which is the whole
-        # gain over the design that reported it by hand. It still raises before the tool body, so
-        # the eleven in-process tools with no required argument cannot be executed by a promotion.
+        # **Below every gate that decides, and that position is the mechanism.** A call whose
+        # arguments the model mis-serialised is promoted onto `tool_calls` by
+        # `PromoteInvalidToolCalls` so that it reaches this chain at all; being below the announcer,
+        # the audit trail, the authorization gate and both guards means all of them have already
+        # seen it, which is the whole gain over the design that reported it by hand. It still
+        # raises before the tool body, so the eleven in-process tools with no required argument
+        # cannot be executed by a promotion.
+        #
+        # **It is not innermost, and this comment said it was.** `enforce_plan_approval` and
+        # `stamp_plan_link` are appended below whenever a profile enables them, so under
+        # `harness_enabled` they nest *inside* this — measured, not read off the list. The
+        # consequence follows and is deliberate rather than discovered: this raises before calling
+        # its handler, so **the plan gate never sees a promoted call**. That is the right outcome —
+        # the arguments did not parse, so there is no well-formed request for a gate to decide
+        # about, and the turn reports a fault (`reason=None`) rather than a refusal it never made.
+        # It is stated here because nothing else can state it: `tests/test_middleware_order.py`
+        # and `tests/test_profiles.py` both pin this list under profiles that attach *neither* of
+        # those two, so the one configuration that falsifies "innermost" was the one they could
+        # not see. `tests/test_invalid_tool_calls.py` now pins the gated order.
         refuse_unparsed_arguments,
         *([enforce_plan_approval] if gate_applies(profile) else []),
         # Innermost, and deliberately after the gate: it raises nothing and records nothing — it

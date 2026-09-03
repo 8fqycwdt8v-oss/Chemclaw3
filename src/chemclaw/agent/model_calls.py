@@ -51,9 +51,9 @@ recovered from.
 
 **The fix is a change of address, and that is the whole of it.** The call is moved onto
 `tool_calls` carrying its unparseable document under `_UNPARSED_ARGUMENTS`, and
-`refuse_unparsed_arguments` — innermost of the tool chain — raises before the body runs. It is then
-an ordinary failing tool call, and everything a failing tool call already gets, it gets: the audit
-row, the span, the authorization gate, the dry-run and repeat guards, the `tool_failed` the
+`refuse_unparsed_arguments` — below every gate that decides — raises before the body runs. It is
+then an ordinary failing tool call, and everything a failing tool call already gets, it gets: the
+audit row, the span, the authorization gate, the dry-run and repeat guards, the `tool_failed` the
 announcer raises carrying the model's **own call id**, and a `ToolMessage` the model reads inside
 its own loop — an ordinary graph iteration the loop cap and the spend cap both count.
 
@@ -72,8 +72,10 @@ with. And an invariant about streamed prose, because `astream(stream_mode=["mess
 *model call* rather than per returned message, so the discarded attempt's tokens reached the
 chemist while the recorded message held only the second attempt — a divergence that had to be
 closed by carrying the discarded prose forward. Promotion has none of those problems, because it
-introduces no hidden call: **~20 lines replace ~180**, and the ~180 were the ones that kept being
-wrong.
+introduces no hidden call: measured with docstrings and comments stripped, **42 lines of code
+replace 113** — and those 113 were the ones that kept being wrong. (This said "~20 replace ~180",
+a 9x reduction against a real one of 2.7x. Neither figure had been counted;
+`D-2026-08-30-a-review-of-the-review` counts them.)
 
 The one property the old design had that this does not: it corrected the model without spending a
 graph iteration. That is the trade, stated so it is not rediscovered — an iteration is what makes
@@ -300,7 +302,15 @@ def _bounded_reason(value: object) -> str:
             lo = mid
         else:
             hi = mid - 1
-    return "…" + repr(text[-lo:])
+    # **`text[-0:]` is the whole string, not the empty one**, so the search failing to fit even one
+    # character has to be answered here rather than by the slice. It was not, and the bound was
+    # then lost completely: measured at a budget of 0, 1 or 2 against a 100 kB parse error, this
+    # returned **100,024** characters — the exact failure the function exists to prevent, at
+    # exactly the tightening an operator would make to be safer. `agent_audit_max_arg_chars` is
+    # `ge=0` with no floor, and `repr` of a single character is already three characters wide, so
+    # any budget under 3 reaches this branch. The ellipsis alone is the honest answer: the budget
+    # says there is no room, and something was still cut.
+    return "…" + repr(text[-lo:]) if lo else "…"
 
 
 @dataclass(frozen=True, slots=True)
@@ -540,12 +550,20 @@ class UnparsedArguments(ChemclawError):
 
 @wrap_tool_call
 async def refuse_unparsed_arguments(request: Any, handler: Callable[[Any], Any]) -> Any:
-    """Refuse a promoted call before its body runs — innermost of the governance chain.
+    """Refuse a promoted call before its body runs — below every gate that decides.
 
-    **Innermost, so everything above it sees the call**: the announcer raises `tool_failed`, the
+    **Below the gates, so all of them see the call**: the announcer raises `tool_failed`, the
     audit trail records the row, and the authorization, dry-run and repeat guards all run on a call
     the model really did make. That is the whole gain over the design this replaces, where none of
     them could see it.
+
+    **Not innermost, though this said so.** `enforce_plan_approval` and `stamp_plan_link` are
+    appended below it whenever a profile enables the harness, so under `harness_enabled` they nest
+    inside — measured against a gated profile, not read off the list. Since this raises before
+    calling its handler, **the plan gate never sees a promoted call**. That is the right outcome
+    and is now written down rather than inherited: arguments that did not parse are not a
+    well-formed request for a gate to decide about, so the turn reports a fault (`reason=None`)
+    rather than a refusal nothing actually made.
 
     **Before the body, because an empty argument dict is not safe.** Measured against the live
     registry, **11 of 54** in-process tools have no required argument, so a promotion that dropped

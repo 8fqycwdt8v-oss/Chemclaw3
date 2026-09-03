@@ -338,6 +338,75 @@ def test_a_valid_call_beside_a_broken_one_survives_the_promotion() -> None:
     assert _UNPARSED_ARGUMENTS in reply.tool_calls[1]["args"]
 
 
+def test_the_promotion_works_on_the_synchronous_hook_too() -> None:
+    """Both hooks are declared, and until now only one of them was ever driven.
+
+    `create_agent` puts a middleware declaring either `wrap_model_call` or `awrap_model_call` into
+    **both** chains — the trap `agent/compaction.RecordContextCompaction` records — so a promotion
+    implemented on the async path alone is green under `graph.ainvoke` and silently promotes
+    nothing under `graph.invoke`.
+
+    **This test exists because its absence was measured.** Gutting `wrap_model_call` to
+    `return handler(request)` left all 137 tests across the seven files this mechanism touches
+    green: every graph-driven test goes through `astream`, and every hook-level test calls
+    `awrap_model_call` directly. The design this replaced had exactly this coverage
+    (`test_the_sync_path_announces_what_the_async_path_announces`) and it was deleted with the
+    mechanism rather than re-pointed at its replacement.
+
+    Asserted as an equality with the async path rather than as a property of its own, so the two
+    cannot drift: whatever promotion means, it must mean the same thing on both.
+    """
+
+    def _sync_handler(request: ModelRequest[Any]) -> Any:
+        return ModelResponse(result=[_broken()])
+
+    async def _async_handler(request: ModelRequest[Any]) -> Any:
+        return ModelResponse(result=[_broken()])
+
+    sync = PromoteInvalidToolCalls().wrap_model_call(_request([HumanMessage("x")]), _sync_handler)
+    asyncio.run(
+        PromoteInvalidToolCalls().awrap_model_call(_request([HumanMessage("x")]), _async_handler)
+    )
+    message = sync.result[0]
+    assert message.invalid_tool_calls == [], "the sync hook promoted nothing"
+    assert [call["name"] for call in message.tool_calls] == ["predict_pka"]
+    assert message.tool_calls[0]["id"] == "c1"
+    assert _UNPARSED_ARGUMENTS in message.tool_calls[0]["args"]
+
+
+def test_a_budget_too_small_for_one_character_still_bounds_the_parse_error() -> None:
+    """`text[-0:]` is the whole string, and the binary search leant on it being empty.
+
+    When no suffix fits the budget the search leaves `lo` at 0, and `repr(text[-0:])` is then a
+    `repr` of the **entire** document. Measured before the fix, against a 100 kB parse error at a
+    budget of 0, 1 or 2: **100,024 characters returned** — a total loss of the bound, which is
+    worse than the loose bound this function was written to replace, and it appears at exactly the
+    tightening an operator would make to be safer.
+
+    Reachable rather than theoretical: `agent_audit_max_arg_chars` is `Field(..., ge=0)` with no
+    floor anywhere, and `repr` of a single character is already three characters wide, so every
+    budget under 3 lands here. The shipped default is 200, which is why nothing caught it.
+    """
+    from chemclaw.agent.model_calls import _bounded_reason
+
+    document = "x" * 100_000 + "\nUnterminated string"
+    original = settings.agent_audit_max_arg_chars
+    try:
+        for budget in (0, 1, 2):
+            settings.agent_audit_max_arg_chars = budget
+            bounded = _bounded_reason(document)
+            assert len(bounded) <= 8, (
+                f"budget {budget} returned {len(bounded)} characters: the bound is gone"
+            )
+            assert bounded == "…", bounded
+        # The neighbouring budget that does fit one character, so the guard is not simply "always
+        # return an ellipsis".
+        settings.agent_audit_max_arg_chars = 3
+        assert _bounded_reason(document) == "…'g'"
+    finally:
+        settings.agent_audit_max_arg_chars = original
+
+
 def test_the_promotion_wraps_the_recorder_and_takes_no_model_call_of_its_own() -> None:
     """Order is nesting, and here it is what keeps the latency histogram honest.
 
