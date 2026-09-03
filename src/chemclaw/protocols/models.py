@@ -443,9 +443,21 @@ class ExperimentDesign(BaseModel):
     # `max_length=1536` is **exactly** the largest plate this system knows, not an order of
     # magnitude above it — an earlier version of this comment said the latter, which would have
     # made a 1536-well design sound like an absurdity rather than the case the number was chosen to
-    # admit. The largest design these ceilings permit serialises to 414 KB (a tenth of the body
-    # cap) and diffs in 0.060 s, which is the measurement that says the ceilings, not the cap, are
-    # what bound the cost.
+    # admit.
+    #
+    # **The cost at that ceiling is a diff time, not a byte count, and this comment used to quote a
+    # byte count as though the ceilings fixed it.** They do not: they bound *counts*, and the free
+    # text inside those counts is bounded only by the body cap. Measured at 1536 arms with every
+    # count at its own ceiling, varying only how full the notes and rationales are:
+    #
+    #     empty free text     482 KB   diff 0.329 s
+    #     short notes         572 KB   diff 0.278 s
+    #     long notes         1382 KB   diff 0.282 s
+    #
+    # So the diff time is flat in the bytes and set by the path count — which is the measurement
+    # that says these ceilings, and not the body cap, are what bound the cost. The single figure
+    # that stood here (414 KB, 0.060 s) was one sample of a two-variable space quoted as a
+    # constant, and it was low on both axes.
     #
     # **Every collection in this module is bounded, and the comment here used to say otherwise.**
     # It read "what is bounded is the lists a diff keys by an identifier, which are the six in

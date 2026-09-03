@@ -140,9 +140,12 @@ def _labelled(items: list[Any], identifier: str | None) -> list[tuple[str, Any]]
     # of blocked event loop** for one authenticated request — but on a payload that predated the
     # `max_length` ceilings and can no longer be posted, so **the ceilings are what closed that,
     # not this line.** At the largest list those ceilings now admit (1536, a full plate) the scan
-    # costs 22.4 ms against this `Counter`'s 0.107 ms, and the whole largest legal design diffs in
-    # 0.060 s. The right claim for `Counter` here is that it keeps a bounded cost flat rather than
-    # quadratic in the bound; the earlier comment credited it with the 46 s, which was false.
+    # costs 22.4 ms against this `Counter`'s 0.107 ms, and a design at every count ceiling diffs in
+    # **~0.3 s** — re-measured, because the 0.060 s this line quoted was taken on one filling of the
+    # free-text fields and stated as though the ceilings fixed it (see `models.py`'s note on the
+    # three-row sweep). The right claim for `Counter` here is that it keeps a bounded cost flat
+    # rather than quadratic in the bound; the earlier comment credited it with the 46 s, which was
+    # false.
     repeated = {label for label, n in Counter(labels).items() if n > 1}
     seen: Counter[str] = Counter()
     resolved: list[str] = []

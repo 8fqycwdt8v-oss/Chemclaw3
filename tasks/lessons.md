@@ -1615,7 +1615,9 @@ number when I took it. Every one was then written down as a fact about the syste
   and reported the sweep.
 - *"2.61 s at the 4 MB cap payload, down from 46 s."* That payload cannot be constructed any more —
   the same commit added the `max_length` ceilings that refuse it. The largest design now legal
-  diffs in 0.060 s, and at its ceiling the quadratic scan costs 22.4 ms against `Counter`'s 0.107
+  diffs in ~0.3 s (0.060 s when that was written, on one filling of the free-text
+  fields — the byte size at those counts ranges 482 KB to 1382 KB and the diff time does not move
+  with it), and at its ceiling the quadratic scan costs 22.4 ms against `Counter`'s 0.107
   ms. **Two fixes shipped together and I gave the credit to the wrong one**, which then went into a
   code comment as the reason that line exists.
 - *"90.6 ms → 15.7 ms."* Reproduces at 384 arms, not at 24 (4x there). And the method it described

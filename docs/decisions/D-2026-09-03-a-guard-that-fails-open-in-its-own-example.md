@@ -131,6 +131,16 @@ gave three different figures for the number of tests it added — 23, 21 and fou
 collecting the node ids at both ends of the branch measured 41 over 36 functions. `tasks/lessons.md`
 now says so and the practice is described without a number.
 
+**A figure that depends on two variables cannot be quoted as one number.** `models.py` said the
+largest design the ceilings permit "serialises to 414 KB and diffs in 0.060 s". A reviewer measured
+1782 KB and 1.556 s; re-measured here it is 482 KB at 0.329 s with the free text empty, 572 KB at
+0.278 s with short notes and 1382 KB at 0.282 s with long ones. All three readings are correct,
+because the ceilings bound *counts* and the free text inside them is bounded only by the body cap —
+so "the largest design these ceilings permit" is not one object. What the sweep shows is better than
+the claim it replaces: the diff time is **flat in the bytes** and set by the path count, which is
+precisely the evidence that the ceilings rather than the cap bound the cost. The single figure was
+one sample, low on both axes.
+
 **A rate quoted as a constant is a rate nobody can act on.** The fifth cycle published "2/25" for
 the torn read; three re-runs gave 1/25, 3/25 and 1/25, and the honest figure over 200 rounds is 9.
 That denominator is what sets the test's round count now, and the arithmetic is in its docstring so
