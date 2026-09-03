@@ -702,6 +702,26 @@ only holds defects can only ever restore the system to what it already intended 
       1 bar N2 for an arm running at 50 bar H2. Eleven of its thirteen tests fail on the previous
       renderer. Keep this row only until the coverage figure above is re-measured.
 
+- [ ] **A truthful `stated` quote from an earlier turn cannot be represented** — [S], found
+      2026-08-30 by the fresh-context review of the agent surface. `require_quotes_are_verbatim`
+      checks the quote against `get_current_user_text()`, which is the message that started *this*
+      turn, and `structure_experiment_request`'s own docstring says to call it "first … while
+      correcting it is still cheap" — i.e. iteratively, across turns. Measured: a chemist who wrote
+      "24 wells, no DMF, by Friday please." on turn 1 and "ok go ahead" on turn 3 gets the intake
+      refused, because `'24 wells'` is not in "ok go ahead".
+
+      So on the ordinary multi-turn path the honest `stated` is unrepresentable, and the remedy the
+      message prescribes records a real chemist constraint as a model inference — the mislabelling
+      the check exists to prevent, running the other way. The refusal message now says which message
+      is checkable rather than "the text you were given", which was itself untrue: it *was* given,
+      one turn earlier.
+
+      **Fixing it properly means widening the ambient to the thread's user turns**, which is a read
+      at the stamp site in `api/runner.py` (and `cli/chat.py`), on the hot path, per turn. Prior
+      turns are still the chemist's own words so the anti-spoofing argument is unaffected — the
+      question is only what that read costs and where it comes from. Anchors:
+      `core/turn_text.py`, `agent/protocol_design_tools.py::require_quotes_are_verbatim`.
+
 - [ ] **A second sign-off at the same revision overwrites the first, and both callers are told
       204** — [M], found 2026-08-30 by the fresh-context review of `protocols/store.py`.
       `expected_revision` is a compare-and-set on the *document*, never on the *status*, so two

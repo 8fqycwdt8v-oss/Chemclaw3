@@ -978,7 +978,7 @@ def test_an_honest_quote_still_passes_including_a_normalised_one() -> None:
 
 
 def test_a_quote_stating_a_different_figure_is_refused() -> None:
-    """ "no more than 48 runs" cannot be the evidence for `max_runs='96'`."""
+    """A quote reading 'no more than 48 runs' cannot be evidence for `max_runs='96'`."""
     said = "Keep it to no more than 48 runs please."
     token = set_current_user_text(said)
     try:

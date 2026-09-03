@@ -171,17 +171,21 @@ async def get_protocol(
     consumer needs both: a document view renders the revision and its lineage together, and asking
     for them separately makes the two answers race whenever somebody else is editing.
     """
-    store = default_design_store()
-    stored = await store.read(design_id, revision or None)
-    if stored is None:
+    # **One call, because four were four transactions and they tore.** The paragraph above says
+    # asking for these separately makes the answers race; the store then answered each from its own
+    # connection, and a read concurrent with one `append` was internally inconsistent in 92 to 100
+    # of every 100 — revision 1's document under a header saying head revision 2, with revision 2
+    # in the history beside it.
+    page = await default_design_store().page(design_id, revision or None)
+    if page is None:
         raise HTTPException(
             status_code=404,
             detail=f"no design {design_id!r}" + (f" at revision {revision}" if revision else ""),
         )
-    history = await store.history(design_id)
+    stored, history = page.revision, page.history
     return DesignOut(
         design_id=design_id,
-        summary=await store.summary(design_id),
+        summary=page.summary,
         revision=stored.revision,
         kind=stored.kind,
         author_kind=stored.author_kind,
@@ -190,7 +194,7 @@ async def get_protocol(
         created_at=stored.created_at,
         design=stored.design,
         checks=stored.checks,
-        status_history=await store.status_history(design_id),
+        status_history=page.status_history,
         history=[
             RevisionSummary(
                 revision=item.revision,

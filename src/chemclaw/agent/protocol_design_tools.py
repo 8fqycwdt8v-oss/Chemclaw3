@@ -334,7 +334,12 @@ async def draft_experiment_protocol(
         factors: What a screen varies. Omit for a single experiment.
         arms: One per set of conditions, each setting every factor. Omit for a single experiment.
         plate_format: 24, 48, 96, 384 or 1536 to lay the arms out. The error names the smallest
-            plate that fits when they do not.
+            plate that fits when they do not. **Omitting it on a revision carries the previous
+            plate forward unchanged**, which is what you want when only a temperature moved — and
+            is wrong the moment the set of arms changes, because the carried-forward layout then
+            leaves a new arm with no well or names a well for an arm that is gone, and the draft is
+            refused with a message about wells. Pass a `plate_format` whenever you add or remove an
+            arm, and the plate is laid out again.
         randomize_run_order: Shuffle the order the arms are *run* in, never their well positions —
             what stops a drift over the session from reading as a factor effect.
         seed: Required when randomizing, so the plate a chemist ran can be reproduced.

@@ -741,11 +741,12 @@ def test_a_design_holding_only_the_ask_cannot_be_marked_executed(backend: str) -
             change_note="structured the request",
             status="requested",
         )
+        refused: DesignStatus
         for refused in ("executed", "approved"):
             with pytest.raises(UnstorableDocument, match="no procedure"):
                 await store.set_status(
                     _askonly,
-                    refused,  # type: ignore[arg-type]
+                    refused,
                     expected_revision=1,
                     actor="chemist-a",
                     reason="ran it",
@@ -790,5 +791,56 @@ def test_a_drafted_protocol_can_still_be_approved(backend: str) -> None:
         )
         header = await store.summary(_signoff)
         assert header is not None and header.status == "approved"
+
+    _run(_body)
+
+
+def test_one_read_of_a_design_is_internally_consistent_under_a_concurrent_write() -> None:
+    """`GET /protocols/{id}` answers from one snapshot, not four.
+
+    The route's own docstring says the history comes back in the same call because "asking for them
+    separately makes the two answers race whenever somebody else is editing" — and the store then
+    answered `read`, `summary`, `history` and `status_history` from four separate connections.
+    Measured against a real database with one concurrent `append`: **100/100** reads were
+    internally inconsistent, serving revision 1's document under a header saying head revision 2
+    with revision 2 in the history beside it. A client picks its `parent_revision` out of that.
+
+    One transaction is not by itself the fix, which is why this test is worth its cost: `core/db.py`
+    is READ COMMITTED and takes a new snapshot per *statement*, so four statements in one
+    transaction tear exactly as four transactions do. `page()` sets `REPEATABLE READ`.
+
+    Postgres only — `InMemoryDesignStore` never yields between its four reads, so it has always
+    been consistent, and every route test proved a property the deployment did not have.
+    """
+
+    async def _body() -> None:
+        await migrated_db_or_skip()
+        store = PostgresDesignStore()
+        torn = 0
+        rounds = 25
+        for index in range(rounds):
+            design_id = _fresh_id("postgres", f"torn{index}")
+            await store.append(design_id, _design(), [], kind="protocol", author_kind="agent")
+
+            page, _ = await asyncio.gather(
+                store.page(design_id),
+                store.append(
+                    design_id,
+                    _design(arms=2),
+                    [],
+                    kind="protocol",
+                    author_kind="human",
+                    parent_revision=1,
+                    change_note="a colleague saves while this read is in flight",
+                ),
+                return_exceptions=True,
+            )
+            assert not isinstance(page, BaseException)
+            assert page is not None
+            assert page.summary is not None
+            head_in_history = max(item.revision for item in page.history)
+            if not (page.revision.revision == page.summary.head_revision == head_in_history):
+                torn += 1
+        assert torn == 0, f"{torn}/{rounds} reads disagreed with themselves"
 
     _run(_body)

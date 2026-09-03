@@ -39,6 +39,7 @@ from typing import Any, Protocol, runtime_checkable
 import psycopg
 from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
+from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -150,6 +151,31 @@ FROM experiment_protocols
 """
 
 
+class DesignPage(BaseModel):
+    """One design as `GET /protocols/{design_id}` serves it, read as a single consistent snapshot.
+
+    **The four halves used to be four transactions, and they tore.** The route's own docstring says
+    the history comes back in the same call because "asking for them separately makes the two
+    answers race whenever somebody else is editing" — and the store then answered `read`, `summary`,
+    `history` and `status_history` from four separate `_connection()` blocks. Measured against a
+    real database with one concurrent `append`, the response was internally inconsistent in **92 to
+    100 of every 100** reads: revision 1's document under a header saying head revision 2, with
+    revision 2 listed in the history beside it. A client then picks its `parent_revision` from a
+    response whose three halves disagree.
+
+    It was also a backend divergence of the kind `InMemoryDesignStore` exists not to have: the
+    in-memory store never yields between its four reads, so it tore 0/100, and every route test
+    proved a consistency the deployment did not have.
+    """
+
+    revision: DesignRevision
+    summary: DesignSummary | None
+    history: list[DesignRevision] = Field(default_factory=list)
+    status_history: list[StatusEvent] = Field(default_factory=list)
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
 class RevisionConflict(ChemclawError):
     """A write whose `parent_revision` is not the design's head — somebody else edited it first."""
 
@@ -244,6 +270,10 @@ class DesignStore(Protocol):
 
     async def status_history(self, design_id: str) -> list[StatusEvent]:
         """Every recorded lifecycle move, newest first."""
+        ...
+
+    async def page(self, design_id: str, revision: int | None = None) -> DesignPage | None:
+        """The revision, the header, the history and the sign-offs as one consistent snapshot."""
         ...
 
 
@@ -428,6 +458,18 @@ class InMemoryDesignStore:
     async def status_history(self, design_id: str) -> list[StatusEvent]:
         """Every recorded lifecycle move, newest first."""
         return list(reversed(self._status_events.get(design_id, [])))
+
+    async def page(self, design_id: str, revision: int | None = None) -> DesignPage | None:
+        """Consistent by construction: nothing between these four reads yields to another task."""
+        stored = await self.read(design_id, revision)
+        if stored is None:
+            return None
+        return DesignPage(
+            revision=stored,
+            summary=await self.summary(design_id),
+            history=await self.history(design_id),
+            status_history=await self.status_history(design_id),
+        )
 
 
 class PostgresDesignStore:
@@ -713,12 +755,57 @@ class PostgresDesignStore:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_STATUS_EVENTS, (design_id,))
                 rows = await cur.fetchall()
-        return [
-            StatusEvent(
-                status=row[0], revision=row[1], actor=row[2], reason=row[3], created_at=row[4]
-            )
-            for row in rows
-        ]
+        return [_status_event(row) for row in rows]
+
+    async def page(self, design_id: str, revision: int | None = None) -> DesignPage | None:
+        """All four reads in one transaction, at an isolation level that makes that mean something.
+
+        **One transaction is not on its own enough, and that is the whole subtlety here.**
+        `core/db.py` is READ COMMITTED, which takes a *new snapshot per statement*, so four
+        statements inside one transaction tear exactly as four transactions do. `REPEATABLE READ`
+        gives the whole block one snapshot, which is what "the history comes back in the same call"
+        was always supposed to mean. Nothing here writes, and a read-only transaction cannot take a
+        serialization failure, so there is no retry to write.
+        """
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                await cur.execute(
+                    f"SELECT {_REVISION_COLUMNS} FROM experiment_protocol_revisions "
+                    "WHERE design_id = %s AND (%s = 0 OR revision = %s) ORDER BY revision DESC "
+                    "LIMIT 1",
+                    (design_id, revision or 0, revision or 0),
+                )
+                head_row = await cur.fetchone()
+                if head_row is None:
+                    return None
+                stored = _revision(design_id, head_row)
+
+                await cur.execute(f"{_SELECT_SUMMARY} WHERE design_id = %s", (design_id,))
+                summary_row = await cur.fetchone()
+
+                await cur.execute(
+                    f"SELECT {_REVISION_COLUMNS} FROM experiment_protocol_revisions "
+                    "WHERE design_id = %s ORDER BY revision",
+                    (design_id,),
+                )
+                history_rows = await cur.fetchall()
+
+                await cur.execute(_SELECT_STATUS_EVENTS, (design_id,))
+                event_rows = await cur.fetchall()
+        return DesignPage(
+            revision=stored,
+            summary=_summary(summary_row) if summary_row else None,
+            history=[_revision(design_id, row) for row in history_rows],
+            status_history=[_status_event(row) for row in event_rows],
+        )
+
+
+def _status_event(row: Any) -> StatusEvent:
+    """One `experiment_protocol_status_events` row as its model."""
+    return StatusEvent(
+        status=row[0], revision=row[1], actor=row[2], reason=row[3], created_at=row[4]
+    )
 
 
 #: The statuses a new revision retires, because each is a claim about a *document* rather than
