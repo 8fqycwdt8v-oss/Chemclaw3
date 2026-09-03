@@ -13,8 +13,8 @@ did not know about. Two chemists editing one plate is the ordinary case.
 import asyncio
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar, get_args
+from uuid import uuid4
 
-import psycopg
 import pytest
 
 from chemclaw.core.config import settings
@@ -33,6 +33,7 @@ from chemclaw.protocols.store import (
     PostgresDesignStore,
     RevisionConflict,
     UnknownDesign,
+    UnstorableDocument,
     advanced,
     default_design_store,
 )
@@ -76,6 +77,16 @@ def _design(
         if cited
         else [],
     )
+
+
+def _fresh_id(backend: str, name: str) -> str:
+    """A design id unique to this *run*, for the tests that must start from nothing.
+
+    `_id` is stable so a Postgres row can be inspected after a failure; these three assert on a
+    design's first revision, and a row left behind by an earlier run makes that assertion about
+    somebody else's history.
+    """
+    return f"design-{backend}-{name}-{uuid4().hex[:8]}"
 
 
 def _id(backend: str, name: str) -> str:
@@ -561,13 +572,22 @@ def test_two_writers_racing_on_one_head_lose_as_a_revision_conflict() -> None:
     """The loser of a real race is told the same thing a stale `parent_revision` is told.
 
     Postgres only, because the race is one `core.db`'s READ COMMITTED connections make possible and
-    a single-threaded dict cannot: both writers read `head=1`, both build revision 2, and what
-    actually decided between them was the `(design_id, revision)` primary key. That surfaced as a
-    raw `psycopg.errors.UniqueViolation` nothing translated, so the second of "two chemists editing
-    one plate" got a **500 with no `revision_conflict` code** from `POST
-    /protocols/{id}/revisions` — precisely the case the 409 exists for. No artificial barrier is
-    needed and none is used: `asyncio.gather` over two real appends reproduces it, which is how it
-    was found.
+    a single-threaded dict cannot. No artificial barrier is needed and none is used:
+    `asyncio.gather` over two real appends reproduces it, which is how it was found.
+
+    **What decides it is `_SELECT_HEAD`'s `FOR UPDATE`, and this docstring used to name the primary
+    key.** That was true when it was written — both writers read `head=1`, both built revision 2,
+    and `(design_id, revision)` stopped the second as a raw `psycopg.errors.UniqueViolation` nobody
+    translated, which is the 500 the 409 exists to prevent. The lock was then added for a different
+    defect and serialises these two as a side effect, so the loser is refused by the
+    `parent_revision` comparison and never reaches the INSERT: measured over 5x100 pairs, the
+    primary key decided none of them, and replacing that handler with a raised `AssertionError`
+    leaves the suite green.
+
+    So what this test proves is the contract — exactly one writer wins, the loser is told
+    `RevisionConflict`, and one revision 2 exists — and not the mechanism. The assertion that used
+    to sit below, that the loser "cannot pass by inheritance" from `UniqueViolation`, was emphatic
+    about a branch nothing reaches; it is gone rather than left looking load-bearing.
     """
 
     async def _body() -> None:
@@ -605,10 +625,6 @@ def test_two_writers_racing_on_one_head_lose_as_a_revision_conflict() -> None:
 
         loser = refusals[0]
         assert isinstance(loser, RevisionConflict)
-        # The whole defect, stated as its own assertion: a `UniqueViolation` escaping here is what
-        # the route turns into a 500, and `RevisionConflict` is not one, so this cannot pass by
-        # inheritance.
-        assert not isinstance(loser, psycopg.errors.UniqueViolation)
         assert "revision 2" in str(loser)
 
         # And exactly one revision 2 exists — the winner's, whichever it was.
@@ -667,5 +683,164 @@ def test_the_session_that_created_a_design_is_the_one_the_listing_filters_on(
         # and it is also the caller that got the wrong answer.
         assert design_id in {row.design_id for row in await store.listing(session_id="one")}
         assert design_id not in {row.design_id for row in await store.listing(session_id="two")}
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_an_unpaired_surrogate_is_refused_rather_than_diverging(backend: str) -> None:
+    r"""Both backends refuse it, which is the only reason `require_storable` exists.
+
+    Starlette parses a request body with stdlib `json.loads`, which turns `"\\ud800"` into a lone
+    surrogate, and pydantic only refuses one on a `str` field carrying a constraint — so any
+    unconstrained string in a design reached the driver. Measured on the real app before this:
+    `POST /protocols/{id}/revisions` answered **500** on Postgres and **200** in memory. It is not
+    even counted as a database failure, because `UnicodeEncodeError` is not a `psycopg.Error`.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design = _design(arms=1)
+        broken = design.model_copy(
+            update={"base": design.base.model_copy(update={"waste": "quench \ud800"})}
+        )
+        with pytest.raises(UnstorableDocument, match="surrogate"):
+            await store.append(
+                _fresh_id(backend, "surrogate"),
+                broken,
+                run_checks(broken),
+                kind="protocol",
+                author_kind="agent",
+                author="chemist-a",
+                change_note="drafted",
+            )
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_design_holding_only_the_ask_cannot_be_marked_executed(backend: str) -> None:
+    """A lab record saying an experiment was run, over a document with no procedure in it.
+
+    Nothing tied a status to the document it is a statement about, so `set_status("executed")` on a
+    `request` revision was accepted on both backends.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        _askonly = _fresh_id(backend, "askonly")
+        design = _design(arms=0)
+        assert not design.has_protocol
+        await store.append(
+            _askonly,
+            design,
+            run_checks(design, stage="request"),
+            kind="request",
+            author_kind="agent",
+            author="chemist-a",
+            change_note="structured the request",
+            status="requested",
+        )
+        refused: DesignStatus
+        for refused in ("executed", "approved"):
+            with pytest.raises(UnstorableDocument, match="no procedure"):
+                await store.set_status(
+                    _askonly,
+                    refused,
+                    expected_revision=1,
+                    actor="chemist-a",
+                    reason="ran it",
+                )
+        # `abandoned` says nothing about a procedure, so it stays available on an ask.
+        await store.set_status(
+            _askonly,
+            "abandoned",
+            expected_revision=1,
+            actor="chemist-a",
+            reason="not going ahead",
+        )
+        header = await store.summary(_askonly)
+        assert header is not None and header.status == "abandoned"
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_drafted_protocol_can_still_be_approved(backend: str) -> None:
+    """The guard refuses an ask, never a protocol — the ordinary sign-off path."""
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        _signoff = _fresh_id(backend, "signoff")
+        design = _design(arms=2)
+        await store.append(
+            _signoff,
+            design,
+            run_checks(design),
+            kind="protocol",
+            author_kind="agent",
+            author="chemist-a",
+            change_note="drafted",
+        )
+        await store.set_status(
+            _signoff,
+            "approved",
+            expected_revision=1,
+            actor="chemist-a",
+            reason="the precedent holds",
+        )
+        header = await store.summary(_signoff)
+        assert header is not None and header.status == "approved"
+
+    _run(_body)
+
+
+def test_one_read_of_a_design_is_internally_consistent_under_a_concurrent_write() -> None:
+    """`GET /protocols/{id}` answers from one snapshot, not four.
+
+    The route's own docstring says the history comes back in the same call because "asking for them
+    separately makes the two answers race whenever somebody else is editing" — and the store then
+    answered `read`, `summary`, `history` and `status_history` from four separate connections.
+    Measured against a real database with one concurrent `append`: **100/100** reads were
+    internally inconsistent, serving revision 1's document under a header saying head revision 2
+    with revision 2 in the history beside it. A client picks its `parent_revision` out of that.
+
+    One transaction is not by itself the fix, which is why this test is worth its cost: `core/db.py`
+    is READ COMMITTED and takes a new snapshot per *statement*, so four statements in one
+    transaction tear exactly as four transactions do. `page()` sets `REPEATABLE READ`.
+
+    Postgres only — `InMemoryDesignStore` never yields between its four reads, so it has always
+    been consistent, and every route test proved a property the deployment did not have.
+    """
+
+    async def _body() -> None:
+        await migrated_db_or_skip()
+        store = PostgresDesignStore()
+        torn = 0
+        rounds = 25
+        for index in range(rounds):
+            design_id = _fresh_id("postgres", f"torn{index}")
+            await store.append(design_id, _design(), [], kind="protocol", author_kind="agent")
+
+            page, _ = await asyncio.gather(
+                store.page(design_id),
+                store.append(
+                    design_id,
+                    _design(arms=2),
+                    [],
+                    kind="protocol",
+                    author_kind="human",
+                    parent_revision=1,
+                    change_note="a colleague saves while this read is in flight",
+                ),
+                return_exceptions=True,
+            )
+            assert not isinstance(page, BaseException)
+            assert page is not None
+            assert page.summary is not None
+            head_in_history = max(item.revision for item in page.history)
+            if not (page.revision.revision == page.summary.head_revision == head_in_history):
+                torn += 1
+        assert torn == 0, f"{torn}/{rounds} reads disagreed with themselves"
 
     _run(_body)

@@ -85,6 +85,16 @@ WITHHELD: dict[str, str] = {
         "one conversation's whole record, and the gate on it is session ownership — there is no "
         "actor here to own anything, so the caller could only ever name somebody else's session"
     ),
+    "find_experiment_protocols": (
+        "every experiment design open in the deployment, with the project it belongs to and the "
+        "named employee who opened it — the same enumeration `check_pending_requests` is withheld "
+        "for, and the discovery path for the ids `read_experiment_protocol` takes"
+    ),
+    "read_experiment_protocol": (
+        "one chemist's in-flight design: the goal they typed, their `prior_work` and `notes`, and "
+        "what they ruled out. A `design-<hash>` id is derived from the ask, which is the same "
+        "guessability argument that withholds `get_durable_job_status`"
+    ),
     "check_pending_requests": (
         "every open request in the deployment with the reasoning a chemist typed, who asked and "
         "which session it belongs to — also the discovery path for the session ids above"

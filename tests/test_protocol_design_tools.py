@@ -23,8 +23,13 @@ from collections.abc import Iterator
 import pytest
 
 import chemclaw.agent.protocol_design_tools as tools
+from chemclaw.agent.authz import require_actor
 from chemclaw.core.errors import ChemclawError
-from chemclaw.core.turn_text import reset_current_user_text, set_current_user_text
+from chemclaw.core.turn_text import (
+    get_current_user_text,
+    reset_current_user_text,
+    set_current_user_text,
+)
 from chemclaw.protocols.models import (
     ChargeLine,
     EvidenceRef,
@@ -202,7 +207,7 @@ def test_structuring_a_request_stores_revision_one_as_a_request(
         payload = await tools.structure_experiment_request(request)
 
         receipt = ProtocolReceipt.model_validate_json(payload)
-        assert receipt.design_id == design_id_for(request)
+        assert receipt.design_id == design_id_for(request, owner=require_actor())
         assert receipt.revision == 1
         assert receipt.status == "requested"
         assert receipt.title == "SM-3 Suzuki"
@@ -275,9 +280,9 @@ def test_structuring_refuses_before_it_stores_anything(
 
     async def _body() -> None:
         request = _request(scale=RequestField(value="5 g", basis="stated", quote="five grams"))
-        with pytest.raises(ChemclawError, match="not in the text"):
+        with pytest.raises(ChemclawError, match="quote is not in the message"):
             await tools.structure_experiment_request(request)
-        assert await store.read(design_id_for(request)) is None
+        assert await store.read(design_id_for(request, owner=require_actor())) is None
 
     asyncio.run(_body())
 
@@ -505,15 +510,15 @@ def test_drafting_after_structuring_the_same_ask_stores_the_next_revision(
 ) -> None:
     """The documented workflow, which is now the only one: structure the ask, then draft for it.
 
-    `structure_experiment_request` files the ask under `design_id_for(request)` and hands back the
-    id and the revision the draft builds on — so the protocol is revision 2 of the design the
-    intake opened, and the two revisions are one document growing rather than two designs.
+    `structure_experiment_request` files the ask under the actor's own `design_id_for` and hands
+    back the id and the revision the draft builds on — so the protocol is revision 2 of the design
+    the intake opened, and the two revisions are one document growing rather than two designs.
     """
 
     async def _body() -> None:
         request = _request()
         intake = await _open(request)
-        assert intake.design_id == design_id_for(request)
+        assert intake.design_id == design_id_for(request, owner=require_actor())
 
         drafted = ProtocolReceipt.model_validate_json(
             await _draft(intake.design_id, intake.revision)
@@ -932,3 +937,55 @@ def test_an_inferred_ask_needs_no_chemist_message(store: InMemoryDesignStore) ->
         assert payload.revision == 1
 
     asyncio.run(_body())
+
+
+def test_a_stated_quote_has_to_say_the_value_it_is_offered_for() -> None:
+    """`stated` attests a *value*, and only the *quote* was ever checked.
+
+    Both halves passed as long as the quote occurred somewhere in the message, and any substring
+    occurs somewhere. Measured against a chemist who wrote "We need to get the Suzuki on the
+    deactivated chloride working. Try what you think.", a model stored four limits the chemist never
+    named as their own words: `scale='5 g'` quoting `'working'`, `plate_format='96'` quoting
+    `'the'`, `max_runs='96'` quoting `'Suzuki'` and `deadline='2026-09-01'` quoting `'.'`.
+    """
+    said = "We need to get the Suzuki on the deactivated chloride working. Try what you think."
+    token = set_current_user_text(said)
+    try:
+        for value, quote in (("5 g", "working"), ("96", "the"), ("2026-09-01", ".")):
+            request = _request(scale=RequestField(value=value, basis="stated", quote=quote))
+            with pytest.raises(ChemclawError, match="does not say their value"):
+                tools.require_quotes_are_verbatim(request, get_current_user_text())
+    finally:
+        reset_current_user_text(token)
+
+
+def test_an_honest_quote_still_passes_including_a_normalised_one() -> None:
+    """The half this must not cost: a real constraint pushed into `inferred` is the same defect."""
+    said = "Run it on 250 mg of the bromide, 24 wells, and I need it by Friday."
+    token = set_current_user_text(said)
+    try:
+        for value, quote in (
+            ("250 mg", "250 mg of the bromide"),
+            ("24", "24 wells"),
+            # The chemist stated a deadline and the model normalised it; the quote carries no
+            # figures, so the value's are not required to appear in it.
+            ("2026-09-01", "by Friday"),
+        ):
+            request = _request(scale=RequestField(value=value, basis="stated", quote=quote))
+            tools.require_quotes_are_verbatim(request, get_current_user_text())
+    finally:
+        reset_current_user_text(token)
+
+
+def test_a_quote_stating_a_different_figure_is_refused() -> None:
+    """A quote reading 'no more than 48 runs' cannot be evidence for `max_runs='96'`."""
+    said = "Keep it to no more than 48 runs please."
+    token = set_current_user_text(said)
+    try:
+        request = _request(
+            max_runs=RequestField(value="96", basis="stated", quote="no more than 48 runs")
+        )
+        with pytest.raises(ChemclawError, match="does not say their value"):
+            tools.require_quotes_are_verbatim(request, get_current_user_text())
+    finally:
+        reset_current_user_text(token)

@@ -14,6 +14,7 @@ neither without being flattened first.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from typing import Any, Literal
 
@@ -58,7 +59,7 @@ class DesignDiff(BaseModel):
 
     @property
     def paths(self) -> list[str]:
-        """The changed paths, in reading order."""
+        """The changed paths, in the order the document lays them out — see `_reading_order`."""
         return [change.path for change in self.changes]
 
 
@@ -156,6 +157,34 @@ def _labelled(items: list[Any], identifier: str | None) -> list[tuple[str, Any]]
     return list(zip(resolved, items, strict=True))
 
 
+#: The document's own order, which is the order `render_markdown` lays the page out in and the order
+#: a reviewer reads a diff in.
+_SECTION_ORDER: tuple[str, ...] = ("request", "base", "factors", "arms", "layout", "evidence")
+
+
+def _reading_order(path: str) -> tuple[int, list[tuple[int, int, str]]]:
+    """Sort key putting a path where a reader expects it.
+
+    Plain `sorted` is lexicographic, which `paths`'s docstring called "reading order" and is not:
+    it interleaves the sections alphabetically (`arms` before `base` before `request`) and orders
+    twelve arms `A1, A10, A11, A12, A2, …`, so a reviewer scanning a 96-arm diff meets arm 10
+    between arm 1 and arm 2. Sections take the document's order and each segment sorts its digit
+    runs numerically, which is what makes `A2` precede `A10`.
+    """
+    head, _, _ = path.partition(".")
+    section = _SECTION_ORDER.index(head) if head in _SECTION_ORDER else len(_SECTION_ORDER)
+    segments = [
+        (0, int(part), "") if part.isdigit() else (1, 0, part)
+        for segment in path.split(".")
+        for part in _NATURAL.findall(segment)
+    ]
+    return section, segments
+
+
+#: Digit runs and non-digit runs, so a segment sorts as the alternating sequence it reads as.
+_NATURAL = re.compile(r"\d+|\D+")
+
+
 def diff_designs(
     before: ExperimentDesign,
     after: ExperimentDesign,
@@ -167,12 +196,22 @@ def diff_designs(
     left = flatten(before.model_dump(mode="json"))
     right = flatten(after.model_dump(mode="json"))
     changes: list[FieldChange] = []
-    for path in sorted(set(left) | set(right)):
+    for path in sorted(set(left) | set(right), key=_reading_order):
         old, new = left.get(path), right.get(path)
         if path not in right:
-            changes.append(FieldChange(path=path, kind="removed", before=_render(old)))
+            # **An appearing or vanishing path whose value is empty is not a change.** `flatten`
+            # skips `None` for exactly this reason and empty-string leaves were never skipped, so
+            # the same rows survived on the same field family: replacing an arm's `setpoints: None`
+            # with an all-default `Setpoints()` changes nothing a chemist can see — `setpoints_for`
+            # returns the identical resolved conditions — and produced
+            # `added arms.A1.setpoints.solvent : '' -> ''`. A miner asking how often a chemist
+            # changes a field counts those as changes that never happened. A path whose value
+            # *changes* to empty is a real deletion and is kept, below.
+            if _render(old):
+                changes.append(FieldChange(path=path, kind="removed", before=_render(old)))
         elif path not in left:
-            changes.append(FieldChange(path=path, kind="added", after=_render(new)))
+            if _render(new):
+                changes.append(FieldChange(path=path, kind="added", after=_render(new)))
         elif old != new:
             changes.append(
                 FieldChange(path=path, kind="changed", before=_render(old), after=_render(new))
