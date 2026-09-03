@@ -80,6 +80,11 @@ logger = logging.getLogger(__name__)
 TOOL_COMPOSITES: frozenset[str] = frozenset({"ThermochemistryResult", "LogdResult"})
 
 
+# Keys that are a *presentation* of the result rather than part of it, dropped before the identity
+# is taken. One entry, and it is not a general escape hatch — see `_composite_ref`.
+_PRESENTATIONAL: frozenset[str] = frozenset({"modes"})
+
+
 def _composite_ref(connector: str, tool: str, payload: dict[str, Any]) -> str:
     """The identity of one tool composite: the route it came from, plus what it produced.
 
@@ -110,10 +115,32 @@ def _composite_ref(connector: str, tool: str, payload: dict[str, Any]) -> str:
     while the same molecule at a second temperature, or the same temperature after the calculator
     moved, is a second record. Both are second measurements.
 
+    **What the payload is hashed *without*, and why that is not a hole in the above.** Moving the
+    identity onto the result put a presentational argument inside it. `compute_thermochemistry`
+    takes `top_bands`, which does nothing to the physics: it truncates `modes` to
+    `result.strongest_bands(limit)` on the way out, for a caller's context budget. Reproduced: the
+    same molecule at the same temperature with `top_bands=200` and with the default produced
+    identical `structure_id`, `gibbs_free_energy_hartree` and `temperature_k`, and two different
+    permanent `calc_ref`s — one physical measurement, two rows kept forever, which is exactly the
+    "two requests, one measurement" defect above coming back in the other seam.
+
+    So `modes` is dropped before the hash rather than canonicalised. Canonicalising would mean
+    reconstructing the untruncated list, and the truncation is lossy in one direction only — a
+    smaller `top_bands` is a subset of a larger one, and this seam holds neither the full set nor
+    the limit that produced the subset, so there is nothing here to reconstruct it from. Dropping
+    it costs no physics: `mode_count` is the honest count of the full set and survives truncation by
+    its own contract, `imaginary_frequencies_cm` and `lowest_wavenumbers_cm` are stated as always
+    coming from the *full* set for the same reason, and every thermodynamic quantity — the
+    electronic energy, the ZPE, the enthalpy, the entropy, the Gibbs free energy — is in the payload
+    unchanged. A genuinely different spectrum is a different Hessian, and a different Hessian moves
+    all of those. `_PRESENTATIONAL` is one key rather than a policy: a field belongs there only when
+    a caller's argument decides it and no measurement does.
+
     The route stays in front of the hash rather than being folded into it, so a `calc_ref` still
     says where it came from when it is read by a person.
     """
-    return f"{connector}.{tool}#{stable_hash(payload)}"
+    identity = {key: value for key, value in payload.items() if key not in _PRESENTATIONAL}
+    return f"{connector}.{tool}#{stable_hash(identity)}"
 
 
 async def publish_tool_result(

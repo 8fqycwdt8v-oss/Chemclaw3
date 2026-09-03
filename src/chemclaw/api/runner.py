@@ -103,6 +103,7 @@ from chemclaw.core.session_context import (
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tracing import start_span
 from chemclaw.core.turn_signals import JobSignal
+from chemclaw.core.turn_text import reset_current_user_text, set_current_user_text
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +251,13 @@ async def run_turn(
     tool_trace: ToolCallTrace | None = None
     with (
         _turn_ambient(
-            session.session_id, actor, roles, dry_run, ledger.correlation_id, ledger.usage
+            session.session_id,
+            actor,
+            roles,
+            dry_run,
+            ledger.correlation_id,
+            ledger.usage,
+            user_message,
         ),
         start_span(
             "chemclaw.turn",
@@ -611,6 +618,7 @@ def _turn_ambient(
     dry_run: bool,
     correlation_id: str,
     usage: TurnUsage,
+    user_text: str,
 ) -> Iterator[None]:
     """Stamp the six ambients a turn runs under, and unstamp every one on the way out.
 
@@ -644,13 +652,16 @@ def _turn_ambient(
       inside a provider's own chain (`chemclaw.agent.turn_usage.off_stream_metering`).
 
     `dry_run` rides here too for the reason it is ambient at all: the model can neither set it nor
-    clear it (IDEA-4).
+    clear it (IDEA-4). `user_text` — the chemist's message for this turn — rides here for exactly
+    that reason and no other: `protocols` checks a `basis="stated"` quote against it, and a haystack
+    the model supplies is a haystack the model can invent (`core.turn_text`).
 
     Reset order is the reverse-ish order the original spelled out and is preserved exactly: the two
     watches, the dry-run flag, then the three identity vars. `set_current_identity` is skipped
     entirely when there is no actor, so the unauthenticated path stamps nothing to reset.
     """
     session_token = set_current_session_id(session_id)
+    user_text_token = set_current_user_text(user_text)
     identity_token = set_current_identity(actor, roles) if actor is not None else None
     correlation_token = set_current_correlation_id(correlation_id)
     calls_token = begin_call_watch()
@@ -672,6 +683,7 @@ def _turn_ambient(
         _unstamp(session_id, end_spend_watch, spend_token)
         _unstamp(session_id, reset_turn_usage, usage_token)
         _unstamp(session_id, reset_dry_run, dry_run_token)
+        _unstamp(session_id, reset_current_user_text, user_text_token)
         _unstamp(session_id, reset_current_session_id, session_token)
         _unstamp(session_id, reset_current_correlation_id, correlation_token)
         if identity_token is not None:

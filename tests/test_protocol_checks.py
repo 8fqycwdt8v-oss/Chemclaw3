@@ -111,13 +111,20 @@ def test_components_resolve_blocks_a_structure_rdkit_cannot_read() -> None:
     assert "not-a-smiles" in verdict.detail
 
 
-def test_components_resolve_reports_an_unresolved_name_as_a_warning_it_passes() -> None:
-    """A name with no structure is a finding a chemist fixes in one word, not a refusal."""
+def test_components_resolve_reports_an_unresolved_name_as_a_failed_warning() -> None:
+    """A name with no structure is a finding a chemist fixes in one word, not a refusal.
+
+    **Failed, not passing, and the old name of this test was the defect.** `render_markdown` and
+    `summarise` both list only failed checks, so a passing warning put "checked and fine" in front
+    of a reader about a species nobody resolved — the sentence never reached the page.
+    `_unreadable`'s docstring describes that exact failure as fixed; it was live in four other
+    branches of this file.
+    """
     design = _design(
         request=_request(components=[RequestedComponent(name_as_written="the new ligand")])
     )
     verdict = components_resolve(design)
-    assert verdict.passed and verdict.severity == "warning"
+    assert not verdict.passed and verdict.severity == "warning"
     assert "the new ligand" in verdict.detail
 
 
@@ -231,11 +238,16 @@ def test_charge_is_consistent_tolerates_a_rounded_amount_inside_two_percent() ->
 
 
 def test_charge_is_consistent_warns_when_the_limiting_reagent_has_no_amount() -> None:
-    """No amount means no equivalents can become a weight — a warning, not a refusal."""
+    """No amount means no equivalents can become a weight — a warning, not a refusal.
+
+    A **failed** warning: this branch returns before the disagreement scan, so a table whose lines
+    contradict each other is reported as checked-and-fine, and a passing verdict is one no
+    rendering path shows.
+    """
     verdict = charge_is_consistent(
         _design(base={"charge": [ChargeLine(component="a", limiting=True).model_dump()]})
     )
-    assert verdict.passed and verdict.severity == "warning"
+    assert not verdict.passed and verdict.severity == "warning"
 
 
 def test_charge_is_consistent_is_a_warning_when_there_is_no_charge_table_at_all() -> None:
@@ -734,6 +746,13 @@ def test_coverage_is_stated_reports_a_reduced_design_and_asks_what_is_confounded
         arms=[ProtocolArm(arm_id="A1", levels={"ligand": "XPhos", "base": "K3PO4"})],
     )
     verdict = coverage_is_stated(design)
+    # **Passing, and the sentence reaches the page anyway.** This check had no `_fail` in any
+    # branch, and the first fix for that made it fail — which was the wrong half. A fractional
+    # factorial is a deliberate, textbook design that `generate_screening_design` emits, and
+    # nothing in `ExperimentDesign` records the confounding statement this asks for, so every
+    # correct reduced plate would have carried a failed check it could not clear. The half that
+    # was right is in `render_markdown`, which now lists every `note` rather than failed checks
+    # only: the sentence reaches the reader, and the check stays a check a reader believes.
     assert verdict.severity == "note" and verdict.passed
     assert "reduced design: 1 of 4" in verdict.detail
     assert "confounded" in verdict.detail

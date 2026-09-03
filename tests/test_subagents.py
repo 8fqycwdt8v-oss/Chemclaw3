@@ -339,12 +339,19 @@ def test_a_helper_cannot_spawn_a_helper(agent: Any, helper: Any) -> None:
 
 
 def test_a_helper_holds_no_connector_tool(helper: Any) -> None:
-    """A concurrency bound, not a narrowing, and the reason it has to be a test.
+    """A lifecycle bound, not a narrowing, and the reason it has to be a test.
 
-    `build_langgraph_agent` records the measurement it rests on: two concurrent turns over one MCP
-    tool object deadlock, and the second turn's calls travel over the first turn's connection,
-    misattributing them in the connector's own log. A helper is concurrent with its caller by
-    construction, so handing it the caller's already-open connector tools reproduces that exactly.
+    **What this test protects against is passing the caller's already-open tools down**, and that is
+    the one thing the deadlock measurement does cover: two concurrent readers of one MCP tool object
+    deadlock, and the second's calls travel over the first's connection, misattributing them in the
+    connector's own log. A helper is concurrent with its caller by construction, so handing it
+    `connectors=` reproduces that exactly.
+
+    **It is not why a helper has no connectors of its own**, and the two were conflated until
+    `D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock`.
+    Sessions of its own share nothing; what rules them out is that connectors are opened by the
+    async caller before the synchronous builder runs and the roster is frozen per compiled graph,
+    so a second set would have to be opened eagerly on every turn. `agent/subagents.py` carries it.
 
     `_subagents` expresses the bound by omitting `connectors=`, which is an *absence* — the class of
     thing an edit removes without noticing. Passing the caller's connectors in would keep every

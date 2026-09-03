@@ -4,8 +4,9 @@
 would leave the front end with a blob it cannot parse — `ResultBlock` in `Chemclaw3_ui` does
 `JSON.parse` and falls back to rendering *nothing* — so the choice is not "prose or JSON", it is
 "one payload both readers use, or two serializations of one design that can disagree". The measured
-context argument does not push the other way either: `D-2026-08-27-a-tool-result-is-not-a-model-on-
-the-wire` found compact JSON 0.4–0.8% *shorter* than the pydantic repr a returned model would
+context argument does not push the other way either:
+`D-2026-08-27-a-tool-result-crosses-a-boundary-and-must-say-so` found compact JSON 0.4–0.8%
+*shorter* than the pydantic repr a returned model would
 become, and declined a blanket switch because it would have been an edit to every tool at once —
 not because JSON was worse. This is one tool, choosing its own return.
 
@@ -26,8 +27,10 @@ from chemclaw.protocols.models import (
     DesignStatus,
     DesignSummary,
     ExperimentDesign,
+    FactorLevel,
     ProtocolArm,
     ProtocolCheck,
+    ProtocolStep,
     Setpoints,
 )
 
@@ -140,7 +143,11 @@ def summarise(design: ExperimentDesign, checks: list[ProtocolCheck]) -> str:
         # separately, in the release whose own note says that is how the second and third got it
         # wrong.
         shape = "the structured ask, no procedure yet"
-    elif design.request.mode == "single":
+    elif len(design.arms) == 1 and not design.factors:
+        # **The design, not the ask.** This branched on `request.mode`, so a 4-arm 2-factor plate
+        # whose ask still said `single` summarised as "1 experiment". `== 1` rather than `<= 1`:
+        # the first rewrite swallowed the zero-arm case too and described a body with no arms
+        # declared as one experiment, which is a count nobody wrote.
         shape = "1 experiment"
     else:
         controls = sum(1 for a in design.arms if a.control)
@@ -187,18 +194,56 @@ def receipt(
     )
 
 
+def _cell(text: str) -> str:
+    """One table cell, escaped so free text cannot restructure the table.
+
+    Cell contents are a chemist's own words — a level's rationale, a charge line's note, an arm's
+    note — and none of them was escaped. A `|` overflowed the row, so GFM dropped the surplus cells
+    and the text after the pipe vanished; a newline *terminated the table* and dumped the rest of
+    the run sheet into the page as a paragraph. Both are reachable from any free-text field.
+    """
+    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+
+
 def _table(headers: list[str], rows: list[list[str]]) -> str:
     """A GitHub-flavoured Markdown table, or an empty string when there are no rows."""
     if not rows:
         return ""
-    head = "| " + " | ".join(headers) + " |"
+    head = "| " + " | ".join(_cell(h) for h in headers) + " |"
     rule = "| " + " | ".join("---" for _ in headers) + " |"
-    body = ["| " + " | ".join(cell or "—" for cell in row) + " |" for row in rows]
+    body = ["| " + " | ".join(_cell(cell) or "—" for cell in row) + " |" for row in rows]
     return "\n".join([head, rule, *body])
 
 
 def _number(value: float | None) -> str:
-    return "" if value is None else f"{value:g}"
+    """One number as a chemist reads it: exact when it is whole, six figures when it is not.
+
+    `%g` alone turns a kilogram-scale charge into `1.23457e+06` mg. `.10g`, which replaced it,
+    fixed that and bought false precision everywhere else — a 1/6 M concentration rendered
+    `0.1666666667 M` and a 200/3 yield `66.66666667%`, ten significant figures off a balance that
+    reads four, on the document a chemist runs from. A whole number is printed whole (no exponent
+    below 1e15, which is past any laboratory quantity); everything else keeps `%g`'s six.
+    """
+    if value is None:
+        return ""
+    if value == int(value) and abs(value) < 1e15:
+        return str(int(value))
+    return f"{value:g}"
+
+
+def _level(level: FactorLevel) -> str:
+    """One level as the Factors table shows it — its label, and its value when it has one."""
+    return level.label if level.value is None else f"{level.label} ({_number(level.value)})"
+
+
+def _step_conditions(step: ProtocolStep) -> str:
+    """A step's own temperature and duration, appended to its line when it states them."""
+    stated = [
+        f"{_number(step.temperature_c)} °C" if step.temperature_c is not None else "",
+        f"{_number(step.duration_h)} h" if step.duration_h is not None else "",
+    ]
+    said = [part for part in stated if part]
+    return f" — {', '.join(said)}" if said else ""
 
 
 def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None = None) -> str:
@@ -214,8 +259,23 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
         parts += [f"**Transformation.** `{request.reaction_smiles}`", ""]
     if request.objectives:
         parts += ["**Objectives.** " + ", ".join(request.objectives), ""]
+    if request.forbidden:
+        # The chemist's hard exclusions, whose violation is a blocker — and which the document a
+        # chemist reads did not mention.
+        parts += ["**Ruled out.** " + ", ".join(request.forbidden), ""]
 
-    points = design.base.setpoints
+    # **The conditions of the arm, when there is exactly one.** `## Conditions` rendered
+    # `base.setpoints` unconditionally and the run sheet was gated on `len(rows) > 1 or factors`,
+    # so a single experiment whose arm overrode the body got neither: the document said 80 °C /
+    # 16 h / dioxane for an arm the design runs at 120 °C / 2 h / toluene, with every blocker
+    # passing and nothing on the page hinting a second set of conditions existed. This is a
+    # document a chemist runs from.
+    # One arm is one arm whether or not the design declares factors. Gating this on `not
+    # design.factors` restored the exact bug it was written for: a one-arm design with one factor
+    # rendered `## Conditions` from the body while its run sheet showed the arm's own — the page
+    # stating two different sets of conditions for the one experiment it describes.
+    solo = design.arms[0] if len(design.arms) == 1 else None
+    points = design.setpoints_for(solo) if solo is not None else design.base.setpoints
     stated = [
         (label, value)
         for label, value in (
@@ -236,11 +296,17 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
                 "Pressure",
                 f"{_number(points.pressure_bar)} bar" if points.pressure_bar is not None else "",
             ),
+            # A stated pH was dropped from the document entirely — a `ProtocolBody` field with no
+            # reader, in the section whose whole subject is the conditions.
+            ("pH", _number(points.ph)),
         )
         if value
     ]
     if stated:
-        parts += ["## Conditions", "", *[f"- **{k}:** {v}" for k, v in stated], ""]
+        heading = "## Conditions" if solo is None else f"## Conditions ({solo.arm_id})"
+        parts += [heading, "", *[f"- **{k}:** {v}" for k, v in stated], ""]
+        if solo is not None and solo.note:
+            parts += [f"*{solo.note}*", ""]
 
     charge = _table(
         ["Component", "Role", "Equiv", "mmol", "mg", "mL", "Note"],
@@ -262,7 +328,12 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
 
     if design.base.steps:
         parts += ["## Procedure", ""]
-        parts += [f"{step.index}. *({step.kind})* {step.text}" for step in design.base.steps]
+        # A step's own temperature and hold time were dropped, which is the pair a step most often
+        # carries and the pair a chemist reads off the page while running it.
+        parts += [
+            f"{step.index}. *({step.kind})* {step.text}" + _step_conditions(step)
+            for step in design.base.steps
+        ]
         parts += [""]
 
     if design.factors:
@@ -270,9 +341,20 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
             "## Factors",
             "",
             _table(
-                ["Factor", "Kind", "Role", "Levels"],
+                # `Unit` and the per-level rationale were both dropped. Every other number in this
+                # document carries a unit, which is exactly what makes a bare `1` in a levels
+                # column read as an equivalent — and `FactorLevel.rationale` is what `models.py`
+                # calls "the single most useful sentence on a screening plate".
+                ["Factor", "Kind", "Role", "Unit", "Levels", "Why"],
                 [
-                    [f.name, f.kind, str(f.role), ", ".join(level.label for level in f.levels)]
+                    [
+                        f.name,
+                        f.kind,
+                        str(f.role),
+                        f.unit,
+                        ", ".join(_level(level) for level in f.levels),
+                        "; ".join(level.rationale for level in f.levels if level.rationale),
+                    ]
                     for f in design.factors
                 ],
             ),
@@ -280,7 +362,11 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
         ]
 
     rows = run_sheet_rows(design)
-    if len(rows) > 1 or design.factors:
+    # **Every design with arms gets a run sheet, and this comment used to say so over an unchanged
+    # gate.** The gate really was left as it was, so a single-arm design still had no run sheet —
+    # and for a lone *negative control* the words `control` and `negative` then appeared nowhere on
+    # the page. `if rows:` is what the sentence claimed.
+    if rows:
         factor_names = [f.name for f in design.factors]
         parts += [
             "## Run sheet",
@@ -324,6 +410,10 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
             *[f"- {c}" for c in design.base.in_process_controls],
             "",
         ]
+    if design.base.waste.strip():
+        # A `ProtocolBody` field with no reader anywhere: waste-disposal instructions were absent
+        # from the bench document.
+        parts += ["## Waste", "", design.base.waste, ""]
     if design.base.hazards:
         parts += [
             "## Hazards",
@@ -365,7 +455,13 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
         ]
 
     if checks:
-        failed = [c for c in checks if not c.passed]
+        # **Failed checks, plus every `note`.** Listing failures only is what made a finding
+        # invisible, and flipping four checks to `_fail` was the wrong half of that fix: a note is
+        # advisory content rather than a verdict, so `coverage_is_stated`'s sentence about what a
+        # reduced design confounds belongs on the page whether or not it "failed". That check is a
+        # passing note again, and a correct fractional plate no longer reports a failure it cannot
+        # clear.
+        failed = [c for c in checks if not c.passed or c.severity == "note"]
         parts += ["## Checks", ""]
         parts += (
             [f"- **{c.severity}** `{c.check_id}` — {c.detail}" for c in failed]

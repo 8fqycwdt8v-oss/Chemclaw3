@@ -357,12 +357,21 @@ probes:
     # Service after ~30 s of somebody else's outage. The connector sweep never gates readiness by
     # design (`api/routes/ops.py`); this is the latency it introduces one layer down.
     #
-    # 5 s rather than 4 leaves the request itself a margin, and
-    # `tests/test_deploy_chart.py::test_the_readiness_probe_outlasts_the_work_readyz_does` derives
-    # the floor from those two settings so raising either one without raising this fails.
+    # **There is no `timeoutSeconds` here, and its absence is the fix.** It used to be the literal
+    # `5` — 4 s of stated work plus a margin — and a literal is exactly what the two budgets above
+    # cannot stay in step with: an operator who raised `CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS`
+    # to 5 via `.Values.config` rendered an unchanged `timeoutSeconds: 5` and got a kubelet that
+    # gives up before the route it is calling has to answer. The guard that was supposed to catch
+    # that read the *test runner's* `Settings` rather than the rendered chart, so it stayed green
+    # for any value an operator could set. `deployment-service.yaml` now derives the number from
+    # those two keys with `required`, the same shape as `terminationGracePeriodSeconds`.
+    #
+    # What is configurable here is the part that is genuinely a judgement call: how much margin the
+    # request itself gets on top of the work it is waiting for. 1 s over the shipped 4 renders the
+    # same 5 this block used to state.
     readiness:
       periodSeconds: 10
-      timeoutSeconds: 5
+      marginSeconds: 1
       failureThreshold: 3
     # Liveness asks `/healthz`, which does no work at all — so its budget is about a wedged event
     # loop rather than about a dependency, and it stays the slower of the two: readiness drains a
@@ -750,6 +759,15 @@ config:
   # The worker half of the same rule (`durable/serve.py`): an in-flight activity gets this long to
   # finish after SIGTERM, and the worker Deployments' grace period is derived from it.
   CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS: "120"
+  # The two budgets `/readyz` spends, stated here for the same reason as the turn timeout above:
+  # the front door's `readinessProbe.timeoutSeconds` is *derived* from them
+  # (`deployment-service.yaml`). Left implicit, an operator who raised either one — the honest
+  # response to a slow connector fleet — kept a probe timeout sized for the old number, and the
+  # kubelet then took a front door that was answering correctly out of its Service. The derivation
+  # is what makes the two numbers one number; `tests/test_deploy_chart.py` renders the chart and
+  # checks that they still agree, rather than reading the test process's own `Settings`.
+  CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS: "2"
+  CHEMCLAW_SERVICE_READINESS_DB_TIMEOUT_SECONDS: "2"
 
 # Secret refs (F6-T6). This list is the whole of what is at rest: nothing else here is a
 # credential, and no component mints an outbound Entra token of its own (the workload-federation
@@ -1014,6 +1032,12 @@ monitoring:
     # panel in `dashboards/chemclaw-data.json` and reading that for a fortnight is how to pick the
     # number. The sync sidecar's own `staleness` liveness probe is the other half of this signal
     # and needs no threshold from here, because it reads when the refresh last *ran*.
+    #
+    # This number gates **both** arms of the rule. The gauge reports -1 for a tree holding no note
+    # at all, and the alert fires on that too (`age > threshold or age < 0`) — a plain comparison
+    # never could, since -1 is not greater than a positive number. Leaving it at 0 therefore also
+    # opts out of the empty-volume alarm, which is deliberate: a deployment that does not use the
+    # knowledge graph has an empty tree on purpose.
     knowledgeCorpusStaleSeconds: 0
     # **When a periodic producer's series is simply absent.** Four gauge families here
     # (`chemclaw_outbox_pending`, `chemclaw_outbox_oldest_pending_seconds`,

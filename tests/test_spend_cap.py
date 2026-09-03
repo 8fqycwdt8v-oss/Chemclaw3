@@ -16,7 +16,9 @@ those add up to. A fake that reported nothing would make every assertion here va
 leaving it as an accident of the fixtures.
 """
 
+import ast
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -34,6 +36,7 @@ from chemclaw.agent.spend_cap import (
 from chemclaw.agent.state import turn_input
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.tool_registry import registered_tool_names
 
 
 def _billing(*costs: int) -> list[AIMessage]:
@@ -330,6 +333,48 @@ def test_the_budget_is_a_ceiling_reached_not_a_ceiling_exceeded(
     )
 
 
+def _modules_that_call_a_model_from_a_tool() -> list[Path]:
+    """Every module that both defines a registered tool and builds a model.
+
+    The two halves are what make the pair dangerous: a model call in a module with no tool in it
+    runs outside the graph and must meter itself, and a tool in a module that calls no model has
+    nothing to take off the stream. Only their intersection is the shape this guard is about.
+
+    Derived from the tool *registry* rather than from a list, so a module added next year is
+    scanned the day its tool is registered.
+    """
+    registered = set(registered_tool_names())
+    found: list[Path] = []
+    for module in sorted(Path("src/chemclaw").rglob("*.py")):
+        tree = ast.parse(module.read_text("utf-8"))
+        names = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+        }
+        builds_model = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "build_chat_model"
+            for node in ast.walk(tree)
+        )
+        if builds_model and names & registered:
+            found.append(module)
+    return found
+
+
+def _model_calls_passing_a_config(module: Path) -> list[int]:
+    """The lines in `module` where a model call carries its own `config`, which is the defect."""
+    return [
+        node.lineno
+        for node in ast.walk(ast.parse(module.read_text("utf-8")))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"ainvoke", "invoke"}
+        and any(keyword.arg == "config" for keyword in node.keywords)
+    ]
+
+
 def test_no_in_tool_model_call_passes_its_own_callbacks() -> None:
     """The absence that puts a tool body's model call on the turn's ledger, guarded as an absence.
 
@@ -345,32 +390,45 @@ def test_no_in_tool_model_call_passes_its_own_callbacks() -> None:
     An absence is what `tests/test_upstream_surface.py` asserts for the same reason: nothing else
     can fail when somebody adds the argument back.
 
-    **What this deliberately does not claim.** It does not prove the inherited callbacks reach the
-    ledger end to end — that is somebody else's machinery, exercised by every real turn and pinned
-    by `tests/test_budget.py` on the stream side. Writing an end-to-end version was attempted and
-    abandoned: a scripted fake's streaming semantics are not a provider's, so the test that
-    resulted would have been evidence about the fake. This asserts the one thing in *this*
-    repository that can break the chain.
+    **The module set is derived rather than named**
+    (`D-2026-08-29-a-guard-that-names-one-file-guards-one-file`). This scanned
+    `agent/condense.py` by name for as long as that was the only tool making a model call, which
+    made it a guard over one file rather than over the invariant — a second in-tool model call, of
+    exactly the kind an advisor would be, walked past it in silence. And the mistake it would walk
+    past is one edit away rather than hypothetical: `agent/verifier.py` passes
+    `config=off_stream_metering()` **correctly**, because a judge runs outside the graph where
+    nothing else is watching, and `off_stream_metering`'s own docstring says attaching it to an
+    in-graph call would take that call off the stream. Copying that line into a tool body is the
+    whole defect.
+
+    **What this deliberately does not claim.** The derivation is at *module* granularity, and that
+    is deliberate rather than loose: in `agent/condense.py` the `.ainvoke` is in `_read_prose` while
+    the registered tool is `condense_protocols`, so a scan of tool bodies would miss the only call
+    that exists to be found. The cost is that a module holding both a tool and a legitimately
+    off-stream call would read as an offender — none does, and the right answer if one ever should
+    is to split the module rather than to loosen this.
+
+    Nor does it prove the inherited callbacks reach the ledger end to end: that is somebody else's
+    machinery, exercised by every real turn and pinned by `tests/test_budget.py` on the stream side.
+    Writing an end-to-end version was attempted and abandoned, because a scripted fake's streaming
+    semantics are not a provider's and the test that resulted would have been evidence about the
+    fake. This asserts the one thing in *this* repository that can break the chain.
     """
-    import ast
-    from pathlib import Path
+    scanned = _modules_that_call_a_model_from_a_tool()
+    assert scanned, (
+        "no module was found that both defines a registered tool and builds a model, so this scan "
+        "is asserting nothing — the derivation, not the invariant, is what broke"
+    )
 
-    source = Path("src/chemclaw/agent/condense.py").read_text("utf-8")
-    tree = ast.parse(source)
-    offenders = [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr in {"ainvoke", "invoke"}
-        and any(keyword.arg == "config" for keyword in node.keywords)
-    ]
-
+    offenders = {
+        str(module): lines for module in scanned if (lines := _model_calls_passing_a_config(module))
+    }
     assert not offenders, (
-        f"agent/condense.py passes an explicit `config` to a model call at line(s) {offenders}. "
-        "An explicit callbacks config replaces the inherited ones, taking the call off the turn's "
-        "stream — so its tokens stop reaching the ledger `agent/spend_cap.py` enforces against, "
-        "and that class of spend becomes invisible to the cap again."
+        f"{offenders} passes an explicit `config` to a model call "
+        "from a module that holds a registered tool. An explicit callbacks config replaces the "
+        "inherited ones, taking the call off the turn's stream — so its tokens stop reaching the "
+        "ledger `agent/spend_cap.py` enforces against, and that class of spend becomes invisible "
+        "to the cap again."
     )
 
 

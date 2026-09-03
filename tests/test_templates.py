@@ -375,8 +375,14 @@ def test_a_shipped_template_whose_arguments_cannot_be_checked_says_so() -> None:
     count is what makes that legible. Every addition is a `chem` enumeration — the bundle whose
     capability is `Chemclaw3-mcp`'s — so the multi-step protocols of
     `D-2026-08-25-the-loop-is-a-composite-not-a-template` are name-checked here and
-    argument-checked only by `make connector-validate` against a running server. That is the known
+    argument-checked only by `make live-template-args` against a running server. That is the known
     cost of enumerating on a bundle we declare and do not run, stated rather than discovered.
+
+    That sentence used to name `make connector-validate`, which never dials a server: its rule
+    imports the bundle's *in-tree* `server/` module and returns `[]` for exactly the bundles that
+    ship none, so the gate named as the control here was the one structurally incapable of seeing
+    this blind spot (`D-2026-08-29-connector-validate-never-dials-a-server`). `live-template-args`
+    is the check that does open the session.
     """
     from chemclaw.cli.validate_templates import unchecked_arguments
 

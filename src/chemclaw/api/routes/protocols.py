@@ -40,7 +40,12 @@ from chemclaw.protocols.models import (
     ProtocolCheck,
     StatusEvent,
 )
-from chemclaw.protocols.store import RevisionConflict, UnknownDesign, default_design_store
+from chemclaw.protocols.store import (
+    RevisionConflict,
+    UnknownDesign,
+    UnstorableDocument,
+    default_design_store,
+)
 
 
 class RevisionSummary(BaseModel):
@@ -117,6 +122,11 @@ class StatusIn(BaseModel):
     """A lifecycle move."""
 
     status: DesignStatus
+    # The revision the person was looking at when they decided. Required and not defaulted to the
+    # head for exactly `RevisionIn.parent_revision`'s reason, one field along: an approval that did
+    # not say what it approved is the one that gets attributed to a document nobody read. A
+    # colleague saving while a chemist thinks is the ordinary case, not the exotic one.
+    expected_revision: int = Field(ge=1)
     # **Recorded, which it was not.** `Chemclaw3_ui`'s status panel labels this "recorded with the
     # move", disables every button until it is filled in, and confirms "the move is recorded
     # against you with the reason you wrote" — and `set_status` took no `reason` at all, so the one
@@ -247,6 +257,11 @@ async def post_revision(
             parent_revision=body.parent_revision,
             change_note=body.change_note,
         )
+    except UnstorableDocument as exc:
+        # 422, because it is the document that is wrong and the caller can fix it — not a 500,
+        # which is what a NUL byte anywhere in a browser-supplied design used to produce, out of
+        # psycopg, with a correlation id and nothing actionable in it.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RevisionConflict as exc:
         # 409 with a machine-readable code, because the caller's next move is to re-read and
         # re-apply rather than to retry. Deliberately *not* the shape `POST
@@ -292,11 +307,22 @@ async def post_status(
     """Move a design's lifecycle status — approve it, mark it run, or abandon it."""
     try:
         await default_design_store().set_status(
-            design_id, body.status, principal.oid or "", body.reason
+            design_id,
+            body.status,
+            expected_revision=body.expected_revision,
+            actor=principal.oid or "",
+            reason=body.reason,
         )
     except UnknownDesign as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ChemclawError as exc:  # pragma: no cover - the store raises only UnknownDesign today
+    except RevisionConflict as exc:
+        # The same 409 and the same machine-readable code the revision route answers with, because
+        # the caller's next move is the same one: re-read the design and decide again. A sign-off is
+        # a write against a revision exactly as an edit is.
+        raise HTTPException(
+            status_code=409, detail={"code": "revision_conflict", "message": str(exc)}
+        ) from exc
+    except ChemclawError as exc:  # pragma: no cover - the store raises only the two above today
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return Response(status_code=204)
 

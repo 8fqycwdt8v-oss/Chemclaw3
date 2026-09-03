@@ -148,6 +148,31 @@ was real and reached `evals/live.py` and `cli/live_probes.py`.
 **The rule that leaves:** a resolver that reconciles two append-only registers by key must treat a
 *changed* row as a conflict, not as a duplicate. Ours reported a clean merge over a discarded edit.
 
+## The tests, checked by mutation
+
+Every fix here has a test that fails without it, and that was established by mutating one thing at a
+time from a **committed** baseline and running the *specific* test written for it rather than the
+suite — a first pass with `-x` reported two of these "caught" by an older test that happened to run
+first, which is not the same claim.
+
+| mutation | the test that catches it |
+| --- | --- |
+| `_bounded_reason` slices the quoted form | `test_the_bounded_reason_never_cuts_an_escape_sequence_in_half` |
+| the tool name unescaped in the WARNING | `test_the_tool_name_is_escaped_in_the_warning_that_carries_it` |
+| the parse error bounded from the head | `test_the_parse_error_keeps_its_reason_where_head_bounding_would_lose_it` |
+| the promotion carries `{}` | `test_a_promotion_cannot_execute_a_tool_that_needs_no_arguments` |
+| the model's call id dropped | `test_a_promoted_call_crosses_the_whole_governance_chain` |
+| valid siblings discarded | `test_a_valid_call_beside_a_broken_one_still_runs` |
+| `invalid_tool_calls` not cleared | `test_the_broken_call_moves_onto_the_field_the_tool_node_iterates` |
+
+**One mutation survived the test whose comment claimed to catch it**, and that is worth recording
+rather than quietly fixing: dropping the call id survived
+`test_an_unparseable_tool_call_reaches_the_stream_as_a_real_tool_failed_event`, because the
+announcer and the refusal both read `request.tool_call["id"]` and therefore pair with each other
+whatever it is. The comment asserting otherwise was a false claim about a control, written one
+commit after this repository's own rule against them. It is corrected in place and the real proof
+lives at the producer, against the signal itself.
+
 ## Measured on the live stack
 
 `make live-storm --families CF` against the mock model: **11/11 checks pass**, including the one

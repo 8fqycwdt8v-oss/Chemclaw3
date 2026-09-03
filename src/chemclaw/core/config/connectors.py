@@ -51,9 +51,32 @@ class ConnectorSettings(BaseSettings):
     # surface is worse than not serving at all (the fail-fast posture).
     connectors_required: bool = False
 
-    # Bound on the startup health probe of one connector. Small: this runs before the service is
-    # ready, and a blackholed host must not delay readiness by more than a couple of seconds.
+    # Bound on one connector's health probe on the *hot* path — every `/readyz`, every 10 seconds
+    # per pod. Small deliberately: this is what the kubelet waits for, and the chart's
+    # `probes.service.readiness.timeoutSeconds` is derived from it (`deployment-service.yaml`), so
+    # it is the number that decides whether somebody else's outage takes a serving front door out
+    # of its Service. It bounds each half whole — connect plus RPC, or connect plus read — rather
+    # than each step in it; see `connectors/health.py`.
     connector_health_timeout_seconds: float = Field(default=2.0, gt=0)
+
+    # The same probe at **startup**, where it is a one-time cost rather than a per-poll one.
+    #
+    # `check_connectors_at_startup` runs this sweep once and its verdict is final for the boot:
+    # under `connectors_required` it decides whether the process serves at all. The poll's budget
+    # is sized against a kubelet stopwatch and against a *cached* Temporal client; the first check
+    # after process start has neither, and pays a cold connect — PEM files parsed, an mTLS
+    # handshake — out of the same budget the `DescribeTaskQueue` RPC needs to come back. What that
+    # costs is not a slow boot but a wrong one: the RPC runs out of budget, the sweep reports
+    # `unknown`, and `unknown` neither counts in the gauge nor trips the gate — so a bundle whose
+    # queue has no poller (a worker fleet at zero replicas, jobs accepted and never run) clears the
+    # fail-fast posture that exists to refuse exactly that.
+    #
+    # 10 s: five times the poll's budget, and bounded by what a startup probe already grants — the
+    # chart gives the front door 30 x 10 s to finish its lifespan (`probes.service.startup`), which
+    # this is a small share of. Raising it delays a boot in the worst case and buys a verdict that
+    # is right; the poll's 2 s cannot be raised for the same benefit without moving the kubelet
+    # timeout with it, which is the coupling the derivation in the chart makes visible.
+    connector_startup_health_timeout_seconds: float = Field(default=10.0, gt=0)
 
     # Bound on one connector's whole *open* — TCP dial, `initialize`, `tools/list` — per turn
     # (`connectors.transport.HeldConnectorSession.__aenter__`). Not redundant with the 5 s connect

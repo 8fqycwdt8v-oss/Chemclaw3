@@ -15,7 +15,9 @@ is a perfectly
    it — the worst place and time to learn about a typo.
 2. **`config:` the half's constructor will not accept.** Free-form config is the deliberate trade
    (the callable's signature *is* the schema, so there is no second model to keep in step with the
-   adapter) and this is what makes it safe: the kwargs are bound against the real signature here.
+   adapter) and this is what makes it safe: the kwargs are bound against the real signature here —
+   the manifest's `config:` *plus* the `name` the registry passes to every half, which is the only
+   thing this gate can get wrong in the direction that ships a broken adapter (see `_check_half`).
 3. **A `labels:` block that does not match the source.** A `provides` naming a group the source
    has no column for is not inert: it is read by the coverage report, so the manifest's claim ends
    up in a sentence a chemist reads. And a `labels:` block on a source that contributes no
@@ -63,20 +65,26 @@ from chemclaw.ingest.sources.registry import (
 def _check_half(name: str, field: str, reference: str, config: dict[str, object]) -> list[str]:
     """Resolve one half and bind the manifest's config against its signature (rules 1 and 2).
 
-    Bound against **exactly what the registry passes**, which is not the same for the two halves: a
-    retrieve half additionally receives `name=<the manifest's name>` (see
-    `chemclaw.ingest.sources.registry._build_retrieve_half` for why every retrieve half is told
-    which source it is). Binding the config alone would report a retriever that correctly requires
-    `name` as broken, and would pass one that refuses it — in both directions the opposite of the
-    truth, which is the only thing worse than not checking.
+    Bound against **exactly what the registry passes**, which is the manifest's `config:` *plus*
+    `name=<the manifest's name>` — for every half, because `_build_ingest_half`,
+    `_build_retrieve_half` and `_build_commitments_half` all pass it, each for the same reason: a
+    half that guesses its own name collapses two instances of one engine into one identity (see
+    `_build_retrieve_half` for the `sharedrive` failure that argument was written about).
+
+    Binding the config alone reports a half that correctly requires `name` as broken, and passes one
+    that refuses it — in both directions the opposite of the truth, which is the only thing worse
+    than not checking. It bound `name` for `retrieve` alone while the registry had come to pass it
+    to all three, so a site's own ingest adapter written to the documented contract passed this gate
+    in CI and raised `TypeError: unexpected keyword argument 'name'` at worker startup. There is no
+    per-field branch left to drift: what the registry passes is uniform, so what is bound here is
+    too, and `tests/test_datasource_seam.py` asserts the gate and the build agree in both
+    directions.
     """
     try:
         factory = resolve_half(reference)
     except DataSourceError as exc:
         return [f"{name}: {field}: {exc}"]
-    passed: dict[str, object] = dict(config)
-    if field == "retrieve":
-        passed["name"] = name
+    passed: dict[str, object] = {**config, "name": name}
     try:
         inspect.signature(factory).bind(**passed)
     except TypeError as exc:
@@ -195,7 +203,14 @@ def validate_datasources(construct: bool = False) -> list[str]:
 
     for name, manifest in sorted(manifests.items()):
         resolved = []
-        for field, reference in (("ingest", manifest.ingest), ("retrieve", manifest.retrieve)):
+        # Every declared half, because the registry builds every declared half. `commitments` was
+        # missing here from the day it was added, so the third seam had no gate at all — and a half
+        # that is not checked is one whose first report of a typo is a worker crash.
+        for field, reference in (
+            ("ingest", manifest.ingest),
+            ("retrieve", manifest.retrieve),
+            ("commitments", manifest.commitments),
+        ):
             if reference is not None:
                 resolved += _check_half(name, field, reference, manifest.config)
         problems += resolved

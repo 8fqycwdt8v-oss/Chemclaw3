@@ -15,8 +15,20 @@ Three steps. None of them is an edit to core Python.
 
 **1. Write the adapter** (only if no existing one fits). An ingest half implements `ElnAdapter`
 (`fetch_new_entries`, `map_to_ord`); a retrieve half implements `SourceRetriever` (`name`,
-`retrieve`). Both protocols are re-exported from `ingest/sources/base.py`. Put it wherever it belongs —
+`retrieve`); a commitments half implements `CommitmentAdapter` (`fetch_commitments`). All three
+protocols are re-exported from `ingest/sources/base.py`. Put it wherever it belongs —
 a warehouse client belongs beside its peers, not in this folder.
+
+**Every half's constructor must accept a `name` keyword**, whichever half it is. The registry passes
+`name=<the manifest's name>` alongside the manifest's `config:` to all three, so a constructor that
+does not take it fails at build time — at worker startup, and at `make datasource-validate`, naming
+the source. Take it and use it as the half's identity: a half that names *itself* collapses two
+instances of one engine into one source, which is how two mounted shares both called themselves
+`sharedrive` and one sweep deleted the other's rows. An ingest half's identity is the rejection
+ledger's `source`, keyed `(source, entry_id)` with a per-source eviction cap; a retrieve half's is
+what the document index partitions on and what evidence is cited with; a commitments half's is half
+of `(source, external_id)`. `name: str | None = None` with a fallback is fine for an adapter also
+built by hand (both file-drop ELN adapters do this); `name: str` required is fine too.
 
 **For a SQL database, skip this step.** `chemclaw.ingest.eln.warehouse` is a generic ELN adapter
 whose knowledge of the source is a *binding* in the manifest rather than code, so attaching one is
@@ -46,7 +58,7 @@ config:                        # keyword arguments for that callable
     ingest: {entry: {relation: v_reaction, key: reaction_id, ...}, ...}
 ```
 
-Declare `ingest:`, `retrieve:`, or both. A source with neither is rejected.
+Declare `ingest:`, `retrieve:`, `commitments:`, or any combination. A source with none is rejected.
 
 **3. Enable it**: add the name to `CHEMCLAW_DATA_SOURCES`. Discovery is not enablement — the repo
 ships every source, a deployment runs the subset it has validated.

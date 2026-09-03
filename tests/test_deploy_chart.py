@@ -2270,6 +2270,46 @@ def test_no_alert_asks_for_to_suppress_what_only_a_threshold_can() -> None:
         )
 
 
+def test_the_corpus_alert_can_fire_for_the_case_it_calls_the_sharper_one() -> None:
+    """A sentinel below every legal threshold is a case a `>` comparison can never reach.
+
+    `chemclaw_knowledge_sync_age_seconds` reports `kg/graph.py::NO_NOTES` (-1) for a tree holding no
+    note at all — negative on purpose, so an unpopulated volume could never be misread as a corpus
+    that had just refreshed. `ChemclawKnowledgeCorpusStale` was `age > {{ threshold }}` and rendered
+    only when the threshold is positive, so -1 could not satisfy it under any configuration: the
+    alert's own description named that case as the sharper failure while being structurally unable
+    to fire for it. The dashboard panel showed it to whoever was looking; nothing paged.
+
+    The opt-in is asserted in the same test because it is the constraint the fix had to respect. An
+    empty tree needs no site-specific budget to interpret, which is a real argument for alerting on
+    it unconditionally — but the gauge is bound in every process that imports `kg.graph`, and a
+    deployment not using the knowledge graph has an empty tree by design. Both arms stay behind the
+    one threshold, so opting out is still one number.
+    """
+    rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    block = re.split(r"\n\s*- alert: ", rule)[1:]
+    stale = [item for item in block if item.startswith("ChemclawKnowledgeCorpusStale")]
+    assert len(stale) == 1, "the alert this test is about is not in the chart under that name"
+    expr = " ".join(stale[0].split("expr:")[1].split("for:")[0].split()).removeprefix(">- ")
+
+    assert "max by (pod) (chemclaw_knowledge_sync_age_seconds) < 0" in expr, (
+        "the rule cannot reach the no-notes sentinel: -1 is not greater than a positive threshold, "
+        f"so an unpopulated knowledge volume never alerts. Expression is {expr!r}"
+    )
+    assert "> {{ .Values.monitoring.alerts.knowledgeCorpusStaleSeconds }}" in expr, (
+        "the staleness arm is gone — the sentinel arm is an addition to it, not a replacement"
+    )
+
+    # And the whole rule is still opt-in: the alert must sit inside the guard, not beside it.
+    guard = "{{- if gt (int .Values.monitoring.alerts.knowledgeCorpusStaleSeconds) 0 }}"
+    assert guard in rule, "the opt-in guard was renamed or removed"
+    guarded = rule.split(guard, 1)[1].split("{{- end }}", 1)[0]
+    assert "ChemclawKnowledgeCorpusStale" in guarded, (
+        "the alert escaped its opt-in guard, so a deployment with an intentionally empty knowledge "
+        "tree is now paged for it and cannot turn it off with `knowledgeCorpusStaleSeconds: 0`"
+    )
+
+
 def test_every_alerted_metric_is_a_metric_the_app_declares() -> None:
     """The other direction: an alert on a metric that does not exist never fires and looks fine.
 
@@ -2459,6 +2499,8 @@ def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
         ("CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS", "deployment-service.yaml"),
         ("CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS", "chemclaw.workerGracePeriod"),
         ("CHEMCLAW_KNOWLEDGE_DIR", "chemclaw.knowledgePublishPath"),
+        ("CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS", "deployment-service.yaml"),
+        ("CHEMCLAW_SERVICE_READINESS_DB_TIMEOUT_SECONDS", "deployment-service.yaml"),
     ],
 )
 def test_a_derived_value_refuses_rather_than_rendering_a_plausible_wrong_one(
@@ -2479,7 +2521,10 @@ def test_a_derived_value_refuses_rather_than_rendering_a_plausible_wrong_one(
     * `CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS` absent rendered 30 s against a 120 s drain;
     * `CHEMCLAW_KNOWLEDGE_DIR` absent published to `<noteRepoPath>/` while every reader resolves
       `note_repo_dir / knowledge_dir` — the silent empty-knowledge-tree failure the same helper's
-      comment narrates and claims to have made impossible.
+      comment narrates and claims to have made impossible;
+    * either half of the `/readyz` budget absent renders a readiness `timeoutSeconds` a whole
+      budget short, so the kubelet drains a front door that is still inside the time the app was
+      configured to take.
 
     An operator reaches this by moving one key into an ExternalSecret, a sidecar-injected env, or
     simply `--set config.<KEY>=null` after deciding the code default is fine.
@@ -2593,33 +2638,133 @@ def test_the_front_door_gets_the_same_head_start() -> None:
     assert budget >= 60, f"a {budget}s cold-start budget is inside the front door's import time"
 
 
-def test_the_readiness_probe_outlasts_the_work_readyz_does() -> None:
-    """`/readyz` is the one probe in this chart whose own answer has a budget, and it had none.
+def test_the_readiness_probe_states_a_timeout_at_all() -> None:
+    """The offline half: neither front-door probe may leave a bound to a Kubernetes default.
 
-    Kubernetes' unstated default is `timeoutSeconds: 1`. That route sweeps every enabled connector
-    — which for a jobs-only bundle is a `DescribeTaskQueue` RPC — and then asks Postgres, so its
-    cost is `connector_health_timeout_seconds` plus `service_readiness_db_timeout_seconds`, 4 s at
-    the shipped defaults. Under the default timeout a blackholed broker took ~2 s per poll and
-    `failureThreshold: 3` removed a perfectly serving front door from its Service after ~30 s of
-    somebody else's outage.
-
-    The floor is **derived from the settings** rather than restated, so raising either budget
-    without raising the probe fails here rather than in a cluster. Read off `Settings` itself
-    because that is what the pod runs; the chart does not override them.
+    `timeoutSeconds` defaults to 1 and `failureThreshold` to 3, and `/readyz` is the one route in
+    this chart whose own answer has a budget — a connector sweep (for a jobs-only bundle, a
+    `DescribeTaskQueue` RPC) and then Postgres. Under the default a blackholed broker took ~2 s per
+    poll and three of those removed a perfectly serving front door from its Service after ~30 s of
+    somebody else's outage. Text-only, so it runs where `helm` is absent; whether the number is
+    *large enough* is a question about rendered values, and the test below renders them.
     """
-    from chemclaw.core.config import settings
-
     text = (CHART / "templates" / "deployment-service.yaml").read_text()
-    readiness = _values()["probes"]["service"]["readiness"]
     for probe in ("readinessProbe", "livenessProbe"):
         body = text.split(f"{probe}:", 1)[1].split("Probe:", 1)[0]
         assert "timeoutSeconds:" in body and "failureThreshold:" in body, (
             f"the front door's {probe} leaves a threshold to a Kubernetes default"
         )
-    work = settings.connector_health_timeout_seconds + settings.service_readiness_db_timeout_seconds
-    assert float(readiness["timeoutSeconds"]) >= work, (
+
+
+def _service_probes(rendered: str) -> dict[str, Any]:
+    """The front-door container's probes, off the *rendered* Deployment rather than the template."""
+    for doc in yaml.safe_load_all(rendered):
+        if not doc or doc.get("kind") != "Deployment":
+            continue
+        if doc["metadata"]["name"] != "chemclaw-service":
+            continue
+        for container in doc["spec"]["template"]["spec"]["containers"]:
+            if container["name"] == "service":
+                probes = {k: v for k, v in container.items() if k.endswith("Probe")}
+                assert isinstance(probes, dict)
+                return probes
+    raise AssertionError("no chemclaw-service Deployment with a `service` container was rendered")
+
+
+def _rendered_config(rendered: str) -> dict[str, str]:
+    """`.Values.config` as the pods actually receive it: the rendered ConfigMap's data.
+
+    The ConfigMap rather than `values.yaml`, because that is the artefact an override reaches. A
+    guard that parses the file on disk cannot see `--set config.X=…`, an ExternalSecret, or a
+    values overlay — which is the whole class of drift this pair of tests exists for.
+    """
+    for doc in yaml.safe_load_all(rendered):
+        if doc and doc.get("kind") == "ConfigMap" and doc["metadata"]["name"] == "chemclaw-config":
+            data = doc["data"]
+            assert isinstance(data, dict)
+            return data
+    raise AssertionError("no chemclaw-config ConfigMap was rendered")
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_readiness_probe_outlasts_the_work_readyz_does() -> None:
+    """The kubelet's patience and the app's own budgets, checked against each other as rendered.
+
+    `/readyz` may spend `CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS` sweeping the connectors and
+    `CHEMCLAW_SERVICE_READINESS_DB_TIMEOUT_SECONDS` asking Postgres. If the probe gives up first,
+    the kubelet drains a front door that is answering correctly — the failure this whole block
+    exists to prevent, arrived at from the other side.
+
+    **The comparison is between two rendered numbers, and that is the fix.** This test used to
+    derive its floor from the *test runner's* `Settings` object, so it compared the chart's probe
+    against the code defaults — a pair that agree in CI no matter what a release does. An operator
+    raising the connector budget through `.Values.config` (the honest response to a slow fleet)
+    rendered an unchanged `timeoutSeconds: 5` and this test stayed green, which is precisely the
+    drift it was written to catch. Both sides now come out of one `helm template`.
+    """
+    result = _render()
+    assert result.returncode == 0, result.stderr
+    config = _rendered_config(result.stdout)
+    work = float(config["CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS"]) + float(
+        config["CHEMCLAW_SERVICE_READINESS_DB_TIMEOUT_SECONDS"]
+    )
+    timeout = float(_service_probes(result.stdout)["readinessProbe"]["timeoutSeconds"])
+    assert timeout >= work, (
         f"/readyz may spend {work}s answering (the connector sweep plus the database probe) and "
-        f"the probe gives up after {readiness['timeoutSeconds']}s"
+        f"the probe gives up after {timeout}s"
+    )
+    assert timeout > work, "no margin is left for the request itself, only for the work inside it"
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_raising_the_apps_readiness_budget_raises_the_probe_that_waits_for_it() -> None:
+    """The drift itself, driven: move the app-side budget and the kubelet must move with it.
+
+    A literal `timeoutSeconds: 5` beside two configurable budgets is a number that only has to
+    *agree* with them, and the derivation is what makes it one number instead of two. 9 s is chosen
+    to exceed the old literal on its own, so a template that kept it fails here rather than passing
+    on a coincidence of margins.
+    """
+    result = _render("--set", "config.CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS=9")
+    assert result.returncode == 0, result.stderr
+    config = _rendered_config(result.stdout)
+    assert config["CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS"] == "9"
+    timeout = float(_service_probes(result.stdout)["readinessProbe"]["timeoutSeconds"])
+    work = 9 + float(config["CHEMCLAW_SERVICE_READINESS_DB_TIMEOUT_SECONDS"])
+    assert timeout >= work, (
+        f"the app was given a {work}s readiness budget and the kubelet still gives up after "
+        f"{timeout}s, so raising the connector timeout drains the pod it was raised for"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_fractional_budget_rounds_the_probe_up_rather_than_down() -> None:
+    """Both budgets are float seconds and `timeoutSeconds` is an integer, so rounding has a side.
+
+    `int 2.5` truncates to 2, which would hand back a fraction of the gap the derivation closes —
+    quietly, and only for deployments that tune in tenths.
+    """
+    result = _render("--set", "config.CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS=2.5")
+    assert result.returncode == 0, result.stderr
+    assert float(_service_probes(result.stdout)["readinessProbe"]["timeoutSeconds"]) == 6
+
+
+def test_the_chart_states_the_readiness_budgets_the_code_defaults_to() -> None:
+    """The third pair: what the chart declares and what `Settings` falls back to must not diverge.
+
+    The two tests above hold the chart together internally — probe against rendered config — and
+    would stay green with both numbers wrong in the same direction. This one is the other axis: a
+    developer reading the code default and an operator reading `values.yaml` have to be looking at
+    the same system — the shape the worker drain's own budget test already holds.
+    """
+    from chemclaw.core.config import settings
+
+    config = _values()["config"]
+    assert float(config["CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS"]) == float(
+        settings.connector_health_timeout_seconds
+    )
+    assert float(config["CHEMCLAW_SERVICE_READINESS_DB_TIMEOUT_SECONDS"]) == float(
+        settings.service_readiness_db_timeout_seconds
     )
 
 

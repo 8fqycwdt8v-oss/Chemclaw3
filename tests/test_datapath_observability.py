@@ -194,6 +194,11 @@ def test_a_pod_serving_a_frozen_knowledge_corpus_says_how_old_it_is(
     (corpus / "insight").mkdir(parents=True)
     monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
     monkeypatch.setattr(settings, "knowledge_dir", "knowledge")
+    # The stat scan behind the gauge is cached for `knowledge_age_scan_ttl_seconds`, so this test
+    # busts it after each write — it rewrites the tree three times inside one second, which is a
+    # local writer's pattern and exactly what `invalidate_cache` exists for, not a pod's.
+    # `test_the_corpus_age_gauge_is_not_a_tree_walk_per_scrape` is where the cache itself is driven.
+    kg_graph.invalidate_cache()
 
     assert _gauge("chemclaw_knowledge_sync_age_seconds") == kg_graph.NO_NOTES, (
         "a tree with no note at all is the volume that was never populated, and 0 would read as a "
@@ -205,11 +210,74 @@ def test_a_pod_serving_a_frozen_knowledge_corpus_says_how_old_it_is(
     os.utime(note, (time.time() - 7200, time.time() - 7200))
     fresh = corpus / "insight" / "fresh.md"
     fresh.write_text("---\nid: fresh\n---\nbody\n", encoding="utf-8")
+    kg_graph.invalidate_cache()
 
     # The *newest* note decides: one stale file beside a fresh one is an ordinary corpus.
     assert _gauge("chemclaw_knowledge_sync_age_seconds") < 60
     fresh.unlink()
+    kg_graph.invalidate_cache()
     assert 7_000 < _gauge("chemclaw_knowledge_sync_age_seconds") < 7_400
+
+
+def test_the_corpus_age_gauge_is_not_a_tree_walk_per_scrape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live gauge callback runs inside `/metrics`, which is served on the event loop.
+
+    The gauge shipped as an unguarded `rglob` + `stat` sweep of the whole knowledge tree, evaluated
+    on every scrape. Measured on this sandbox, `METRICS.render()` went from 0.128 ms on an empty
+    tree to 8.7 ms at 1k notes and 102.6 ms at 10k — and `api/routes/ops.py::metrics` renders
+    synchronously inside an `async def`, so that is the front door's whole event loop stalled every
+    30 s, not one request's latency. `_dir_fingerprint` does the same sweep and has been TTL-gated
+    since DA-5; this one had no gate at all.
+
+    Both halves are asserted here, because fixing the cost by capping the freshness would have
+    replaced a slow gauge with a lying one:
+
+    1. Repeated scrapes inside the window walk the tree **once**.
+    2. The age still **grows in real time** while that entry is warm — a corpus that stopped
+       arriving cannot be cached into looking fresh, because what is cached is the newest note's
+       mtime and the age is recomputed from the clock on every read.
+    """
+    corpus = tmp_path / "knowledge" / "insight"
+    corpus.mkdir(parents=True)
+    note = corpus / "frozen.md"
+    note.write_text("---\nid: frozen\n---\nbody\n", encoding="utf-8")
+    frozen_at = time.time() - 7200
+    os.utime(note, (frozen_at, frozen_at))
+    monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "knowledge_dir", "knowledge")
+    kg_graph.invalidate_cache()
+
+    walks = 0
+    real_scan = kg_graph.scan_notes_dir
+
+    def counting_scan(notes_dir: Path) -> Any:
+        nonlocal walks
+        walks += 1
+        return real_scan(notes_dir)
+
+    monkeypatch.setattr(kg_graph, "scan_notes_dir", counting_scan)
+
+    readings = [_gauge("chemclaw_knowledge_sync_age_seconds") for _ in range(5)]
+    assert walks == 1, (
+        f"five scrapes walked the tree {walks} times — the gauge is back to an O(notes) sweep per "
+        "scrape, on the event loop that serves every other request"
+    )
+    assert all(7_000 < value < 7_400 for value in readings), readings
+
+    # The half that must survive the cache: an hour passes with no sync and no rescan. The reading
+    # has to move, or a wedged corpus would read as whatever it read when the entry was filled.
+    # `kg/graph.py` reads the clock as `time.time()` through the stdlib module, so this is the same
+    # object it will call. Captured before the patch, or the replacement calls itself; monkeypatch
+    # puts it back, and the shift is a shifted log timestamp to everything else in the meantime.
+    real_time = time.time
+    monkeypatch.setattr(time, "time", lambda: real_time() + 3600)
+    assert 10_600 < _gauge("chemclaw_knowledge_sync_age_seconds") < 11_000, (
+        "the age was cached rather than the mtime, so a corpus that stopped arriving stops "
+        "reporting that it did — which is the failure this gauge exists for"
+    )
+    assert walks == 1, "reading the age must not need a rescan"
 
 
 # --- G1: what survived the merge, and how long a source took ----------------------------------

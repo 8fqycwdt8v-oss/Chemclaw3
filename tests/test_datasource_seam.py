@@ -24,6 +24,7 @@ import pytest
 
 import chemclaw.agent.research_tools as research_tools
 import chemclaw.ingest.sources.registry as registry
+from chemclaw.cli.validate_datasources import validate_datasources
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.adapter import RawEntry
 from chemclaw.ingest.sources.base import DataSource, SourceSpec
@@ -518,3 +519,76 @@ def test_an_entry_dated_series_does_not_claim_it_was_ordered_by_experiment() -> 
     assert "order they were performed." not in caveat, "the strong claim must not survive"
 
     assert ordering_caveat(progression([stated])) == "Runs in the order they were performed."
+
+
+class _DocumentedIngest:
+    """An ingest half written to exactly the contract `ingest/sources/README.md` documented.
+
+    Two methods, no constructor arguments — which is what a site reading that README would write,
+    and what `make datasource-validate` used to pass while the registry then refused to build it.
+    """
+
+    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+        return []  # pragma: no cover - never built
+
+    def map_to_ord(self, raw: RawEntry) -> Any:  # pragma: no cover - never built
+        raise NotImplementedError
+
+
+class _DocumentedCommitments:
+    """A commitments half that takes no source name — the same shape, on the third half."""
+
+    name = "documented-commitments"
+
+    async def fetch_commitments(self, since: datetime | None) -> list[Any]:
+        return []  # pragma: no cover - never built
+
+
+def test_the_gate_binds_every_half_as_the_registry_actually_calls_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`make datasource-validate` and worker startup must agree, in both directions.
+
+    The seam's whole trade is that the callable's signature *is* the config schema, so the gate
+    binds the manifest's kwargs against the real signature offline. It bound `name` for the
+    `retrieve` half only, while `registry._build_ingest_half` and `_build_commitments_half` pass it
+    to every half — so a site's own adapter, written to exactly the documented contract, passed the
+    gate cleanly in CI and then failed at worker startup with `TypeError: unexpected keyword
+    argument 'name'`. A gate that passes what the runtime refuses is worse than no gate: it is the
+    reason the adapter was shipped.
+
+    Asserted as an agreement rather than as a message, so it stays true whichever way a future
+    change moves the contract.
+    """
+    for half, reference in (
+        ("ingest", "tests.test_datasource_seam:_DocumentedIngest"),
+        ("commitments", "tests.test_datasource_seam:_DocumentedCommitments"),
+    ):
+        folder = tmp_path / half
+        folder.mkdir()
+        _write_source(
+            folder,
+            "documented",
+            f"""\
+            name: documented
+            description: A half written to the documented contract, with no `name` parameter.
+            {half}: {reference}
+            """,
+        )
+        monkeypatch.setattr(settings, "data_sources_dir", str(folder))
+        monkeypatch.setattr(settings, "data_sources", "documented")
+        registry.discovered.cache_clear()
+
+        built: Exception | None = None
+        try:
+            registry.make_data_source("documented")
+        except registry.DataSourceError as exc:
+            built = exc
+
+        assert built is not None, f"the registry passes `name` to every {half} half"
+        assert "name" in str(built)
+        problems = validate_datasources()
+        assert [p for p in problems if "documented" in p and half in p], (
+            f"the {half} half fails to build, and the gate that exists to say so before a deploy "
+            f"reported: {problems}"
+        )

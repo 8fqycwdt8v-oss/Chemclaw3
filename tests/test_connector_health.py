@@ -87,6 +87,9 @@ class _FakeWorkflowService:
         self.pollers = pollers
         self.error = error
         self.requests: list[DescribeTaskQueueRequest] = []
+        # The deadline each call was given, because *which* budget reached the RPC is the thing the
+        # startup sweep changes — and a `wait_for` above it would pass a test that only timed it.
+        self.timeouts: list[timedelta | None] = []
 
     async def describe_task_queue(
         self,
@@ -97,6 +100,7 @@ class _FakeWorkflowService:
     ) -> DescribeTaskQueueResponse:
         """Answer with the SDK's own response message — the poller list is the whole verdict."""
         self.requests.append(req)
+        self.timeouts.append(timeout)
         if self.error is not None:
             raise self.error
         return DescribeTaskQueueResponse(
@@ -356,3 +360,175 @@ def test_the_queue_half_spends_one_budget_rather_than_one_per_step(
     )
     # The reason has to reach the operator: a bare `TimeoutError` renders as the empty string.
     assert "TimeoutError" in result[0].detail and "connector-durable" in result[0].detail
+
+
+def _http_serving(name: str, port: int) -> str:
+    """An HTTP bundle whose `/healthz` is a real socket on `port`, rather than a dark loopback."""
+    return (
+        f"name: {name}\n"
+        f"description: the {name} capability\n"
+        "endpoint:\n"
+        "  transport: http\n"
+        f"  url: http://127.0.0.1:{port}/{name}/mcp\n"
+        f"  health_url: http://127.0.0.1:{port}/{name}/healthz\n"
+        "  tools:\n"
+        f"    - {name}_lookup\n"
+        "  read_only:\n"
+        f"    - {name}_lookup\n"
+    )
+
+
+async def _trickle(interval: float, reader: Any, writer: Any) -> None:
+    """A `/healthz` that answers, slowly, forever: one byte of the body every `interval`.
+
+    The pathology this exists to reproduce, and it is a realistic one — an overloaded pod behind an
+    ingress that flushes as it goes. Every individual read lands well inside a per-read timeout, so
+    httpx's `timeout=` never fires: the deadline it enforces restarts on each byte.
+    """
+    try:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 64\r\n\r\n")
+        await writer.drain()
+        for _ in range(64):
+            writer.write(b"x")
+            await writer.drain()
+            await asyncio.sleep(interval)
+    except (OSError, asyncio.IncompleteReadError):  # pragma: no cover - the client hung up
+        pass
+
+
+def test_the_http_half_bounds_the_answer_rather_than_each_socket_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The endpoint half had the defect the queue half was fixed for, one layer down.
+
+    `httpx.AsyncClient(timeout=...)` is a **per-operation** timeout, not a budget: the read leg
+    restarts it on every socket read. Measured against the shipped 2 s number before this change, a
+    `/healthz` trickling one byte every 1.5 s held `_probe_endpoints` for **16.6 s** — and then
+    reported `healthy`, because the response did eventually arrive. `/readyz` runs this sweep
+    inside a kubelet probe whose `timeoutSeconds` the chart *derives* from that same number, so the
+    derivation was describing a bound that did not exist.
+
+    Two bundles rather than one, pointed at the same slow server: the per-endpoint bound is only a
+    sweep bound because the probes run concurrently, and a serialising regression (a connection
+    pool that queues them, a `gather` turned into a loop) would double the wall clock while every
+    single-endpoint assertion still passed.
+    """
+    budget = 0.2
+
+    async def _measure() -> tuple[list[ConnectorHealth], float]:
+        # Half the budget: every read lands comfortably inside a per-read timeout of `budget`,
+        # so httpx's own deadline never fires while the response takes 64 x 0.1 s to complete —
+        # which is exactly the case the old bound could not see. An interval *longer* than the
+        # per-read timeout is caught by either form and would prove nothing.
+        server = await asyncio.start_server(
+            lambda r, w: _trickle(budget * 0.5, r, w), "127.0.0.1", 0
+        )
+        port = server.sockets[0].getsockname()[1]
+        _bundles(
+            tmp_path,
+            monkeypatch,
+            slow=_http_serving("slow", port),
+            slower=_http_serving("slower", port),
+        )
+        monkeypatch.setattr(settings, "connector_health_timeout_seconds", budget)
+        started = time.monotonic()
+        result = await probe_connectors()
+        elapsed = time.monotonic() - started
+        server.close()
+        return result, elapsed
+
+    result, elapsed = asyncio.run(_measure())
+
+    assert _states(result) == {"slow": "unreachable", "slower": "unreachable"}
+    assert elapsed < budget * 3, (
+        f"the sweep took {elapsed:.3f}s against a {budget}s budget: a trickling health route "
+        "restarts httpx's per-read timeout forever, so only a wall clock bounds it"
+    )
+    # A bare `TimeoutError` renders as the empty string, so the budget is named rather than shown.
+    assert f"{budget}s" in result[0].detail, result[0].detail
+
+
+def test_a_trickling_health_route_is_not_reported_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half of the defect that was not about latency: the verdict was wrong too.
+
+    The old form waited out the whole trickle and then read a 200, so a connector nobody could get
+    an answer from inside a turn was published as `healthy` — counted healthy by the gauge, cleared
+    by `connectors_required`, and readmitted by the breaker. Asserted separately from the timing
+    above because a fix that bounded the wait and then reported `unprobed`, or `unknown`, would
+    satisfy that test while leaving the gauge as wrong as it was.
+    """
+    budget = 0.2
+
+    async def _measure() -> list[ConnectorHealth]:
+        server = await asyncio.start_server(
+            lambda r, w: _trickle(budget * 0.5, r, w), "127.0.0.1", 0
+        )
+        port = server.sockets[0].getsockname()[1]
+        _bundles(tmp_path, monkeypatch, slow=_http_serving("slow", port))
+        monkeypatch.setattr(settings, "connector_health_timeout_seconds", budget)
+        result = await probe_connectors()
+        server.close()
+        return result
+
+    (item,) = asyncio.run(_measure())
+
+    assert item.state == "unreachable" and item.unhealthy
+
+
+def test_the_startup_sweep_gets_its_own_budget_so_a_cold_connect_cannot_hide_an_empty_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cost of sharing one budget across the connect and the RPC, paid where it is worst.
+
+    Sharing is right on the hot path — `/readyz` every 10 s per pod, off a cached client. The
+    *first* check after process start has no cached client: it parses PEM files and does an mTLS
+    handshake, and whatever that costs comes out of the same budget the `DescribeTaskQueue` needs
+    to answer in. Run out of it and the sweep reports `unknown`, which neither counts in the gauge
+    nor trips the gate — so a worker fleet at zero replicas clears `connectors_required`, the one
+    posture that exists to refuse it, and the verdict is final for that boot.
+
+    Both directions in one test, against one broker: at the poll's budget the cold connect leaves
+    nothing and the answer is `unknown`; at the startup budget the same broker answers and the same
+    empty poller list is `unpolled` — and the gate refuses.
+    """
+    _bundles(tmp_path, monkeypatch, durable=_jobs_only("durable"))
+    poll, cold, boot = 0.1, 0.3, 2.0
+    monkeypatch.setattr(settings, "connector_health_timeout_seconds", poll)
+    monkeypatch.setattr(settings, "connector_startup_health_timeout_seconds", boot)
+    monkeypatch.setattr(settings, "connectors_required", True)
+    client = _broker(monkeypatch, pollers=0)
+    connected = _FakeClient(pollers=0)
+    connected.workflow_service = client.workflow_service
+
+    async def _cold_connect() -> _FakeClient:
+        await asyncio.sleep(cold)  # PEM parsing and the mTLS handshake, once per process
+        return connected
+
+    monkeypatch.setattr("chemclaw.connectors.health.connect", _cold_connect)
+
+    # The poll: the connect eats the budget, so the RPC never answers and nothing is learned.
+    assert _states(asyncio.run(probe_connectors())) == {"durable": "unknown"}
+
+    # The boot: the same broker, the same empty queue, and a budget that lets the RPC finish.
+    with pytest.raises(ConnectorsUnavailable) as raised:
+        asyncio.run(check_connectors_at_startup())
+    assert "durable" in str(raised.value) and "unpolled" in str(raised.value)
+    # And the budget reached the RPC itself rather than only the `wait_for` above it.
+    assert client.workflow_service.timeouts[-1] == timedelta(seconds=boot)
+
+
+def test_the_startup_budget_is_materially_larger_than_the_polls() -> None:
+    """The two numbers are only worth having apart if they are apart, so the defaults are pinned.
+
+    Not an arbitrary ratio: the poll's budget is what a kubelet waits for and the chart derives its
+    `timeoutSeconds` from, while the startup budget is paid once and bounded by a startup probe
+    already granting 300 s. A deployment that sets them equal has re-created the defect — a cold
+    connect charged to the RPC that decides `unpolled` — and this is where that shows up.
+    """
+    assert (
+        settings.connector_startup_health_timeout_seconds
+        >= settings.connector_health_timeout_seconds * 2
+    )

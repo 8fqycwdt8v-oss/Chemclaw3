@@ -279,6 +279,19 @@ def test_the_config_gate_refuses_a_plaintext_channel_the_delivery_path_only_swal
     So the gate an operator runs before delivering is where the question gets asked, and this
     asserts it in both directions — including that the shipped `https://` manifest still passes,
     since a posture check that failed everything would be removed by the next person.
+
+    **And it is asked whatever this environment's posture happens to be**, which is the half that
+    shipped inert. This test used to assert the opposite — "the posture check must not fire where
+    the posture is not enforced" — and that assertion was the defect written down as a contract:
+    `entra_required` defaults `False`, nothing in `ci.yml`, the chart or the runbook sets it where
+    `channel-validate` runs, so the rule added to stop a plaintext channel merging silently could
+    only ever fire on a deployment that had already turned enforcement on. It is the same
+    CI-blindness rules 2 and 3 work around by iterating discovered rather than enabled manifests,
+    one layer further in. A validator asks about the manifest, not about today's environment: a
+    channel that will be refused the day enforcement is turned on is a broken channel today.
+
+    The construction site is the one that still reads the setting, and
+    `test_a_driver_built_outside_the_gate_still_refuses_a_cleartext_destination` holds that half.
     """
     from chemclaw.cli.validate_channels import problems
 
@@ -293,12 +306,42 @@ def test_the_config_gate_refuses_a_plaintext_channel_the_delivery_path_only_swal
     )
     monkeypatch.setattr(settings, "delivery_channels_dir", str(root))
 
+    for enforced in (False, True):
+        monkeypatch.setattr(settings, "entra_required", enforced)
+        found = problems()
+        assert len(found) == 1 and "cleartext" in found[0] and "plainhook" in found[0], (
+            f"with entra_required={enforced} the gate reported {found!r}. The rule must not depend "
+            "on the setting it exists to catch a violation of being already switched on — that is "
+            "a gate that passes in CI and fails in production"
+        )
+
+
+def test_a_driver_built_outside_the_gate_still_refuses_a_cleartext_destination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the one definition: construction asks about *this* deployment.
+
+    `plaintext_channel_refusal` takes the posture as a parameter now, so there are two askers and
+    they ask different questions. The validator asks "is this manifest legal under enforcement?"
+    and always passes `enforced=True`. Building a driver is an act rather than a review — it opens
+    a destination *now* — so it passes `settings.entra_required`, and a dev deployment with
+    enforcement off must still be able to run a plaintext channel against a local host.
+
+    Both directions here, because making the validator unconditional is exactly the change that
+    could have made construction unconditional too by accident, and that would refuse every
+    local-dev http channel in a repository whose whole live lane is local.
+    """
+    from chemclaw.deliver.driver import webhook_channel
+
     monkeypatch.setattr(settings, "entra_required", False)
-    assert problems() == [], "the posture check must not fire where the posture is not enforced"
+    assert webhook_channel(name="dev", url="http://chat.internal/hooks/chemclaw") is not None, (
+        "construction must follow this deployment's own posture; refusing here would break every "
+        "unenforced deployment's plaintext channel"
+    )
 
     monkeypatch.setattr(settings, "entra_required", True)
-    found = problems()
-    assert len(found) == 1 and "cleartext" in found[0] and "plainhook" in found[0], found
+    with pytest.raises(ValueError, match="cleartext"):
+        webhook_channel(name="dev", url="http://chat.internal/hooks/chemclaw")
 
 
 def test_the_posture_check_reads_the_destination_whatever_the_driver_calls_it(
@@ -343,6 +386,110 @@ def test_the_posture_check_reads_the_destination_whatever_the_driver_calls_it(
         f"destination: {found}"
     )
     assert any("oddkey" in problem and "cleartext" in problem for problem in found), found
+
+
+def test_the_posture_check_walks_into_a_list_or_a_nested_destination(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Free-form means the shape is free too, not only the key's spelling.
+
+    The first version of this rule looked at top-level `str` values, which is a second assumption
+    about a block whose whole design point is that a site writes any driver against it. A fan-out
+    driver taking `urls: [a, b]` and a failover driver taking `endpoints: {primary: …}` both
+    escaped it entirely — and escaped it silently, which is the failure mode the rule exists to end.
+
+    Bounded rather than fully recursive on purpose (`_config_strings`): the three shapes a
+    destination is realistically written in, and then it stops.
+    """
+    from chemclaw.cli.validate_channels import problems
+
+    root = tmp_path / "channels"
+    _channel(
+        root,
+        "fanout",
+        "name: fanout\ndescription: a site driver posting to several hooks\n"
+        "driver: chemclaw.deliver.driver:webhook_channel\n"
+        "config:\n  urls:\n    - https://chat.internal/a\n    - http://chat.internal/b\n",
+    )
+    _channel(
+        root,
+        "failover",
+        "name: failover\ndescription: a site driver with a primary and a fallback\n"
+        "driver: chemclaw.deliver.driver:webhook_channel\n"
+        "config:\n  endpoints:\n    primary: https://chat.internal/a\n"
+        "    fallback: http://chat.internal/b\n",
+    )
+    monkeypatch.setattr(settings, "delivery_channels_dir", str(root))
+
+    found = problems()
+    for name in ("fanout", "failover"):
+        assert any(name in problem and "cleartext" in problem for problem in found), (
+            f"the plaintext destination inside {name}'s config was never asked about: {found}. A "
+            "check that only reads top-level strings passes every driver that groups its "
+            "destinations, which is most of the ones a site would write"
+        )
+
+
+def test_a_file_channel_with_an_impossible_directory_is_a_config_fault_not_an_outage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The config-versus-outage split had a hole exactly where the file driver is.
+
+    `FileDeliveryDriver.__init__` touched no filesystem, so `build()` succeeded for any string at
+    all and a bad `directory:` first surfaced at `mkdir` time inside `deliver()` — on
+    `chemclaw_delivery_failures_total`, the series an operator reads as "the destination is having a
+    bad afternoon". A path with a regular file where a directory belongs will fail identically on
+    every message until somebody edits a manifest, which is the definition of the *other* counter.
+
+    Both directions, because the easy over-correction is worse than the defect: a directory that
+    does not exist yet is **not** a misconfiguration — creating it is what a first delivery to a
+    fresh mount does — and refusing it would turn every new deployment's first message into an
+    alert.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    blocked = tmp_path / "not-a-dir"
+    blocked.write_text("a regular file sitting where the share should be", encoding="utf-8")
+
+    root = tmp_path / "channels"
+    _channel(
+        root,
+        "typo",
+        "name: typo\ndescription: its directory is a regular file\n"
+        f"driver: chemclaw.deliver.driver:file_channel\nconfig:\n  directory: {blocked}\n",
+    )
+    _channel(
+        root,
+        "fresh",
+        "name: fresh\ndescription: a mount whose directory does not exist yet\n"
+        "driver: chemclaw.deliver.driver:file_channel\n"
+        f"config:\n  directory: {tmp_path / 'never' / 'made'}\n",
+    )
+    monkeypatch.setattr(settings, "delivery_channels_dir", str(root))
+    monkeypatch.setattr(settings, "delivery_channels", "typo,fresh")
+
+    def _series(line_prefix: str) -> float:
+        for line in METRICS.render().splitlines():
+            if line.startswith(line_prefix):
+                return float(line.rsplit(" ", 1)[1])
+        return 0.0
+
+    config = 'chemclaw_degraded_total{subsystem="delivery_channel_config"}'
+    outage = "chemclaw_delivery_failures_total"
+    config_before, outage_before = _series(config), METRICS.value(outage)
+
+    assert asyncio.run(deliver(Message(recipient="u-1", subject="s", body="b"))) == ["fresh"], (
+        "a directory that does not exist yet must still be delivered to — creating it is what a "
+        "first delivery to a fresh mount does"
+    )
+    assert _series(config) == config_before + 1, (
+        "a directory that can never be a directory left no configuration-degradation signal; it "
+        "was still being discovered at mkdir time and reported as the share being down"
+    )
+    assert METRICS.value(outage) == outage_before, (
+        "the impossible path was counted as a destination outage, which is the conflation the "
+        "config counter exists to end"
+    )
 
 
 def test_a_channel_that_cannot_be_built_is_not_counted_as_a_destination_outage(
