@@ -1725,13 +1725,26 @@ so the branch is now unreachable, replacing the handler with a raised `Assertion
 suite green, and the test goes on passing while its docstring is false. Nothing signals this.
 
 The remedy is cheap and I now use it: **for any test whose value is the branch it reaches, break the
-source and check it goes red.** I did that for every test added in this cycle — 11 of 13 render
-tests, all 4 authorization tests, all 4 store tests, both diff tests — and it caught two of my own
-tests asserting something other than what I thought.
+source and check it goes red.** I did that for the render, authorization, store and diff tests added
+in this cycle, and it caught two of my own tests asserting something other than what I thought.
+
+**The sentence that stood here counted them, and the count was wrong three different ways.** It read
+"11 of 13 render tests, all 4 authorization tests, all 4 store tests, both diff tests" — 21 — while
+the commit and the merge said "all 23 tests added in this cycle" and the ADR said four. A later
+review collected the node ids at both ends of the branch and measured **41 new node ids over 36 new
+test functions**: authorization +7 (not 4), checks +8 and design_tools +3 (which this sentence
+omitted entirely), render +15, store +4. The store figure was the only one right. **A count of my
+own work is a measurement like any other, and I wrote three of them from memory in one cycle.**
+Either collect it — `pytest --collect-only -q` at both ends is one command — or describe the
+practice without a number, which is what the paragraph above now does.
 
 **A measurement note, continuing the previous entry's rule.** The reviewers handed me numbers and I
 re-ran every one before using it. Two did not reproduce as reported: the sign-off race was described
 as a concurrency defect and reproduces 0/100 as a race but 100/100 as plain latency, and the torn
-read needed `REPEATABLE READ` rather than merely one transaction (2/25 still tore). Had I taken
-either on trust I would have written a fix for the wrong mechanism and a commit message asserting it.
-**Someone else's measurement is evidence about their run, not about mine.**
+read needed `REPEATABLE READ` rather than merely one transaction. Had I taken either on trust I
+would have written a fix for the wrong mechanism and a commit message asserting it. **Someone
+else's measurement is evidence about their run, not about mine.** The torn-read figure I published
+for that second one — "2/25" — is the same lesson turned on me: a later reviewer got 1/25, 3/25 and
+1/25 on three runs, because a race rate is a *rate* and I quoted one sample of it as a constant. The
+mechanism was right; the number needed a denominator big enough to be one. Measured properly it is
+**9 of 200**, and that figure is now what sets the test's round count.

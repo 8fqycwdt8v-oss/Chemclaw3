@@ -601,6 +601,26 @@ only holds defects can only ever restore the system to what it already intended 
       `values.yaml` entry, an `egressPorts` entry for 8857, and the `CHEMCLAW_RXNPREDICT_TOKEN`
       obligation `chem` already models.
 
+- [ ] **`_quote_supports` cannot tell whether the figure a quote carries is about *this* slot** —
+      [S], and it is the honest limit of a rule that is otherwise doing its job. A `stated` slot
+      attests a value, and the check now relates value to quote for every quote: the value's figures
+      have to be the quote's, compared as numbers; a figure written in words satisfies that; a value
+      carrying no figures needs the quote's own tokens. That refuses every fabrication measured so
+      far, on quotes of any length.
+
+      What it cannot do is *attribution*. A chemist who wrote "24 wells" has stated a figure, and
+      nothing in the string says whether that 24 is the plate format, the run cap or a coincidence —
+      so `max_runs='24'` quoting "24 wells" passes, and it should not. Closing that needs the slot's
+      identity to be part of the judgment, which means either a per-slot unit vocabulary (a *well*
+      is not a *run*, an *hour* is not a *gram*) or asking the model to point at the span and
+      checking the *span's* neighbourhood rather than its digits.
+
+      **Deliberately not built yet**, because the first form is a table of units that will be wrong
+      for the first ask nobody anticipated and the second is a second model call inside a check that
+      currently costs a regex. What is owed first is a count: over real turns, how often a `stated`
+      slot's quote carries a figure that belongs to a different slot. The anchor when it does:
+      `agent/protocol_design_tools.py::_quote_supports` and its test file's case table.
+
 - [ ] **Nothing mines the edit a chemist makes to a generated protocol** — [M], and the data for it
       starts accumulating now. `experiment_protocol_revisions` is append-only and carries
       `author_kind`, so `protocols.diff.diff_designs` between an `agent` revision and the `human`
