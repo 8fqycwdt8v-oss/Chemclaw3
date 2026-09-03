@@ -480,8 +480,20 @@ def _subagents(
     - **No checkpointer.** Upstream's contract is that a helper sees the prompt it was given and
       returns one report; a thread to resume would be a second conversation nobody addresses.
     - **No durable memory and no store.** `store=` is not forwarded, so the helper's backend has no
-      `/memories/` route. A helper's scratch work lives in its own graph state and dies with it,
-      which is what "returns one report" means when written down as a data path.
+      `/memories/` route: nothing a helper writes outlives the *turn*, and nothing reaches the
+      knowledge graph or the memory tiers.
+
+      **It does not die with the helper, though, and this comment said it did.** Measured:
+      upstream's `_return_command_with_state_update` copies every helper state key except
+      `messages`, `todos` and `structured_response` into the caller's update, and `files` is not
+      among the three — so a helper's `/scratch/evidence.md` lands in the caller's `files` channel
+      (9,937 characters of it, on the isolation fixture). The reverse holds too: the helper is
+      handed the caller's state minus those same three keys. "Returns one report" is true of the
+      *message thread* and false as a statement about state, which is a distinction this comment
+      and `HELPER_BRIEF` both used to blur — see
+      `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`, and the BACKLOG row for the
+      laundering path it opens (a helper writes a live envelope delimiter into a file; the caller's
+      `read_file` is in-process, so `frame_connector_results` neither frames nor defangs it).
     - **No helpers.** The guard is that `build_langgraph_agent(helper=True)` compiles on
       `create_agent`, so `SubAgentMiddleware` is absent rather than merely unpopulated — see the
       branch there for why returning an empty roster was not enough.

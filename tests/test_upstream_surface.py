@@ -26,6 +26,7 @@ having them in one file: a bump becomes one conversation instead of six surprise
 """
 
 import asyncio
+import inspect
 from typing import Any, get_type_hints
 
 import pytest
@@ -1238,4 +1239,47 @@ def test_tool_node_still_stores_a_prebuilt_tool_object_instead_of_rebuilding_it(
         "ToolNode no longer stores a prebuilt BaseTool as the same object — it copies or "
         "re-derives it, so `agent/tool_schema.py`'s per-process cache buys nothing and the "
         "measurement in tests/test_langgraph_connectors.py no longer holds"
+    )
+
+
+def test_the_task_tool_returns_a_dict_shaped_command_update() -> None:
+    """`agent/tool_result_shape.py` rewrites only a dict-shaped `Command.update`.
+
+    The seventh coupling, and the one with the shortest fuse. `Command.update` is typed `Any`, and
+    LangGraph's own `Command._update_as_tuples` accepts three forms: a dict, a sequence of
+    `(key, value)` pairs, and an annotated object. `rewritten_tool_messages` handles the dict and
+    returns the other two untouched — which for the `task` tool means a helper's report reaching
+    the caller's thread with **neither** the envelope defang nor the size ceiling applied, the exact
+    pair of defects `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread` closed.
+
+    Handling forms nothing produces would be branches no test could reach, so the assumption is
+    asserted here instead. If upstream changes the shape, this goes red naming the module, rather
+    than two controls going quiet on the one tool whose result is unbounded model prose.
+    """
+    import deepagents.middleware.subagents as upstream_subagents
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_shape import rewritten_tool_messages
+
+    source = inspect.getsource(upstream_subagents._build_task_tool)
+    assert "Command(" in source, (
+        "deepagents' task tool no longer returns a Command; `agent/tool_result_shape.py` "
+        "dispatches on that type, and a plain return would take the ToolMessage branch instead"
+    )
+    assert "update={" in source, (
+        "deepagents' task tool no longer builds a dict-shaped Command.update, so "
+        "`agent/tool_result_shape.py` rewrites nothing in a helper's report — it reaches the "
+        "caller's thread undefanged and unbounded, which is what that module exists to prevent"
+    )
+
+    marked = ToolMessage(content="report", tool_call_id="probe")
+    rewritten = rewritten_tool_messages(
+        Command(update={"messages": [marked], "model_calls": 1}),
+        lambda message: message.model_copy(update={"content": "rewritten"}),
+    )
+    assert rewritten.update["messages"][0].content == "rewritten"
+    assert rewritten.update["model_calls"] == 1, (
+        "rewriting a helper's report dropped another update key; those keys are how a fan-out's "
+        "spend reaches the single budget it shares"
     )
