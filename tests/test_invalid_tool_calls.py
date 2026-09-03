@@ -3,7 +3,7 @@
 `agent/model_calls.py` is the mechanism and
 `D-2026-08-30-an-unparseable-tool-call-is-an-ordinary-tool-failure` is the decision:
 `PromoteInvalidToolCalls` moves the call from `AIMessage.invalid_tool_calls` onto `tool_calls`
-behind a sentinel, and `refuse_unparsed_arguments` — innermost of the governance chain — refuses it
+behind a sentinel, and `refuse_unparsed_arguments` — below every gate that decides — refuses it
 before the body runs. `tests/test_agent_observability_model.py` proves what each half *decides* by
 calling the hooks directly. That is the right shape for a decision and it cannot establish that the
 decision is connected to anything, which is the property `tests/test_state_channels.py` exists for
@@ -478,6 +478,56 @@ def test_a_corrected_turn_still_hits_the_runaway_cap() -> None:
 
     assert loop_capped(final), "the cap must still stop a turn whose model call was promoted"
     assert len(model.seen) == 1, "the cap ended the run before a second attempt"
+
+
+def test_the_guard_sits_below_every_gate_that_decides_including_the_plan_gate() -> None:
+    """Where the refusal sits, pinned under the profile that falsifies the easy claim.
+
+    The comment on this entry said "innermost of everything" and that was false: a profile with
+    the harness enabled appends `enforce_plan_approval` and `stamp_plan_link` *below* it, so both
+    nest inside. `tests/test_middleware_order.py` and `tests/test_profiles.py` both pin the chain
+    under profiles that attach neither, so the one configuration that could falsify the claim was
+    the one neither of them built.
+
+    The property that actually matters is the one asserted here and it is a *relation*, not an
+    index: every gate that makes a decision about a call must sit **outside** this guard, so a
+    promoted call crosses all of them before being refused. That survives a deliberate reordering,
+    which an index would not.
+
+    **And the consequence, which is deliberate rather than discovered:** the plan gate is *inside*,
+    and this raises before calling its handler, so a promoted call never reaches it. That is right —
+    arguments that did not parse are not a well-formed request for a gate to decide about — and it
+    is asserted so that a future change making the plan gate refuse malformed calls has to change
+    this test on purpose.
+    """
+    from chemclaw.agent.langgraph_agent import tool_governance_middleware
+
+    def names(profile: AgentProfile) -> list[str]:
+        return [
+            getattr(entry, "name", None) or getattr(entry, "__name__", None) or type(entry).__name__
+            for entry in tool_governance_middleware(object(), profile)
+        ]
+
+    gated = names(AgentProfile(name="gated", harness_enabled=True, harness_autonomy="plan_only"))
+    guard = gated.index("refuse_unparsed_arguments")
+
+    # Every deciding gate is outside the guard, so a promoted call crosses all of them.
+    for gate in (
+        "announce_tool_failures",
+        "enforce_tool_authz",
+        "refuse_writes_on_dry_run",
+        "refuse_repeated_calls",
+    ):
+        assert gated.index(gate) < guard, f"{gate} nests inside the guard, so it never sees a call"
+
+    # And the two that are inside it, named rather than assumed absent.
+    assert gated[guard + 1 :] == ["enforce_plan_approval", "stamp_plan_link"], (
+        "the entries below the guard changed; the plan gate not seeing a promoted call is a "
+        "property this test exists to keep deliberate"
+    )
+    assert names(AgentProfile(name="default"))[-1] == "refuse_unparsed_arguments", (
+        "without the harness it *is* last, which is why the false claim survived review"
+    )
 
 
 def test_a_streamed_truncation_is_completed_by_upstream_and_never_becomes_invalid() -> None:

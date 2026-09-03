@@ -35,7 +35,7 @@ from langgraph.types import Command
 
 
 def rewritten_tool_messages(result: Any, rewrite: Callable[[ToolMessage], ToolMessage]) -> Any:
-    """Apply `rewrite` to every `ToolMessage` in `result`, whatever shape it arrived in.
+    """Apply `rewrite` to every `ToolMessage` in `result`, for the shapes a tool here returns.
 
     Three shapes, and the third is why this exists:
 
@@ -47,6 +47,16 @@ def rewritten_tool_messages(result: Any, rewrite: Callable[[ToolMessage], ToolMe
       of `tests/test_state_channels.py`'s whole subject: a write the graph never sees;
     - anything else — returned untouched. A tool may return a plain string or a `Command` that
       only routes, and neither is a result to rewrite.
+
+    **`Command.update` is typed `Any`, and only its dict form is rewritten here.** LangGraph's own
+    `Command._update_as_tuples` also accepts a sequence of `(key, value)` pairs and an annotated
+    object, and a `Command` in either of those forms passes through this function with **both**
+    controls unapplied — which is the defect this module exists to close, one shape further out.
+    That is deliberate rather than overlooked: upstream's `_build_task_tool` builds a dict, and so
+    does upstream's own `FilesystemMiddleware._intercept_large_tool_result`, so handling a form
+    nothing produces would be a branch no test could reach honestly. What makes it safe is that the
+    assumption is *asserted* rather than believed — `tests/test_upstream_surface.py` fails if the
+    `task` tool stops returning a dict-shaped update, naming this module as the one that breaks.
 
     **Rebuilt only when something changed.** `dataclasses.replace` on an unchanged command would
     return a new object every call for no reason, and identity is the cheapest way for a caller to

@@ -51,9 +51,9 @@ recovered from.
 
 **The fix is a change of address, and that is the whole of it.** The call is moved onto
 `tool_calls` carrying its unparseable document under `_UNPARSED_ARGUMENTS`, and
-`refuse_unparsed_arguments` — innermost of the tool chain — raises before the body runs. It is then
-an ordinary failing tool call, and everything a failing tool call already gets, it gets: the audit
-row, the span, the authorization gate, the dry-run and repeat guards, the `tool_failed` the
+`refuse_unparsed_arguments` — below every gate that decides — raises before the body runs. It is
+then an ordinary failing tool call, and everything a failing tool call already gets, it gets: the
+audit row, the span, the authorization gate, the dry-run and repeat guards, the `tool_failed` the
 announcer raises carrying the model's **own call id**, and a `ToolMessage` the model reads inside
 its own loop — an ordinary graph iteration the loop cap and the spend cap both count.
 
@@ -72,8 +72,10 @@ with. And an invariant about streamed prose, because `astream(stream_mode=["mess
 *model call* rather than per returned message, so the discarded attempt's tokens reached the
 chemist while the recorded message held only the second attempt — a divergence that had to be
 closed by carrying the discarded prose forward. Promotion has none of those problems, because it
-introduces no hidden call: **~20 lines replace ~180**, and the ~180 were the ones that kept being
-wrong.
+introduces no hidden call: measured with docstrings and comments stripped, **42 lines of code
+replace 113** — and those 113 were the ones that kept being wrong. (This said "~20 replace ~180",
+a 9x reduction against a real one of 2.7x. Neither figure had been counted;
+`D-2026-08-30-a-review-of-the-review` counts them.)
 
 The one property the old design had that this does not: it corrected the model without spending a
 graph iteration. That is the trade, stated so it is not rediscovered — an iteration is what makes
@@ -97,6 +99,7 @@ from langchain.agents.middleware import AgentMiddleware, ModelRequest, wrap_tool
 from langchain_core.messages import AIMessage, BaseMessage
 
 from chemclaw.agent.audit import UNKNOWN_TOOL, bounded_repr
+from chemclaw.agent.framing import defang
 from chemclaw.agent.llm_provider import classify_model_failure
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -116,6 +119,14 @@ logger = logging.getLogger(__name__)
 # live registry so a future one fails the suite rather than silently swallowing a promotion — a
 # tool that did declare it would have its own calls refused before the body, on every turn.
 _UNPARSED_ARGUMENTS = "__unparsed_arguments__"
+
+# The prefix a promoted call is given when the provider named no id, suffixed with its index in the
+# reply. `""` was used until a reviewer measured what two of them do: `graph_stream.failed_calls`
+# and `ToolCallTrace._issued` both key on a call id and both assume it identifies one call, so two
+# id-less calls in one reply made a failure suppress an unrelated result and made an
+# `_empty_answer_event` count more refusals than attempts. Distinct from anything a provider mints,
+# and stable within the reply, which is the only scope that can collide.
+_UNPARSED_CALL_ID = "unparsed-call-"
 
 
 def model_call_middleware() -> list[Any]:
@@ -300,7 +311,15 @@ def _bounded_reason(value: object) -> str:
             lo = mid
         else:
             hi = mid - 1
-    return "…" + repr(text[-lo:])
+    # **`text[-0:]` is the whole string, not the empty one**, so the search failing to fit even one
+    # character has to be answered here rather than by the slice. It was not, and the bound was
+    # then lost completely: measured at a budget of 0, 1 or 2 against a 100 kB parse error, this
+    # returned **100,024** characters — the exact failure the function exists to prevent, at
+    # exactly the tightening an operator would make to be safer. `agent_audit_max_arg_chars` is
+    # `ge=0` with no floor, and `repr` of a single character is already three characters wide, so
+    # any budget under 3 reaches this branch. The ellipsis alone is the honest answer: the budget
+    # says there is no room, and something was still cut.
+    return "…" + repr(text[-lo:]) if lo else "…"
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,14 +524,38 @@ def _promote(request: ModelRequest[Any], response: Any) -> Any:
         if not isinstance(message, AIMessage) or not message.invalid_tool_calls:
             continue
         promoted: list[Any] = list(message.tool_calls or [])
-        for call in message.invalid_tool_calls:
+        # Bounded, because one reply may carry any number of these and each becomes an audit row,
+        # a stream event and a `ToolMessage` in the model's own context — see
+        # `agent_max_promoted_invalid_calls` for the measurement and for why nothing is lost past
+        # the bound. `_count_invalid` above has already counted and named every one of them.
+        ceiling = settings.agent_max_promoted_invalid_calls
+        entries = message.invalid_tool_calls[:ceiling] if ceiling else message.invalid_tool_calls
+        for index, call in enumerate(entries):
             promoted.append(
                 {
-                    "name": str(call.get("name") or UNKNOWN_TOOL),
+                    # **Bounded, because this one reaches further than the operator's WARNING.**
+                    # It becomes `request.tool_call["name"]`, and from there `audit_events.tool`,
+                    # the `chemclaw.tool` span attribute and `ToolFailedEvent.tool` on the
+                    # chemist's stream — none of which bounds it, and `agent/audit.py::_recording`
+                    # `%s`-formats it into a log line the default formatter does not escape. The
+                    # design this replaced bounded the name for exactly this reason and the
+                    # promotion dropped the bound; `_bounded_text`'s own docstring already claimed
+                    # this was happening. Escaping stays at the sinks, so `_metric_label`'s
+                    # comparison against the bound tools is untouched.
+                    "name": _bounded_text(call.get("name") or UNKNOWN_TOOL),
                     # The model's own id, kept: it is what pairs the `tool_failed` the announcer
                     # raises with the `tool_call` event the stream already emitted, and dropping it
                     # is what forced the previous design's `graph_stream` guard.
-                    "id": str(call.get("id") or ""),
+                    #
+                    # **A missing id becomes a distinct synthetic one rather than `""`.** A
+                    # provider may omit it — measured, both `_convert_dict_to_message` and the
+                    # streamed chunk merge yield `id=None` when it does — and two such calls in one
+                    # reply then shared the empty string, which two independent readers key on:
+                    # `graph_stream.failed_calls` suppressed an unrelated call's `tool_result`, and
+                    # `ToolCallTrace._issued` collapsed both into one, so `_empty_answer_event`
+                    # printed "1 tool call(s) attempted, 2 refused by a gate" — an impossible count.
+                    # The index makes it unique within the reply, which is the scope that collides.
+                    "id": str(call.get("id") or "") or f"{_UNPARSED_CALL_ID}{index}",
                     "args": {_UNPARSED_ARGUMENTS: bounded_repr(call.get("args"))},
                     "type": "tool_call",
                 }
@@ -540,12 +583,20 @@ class UnparsedArguments(ChemclawError):
 
 @wrap_tool_call
 async def refuse_unparsed_arguments(request: Any, handler: Callable[[Any], Any]) -> Any:
-    """Refuse a promoted call before its body runs — innermost of the governance chain.
+    """Refuse a promoted call before its body runs — below every gate that decides.
 
-    **Innermost, so everything above it sees the call**: the announcer raises `tool_failed`, the
+    **Below the gates, so all of them see the call**: the announcer raises `tool_failed`, the
     audit trail records the row, and the authorization, dry-run and repeat guards all run on a call
     the model really did make. That is the whole gain over the design this replaces, where none of
     them could see it.
+
+    **Not innermost, though this said so.** `enforce_plan_approval` and `stamp_plan_link` are
+    appended below it whenever a profile enables the harness, so under `harness_enabled` they nest
+    inside — measured against a gated profile, not read off the list. Since this raises before
+    calling its handler, **the plan gate never sees a promoted call**. That is the right outcome
+    and is now written down rather than inherited: arguments that did not parse are not a
+    well-formed request for a gate to decide about, so the turn reports a fault (`reason=None`)
+    rather than a refusal nothing actually made.
 
     **Before the body, because an empty argument dict is not safe.** Measured against the live
     registry, **11 of 54** in-process tools have no required argument, so a promotion that dropped
@@ -563,6 +614,7 @@ async def refuse_unparsed_arguments(request: Any, handler: Callable[[Any], Any])
         return await handler(request)
     raise UnparsedArguments(
         f"The arguments for this call were not valid JSON, so it did not run. What was received "
-        f"was {document}. Re-issue the call with complete, valid JSON arguments; if you cannot, "
-        f"say what you were unable to do rather than answering as though the tool had returned."
+        f"was {defang(str(document))}. Re-issue the call with complete, valid JSON arguments; if "
+        f"you cannot, say what you were unable to do rather than answering as though the tool had "
+        f"returned."
     )
