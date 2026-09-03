@@ -26,7 +26,13 @@ from chemclaw.protocols.models import (
     Setpoints,
     Well,
 )
-from chemclaw.protocols.render import _number, render_markdown, run_sheet_rows, summarise
+from chemclaw.protocols.render import (
+    _number,
+    receipt,
+    render_markdown,
+    run_sheet_rows,
+    summarise,
+)
 
 
 def _design(**overrides: object) -> ExperimentDesign:
@@ -499,3 +505,17 @@ def test_a_number_is_written_out_rather_than_rounded_into_a_collision() -> None:
     assert _number(1234.0) == "1234"
     assert _number(1e-5) == "1e-05"
     assert _number(None) == ""
+
+
+def test_a_receipt_says_whether_its_checks_were_graded_against_a_procedure() -> None:
+    """`status` is a proxy for that and the two are decided independently.
+
+    `advanced()` decides the status and `has_protocol` decides the check stage, so a `draft` design
+    edited back down to the bare ask keeps a non-`requested` status while every protocol-only check
+    comes back a *passing* note — and a reader counting passes reports a clearance nobody issued.
+    Only the receipt can carry the value the stage was actually chosen by.
+    """
+    ask = ExperimentDesign(request=ExperimentRequest(title="T", goal="G"))
+    assert not receipt(ask, [], design_id="d", revision=2, status="draft").has_protocol
+    drafted = _design(arms=[ProtocolArm(arm_id="A1")])
+    assert receipt(drafted, [], design_id="d", revision=3, status="draft").has_protocol

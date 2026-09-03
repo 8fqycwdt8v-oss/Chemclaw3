@@ -81,6 +81,15 @@ class ProtocolReceipt(BaseModel):
     title: str
     mode: str
     status: DesignStatus
+    # **Whether the checks below were graded against a procedure, which nothing on this payload
+    # could say.** At the request stage the service reports every protocol-only check as a
+    # *passing* note reading "not checked yet — this design holds only the ask", so a reader that
+    # counts passes reports a clearance nobody issued. The browser guarded that on `status ==
+    # "requested"`, which is a *proxy*: `advanced()` decides the status and `has_protocol` decides
+    # the stage, independently — so a `draft` or `approved` design edited back down to the bare ask
+    # keeps its status and got a green "15 checks passed" over a design with no charge table, no
+    # procedure and no evidence. This is the value the stage was actually chosen by.
+    has_protocol: bool = False
     # One sentence a model can quote to the chemist without re-reading the design.
     summary: str
     checks: list[ProtocolCheck] = Field(default_factory=list)
@@ -270,6 +279,7 @@ def receipt(
         title=design.request.title,
         mode=design.request.mode,
         status=status,
+        has_protocol=design.has_protocol,
         summary=summarise(design, checks),
         checks=checks,
         blocking=[c.check_id for c in checks if c.severity == "blocker" and not c.passed],

@@ -767,6 +767,12 @@ def test_a_drafted_protocol_can_still_be_approved(backend: str) -> None:
     _run(_body)
 
 
+#: How many concurrent read/write rounds the torn-read test drives. See that test's docstring for
+#: where the number comes from: the measured per-round tear rate is 4.5%, so this is the count at
+#: which a broken store passes with probability ~0.01% instead of the 32% that 25 rounds gave.
+_TORN_READ_ROUNDS = 200
+
+
 def test_one_read_of_a_design_is_internally_consistent_under_a_concurrent_write() -> None:
     """`GET /protocols/{id}` answers from one snapshot, not four.
 
@@ -783,13 +789,20 @@ def test_one_read_of_a_design_is_internally_consistent_under_a_concurrent_write(
 
     Postgres only — `InMemoryDesignStore` never yields between its four reads, so it has always
     been consistent, and every route test proved a property the deployment did not have.
+
+    **The round count is arithmetic rather than a round number**, and the first one was too small
+    to catch what it exists to catch. A race does not tear on every round: measured on this database
+    with the isolation level removed and nothing else changed, **9 of 200** rounds tore — 4.5%. At
+    the 25 rounds this ran for, a broken store passes with probability `0.955 ** 25`, which is
+    **32%**: the test missed the regression roughly one run in three, and a green line was therefore
+    not evidence. At 200 the same figure is `0.955 ** 200` ≈ 0.01%, for about five seconds more.
     """
 
     async def _body() -> None:
         await migrated_db_or_skip()
         store = PostgresDesignStore()
         torn = 0
-        rounds = 25
+        rounds = _TORN_READ_ROUNDS
         for index in range(rounds):
             design_id = _fresh_id("postgres", f"torn{index}")
             await store.append(design_id, _design(), [], author_kind="agent")
@@ -813,5 +826,60 @@ def test_one_read_of_a_design_is_internally_consistent_under_a_concurrent_write(
             if not (page.revision.revision == page.summary.head_revision == head_in_history):
                 torn += 1
         assert torn == 0, f"{torn}/{rounds} reads disagreed with themselves"
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_page_selects_a_revision_and_orders_the_two_histories(backend: str) -> None:
+    """The four halves of `GET /protocols/{id}`, over both backends, on a design with a past.
+
+    The torn-read test above drives `page()` hard and asserts only that its halves *agree*; nothing
+    asserted what any of them contains. So the parts a client actually reads — which revision came
+    back, whether the history is oldest-first, whether the sign-offs are newest-first — were
+    unchecked on the backend that serves them, and the in-memory store is not evidence about SQL
+    ordering.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design_id = _id(backend, "page-shape")
+        await store.append(design_id, _design(arms=1), [], author_kind="agent", status="draft")
+        await store.append(
+            design_id,
+            _design(arms=2),
+            [],
+            author_kind="human",
+            parent_revision=1,
+            change_note="a second arm",
+        )
+        await store.set_status(design_id, "approved", expected_revision=2, actor="chemist-a")
+        await store.set_status(design_id, "executed", expected_revision=2, actor="chemist-b")
+
+        head = await store.page(design_id)
+        assert head is not None
+        assert head.revision.revision == 2
+        assert head.summary is not None and head.summary.head_revision == 2
+        # Oldest first, which is the order a reviewer reads a design's history in.
+        assert [item.revision for item in head.history] == [1, 2]
+        assert [item.change_note for item in head.history] == ["", "a second arm"]
+        # Newest first, because the last move is the one that describes the design now.
+        assert [event.status for event in head.status_history] == ["executed", "approved"]
+        assert [event.actor for event in head.status_history] == ["chemist-b", "chemist-a"]
+
+        # An explicit revision serves that document, with the header and both histories still
+        # describing the design as a whole rather than as it was.
+        earlier = await store.page(design_id, 1)
+        assert earlier is not None
+        assert earlier.revision.revision == 1
+        assert earlier.summary is not None and earlier.summary.head_revision == 2
+        assert [item.revision for item in earlier.history] == [1, 2]
+
+        assert await store.page(design_id, 3) is None
+        # **There is no revision 0**, and the two backends disagreed about it: Postgres selected on
+        # `(%s = 0 OR revision = %s)` over `revision or 0`, so a `revision=0` from a client got the
+        # *head* there and `None` here — a divergence in the one method written to remove one.
+        assert await store.page(design_id, 0) is None
+        assert await store.page(_id(backend, "page-nothing")) is None
 
     _run(_body)

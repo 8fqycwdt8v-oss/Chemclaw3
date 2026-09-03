@@ -186,18 +186,25 @@ class UnknownDesign(ChemclawError):
 
 
 class UnstorableDocument(ChemclawError):
-    """A design carrying bytes no text column can hold — a NUL, or a C0 control character.
+    """A write this store will not take, that the caller can fix — the 422 of this module.
 
-    Postgres `text` and `jsonb` reject `\u0000` outright, and psycopg raises it as an untyped
-    `DataError`/`UntranslatableCharacter` from inside the driver. Measured before this existed: a
-    NUL anywhere in a browser-supplied design — the notes field, the title, the change note — was a
-    **500** with a correlation id and nothing a caller could act on, while the in-memory backend
-    accepted it, so the two backends disagreed about whether the write was possible.
+    Two families, and the docstring named only the first for as long as the second existed:
 
-    Refused here rather than sanitised, because a chemist did not type a NUL: silently stripping it
-    would store a document that is not the one that was sent. `ingest.eln.sync` strips control
-    characters on the *ingest* path for the opposite reason — there the bytes come from somebody
-    else's database and there is no author to refuse.
+    **Bytes no text column can hold** — a NUL, or a C0 control character, or an unpaired UTF-16
+    surrogate. Postgres `text` and `jsonb` reject `\u0000` outright, and psycopg raises it as an
+    untyped `DataError`/`UntranslatableCharacter` from inside the driver. Measured before this
+    existed: a NUL anywhere in a browser-supplied design — the notes field, the title, the change
+    note — was a **500** with a correlation id and nothing a caller could act on, while the
+    in-memory backend accepted it, so the two backends disagreed about whether the write was
+    possible. Refused rather than sanitised, because a chemist did not type a NUL: silently
+    stripping it would store a document that is not the one that was sent. `ingest.eln.sync` strips
+    control characters on the *ingest* path for the opposite reason — there the bytes come from
+    somebody else's database and there is no author to refuse.
+
+    **A status the design cannot support** — `require_movable`, which refuses `approved` or
+    `executed` on a design holding only the structured ask. Same exception because it is the same
+    answer to the caller: the request as sent cannot be stored, the reason is in the message, and
+    the fix is theirs. Both reach the routes as a 422.
     """
 
 
@@ -724,13 +731,15 @@ class PostgresDesignStore:
                         f"revision {expected_revision} is not the head ({head}); "
                         "re-read the design before signing off on it"
                     )
-                # Inside the same transaction and under the same `FOR UPDATE`, so the kind read
-                # here is the kind of the revision this move is stamped against.
+                # The kind of the revision this move is stamped against, and the reason that is
+                # not a race: `_SELECT_HEAD` locks the *header* row, and every `append` takes that
+                # same lock before writing, so no revision can land between the two reads. The
+                # revisions table is append-only, so the row this finds cannot change either.
                 await cur.execute(_SELECT_HEAD_KIND, (design_id, head))
                 kind_row = await cur.fetchone()
-                # Anything that is not provably `protocol` is treated as `request`, so a row the
-                # `FOR UPDATE` above says exists and this read somehow does not fails *closed*
-                # rather than waving an `executed` through on a document nobody can see.
+                # Anything that is not provably `protocol` is treated as `request`, so a header
+                # naming a head revision whose row this read does not find fails *closed* rather
+                # than waving an `executed` through on a document nobody can see.
                 require_movable(
                     status, "protocol" if kind_row and kind_row[0] == "protocol" else "request"
                 )
@@ -771,15 +780,22 @@ class PostgresDesignStore:
         gives the whole block one snapshot, which is what "the history comes back in the same call"
         was always supposed to mean. Nothing here writes, and a read-only transaction cannot take a
         serialization failure, so there is no retry to write.
+
+        **The revision clause is `read`'s, spelled the same way, because `or 0` is not `is None`.**
+        This selected on `(%s = 0 OR revision = %s)` over `revision or 0`, so `page(design_id, 0)`
+        answered with the **head** here and `None` on the in-memory store — a backend divergence in
+        the one method written to remove one, and reachable from a client that sends `revision=0`.
+        There is no revision 0: `DesignRevision.revision` is `ge=1` and `parent_revision=0` is the
+        word for "nothing", so `None` is the honest answer on both.
         """
+        clause = "AND revision = %(revision)s " if revision is not None else ""
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                 await cur.execute(
                     f"SELECT {_REVISION_COLUMNS} FROM experiment_protocol_revisions "
-                    "WHERE design_id = %s AND (%s = 0 OR revision = %s) ORDER BY revision DESC "
-                    "LIMIT 1",
-                    (design_id, revision or 0, revision or 0),
+                    "WHERE design_id = %(design_id)s " + clause + "ORDER BY revision DESC LIMIT 1",
+                    {"design_id": design_id, "revision": revision},
                 )
                 head_row = await cur.fetchone()
                 if head_row is None:

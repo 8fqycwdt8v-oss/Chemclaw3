@@ -235,6 +235,28 @@ async def _require_writable(store: DesignStore, design_id: str) -> DesignSummary
     return header
 
 
+async def _stored_status(store: DesignStore, design_id: str) -> DesignStatus:
+    """The design's status as the store holds it — never a default this function invented.
+
+    Every caller reaches this *after* a revision exists, so a missing header row is a store that
+    lost one rather than a design that is merely `requested`. Four call sites each carried their own
+    `header.status if header else "requested"` / `else "draft"`, and both defaults are unreachable
+    and wrong: the receipt a chemist reads would name a status the design does not have, on the one
+    surface that reports what happened to their write. If the header is gone the honest answer is an
+    error naming the inconsistency.
+
+    Raises:
+        ChemclawError: the design has revisions and no header row.
+    """
+    header = await store.summary(design_id)
+    if header is None:
+        raise ChemclawError(
+            f"{design_id} has revisions but no header row, so its status cannot be read; "
+            "the store is inconsistent"
+        )
+    return header.status
+
+
 @tool
 async def structure_experiment_request(request: ExperimentRequest, salt: str = "") -> str:
     """Turn a chemist's free-text ask into the structured request a protocol is drafted from.
@@ -292,13 +314,12 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
     # plate, the ask was restated in a later session, and the header came back `draft` over a head
     # that compared equal to the approved one. Nothing changed, so nothing is stored.
     if head is not None and design == head.design:
-        header = await store.summary(design_id)
         return receipt(
             design,
             head.checks,
             design_id=design_id,
             revision=head.revision,
-            status=header.status if header else "requested",
+            status=await _stored_status(store, design_id),
         ).model_dump_json()
 
     checks = run_checks(design, stage="protocol" if design.has_protocol else "request")
@@ -314,13 +335,12 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
         correlation_id=get_current_correlation_id() or "",
         status="requested",
     )
-    header = await store.summary(design_id)
     return receipt(
         design,
         checks,
         design_id=design_id,
         revision=revision.revision,
-        status=header.status if header else "requested",
+        status=await _stored_status(store, design_id),
     ).model_dump_json()
 
 
@@ -451,8 +471,7 @@ async def draft_experiment_protocol(
     except RevisionConflict as exc:
         raise ChemclawError(str(exc)) from exc
 
-    header = await store.summary(design_id)
-    status: DesignStatus = header.status if header else "draft"
+    status = await _stored_status(store, design_id)
     logger.info(
         "protocol.drafted design_id=%s revision=%s arms=%d evidence=%d",
         design_id,
@@ -513,14 +532,13 @@ async def read_experiment_protocol(design_id: str, revision: int = 0) -> str:
             + (f" at revision {revision}" if revision else "")
             + ". Use find_experiment_protocols to list what exists."
         )
-    header = await store.summary(design_id)
     body = ProtocolReadout(
         receipt=receipt(
             stored.design,
             stored.checks,
             design_id=design_id,
             revision=stored.revision,
-            status=header.status if header else "draft",
+            status=await _stored_status(store, design_id),
         ),
         design=stored.design,
         markdown=render_markdown(stored.design, stored.checks),
