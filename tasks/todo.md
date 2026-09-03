@@ -339,3 +339,29 @@ introduced. Phases below; each ships with its own tests and mutations.
 - [ ] **P8 `Chemclaw3_ui`** — the diff query params, 0-based plate columns, dropped 422 detail,
       orphaned arms on a level rename, request-stage "14 checks passed", swallowed errors, and
       fixtures the service would reject.
+## Review section — fifth cycle over the prescriptive tier (2026-08-30)
+
+Six fresh-context subagents over disjoint slices; 67 findings, 37 defects here and 8 in the
+frontend. Every one reproduced locally before being fixed, and every new test was checked against
+the pre-fix code.
+
+- [x] **Authorization** — `design_id_for` takes the owner; both write surfaces consult
+      `owner_permits`; HTTP answers 403 for owner-or-reviewer. Was: a second chemist's turn replaced
+      a signed-off plate, and any principal with no role wrote `executed` into somebody else's trail.
+- [x] **Checks** — eight fixed, one added (`limiting_is_limiting`). `forbidden_absent` reads what
+      the design does; the equivalents tolerance allows written rounding; coverage counts
+      combinations; plausibility reads all eight fields; three checks read `is_plate` rather than
+      `request.mode`; a randomised layout needs its seed.
+- [x] **Renderer** — nine fixed, and `tests/test_protocol_render.py` created (the module had no test
+      file at all). The safety one: per-arm atmosphere and pressure now reach the page.
+- [x] **Store** — unpaired surrogates refused on both backends; `require_movable` stops `executed`
+      on an ask; `page()` reads one snapshot at `REPEATABLE READ`.
+- [x] **Agent surface** — `stated` attests the value; the two protocol readers left the MCP face;
+      both `levels` collections bounded.
+- [x] **Prose** — four false claims corrected in place, one ADR sentence corrected by the new ADR.
+- [ ] **Deferred, with rows in `docs/planning/BACKLOG.md`:** the status compare-and-set (needs
+      `expected_status` across the store, the route and the UI) and the multi-turn `stated` quote
+      (needs the thread's user turns at the stamp site).
+
+Gate: 6,340 passed / 19 skipped with Postgres up, `ruff` and `mypy --strict` clean over 798 files;
+frontend 820 tests over 81 files plus the full seven-command gate.
