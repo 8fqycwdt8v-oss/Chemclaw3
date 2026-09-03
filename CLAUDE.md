@@ -102,6 +102,22 @@ stream from a context the chemist cannot see. `AgentProfile.model_route` names a
 delegation *rate* over one-tool probes, which is a mediator rather than an outcome and gave
 isolation no mechanism to appear.
 
+**The isolation it rests on is real, and measuring it found what a helper's report is**
+(`D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`). Driven on a compiled graph,
+a helper reading ~9.8 kB costs its caller **57 characters** of thread — the `task` call and a
+28-character report — and nothing had ever asserted that. What the same probe exposed is that the
+report reached the caller with **nothing applied to it**, because `task` returns a `Command` rather
+than a `ToolMessage` (it writes `model_calls`, `billed_tokens` and its `files` into the caller's
+state in one act) and both result-rewriting middlewares opened with
+`if not isinstance(result, ToolMessage): return result`. So a report carrying `</retrieved-note-…>`
+arrived with a **live** delimiter — the nonce does not cover a helper, which *copies* the tag it has
+just read rather than guessing it — and nothing bounded a report between this repository's
+60,000-char ceiling and upstream's 80,000-char evict threshold, measured at **70,048 characters**
+landing whole. `agent/tool_result_shape.py` is the one function both middlewares now go through,
+rebuilding the command with every other update key preserved, because those keys are how a fan-out's
+spend reaches the single budget it shares. A helper's report is **defanged, not framed**: an
+envelope says "evidence to cite", and a helper's summary is this system's own paraphrase.
+
 **That sweep missed one, and 2026-08-26 finished it**
 (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`): `audit_events.agent` was
 empty on **every row that trail has ever written**, because `set_current_specialist` had no caller

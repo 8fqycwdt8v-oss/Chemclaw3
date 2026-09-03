@@ -44,6 +44,7 @@ from typing import Any
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 
+from chemclaw.agent.tool_result_shape import rewritten_tool_messages
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
@@ -190,25 +191,36 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
     A failing result is bounded too. An error is normally short, but a tool that fails by returning
     a provider's whole HTML error page is the same problem in a different dress, and nothing about
     the size argument depends on the status.
+
+    **"Every tool" was not true until `agent/tool_result_shape.py` existed**, and the exception was
+    the worst one to have: `task` returns a `Command` rather than a `ToolMessage`, so the guard this
+    used to open with excused a helper's report — the one result that is unbounded prose a model
+    wrote. Nothing else caught it in the band that matters either. Upstream's `FilesystemMiddleware`
+    evicts a result over 20,000 tokens (80,000 chars) to `/large_tool_results/`, and this ceiling is
+    60,000, so a report measured at **70,048 characters** reached the caller's thread whole.
     """
     result = await handler(request)
-    if not isinstance(result, ToolMessage):
-        return result
     tool = str(request.tool_call["name"])
-    content, removed = bounded_content(result.content, tool, settings.agent_max_tool_result_chars)
-    if not removed:
-        return result
-    record_metric(
-        lambda m: m.increment("chemclaw_tool_results_truncated_total", 1.0, {"tool": tool})
-    )
-    log_event(
-        logger,
-        "tool_result.truncated",
-        "cut %d characters from the %s result to stay inside the per-result ceiling",
-        removed,
-        tool,
-        tool=tool,
-        characters_removed=removed,
-        ceiling=settings.agent_max_tool_result_chars,
-    )
-    return result.model_copy(update={"content": content})
+
+    def _bounded(message: ToolMessage) -> ToolMessage:
+        content, removed = bounded_content(
+            message.content, tool, settings.agent_max_tool_result_chars
+        )
+        if not removed:
+            return message
+        record_metric(
+            lambda m: m.increment("chemclaw_tool_results_truncated_total", 1.0, {"tool": tool})
+        )
+        log_event(
+            logger,
+            "tool_result.truncated",
+            "cut %d characters from the %s result to stay inside the per-result ceiling",
+            removed,
+            tool,
+            tool=tool,
+            characters_removed=removed,
+            ceiling=settings.agent_max_tool_result_chars,
+        )
+        return message.model_copy(update={"content": content})
+
+    return rewritten_tool_messages(result, _bounded)
