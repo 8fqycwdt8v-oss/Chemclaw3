@@ -92,10 +92,15 @@ Reading the deletion paragraph above as "no delegation" is therefore wrong in th
 matters, and it stayed wrong long enough for the helper's surface to drift from its description:
 the `task` tool said isolation and parallel reading while the helper held its caller's **54**
 in-process tools, nine `run_*` launchers and `propose_knowledge_note` among them. It now holds
-**24** — its caller's set minus `authz.side_effecting_tools()` (derived from the partition that
-already exists, so a bundle added next year is out of reach the day it is enabled) and minus
+**18** of them — its caller's set minus `authz.side_effecting_tools()` (derived from the partition
+that already exists, so a bundle added next year is out of reach the day it is enabled) and minus
 `ask_clarifying_question`, which changes nothing and still writes a question onto the *chemist's*
-stream from a context the chemist cannot see. `AgentProfile.model_route` names a key in
+stream from a context the chemist cannot see. **The compiled helper graph binds 24**, because
+`FilesystemMiddleware` supplies six file verbs that `tool_names` does not reach — they write to the
+helper's own scratch space and it is handed no store, so they reach nothing that outlives it. Both
+numbers are here because this paragraph shipped saying 54 and 24 in one subtraction that does not
+work: the first is in-process, the second is bound, and a narrowing argued across two bases is the
+defect `_bound_tools` was written to end one section below. `AgentProfile.model_route` names a key in
 `model_routes` — a key, never a model id, which would be a site's model name in git — so
 `CHEMCLAW_MODEL_ROUTES='{"helper": "…"}'` makes delegated reading cheaper with no code change.
 **The delegation question is still open**: the corpus that was supposed to settle it measured
@@ -104,8 +109,12 @@ isolation no mechanism to appear.
 
 **The isolation it rests on is real, and measuring it found what a helper's report is**
 (`D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`). Driven on a compiled graph,
-a helper reading ~9.8 kB costs its caller **57 characters** of thread — the `task` call and a
-28-character report — and nothing had ever asserted that. What the same probe exposed is that the
+a helper reading ~9.8 kB leaves its caller a thread of **57 characters** — and that is the *whole*
+thread, prompt to answer: a 17-character question, a `task` call whose own content is empty, the
+28-character report, and a 12-character reply. Not "the `task` call and the report", which is how
+that number shipped here and in its ADR; the helper's 9,800 characters of reading appear in none of
+the four. Nothing had asserted any of it, and `tests/test_subagents.py` now does — as a ratio, so
+that a fixture reworded to ask a longer question does not read as a regression. What the same probe exposed is that the
 report reached the caller with **nothing applied to it**, because `task` returns a `Command` rather
 than a `ToolMessage` (it writes `model_calls`, `billed_tokens` and its `files` into the caller's
 state in one act) and both result-rewriting middlewares opened with
@@ -117,6 +126,18 @@ landing whole. `agent/tool_result_shape.py` is the one function both middlewares
 rebuilding the command with every other update key preserved, because those keys are how a fan-out's
 spend reaches the single budget it shares. A helper's report is **defanged, not framed**: an
 envelope says "evidence to cite", and a helper's summary is this system's own paraphrase.
+
+**Four fresh-context reviews of all of that found the code sound and four of its own sentences
+stale** (`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`), each written by the session
+that had just measured what it was describing. Three are corrected above; the fourth is why the
+floor paragraph no longer states a current number. Two assumptions that were held rather than
+asserted are now in `tests/test_upstream_surface.py` — `rewritten_tool_messages` rewrites only a
+*dict-shaped* `Command.update`, and the suppression of upstream's unguarded `general-purpose`
+subagent was checked against a phrase copied out of upstream's description rather than against
+upstream's own constant. And one explanation everybody reached for is wrong: an oversized connector
+result stays **one well-formed envelope** because `bound_tool_results` keeps head *and* tail, not
+because it runs inside the framer — the test written to assert the ordering passed with the ordering
+swapped, which is the whole reason to run a test you believe you know the answer to.
 
 **That sweep missed one, and 2026-08-26 finished it**
 (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`): `audit_events.agent` was
@@ -193,13 +214,18 @@ the model was sent, because `@tool` is identity so it measured raw callables rat
 objects, and never saw the seven `FilesystemMiddleware`/`SubAgentMiddleware` tools at all.
 **That second half is closed.** `_bound_tools` now reads the surface off the compiled graph's
 `ToolNode` — so any future tool source lands in the count the moment it is bound — and every
-ceiling was re-baselined in one commit: `default` measures **42,505** where the old basis reported
-34,379, six tools turned out to have been over `MAX_SINGLE_TOOL_TOKENS` all along, and **nothing
-was added**. The number grew because the measurement got honest, not because the surface did.
-(Those two figures shipped as 42,458 and 34,399 and were corrected the same day by re-measuring at
-`HEAD`: the first was taken on a branch that landed *after* the helper-subagent commit rewrote the
-`task` tool's description, and the second was a transcription error nothing had ever measured. The
-mechanism did not change — the numbers were simply taken again.)
+ceiling was re-baselined in one commit: on 2026-08-29 `default` measured **42,505** where the old
+basis reported 34,379, six tools turned out to have been over `MAX_SINGLE_TOOL_TOKENS` all along,
+and **nothing was added**. The number grew because the measurement got honest, not because the
+surface did.
+
+**Those are figures about a commit, and this file no longer claims a current one.** The floor moves
+whenever any bound tool's schema changes, which is a thing other branches do: measured four days
+later it was 42,549 — drifted by a merge that touched a tool-schema module, with no line of this
+paragraph's subject rewritten. Twice now a session has re-transcribed these numbers to correct them
+and been stale again within a merge, which is the same argument this file already makes about
+counting `make` targets and skipped tests: **the live number is whatever `tests/test_context_floor.py`
+measures, and the ceiling it ratchets against is the only figure worth reading here — 43,500.**
 The deferral itself stands.
 
 M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is

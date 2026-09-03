@@ -98,6 +98,7 @@ from typing import Any
 from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.tool_registry import registered_tool_names
 
 #: Tools that change nothing and still reach the person on the other side of the conversation.
 #:
@@ -125,10 +126,12 @@ You see nothing of the conversation that spawned you beyond the brief you were g
 you write reaches the chemist except the single report you return — so answer the brief you were
 given, completely, and say what you could not establish rather than leaving it out.
 
-You hold read-only tools only. You cannot start a durable job, propose a knowledge note, record an
-answer, ask the chemist a question, or call an external connector tool; the agent that spawned you
-can do all of those, and the right way to make one happen is to say so in your report. Do not
-describe work as started, scheduled or arriving later: nothing you can reach starts anything."""
+Every tool of this system's that you hold only reads. You cannot start a durable job, propose a
+knowledge note, record an answer, ask the chemist a question, or call an external connector tool;
+the agent that spawned you can do all of those, and the right way to make one happen is to say so
+in your report. You do hold file tools that write, and what they write reaches nothing but your own
+scratch space, which goes away when you return — a file is not a way to leave something behind. Do
+not describe work as started, scheduled or arriving later: nothing you can reach starts anything."""
 
 
 def governed_roster(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -247,6 +250,24 @@ def helper_profile(caller: AgentProfile, held: frozenset[str]) -> AgentProfile:
     Returns:
         A profile to build the helper's graph from. Never registered, never cached.
     """
+    # `held` decides the whole surface and arrives from outside, so a wrong one is caught here
+    # rather than shipped. Both directions are silent otherwise: an empty set narrows to a helper
+    # with no tools at all (`frozenset()` is not `None`, so nothing falls back), and a set read from
+    # a *different* profile's build would hand this helper names its own caller does not hold —
+    # which is the one property `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` turns
+    # on. The call site is correct today; this is what makes a second call site fail loudly instead.
+    if not held:
+        raise ValueError(
+            "helper_profile was given no held tool names; the caller's build resolves them with "
+            "`_capability_tools(profile)` and the registry is incomplete before that runs"
+        )
+    unknown = held - frozenset(registered_tool_names())
+    if unknown:
+        raise ValueError(
+            f"helper_profile was given tool names its caller does not hold: {sorted(unknown)}; "
+            "a helper is its caller attenuated, so `held` must come from that caller's own build"
+        )
+
     # `model_copy` rather than a fresh `AgentProfile(...)`: a field added to the model later is
     # carried into the helper automatically, where an explicit constructor call would drop it in
     # silence and read as deliberate. The three values below are typed as the model declares them,

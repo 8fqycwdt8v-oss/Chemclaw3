@@ -223,9 +223,17 @@ load_profiles()
 #: is restated here: they were each right about the delta they measured and wrong about the base,
 #: and rewriting them would be inventing measurements nobody took.
 #:
-#: The headroom is **995** tokens against 42,505 — under what `propose_knowledge_note` costs on the
-#: honest basis (1,126), so it still cannot absorb another tool of that size unnoticed, which is the
-#: property every raise above was chosen for.
+#: The headroom on that day was **995** tokens against 42,505 — under what `propose_knowledge_note`
+#: costs on the honest basis (1,126), so it could not absorb another tool of that size unnoticed,
+#: which is the property every raise above was chosen for.
+#:
+#: **That headroom figure is about a commit, not about `HEAD`, and this file no longer states a
+#: current one.** The floor moves whenever any bound tool's schema changes, including on branches
+#: that never touch this file: four days later `default` measured 42,549 — 951 of headroom — after
+#: a merge that touched `agent/protocol_design_tools.py` and nothing else here. Two sessions in a
+#: row have re-transcribed these numbers *in order to correct them* and been stale again within a
+#: merge. The property that survives is the one the assertion below tests; the number is whatever
+#: `_floor` returns when you run it, which is why the failure message prints it.
 #:
 #: **The three figures in the two paragraphs above were re-measured on 2026-08-29 and each moved,
 #: and the reason is the same one they are about.** They were written on a branch and landed after
