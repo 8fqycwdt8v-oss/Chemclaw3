@@ -764,10 +764,11 @@ def test_a_helper_built_from_the_wrong_held_set_fails_loudly() -> None:
     Neither shows up as a failure anywhere downstream; a wrong-sized helper simply works, which is
     why this is a raise rather than a comment about ordering.
     """
-    caller = AgentProfile(name="default")
-
     with pytest.raises(ValueError, match="no held tool names"):
-        helper_profile(caller, frozenset())
+        helper_profile(AgentProfile(name="default"), frozenset())
 
+    # The second half needs a caller that *has* narrowed, because the question is "did `held` come
+    # from this caller" and a profile holding everything has nothing to disagree with.
+    narrowed = AgentProfile(name="probe", tool_names=frozenset({"find_notes"}))
     with pytest.raises(ValueError, match="does not hold"):
-        helper_profile(caller, frozenset({"find_notes", "a_tool_no_registry_has"}))
+        helper_profile(narrowed, frozenset({"find_notes", "gather_evidence"}))
