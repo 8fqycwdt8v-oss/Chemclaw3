@@ -88,9 +88,13 @@ _BAD_DATA_TYPES = [
     # before the body runs. It is here because `tests/test_publish.py` walks the hierarchy and every
     # `ChemclawError` must be classified, and it is *non*-retryable for the ordinary reason: the
     # arguments are a fact about the emission, so an identical retry re-reads the identical
-    # unparseable document. It is also unreachable across an activity boundary today — a promoted
-    # call is refused in the conversation layer's tool chain, and no activity invokes that chain —
-    # so this row is the classification rather than a live policy.
+    # unparseable document. It is also unreachable across an activity boundary, though **not** for
+    # the reason this comment first gave ("no activity invokes that chain" —
+    # `durable/template_activities.run_agent_step` is an `@activity.defn` that builds the agent and
+    # runs a whole turn through exactly that chain). The real reason is one middleware out:
+    # `surface_domain_errors` is outermost of `tool_call_middleware` and converts every
+    # `ChemclawError` into a `ToolMessage`, so this never leaves the graph as a raised exception
+    # whatever ran it. Either way the row is the classification rather than a live policy.
     "UnparsedArguments",
     # A turn tried to change the skills tree (`chemclaw.agent.skill_backend`). An
     # `AuthorizationError` subclass, and registered for the same reason every other one is: Temporal

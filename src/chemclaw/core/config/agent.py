@@ -314,6 +314,26 @@ class AgentSettings(BaseSettings):
     # worker's activity slots, which are both sized to that pool; 0 removes the bound.
     agent_max_parallel_tool_calls: int = Field(default=8, ge=0)
 
+    # How many of one reply's unparseable tool calls are promoted onto `tool_calls` and refused
+    # individually (`agent/model_calls.PromoteInvalidToolCalls`); the rest are counted and named
+    # for the operator without becoming calls. 0 removes the bound.
+    #
+    # **This restores a ceiling that was deleted on a false premise.**
+    # `D-2026-08-30-an-unparseable-tool-call-is-an-ordinary-tool-failure` removed
+    # `agent_max_reported_lost_calls` saying `agent_max_parallel_tool_calls` "bounds how many calls
+    # a reply may hold". It does not — it is LangGraph's `max_concurrency`, which bounds how many
+    # run *at once*. Measured with nothing in between: one reply carrying 1000 unparseable calls
+    # produced **1000 audit rows, 1000 `tool_failed` events and 268 kB of `ToolMessage`s** fed back
+    # into the model's own context, in 5.8 s, with nothing refusing or truncating — and a model
+    # steered by injected content is exactly what emits a wide fan-out of malformed calls.
+    #
+    # Nothing is *lost* past the bound, which is the property the old setting also kept:
+    # `chemclaw_invalid_tool_calls_total` counts every call, the WARNING names the remainder, and
+    # the model still learns what it did wrong from the calls that were promoted — every one of
+    # them carries the same sentence. 20 is the old setting's value, kept so a deployment that
+    # tuned it reads the same number.
+    agent_max_promoted_invalid_calls: int = Field(default=20, ge=0)
+
     # How many times one turn may call a tool with the *identical* arguments before the call is
     # refused (`agent.repeat_guard`). The loop cap above bounds the harness's iterations and says
     # nothing about this: a live run called `find_past_jobs` 7-8 times in a single turn, with

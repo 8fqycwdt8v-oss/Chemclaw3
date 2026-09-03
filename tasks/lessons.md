@@ -1644,8 +1644,9 @@ producer is the evidence.** I now read the producer before writing the fixture, 
 
 ## 2026-08-30 — the fourth pass, and the signal I kept ignoring
 
-The fourth review of one subject ended in a rewrite: `~180` lines of retry machinery replaced by
-`~20` lines that move a call from one field to another. What is worth carrying is not the design —
+The fourth review of one subject ended in a rewrite: 113 lines of retry machinery replaced by 42
+that move a call from one field to another. (I first wrote that as "~180 replaced by ~20" — a 9x
+reduction I never measured, against a real 2.7x. See the fifth entry.) What is worth carrying is not the design —
 it is that **three rounds of "found a defect, fixed the defect" was itself the finding**, and I read
 it three times as three unrelated bugs.
 
@@ -1735,3 +1736,40 @@ as a concurrency defect and reproduces 0/100 as a race but 100/100 as plain late
 read needed `REPEATABLE READ` rather than merely one transaction (2/25 still tore). Had I taken
 either on trust I would have written a fix for the wrong mechanism and a commit message asserting it.
 **Someone else's measurement is evidence about their run, not about mine.**
+## 2026-08-30 (second entry) — what the fifth review round found, and why it kept going
+
+Three fresh-context reviewers over the change I had just merged. They found four things, and none
+of them was a defect in what the code *does* — two false claims and two untested paths.
+
+**The rule that comes out of it: a review round that finds only false claims and untested paths is
+the signal a design has settled, not the signal to stop reviewing.** Those are the cheapest defects
+to introduce and the most expensive to find later, precisely because nothing goes red. Rounds one
+to three found design defects and I kept going because things were obviously wrong; round five is
+the one I would have skipped, and it caught a total loss of a bound.
+
+**A fix for an off-by-one at one end of a range is not evidence about the other end.** My binary
+search fixed a `repr`-escape being cut in half — a large-input bug — and created a worse bug at
+small budgets: `text[-0:]` is the whole string, so when nothing fits the budget the function
+returned the *entire* 100 kB document. The test I wrote with the fix exercised only the budget the
+original defect had been found at. When a change touches a bound, test both ends of it and the
+degenerate middle, not the value that motivated the change.
+
+**A predecessor's tests are a checklist of properties somebody already thought were worth holding.**
+I deleted `test_the_sync_path_announces_what_the_async_path_announces` along with the mechanism it
+covered, and wrote no equivalent — so gutting the replacement's synchronous hook left 137 tests
+green. Deleting a test is a decision that needs the same argument as deleting the code. Before
+removing a test file's worth of coverage, list what each deleted test asserted and say, per item,
+whether the replacement still needs it.
+
+**A claim about ordering must be tested under the configuration that can falsify it.** "Innermost
+of the governance chain" was false whenever the harness is enabled, and both tests pinning that
+chain build it under profiles that attach neither of the two entries that nest inside. The
+falsifying configuration was the one nothing constructed. When pinning a list that is assembled
+conditionally, enumerate the conditions and pin the widest one.
+
+**And the third round running in which I published a number I had not measured.** "~20 lines
+replace ~180" — a 9x reduction against a real 2.7x (113 against 42, AST-counted). The previous
+entry in this file is about exactly this, written by me, one round earlier. Writing the rule down
+did not stop me doing it; what would have is counting before typing the sentence. **Treat any
+ratio, count or size in prose as requiring a command in the same edit.** If there is no command,
+there is no number — write "smaller" instead.
