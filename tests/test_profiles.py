@@ -108,6 +108,11 @@ def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
         "enforce_tool_authz",
         "refuse_writes_on_dry_run",
         "refuse_repeated_calls",
+        # Innermost, and the position is the mechanism rather than a preference: a call the model
+        # mis-serialised is promoted onto `tool_calls` precisely so it reaches this chain, so
+        # everything above must see it before it is refused
+        # (`D-2026-08-30-an-unparseable-tool-call-is-an-ordinary-tool-failure`).
+        "refuse_unparsed_arguments",
     ]
     assert enforce_tool_authz in middleware
     assert refuse_writes_on_dry_run in middleware

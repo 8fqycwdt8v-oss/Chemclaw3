@@ -98,7 +98,7 @@ from chemclaw.agent.chemclaw_agent import (
 from chemclaw.agent.compaction import context_compaction_middleware, disabled_summarizer
 from chemclaw.agent.llm_provider import build_chat_model, prompt_caching_middleware
 from chemclaw.agent.loop_cap import enforce_loop_cap
-from chemclaw.agent.model_calls import model_call_middleware
+from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_arguments
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.plan_link import stamp_plan_link
 from chemclaw.agent.profiles import AgentProfile, get_profile
@@ -819,6 +819,13 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
         enforce_tool_authz,
         refuse_writes_on_dry_run,
         refuse_repeated_calls,
+        # **Innermost of everything, and that position is the mechanism.** A call whose arguments
+        # the model mis-serialised is promoted onto `tool_calls` by `PromoteInvalidToolCalls` so
+        # that it reaches this chain at all; being last here means the announcer, the audit trail,
+        # the authorization gate and both guards above have already seen it, which is the whole
+        # gain over the design that reported it by hand. It still raises before the tool body, so
+        # the eleven in-process tools with no required argument cannot be executed by a promotion.
+        refuse_unparsed_arguments,
         *([enforce_plan_approval] if gate_applies(profile) else []),
         # Innermost, and deliberately after the gate: it raises nothing and records nothing — it
         # binds the current plan step and plan hash as ambient context so a launcher inside the

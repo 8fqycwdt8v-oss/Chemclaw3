@@ -189,6 +189,68 @@ def test_the_classifier_reads_the_discriminator_and_not_the_refusal_prose() -> N
     assert unstamped.tools_failed == ["propose_knowledge_note"]
 
 
+def test_every_gate_is_scored_as_the_control_working_not_as_a_broken_tool() -> None:
+    """Four of the five gates were scored as faults, which is the same defect one layer out.
+
+    `core/turn_signals.RefusalReason` names five: `plan_gate`, `dry_run`, `undeclared_write`,
+    `repeat` and `authz`. This reader split only the first off `tools_failed`, so a dry run the
+    chemist switched on, an agent refusing a tool its profile does not hold, the repeat guard and
+    an authorization denial all scored as tools falling over — and each set `failed_loudly`, which
+    is the harness's headline finding.
+
+    The set is read from the type rather than restated, so a sixth gate added next year fails here
+    instead of being silently scored as a fault. `plan_gate` keeps its own list because
+    `_plan_gate_findings` asks specifically what the plan gate held.
+    """
+    from typing import get_args
+
+    from chemclaw.core.turn_signals import RefusalReason
+
+    reasons = [reason for reason in get_args(RefusalReason) if reason != PLAN_GATE_REASON]
+    assert reasons, "RefusalReason names only the plan gate — has the union changed?"
+
+    outcome = _run_one(
+        _probe(),
+        *[
+            {
+                "type": "tool_failed",
+                "tool": f"tool_{reason}",
+                "message": "held",
+                "reason": reason,
+            }
+            for reason in reasons
+        ],
+        {"type": "tool_failed", "tool": "gather_evidence", "message": "the index is unreachable"},
+        {"type": "answer", "text": "Some steps were held."},
+    )
+    assert outcome.tool_refusals == [f"tool_{reason}" for reason in reasons]
+    assert outcome.tools_failed == ["gather_evidence"], (
+        f"a gate refusal was scored as a broken tool: {outcome.tools_failed}"
+    )
+    assert outcome.plan_refusals == []
+
+
+def test_a_turn_held_entirely_by_gates_is_not_reported_as_having_failed_loudly() -> None:
+    """The consequence of the split, at the field the harness actually reports.
+
+    `failed_loudly` reads `tools_failed`, so scoring a refusal there did not merely mislabel a
+    list — it made a correctly-gated turn the harness's loudest finding. A turn where every
+    state-changing call was held by a dry run is a turn where the control worked.
+    """
+    outcome = _run_one(
+        _probe(),
+        {
+            "type": "tool_failed",
+            "tool": "propose_knowledge_note",
+            "message": "held: this session is a dry run",
+            "reason": "dry_run",
+        },
+        {"type": "answer", "text": "Nothing was written — this is a dry run."},
+    )
+    assert not outcome.failed_loudly
+    assert outcome.tool_refusals == ["propose_knowledge_note"]
+
+
 def test_the_plan_gate_reason_is_the_one_the_wire_actually_carries() -> None:
     """The declaration-versus-surface check for the one value this harness copies.
 
