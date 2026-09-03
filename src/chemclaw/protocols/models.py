@@ -203,7 +203,11 @@ class Factor(BaseModel):
     name: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
     kind: Literal["categorical", "continuous"]
     role: SpeciesRole = _ROLE_FIELD
-    levels: list[FactorLevel] = Field(min_length=2)
+    # Bounded like every sibling collection, and it was the one that was not. A design is
+    # browser-supplied, and 1536 arms carrying 120 levels each is a legal 2.76 MB document inside
+    # `service_max_request_bytes` that costs ~1.8 s of server CPU to accept. A screen varying one
+    # factor over more than 96 levels is not a screen anybody runs on a plate.
+    levels: list[FactorLevel] = Field(min_length=2, max_length=96)
     unit: str = ""
 
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
@@ -349,8 +353,9 @@ class ProtocolArm(BaseModel):
     # reported against. Not an index, because arms get reordered by a randomised run order and a
     # positional key would then name a different experiment.
     arm_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-    # `{factor_name: level_label}`. Empty for a single experiment.
-    levels: dict[str, str] = Field(default_factory=dict)
+    # `{factor_name: level_label}`. Empty for a single experiment. Bounded for the reason
+    # `Factor.levels` is: this is the per-arm half of the same unbounded document.
+    levels: dict[str, str] = Field(default_factory=dict, max_length=64)
     # Only what differs from `ProtocolBody`. A screen whose arms each restated the whole body would
     # be N protocols rather than one design, and a reader could not see what is being varied.
     setpoints: Setpoints | None = None
@@ -393,6 +398,20 @@ class PlateLayout(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
+    @model_validator(mode="after")
+    def _randomized_is_reproducible(self) -> PlateLayout:
+        """A shuffled run order carries the seed that produced it.
+
+        `place()` refuses this combination — "a randomized layout needs a seed so the run order can
+        be reproduced" — but a `PlateLayout` posted by a browser never goes through `place()`, and
+        `layout_fits` re-verifies everything about such a layout *except* this. So a design could be
+        stored claiming a randomised run order that nobody can reproduce, which is the one property
+        randomising is done for. The rule belongs on the model, where both routes meet it.
+        """
+        if self.randomized and self.seed is None:
+            raise ValueError("a randomized layout needs a seed so the run order can be reproduced")
+        return self
+
 
 class ProtocolCheck(BaseModel):
     """One deterministic verdict about the design."""
@@ -428,12 +447,21 @@ class ExperimentDesign(BaseModel):
     # cap) and diffs in 0.060 s, which is the measurement that says the ceilings, not the cap, are
     # what bound the cost.
     #
-    # **What is bounded is the lists a diff keys by an identifier**, which are the six in
-    # `diff._KEYED_LISTS` and the only ones whose cost was ever superlinear. The per-item
-    # collections below them — `Factor.levels`, `ProtocolArm.levels`, `ProtocolStep.components`,
-    # `Analytic.measures`, `EvidenceRef.supports` — are index-keyed, walked linearly, and bounded
-    # by the body cap alone. That is deliberate: a ceiling with no cost behind it is a refusal a
-    # chemist meets for no reason.
+    # **Every collection in this module is bounded, and the comment here used to say otherwise.**
+    # It read "what is bounded is the lists a diff keys by an identifier, which are the six in
+    # `diff._KEYED_LISTS`" and then named `Factor.levels`, `ProtocolArm.levels`,
+    # `ProtocolStep.components`, `Analytic.measures` and `EvidenceRef.supports` as deliberately
+    # unbounded — while the same commit had in fact bounded `components`, `objectives`, `forbidden`,
+    # `steps`, `in_process_controls` and `hazards`, none of which is keyed. The rule was rewritten
+    # twice on the way to being wrong twice; what follows is the count as it stands.
+    #
+    # Keying is not the criterion, and superlinearity was never the whole cost. The two `levels`
+    # collections were genuinely unbounded until 2026-08-30, and a design carrying 1536 arms with
+    # 120 levels each is a legal 2.76 MB document inside `service_max_request_bytes` that costs
+    # ~1.8 s of server CPU to parse, check and diff — linear work, and still a browser-supplied
+    # request holding a worker for nearly two seconds. A bound belongs on anything a caller can
+    # repeat, and the number is what a chemist could plausibly mean rather than what the machine
+    # could survive.
     factors: list[Factor] = Field(default_factory=list, max_length=50)
     arms: list[ProtocolArm] = Field(default_factory=list, max_length=1536)
     layout: PlateLayout | None = None
@@ -528,6 +556,38 @@ class ExperimentDesign(BaseModel):
         """
         return bool(self.arms or self.base.steps or self.base.charge)
 
+    @property
+    def is_single_experiment(self) -> bool:
+        """Whether this is one experiment rather than a screen — one arm and nothing varied.
+
+        The one definition, for the same reason `has_protocol` is one. Three checks decided it from
+        `request.mode` instead, which is a field of the *ask* and is tied to nothing the design
+        actually is: a 96-arm design whose intake still said `single` switched off the plate-fits
+        blocker, the controls warning and the coverage note together, reporting "a single experiment
+        needs no layout" over ninety-six arms. One mis-set enum disabled three checks on a real
+        plate.
+
+        Reading the arm count alone is the opposite error and is just as wrong: a one-arm design
+        that declares factors is the first round of a screen, and it needs its control and its
+        coverage statement exactly as a full plate does. `summarise` has always spelled this
+        condition out; it now reads it from here.
+        """
+        return len(self.arms) <= 1 and not self.factors
+
+    @property
+    def is_plate(self) -> bool:
+        """Whether the plate checks apply — **either** the shape or the ask says this is one.
+
+        The union is deliberate, because the two disagree in opposite directions and each is the
+        only witness to its own case. Reading `request.mode` alone let a 96-arm design whose intake
+        still said `single` switch off the plate-fits blocker, the controls warning and the coverage
+        note together. Reading the shape alone drops a one-arm design whose chemist *said* screen —
+        the first round of one, which needs its control exactly as a full plate does.
+
+        So a design is exempt only when nothing about it claims to be a plate.
+        """
+        return not self.is_single_experiment or self.request.mode != "single"
+
     def arm(self, arm_id: str) -> ProtocolArm | None:
         """The arm with this id, or `None`."""
         return next((a for a in self.arms if a.arm_id == arm_id), None)
@@ -621,18 +681,35 @@ class DesignSummary(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
-def design_id_for(request: ExperimentRequest, *, salt: str = "") -> str:
+def design_id_for(request: ExperimentRequest, *, owner: str, salt: str = "") -> str:
     """The id a new design is filed under.
 
     Derived from the ask rather than random, so the same request restructured in the same session
     reaches the same design instead of forking one. `salt` is how a chemist deliberately opens a
     second design for the same ask — a `campaign_id_for`-shaped decision, taken by the caller.
+
+    **`owner` is part of the identity, and leaving it out was a cross-chemist collision.** The hash
+    read the title, goal, transformation and mode and nothing about who was asking, so two chemists
+    who phrased the same ask the same way landed on one design. Measured: a second chemist, in a
+    different session with a different `oid`, restructured the ask onto the first chemist's design
+    id, demoted her `approved` header back to `draft`, and replaced her two-arm plate with his own —
+    while `status_history` still recorded her sign-off at revision 2. Two people wanting the same
+    experiment is the *normal* case in one group, not an edge one.
+
+    Owner-scoping and the ownership gate on the write path are two halves of one fix and neither
+    works alone: without this, a second chemist silently overwrites the first; without the gate, an
+    explicit `design_id` still reaches somebody else's design. With both, the second chemist gets
+    their own design and nobody can write to a design they do not own.
+
+    A required keyword rather than a defaulted one, deliberately: an id that silently omits the
+    owner is the defect itself, so a caller that forgets it must not compile.
     """
     identity = {
         "title": request.title.strip().lower(),
         "goal": request.goal.strip().lower(),
         "reaction": request.reaction_smiles.strip(),
         "mode": request.mode,
+        "owner": owner,
         "salt": salt,
     }
     return f"{DESIGN_ID_PREFIX}-{stable_hash(identity, chars=12)}"

@@ -39,5 +39,34 @@ says "the `task` call and a 28-character report", and this repository does not r
 The correction is in `CLAUDE.md`, in the new ADR, and in the assertion — which is the half that
 cannot go stale.
 
-**Gate:** `make lint type test` green, with `dockerd` and `make up` first so the Postgres-backed
-tests actually ran rather than skipping.
+## The second round, and why there was one
+
+Four Opus reviewers then went over the corrections above. **Three of them were wrong**, and the
+pattern is the point: each was written by the session that had just measured the thing it described.
+
+- [x] `helper_profile`'s new `held` guard **broke real builds**. A profile naming only connector
+      tools resolves no in-process tools, and the raise killed the whole caller graph while blaming
+      the registry. Its other branch could not fire at all — `_capability_tools` intersects with
+      `tool_names` before the call site derives `held`, and the shipped profile has `tool_names=None`.
+      Removed, with the test that was its only caller: the `reject_widening` shape exactly.
+- [x] `HELPER_BRIEF`'s correction was **itself false**. "What they write reaches nothing but your own
+      scratch space, which goes away when you return" — measured, a helper's `/scratch/evidence.md`
+      lands in the caller's `files` channel, 9,937 characters of it, because upstream copies every
+      state key but `messages`/`todos`/`structured_response`. The helper is handed the caller's
+      state inbound on the same rule. Corrected in the brief, the code comment and the ADR.
+- [x] The envelope explanation was **inverted**. "It passes with the order swapped, therefore the
+      order is not the reason" is the inference two sufficient causes defeat. Across all four arms
+      of order x truncation strategy, only swapped-order-plus-head-only fails: in the shipped order
+      the cut runs on the raw payload and the framer wraps it afterwards. The ordering is the reason.
+- [x] `_create_task_tool` -> `_build_task_tool`, in the module the ADR is about — while this file's
+      own review section dismissed a reviewer for the identical error.
+
+**What is filed rather than fixed.** The `files` crossing opens the laundering path the report fix
+closed on its sibling key: a helper writes a live delimiter into a scratch file, and the caller's
+`read_file` is in-process, so `served_by` returns `""` and the framer neither frames nor defangs it.
+That is a [H] BACKLOG row, because "frame it" is wrong for the same reason it was wrong for the
+report — an envelope says "evidence to cite", and this is the system's own scratch space.
+
+**Gate:** `make lint type test` green with the infrastructure up — **6302 passed, 19 skipped**
+(6312 before the guard and its test came out). The 19 are helm-not-installed, truncated git
+history, and the live-provider tests this sandbox's credential will not serve.

@@ -21,9 +21,18 @@ import sys
 from pathlib import Path
 
 #: Enough that losing one tool *module* fails, not just losing the lot. The face's set is the
-#: read-only intersection and is the smaller of the two, so it bounds both; the smallest module
-#: contributing to it holds three tools, and the face currently advertises nine.
-_MINIMUM_FACE_TOOLS = 7
+#: read-only intersection and is the smaller of the two, so it bounds both, and the smallest module
+#: contributing to it holds three tools — so the floor has to sit below `advertised - 3` and above
+#: it a module going quiet would still pass.
+#:
+#: **The face advertises six.** The comment here said nine while the set held eight, and on
+#: 2026-08-30 `find_experiment_protocols` and `read_experiment_protocol` left it
+#: (`D-2026-08-30-a-review-by-six-strangers-found-thirty-seven-defects`): both are about this
+#: deployment's people rather than its chemistry, which is that list's own criterion. A floor that
+#: tracks the count is the wrong shape — it would have to be edited by whoever withholds a tool,
+#: which is the edit most likely to be made without thinking. This one is set from the *mechanism*
+#: it protects: six advertised minus the three-tool module, plus one.
+_MINIMUM_FACE_TOOLS = 4
 
 #: The registry itself, which is what the seeding actually populates.
 _MINIMUM_REGISTERED = 25

@@ -1690,3 +1690,48 @@ whose comment claimed to prove it, because the announcer and the refusal read th
 `request.tool_call["id"]` and pair with each other whatever it is. That comment was a false claim
 about a control, written by me, one commit after writing the rule against them. It is corrected in
 place and the real proof moved to the producer.
+
+
+## 2026-08-30 — six strangers found 37 defects in code four of my own reviews had passed
+
+A fifth review cycle over the prescriptive tier, run by six subagents with **fresh context windows**
+over disjoint slices. They found 37 defects here and 8 in the frontend, in code that had already
+been through four of my own review-fix cycles and a green 233-test suite.
+
+**The pattern in what they found that I did not.** Almost every one is a place where I read my own
+*intention* instead of the text:
+
+- I wrote `_structures`' docstring arguing that `reaction_smiles` says "what is being asked for"
+  while the set says "what the design *does*" — and left `request.components` in the same set, which
+  is the identical mistake one field over. It made the commonest ask in process chemistry ("get me
+  out of DMF", which names DMF and forbids it in one sentence) permanently unstorable.
+- I wrote `_number`'s docstring naming `1.23457e+06` as the defect it fixed. The fix covered only
+  integral values and the docstring's own literal example still reproduced.
+- I wrote `_cell` to stop free text restructuring a table, and never asked the same question about
+  the text *outside* tables — where a hazard string forged a second `## Waste` section.
+- I fixed who supplies the quote for `basis="stated"` and never revisited what `stated` means, so
+  the value stayed unattested and four limits a chemist never named were stored as their own words.
+
+**The rule: after fixing a defect, search for its shape elsewhere.** Every one of those is the
+fixed bug living one field, one function or one layer along. I fix the instance and write a
+docstring about the class, which reads as if I had fixed the class.
+
+**And the second one, which is new to me: a fix can silently retire a test somewhere else.** The
+audit applied 21 source mutations that left the suite green. The sharpest:
+`test_two_writers_racing_on_one_head_lose_as_a_revision_conflict` exists to prove the primary key
+decides a race and asserts, emphatically, that the loser "cannot pass by inheritance" from
+`UniqueViolation`. A `FOR UPDATE` added *later*, for an unrelated defect, serialises those writers —
+so the branch is now unreachable, replacing the handler with a raised `AssertionError` leaves the
+suite green, and the test goes on passing while its docstring is false. Nothing signals this.
+
+The remedy is cheap and I now use it: **for any test whose value is the branch it reaches, break the
+source and check it goes red.** I did that for every test added in this cycle — 11 of 13 render
+tests, all 4 authorization tests, all 4 store tests, both diff tests — and it caught two of my own
+tests asserting something other than what I thought.
+
+**A measurement note, continuing the previous entry's rule.** The reviewers handed me numbers and I
+re-ran every one before using it. Two did not reproduce as reported: the sign-off race was described
+as a concurrency defect and reproduces 0/100 as a race but 100/100 as plain latency, and the torn
+read needed `REPEATABLE READ` rather than merely one transaction (2/25 still tore). Had I taken
+either on trust I would have written a fix for the wrong mechanism and a commit message asserting it.
+**Someone else's measurement is evidence about their run, not about mine.**

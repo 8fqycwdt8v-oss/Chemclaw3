@@ -20,8 +20,10 @@ where the model has an answer it likes and no reason to go looking.
 from __future__ import annotations
 
 import logging
+import re
 
 from chemclaw.agent.authz import require_actor
+from chemclaw.agent.session_store import owner_permits
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.session_context import get_current_session_id
@@ -32,6 +34,7 @@ from chemclaw.protocols.diff import diff_designs
 from chemclaw.protocols.layout import LayoutError, place, smallest_plate_for
 from chemclaw.protocols.models import (
     DesignStatus,
+    DesignSummary,
     EvidenceRef,
     ExperimentDesign,
     ExperimentRequest,
@@ -58,6 +61,43 @@ _LISTING_LIMIT = 50
 
 def _store() -> DesignStore:
     return default_design_store()
+
+
+#: Digit runs, for relating a stated value to the words offered as evidence for it.
+_DIGITS = re.compile(r"\d+")
+
+
+def _quote_supports(value: str, quote: str) -> bool:
+    """Whether these words plausibly state this value.
+
+    **`stated` attests a *value*, and only the *quote* was ever checked.** Both halves passed as
+    long as the quote occurred somewhere in the message, and any substring occurs somewhere: against
+    a chemist who wrote "We need to get the Suzuki on the deactivated chloride working. Try what you
+    think.", a model stored `scale='5 g'` quoting `'working'`, `plate_format='96'` quoting `'the'`,
+    `max_runs='96'` quoting `'Suzuki'` and `deadline='2026-09-01'` quoting `'.'` — four limits the
+    chemist never named, recorded as their own words. Moving the haystack out of the model's reach
+    fixed who supplies the text and left what `stated` means untouched.
+
+    Two rules, and the second is skipped rather than guessed at:
+
+    1. **The quote is a span, not a word.** Two words, or one word the value itself contains — which
+       is what separates `'250 mg'`, `'by Friday'` and `'96-well'` from `'working'` and `'.'`.
+    2. **When the quote states figures, they have to be the value's figures.** A quote reading "no
+       more than 48 runs" cannot be the evidence for `max_runs='96'`. A quote carrying no digits at
+       all is left to rule 1, because a chemist who wrote "five grams" or "by Friday" stated the
+       thing and the model normalised it — refusing that would push a real constraint into
+       `inferred`, which is the mislabelling this check exists to prevent, running the other way.
+    """
+    words = quote.split()
+    value_text = value.lower()
+    # Overlap in either direction: the value can contain the word (`'96 well'` for `'96'`) or the
+    # word can contain the value (`'96-well'`).
+    if len(words) < 2 and not any(
+        word.lower() in value_text or value_text in word.lower() for word in words if word
+    ):
+        return False
+    quote_digits = set(_DIGITS.findall(quote))
+    return not quote_digits or set(_DIGITS.findall(value)) <= quote_digits
 
 
 def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str | None) -> None:
@@ -118,11 +158,51 @@ def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str | N
     ]
     if missing:
         raise ChemclawError(
-            "these slots are marked `stated` but their quote is not in the text you were given: "
+            "these slots are marked `stated` but their quote is not in the message that started "
+            "this turn: "
             + "; ".join(missing)
-            + ". Use basis='inferred' for your own judgment and quote the chemist verbatim when "
-            "you mark something stated."
+            + ". Only that message is checkable — a quote from an earlier turn cannot be verified "
+            "here, so ask the chemist to restate it if it matters. Use basis='inferred' for your "
+            "own judgment and quote the chemist verbatim when you mark something stated."
         )
+    unsupported = [
+        f"{name}: value {field.value!r} is not supported by quote {field.quote!r}"
+        for name, field in slots.items()
+        if field.basis == "stated" and not _quote_supports(field.value, field.quote)
+    ]
+    if unsupported:
+        raise ChemclawError(
+            "these slots are marked `stated` but their quote does not say their value: "
+            + "; ".join(unsupported)
+            + ". The quote has to be the words that state the value, not any words from the "
+            "message. Use basis='inferred' when the value is your own reading."
+        )
+
+
+async def _require_writable(store: DesignStore, design_id: str) -> DesignSummary | None:
+    """The design's header, refusing the write when this actor does not own the design.
+
+    **The one ownership rule, `owner_permits`, applied to its third caller.** The HTTP layer
+    resolves ownership for `/sessions/{id}/…` and the agent resolves it for a tool handed an
+    explicit session id; a design handed an explicit `design_id` is the same question and a second
+    copy of the predicate is how one surface ends up looser than the other.
+
+    Nothing checked this before, so a turn could name any `design-…` id and write to it: a second
+    chemist's turn demoted an `approved` header to `draft` and replaced a signed-off plate, with
+    `status_history` still naming the first chemist's sign-off. `design_id_for` now scopes the id by
+    owner so the ordinary path cannot collide, and this is the half that holds when an id is passed
+    in rather than derived.
+
+    A design nobody has opened yet (`None`) is writable — that is the create path, and the write
+    that creates it is what records the owner.
+    """
+    header = await store.summary(design_id)
+    if header is not None and not owner_permits(header.opened_by, require_actor()):
+        raise ChemclawError(
+            f"{design_id} belongs to another chemist. Open your own design for this ask with "
+            "`structure_experiment_request` rather than writing to theirs."
+        )
+    return header
 
 
 @tool
@@ -149,11 +229,15 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
         and let them correct it before you draft.
 
     Raises:
-        ChemclawError: a `stated` slot whose quote is not in `source_text`.
+        ChemclawError: a `stated` slot whose quote is not in the chemist's own message, or a
+            design of that ask belonging to another chemist.
     """
     require_quotes_are_verbatim(request, get_current_user_text())
-    design_id = design_id_for(request, salt=salt)
+    # Scoped by the actor, so two chemists phrasing one ask the same way get two designs rather
+    # than one they overwrite in turn.
+    design_id = design_id_for(request, owner=require_actor(), salt=salt)
     store = _store()
+    await _require_writable(store, design_id)
     head = await store.read(design_id)
     # **The protocol survives a re-structured ask**, which the first version did not do. The id is
     # derived from the ask, so re-structuring the same one reaches the same design — and building a
@@ -250,7 +334,12 @@ async def draft_experiment_protocol(
         factors: What a screen varies. Omit for a single experiment.
         arms: One per set of conditions, each setting every factor. Omit for a single experiment.
         plate_format: 24, 48, 96, 384 or 1536 to lay the arms out. The error names the smallest
-            plate that fits when they do not.
+            plate that fits when they do not. **Omitting it on a revision carries the previous
+            plate forward unchanged**, which is what you want when only a temperature moved — and
+            is wrong the moment the set of arms changes, because the carried-forward layout then
+            leaves a new arm with no well or names a well for an arm that is gone, and the draft is
+            refused with a message about wells. Pass a `plate_format` whenever you add or remove an
+            arm, and the plate is laid out again.
         randomize_run_order: Shuffle the order the arms are *run* in, never their well positions —
             what stops a drift over the session from reading as a factor effect.
         seed: Required when randomizing, so the plate a chemist ran can be reproduced.
@@ -260,8 +349,9 @@ async def draft_experiment_protocol(
         sheet. Read the checks back — a warning is the chemist's judgment, not one to suppress.
 
     Raises:
-        ChemclawError: no such design, a blocking check failed, the plate cannot hold the arms, or
-            the revision is derived from something that is no longer the head.
+        ChemclawError: no such design, the design belongs to another chemist, a blocking check
+            failed, the plate cannot hold the arms, or the revision is derived from something that
+            is no longer the head.
     """
     if not change_note.strip():
         raise ChemclawError(
@@ -269,6 +359,7 @@ async def draft_experiment_protocol(
             "first draft, which is revision one of the protocol rather than a special case"
         )
     store = _store()
+    await _require_writable(store, design_id)
     previous = await store.read(design_id)
     if previous is None:
         raise ChemclawError(
