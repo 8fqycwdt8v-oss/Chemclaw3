@@ -26,6 +26,10 @@ from chemclaw.protocols.models import (
     design_id_for,
 )
 
+#: The chemist an id is scoped to. `design_id_for` takes it as a required keyword because an id
+#: that omits the owner is a cross-chemist collision — see `tests/test_protocol_authorization.py`.
+_OWNER = "chemist-a"
+
 
 def _request(**overrides: object) -> ExperimentRequest:
     """The smallest well-formed ask, with named slots overridden."""
@@ -191,29 +195,39 @@ def test_design_id_is_stable_for_the_same_request() -> None:
     """The same ask restructured reaches the same design instead of forking one."""
     first = _request(reaction_smiles="CCO>>CCBr")
     second = _request(reaction_smiles="CCO>>CCBr")
-    assert design_id_for(first) == design_id_for(second)
-    assert design_id_for(first).startswith("design-")
+    assert design_id_for(first, owner=_OWNER) == design_id_for(second, owner=_OWNER)
+    assert design_id_for(first, owner=_OWNER).startswith("design-")
 
 
 def test_design_id_ignores_case_and_surrounding_whitespace_in_the_ask() -> None:
     """`design_id_for` normalises the two things a re-typed title differs by."""
-    assert design_id_for(_request(title="  sm-3 SUZUKI  ")) == design_id_for(_request())
+    assert design_id_for(_request(title="  sm-3 SUZUKI  "), owner=_OWNER) == design_id_for(
+        _request(), owner=_OWNER
+    )
 
 
 def test_design_id_differs_for_a_different_request() -> None:
     """Each identity slot moves the id, or two different asks would share a design."""
     base = _request()
-    assert design_id_for(_request(goal="something else")) != design_id_for(base)
-    assert design_id_for(_request(reaction_smiles="CCO>>CCBr")) != design_id_for(base)
-    assert design_id_for(_request(mode="screen")) != design_id_for(base)
+    assert design_id_for(_request(goal="something else"), owner=_OWNER) != design_id_for(
+        base, owner=_OWNER
+    )
+    assert design_id_for(_request(reaction_smiles="CCO>>CCBr"), owner=_OWNER) != design_id_for(
+        base, owner=_OWNER
+    )
+    assert design_id_for(_request(mode="screen"), owner=_OWNER) != design_id_for(base, owner=_OWNER)
 
 
 def test_design_id_differs_when_the_salt_differs() -> None:
     """`salt` is how a chemist deliberately opens a second design for one ask."""
     base = _request()
-    assert design_id_for(base, salt="second") != design_id_for(base)
-    assert design_id_for(base, salt="second") == design_id_for(base, salt="second")
-    assert design_id_for(base, salt="third") != design_id_for(base, salt="second")
+    assert design_id_for(base, owner=_OWNER, salt="second") != design_id_for(base, owner=_OWNER)
+    assert design_id_for(base, owner=_OWNER, salt="second") == design_id_for(
+        base, owner=_OWNER, salt="second"
+    )
+    assert design_id_for(base, owner=_OWNER, salt="third") != design_id_for(
+        base, owner=_OWNER, salt="second"
+    )
 
 
 def test_a_design_refuses_a_field_it_does_not_declare() -> None:

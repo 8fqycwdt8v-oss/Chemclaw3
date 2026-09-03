@@ -115,10 +115,15 @@ returned and the *protocol* half only — the shared body, the factors, the arms
 does not take the ask back, because the design already holds the one the chemist corrected, and a
 second copy is a second thing that can be wrong.
 
-It refuses a design that cites no precedent and no tool, which should never fire if you did steps 2
-and 3. Everything else it returns is a *warning*, which means it is a judgment for the chemist, not
-a nuisance for you to suppress. A warning you do not mention is a warning you have decided on their
-behalf.
+It refuses a design that fails any *blocker*, and there are seven: a document that is not a protocol
+at all, a species that will not resolve, a charge table whose equivalents contradict its amounts, an
+arm setting a level no factor declares, a plate that cannot hold its arms, a reagent the chemist
+forbade, and — the one that should never fire if you did steps 2 and 3 — no followable citation.
+This paragraph used to name only the last of those and call everything else a warning.
+
+What is *not* a blocker is a *warning* or a *note*, which means it is a judgment for the chemist,
+not a nuisance for you to suppress. A warning you do not mention is a warning you have decided on
+their behalf.
 
 ## What separates a good protocol from a plausible one
 

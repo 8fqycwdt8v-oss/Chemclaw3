@@ -576,12 +576,11 @@ def test_the_diff_route_takes_both_endpoints_explicitly(
     ).json()
     assert (body["from_revision"], body["to_revision"]) == (2, 3)
     assert all(change["kind"] == "added" for change in body["changes"])
-    assert {change["path"] for change in body["changes"]} == {
-        "arms.A3.arm_id",
-        "arms.A3.control",
-        "arms.A3.note",
-        "arms.A3.replicate_of",
-    }
+    # The added arm's *identity*, and nothing else: `control`, `note` and `replicate_of` are empty
+    # on a new arm, and an appearing path whose value is empty is not a change anybody made. Those
+    # three rows read `'' -> ''` and a miner asking how often a chemist sets an arm note counted
+    # them as changes that never happened.
+    assert {change["path"] for change in body["changes"]} == {"arms.A3.arm_id"}
 
 
 def test_the_diff_route_404s_on_a_revision_that_does_not_exist(

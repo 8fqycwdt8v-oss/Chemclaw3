@@ -106,11 +106,9 @@ def test_the_face_is_not_addressable_as_a_connector() -> None:
 #: list makes adding one a decision somebody has to take.
 _ADVERTISED = {
     "expand_note",
-    "find_experiment_protocols",
     "find_knowledge_gaps",
     "find_notes",
     "gather_evidence",
-    "read_experiment_protocol",
     "recall_observations",
     "condense_protocols",
 }
