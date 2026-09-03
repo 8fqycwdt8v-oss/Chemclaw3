@@ -48,11 +48,19 @@ from chemclaw.kg.proposal import NoteProposal, read_proposal
 
 logger = logging.getLogger(__name__)
 
-# The resources this module can refuse, as a closed label set. Two, because two is how many kinds
-# of row it gates: a conversation and a knowledge proposal. A source literal at every call site, so
-# `chemclaw_authz_refusals_total` can never grow a series from anything a caller sends.
+# The resources this module can refuse, as a closed label set. Three, because three is how many
+# kinds of row are gated: a conversation, a knowledge proposal and an experiment design. A source
+# literal at every call site, so `chemclaw_authz_refusals_total` can never grow a series from
+# anything a caller sends.
 _SESSION = "session"
 _PROPOSAL = "proposal"
+#: `POST /protocols/{id}/revisions` and `/status` refuse in their own module, with a 403 rather
+#: than this module's 404, and for a reason that module argues: a design is a shared artifact whose
+#: reads are open, so its id's existence is not the secret. **The record is the same record**, and
+#: it was not being written — the two design writes raised inline, so a scan of design ids was
+#: invisible on the one surface where the distinction between "no such design" and "not yours"
+#: survives at all. `record_refusal` is exported for exactly that call.
+DESIGN = "design"
 
 
 def _refuse(
@@ -77,24 +85,42 @@ def _refuse(
     characters, an 8,093-character record for `SecretRedactingFilter` to regex-scan with the
     logging lock held. A refused id is worth recording; the bytes past a real id's length are not.
     """
+    record_refusal(resource, reason, principal, target, status=404)
+    return HTTPException(status_code=404, detail=detail)
+
+
+def record_refusal(
+    resource: str, reason: str, principal: Principal, target: str, *, status: int
+) -> None:
+    """Write the server-side record of one authorization refusal, whatever the response says.
+
+    Separate from `_refuse` because the response and the record are different decisions. This
+    module answers 404 so the id's existence stays undisclosed;
+    `chemclaw/api/routes/protocols.py` answers 403 because a design's reads are open and only the
+    right to change it is withheld. Both are refusals an operator needs to see, and only one of
+    them was being written.
+
+    `status` is a source literal from the caller, so the trail says what the caller was actually
+    told rather than what this module would have said.
+    """
     clipped = clip_for_log(target)
     METRICS.increment("chemclaw_authz_refusals_total", labels={"resource": resource})
     log_event(
         logger,
         "authz.refused",
-        "refused %s access to %s %s (%s); answered 404",
+        "refused %s access to %s %s (%s); answered %d",
         principal.oid or "-",
         resource,
         clipped,
         reason,
+        status,
         level=logging.WARNING,
         resource=resource,
         reason=reason,
         target=clipped,
         actor=principal.oid,
+        status=status,
     )
-
-    return HTTPException(status_code=404, detail=detail)
 
 
 # The authenticated caller for this request (401/429 handled inside `require_principal`). Every

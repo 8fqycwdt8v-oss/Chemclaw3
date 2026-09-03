@@ -26,7 +26,7 @@ from chemclaw.protocols.models import (
     Setpoints,
     Well,
 )
-from chemclaw.protocols.render import render_markdown, run_sheet_rows, summarise
+from chemclaw.protocols.render import _number, render_markdown, run_sheet_rows, summarise
 
 
 def _design(**overrides: object) -> ExperimentDesign:
@@ -443,3 +443,59 @@ def test_a_citation_carrying_two_backticks_still_renders_as_one_span() -> None:
         _design(evidence=[EvidenceRef(kind="precedent", ref="rxn``42", summary="s")])
     )
     assert "``` rxn``42 ```" in page
+
+
+def test_one_experiment_run_in_triplicate_is_one_experiment_and_three_runs() -> None:
+    """A replicate is the same experiment again, and the count was over every arm.
+
+    So a triplicate came out a screen: `controls_present` warned that "a screen with nothing to
+    compare against cannot tell a flat result from a failed run" over three arms the model validator
+    guarantees are the same conditions, and `layout_fits` asked a single experiment for a plate.
+    The runs are still named, because one experiment and three of them are different facts.
+    """
+    design = _design(
+        request=ExperimentRequest(title="T", goal="G", mode="single"),
+        arms=[
+            ProtocolArm(arm_id="A1"),
+            ProtocolArm(arm_id="A2", replicate_of="A1"),
+            ProtocolArm(arm_id="A3", replicate_of="A1"),
+        ],
+    )
+    assert design.is_single_experiment
+    assert not design.is_plate
+    assert "1 experiment, 3 runs" in summarise(design, [])
+
+
+def test_a_one_arm_design_that_declares_a_factor_is_still_a_screen() -> None:
+    """The opposite error, and the replicate rule must not reintroduce it.
+
+    A one-arm design with a factor is the first round of a screen and needs its control and its
+    coverage statement exactly as a full plate does.
+    """
+    design = _design(
+        arms=[ProtocolArm(arm_id="A1", levels={"ligand": "XPhos"})],
+        factors=[
+            Factor(
+                name="ligand",
+                kind="categorical",
+                levels=[FactorLevel(label="XPhos"), FactorLevel(label="SPhos")],
+            )
+        ],
+    )
+    assert not design.is_single_experiment
+
+
+def test_a_number_is_written_out_rather_than_rounded_into_a_collision() -> None:
+    """Two different weigh-outs must not print as one number, and `%.6g` prints them as one.
+
+    The docstring claimed six significant figures throughout, which is true below 1e6 and false
+    above it — `1234567.8` comes back with eight. Pinning both halves here is what keeps the prose
+    and the behaviour from drifting apart again.
+    """
+    assert _number(1 / 6) == "0.166667"
+    assert _number(200 / 3) == "66.6667"
+    assert _number(1234567.8) == "1234567.8"
+    assert _number(999999.5) != _number(1000000.5)
+    assert _number(1234.0) == "1234"
+    assert _number(1e-5) == "1e-05"
+    assert _number(None) == ""

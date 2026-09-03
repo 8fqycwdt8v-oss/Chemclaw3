@@ -227,6 +227,10 @@ def summarise(design: ExperimentDesign, checks: list[ProtocolCheck]) -> str:
         # the first rewrite swallowed the zero-arm case too and described a body with no arms
         # declared as one experiment, which is a count nobody wrote.
         shape = "1 experiment"
+        # The runs are not lost with the word: a triplicate is one experiment and three arms, and
+        # a summary saying only "1 experiment" would hide two of them.
+        if len(design.arms) > 1:
+            shape += f", {len(design.arms)} runs"
     else:
         controls = sum(1 for a in design.arms if a.control)
         shape = f"{len(design.arms)} arms over {len(design.factors)} factors"
@@ -357,13 +361,22 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
 
 
 def _number(value: float | None) -> str:
-    """One number as a chemist reads it: exact when it is whole, six figures when it is not.
+    """One number as a chemist reads it, and never in exponent form inside laboratory range.
 
     `%g` alone turns a kilogram-scale charge into `1.23457e+06` mg. `.10g`, which replaced it,
     fixed that and bought false precision everywhere else — a 1/6 M concentration rendered
     `0.1666666667 M` and a 200/3 yield `66.66666667%`, ten significant figures off a balance that
     reads four, on the document a chemist runs from. A whole number is printed whole (no exponent
-    below 1e15, which is past any laboratory quantity); everything else keeps `%g`'s six.
+    below 1e15, which is past any laboratory quantity).
+
+    **Six significant figures is what `%.6g` gives and is not what this function gives above 1e6**,
+    and the docstring claimed otherwise for as long as the branch below existed. `1234567.8` comes
+    back as `'1234567.8'` — eight figures — because inside `[1e-4, 1e15)` the number is written out
+    positionally rather than in exponent form. That is deliberate rather than an oversight: `%.6g`
+    prints both 999999.5 and 1000000.5 as `1e+06`, and those are two different weigh-outs on a
+    document somebody weighs from. Six figures is the ceiling below 1e6, where `%.6g` has decimals
+    to spend on it; above 1e6 the integer part is already six figures and trimming further would
+    collide.
     """
     if value is None:
         return ""

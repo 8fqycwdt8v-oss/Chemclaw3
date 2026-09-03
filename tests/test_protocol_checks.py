@@ -29,6 +29,7 @@ from chemclaw.protocols.checks import (
     hazard_screen_ran,
     is_a_protocol,
     layout_fits,
+    limiting_is_limiting,
     objectives_are_measured,
     quantities_are_plausible,
     run_checks,
@@ -1139,3 +1140,96 @@ def test_a_randomized_layout_without_a_seed_is_refused_by_the_model() -> None:
     """`place()` refuses this; a browser-posted layout never goes through `place()`."""
     with pytest.raises(ValidationError, match="needs a seed"):
         PlateLayout(plate_format=24, rows=4, columns=6, randomized=True, seed=None)
+
+
+# --- limiting_is_limiting -----------------------------------------------------------------------
+
+
+def _charge(*lines: dict[str, object]) -> ExperimentDesign:
+    """A design holding only a charge table, which is all this check reads."""
+    return _design(
+        base={"charge": [ChargeLine.model_validate(line).model_dump() for line in lines]}
+    )
+
+
+def test_limiting_is_limiting_names_the_line_that_actually_runs_out_first() -> None:
+    """A self-consistent table can name the wrong reference, and every yield doubles.
+
+    `charge_is_consistent` says the reference sits at 1.0 equivalents and that the amounts agree
+    with the equivalents. Neither says the reference is the *minimum*, so acid at 1.0 eq / 1.0 mmol
+    marked limiting beside an amine at 0.5 eq / 0.5 mmol passes with no blockers while the amine
+    caps the reaction at half the scale.
+    """
+    verdict = limiting_is_limiting(
+        _charge(
+            {
+                "component": "acid",
+                "limiting": True,
+                "equivalents": 1.0,
+                "amount_mmol": 1.0,
+                "role": "starting-material",
+            },
+            {"component": "amine", "equivalents": 0.5, "amount_mmol": 0.5, "role": "reagent"},
+        )
+    )
+    assert not verdict.passed and verdict.severity == "warning"
+    assert "'amine' at 0.5 mmol" in verdict.detail
+
+
+def test_limiting_is_limiting_says_so_when_it_weighed_nothing() -> None:
+    """`role` defaults to `UNKNOWN`, so on an unlabelled table this check compares nothing.
+
+    It reported that as "'acid' is the smallest stoichiometric charge" — a claim about a comparison
+    that never happened, over the very table above with its roles left at the default. A passing
+    verdict has to say what it looked at, or a chemist reads a clearance that was never granted.
+    """
+    verdict = limiting_is_limiting(
+        _charge(
+            {"component": "acid", "limiting": True, "equivalents": 1.0, "amount_mmol": 1.0},
+            {"component": "amine", "equivalents": 0.5, "amount_mmol": 0.5},
+        )
+    )
+    assert verdict.passed
+    assert "nothing was weighed against 'acid'" in verdict.detail
+    assert "smallest" not in verdict.detail
+
+
+def test_limiting_is_limiting_counts_what_it_compared_when_it_passes() -> None:
+    """A correct table gets a verdict naming the figure and how many lines it was smallest of."""
+    verdict = limiting_is_limiting(
+        _charge(
+            {
+                "component": "amine",
+                "limiting": True,
+                "equivalents": 1.0,
+                "amount_mmol": 0.5,
+                "role": "starting-material",
+            },
+            {"component": "acid", "equivalents": 2.0, "amount_mmol": 1.0, "role": "reagent"},
+        )
+    )
+    assert verdict.passed
+    assert verdict.detail == "'amine' at 0.5 mmol is the smallest of the 2 stoichiometric charges"
+
+
+def test_limiting_is_limiting_ignores_a_sub_stoichiometric_catalyst() -> None:
+    """A catalyst below one equivalent is the normal case, not a finding."""
+    verdict = limiting_is_limiting(
+        _charge(
+            {
+                "component": "aryl chloride",
+                "limiting": True,
+                "equivalents": 1.0,
+                "amount_mmol": 1.0,
+                "role": "starting-material",
+            },
+            {
+                "component": "boronic acid",
+                "equivalents": 1.2,
+                "amount_mmol": 1.2,
+                "role": "reagent",
+            },
+            {"component": "Pd(OAc)2", "equivalents": 0.05, "amount_mmol": 0.05, "role": "catalyst"},
+        )
+    )
+    assert verdict.passed

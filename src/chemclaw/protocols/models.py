@@ -571,8 +571,26 @@ class ExperimentDesign(BaseModel):
         that declares factors is the first round of a screen, and it needs its control and its
         coverage statement exactly as a full plate does. `summarise` has always spelled this
         condition out; it now reads it from here.
+
+        **A replicate is the same experiment again, not a second one.** The count was over every
+        arm, so one experiment run in triplicate came out a screen: `controls_present` warned that
+        "a screen with nothing to compare against cannot tell a flat result from a failed run" over
+        three arms that are the same conditions by construction, and `layout_fits` asked a single
+        experiment for a plate. `arms_are_distinct` and `coverage_is_stated` already skip an arm
+        carrying `replicate_of` — this is that same reading, in the predicate the other two derive
+        from. `summarise` names the replicate count so the runs are not lost with the word.
         """
-        return len(self.arms) <= 1 and not self.factors
+        return len(self.distinct_arms) <= 1 and not self.factors
+
+    @property
+    def distinct_arms(self) -> list[ProtocolArm]:
+        """The arms that are their own conditions — every arm that is not a repeat of another.
+
+        The model validator already guarantees a replicate runs the same levels and the same
+        resolved setpoints as the arm it names, so this is the set of *conditions* the design tries
+        rather than the set of runs it schedules.
+        """
+        return [arm for arm in self.arms if not arm.replicate_of]
 
     @property
     def is_plate(self) -> bool:

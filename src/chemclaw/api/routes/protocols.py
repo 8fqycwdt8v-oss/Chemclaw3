@@ -29,7 +29,13 @@ from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.api.auth import Principal
-from chemclaw.api.deps import CurrentUser, _is_reviewer, _owner_authorizes
+from chemclaw.api.deps import (
+    DESIGN,
+    CurrentUser,
+    _is_reviewer,
+    _owner_authorizes,
+    record_refusal,
+)
 from chemclaw.core.errors import ChemclawError
 from chemclaw.protocols.checks import run_checks
 from chemclaw.protocols.diff import DesignDiff, diff_designs
@@ -231,9 +237,15 @@ async def _require_writable(design_id: str, principal: Principal) -> None:
     """
     header = await default_design_store().summary(design_id)
     if header is None:
+        record_refusal(DESIGN, "unknown design", principal, design_id, status=404)
         raise HTTPException(status_code=404, detail=f"no design {design_id!r}")
     if _owner_authorizes(header.opened_by, principal) or _is_reviewer(principal):
         return
+    # The record, which this gate did not write. A 403 discloses that the design exists, so unlike
+    # the session routes the response is not the thing being protected — but "who tried to write to
+    # whose design" is still only knowable from the server side, and both raise sites here were
+    # silent: no log line, no metric, a scan indistinguishable from ordinary traffic.
+    record_refusal(DESIGN, "another chemist's design", principal, design_id, status=403)
     raise HTTPException(
         status_code=403,
         detail=f"{design_id} was opened by another chemist; writing to it needs a review role",

@@ -308,6 +308,15 @@ def limiting_is_limiting(design: ExperimentDesign) -> ProtocolCheck:
 
     Only `starting-material` and `reagent` lines are weighed. A catalyst, a ligand, an additive, a
     base or a solvent below one equivalent is the normal case, not a finding.
+
+    **`role` defaults to `UNKNOWN`, so on an unlabelled table this check weighs nothing** — and it
+    used to report that as `'acid' is the smallest stoichiometric charge`, which is a claim about a
+    comparison that never happened. Measured on the docstring's own example with the roles left at
+    their default: `passed=True`, with the wrong reagent marked limiting and every yield stated
+    against it over-reported twofold. The finding is not a reason to delete the check — it catches
+    exactly that fault the moment the table says what its lines are — but a passing verdict has to
+    say what it looked at, so a chemist reading "nothing here is labelled" knows to label it rather
+    than reading a clearance that was never granted.
     """
     lines = design.base.charge
     limiting = [line for line in lines if line.limiting]
@@ -335,10 +344,24 @@ def limiting_is_limiting(design: ExperimentDesign) -> ProtocolCheck:
             + " runs out first. Every equivalents figure and any yield are stated against the "
             "limiting reagent, so mark the one that actually caps the reaction.",
         )
+    weighed = [
+        line
+        for line in lines
+        if line is not reference and line.role in stoichiometric and line.amount_mmol is not None
+    ]
+    if not weighed:
+        return _ok(
+            "limiting_is_limiting",
+            "warning",
+            f"nothing was weighed against {reference.component!r}: no other line carries a "
+            "starting-material or reagent role with an amount. Label the charge table's roles and "
+            "this check can tell you whether the right line is marked limiting",
+        )
     return _ok(
         "limiting_is_limiting",
         "warning",
-        f"{reference.component!r} is the smallest stoichiometric charge",
+        f"{reference.component!r} at {reference_mmol:.4g} mmol is the smallest of the "
+        f"{len(weighed) + 1} stoichiometric charges",
     )
 
 
