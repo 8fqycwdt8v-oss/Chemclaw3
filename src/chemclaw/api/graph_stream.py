@@ -147,17 +147,23 @@ async def graph_events(
                 yield TokenEvent(text=text, agent="subagent" if namespace else "")
         elif mode == "custom":
             if isinstance(signal := (payload or {}).get(_SIGNAL_KEY), ToolFailureSignal):
-                # **Only an attributed id.** `ToolFailureSignal.call_id` documents `""` as "not
-                # attributed", never "the call with no id" — and a failure that never reached
-                # the tool chain has nothing to be matched *to*: `agent/model_calls` announces the
-                # calls a turn will not run, and no `tool_call` event is ever emitted for them.
-                # (The upstream entries do carry an id; `BrokenCall` drops it as unusable
-                # here.) Adding the empty
-                # string here would put it in the suppression set, so any `ToolMessage` arriving
-                # with an empty `tool_call_id` would have its result silently dropped for a
-                # failure that was not its own.
-                if signal.call_id:
-                    failed_calls.add(signal.call_id)
+                # **Every id, the empty one included, and that is a decision rather than an
+                # oversight.** A `if signal.call_id:` guard stood here for a day
+                # (`D-2026-08-30-an-unparseable-tool-call-is-an-ordinary-tool-failure` removed it):
+                # it was added for a producer that announced calls the tool chain never saw and so
+                # had no id to carry, and that producer is gone. It was also wrong. A refusal is
+                # deliberately `status="success"` — `agent/tool_authz._refusal_message` says why,
+                # `is_error` invites the retry the wording exists to prevent — so this set is the
+                # *only* thing suppressing it, and with the guard a refusal whose call carried an
+                # empty id produced `tool_failed` **and** `tool_result`, putting the refusal
+                # sentence into the grounding corpus `score_answer` reads.
+                #
+                # The "an unrelated result is dropped" case the guard reached for cannot arise: a
+                # signal's id is its own call's id (`announce_tool_failures` reads
+                # `request.tool_call["id"]`, and so does the refusal message), so an empty one
+                # belongs to a call whose `ToolMessage` also carries an empty id. A provider mints
+                # an id for every call.
+                failed_calls.add(signal.call_id)
             event = _custom_event(payload, on_signal)
             if event is not None:
                 yield event

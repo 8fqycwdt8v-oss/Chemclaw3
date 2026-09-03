@@ -151,7 +151,7 @@ BEHAVIOURS: list[Behaviour] = [
         name="f-malformed-json",
         # JSON-shaped and **unclosable**, not merely truncated. This is the only argument document
         # that actually reaches `AIMessage.invalid_tool_calls`, which is the field
-        # `RepairInvalidToolCalls` exists to read — so it is the only one that exercises it.
+        # `PromoteInvalidToolCalls` exists to read — so it is the only one that exercises it.
         #
         # It used to be `'{"text": "unterminated'`, and that check could never pass. LangChain runs
         # a streamed call's fragments through `parse_partial_json`, which closes an unterminated

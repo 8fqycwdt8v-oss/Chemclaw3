@@ -576,21 +576,28 @@ def test_a_tool_result_is_traced_however_upstream_spells_its_class(streamed: boo
     assert trace.outputs, "the trace the answer gate scores against was left empty"
 
 
-def test_an_unattributed_failure_does_not_suppress_a_result() -> None:
-    """`call_id=""` means "not attributed", and this module used it as an attribution key.
+def test_a_failure_and_its_own_result_are_one_event_even_with_no_call_id() -> None:
+    """`failed_calls` pairs by id, and an empty id pairs with an empty id — which is the same call.
 
-    `ToolFailureSignal.call_id` documents the empty string as "not attributed, never 'the first
-    call to this tool'", and `failed_calls` is an index *by* call id whose only job is to stop a
-    failed call's `ToolMessage` from also being emitted as a `tool_result`. Adding `""` to it
-    therefore says "the call with no id already failed" about a turn where nothing of the sort
-    happened, and the next result carrying an empty `tool_call_id` is dropped for a failure that
-    was not its own.
+    This test used to assert the opposite, and the producer it was written for is gone. Under the
+    design `D-2026-08-30-an-unparseable-tool-call-is-an-ordinary-tool-failure` replaced, the
+    announcement for an unparseable call was hand-built and carried **no** id (the upstream entry
+    had one; the record dropped it, because no `tool_call` event existed to pair with), so `""`
+    landed in this index meaning "not attributed" and a `if signal.call_id:` guard was added here
+    to stop it suppressing an unrelated result.
 
-    It became worth pinning when a second producer appeared:
-    `agent/model_calls._announce_unrun` announces the calls a turn will not run, and those carry
-    no id *here* — the upstream entries do have one, `BrokenCall` drops it, because no `tool_call`
-    event is ever emitted for them to be matched to. So an unrepaired emission writes `""` into
-    that set.
+    That guard was wrong in the direction that matters, and it was measured: a *refusal* is
+    deliberately `status="success"` — `agent/tool_authz._refusal_message` says why, a refusal is
+    the tool's answer and `is_error` would invite the retry the wording exists to prevent — so
+    `failed_calls` is the **only** thing suppressing it. With the guard, a refusal whose call
+    carried an empty id produced `tool_failed` *and* `tool_result`, and the refusal sentence joined
+    the grounding corpus `score_answer` reads. Without it, the two pair and the turn shows one
+    failure.
+
+    The two-different-calls case the guard was reaching for cannot arise: a signal's id is the
+    tool call's own id, so an empty one belongs to a call whose `ToolMessage` also carries an empty
+    id. A provider mints an id for every call, so this state is reachable only from a first-party
+    invocation — where the pairing is exact.
 
     Driven over a scripted stream rather than a compiled graph, deliberately: a real engine mints
     an id for every call, so the state under test is one only this module's own bookkeeping can
@@ -599,7 +606,7 @@ def test_an_unattributed_failure_does_not_suppress_a_result() -> None:
     """
 
     class _Graph:
-        """A stream of exactly the two payloads whose interaction is the subject."""
+        """A stream of exactly the payloads whose interaction is the subject."""
 
         async def astream(self, *_args: Any, **_kwargs: Any) -> Any:
             yield ((), "custom", {SIGNAL_KEY: ToolFailureSignal(tool="find_notes", message="no")})
@@ -609,7 +616,17 @@ def test_an_unattributed_failure_does_not_suppress_a_result() -> None:
                 {
                     "tools": {
                         "messages": [
-                            ToolMessage(content="matches=[]", tool_call_id="", name="find_notes")
+                            # The refused call's own answer: same (empty) id, and `status="success"`
+                            # because a refusal is not an error to the provider.
+                            ToolMessage(
+                                content="Refused: not valid JSON",
+                                tool_call_id="",
+                                name="find_notes",
+                            ),
+                            # A different call, which must still be reported.
+                            ToolMessage(
+                                content="matches=[]", tool_call_id="call-9", name="find_notes"
+                            ),
                         ]
                     }
                 },
@@ -630,26 +647,36 @@ def test_an_unattributed_failure_does_not_suppress_a_result() -> None:
             )
         ]
 
-    kinds = [event.type for event in asyncio.run(_run())]
-    assert kinds == ["tool_failed", "tool_result"], (
-        f"the unattributed failure swallowed an unrelated result: {kinds}"
+    events = asyncio.run(_run())
+    assert [event.type for event in events] == ["tool_failed", "tool_result"], (
+        f"expected the refusal paired and the unrelated result kept: {[e.type for e in events]}"
+    )
+    assert "Refused" not in str(getattr(events[1], "result", "")), (
+        "the refusal sentence reached the stream as a result the model is told to weigh"
     )
 
 
 def test_an_unparseable_tool_call_reaches_the_stream_as_a_real_tool_failed_event() -> None:
-    """The sentence both ADRs are titled after, asserted end to end for the first time.
+    """The sentence four ADRs are titled after, asserted end to end through the real tool chain.
 
-    `agent/model_calls` publishes a `ToolFailureSignal`; this module turns it into a
-    `ToolFailedEvent`; the front door writes that to the chemist's SSE stream. Every test covered
-    one hop: the middleware's tests drive a compiled graph and read the *signal* off the custom
-    channel, and `test_an_unattributed_failure_does_not_suppress_a_result` drives a hand-built
-    stream. Nothing put the middleware behind `graph_events` and looked at the event — so "an
-    unparseable call is announced to the chemist", the claim the whole change exists to make, was
-    proven by no test at all.
+    `agent/model_calls.PromoteInvalidToolCalls` moves the call onto `tool_calls`;
+    `refuse_unparsed_arguments` refuses it; `agent/tool_authz.announce_tool_failures` publishes the
+    `ToolFailureSignal`; this module turns that into a `ToolFailedEvent`; the front door writes it
+    to the chemist's SSE stream. Every test used to cover one hop, and nothing put the whole chain
+    behind `graph_events` and looked at the event — so "an unparseable call is announced to the
+    chemist", the claim the change exists to make, was proven by no test at all.
 
-    Driven with `RepairInvalidToolCalls` spliced into a real `create_agent` graph rather than
-    through `build_langgraph_agent`, because the middleware chain's *order* is asserted elsewhere
-    (`tests/test_middleware_order.py`) and what is unproven here is the signal-to-event hop.
+    **Two properties, and the second is what the promotion bought.** The failure reaches the wire
+    carrying the model's *own* call id, so the error `ToolMessage` the refusal produces is
+    suppressed by the pairing this module already does and the turn shows one `tool_failed` rather
+    than a failure and a result for the same call. The design this replaced dropped the id, which
+    forced a `if signal.call_id:` special case here — and that special case broke suppression for
+    every *other* refusal whose call carried an empty id, putting the refusal sentence into the
+    grounding corpus `score_answer` reads.
+
+    The middleware is spliced into a real `create_agent` graph rather than built through
+    `build_langgraph_agent`, because the chain's *order* is asserted in
+    `tests/test_middleware_order.py` and what is unproven here is the signal-to-event hop.
     """
     from langchain.agents import create_agent
     from langchain_core.language_models import GenericFakeChatModel
@@ -657,7 +684,8 @@ def test_an_unparseable_tool_call_reaches_the_stream_as_a_real_tool_failed_event
     from langchain_core.outputs import ChatGenerationChunk
     from langchain_core.tools import tool
 
-    from chemclaw.agent.model_calls import RepairInvalidToolCalls
+    from chemclaw.agent.model_calls import PromoteInvalidToolCalls, refuse_unparsed_arguments
+    from chemclaw.agent.tool_authz import announce_tool_failures, surface_domain_errors
 
     @tool
     def find_notes(text: str) -> str:
@@ -665,7 +693,7 @@ def test_an_unparseable_tool_call_reaches_the_stream_as_a_real_tool_failed_event
         return "matches=[]"
 
     class _Model(GenericFakeChatModel):
-        """Two replies, both carrying the same unparseable argument document."""
+        """One unparseable call, then prose — the model giving up rather than looping."""
 
         def __init__(self, **kwargs: Any) -> None:
             super().__init__(messages=iter([]), **kwargs)
@@ -677,6 +705,9 @@ def test_an_unparseable_tool_call_reaches_the_stream_as_a_real_tool_failed_event
         def _stream(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any):  # type: ignore[no-untyped-def]
             step = object.__getattribute__(self, "_step")
             object.__setattr__(self, "_step", step + 1)
+            if step:
+                yield ChatGenerationChunk(message=AIMessageChunk(content="I could not run that."))
+                return
             yield ChatGenerationChunk(message=AIMessageChunk(content=""))
             yield ChatGenerationChunk(
                 message=AIMessageChunk(
@@ -685,7 +716,7 @@ def test_an_unparseable_tool_call_reaches_the_stream_as_a_real_tool_failed_event
                         {
                             "name": "find_notes",
                             "args": '{"text": }',
-                            "id": f"call-{step}",
+                            "id": "call-0",
                             "index": 0,
                             "type": "tool_call_chunk",
                         }
@@ -693,7 +724,16 @@ def test_an_unparseable_tool_call_reaches_the_stream_as_a_real_tool_failed_event
                 )
             )
 
-    graph = create_agent(model=_Model(), tools=[find_notes], middleware=[RepairInvalidToolCalls()])
+    graph = create_agent(
+        model=_Model(),
+        tools=[find_notes],
+        middleware=[
+            surface_domain_errors,
+            announce_tool_failures,
+            PromoteInvalidToolCalls(),
+            refuse_unparsed_arguments,
+        ],
+    )
     trace = ToolCallTrace()
 
     async def _run() -> list[Any]:
@@ -718,6 +758,17 @@ def test_an_unparseable_tool_call_reaches_the_stream_as_a_real_tool_failed_event
     # `reason` separates a gate refusal from a fault, and this is a fault: `Chemclaw3_ui` renders
     # `None` in the failure red, which is what a call that could not run should look like.
     assert failed[0].reason is None
+    # The pairing, which is what `failed_calls` exists for: `_refusal_message` returns
+    # `status="success"` deliberately, so matching the refusal's `tool_call_id` is the only thing
+    # that can suppress it, and without the suppression the refusal sentence joins the grounding
+    # corpus `score_answer` reads.
+    #
+    # **It does not prove the id is the model's own**, and saying so here would be wrong: the
+    # announcer and the refusal read the same `request.tool_call["id"]`, so they pair with each
+    # other whatever it is — a promotion writing `""` survives this assertion (measured). What the
+    # real id buys is the pairing with the `tool_call` *event* a consumer already rendered, and one
+    # distinct id per broken call in a reply that holds several. That is asserted at the producer,
+    # in `tests/test_invalid_tool_calls.py`, against the signal itself.
     assert not [event for event in events if event.type == "tool_result"], (
-        "a call that never ran must not also produce a result"
+        "a call that could not run must not also produce a result the model is told to weigh"
     )

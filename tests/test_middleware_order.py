@@ -97,6 +97,13 @@ _EXPECTED_ORDER = (
     "enforce_tool_authz",
     "refuse_writes_on_dry_run",
     "refuse_repeated_calls",
+    # Innermost of the governance chain, and the position is the mechanism rather than a
+    # preference: a call whose arguments the model mis-serialised is promoted onto `tool_calls` by
+    # `PromoteInvalidToolCalls` precisely so it reaches this chain, and being last here means the
+    # announcer, the trail, the authorization gate and both guards have all seen it before it is
+    # refused. It still raises before the tool body, so the in-process tools with no required
+    # argument cannot be executed by a promotion that carries no usable arguments.
+    "refuse_unparsed_arguments",
     # Outermost of the compaction group: a `ContextEdit` sees a message list and a counter, never
     # the request, so the prefix it must budget against can only be published by a middleware above
     # the editor (`agent/context_budget.py`).
@@ -104,12 +111,12 @@ _EXPECTED_ORDER = (
     "ContextEditingMiddleware",
     "RecordContextCompaction",
     # The two model-call observers, innermost of this repository's block and therefore closest to
-    # the provider call (`D-2026-08-27-a-refusal-is-not-a-crash`). Below the compaction group
-    # deliberately: the context edits also run in `wrap_model_call`, so recording from above them
-    # would fold this repository's own token counting into the histogram an operator reads as "how
-    # slow is the endpoint". The repair is outside the recorder so a repaired turn books both model
-    # calls, which is what happened.
-    "RepairInvalidToolCalls",
+    # the provider call. Below the compaction group deliberately: the context edits also run in
+    # `wrap_model_call`, so recording from above them would fold this repository's own token
+    # counting into the histogram an operator reads as "how slow is the endpoint". The promotion is
+    # outside the recorder because it reads the response the recorder timed, and it takes no
+    # provider call of its own — which is the difference from the repair it replaced.
+    "PromoteInvalidToolCalls",
     "RecordModelCalls",
     "AnthropicPromptCachingMiddleware",
 )

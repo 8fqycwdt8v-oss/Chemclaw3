@@ -169,18 +169,18 @@ def enforce_spend_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] 
     # **The larger of the two readings, because each sees calls the other cannot.**
     #
     # `billed_tokens` counts what this middleware metered: one figure per model response, folded
-    # across the subagent boundary. Two whole classes of provider call never reach it, and both
-    # were measured rather than reasoned about:
+    # across the subagent boundary. One whole class of provider call never reaches it, and it was
+    # measured rather than reasoned about:
     #
-    # - **A repaired call is two calls.** `model_calls.RepairInvalidToolCalls` re-invokes the
-    #   handler when the model emits unparseable tool arguments and returns only the repaired
-    #   response, whose `usage_metadata` is its own. `MeterTurnSpend` wraps that middleware from
-    #   outside, so it books one bill for two calls — measured at 700 booked against 1,200 spent.
-    #   A model looping on malformed arguments is precisely the runaway this guard exists for, and
-    #   it was the case the guard under-counted worst.
     # - **A model call inside a tool body is invisible.** `agent/condense.py` makes one per
     #   protocol, up to `protocol_digest_max_protocols`, and a tool body is not a graph node.
     #   Measured: 5,200 tokens spent against a 150-token budget with the cap never firing.
+    #
+    # A second class used to sit beside it — a model call the old unparseable-arguments repair took
+    # from inside `wrap_model_call`, booking one bill for two calls (700 booked against 1,200
+    # spent). It is gone with the mechanism: an unparseable call is now promoted onto `tool_calls`
+    # and refused by the tool chain, so the model's correction is an ordinary graph iteration this
+    # middleware meters like any other.
     #
     # The turn's own ledger sees both, because both ride the message stream the runner meters
     # (`agent/turn_usage.metered_turn_tokens`). It is 0 off the request path, where the channel is
