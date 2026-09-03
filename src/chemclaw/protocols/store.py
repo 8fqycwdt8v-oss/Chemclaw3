@@ -51,6 +51,7 @@ from chemclaw.protocols.models import (
     DesignSummary,
     ExperimentDesign,
     ProtocolCheck,
+    RevisionKind,
     StatusEvent,
 )
 
@@ -210,7 +211,6 @@ class DesignStore(Protocol):
         design: ExperimentDesign,
         checks: Sequence[ProtocolCheck],
         *,
-        kind: str,
         author_kind: AuthorKind,
         author: str = "",
         parent_revision: int = 0,
@@ -292,7 +292,6 @@ class InMemoryDesignStore:
         design: ExperimentDesign,
         checks: Sequence[ProtocolCheck],
         *,
-        kind: str,
         author_kind: AuthorKind,
         author: str = "",
         parent_revision: int = 0,
@@ -310,13 +309,14 @@ class InMemoryDesignStore:
             session_id=session_id,
             correlation_id=correlation_id,
         )
+        kind = revision_kind(design)
         existing = self._revisions.get(design_id, [])
         head = existing[-1].revision if existing else 0
         _require_head(design_id, head, parent_revision)
         revision = DesignRevision(
             design_id=design_id,
             revision=head + 1,
-            kind=kind,  # type: ignore[arg-type]
+            kind=kind,
             author_kind=author_kind,
             author=author,
             parent_revision=head,
@@ -487,7 +487,6 @@ class PostgresDesignStore:
         design: ExperimentDesign,
         checks: Sequence[ProtocolCheck],
         *,
-        kind: str,
         author_kind: AuthorKind,
         author: str = "",
         parent_revision: int = 0,
@@ -533,6 +532,7 @@ class PostgresDesignStore:
             session_id=session_id,
             correlation_id=correlation_id,
         )
+        kind = revision_kind(design)
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_HEAD, (design_id,))
@@ -549,7 +549,7 @@ class PostgresDesignStore:
                 revision = DesignRevision(
                     design_id=design_id,
                     revision=head + 1,
-                    kind=kind,  # type: ignore[arg-type]
+                    kind=kind,
                     author_kind=author_kind,
                     author=author,
                     parent_revision=head,
@@ -728,7 +728,12 @@ class PostgresDesignStore:
                 # here is the kind of the revision this move is stamped against.
                 await cur.execute(_SELECT_HEAD_KIND, (design_id, head))
                 kind_row = await cur.fetchone()
-                require_movable(status, str(kind_row[0]) if kind_row else "")
+                # Anything that is not provably `protocol` is treated as `request`, so a row the
+                # `FOR UPDATE` above says exists and this read somehow does not fails *closed*
+                # rather than waving an `executed` through on a document nobody can see.
+                require_movable(
+                    status, "protocol" if kind_row and kind_row[0] == "protocol" else "request"
+                )
                 await cur.execute(_SET_STATUS, {"status": status, "design_id": design_id})
                 await cur.execute(
                     _INSERT_STATUS_EVENT,
@@ -814,7 +819,7 @@ def _status_event(row: Any) -> StatusEvent:
 _RETIRED_BY_A_REVISION: frozenset[DesignStatus] = frozenset({"approved", "executed"})
 
 
-def advanced(current: DesignStatus, kind: str) -> DesignStatus:
+def advanced(current: DesignStatus, kind: RevisionKind) -> DesignStatus:
     """The status a design has after a revision of `kind` lands on it.
 
     A design that held only a structured ask becomes a `draft` the moment a protocol revision
@@ -841,12 +846,33 @@ def advanced(current: DesignStatus, kind: str) -> DesignStatus:
     return "draft" if current in _RETIRED_BY_A_REVISION else current
 
 
+def revision_kind(design: ExperimentDesign) -> RevisionKind:
+    """The word for what this revision *is*, read off the document rather than taken on trust.
+
+    It used to be an argument, and the three callers derived it separately — which is the shape
+    `has_protocol` exists to prevent and which failed exactly where a duplicated predicate always
+    does, on the path where the two inputs come apart. `structure_experiment_request` deliberately
+    carries a drafted procedure forward when a chemist corrects the ask, and it stamped
+    `kind="request"` regardless. `require_movable` reads this column to decide whether a design has
+    a procedure to approve, so a corrected ask made a fully drafted plate **permanently
+    un-approvable and un-executable**: every arm, step and charge line present, and the store
+    refusing the sign-off with "this design holds only the structured ask". The document was right
+    and only the word for it was wrong, so nothing on the page hinted at the contradiction.
+
+    Deriving it here is what makes the column true by construction: `kind` is `has_protocol` as it
+    stood when the revision was written, which is what `advanced` and `require_movable` have always
+    said they were reading. There is no caller that legitimately wants the other word — a document
+    holding a procedure is a protocol whatever the tool that stored it was called.
+    """
+    return "protocol" if design.has_protocol else "request"
+
+
 #: The statuses that assert something about a *procedure*. A design holding only a structured ask
 #: has no procedure, so neither word can be true of it.
 _NEEDS_A_PROTOCOL: frozenset[DesignStatus] = frozenset({"approved", "executed"})
 
 
-def require_movable(status: DesignStatus, head_kind: str) -> None:
+def require_movable(status: DesignStatus, head_kind: RevisionKind) -> None:
     """Refuse a lifecycle move the design cannot support, naming why.
 
     Nothing tied a status to the document it is a statement about, so `set_status("executed")` on a

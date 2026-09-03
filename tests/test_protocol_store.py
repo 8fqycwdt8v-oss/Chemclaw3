@@ -103,7 +103,6 @@ def test_a_stored_revision_reads_back_whole(backend: str) -> None:
             _id(backend, "readback"),
             design,
             run_checks(design),
-            kind="protocol",
             author_kind="agent",
             author="chemist-a",
             change_note="drafted the protocol",
@@ -146,7 +145,6 @@ def test_read_selects_a_specific_revision_and_defaults_to_the_head(backend: str)
                 design_id,
                 _design(arms=revision),
                 [],
-                kind="protocol",
                 author_kind="agent",
                 parent_revision=revision - 1,
                 change_note=note,
@@ -174,7 +172,6 @@ def test_history_comes_back_oldest_first(backend: str) -> None:
                 design_id,
                 _design(),
                 [],
-                kind="protocol",
                 author_kind="human" if revision == 2 else "agent",
                 parent_revision=revision - 1,
                 change_note=note,
@@ -196,15 +193,11 @@ def test_a_write_derived_from_a_stale_revision_is_refused(backend: str) -> None:
     async def _body() -> None:
         store = await _backend(backend)
         design_id = _id(backend, "stale")
-        await store.append(design_id, _design(), [], kind="protocol", author_kind="agent")
-        await store.append(
-            design_id, _design(), [], kind="protocol", author_kind="human", parent_revision=1
-        )
+        await store.append(design_id, _design(), [], author_kind="agent")
+        await store.append(design_id, _design(), [], author_kind="human", parent_revision=1)
 
         with pytest.raises(RevisionConflict, match="is at revision 2"):
-            await store.append(
-                design_id, _design(), [], kind="protocol", author_kind="human", parent_revision=1
-            )
+            await store.append(design_id, _design(), [], author_kind="human", parent_revision=1)
 
         # And nothing was written by the refusal.
         assert [item.revision for item in await store.history(design_id)] == [1, 2]
@@ -219,12 +212,10 @@ def test_parent_revision_zero_on_an_existing_design_is_refused(backend: str) -> 
     async def _body() -> None:
         store = await _backend(backend)
         design_id = _id(backend, "zero-parent")
-        await store.append(design_id, _design(), [], kind="protocol", author_kind="agent")
+        await store.append(design_id, _design(), [], author_kind="agent")
 
         with pytest.raises(RevisionConflict, match="derived from 0"):
-            await store.append(
-                design_id, _design(), [], kind="protocol", author_kind="agent", parent_revision=0
-            )
+            await store.append(design_id, _design(), [], author_kind="agent", parent_revision=0)
 
     _run(_body)
 
@@ -247,7 +238,6 @@ def test_the_summary_reflects_the_head_revision_and_its_counts(backend: str) -> 
             design_id,
             blocked,
             run_checks(blocked),
-            kind="protocol",
             author_kind="agent",
             author="chemist-a",
         )
@@ -267,7 +257,6 @@ def test_the_summary_reflects_the_head_revision_and_its_counts(backend: str) -> 
             design_id,
             cured,
             run_checks(cured),
-            kind="protocol",
             author_kind="human",
             parent_revision=1,
             change_note="cited the precedent",
@@ -293,7 +282,6 @@ def test_the_listing_filters_by_status_and_project_and_is_newest_first(backend: 
                 design_id,
                 _design(project=project),
                 [],
-                kind="request" if status == "requested" else "protocol",
                 author_kind="agent",
                 status=status,
             )
@@ -340,9 +328,9 @@ def test_set_status_moves_a_design_a_write_never_would(backend: str) -> None:
     async def _body() -> None:
         store = await _backend(backend)
         design_id = _id(backend, "status-move")
-        await store.append(
-            design_id, _design(), [], kind="protocol", author_kind="agent", status="draft"
-        )
+        # An arm, because `require_movable` refuses `approved` on a design holding only the ask —
+        # and the revision's `kind` is derived from the document, so the two cannot disagree.
+        await store.append(design_id, _design(arms=1), [], author_kind="agent", status="draft")
         await store.set_status(design_id, "approved", expected_revision=1, actor="chemist-a")
         summary = await store.summary(design_id)
         assert summary is not None and summary.status == "approved"
@@ -367,17 +355,17 @@ def test_the_one_automatic_status_transition_and_the_two_that_are_not(backend: s
         store = await _backend(backend)
         design_id = _id(backend, "lifecycle")
 
-        await store.append(
-            design_id, _design(), [], kind="request", author_kind="agent", status="requested"
-        )
+        await store.append(design_id, _design(), [], author_kind="agent", status="requested")
         first = await store.summary(design_id)
         assert first is not None and first.status == "requested"
 
+        # A revision that actually holds a procedure, because `kind` is derived from the document
+        # rather than asserted beside it: this is the write that makes a `requested` design a
+        # `draft`, and it is the *procedure arriving* that makes it one.
         await store.append(
             design_id,
-            _design(),
+            _design(arms=1),
             [],
-            kind="protocol",
             author_kind="agent",
             parent_revision=1,
             status="draft",
@@ -388,9 +376,8 @@ def test_the_one_automatic_status_transition_and_the_two_that_are_not(backend: s
         await store.set_status(design_id, "approved", expected_revision=2)
         await store.append(
             design_id,
-            _design(),
+            _design(arms=1),
             [],
-            kind="protocol",
             author_kind="human",
             parent_revision=2,
             change_note="the chemist raised the temperature",
@@ -405,9 +392,8 @@ def test_the_one_automatic_status_transition_and_the_two_that_are_not(backend: s
         await store.set_status(design_id, "abandoned", expected_revision=3)
         await store.append(
             design_id,
-            _design(),
+            _design(arms=1),
             [],
-            kind="protocol",
             author_kind="agent",
             parent_revision=3,
             change_note="an agent wrote to it anyway",
@@ -432,9 +418,7 @@ def test_every_status_the_type_allows_is_a_status_the_schema_accepts(backend: st
         store = await _backend(backend)
         design_id = _id(backend, "allstatuses")
         design = _design(arms=1)
-        await store.append(
-            design_id, design, run_checks(design), kind="protocol", author_kind="agent"
-        )
+        await store.append(design_id, design, run_checks(design), author_kind="agent")
         for status in get_args(DesignStatus):
             await store.set_status(
                 design_id,
@@ -486,9 +470,7 @@ def test_a_status_move_records_which_revision_it_was_made_against(backend: str) 
         store = await _backend(backend)
         design_id = _id(backend, "signoff")
         design = _design(arms=2)
-        await store.append(
-            design_id, design, run_checks(design), kind="protocol", author_kind="agent"
-        )
+        await store.append(design_id, design, run_checks(design), author_kind="agent")
         await store.set_status(
             design_id,
             "approved",
@@ -502,7 +484,6 @@ def test_a_status_move_records_which_revision_it_was_made_against(backend: str) 
             design_id,
             design,
             run_checks(design),
-            kind="protocol",
             author_kind="agent",
             parent_revision=1,
             change_note="an agent redrafted it at 200 C",
@@ -528,9 +509,7 @@ def test_status_history_is_newest_first_and_empty_before_any_move(backend: str) 
         store = await _backend(backend)
         design_id = _id(backend, "signoffs")
         design = _design(arms=1)
-        await store.append(
-            design_id, design, run_checks(design), kind="protocol", author_kind="agent"
-        )
+        await store.append(design_id, design, run_checks(design), author_kind="agent")
         assert await store.status_history(design_id) == []
 
         await store.set_status(
@@ -594,14 +573,13 @@ def test_two_writers_racing_on_one_head_lose_as_a_revision_conflict() -> None:
         await migrated_db_or_skip()
         store = PostgresDesignStore()
         design_id = _id("postgres", "race")
-        await store.append(design_id, _design(), [], kind="protocol", author_kind="agent")
+        await store.append(design_id, _design(), [], author_kind="agent")
 
         outcomes = await asyncio.gather(
             store.append(
                 design_id,
                 _design(arms=2),
                 [],
-                kind="protocol",
                 author_kind="human",
                 parent_revision=1,
                 change_note="alice, from revision 1",
@@ -610,7 +588,6 @@ def test_two_writers_racing_on_one_head_lose_as_a_revision_conflict() -> None:
                 design_id,
                 _design(arms=3),
                 [],
-                kind="protocol",
                 author_kind="human",
                 parent_revision=1,
                 change_note="bob, from the same revision 1",
@@ -656,7 +633,6 @@ def test_the_session_that_created_a_design_is_the_one_the_listing_filters_on(
             design_id,
             _design(),
             [],
-            kind="request",
             author_kind="agent",
             author="chemist-a",
             session_id="one",
@@ -666,7 +642,6 @@ def test_the_session_that_created_a_design_is_the_one_the_listing_filters_on(
             design_id,
             _design(arms=2),
             [],
-            kind="protocol",
             author_kind="human",
             author="chemist-b",
             parent_revision=1,
@@ -709,7 +684,6 @@ def test_an_unpaired_surrogate_is_refused_rather_than_diverging(backend: str) ->
                 _fresh_id(backend, "surrogate"),
                 broken,
                 run_checks(broken),
-                kind="protocol",
                 author_kind="agent",
                 author="chemist-a",
                 change_note="drafted",
@@ -735,7 +709,6 @@ def test_a_design_holding_only_the_ask_cannot_be_marked_executed(backend: str) -
             _askonly,
             design,
             run_checks(design, stage="request"),
-            kind="request",
             author_kind="agent",
             author="chemist-a",
             change_note="structured the request",
@@ -777,7 +750,6 @@ def test_a_drafted_protocol_can_still_be_approved(backend: str) -> None:
             _signoff,
             design,
             run_checks(design),
-            kind="protocol",
             author_kind="agent",
             author="chemist-a",
             change_note="drafted",
@@ -820,7 +792,7 @@ def test_one_read_of_a_design_is_internally_consistent_under_a_concurrent_write(
         rounds = 25
         for index in range(rounds):
             design_id = _fresh_id("postgres", f"torn{index}")
-            await store.append(design_id, _design(), [], kind="protocol", author_kind="agent")
+            await store.append(design_id, _design(), [], author_kind="agent")
 
             page, _ = await asyncio.gather(
                 store.page(design_id),
@@ -828,7 +800,6 @@ def test_one_read_of_a_design_is_internally_consistent_under_a_concurrent_write(
                     design_id,
                     _design(arms=2),
                     [],
-                    kind="protocol",
                     author_kind="human",
                     parent_revision=1,
                     change_note="a colleague saves while this read is in flight",

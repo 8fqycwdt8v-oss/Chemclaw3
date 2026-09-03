@@ -11,7 +11,7 @@ the second broke, reordering a procedure would be invisible to the miner that re
 
 from typing import Any
 
-from chemclaw.protocols.diff import diff_designs, flatten
+from chemclaw.protocols.diff import _reading_order, diff_designs, flatten
 from chemclaw.protocols.models import (
     Analytic,
     ChargeLine,
@@ -230,3 +230,32 @@ def test_a_boolean_renders_as_a_word_rather_than_a_python_repr() -> None:
     after = _design(base={"charge": [ChargeLine(component="a", limiting=True).model_dump()]})
     change = diff_designs(before, after).changes[0]
     assert (change.path, change.before, change.after) == ("base.charge.a.limiting", "false", "true")
+
+
+def test_a_path_segment_a_chemist_typed_cannot_crash_the_ordering() -> None:
+    r"""`'²'.isdigit()` is `True` and `int('²')` raises, and a factor name is free text.
+
+    `_NATURAL` splits on `\\d`, which does not match a superscript, so `'²'` arrived through the
+    *non-digit* branch and `str.isdigit` sent it to `int()` anyway — a `ValueError` out of
+    `diff_designs`, which is a 500 on the diff route from a name somebody typed into a form. The
+    regex's own group decides now, so the test and the pattern cannot disagree.
+    """
+    for name in ("²", "²³", "½", "①", "٣", "plain"):
+        assert _reading_order(f"factors.{name}.name")
+
+
+def test_the_reading_order_is_a_total_order_over_distinct_paths() -> None:
+    """`A1` and `A01` used to produce identical keys, so their order came from a set's hash seed.
+
+    `int('01') == int('1')` and the residual text is empty in both, so `sorted` fell back to its
+    stability over `set(left) | set(right)` — and a set of strings iterates in an order that varies
+    between processes. The same diff of the same two revisions listed its rows differently from one
+    run to the next.
+    """
+    colliding = ["arms.A1.control", "arms.A01.control", "arms.A001.control"]
+    shuffled = ["arms.A001.control", "arms.A1.control", "arms.A01.control"]
+    keys = [_reading_order(path) for path in colliding]
+    assert len({repr(key) for key in keys}) == len(colliding)
+    # A stable sort agrees with itself whatever the key; two *different* input orders agreeing is
+    # what says the key separates them rather than leaving it to however the set iterated.
+    assert sorted(colliding, key=_reading_order) == sorted(shuffled, key=_reading_order)

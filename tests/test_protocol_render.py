@@ -312,3 +312,134 @@ def test_deleting_an_unrelated_line_is_not_an_edit_to_the_repeated_one() -> None
     paths = diff_designs(before, after).paths
     # Only the removed line. Neither toluene moved, so neither may appear.
     assert all(path.startswith("base.charge.water") for path in paths), paths
+
+
+def test_conditions_show_what_the_arms_run_at_when_they_all_override_the_body() -> None:
+    """A value every arm overrode to the same thing fell through both halves of the page.
+
+    `## Conditions` rendered the body's own setpoints and the run sheet carries a column only when
+    the arms *disagree*, so three arms all set to `N2` over a body reading `air` produced a page
+    saying "Atmosphere: air" with no atmosphere column anywhere — the atmosphere the design is
+    actually run under stated nowhere, and a wrong one stated as fact.
+    """
+    design = _design(
+        base=ProtocolBody(setpoints=Setpoints(temperature_c=80, atmosphere="air", solvent="THF")),
+        arms=[
+            ProtocolArm(arm_id=f"A{index}", setpoints=Setpoints(atmosphere="N2"))
+            for index in (1, 2, 3)
+        ],
+    )
+    page = render_markdown(design)
+    assert "- **Atmosphere:** N2" in page
+    assert "air" not in page, "no arm runs under air, so the page must not state it"
+
+
+def test_a_condition_the_arms_disagree_about_leaves_the_shared_list_and_says_so() -> None:
+    """The two sections are complements: shared here, varying in the run sheet, never both.
+
+    Without the notice a reader takes `## Conditions` for the whole of them, which is exactly the
+    reading that made the previous version dangerous.
+    """
+    design = _design(
+        base=ProtocolBody(setpoints=Setpoints(temperature_c=80, atmosphere="air", solvent="THF")),
+        arms=[
+            ProtocolArm(arm_id="A1", setpoints=Setpoints(atmosphere="N2")),
+            ProtocolArm(arm_id="A2", setpoints=Setpoints(atmosphere="Ar")),
+        ],
+    )
+    page = render_markdown(design)
+    assert "- **Atmosphere:**" not in page, (
+        "the arms disagree, so there is no shared value to state"
+    )
+    assert "the run sheet carries what varies" in page
+    assert "| Atmosphere |" in page
+    assert "N2" in page and "Ar" in page
+
+
+def test_the_shared_conditions_of_a_single_arm_are_that_arms_own() -> None:
+    """One arm agrees with itself, so the same rule covers the case it was first written for."""
+    design = _design(
+        base=ProtocolBody(setpoints=Setpoints(temperature_c=80, time_h=16, solvent="dioxane")),
+        arms=[
+            ProtocolArm(
+                arm_id="A1",
+                setpoints=Setpoints(temperature_c=120, time_h=2, solvent="toluene"),
+            )
+        ],
+    )
+    page = render_markdown(design)
+    assert "## Conditions (A1)" in page
+    assert "- **Temperature:** 120 °C" in page
+    assert "- **Solvent:** toluene" in page
+    assert "dioxane" not in page and "80 °C" not in page
+
+
+def test_no_free_text_field_on_the_page_can_open_a_block() -> None:
+    r"""`_text` guarded the steps, the hazards and the waste — and nothing above them.
+
+    The title, the goal, the objectives, the exclusions, the solvent, the atmosphere, an arm's note
+    and what a citation says it supports are all browser-supplied strings placed straight into the
+    block flow. Measured, a title reading `T\\n\\n## Forged` put a second `## Forged` section on the
+    page, and the goal, the solvent and the arm note each did it again — four forged sections on the
+    half of the document a chemist reads first.
+    """
+    forge = "\n\n## Forged"
+    design = _design(
+        request=ExperimentRequest(
+            title=f"T{forge}",
+            goal=f"G{forge}",
+            objectives=[f"o{forge}"],
+            forbidden=[f"f{forge}"],
+            mode="single",
+        ),
+        base=ProtocolBody(
+            setpoints=Setpoints(solvent=f"THF{forge}", atmosphere=f"N2{forge}"),
+            waste=f"w{forge}",
+            hazards=[f"h{forge}"],
+        ),
+        arms=[ProtocolArm(arm_id="A1", note=f"n{forge}")],
+        evidence=[
+            EvidenceRef(kind="precedent", ref="r1", summary=f"s{forge}", supports=[f"x{forge}"])
+        ],
+    )
+    # The text a chemist typed is preserved — it just cannot start a line any more, which is the
+    # only thing that makes it a heading.
+    page = render_markdown(design)
+    assert not [line for line in page.splitlines() if line.startswith("## Forged")]
+    assert page.count("## Forged") == 13, (
+        "the words themselves are kept — every field carrying them, run sheet and receipt included"
+    )
+
+
+def test_a_leading_fence_or_html_or_list_marker_cannot_open_a_block_either() -> None:
+    """Four openers the first marker set left out, three of them worse than the heading it caught.
+
+    A leading `` ` `` or `~` opens a fenced code block, which swallows every following line until it
+    closes — so a hazard line starting with one takes the procedure, the charge table and the
+    evidence with it.
+    """
+    for opener in ("```python", "~~~", "<script>alert(1)</script>", "1. not a step"):
+        page = render_markdown(
+            _design(
+                base=ProtocolBody(hazards=[opener], waste=opener),
+                evidence=[EvidenceRef(kind="precedent", ref="r1", summary="s")],
+            )
+        )
+        # Every section *after* the one holding the opener still opens as itself.
+        assert "## Waste" in page and "## Hazards" in page and "## Evidence" in page, (
+            f"{opener!r} swallowed the rest of the document"
+        )
+
+
+def test_a_citation_carrying_two_backticks_still_renders_as_one_span() -> None:
+    """A doubled fence closes on a doubled run inside it — the fence has to be longer than that.
+
+    CommonMark ends a code span at the next run of *exactly* the opening length, so `` a``b ``
+    between two doubled fences rendered `a` as code and `b` beside it as prose: the rest of the
+    citation escaped the span, which is the defect the doubled fence was introduced to fix, one
+    backtick along.
+    """
+    page = render_markdown(
+        _design(evidence=[EvidenceRef(kind="precedent", ref="rxn``42", summary="s")])
+    )
+    assert "``` rxn``42 ```" in page

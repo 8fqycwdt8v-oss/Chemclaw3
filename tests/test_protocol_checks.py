@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from chemclaw.protocols.checks import (
+    _AGREEMENT_FRACTION,
     arms_are_distinct,
     atom_balance,
     blockers,
@@ -169,6 +170,68 @@ def test_charge_is_consistent_passes_a_table_whose_equivalents_agree() -> None:
     assert verdict.passed and verdict.severity == "blocker"
 
 
+#: `(label, limiting mmol, the line's equivalents, the mmol a chemist writes, does it pass)`.
+#: Four scales and five loadings, each verdict the one a chemist would give reading the table. This
+#: is the sweep `_agreement_tolerance` cites, and it exists because that function's previous rule
+#: was argued from one worked example whose arithmetic was wrong.
+_AGREEMENT_SWEEP: list[tuple[str, float, float, float, bool]] = [
+    ("catalyst 5 mol% of 1.37 mmol, two decimals", 1.37, 0.05, 0.07, True),
+    ("the same catalyst with one digit too many", 1.37, 0.05, 0.10, False),
+    ("the same catalyst a factor of ten out", 1.37, 0.05, 0.685, False),
+    ("ligand 6 mol% of 1.37 mmol, two decimals", 1.37, 0.06, 0.08, True),
+    ("2.0 equivalents of base, exact", 1.37, 2.0, 2.74, True),
+    ("2.0 equivalents of base, one decimal", 1.37, 2.0, 2.7, True),
+    ("2.0 equivalents written as one equivalent's worth", 1.37, 2.0, 1.37, False),
+    ("1.2 equivalents at a 10 mmol scale", 10.0, 1.2, 12.0, True),
+    ("the same line 20% out", 10.0, 1.2, 14.4, False),
+    ("0.5 mol% Pd at a 20 mmol scale", 20.0, 0.005, 0.1, True),
+    ("the same Pd line written ten times over", 20.0, 0.005, 1.0, False),
+    ("a trace charge rounded to three decimals", 0.16, 0.005, 0.001, True),
+    ("two decimals where two decimals is 20% of the line", 0.25, 0.05, 0.01, False),
+    ("the same line written to three decimals", 0.25, 0.05, 0.013, True),
+    ("the limiting reagent against itself", 1.37, 1.0, 1.37, True),
+]
+
+
+def test_the_agreement_tolerance_over_the_scales_a_bench_uses() -> None:
+    """Every row of the sweep gets the verdict a chemist would give.
+
+    **Row two is the one this test was written for.** `_agreement_tolerance` used to read the
+    written precision back out of the figure with `Decimal(repr(…))`, and a float carries no
+    trailing zero — so a catalyst written `0.10` against an implied `0.0685` got half a unit in the
+    *first* decimal as slack, and a 46% error passed a blocker. The function's own docstring
+    asserted that same line fails by six times the slack. One worked example is not a sweep, which
+    is why this is one.
+    """
+    wrong = []
+    for label, reference_mmol, equivalents, written_mmol, expected in _AGREEMENT_SWEEP:
+        design = _design(
+            base={
+                "charge": [
+                    ChargeLine(
+                        component="limiting",
+                        limiting=True,
+                        equivalents=1.0,
+                        amount_mmol=reference_mmol,
+                    ).model_dump(),
+                    ChargeLine(
+                        component="line",
+                        equivalents=equivalents,
+                        amount_mmol=written_mmol,
+                    ).model_dump(),
+                ]
+            }
+        )
+        verdict = charge_is_consistent(design)
+        if verdict.passed is not expected:
+            wrong.append(
+                f"{label}: {equivalents} eq of {reference_mmol} mmol implies "
+                f"{equivalents * reference_mmol:.4g}, table says {written_mmol:.4g} — "
+                f"passed={verdict.passed}, expected {expected}"
+            )
+    assert not wrong, "\n".join(wrong)
+
+
 def test_charge_is_consistent_blocks_a_table_with_no_limiting_reagent() -> None:
     design = _design(
         base={"charge": [ChargeLine(component="aryl chloride", equivalents=1.0).model_dump()]}
@@ -220,7 +283,7 @@ def test_charge_is_consistent_blocks_equivalents_that_disagree_with_the_amounts(
     )
     verdict = charge_is_consistent(design)
     assert not verdict.passed
-    assert "disagree by more than 2%" in verdict.detail
+    assert f"disagree by more than {_AGREEMENT_FRACTION:.0%}" in verdict.detail
     assert "boronic acid" in verdict.detail
 
 

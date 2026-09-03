@@ -615,15 +615,20 @@ class ExperimentDesign(BaseModel):
         return self.base.setpoints.model_copy(update=stated)
 
 
+#: What a stored revision *is*. `request` holds only a structured ask (the intake, before any
+#: protocol exists); `protocol` holds a whole design. Two kinds in one table because they are the
+#: same document growing, and a reader wants the history in one list. It is derived from the
+#: document by `store.revision_kind` rather than declared — see that function for what a caller
+#: declaring it separately cost.
+RevisionKind = Literal["request", "protocol"]
+
+
 class DesignRevision(BaseModel):
     """One immutable version of a design, and who wrote it."""
 
     design_id: str = Field(min_length=1)
     revision: int = Field(ge=1)
-    # `request` holds only a structured ask (the intake, before any protocol exists); `protocol`
-    # holds a whole design. Two kinds in one table because they are the same document growing, and
-    # a reader wants the history in one list.
-    kind: Literal["request", "protocol"]
+    kind: RevisionKind
     author_kind: AuthorKind
     author: str = ""
     # 0 on the first revision. Every later one names the revision it was derived from, which is

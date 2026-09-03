@@ -162,27 +162,40 @@ def _labelled(items: list[Any], identifier: str | None) -> list[tuple[str, Any]]
 _SECTION_ORDER: tuple[str, ...] = ("request", "base", "factors", "arms", "layout", "evidence")
 
 
-def _reading_order(path: str) -> tuple[int, list[tuple[int, int, str]]]:
-    """Sort key putting a path where a reader expects it.
+def _reading_order(path: str) -> tuple[int, list[tuple[int, int, str]], str]:
+    r"""Sort key putting a path where a reader expects it.
 
     Plain `sorted` is lexicographic, which `paths`'s docstring called "reading order" and is not:
     it interleaves the sections alphabetically (`arms` before `base` before `request`) and orders
     twelve arms `A1, A10, A11, A12, A2, …`, so a reviewer scanning a 96-arm diff meets arm 10
     between arm 1 and arm 2. Sections take the document's order and each segment sorts its digit
     runs numerically, which is what makes `A2` precede `A10`.
+
+    **Which run is a number is the regex's answer and not `str.isdigit`'s**, because the two
+    disagree and a path segment is chemist-supplied text. `'²'.isdigit()` is `True` and `int('²')`
+    raises, while `\D` matches `'²'` — so a factor named `²` reached `int()` through the
+    non-digit branch and raised `ValueError` out of `diff_designs`, which is a 500 on the diff
+    route from a name somebody typed. Reading the group the match came from cannot disagree with
+    the pattern that produced it: whatever `\d+` matched, `int` accepts.
+
+    **The raw path is the last term, because the key before it is not a total order.** `A1` and
+    `A01` produce identical keys (`int('01') == int('1')`, and the residual text is empty in both),
+    so two distinct paths compared equal and their order fell to `sorted`'s stability over a
+    **set**, whose iteration order varies with the interpreter's hash seed. The same diff of the
+    same two revisions listed its rows in a different order from one process to the next.
     """
     head, _, _ = path.partition(".")
     section = _SECTION_ORDER.index(head) if head in _SECTION_ORDER else len(_SECTION_ORDER)
     segments = [
-        (0, int(part), "") if part.isdigit() else (1, 0, part)
+        (0, int(digits), "") if (digits := match.group("digits")) else (1, 0, match.group())
         for segment in path.split(".")
-        for part in _NATURAL.findall(segment)
+        for match in _NATURAL.finditer(segment)
     ]
-    return section, segments
+    return section, segments, path
 
 
 #: Digit runs and non-digit runs, so a segment sorts as the alternating sequence it reads as.
-_NATURAL = re.compile(r"\d+|\D+")
+_NATURAL = re.compile(r"(?P<digits>\d+)|\D+")
 
 
 def diff_designs(

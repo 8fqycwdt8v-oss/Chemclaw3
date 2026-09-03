@@ -26,7 +26,6 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Iterable
-from decimal import Decimal
 from typing import Any
 
 from chemclaw.core.chem import InvalidSmilesError, element_counts
@@ -186,7 +185,19 @@ def _parses(smiles: str) -> bool:
     return True
 
 
-def _agreement_tolerance(stated_mmol: float) -> float:
+#: How far a stated amount may sit from the one its equivalents imply, as a fraction of the implied
+#: figure. A twentieth: the two are statements of the same fact, and an ordinary two-decimal entry
+#: at a catalyst loading is about 2% off, so 5% clears the rounding a chemist writes with room to
+#: spare while a mis-written digit does not fit inside it.
+_AGREEMENT_FRACTION = 0.05
+
+#: The floor under that fraction, in mmol — half a unit in the third decimal, which is the precision
+#: a mmol column realistically carries. Without it a sub-milligram line has a tolerance smaller than
+#: the column it is written in, and every correctly-rounded trace charge is a blocker.
+_AGREEMENT_FLOOR_MMOL = 0.0005
+
+
+def _agreement_tolerance(implied_mmol: float) -> float:
     """How far a stated amount may sit from the one its equivalents imply.
 
     **A flat 2% of the line's own figure blocked ordinarily-rounded catalyst lines.** The tolerance
@@ -196,18 +207,23 @@ def _agreement_tolerance(stated_mmol: float) -> float:
     scales and loadings, 4 of 18 correct tables were refused, every one of them a normal catalyst or
     ligand line at a non-round limiting scale.
 
-    The fix is to allow the rounding that is actually written and nothing more. `Decimal(repr(…))`
-    recovers the precision of the figure as it was typed (`0.07` → two decimals → half a unit in the
-    last place is 0.005), `normalize` keeps a whole number whole through JSON's `68` → `68.0`, and
-    the exponent is clamped at 0 so a round `100` buys half a unit rather than fifty. The 2% term
-    stays for the large lines, where the written precision is coarser than the real agreement.
+    **The first fix for that read the precision back out of the written figure, and it cannot be
+    read back out of a float.** `Decimal(repr(0.10))` is `Decimal('0.1')` — a Python float carries
+    no trailing zero — so "the precision of the figure as it was typed" was recovered correctly for
+    `0.07` and wrong by a factor of ten for every figure whose last typed digit is `0`. Measured
+    against the function's own worked example: a catalyst written `0.10` against an implied `0.0685`
+    is 46% out, and it **passed**, on a tolerance of 0.05 mmol. The docstring asserted that same
+    line fails "six times the slack". A blocker that fails open in exactly the regime it was written
+    for is worse than the false refusal it replaced, because nothing on the page says so.
 
-    A gross error still fails: a catalyst written `0.10` against an implied `0.0685` is 0.0315 out,
-    six times the slack, and a factor-of-ten slip is never close.
+    So the tolerance is derived from the *implied* amount and from nothing the chemist typed: a
+    twentieth of it, floored at half a unit in the third decimal. Neither term can be moved by how a
+    figure was rounded, which is what makes the rule the same rule for every line in the table.
+    `tests/test_protocol_checks.py::test_the_agreement_tolerance_over_the_scales_a_bench_uses`
+    is the sweep — fifteen tables across four scales and five loadings, each with the verdict a
+    chemist would give.
     """
-    exponent = min(int(Decimal(repr(stated_mmol)).normalize().as_tuple().exponent), 0)
-    rounding_slack = 0.5 * 10.0**exponent
-    return max(0.02 * abs(stated_mmol), rounding_slack)
+    return max(_AGREEMENT_FRACTION * abs(implied_mmol), _AGREEMENT_FLOOR_MMOL)
 
 
 def charge_is_consistent(design: ExperimentDesign) -> ProtocolCheck:
@@ -246,22 +262,26 @@ def charge_is_consistent(design: ExperimentDesign) -> ProtocolCheck:
             "weight",
         )
     # Equivalents and amounts are two statements of the same fact, and a table where they disagree
-    # is one a chemist will weigh out wrong. The tolerance is 2% of the line's own figure **or the
-    # rounding a chemist actually wrote, whichever is larger** — see `_agreement_tolerance`.
+    # is one a chemist will weigh out wrong. The tolerance is a twentieth of the *implied* figure,
+    # floored — derived from nothing the chemist typed, see `_agreement_tolerance`.
     disagreements = [
         f"{line.component!r}: {line.equivalents} eq implies "
         f"{line.equivalents * reference.amount_mmol:.4g} mmol, table says {line.amount_mmol:.4g}"
         for line in lines
         if line.equivalents is not None
         and line.amount_mmol is not None
+        # The relative slack on the comparison itself, not on the chemistry: `0.075 * 1.0` is
+        # 0.07500000000000001 in binary, so a table sitting exactly on its tolerance was refused by
+        # a rounding error in the check rather than by anything in the table.
         and abs(line.equivalents * reference.amount_mmol - line.amount_mmol)
-        > _agreement_tolerance(line.amount_mmol)
+        > _agreement_tolerance(line.equivalents * reference.amount_mmol) * (1 + 1e-9)
     ]
     if disagreements:
         return _fail(
             "charge_is_consistent",
             "blocker",
-            "equivalents and amounts disagree by more than 2%: " + "; ".join(disagreements),
+            "equivalents and amounts disagree by more than "
+            f"{_AGREEMENT_FRACTION:.0%}: " + "; ".join(disagreements),
         )
     return _ok(
         "charge_is_consistent",

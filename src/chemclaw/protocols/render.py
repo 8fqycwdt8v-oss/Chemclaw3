@@ -21,6 +21,7 @@ a note body. It is not what a tool returns.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import NamedTuple
 
@@ -35,6 +36,7 @@ from chemclaw.protocols.models import (
     ProtocolArm,
     ProtocolCheck,
     ProtocolStep,
+    Setpoints,
     Well,
 )
 
@@ -168,6 +170,37 @@ def _arm_row(design: ExperimentDesign, arm: ProtocolArm, wells: dict[str, Well])
     )
 
 
+def shared_setpoints(design: ExperimentDesign) -> Setpoints:
+    """The conditions **every arm agrees on**, each arm resolved against the shared body first.
+
+    `## Conditions` used to render `design.base.setpoints` — what the body happens to hold, which
+    is not what anybody runs the moment an arm overrides it. The run sheet is the other half and
+    carries a column only when the arms *disagree*, so a field every arm overrode to the same value
+    fell through both: measured on three arms all set to `N2` over a body reading `air`, the page
+    said "Atmosphere: air", the run sheet had no atmosphere column, and the atmosphere the design is
+    actually run under appeared nowhere on a document a chemist runs from.
+
+    A field the arms disagree about comes back at its default, so the caller drops it and the run
+    sheet's own rule shows it per row. That makes the two sections complementary by construction:
+    every stated field is in exactly one of them, and neither list has to be kept in step with the
+    other by hand.
+
+    With no arms there is nothing to resolve and the body *is* the answer, which is the intake and
+    the bodies-only protocol.
+    """
+    if not design.arms:
+        return design.base.setpoints
+    resolved = [design.setpoints_for(arm) for arm in design.arms]
+    first, rest = resolved[0], resolved[1:]
+    return Setpoints.model_validate(
+        {
+            field: value
+            for field, value in first
+            if all(getattr(other, field) == value for other in rest)
+        }
+    )
+
+
 def run_sheet_rows(design: ExperimentDesign) -> list[ArmRow]:
     """Every arm as a row, in run order when there is a layout and in arm order otherwise."""
     wells = {well.arm_id: well for well in (design.layout.wells if design.layout else [])}
@@ -257,15 +290,33 @@ def _cell(text: str) -> str:
     return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
 
+#: Backtick runs, so a code span can be fenced longer than anything inside it.
+_BACKTICKS = re.compile(r"`+")
+
+#: Every character that opens a Markdown block when it starts a line. `` ` `` and `~` open a fenced
+#: code block that swallows the rest of the document; `<` opens a raw HTML block; the other six are
+#: headings, quotes, tables, lists and setext rules.
+_BLOCK_OPENERS = frozenset("#>|-*+=~`<")
+
+#: A leading ordered-list marker. CommonMark takes up to nine digits before the `.` or `)`.
+_ORDERED_MARKER = re.compile(r"^(\d{1,9})([.)])")
+
+
 def _code(value: str) -> str:
-    """One identifier as an inline code span a backtick inside it cannot close.
+    """One identifier as an inline code span no run of backticks inside it can close.
 
     An `EvidenceRef.ref` is free text and a backtick in it closed the span early, so the rest of the
-    citation rendered as prose. A doubled fence with padding spaces is the GFM form that carries a
-    literal backtick.
+    citation rendered as prose. **A fixed doubled fence only moved the problem one backtick along**:
+    CommonMark closes a span at the next run of *exactly* the opening length, so `` a``b `` written
+    between two doubled fences closes on its own inner pair and renders `a` as code with `b` beside
+    it as prose. The fence is therefore one longer than the longest run the value contains, and the
+    padding spaces are what let the content itself begin or end with a backtick.
     """
     flat = " ".join(value.split())
-    return f"`` {flat} ``" if "`" in flat else f"`{flat}`"
+    if "`" not in flat:
+        return f"`{flat}`"
+    fence = "`" * (max(len(run) for run in _BACKTICKS.findall(flat)) + 1)
+    return f"{fence} {flat} {fence}"
 
 
 def _text(value: str) -> str:
@@ -280,11 +331,19 @@ def _text(value: str) -> str:
 
     Both come from the same two characters: a newline that ends the block, and a leading marker that
     starts a new one. Line breaks collapse to spaces (a bullet or a numbered step is one line by
-    construction), and a leading `#`, `>`, `|`, `-`, `*`, `+` or `=` is escaped so it renders as
-    itself. The text a chemist typed is preserved; only its power to open a section is not.
+    construction) and a leading block marker is escaped so it renders as itself. The text a chemist
+    typed is preserved; only its power to open a section is not.
+
+    **The first marker set was the ones a reader thinks of, and it left four openers out.** A
+    leading `` ` `` or `~` opens a *fenced code block*, which swallows every following line of the
+    document until it closes; a leading `<` opens a raw HTML block, which GFM renders; and a
+    leading `1.` opens an ordered list. Each is a block opener on the same terms as `#`, and three
+    of the four do more damage than the heading the set was written for.
     """
     flat = " ".join(value.split())
-    return f"\\{flat}" if flat[:1] in {"#", ">", "|", "-", "*", "+", "="} else flat
+    if flat[:1] in _BLOCK_OPENERS:
+        return f"\\{flat}"
+    return _ORDERED_MARKER.sub(r"\1\\\2", flat, count=1)
 
 
 def _table(headers: list[str], rows: list[list[str]]) -> str:
@@ -361,28 +420,37 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
     the shared body once and the arms as a table, rather than N protocols.
     """
     request = design.request
-    parts: list[str] = [f"# {request.title}", "", f"**Goal.** {request.goal}", ""]
+    # **Every one of these is browser-supplied free text and none of them was escaped.** Measured,
+    # a title reading "T\n\n## Forged" put a second `## Forged` section on the page and a goal did
+    # it again — `_text` was applied to the steps, the hazards and the waste and to nothing above
+    # them, which is the half of the document a chemist reads first.
+    parts: list[str] = [f"# {_text(request.title)}", "", f"**Goal.** {_text(request.goal)}", ""]
     if request.reaction_smiles:
-        parts += [f"**Transformation.** `{request.reaction_smiles}`", ""]
+        # `_code`, not a bare span: a backtick in a SMILES closes the span and spills the rest.
+        parts += [f"**Transformation.** {_code(request.reaction_smiles)}", ""]
     if request.objectives:
-        parts += ["**Objectives.** " + ", ".join(request.objectives), ""]
+        parts += ["**Objectives.** " + ", ".join(_text(o) for o in request.objectives), ""]
     if request.forbidden:
         # The chemist's hard exclusions, whose violation is a blocker — and which the document a
         # chemist reads did not mention.
-        parts += ["**Ruled out.** " + ", ".join(request.forbidden), ""]
+        parts += ["**Ruled out.** " + ", ".join(_text(f) for f in request.forbidden), ""]
 
-    # **The conditions of the arm, when there is exactly one.** `## Conditions` rendered
-    # `base.setpoints` unconditionally and the run sheet was gated on `len(rows) > 1 or factors`,
-    # so a single experiment whose arm overrode the body got neither: the document said 80 °C /
-    # 16 h / dioxane for an arm the design runs at 120 °C / 2 h / toluene, with every blocker
-    # passing and nothing on the page hinting a second set of conditions existed. This is a
-    # document a chemist runs from.
-    # One arm is one arm whether or not the design declares factors. Gating this on `not
-    # design.factors` restored the exact bug it was written for: a one-arm design with one factor
-    # rendered `## Conditions` from the body while its run sheet showed the arm's own — the page
-    # stating two different sets of conditions for the one experiment it describes.
+    # **The conditions the arms actually run at, not the ones the body happens to hold.**
+    # `## Conditions` rendered `base.setpoints` unconditionally and the run sheet carries a column
+    # only when the arms disagree, so a value every arm overrode to the *same* thing appeared in
+    # neither place while the body's own value printed as fact. Measured on three arms all set to
+    # N2 over a body reading `air`: the page said "Atmosphere: air", the run sheet had no
+    # atmosphere column, and nothing anywhere named the atmosphere the design is run under.
+    #
+    # The one-arm case was the first half of this and is now the same rule: a single experiment
+    # whose arm overrode the body got neither the body's value nor a run sheet, so the document
+    # said 80 °C / 16 h / dioxane for an arm the design runs at 120 °C / 2 h / toluene.
+    #
+    # So this section shows what every arm agrees on, resolved; a field they disagree about is
+    # dropped here and the run sheet's own rule picks it up. The two are complementary by
+    # construction rather than by two lists somebody keeps in step.
     solo = design.arms[0] if len(design.arms) == 1 else None
-    points = design.setpoints_for(solo) if solo is not None else design.base.setpoints
+    points = shared_setpoints(design)
     stated = [
         (label, value)
         for label, value in (
@@ -391,14 +459,14 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
                 f"{_number(points.temperature_c)} °C" if points.temperature_c is not None else "",
             ),
             ("Time", f"{_number(points.time_h)} h" if points.time_h is not None else ""),
-            ("Solvent", points.solvent),
+            ("Solvent", _text(points.solvent)),
             (
                 "Concentration",
                 f"{_number(points.concentration_molar)} M"
                 if points.concentration_molar is not None
                 else "",
             ),
-            ("Atmosphere", points.atmosphere),
+            ("Atmosphere", _text(points.atmosphere)),
             (
                 "Pressure",
                 f"{_number(points.pressure_bar)} bar" if points.pressure_bar is not None else "",
@@ -412,8 +480,13 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
     if stated:
         heading = "## Conditions" if solo is None else f"## Conditions ({solo.arm_id})"
         parts += [heading, "", *[f"- **{k}:** {v}" for k, v in stated], ""]
+        # A reader must not take this list for the whole of the conditions when it is not. Said
+        # only when a field was actually dropped, so the ordinary page carries no caveat about a
+        # case it is not in.
+        if any(design.setpoints_for(arm) != points for arm in design.arms):
+            parts += ["*The conditions every arm shares; the run sheet carries what varies.*", ""]
         if solo is not None and solo.note:
-            parts += [f"*{solo.note}*", ""]
+            parts += [f"*{_text(solo.note)}*", ""]
 
     charge = _table(
         ["Component", "Role", "Equiv", "mmol", "mg", "mL", "Note"],
@@ -520,10 +593,10 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
             "## Analytics",
             "",
             *[
-                f"- **{a.name}**"
-                + (f" ({a.timing})" if a.timing else "")
-                + (f" — {a.method}" if a.method else "")
-                + (f" — measures {', '.join(a.measures)}" if a.measures else "")
+                f"- **{_text(a.name)}**"
+                + (f" ({_text(a.timing)})" if a.timing else "")
+                + (f" — {_text(a.method)}" if a.method else "")
+                + (f" — measures {', '.join(_text(m) for m in a.measures)}" if a.measures else "")
                 for a in design.base.analytics
             ],
             "",
@@ -575,7 +648,11 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
                 + (f" {_code(ref.ref)}" if ref.ref else "")
                 + (f" via {_code(ref.tool)}" if ref.tool else "")
                 + f" — {_text(ref.summary)}"
-                + (f" (supports {', '.join(ref.supports)})" if ref.supports else "")
+                + (
+                    f" (supports {', '.join(_text(sup) for sup in ref.supports)})"
+                    if ref.supports
+                    else ""
+                )
                 for ref in design.evidence
             ],
             "",
