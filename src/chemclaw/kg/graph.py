@@ -541,7 +541,16 @@ def _newest_note_mtime(notes_dir: Path) -> float | None:
 
     **Deliberately not under `_corpus_lock`.** A scrape must never queue behind a cold
     `_parse_notes` of the same tree — 198 ms for 2k notes, seconds under concurrency. Two scrapes
-    racing a cold entry both scan, which costs one duplicated stat sweep and nothing else.
+    racing a cold entry both scan, which costs one duplicated stat sweep — **and the write-back is
+    ordered by `scanned_at`, not by finish order, which is what makes that duplicated sweep free of
+    consequence rather than merely cheap.** Two scans can finish in either order: one that started
+    first can be the slower of the two (scheduling, disk contention) and land its write *after* one
+    that started later and already finished. A plain last-writer-wins store would then keep the
+    earlier, possibly-stale view — silently reverting a fresher answer to a staler one for up to one
+    more `ttl` window, exactly the failure the module comment above `_NEWEST_MTIME` claims costs
+    "nothing else". The guard below is what actually makes that true: a write is applied only when
+    no fresher scan (larger `scanned_at`) is already cached, so whichever scan looked at the corpus
+    *last* is the one whose `newest` survives, regardless of which happened to finish last.
     """
     key = str(notes_dir)
     ttl = settings.knowledge_age_scan_ttl_seconds
@@ -555,7 +564,13 @@ def _newest_note_mtime(notes_dir: Path) -> float | None:
     scanned_at = time.monotonic()
     newest = max((stat.st_mtime for _, stat in scan_notes_dir(notes_dir)), default=None)
     with _CACHE_LOCK:
-        _NEWEST_MTIME[key] = (scanned_at, newest)
+        # Monotonic write: skip if a scan that started at or after this one already wrote its
+        # result. Without this check the write below is last-writer-wins regardless of
+        # `scanned_at`, which is exactly the ordering hole a slower-but-earlier scan exploits to
+        # clobber a fresher concurrent result (see the docstring above).
+        cached = _NEWEST_MTIME.get(key)
+        if cached is None or scanned_at >= cached[0]:
+            _NEWEST_MTIME[key] = (scanned_at, newest)
     return newest
 
 

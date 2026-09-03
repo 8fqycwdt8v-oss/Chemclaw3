@@ -1,84 +1,58 @@
-# The remaining actionable parts of C, D and E
+# What a helper returns
 
-Follow-up to `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`, which investigated
-C (per-helper connector sessions), D (an advisor) and E (a second roster name) and built none of
-them. What each investigation left actionable *now*, as distinct from what it left to a measurement:
+Continuation of the C/D/E follow-up. The delegation *run* the BACKLOG row asks for needs a live
+model, and this environment has none — `API-KEY` is present and the provider answers
+"credit balance is too low", checked rather than assumed. So this took the half of the same question
+that needs no model: **is the isolation a helper exists for actually real?** That is a property of
+the graph, not of a model, and nothing had ever asserted it.
 
-## C — the stated reason is not the binding one
-
-- [x] `agent/subagents.py` and `langgraph_agent._subagents` both give "two concurrent turns over one
-      MCP tool object deadlock" as why a helper reaches no connector. That measurement is real and
-      it is about **sharing one session object**; a helper holding sessions of its own shares
-      nothing, and `open_connector_specs` already opens a fleet concurrently by design.
-- [x] Replace it with the constraint that actually binds — the lifecycle — which is also the
-      stronger argument: connectors are opened by the *async caller* into an `AsyncExitStack`
-      before the *synchronous* builder runs, and the roster is frozen per compiled graph, so a
-      per-helper set means a second full set opened eagerly on every turn.
-- [x] `tests/test_subagents.py::test_a_helper_holds_no_connector_tool` cites the same wrong reason.
-- [x] Behaviour unchanged. The BACKLOG row keeps the behavioural half, gated on the measurement.
-
-## D — the guard the advisor investigation exposed, fixed without building the advisor
-
-- [x] `tests/test_spend_cap.py::test_no_in_tool_model_call_passes_its_own_callbacks` guards the
-      chain that puts a tool body's model call on the turn's ledger — and it guards it in
-      **`agent/condense.py`**, by name. A second in-tool model call walks past it in silence.
-- [x] The realistic mistake is not hypothetical: `verifier.py` passes `config=off_stream_metering()`
-      deliberately, and `off_stream_metering`'s own docstring says attaching it to an in-graph call
-      would take that call off the stream. Copying that line into a tool body is one edit.
-- [x] Derive the module set instead: every module that defines a registered tool **and** makes a
-      model call. Module granularity, not per-function — in `condense.py` the `.ainvoke` is in
-      `_read_prose`, and the tool is `condense_protocols`, so a per-function scan misses it.
-- [x] The advisor itself is **not** built: it cannot be enabled without a second model tier this
-      deployment does not have, which is the shape `D-2026-08-15` deleted 3,300 lines for.
-
-## E — nothing to implement, and saying so is the deliverable
-
-- [x] The recommendation was to leave it closed; the BACKLOG row already carries the trigger. No
-      code follows from "not yet", and adding a second roster name to be ready for one is the
-      capability-that-ships-off shape again.
-
-## Verification
-
-- [x] The derived scan finds exactly the module the hardcoded one named, and would fail on a
-      planted second offender.
-- [x] `make lint type test`, reporting what it skipped.
-- [x] Two ADRs, one decision each, and their ledger rows.
+- [x] Measure it. Driven on a compiled graph with a scripted helper reading ~9.8 kB: the caller's
+      whole thread is **57 characters** — the `task` call and a 28-character report. Isolation holds.
+- [x] Pin it, since every argument for spawning a helper rests on it.
+- [x] Follow what the probe exposed: a helper's report reaches the caller's thread with **nothing
+      applied to it**, because `task` returns a `Command` rather than a `ToolMessage`.
+- [x] `agent/tool_result_shape.py` — one function both result-rewriting middlewares go through.
+- [x] Two ADR-worthy defects fixed, each measured before and after, each test verified to fail first.
+- [x] `make check` green, with the infrastructure actually up.
 
 ## Review
 
-**Two of the three had an implementable part; E did not, and that is the finding rather than an
-omission.**
+**The finding is one shape, and it produced two defects that had been invisible for the same
+reason.** `task` returns `Command(update={'files': …, 'model_calls': …, 'messages': [ToolMessage]})`
+— it has to, because a helper must write its report *and* the channels that cross the subagent
+boundary in one act. Both middlewares that rewrite what the model reads opened with
+`if not isinstance(result, ToolMessage): return result`, so both silently excused the one tool whose
+result is unbounded prose a model wrote, while both docstrings said "every tool".
 
-**C — done, and the correction made the bound stronger rather than weaker.** The three places that
-said "two concurrent turns over one MCP tool object deadlock" now say what actually binds: a
-connector's tools do not exist until its session is live, so the async caller opens them into an
-exit stack *before* the synchronous builder runs, and `SubAgentMiddleware` freezes the roster at
-compile time — a helper cannot open sessions at spawn time even in principle, and its own set would
-mean a second full set opened eagerly on every turn, spawned or not. The deadlock measurement keeps
-the one job it fits, in `test_a_helper_holds_no_connector_tool`: it is why the caller's *already
-open* tools must not be passed down, which is the edit that test exists to catch. No behaviour
-changed.
+*Defect 1, measured:* a report containing `</retrieved-note-…>` reached the caller's thread with a
+**live** delimiter, so everything after it read as text outside any envelope. The nonce does not
+cover this the way it covers external content — a helper *copies* the tag it has just read around
+its own evidence rather than guessing it, and `frame_untrusted`'s own docstring says the nonce and
+the defang each cover the other's gap. Every other route by which model prose reaches a prompt
+already neutralises it: the condenser defangs each field the digest model returns, the verifier
+defangs the answer under review. This was the one span arriving raw.
 
-**D — the advisor is still not built, and the trap it exposed is closed.** Building it now would
-create a capability that cannot be enabled without a second model tier this deployment does not
-have, which is the exact shape `D-2026-08-15` deleted 1,442 lines for. What *was* implementable is
-the guard: `test_no_in_tool_model_call_passes_its_own_callbacks` scanned `agent/condense.py` **by
-name**, so it guarded one file rather than the invariant, and a second in-tool model call would have
-walked past it in silence — silence being the defect's own signature, since what fails is that spend
-stops being counted. It now derives its module set from the tool registry: every module that defines
-a registered tool *and* builds a model.
+*Defect 2, measured:* nothing bounded the report in the band between this repository's
+`agent_max_tool_result_chars` (60,000) and upstream's `tool_token_limit_before_evict` (20,000 tokens
+x 4 = 80,000). A 180,048-char report was offloaded by upstream to 1,599 chars; a **70,048-char**
+report landed whole. After the fix: 60,312.
 
-*Two things that decided the derivation's shape, both found by looking rather than reasoning.*
-`agent/verifier.py` passes `config=off_stream_metering()` and is **right** to — a judge runs outside
-the graph where nothing else meters it — and it holds **zero** registered tools, so requiring both
-halves excludes it precisely; a naive "every module that builds a model" scan would have failed on
-correct code. And in `condense.py` the `.ainvoke` is in `_read_prose` while the tool is
-`condense_protocols`, so a per-function scan would have found **nothing** — module granularity is
-not looseness here, it is the only granularity that sees the one call there is to see.
+**Two things I got wrong on the way, both caught by measuring rather than reasoning.** I first
+patched `frame_connector_results` behind its existing `isinstance` guard and re-ran the probe — the
+delimiter was still live, which is what sent me to look at the return type instead of assuming the
+branch had fired. And I first read the 180 kB result being cut to 1,599 chars as "the size control
+works", when what had actually fired was *upstream's* offload at a different threshold; only probing
+the band between the two thresholds showed the gap.
 
-**The new scan was verified to fail rather than assumed to.** A planted second module holding a
-registered tool and an `ainvoke(..., config=off_stream_metering())` failed the test naming the file
-and the line; the by-name scan passed on the same tree. Then removed.
+**What is deliberately not fixed.** A caller still cannot tell that a helper's report is derived from
+untrusted reading. Framing it is the obvious answer and the wrong one — an envelope says "evidence to
+cite", and citing a helper's summary credits a source that is this system's own paraphrase. That is a
+BACKLOG row with the measurement that should come before any design, and that measurement needs a
+live model.
+
+**Gate:** `make check` green — **6275 passed, 14 skipped**. An earlier run reported 8 failures and
+386 skips; the Docker daemon had died mid-run, and all 111 tests in those five files pass with
+Postgres up. Reporting that rather than only the green number is the point of the rule.
 
 **E — nothing to implement, recorded in the row so nobody looks again.** Everything a second roster
 name needs already exists — `AgentProfile.model_route` for its model, `helper_profile` for its

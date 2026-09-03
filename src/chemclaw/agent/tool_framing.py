@@ -51,6 +51,7 @@ from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 
 from chemclaw.agent.framing import defang, frame_untrusted
+from chemclaw.agent.tool_result_shape import rewritten_tool_messages
 from chemclaw.connectors.transport import SERVED_BY
 
 
@@ -140,12 +141,52 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
 
     An MCP tool never raises (`agent/audit.py::returned_failure`), so `status="error"` is the only
     form a connector failure takes and this branch is the one that sees it.
+
+    **A helper's report is defanged on the same grounds, and it is the third case rather than an
+    exception to the first two** (`D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-
+    thread`). What `task` returns is prose a model wrote after reading evidence that arrived framed,
+    and it lands in the caller's thread as an ordinary tool result — measured, carrying a **live**
+    closing delimiter, because nothing on that path rewrote it. Every other route by which model
+    prose or third-party text reaches a prompt neutralises it: `agent/condense.py` defangs each
+    field the digest model returns, `agent/verifier.py` defangs the answer under review, and
+    retrieved content is framed at its source. This was the one span that arrived raw.
+
+    The nonce does not cover this the way it covers external content. `frame_untrusted`'s own
+    docstring is explicit that "forgery is closed by *defanging* the content, and the nonce and the
+    defang each cover the other's gap" — and a helper is inside the deployment, so it does not have
+    to *guess* the tag: it has just read it, in the envelopes around its own evidence. A report that
+    reproduces the delimiter puts everything after it outside an envelope as far as the caller's
+    model can tell, which is exactly the laundering
+    `D-2026-08-25-a-summarizer-in-the-thread-and-a-condenser-behind-a-tool` declines a summarizer
+    for.
+
+    **Defanged and not framed**, for the reason the error branch above is: an envelope tells the
+    model the span is evidence to weigh and cite, and a helper's summary is neither — citing it
+    would credit a source that is this system's own paraphrase. The delimiter is neutralised; the
+    citation frame is withheld. What the caller still cannot see is *that* the report is derived
+    from untrusted reading, which is an epistemic gap rather than a mechanical one and is a
+    `docs/planning/BACKLOG.md` row.
     """
+    # Imported here rather than at module scope: `chemclaw_agent` reaches this module's siblings
+    # through the agent builder, and the name it derives is a property of the installed package —
+    # cached there, so this costs a dict lookup per call rather than a middleware build.
+    from chemclaw.agent.chemclaw_agent import subagent_tool_names
+
     result = await handler(request)
+
+    def _defanged(message: ToolMessage) -> ToolMessage:
+        return message.model_copy(update={"content": _rewritten(message.content, defang)})
+
+    if request.tool_call["name"] in subagent_tool_names():
+        return rewritten_tool_messages(result, _defanged)
     origin = served_by(request)
-    if not origin or not isinstance(result, ToolMessage):
+    if not origin:
         return result
-    if result.status == "error":
-        return result.model_copy(update={"content": _rewritten(result.content, defang)})
-    framed = _rewritten(result.content, lambda text: frame_untrusted(text, note_id=origin))
-    return result.model_copy(update={"content": framed})
+
+    def _framed(message: ToolMessage) -> ToolMessage:
+        if message.status == "error":
+            return _defanged(message)
+        content = _rewritten(message.content, lambda text: frame_untrusted(text, note_id=origin))
+        return message.model_copy(update={"content": content})
+
+    return rewritten_tool_messages(result, _framed)

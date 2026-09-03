@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 #
 # **This used to be a phrase of the refusal sentence** ("has not been approved yet"), matched as a
 # substring of `message`. That made a *reword* of prose written for chemists silently reclassify
-# every gated turn: `plan_refusals` and `tools_failed` are opposite findings — the control holding
+# every gated turn: a refusal list and `tools_failed` are opposite findings — the control holding
 # versus a fault — and the harness would have started reporting the second for the first, with the
 # tests still green because they pinned the same copy of the same sentence. A field is a
 # classification the producer makes once; a substring is one this reader guesses at.
@@ -202,6 +202,12 @@ class ProbeOutcome(BaseModel):
     # because a plan refusal is not a broken tool — it is the gate working — and folding them
     # together would make a correctly-gated turn indistinguishable from one whose tools fell over.
     plan_refusals: list[str] = Field(default_factory=list)
+    # Every *other* gate's refusals — `dry_run`, `undeclared_write`, `repeat`, `authz`. Separate
+    # from `plan_refusals` because `_plan_gate_findings` asks specifically what the plan gate held,
+    # and separate from `tools_failed` for the reason above: four of the five gates used to be
+    # scored as broken tools, so a dry run of the harness reported every held write as a fault.
+    # `core/turn_signals.RefusalReason` is the closed set; anything in it is the control working.
+    tool_refusals: list[str] = Field(default_factory=list)
 
 
 def load_probes(probe_dir: str | None = None) -> list[Probe]:
@@ -430,8 +436,15 @@ async def run_turn(
                     # event's own discriminator. Recorded on both lists is wrong and this is not
                     # it: a refusal is the gate working, and counting it in `tools_failed` would
                     # make a correctly-gated turn read as a turn whose tools fell over.
-                    if str(event.get("reason", "")) == PLAN_GATE_REASON:
+                    reason = str(event.get("reason") or "")
+                    if reason == PLAN_GATE_REASON:
                         outcome.plan_refusals.append(tool)
+                    elif reason:
+                        # **Any** reason means a gate decided, not that a tool broke. This branch
+                        # used to be absent, so `dry_run`, `undeclared_write`, `repeat` and `authz`
+                        # all landed in `tools_failed` and set `failed_loudly` — the same defect
+                        # one layer out, for four of the five gates the wire can name.
+                        outcome.tool_refusals.append(tool)
                     else:
                         outcome.tools_failed.append(tool)
                 elif kind == "capability_degraded":

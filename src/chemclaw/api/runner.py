@@ -940,31 +940,41 @@ def _empty_answer_event(
     **A refusal is not a failure, and the first fix said it was.**
     `D-2026-08-29-a-discarded-call-is-not-a-lost-call` replaced the advice with
     `tool_failures + tool_refusals` rendered as "N tool call(s) failed" — so a dry run the chemist
-    themselves switched on reported three failures, while `_TurnLedger.tool_refusals` one screen
-    above says in as many words that a refusal is "the control working, which must not be read as
-    a failure". That is what
-    `D-2026-08-28-a-refusal-the-wire-cannot-name-is-a-fault-to-everyone-downstream` exists to stop,
-    reintroduced one layer further out. They are counted apart here and lead to different next
-    steps, because they *are* different: a fault is something to read, a refusal something to
+    themselves switched on reported three failures, while `TurnCost.tool_refusals` says in as many
+    words that a refusal is "the control working, which must not be read as a failure". That is
+    what `D-2026-08-28-a-refusal-the-wire-cannot-name-is-a-fault-to-everyone-downstream` exists to
+    stop, reintroduced one layer further out. They are counted apart here and lead to different
+    next steps, because they *are* different: a fault is something to read, a refusal something to
     approve.
 
-    **What happened is always stated; only the advice branches.** The earlier form replaced the
-    narrower-question line entirely, so one failure among twenty-nine calls deleted the only useful
-    next step on the exact du-03 shape this docstring is about. The counts are their own clause now
-    and the remedy follows from what dominates.
+    **And the first count is *attempts*, which is why it does not say "ran".** `called_tools` is a
+    view of the calls this turn *announced* — its own docstring says so, and `_acted` one screen
+    below relies on it — so a refused call is in it. Printing that total as "ran" beside "3 refused
+    by a gate" reported six intents where there were three, and told a chemist three calls had run
+    that a gate had stopped before the body. The subsets are named as subsets.
+
+    **What happened is always stated; only the advice branches, and it branches by precedence
+    rather than by size.** The earlier form replaced the narrower-question line entirely, so one
+    failure among twenty-nine calls deleted the only useful next step on the exact du-03 shape this
+    docstring is about. The counts are their own clause now, and a fault takes the remedy whenever
+    there is one — deliberately, because one fault among twenty-nine refusals is still the thing to
+    read first. (This paragraph said the remedy "follows from what dominates", which describes a
+    comparison the code does not make.)
     """
     if ledger.answer_text.strip():
         return None
     METRICS.increment("chemclaw_turn_empty_answers_total")
-    ran, failed, refused = len(trace.called_tools), ledger.tool_failures, ledger.tool_refusals
+    attempted = len(trace.called_tools)
+    failed, refused = ledger.tool_failures, ledger.tool_refusals
     logger.warning(
-        "turn for session %s ended with no answer text: %d tool call(s) ran, %d failed, %d refused",
+        "turn for session %s ended with no answer text: %d tool call(s) attempted, %d failed, "
+        "%d refused",
         session.session_id,
-        ran,
+        attempted,
         failed,
         refused,
     )
-    counts = f"{ran} tool call(s) ran"
+    counts = f"{attempted} tool call(s) attempted"
     if failed:
         counts += f", {failed} failed"
     if refused:

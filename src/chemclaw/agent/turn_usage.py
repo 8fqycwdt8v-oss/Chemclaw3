@@ -215,9 +215,8 @@ def metered_turn_tokens() -> int:
     **The turn's whole bill, which is a wider number than any one reader assembles.** The runner
     hands one `TurnUsage` to both `set_turn_usage` and `api/graph_stream.graph_events`, so this
     object accumulates every chunk the stream carries — including the calls a *tool body* makes
-    (`agent/condense.py` fans out one per protocol) and both attempts of a model call that
-    `model_calls.RepairInvalidToolCalls` retried. Neither of those passes through
-    `wrap_model_call`, so neither is visible to a middleware counting model responses.
+    (`agent/condense.py` fans out one per protocol). Those do not pass through `wrap_model_call`,
+    so they are invisible to a middleware counting model responses.
 
     `agent/spend_cap.py` reads it for exactly that reason. It is a *floor* on the turn's spend
     rather than a live-exact figure — the stream accumulates as chunks arrive, so a call still in
