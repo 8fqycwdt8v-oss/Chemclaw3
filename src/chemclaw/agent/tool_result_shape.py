@@ -52,7 +52,7 @@ def rewritten_tool_messages(result: Any, rewrite: Callable[[ToolMessage], ToolMe
     `Command._update_as_tuples` also accepts a sequence of `(key, value)` pairs and an annotated
     object, and a `Command` in either of those forms passes through this function with **both**
     controls unapplied — which is the defect this module exists to close, one shape further out.
-    That is deliberate rather than overlooked: upstream's `_create_task_tool` builds a dict, and so
+    That is deliberate rather than overlooked: upstream's `_build_task_tool` builds a dict, and so
     does upstream's own `FilesystemMiddleware._intercept_large_tool_result`, so handling a form
     nothing produces would be a branch no test could reach honestly. What makes it safe is that the
     assumption is *asserted* rather than believed — `tests/test_upstream_surface.py` fails if the

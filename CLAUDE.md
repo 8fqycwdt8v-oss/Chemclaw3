@@ -134,10 +134,13 @@ floor paragraph no longer states a current number. Two assumptions that were hel
 asserted are now in `tests/test_upstream_surface.py` — `rewritten_tool_messages` rewrites only a
 *dict-shaped* `Command.update`, and the suppression of upstream's unguarded `general-purpose`
 subagent was checked against a phrase copied out of upstream's description rather than against
-upstream's own constant. And one explanation everybody reached for is wrong: an oversized connector
-result stays **one well-formed envelope** because `bound_tool_results` keeps head *and* tail, not
-because it runs inside the framer — the test written to assert the ordering passed with the ordering
-swapped, which is the whole reason to run a test you believe you know the answer to.
+upstream's own constant. A second review then caught this paragraph's own first
+attempt at that: an oversized connector result stays **one well-formed envelope** for two
+independent reasons — in the shipped order `bound_tool_results` cuts the raw payload and the framer
+wraps it afterwards, and if the two were swapped the head-and-tail cut would keep the closing
+delimiter anyway. Only swapped-order-plus-head-only fails. Reading "it passes with the order
+swapped" as "the order is not the reason" is the inference two sufficient causes defeat, and it
+shipped here before a reviewer ran the fourth arm.
 
 **That sweep missed one, and 2026-08-26 finished it**
 (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`): `audit_events.agent` was

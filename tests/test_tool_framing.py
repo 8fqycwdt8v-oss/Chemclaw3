@@ -343,16 +343,23 @@ def test_an_oversized_connector_result_is_still_one_well_formed_envelope(probe: 
     model an envelope opened and never closed, everything after it reading as this system's own
     prose.
 
-    **It cannot, and the reason is not the middleware order.** That was the obvious answer and it is
-    wrong: measured by swapping the two entries in `build_langgraph_agent`'s list, this test passes
-    either way. What closes the envelope is that `bound_tool_results` cuts **head and tail**, so the
-    closing delimiter is inside the tail it keeps whether it runs before framing or after. The
-    ordering comment in that module is about which text gets defanged, not about this.
+    **It cannot, and two independent mechanisms each suffice — which is what makes this easy to
+    explain wrongly.** In the shipped order `bound_tool_results` is *inner*, so it cuts the raw
+    payload and `frame_connector_results` wraps the already-cut text afterwards: the delimiters are
+    added last and truncation never sees them. If the two were swapped, framing would go first and
+    the cut could land between the tags — except that `bound_tool_results` keeps **head and tail**,
+    so the closing delimiter survives in the tail.
 
-    So what this test is a ratchet against is the *truncation strategy*: a change from head-and-tail
-    to head-only, or a notice appended past the closing delimiter, breaks it. `_unwrapped` fails on
-    anything that is not exactly one well-formed envelope, and the payload carries a forged
-    delimiter besides, so the test says the envelope survived *and* the payload cannot close it.
+    Measured across all four arms (order x strategy), only *swapped order with a head-only cut*
+    fails. An earlier version of this docstring drew the opposite conclusion from that same
+    observation — "it passes with the order swapped, therefore the order is not the reason" — which
+    is exactly the inference two sufficient causes defeat. In the configuration that ships, the
+    order is the reason.
+
+    So this is a ratchet against changing *both*: reorder the two middlewares and the head-and-tail
+    cut is what holds; keep the order and the strategy is free. `_unwrapped` fails on anything that
+    is not exactly one well-formed envelope, and the payload carries a forged delimiter besides, so
+    the test says the envelope survived *and* the payload cannot close it.
     """
     # Past the ceiling and no further: this goes through a real socket, and a payload sized
     # from the ceiling itself rather than a multiple of it keeps the test honest if a

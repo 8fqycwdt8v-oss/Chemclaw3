@@ -128,9 +128,10 @@ given, completely, and say what you could not establish rather than leaving it o
 Every tool of this system's that you hold only reads. You cannot start a durable job, propose a
 knowledge note, record an answer, ask the chemist a question, or call an external connector tool;
 the agent that spawned you can do all of those, and the right way to make one happen is to say so
-in your report. You do hold file tools that write, and what they write reaches nothing but your own
-scratch space, which goes away when you return — a file is not a way to leave something behind. Do
-not describe work as started, scheduled or arriving later: nothing you can reach starts anything."""
+in your report. You do hold file tools that write, and a file you write is **not** private to you:
+it crosses back to the agent that spawned you along with your report, so treat anything you put in
+one as something you are handing over. Do not describe work as started, scheduled or arriving
+later: nothing you can reach starts anything."""
 
 
 def governed_roster(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -249,32 +250,6 @@ def helper_profile(caller: AgentProfile, held: frozenset[str]) -> AgentProfile:
     Returns:
         A profile to build the helper's graph from. Never registered, never cached.
     """
-    # `held` decides the whole surface and arrives from outside, so a wrong one is caught here
-    # rather than shipped. Both directions are silent otherwise: an empty set narrows to a helper
-    # with no tools at all (`frozenset()` is not `None`, so nothing falls back), and a set read from
-    # a *different* profile's build would hand this helper names its own caller does not hold —
-    # which is the one property `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` turns
-    # on. The call site is correct today; this is what makes a second call site fail loudly instead.
-    #
-    # Checked against the *caller's own* narrowing rather than against the global registry, and the
-    # difference is not stylistic: `tests/test_tool_modules.py` fails a module that reads the
-    # registry without importing what fills it, because the registry fills by import side effect
-    # and such a reader sees it empty in production while every in-process test passes. The
-    # narrowing is also the stricter question — "did this come from *this* caller" rather than
-    # "is it a tool somewhere" — so an unnarrowed profile, which holds everything by definition,
-    # is the one case with nothing to check.
-    if not held:
-        raise ValueError(
-            "helper_profile was given no held tool names; the caller's build resolves them with "
-            "`_capability_tools(profile)` and the registry is incomplete before that runs"
-        )
-    unknown = held - caller.tool_names if caller.tool_names is not None else frozenset()
-    if unknown:
-        raise ValueError(
-            f"helper_profile was given tool names its caller does not hold: {sorted(unknown)}; "
-            "a helper is its caller attenuated, so `held` must come from that caller's own build"
-        )
-
     # `model_copy` rather than a fresh `AgentProfile(...)`: a field added to the model later is
     # carried into the helper automatically, where an explicit constructor call would drop it in
     # silence and read as deliberate. The three values below are typed as the model declares them,

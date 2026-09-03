@@ -172,6 +172,24 @@ topic).
 
 ## 4 — Operating it
 
+- [ ] **A helper's scratch file crosses to its caller unframed, and a `read_file` never defangs it**
+      — [H], opened by `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`, which measured
+      the crossing while fact-checking a sentence that denied it.
+      `task` returns a `Command`, and upstream copies every helper state key except `messages`,
+      `todos` and `structured_response` into the caller's update — so `files` crosses. Measured:
+      the helper's `/scratch/evidence.md` arrives in the caller's `files` channel carrying 9,937
+      characters of what the helper read. The report itself is now defanged; **the file beside it is
+      not**, and the caller's `read_file` is an in-process tool, so `served_by` returns `""` and
+      `frame_connector_results` neither frames nor defangs it. A helper that reads enveloped
+      evidence can therefore copy a live delimiter into a file and have its caller read it back
+      outside any envelope — the exact laundering the report fix closed, still open on the sibling
+      key of the same object. Two things to decide before writing code: whether a helper should be
+      able to write a file the caller reads at all (the isolation argument says the report is the
+      channel), and whether the fix belongs in `frame_connector_results` (which would have to stop
+      keying on connector origin) or in the file backend. Do not simply frame it — an envelope says
+      "evidence to cite", and this is the system's own scratch space, which is the same trap the
+      row below is about.
+
 - [ ] **A caller cannot tell that a helper's report is derived from untrusted reading**
       — [M], opened by `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`, which
       closed the mechanical half and deliberately left this open rather than silent.

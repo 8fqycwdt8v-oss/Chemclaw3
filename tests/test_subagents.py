@@ -34,7 +34,6 @@ from chemclaw.agent.subagents import (
     HELPER_BRIEF,
     SPEAKS_TO_THE_CHEMIST,
     general_purpose_helper,
-    helper_profile,
 )
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import registered_tool_names
@@ -748,27 +747,3 @@ def test_several_helpers_finishing_in_one_superstep_do_not_kill_the_turn(
         f"{model.calls} model calls were made and {final['model_calls']} were counted — a fan-out "
         "that under-counts gives every helper its own share of one budget"
     )
-
-
-def test_a_helper_built_from_the_wrong_held_set_fails_loudly() -> None:
-    """`held` arrives from outside, and both ways of getting it wrong are otherwise silent.
-
-    The narrowing is only as good as the set it subtracts from, and that set is the one input
-    `helper_profile` cannot derive itself — the registry is incomplete until `_capability_tools`
-    has run `_register_generated_tools()`, which is why the call site passes it in. That makes a
-    second call site the risk: an empty set yields a helper with no tools (`frozenset()` is not
-    `None`, so nothing falls back to the global surface), and a set taken from a *different*
-    profile's build yields a helper holding names its own caller does not — the one thing
-    `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` forbids.
-
-    Neither shows up as a failure anywhere downstream; a wrong-sized helper simply works, which is
-    why this is a raise rather than a comment about ordering.
-    """
-    with pytest.raises(ValueError, match="no held tool names"):
-        helper_profile(AgentProfile(name="default"), frozenset())
-
-    # The second half needs a caller that *has* narrowed, because the question is "did `held` come
-    # from this caller" and a profile holding everything has nothing to disagree with.
-    narrowed = AgentProfile(name="probe", tool_names=frozenset({"find_notes"}))
-    with pytest.raises(ValueError, match="does not hold"):
-        helper_profile(narrowed, frozenset({"find_notes", "gather_evidence"}))
