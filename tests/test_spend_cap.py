@@ -143,6 +143,32 @@ def test_a_turn_over_its_budget_is_stopped_and_says_so(
     assert turn_billed_tokens() == 1_200
 
 
+def test_the_call_count_is_what_the_turn_authorised_not_what_it_made(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`model_calls` counts authorisations, and it says so — because it cannot count completions.
+
+    `enforce_loop_cap` increments in `before_model`, which is the one hook no later middleware can
+    skip and therefore the only safe place for the number a cap is compared against
+    (`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`). The consequence is
+    that a *later* `before_model` hook ending the run — this cap, ordered right after it — leaves
+    the increment for a call that never happened: two calls made, three counted.
+
+    Conservative in the direction that matters (a cap can only bind early) and inert for the guard
+    itself, which compares the same number it wrote. It is pinned because the field is deliberately
+    non-private so a caller may read it off the finished run, and "how many model calls this turn
+    made" was what the declaration promised.
+    """
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 1_000)
+    graph = build_langgraph_agent(model=_Model(messages=iter(_billing(600, 600, 600))))
+
+    result = asyncio.run(graph.ainvoke(turn_input("hello")))
+
+    assert spend_capped(result)
+    assert result["billed_tokens"] == 1_200, "two calls were billed"
+    assert result["model_calls"] == 3, "the third was authorised and never made"
+
+
 def test_the_partial_answer_still_goes_out(monkeypatch: pytest.MonkeyPatch) -> None:
     """A capped turn delivers what it managed, rather than raising it away.
 

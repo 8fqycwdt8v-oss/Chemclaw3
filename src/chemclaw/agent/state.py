@@ -152,8 +152,19 @@ class ChemclawState(PlanningState):
     therefore unreadable by the time anyone asks, which is why neither field below delegates to it.
     """
 
-    # How many model calls *this turn* has made — the runaway guard's counter
-    # (`agent/loop_cap.py`). A field rather than a framework internal, and that survived an attempt
+    # How many model calls *this turn* has authorised — the runaway guard's counter
+    # (`agent/loop_cap.py`). **Authorised, not made**, and the difference is one call: the increment
+    # is written in `before_model`, which is where it has to be (see below), so a *later*
+    # `before_model` hook that ends the run — `spend_cap.enforce_spend_cap`, ordered immediately
+    # after — leaves behind the increment for a call that never happened. Measured on the compiled
+    # graph: a turn stopped by the spend cap after four real calls returns 5.
+    #
+    # Inert for the guard itself, which compares the same number it wrote, and conservative in the
+    # only direction that matters — a cap can bind one call early, never one call late. It is
+    # written down because the field is deliberately non-private so a caller may read it off the
+    # finished run, and `tests/test_spend_cap.py` pins it so the claim cannot drift back.
+    #
+    # A field rather than a framework internal, and that survived an attempt
     # to delegate it: `ModelCallLimitMiddleware` counts in `after_model`, which any middleware
     # declaring `after_model` with a `jump_to` runs *before* and short-circuits — measured, the
     # challenge gate's revision jump skipped the increment and the cap let one extra model call
