@@ -1,60 +1,78 @@
-# Deployment-readiness review and hardening — 2026-09-04
+# Knowledge capture, storage and retrieval — deep review and fixes
 
-Branch `claude/code-review-hardening-lchtz5`. Goal: prove the tree is deployable, robust and
-maintainable, and fix what proves it is not. Every finding is a claim about a commit, so every
-finding carries a command and its output or it does not ship.
+Six fresh-context reviews (capture coverage, PR-gate/graph, storage, retrieval mechanics, the
+agent-side loop, measurement) against a live Postgres/Temporal stack. What they found is not a
+missing feature: **every mechanism in this loop exists and most of them are well argued. The loop
+does not close because the pieces disagree with each other, and nothing measured the disagreement.**
 
-## Method
+The one-line answer to the question asked: *data is captured automatically; conclusions are not —
+and what is captured is retrieved by a ranker that sorts alphabetically and reports no truncation.*
 
-Fifteen fresh-context reviews, each with its own scope and no shared belief about the tree, over a
-running stack (`dockerd` + `make up` + `make db-migrate`) so the Postgres-backed half of the suite
-was evidence rather than a skip. Six cross-cutting sweeps, eight per-package reads, one asking
-whether the suite can fail. Then nine fixers on disjoint file territories, each required to
-reproduce a finding at `HEAD` before fixing it and to write the failing test first.
+## Tier 1 — retrieval returns the right thing
 
-## Steps
+- [ ] 1. Graph leg has no relevance signal. `retrievers.py:246` sorts `(-coverage, -confidence, id)`
+      and `confidence` defaults to 0.5 for every note, so on tied coverage the ranking is
+      **alphabetical**. Measured: 5,000 notes match, 8 returned, ids `reaction-00000..00002`.
+- [ ] 2. That cut is invisible. `total_before_cap` is computed after the merge, so `gather_evidence`
+      reports `truncated_by=None` while 4,992 matching notes were dropped inside the retriever.
+      The two caps wired to `truncated_by` cannot bite (max 24-34 chunks against a cap of 40).
+- [ ] 3. One oversized note bricks both derived legs, silently, forever. `vector_index.py:674`
+      embeds `search_text(note)` whole with no guard and upserts the whole changed set after one
+      `embed_texts`. Measured: a 989 kB note raises, notes indexed after the failure = 0. The
+      tsvector is written in the same INSERT, so the lexical leg freezes too.
+- [ ] 4. A ranked evidence list is cut head-and-tail by bytes. Measured at batch width 4 the sweep
+      keeps ranks 0-3 and 27-29 — it retains the three *worst*-ranked chunks and drops the middle.
+- [x] 5. The lexical reference and Postgres disagree on chemistry numerics. `-78 °C` indexes as the
+      lexeme `-78`, so a query of `78` misses it and `-78` reads as "exclude 78": a cryogenic
+      temperature was reachable by no query at all. Decimals diverge the other way. Fixed by
+      `normalize_search_text` applied on **both** sides — document-side only would have broken CAS
+      lookup, which works today only because query and document fragment identically.
+- [ ] 6. `reaction_records` lost its `reaction_id` index when migration 056 moved the PK to
+      `(ingest_source, reaction_id)`. Measured at 500k rows: `expand_note`'s read is a 38.9 ms full
+      index scan (0.10 ms with the index); `eligible()` at the shipped depth is a 76.3 ms parallel
+      seq scan (1.1 ms with it).
 
-- [x] Baseline `make lint type test`: **6,406 passed, 1 failed, 17 skipped**.
-- [x] Wave 1 — fifteen reviews. **78 findings, 26 HIGH.**
-- [x] Wave 2 — triage; every fix reproduced at `HEAD` first. Several findings did not survive that
-      and were dropped; two reviewer-proposed fixes were measured and **rejected in favour of
-      something else** (see Review).
-- [x] Wave 3 — fixes, each with a test that fails before and passes after.
-- [x] Wave 4 — five ADRs, two `BACKLOG.md` rows closed, seven opened, full gate, PR.
+## Tier 2 — the gate that should have caught Tier 1
 
-## Review
+- [ ] 7. The retrieval gate scores a **6-note** corpus — smaller than `retrieval_top_k` — so the cut
+      can never engage. Adding 30 distractor notes that sort earlier, with no code change, takes
+      `retrieval-coupling` from 1.00 to 0.25 and `retrieval-suzuki` from 1.00 to 0.50.
 
-**Result: `make lint type test` green — 6,551 passed, 4 skipped, 0 failed.** From a baseline of
-6,406 passed / 1 failed / 17 skipped: +145 tests, the failure fixed, and thirteen fewer skips
-because `helm` was installed.
+## Tier 3 — gate and graph correctness
 
-**What the method got right.** Installing `helm` was the single highest-yield act of the session.
-Twelve chart assertions skip in this sandbox as "helm is not installed", the epilogue this
-repository built to make skips loud does not cover that one, and five HIGH chart defects had
-survived every previous review because nobody had ever rendered the chart. A gate that cannot run
-is not a gate.
+- [ ] 8. A rejected note is silently re-pushed and a later merge mislabels the record forever.
+      `pr_gate.propose_note:157` submits to git *before* consulting the store; the store refuses to
+      reopen the row but the branch stays live and mergeable, and `mark_merged` moves only OPEN
+      rows — so `close_merged_notes` moves 0 and the trail says "rejected" for a note now serving
+      as evidence.
+- [ ] 9. A transient parse failure deletes derived-index rows. `reindex_notes:662` builds `keep`
+      from the *parsed* set while `_parse_notes` skips unparseable notes by design. Measured:
+      40 of 100 notes unparseable deletes 40 index rows, which must then be re-embedded.
 
-Requiring reproduction-before-fix paid for itself repeatedly. Fixers rejected reviewer prescriptions
-on measurement four times: `ABANDON` as a parent-close policy is *worse* than the default, not
-better; writing an ingest record before its index rows breaks the invariant the replay-skip rests
-on; a 503-on-`None` for the plan routes would 503 every new conversation, because a healthy
-checkpointer and an outage are byte-identical there; and `Component.attributes` cannot hold
-per-product yields because nothing renders them for outcomes.
+## Tier 4 — the agent looks, and keeps what it found
 
-**What the method missed, and what caught it.** Each fixer ran `mypy --strict` over its own `src/`
-package and reported clean; the gate runs `mypy src examples tests`, and eleven errors were in the
-tests. Then the full suite found three regressions this branch itself introduced — a new error class
-not registered non-retryable, a new `DELETE` with no grant, and `core/config` acquiring a
-module-scope `psycopg` import that the datasource-isolation seam forbids transitively. All three
-were caught by gates this repository had already built. A per-package check is not the gate.
+- [ ] 10. Retrieval is 100% model discretion and the prompt *describes* it. The strong form exists
+      exactly once, for safety. Give retrieval an obligation in that same shape.
+- [ ] 11. Compaction clears the `gather_evidence` sweep **first** (upstream is oldest-first) —
+      measured, 3 tool calls at the ceiling and it is gone before the model writes the answer.
+      Preserve the citation index in the placeholder.
+- [ ] 12. `HELPER_BRIEF` never tells the helper to carry note ids, so a caller cannot cite what its
+      helper read.
+- [ ] 13. `recall_preferences` is never named in the system prompt — a built, durable, per-actor
+      cross-session layer the model does not know exists.
 
-**The finding no in-repo review could have produced**: `StatusIn` is `extra="forbid"` and the
-shipped `Chemclaw3_ui` has always sent `expected_status`, so **every protocol sign-off from the UI
-was a 422** — while twenty-seven route tests, `mypy --strict`, ten validators and a 6,406-test suite
-stayed green, because each test wrote the body the *server* expected.
+## Tier 5 — measurement, so none of this can regress silently
 
-**Open, and named so its absence is not read as an answer**: no OpenShift cluster and no real
-Temporal broker beyond the dev server, so the live edges in `docs/planning/BACKLOG.md` stand. A
-rendered chart is not a deployed one. Seven new rows are queued, three of them mutants that survive
-— `core/fulltext.py`'s tokeniser can revert to the exact bug its own comment names while 349
-retrieval tests stay green and it measures 100% line and branch coverage doing it.
+- [ ] 14. `chemclaw_evidence_source_kept_total` reads **0.00 for every non-first source** on a
+      healthy corpus: `kept` is attributed by `chunk.retriever` and both merge paths keep the first
+      occurrence. The one metric built to detect a starved source is pinned at zero.
+- [ ] 15. Bind the corpus census (`GraphGaps`, already computed, 0.71 ms) as a gauge family, and
+      meter the sweep outcome.
+
+## Deliberately not in this change (opened as BACKLOG rows instead)
+
+RRF `k=60` over 8-item lists (needs a tuning decision plus the graph/lexical double-count question);
+the O(corpus) `git worktree add` in the PR-gate (2.9 s/proposal at 10k notes — a real fix, but it
+replaces a security-relevant containment check); `random_page_cost` and the dense leg's plan flip
+(a deployment tuning requirement, not code); the runbook's restore inventory; end-of-turn
+distillation and template-job `record_job` (capture, a larger change than this one).

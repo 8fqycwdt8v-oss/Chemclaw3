@@ -35,7 +35,12 @@ from pydantic import BaseModel, Field
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts, embedding_config_key
-from chemclaw.core.fulltext import TSQUERY_TERMS, reference_terms, reference_tokens
+from chemclaw.core.fulltext import (
+    TSQUERY_TERMS,
+    normalize_search_text,
+    reference_terms,
+    reference_tokens,
+)
 from chemclaw.kg.graph import invalidate_cache, load_notes, note_file_fingerprints
 from chemclaw.kg.search import search_text
 
@@ -451,7 +456,9 @@ class PostgresNoteIndex:
                     {
                         "id": record.note_id,
                         "emb": self._row_vector(record),
-                        "text": record.text,
+                        # Normalised on the way in, exactly as the query is on the way out:
+                        # `chemclaw.core.fulltext` owns that rule and both sides must apply it.
+                        "text": normalize_search_text(record.text),
                         "fp": record.fingerprint or None,
                         "key": embedding_key,
                     },
@@ -543,7 +550,12 @@ class PostgresNoteIndex:
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    self._lexical, {"q": query, "k": top_k, "ids": _scope_array(within)}
+                    self._lexical,
+                    {
+                        "q": normalize_search_text(query),
+                        "k": top_k,
+                        "ids": _scope_array(within),
+                    },
                 )
                 rows = await cur.fetchall()
         return [IndexHit(note_id=r[0], score=float(r[1])) for r in rows]
@@ -656,10 +668,30 @@ async def reindex_notes(
             log.debug("note re-index found no notes under %s; nothing to do", directory)
         return 0
     current_fingerprints = await asyncio.to_thread(note_file_fingerprints, directory)
-    # Guarded twice over against wiping the index: `notes` is non-empty by the return above, and
-    # `retire_absent` itself does nothing for an empty `keep`. A mis-pointed directory costs one
-    # embedding call per note to recover from, so it is worth saying no twice.
-    retired = await index.retire_absent({note.id for note in notes})
+    # Guarded three times over against wiping the index: `notes` is non-empty by the return above,
+    # `retire_absent` itself does nothing for an empty `keep`, and `keep` is the union below rather
+    # than the parsed set. A mis-pointed directory costs one embedding call per note to recover
+    # from, so it is worth saying no three times.
+    #
+    # **`keep` is the union of what parsed and what is on disk, and the second half is the fix.**
+    # `_parse_notes` skips an unparseable note by design — it names the case itself, "an rsync that
+    # lands a renamed note before removing the old one" — so building `keep` from the parsed set
+    # alone made a *transient* parse failure a *deletion* from the derived index. Measured: 40 of
+    # 100 notes made unparseable retired 40 index rows, and repairing them cost one embedding call
+    # each, over an hour in which both index-backed legs answered as though those notes did not
+    # exist. `note_file_fingerprints` is stat-only and keyed by the same id, so it holds an entry
+    # for a file whose frontmatter is broken — which is exactly the population that must survive.
+    # The graph leg already degrades this way (skip, WARNING, counter); the derived legs now do too.
+    on_disk = set(current_fingerprints)
+    unparsed = on_disk - {note.id for note in notes}
+    if unparsed:
+        log.warning(
+            "note re-index: %d note file(s) on disk did not parse and are kept in the index rather "
+            "than retired (%s); they will be re-embedded when they parse again",
+            len(unparsed),
+            ", ".join(sorted(unparsed)[:5]),
+        )
+    retired = await index.retire_absent({note.id for note in notes} | on_disk)
     if retired:
         log.info("retired %d note(s) no longer on disk", retired)
     embedding_key = note_embedding_key()
@@ -671,20 +703,30 @@ async def reindex_notes(
     ]
     if not changed:
         return 0
-    texts = [search_text(note) for note in changed]
-    # embed_texts may call the endpoint (openai_compatible) — offload so the event loop is free.
-    embeddings = await asyncio.to_thread(lambda: embed_texts(texts, cache=False))
-    records = [
-        NoteRecord(
-            note_id=note.id,
-            text=text,
-            embedding=embedding,
-            fingerprint=current_fingerprints.get(note.id, ""),
-        )
-        for note, text, embedding in zip(changed, texts, embeddings, strict=True)
-    ]
-    await index.upsert(records, embedding_key)
-    return len(records)
+    # **Bounded per note and embedded in batches**, because neither bound existed and one note
+    # without them froze both derived legs indefinitely. See `note_embed_max_chars` for the
+    # measurement; the batching is the half that keeps a refusal local — a failing batch raises
+    # after the batches before it have already been upserted, so the pass makes partial progress
+    # and the next one only retries what is still missing (a note whose row was never written has
+    # no stored fingerprint, which reads as "changed").
+    indexed = 0
+    for start in range(0, len(changed), settings.note_embed_batch_size):
+        batch = changed[start : start + settings.note_embed_batch_size]
+        texts = [search_text(note)[: settings.note_embed_max_chars] for note in batch]
+        # embed_texts may call the endpoint (openai_compatible) — offload so the event loop is free.
+        embeddings = await asyncio.to_thread(embed_texts, texts, cache=False)
+        records = [
+            NoteRecord(
+                note_id=note.id,
+                text=text,
+                embedding=embedding,
+                fingerprint=current_fingerprints.get(note.id, ""),
+            )
+            for note, text, embedding in zip(batch, texts, embeddings, strict=True)
+        ]
+        await index.upsert(records, embedding_key)
+        indexed += len(records)
+    return indexed
 
 
 def main(argv: list[str] | None = None) -> int:
