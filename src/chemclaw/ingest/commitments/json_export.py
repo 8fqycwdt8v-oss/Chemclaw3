@@ -32,6 +32,14 @@ class JsonCommitmentExport:
     both shapes an export tool produces are readable without a per-site flag.
     """
 
+    #: Declared `False` even though `fetch_commitments` does return the whole export every time,
+    #: and the two are not the same claim: `snapshot` licenses a *destructive* sweep that deletes
+    #: every commitment this pass did not see, so it is the operator's statement that the export is
+    #: complete rather than this class's statement that it read all of it. A directory this adapter
+    #: is pointed at mid-write, or one an export tool half-filled, returns "everything" and means
+    #: nothing. Turning it on for the shipped adapter is a behaviour change and a `BACKLOG.md` row.
+    snapshot: bool = False
+
     def __init__(self, name: str, path: str) -> None:
         """Bind the source's name and the file or directory its export lands in."""
         self.name = name

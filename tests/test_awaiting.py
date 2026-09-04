@@ -481,7 +481,7 @@ def test_a_wait_started_as_a_child_settles_when_its_parent_dies() -> None:
     from temporalio import activity
 
     async def _open(payload: object) -> str:
-        request: Any = payload["request"] if isinstance(payload, dict) else payload.request  # type: ignore[index,union-attr]
+        request: Any = payload["request"] if isinstance(payload, dict) else payload.request  # type: ignore[attr-defined]
         days = request["deadline_days"] if isinstance(request, dict) else request.deadline_days
         started = datetime.fromisoformat(_field(payload, "started_at"))
         return (started + timedelta(days=float(days))).isoformat()
@@ -500,7 +500,7 @@ def test_a_wait_started_as_a_child_settles_when_its_parent_dies() -> None:
         ParentClosePolicy.REQUEST_CANCEL,
     )
 
-    async def _run() -> dict[str, tuple[str, list[str]]]:
+    async def _run() -> dict[str, str]:
         """Start one parent per policy, kill them all, and report what each child did."""
         async with await start_local_env_or_skip() as env:
             client = pydantic_client(env)
@@ -539,9 +539,13 @@ def test_a_wait_started_as_a_child_settles_when_its_parent_dies() -> None:
                 # policy. Bounded on the *cancelled* status rather than on a settle, for the reason
                 # the docstring gives.
                 await _cancelled(children[ParentClosePolicy.REQUEST_CANCEL])
+                described = {p: await c.describe() for p, c in children.items()}
+                # `status` is `WorkflowExecutionStatus | None` on the SDK's description; a child
+                # this block has just awaited into a terminal or running state always carries one,
+                # and an absent status is a bug in the probe rather than an outcome to assert on.
                 return {
-                    policy.name: (await child.describe()).status.name
-                    for policy, child in children.items()
+                    policy.name: d.status.name if d.status else "NO_STATUS"
+                    for policy, d in described.items()
                 }
 
     outcomes = asyncio.run(_run())

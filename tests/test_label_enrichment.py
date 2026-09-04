@@ -303,7 +303,7 @@ def test_a_short_species_list_is_dropped_rather_than_shifting_every_role(
 
     async def _run() -> None:
         server = RxnLabelServer()
-        short = {
+        short: dict[str, object] = {
             "results": [
                 {
                     "id": "r1",

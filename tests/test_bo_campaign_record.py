@@ -617,7 +617,9 @@ def test_two_libraries_whose_smiles_differ_only_in_case_are_two_campaigns() -> N
     """
     piperidine = molecule_library_problem(["C1CCNCC1", "CCO"])
     pyridine = molecule_library_problem(["c1ccncc1", "CCO"])
-    assert piperidine.parameters[0].categories != pyridine.parameters[0].categories
+    first, second = piperidine.parameters[0], pyridine.parameters[0]
+    assert isinstance(first, CategoricalParameter) and isinstance(second, CategoricalParameter)
+    assert first.categories != second.categories
     assert campaign_id_for(piperidine) != campaign_id_for(pyridine)
 
 
