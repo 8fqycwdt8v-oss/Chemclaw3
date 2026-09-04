@@ -479,14 +479,14 @@ async def _recorded_status(job_id: str) -> DurableJobStatus | None:
     return DurableJobStatus(
         job_id=job_id,
         status=record.state,
-        summary=record.summary or (record.failure_reason or None),
+        summary=_framed_free_text(record.summary or record.failure_reason or "", job_id) or None,
         calc_refs=record.calc_refs,
         # Projected on the way out as well as on the way in, and the difference is *old rows*: a
         # record written before D-2026-08-21 holds the whole geometry, so a months-old conformer
         # search collected here would still spend a context window on coordinates. The projection
         # is idempotent, so applying it to a record already written without them costs a walk.
         result=without_geometry(record.result),
-        rationale=record.rationale,
+        rationale=_framed_free_text(record.rationale, job_id),
     )
 
 
