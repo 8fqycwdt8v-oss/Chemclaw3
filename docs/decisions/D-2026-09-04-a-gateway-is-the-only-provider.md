@@ -81,16 +81,28 @@ which is the same hole one vendor over.
 
 ## Consequences
 
-**Prompt caching is gone, and the loss is smaller than it looks.** `prompt_caching_middleware`,
-`_CachingDisabled` and `llm_prompt_caching` are deleted. `cache_control: {"type": "ephemeral"}` has
-no counterpart on an OpenAI-compatible endpoint — `langchain_openai` contains zero occurrences of
-it — so the mechanism was **never reachable from the production path**. What actually changed is
-that the dev path lost a saving production never had. `chemclaw_cache_write_tokens_total` should now
-be expected to read a flat 0.
+**This repository's prompt-caching entry is gone, and the loss is smaller than it looks.**
+`prompt_caching_middleware`, `_CachingDisabled` and `llm_prompt_caching` are deleted.
+`cache_control: {"type": "ephemeral"}` has no counterpart on an OpenAI-compatible endpoint —
+`langchain_openai` contains zero occurrences of it — so the mechanism was **never reachable from
+the production path**. What actually changed is that the dev path lost a saving production never
+had. `chemclaw_cache_write_tokens_total` should now be expected to read a flat 0.
+
+**Say what was deleted precisely, because a first draft of this paragraph did not.** What went is
+*this repository's replacement of* an upstream entry, not caching from the chain: `deepagents`
+appends `AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore")` unconditionally,
+so it still runs on every turn and `tests/test_middleware_order.py` still asserts it is last. It
+no-ops against `ChatOpenAI`, which is why nothing behavioural changes — but "prompt caching is
+gone" would have been a false sentence about the shipped chain, of exactly the kind this change
+was written to remove.
 
 **Token usage.** `_cache_creation` is deleted as dead: the `ephemeral_5m_input_tokens` /
-`ephemeral_1h_input_tokens` keys came only from `langchain_anthropic`'s reader, which nothing
-installed now produces. Its knowledge is preserved as an assertion rather than a comment —
+`ephemeral_1h_input_tokens` keys came only from `langchain_anthropic`'s reader, and nothing
+constructs a `ChatAnthropic` any more — `build_langgraph_agent` always passes a model, and the AST
+scan is what defends that. **Not "nothing installs it", which a first draft of this said and which
+is false**: `deepagents` requires the wrapper, which requires the SDK, so both stay in the resolved
+closure and `langchain_anthropic` is imported on every agent build. Absence from the lockfile was
+never the control here and saying so would have put the same wrong reason into the record twice. Its knowledge is preserved as an assertion rather than a comment —
 `tests/test_upstream_surface.py` pins both flat key names **and the absence of `ephemeral_*`**, so
 if upstream ever adds a per-TTL split the helper comes back instead of the tokens quietly moving
 into `input`. `input` stays a *residual* for a newly measured reason:
