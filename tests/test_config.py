@@ -207,9 +207,20 @@ def test_raising_only_the_activity_budget_is_refused_rather_than_silently_ignore
         Settings(_env_file=None, xtb_job_timeout_seconds=28_800)  # type: ignore[call-arg]
 
     # And the fix the message asks for actually works — a guard that cannot be satisfied is a wall.
+    #
+    # It now takes a third setting, and that is the point rather than an inconvenience: a template
+    # `job` step is a child workflow bounded by `connector_job_timeout_seconds` + 4 x
+    # `activity_timeout_seconds`, so raising the job ceiling raises the ceiling a template run has
+    # to contain (`_the_template_run_ceiling_covers_one_step`). Before that rule existed, the
+    # eight-hour search this operator is buying would have run under a 7,200 s template run and
+    # ended it as a bare TIMED_OUT with nothing on the chemist's stream. The startup refusal names
+    # the number, so the chain costs one more line rather than an afternoon.
     assert (
         Settings(  # type: ignore[call-arg]
-            _env_file=None, xtb_job_timeout_seconds=28_800, connector_job_timeout_seconds=32_400.0
+            _env_file=None,
+            xtb_job_timeout_seconds=28_800,
+            connector_job_timeout_seconds=32_400.0,
+            template_run_timeout_seconds=39_600.0,
         ).connector_job_timeout_seconds
         == 32_400.0
     )

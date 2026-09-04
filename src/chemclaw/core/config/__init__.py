@@ -118,6 +118,23 @@ __all__ = [
 _TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
 PG_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 
+# `durable/connector_job.py::_FINISH_STEPS`, restated because it cannot be imported.
+#
+# `ConnectorJobWorkflow` is bounded by `wrapper_execution_timeout()` — its child's whole ceiling
+# plus one activity's wall clock for each of the four things the wrapper still owes after that
+# child returns (the durable record, the results offer, the note PR-gate, the session push-back).
+# That number is what a template `job` step is actually bounded by, and
+# `_the_template_run_ceiling_covers_one_step` below has to clear it.
+#
+# It is a literal here and a literal there because `chemclaw.core` imports no sibling
+# (`tests/test_layering.py`, `core/README.md`), so this module cannot call the function that owns
+# the arithmetic. A restatement nothing checks would be the duplication moved rather than removed,
+# so `tests/test_template_job_step.py` asserts the two constants agree *and* that the full
+# identity `wrapper_execution_timeout() == connector_job_timeout_seconds + activity_timeout_seconds
+# * _WRAPPER_FINISH_STEPS` still holds — a fifth post-child step turns that red instead of leaving
+# this validator clearing a bound 30 s short.
+_WRAPPER_FINISH_STEPS = 4
+
 
 def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
     """The host libpq will dial and the sslmode it will use, read with libpq's own parser.
@@ -550,26 +567,60 @@ class Settings(
 
     @model_validator(mode="after")
     def _the_template_run_ceiling_covers_one_step(self) -> Self:
-        """The same rule again, on the template run and the step it has to contain.
+        """The same rule again, on the template run and the longest step it has to contain.
 
         `templates/registry.py` starts `TemplateWorkflow` with `template_run_timeout_seconds` as an
-        execution timeout, and the longest thing inside it is one step at
-        `template_step_timeout_seconds`. A run ceiling at or below the step budget kills the
-        procedure inside its own first step — with a bare `WorkflowExecutionTimedOut` naming
-        neither setting, and with the per-step timeout that was *meant* to fire made unreachable,
-        so `agent_step_retry`'s attempts become a number that can never be spent.
+        execution timeout. A run ceiling at or below the longest step's budget kills the procedure
+        inside that step — with a bare `WorkflowExecutionTimedOut` naming neither setting, and with
+        the per-step timeout that was *meant* to fire made unreachable, so `agent_step_retry`'s
+        attempts become a number that can never be spent.
+
+        **A step's budget is not one number, and this rule read the wrong one for the kind of step
+        that costs the most.** `template_step_timeout_seconds` (900 s) is the `start_to_close` of an
+        `agent` or a `tool` step, both of which are activities. A `job` step is not an activity: it
+        starts `ConnectorJobWorkflow` as a child under `wrapper_execution_timeout()`
+        (`durable/template_job.py`), which is `connector_job_timeout_seconds` plus the wrapper's
+        four post-child steps — 18,120 s against a run ceiling of 7,200 s when this was measured.
+        So a CREST search well inside its own budget ended the whole run as a silent `TIMED_OUT`:
+        an execution timeout is not delivered to workflow code, so `TemplateWorkflow`'s `except
+        BaseException -> _notify_failure` never ran, the chemist was told nothing on the session
+        stream, and the connector child was terminated with its parent before it could write its
+        own `job_records` failure row. Seven of the nine shipped templates have a `job` step.
+
+        Only `connector_job_timeout_seconds` can move to close that: its own floor is the CREST
+        search plus the activity's overhead (`_the_job_ceiling_covers_the_activity_it_bounds`), so
+        raising the run ceiling is the one direction available.
 
         Strictly greater rather than at least, because equality is the defect. Only one step is
         required rather than N: how many steps a template has is a property of a YAML file this
         object cannot see, so the honest machine-checkable floor is "a single step fits", and the
         setting's own comment carries the sizing advice for a longer procedure.
         """
-        if self.template_run_timeout_seconds <= self.template_step_timeout_seconds:
+        # The max over the budgets a *step* can carry, the shape
+        # `_the_job_ceiling_covers_the_activity_it_bounds` already uses one level down: naming one
+        # step kind is how this rule came to be checking 900 s against an 18,120 s bound. A new
+        # step kind with its own ceiling gets covered by being added here.
+        job_step = (
+            self.connector_job_timeout_seconds
+            + self.activity_timeout_seconds * _WRAPPER_FINISH_STEPS
+        )
+        longest, budget = max(
+            (
+                (self.template_step_timeout_seconds, "template_step_timeout_seconds"),
+                (
+                    job_step,
+                    "connector_job_timeout_seconds + activity_timeout_seconds x "
+                    f"{_WRAPPER_FINISH_STEPS}, the ceiling a `job` step carries",
+                ),
+            )
+        )
+        if self.template_run_timeout_seconds <= longest:
             raise ValueError(
                 f"template_run_timeout_seconds={self.template_run_timeout_seconds} does not cover "
-                f"the step it bounds: one step may take {self.template_step_timeout_seconds}s "
-                "(template_step_timeout_seconds), so the run would time out inside its own first "
-                "step. Raise the run ceiling above it, or lower the step budget."
+                f"the step it bounds: one step may take {longest}s ({budget}), so the run would "
+                "time out inside that step — as a bare TIMED_OUT that reaches neither the chemist "
+                "nor the job record, because a workflow execution timeout is not delivered to "
+                f"workflow code. Raise the run ceiling above {longest}, or lower that budget."
             )
         return self
 

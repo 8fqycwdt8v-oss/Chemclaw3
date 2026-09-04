@@ -221,13 +221,22 @@ class AgentSettings(BaseSettings):
     # Ceiling on the factor, so a pathological sample cannot collapse the budget. 4.0 is well above
     # the 2.2x the worst measured payload class produces and still bounds the arithmetic.
     agent_context_calibration_max_factor: float = Field(default=4.0, ge=1.0)
-    # **Ceiling on what one tool result may put in front of the model**, and the one bound that was
-    # missing entirely. `connector_max_request_bytes` caps what this system *sends* a server;
-    # nothing capped what a server — or an in-process tool — sends back. Both context edits have a
-    # carve-out for the newest results (`agent_keep_last_tool_groups`) and for the newest
-    # conversation group, so a single large result is by construction the thing neither can touch:
+    # **Ceiling on what one model call's tool results may put in front of the model**, and the one
+    # bound that was missing entirely. `connector_max_request_bytes` caps what this system *sends* a
+    # server; nothing capped what a server — or an in-process tool — sends back. Both context edits
+    # have a carve-out for the newest results (`agent_keep_last_tool_groups`) and for the newest
+    # conversation group, so the newest results are by construction the thing neither can touch:
     # two results at 200,000 characters each measured 100,077 estimated tokens (one over the
     # budget), ~224,000 billed, with both edits running and reclaiming nothing.
+    #
+    # **The unit is the batch, not one result** — `agent/tool_result_size.py` divides this number
+    # evenly among the originating `AIMessage`'s tool calls, because what neither edit can reclaim
+    # is the newest *batch*. Per-result, each of N parallel calls was separately inside the ceiling
+    # while the request was N times over it: measured on a compiled graph against a 100,000-token
+    # budget, 164,229 estimated request tokens at 8 parallel calls and 345,735 at 20, with the
+    # compaction counter at 0 throughout; 58,605 and 59,175 once the number is a batch's. A lone
+    # call — which is nearly every call — still gets the whole number, so the common case is
+    # unchanged and only a fan-out shares.
     #
     # 60,000 rather than a new opinion: it is the number this repository already chose for
     # `gather_evidence_max_chars`, its largest deliberate evidence payload. A result over it is cut
@@ -430,10 +439,22 @@ class AgentSettings(BaseSettings):
     # nothing declares, that changes when an author adds a step, and that no operator can read off
     # any setting. `ConnectorJobWorkflow` gives its children `connector_job_timeout_seconds` for
     # exactly this reason (`durable/connector_job.py`), and a template is core's own sequencer of
-    # the same kind of work. Eight steps at the default step budget; a longer procedure raises this
-    # deliberately rather than inheriting an unbounded run. The cross-field validator in
-    # `core/config/__init__.py` refuses a run ceiling that cannot contain a single step.
-    template_run_timeout_seconds: float = Field(default=7200.0, gt=0)
+    # the same kind of work. A longer procedure raises this deliberately rather than inheriting an
+    # unbounded run. The cross-field validator in `core/config/__init__.py` refuses a run ceiling
+    # that cannot contain a single step.
+    #
+    # **The default is the old 7,200 s plus the one bound it never counted.** Eight steps at the
+    # step budget is what sized 7,200, and that arithmetic silently assumed every step is an
+    # activity. A `job` step is a child workflow bounded by `wrapper_execution_timeout()` =
+    # `connector_job_timeout_seconds` + 4 × `activity_timeout_seconds` = 18,120 s, two and a half
+    # times the whole run it sat inside, so seven of the nine shipped templates could end as a
+    # silent TIMED_OUT. 18,120 + 7,200 = 25,320: one `job` step at the ceiling it actually carries,
+    # and the entire eight-ordinary-step allowance this setting used to be, beside it. Every
+    # shipped template is one `job` step plus at most two ordinary ones, so the margin is real
+    # rather than nominal. Stated as a literal rather than derived, because a default that moved
+    # with `connector_job_timeout_seconds` would hide the relation the validator exists to make
+    # loud — a site that raises the job ceiling is refused at startup and told to raise this too.
+    template_run_timeout_seconds: float = Field(default=25320.0, gt=0)
 
     @property
     def templates_dirs(self) -> list[str]:

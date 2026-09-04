@@ -313,10 +313,9 @@ def _components(
 
 
 def _outcomes(payload: dict[str, Any]) -> tuple[list[Component], float | None, float | None]:
-    """Map ORD `outcomes[].products[]` to components + the first YIELD and PURITY measurements."""
+    """Map ORD `outcomes[].products[]` to components + the headline product's YIELD and PURITY."""
     products: list[Component] = []
-    yield_percent: float | None = None
-    purity_percent: float | None = None
+    raw: list[dict[str, Any]] = []
     for outcome in _optional_list(payload, "outcomes"):
         if not isinstance(outcome, dict):
             raise OrdFormatError(f"outcome is not an object: {outcome!r}")
@@ -324,13 +323,64 @@ def _outcomes(payload: dict[str, Any]) -> tuple[list[Component], float | None, f
             if not isinstance(product, dict):
                 raise OrdFormatError(f"product is not an object: {product!r}")
             products.append(Component(smiles=_smiles(product), role=Role.PRODUCT))
-            if yield_percent is None:
-                yield_percent = _percentage(product, "YIELD")
-            if purity_percent is None:
-                purity_percent = _percentage(product, "PURITY")
+            raw.append(product)
     if not products:
         raise OrdFormatError("ORD reaction has no products")
-    return products, yield_percent, purity_percent
+    headline = _headline_product(raw)
+    if headline is None:
+        return products, None, None
+    return products, _percentage(headline, "YIELD"), _percentage(headline, "PURITY")
+
+
+def _headline_product(products: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The one product the reaction's `yield_percent`/`purity_percent` are about, or `None`.
+
+    **The source's own marking beats a positional one, which is why this function exists.** This
+    used to be "the first product that states a YIELD", and with several products that is a
+    position in an export's array being read as a claim about chemistry: an ORD record listing the
+    des-ethyl by-product at 12% ahead of the desired ester at 85% transcribed the reaction's yield
+    as 12% — into `conditions.yield_percent`, the number every comparison renders, and into the
+    body's `- yield:` bullet. `record.py::_principal_product` already refuses to *name* a compound
+    in exactly this situation ("a wrong `compound_smiles` is worse than none: it is what a
+    by-compound search would return, and it would look right"); the number carried no such guard,
+    so the record named no product while confidently asserting one product's figure. A chemist
+    reads that figure as precedent.
+
+    `ProductCompound.is_desired_product` is ORD's field for this and this adapter ignored it
+    entirely. Reading it is a **transcription** — the source stating which compound the run was
+    for — while ordering by array position is an *inference* this seam has no standing to make, and
+    `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` is the rule that separates the two.
+
+    Only an actual JSON `true` is a marking; an explicit `false` and an absent field are both
+    "unmarked", which is what ORD's own default means, and any other value falls through to the
+    rules below rather than being coerced — the failure mode of that strictness is `None`, never a
+    wrong number.
+
+    Unmarked, the honest answers in order:
+
+    - **one product** — unambiguous by construction, and the overwhelmingly common export;
+    - **exactly one product stating a YIELD** — the other products are by-products the source did
+      not measure, so there is still only one candidate;
+    - **anything else** — `None`, and the record carries no headline yield. A reader then sees that
+      the figure was not recorded, which is true, rather than a figure belonging to a compound
+      nobody chose.
+
+    One product decides **both** figures rather than each being resolved on its own. Read
+    separately, a two-product record where A states the YIELD and B the PURITY produced a headline
+    pair describing two different compounds — the same fabrication one level down, and harder to
+    see because each half is individually a real measurement.
+    """
+    marked = [p for p in products if _get(p, "is_desired_product", "isDesiredProduct") is True]
+    if len(marked) == 1:
+        return marked[0]
+    if marked:
+        # Several marked desired: the source contradicts itself, so it has stated nothing this can
+        # read. Falling through to the yield count would silently re-introduce the positional pick.
+        return None
+    if len(products) == 1:
+        return products[0]
+    measured = [p for p in products if _percentage(p, "YIELD") is not None]
+    return measured[0] if len(measured) == 1 else None
 
 
 def _identifiers(compound: dict[str, Any]) -> list[tuple[str, str]]:
