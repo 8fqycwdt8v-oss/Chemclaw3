@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "rp-25",
+    "section": 14,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I brief the receiving team, summarise the three things most likely to go wrong with this coupling — and for each one tell me whether that's from our data or from general chemistry.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_knowledge_gaps",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a failure mode attributed to the record with no retrieved note behind it",
+      "a frequency, probability or rate for any failure mode",
+      "a note id that did not appear in a tool result"
+    ],
+    "direction": "The evidence-versus-analogy split is the graded behaviour, and the user has asked for it explicitly. Two items are documented and citable in the corpus: aqueous protodeboronation and the oxygen/degassing requirement. A third will most likely be general chemistry — catalyst loading, water content, order of addition — and must be labelled as such rather than dressed up as a record finding. Any frequency claim (\"fails about one run in five\") is invented and a fail. Saying that only two are evidenced and the third is judgement is a better answer than three items that all look sourced.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-25",
+    "section": 14,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I brief the receiving team, summarise the three things most likely to go wrong with this coupling — and for each one tell me whether that's from our data or from general chemistry.",
+    "profile": "no-tools",
+    "answer": "I'd be happy to help, but I need to know which coupling you're asking about. Could you provide:\n\n1. **The reaction details** — starting materials, reagents, conditions, or a reference to where this data is stored (e.g., a reaction note, ELN entry, or experiment ID)?\n2. **What type of coupling** — for example, Suzuki–Miyaura, Negishi, Stille, cross-coupling in general, or something else?\n\nOnce you give me those details, I can:\n- Check your data for failure modes you've actually encountered\n- Distinguish between problems shown in your experiments vs. general chemistry knowledge\n- Give you a briefing-ready summary for the receiving team",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.28,
+    "event_counts": {
+      "token": 10,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "917177a094b849e8938231664469056f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "probe": {
+    "id": "ms-09",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Those conformer populations you gave me are Boltzmann weights over electronic energies, which assumes every conformer has the same entropy. That is exactly wrong for a folded structure. Re-weight them by free energy — the lowest ten members is plenty.",
+    "expects_tools": [
+      "refine_ensemble"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a refined population or entropy the job did not return",
+      "that the refined members cover the whole ensemble when the result says otherwise",
+      "that free-energy weighting is more accurate rather than a different treatment"
+    ],
+    "direction": "The asker has stated the defect correctly — a compact hydrogen-bonded fold has both a low electronic energy and a stiff set of low modes, so it is over-populated by electronic energy alone — and the right response is to run the refinement they asked for with the member count they set, since that count is the cost knob and each member is an optimization and a Hessian. The qualifier is the graded part: the result reports what share of the ensemble population the refined members carry, and below roughly 90% that share belongs in the sentence reporting the populations rather than in a footnote. \"Free energies over 5 of 47 conformers\" is a different claim from \"the ensemble\", and the free-energy version is the one that looks more careful. Presenting the refinement as a strict improvement rather than as a different and more expensive treatment is the misframing to catch.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-09",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Those conformer populations you gave me are Boltzmann weights over electronic energies, which assumes every conformer has the same entropy. That is exactly wrong for a folded structure. Re-weight them by free energy — the lowest ten members is plenty.",
+    "profile": "",
+    "answer": "I need to refine the conformer ensemble by free energy weighting. Let me load the ensemble-workflows skill first to get the judgment right, then call the tool.I need the molecule SMILES and which conformer ensemble you're referring to. The skill tells me to use `refine_ensemble`, which optimizes and takes a Hessian for the lowest members and re-weights by Gibbs free energy.\n\nHowever, I don't have the SMILES or the molecule you want refined. Could you supply:\n\n1. **The SMILES of the molecule** whose conformer ensemble you want to refine\n2. **The solvent** (if any) the ensemble was sampled in, or omit it for gas phase\n\nOnce I have those, I'll call `refine_ensemble` with `top_n=10` to re-weight the lowest ten conformers by free energy and report back the refined populations and the coverage.",
+    "answered": true,
+    "tools_called": [
+      "read_file"
+    ],
+    "tool_results": [
+      {
+        "tool": "read_file",
+        "preview": "  1  ---\n  2  name: ensemble-workflows\n  3  description: >-\n  4    Judgment for multi-step calculations over sets — when a conformer ensemble or a species\n  5    set changes an answer rather than mere"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 6.75,
+    "event_counts": {
+      "token": 11,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "28a76becf27e45a0909d9b62d234b4b0",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

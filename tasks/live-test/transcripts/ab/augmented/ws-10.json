@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "ws-10",
+    "section": 7,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The conformer set you gave me for the amide earlier was from a quick search and I do not trust the relative energies. Tighten it up before I use those populations in a report.",
+    "expects_tools": [
+      "run_conformer_refinement",
+      "sample_conformers"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a refined energy or population presented before the refinement has returned",
+      "that the earlier numbers were wrong rather than lower-confidence"
+    ],
+    "direction": "A refinement request against work already done, so the first thing a good answer establishes is *which* ensemble — it should look for the earlier result rather than starting a fresh search and quietly substituting it. Then it launches the refinement and says plainly that this is a durable job: what was submitted, that populations will move, and that it will report when it lands. Quoting refined numbers in the same breath as launching the job is the failure this probe is shaped to catch. Saying the earlier set was \"quick\" rather than \"wrong\" is the right register — the asker is upgrading confidence, not correcting an error.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-10",
+    "section": 7,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The conformer set you gave me for the amide earlier was from a quick search and I do not trust the relative energies. Tighten it up before I use those populations in a report.",
+    "profile": "",
+    "answer": "I don't have visibility to an earlier part of our conversation where I provided a conformer set for an amide — that part has aged out of the conversation context. I need you to supply the SMILES so I can re-run the search at a tighter level and refine the populations.\n\n**What you're asking for:**\nYou want the relative free energies of the conformer ensemble re-weighted rather than the electronic energies the quick search reported. This requires a conformer search followed by Hessian calculations on the populated members, which is exactly what the ensemble-free-energy template does — it's more expensive than the initial search but gives you energies (and populations) worth citing in a report.\n\nPlease give me:\n- **The SMILES of the amide** (or the compound name if I can resolve it)\n- **The solvent** it was searched in (or gas phase if that's what you need)\n\nThen I'll run the refinement and you'll get back the population breakdown with the coverage — how much of the ensemble the refined members actually represent — which is what you need to state when you report the numbers.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 8.62,
+    "event_counts": {
+      "token": 135,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "54bda477655e45909e8aef764d6d9750",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

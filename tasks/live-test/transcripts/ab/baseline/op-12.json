@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "op-12",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "You gave me two points — one sitting right next to my best run, one way out at low temperature. Explain why the model wants the second one. I need to defend it to my boss when it comes back at 20%.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "the model predicts the low-temperature point will be better",
+      "the optimizer guarantees an improvement",
+      "the second point is the optimum"
+    ],
+    "direction": "This is an explanation question and no tool call is required; an answer that re-runs the optimizer instead of explaining is worse, not better. A satisfying answer says, in a process chemist's language, that the two points are doing different jobs: the near one exploits a region the surrogate has already learned, where its predicted spread is small, and the far one is placed where the model is most uncertain, so its value is the information it returns rather than the yield. It must make the consequence explicit and defensible — a 20% result from the far point is not a wasted run, it is the run that stops the model recommending that region again — while being honest that the far point is not predicted to win and the optimizer promises nothing. Bonus for naming the risk the chemist should weigh: an excursion into untried conditions can carry a safety or selectivity surprise the model cannot see.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-12",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "You gave me two points — one sitting right next to my best run, one way out at low temperature. Explain why the model wants the second one. I need to defend it to my boss when it comes back at 20%.",
+    "profile": "no-tools",
+    "answer": "I don't have any context about what model you're referring to, what experiment or optimization you're running, or what those two points represent. I can't see your previous conversation, data, or results.\n\nTo help you build a defensible case to your boss, I'd need to know:\n\n1. **What model?** (e.g., response surface model, machine learning predictor, kinetic model, Bayesian optimization algorithm)\n2. **What are you optimizing for?** (yield, selectivity, cost, safety?)\n3. **What do the two points represent?** (reaction conditions like temperature, equivalents, solvent, catalyst loading?)\n4. **What does \"sitting right next to my best run\" and \"way out at low temperature\" mean quantitatively?** (actual values)\n5. **What's the predicted outcome at the second point?** (20% yield — is that what you're defending, or is that what your boss predicted?)\n6. **Why does the model want you to try there?** (Does it predict higher yield? Lower cost? Validation of a boundary?)\n\nOnce you share those details — ideally with the actual model prediction, the best run's conditions and result, and the proposed point's conditions and predicted result — I can help you construct a scientific argument for why it makes sense to run the experiment, what it would tell you, and whether the risk is worth it.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.14,
+    "event_counts": {
+      "token": 12,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a4d0c10b9e6340fa8ff11072c25c9cc6",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -25,9 +25,11 @@ this file is the run.
 | wall clock | ~29 minutes |
 | evidence | `tasks/live-test/transcripts/ab/{summary.md,evidence.json}` |
 
-The 442 per-turn transcripts stayed local. `evidence.json` carries every verdict, every paired
-score and every aggregate, which is the basis for every number below; the transcripts carry the
-prose those verdicts were passed on.
+`evidence.json` carries every verdict, every paired score and every aggregate, which is the basis
+for every number below; the 442 per-turn transcripts beside it carry the answers those verdicts
+were passed on, one file per probe per arm, each recording the profile that produced it. They are
+committed for the reason `_write_outputs` already records about `grades.json` — a run's results
+have been lost here before, and were recoverable only because they had been committed.
 
 ## The result
 

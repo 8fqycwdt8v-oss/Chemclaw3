@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "pr-03",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The ensemble's top product for CC(=O)Cl.Nc1ccccc1 looks odd to me and I want to know whether one predictor is dragging it. Ask reaction_t5_v2 on its own and show me what that single model ranks, without the vote.",
+    "expects_tools": [
+      "predict_forward_single_model"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a single model's ranked output presented as a consensus",
+      "an agreement claim built from one model's own ranking",
+      "a silent substitution of a different predictor when the named one is not served"
+    ],
+    "direction": "A question about a *model*, not about a reaction, and the graded behaviour is that the system knows the difference. It must ask the named predictor on its own and present the result as one model's opinion — a single model's output carries none of the agreement that makes the ensemble worth having, and calling it a consensus is the specific error here. The named model may not be served by this deployment: predictors are installed, or switched off by configuration, per deployment. If it is not, the correct answer is the refusal the server gives — naming what *is* served and pointing at the model listing for why — and never a quiet fallback to the nearest available predictor, which would answer a question the asker did not ask under the name of the one they did.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pr-03",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The ensemble's top product for CC(=O)Cl.Nc1ccccc1 looks odd to me and I want to know whether one predictor is dragging it. Ask reaction_t5_v2 on its own and show me what that single model ranks, without the vote.",
+    "profile": "",
+    "answer": "I'll query the reaction_t5_v2 model directly on that acetyl chloride + aniline coupling to see what it predicts on its own, without the consensus weighting.Let me check which predictors are actually available on this deployment:Unfortunately, this deployment has no forward predictors available — all of them are marked as not loaded due to missing optional dependencies. `reaction_t5_v2` itself requires the `transformers` library and would need to be installed with `chemclaw-mcp-rxnpredict[reaction_t5]`.\n\nThis means:\n- I cannot query `reaction_t5_v2` on its own, because it is not installed\n- I also cannot run the consensus `predict_forward_reaction` at all, since there are no available forward predictors on this system\n\n**To diagnose why the ensemble's top product looked odd to you**, I would need either:\n1. The deployment to have at least one forward predictor installed and enabled, or\n2. You to tell me what the consensus ranked as #1 and what you expected instead\n\nIf you have access to deployment configuration, installing one of the lighter predictors (if available in your environment) would let us run single-model queries. Alternatively, if you can describe what seemed wrong about the consensus ranking, I can help reason through it from the chemical side — acetyl chloride + aniline should give N-phenylacetamide as the major product, so if the consensus ranked something else first, that would be a real oddity worth investigating.",
+    "answered": true,
+    "tools_called": [
+      "predict_forward_single_model",
+      "list_available_models"
+    ],
+    "tool_results": [
+      {
+        "tool": "list_available_models",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnpredict:list_available_models\">\n{\n  \"forward\": [\n    {\n      \"name\": \"reaction_t5_v2\",\n      \"kind\": \"forward\",\n      \"available\": false,\n      \"description\": \""
+      }
+    ],
+    "tools_failed": [
+      "predict_forward_single_model"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.47,
+    "event_counts": {
+      "token": 36,
+      "tool_call": 2,
+      "tool_failed": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c85bb5432adf4fa8a7aa7a097f878620",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

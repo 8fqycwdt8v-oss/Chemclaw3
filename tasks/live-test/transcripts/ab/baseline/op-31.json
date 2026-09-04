@@ -1,0 +1,98 @@
+{
+  "probe": {
+    "id": "op-31",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I commit the team to a ligand screen — what don't we know that we should? Point me at the actual holes in what we hold on Pd cross-coupling.",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that does not exist",
+      "the literature does not cover this",
+      "a gap in the science, asserted from a gap in the graph"
+    ],
+    "direction": "Answers from the graph rather than reciting generic chemistry gaps: names specific structural holes it can actually see — a transformation with no failure-mode note attached, a compound referenced but with no linked reaction, a playbook with no run supporting it — and for each, the experiment or note that would close it. The distinction that matters: a gap in what *we have recorded* is not a gap in what is *known*, and the answer must not slide from one to the other. Prioritising the gaps by what a ligand screen would actually depend on is the good version.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-31",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I commit the team to a ligand screen — what don't we know that we should? Point me at the actual holes in what we hold on Pd cross-coupling.",
+    "profile": "no-tools",
+    "answer": "I need to search your system's data on Pd cross-coupling to see what's documented and identify the gaps. Let me start by exploring what you have.Let me search more broadly for reaction and experimental data:Let me check these directories for project data:**I don't see any reaction data, ELN entries, or notes on Pd cross-coupling in your system right now.** No experiments are loaded, no ligand screens documented, no conditions reported — the directories are empty.\n\nThis is actually the key insight: **you have a blank slate.** Before committing to a ligand screen, here are the gaps you need to fill, starting from first principles:\n\n### Critical unknowns for *your* Pd coupling:\n\n1. **Substrate scope & functional group tolerance**\n   - Which aryl/heteroaryl halides do you actually need to couple? (iodides, bromides, chlorides? Steric/electronic profile?)\n   - Which nucleophiles? (arylboronic acids, organostannanes, organosilanes, Grignards?)\n   - What functional groups on either partner will survive your conditions?\n   - *Why this matters:* Different substrates favor different ligands. A screen without substrate definition is a fishing expedition.\n\n2. **Scale and throughput requirements**\n   - Are you doing 1 mmol discovery runs, >gram scale, or <100 mg high-throughput?\n   - Solubility, Pd recovery, cost-per-point all change the calculus.\n\n3. **Base and solvent behavior**\n   - Is the base & solvent system locked in, or is that part of the ligand screen?\n   - Ligand performance is *highly* coupled to these — screening ligands in the \"wrong\" solvent can hide winners.\n\n4. **Temperature profile**\n   - Room temperature vs. heated? This changes which ligands are viable (some collapse, others come alive at heat).\n\n5. **Pd source & loading**\n   - Pd(OAc)₂? Pd(PhCN)₂Cl₂? What pre-catalyst form? What mol%?\n   - This directly affects which ligands will perform (bulky NHC vs. phosphine requirements shift with Pd loading).\n\n6. **Poison/deactivation risks you haven't mapped**\n   - Any substrates with B(OH)₂ groups that form stable complexes? Hindered positions?\n   - Are you hitting decomposition, homocoupling, or protodeboronation?\n   - *Without knowing this*, a ligand screen may find that nothing works because the substrate is poisonous, not because you have the wrong ligand.\n\n### Why you should measure *before* committing to the screen:\n\n- **A diagnostic optimization** (one substrate + one nucleophile, vary solvent/base/Pd source) takes ~10 reactions and tells you if the coupling is *fundamentally viable*. Ligand screens on broken substrates waste time.\n- **A quick survey of functional groups** (test 2–3 key FGs on your real substrates) identifies which ones are compatible, so you don't screen a ligand that works but gets destroyed by a protecting group you need.\n\n### What a ligand screen *should* answer:\n\nOnce you've locked in solvent, base, Pd source, and confirmed the coupling works on at least your lead substrate, *then* a phosphine/NHC/carbene screen can optimize turnover, selectivity, or cost.\n\n**What I'd do first:** Post your substrate scope need and one or two specific coupling pairs that are \"must-wins.\" That'll let me point at what ligand families typically work for your substrate class, and what the realistic holes are (e.g., \"bulky boronic acids on hindered bromides almost always need a specialized ligand\" vs. \"this is textbook Buchwald, standard screening should work\").",
+    "answered": true,
+    "tools_called": [
+      "grep",
+      "grep",
+      "grep",
+      "glob",
+      "ls",
+      "ls",
+      "ls"
+    ],
+    "tool_results": [
+      {
+        "tool": "glob",
+        "preview": "['/skills/README.md', '/skills/campaign-narrative-synthesis/SKILL.md', '/skills/development-report/SKILL.md', '/skills/eln-reaction-extraction/SKILL.md', '/skills/optimization-campaign-synthesis/SKILL"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "ls",
+        "preview": "['/bo/', '/calc/', '/safety/', '/skills/']"
+      },
+      {
+        "tool": "ls",
+        "preview": "No files found"
+      },
+      {
+        "tool": "ls",
+        "preview": "No files found"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 17.95,
+    "event_counts": {
+      "token": 430,
+      "tool_call": 7,
+      "tool_result": 7,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "4ce918aa555247a48fc2e0d1b5b2d02b",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

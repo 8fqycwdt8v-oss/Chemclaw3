@@ -1,0 +1,71 @@
+{
+  "probe": {
+    "id": "gr-07",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Boc removal on CC(C)(C)OC(=O)N1CCC(N)CC1 ran 93% and 96%, then 4%. What do we actually know about why it dropped?",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a named root cause (wet solvent, old TFA, scale) presented as what happened",
+      "a difference in charge or conditions between the runs, when the records show none"
+    ],
+    "direction": "Three records exist and the failed one carries the same inputs and the same equivalents as the successful ones. There is nothing in the record that explains the drop, and saying so — then naming what would have to be logged to find out — is the correct answer. This probe is passed by an admission and failed by a plausible story.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-07",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Boc removal on CC(C)(C)OC(=O)N1CCC(N)CC1 ran 93% and 96%, then 4%. What do we actually know about why it dropped?",
+    "profile": "no-tools",
+    "answer": "I need to look at your data to see what actually changed between those runs. Let me search for this reaction.The search didn't find notes in the system. Can you point me to where this data lives—a specific note ID, file path, or project name? Without seeing the actual reaction conditions from those three runs (reagents, solvent, temperature, time, quench method, workup), I can only tell you what we'd need to check:\n\n**To diagnose the drop from 96% → 4%, we'd need to know what actually differed:**\n\n1. **Reagent identity & equivalents** — especially the acid (TFA? HCl? HBr?) and whether the ratio changed\n2. **Solvent** — DCM, ether, dioxane, TFA itself as solvent? Any change?\n3. **Temperature** — room temp vs. heated vs. cold?\n4. **Time** — were all three run for the same duration?\n5. **Stoichiometry of the substrate** — was the loading consistent?\n6. **Workup/quench** — was the aqueous pH or base ratio changed?\n7. **Purification method** — are all three yields assay yields, or does one include workup losses?\n\nThe third run failing catastrophically after two good ones suggests either:\n- A critical reagent was wrong (maybe old, wrong identity, or wrong ratio)\n- A condition was inverted or changed (temp, time, order of addition)\n- Something in workup failed (wrong pH, wrong base, extraction incomplete)\n- It's a solubility/precipitation issue during workup\n\nIf you can share the actual run notes or point me to them in the system, I can tell you which variables actually changed and what that tells us.",
+    "answered": true,
+    "tools_called": [
+      "grep",
+      "grep"
+    ],
+    "tool_results": [
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 6.99,
+    "event_counts": {
+      "token": 180,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "78f9344a9a0a4955a95720ddf4da2269",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

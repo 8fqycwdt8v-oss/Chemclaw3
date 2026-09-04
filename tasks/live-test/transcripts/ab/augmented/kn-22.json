@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "kn-22",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "You just told me 2-MeTHF costs about five points. Where exactly did that come from? I need to be able to point at something in a meeting.",
+    "expects_tools": [
+      "expand_note",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "an external or literature source for the number",
+      "a measurement the cited note does not contain",
+      "a confidence or validation status the note does not carry"
+    ],
+    "direction": "Names the source by note id — opt-amide-solvent for the screen, and interaction-solvent-swap-question as the confirmed exchange that repeats it — and quotes what those notes actually say: 81% DMF, 79% MeCN, 76% 2-MeTHF on the same substrate, hence ~5 points. It should separate the retrieved fact from its own inference, and state the limit honestly: one internal solvent screen on one substrate, not a validated constant. Re-retrieving to check before answering is the right behaviour here, not a hedge.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-22",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "You just told me 2-MeTHF costs about five points. Where exactly did that come from? I need to be able to point at something in a meeting.",
+    "profile": "",
+    "answer": "I don't have that earlier part of our conversation in view right now — the context has moved on since then. I can't see what I said about 2-MeTHF or where I cited it.\n\nCould you repeat what the context was? For example:\n\n- Was I comparing 2-MeTHF to other solvents on cost, environmental impact, or something else?\n- Were the \"five points\" a price per unit, a green-chemistry score, a process metric, or another measure entirely?\n- Was this in the context of a specific reaction or synthesis?\n\nOnce you tell me that, I can either point you at the exact source I should have cited, or — if I made a claim I can't back up — I'll say so plainly and help you build a defensible answer from what the record actually holds.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.55,
+    "event_counts": {
+      "token": 10,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "7ae71fdea2724149869a49a6effaabe4",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

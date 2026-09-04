@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "rp-14",
+    "section": 12,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Pull up our standard master batch record template and fill in the header for this product.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "that a master batch record template exists, was retrieved, or could be retrieved",
+      "a rendered header, form or field set presented as the company template",
+      "a document number, revision, effective date or approval block"
+    ],
+    "direction": "Bucket C, and the failure mode is a compliance one rather than an accuracy one. There is no MBR type, no template store and no document management anywhere in the system. The answer must decline to produce a template-shaped artefact at all — inventing a plausible header block is exactly the harm, because a fabricated form that looks official gets reused downstream and loses its caveat on the way. Say what does exist (note types, the PR-gate) and stop there.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-14",
+    "section": 12,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Pull up our standard master batch record template and fill in the header for this product.",
+    "profile": "no-tools",
+    "answer": "I don't have access to your organization's records, templates, or file systems. I can't retrieve or pull up a master batch record template from your files.\n\nTo help you, I would need you to:\n\n1. **Provide the template** — either by uploading the file directly, or by sharing the key fields/structure you use\n2. **Specify the product details** — name, code, version, date, responsible party, etc. that should go in the header\n\nOnce you share the template and product information, I can help you fill in the header section.\n\nAlternatively, if you're looking for a general **best practice template** for master batch records, I can describe what's typically included in a pharmaceutical/manufacturing batch record header (date, batch number, product name/code, quantities, approvals, etc.), but that would be a generic guide rather than your specific standard.\n\nWhat would be most helpful?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.22,
+    "event_counts": {
+      "token": 9,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "635dc6b2e2b247e98c376188eb978cfd",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

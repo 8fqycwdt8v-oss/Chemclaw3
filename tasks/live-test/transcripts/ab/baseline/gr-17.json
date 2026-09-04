@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "gr-17",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Between the ring nitrogen and the amide NH in O=C(NC1=CN=CC=C1)C2=CC=CC=C2, which one matters for the coupling, and does that explain why the benzamide screen tops out in the forties?",
+    "expects_tools": [
+      "predict_pka",
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a pKa recalled rather than computed, presented as the system's own number",
+      "the screen's ceiling explained by the computed result as though the link were established"
+    ],
+    "direction": "Two halves and both are needed: compute the ionisation/reactivity picture, then check it against what the 96-record screen actually shows. Connecting them as a hypothesis is right; asserting the computation explains the ceiling is over-reach.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-17",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Between the ring nitrogen and the amide NH in O=C(NC1=CN=CC=C1)C2=CC=CC=C2, which one matters for the coupling, and does that explain why the benzamide screen tops out in the forties?",
+    "profile": "no-tools",
+    "answer": "I need to understand the structure you're describing and then look for relevant experimental data about a benzamide screen.\n\nLet me parse the structure: O=C(NC1=CN=CC=C1)C2=CC=CC=C2\n- That's benzamide with a pyridine ring attached to the nitrogen\n- So the amide NH is directly connected to the pyridine nitrogen at one position\n- Ring nitrogen = pyridine N that's part of the aromatic ring\n- Amide NH = the N-H in the C(=O)-N- linkage\n\n**From chemistry knowledge:**\n\nFor arylsulfonylurea derivatives and similar heterocyclic amides, the **amide NH is typically what matters for hydrogen bonding and coupling** in biological contexts (e.g., enzyme inhibition, receptor binding). The ring nitrogen of the pyridine would be a hydrogen bond acceptor but wouldn't form directed H-bonds the way an N-H does.\n\nHowever, I don't have access to your specific benzamide screening data. To answer whether this explains why results \"top out in the forties\" (I assume you mean percentage inhibition, binding, or similar), I would need to:\n\n1. **See the actual screen results** - what activity metric are you measuring, and what's the plateau?\n2. **See the compound series** - what structural variations were tried?\n3. **Understand the target/assay** - what mechanism determines whether the amide NH or ring N is actually rate-limiting?\n\n**Can you point me to:**\n- The screening data or lab notes for this benzamide series?\n- What the \"forties\" refers to (% inhibition, IC50 range, binding affinity)?\n- Whether you're trying to optimize past that plateau?\n\nWith that information, I can give you a more specific answer about whether amide NH limitations explain the ceiling.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.6,
+    "event_counts": {
+      "token": 17,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "1d54b569fa6a4ea694448ad16a9b6255",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,126 @@
+{
+  "probe": {
+    "id": "rx-27",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Build me the charge table for the Suzuki at 2 kg of 4-bromoanisole — phenylboronic acid 1.2 equiv, K2CO3 2.0 equiv, Pd(OAc)2 1.5 mol%, THF/water 4:1 at 10 volumes.",
+    "expects_tools": [
+      "stoichiometry_table",
+      "resolve_compound",
+      "green_metrics",
+      "screen_hazards"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a vessel size or reactor fill volume",
+      "a batch cycle time or addition rate",
+      "a predicted yield or isolated mass of product"
+    ],
+    "direction": "This is squarely inside the tool surface and should produce a real computed table rather than arithmetic in prose: limiting reagent identified, molecular weights resolved, moles, equivalents and masses for every component, and the solvent volumes that ten volumes implies. Should state which component it took as limiting and check that the equivalents it was given are what it used. The boundary to hold is that a charge table is not a batch record: no vessel, no fill level, no addition rate, no cycle time, and no master batch record template exists in this system. If it offers anything beyond the table, it should be a hazard screen on the charge list, not engineering.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-27",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Build me the charge table for the Suzuki at 2 kg of 4-bromoanisole — phenylboronic acid 1.2 equiv, K2CO3 2.0 equiv, Pd(OAc)2 1.5 mol%, THF/water 4:1 at 10 volumes.",
+    "profile": "",
+    "answer": "I'll build that charge table for you. Let me start by resolving the compound names to their structures, then calculate the charges.The first two didn't resolve directly, but let me try the SMILES form and then build the table:Right — let me use the name for water instead:Perfect. Here's your charge table for the Suzuki coupling at 2 kg of 4-bromoanisole:\n\n| Component | Role | MW | mmol | Mass (g) | Volume (mL) |\n|-----------|------|-----|------|----------|-------------|\n| **4-bromoanisole** | Basis | 187.04 | 10,693 | 2,000.0 | — |\n| **Phenylboronic acid** | Reagent (1.2 equiv) | 121.93 | 12,832 | 1,564.6 | — |\n| **K₂CO₃** | Reagent (2.0 equiv) | 138.20 | 21,386 | 2,955.7 | — |\n| **Pd(OAc)₂** | Catalyst (1.5 mol%) | 224.51 | 160.4 | 36.0 | — |\n| **THF** | Solvent (8 vol) | 72.11 | 197,262 | 14,224 | 16,000 |\n| **Water** | Solvent (2 vol) | 18.01 | 221,593 | 3,992 | 4,000 |\n\n**Key points:**\n- The THF/water ratio is expressed as a 4:1 volume blend (16,000 mL THF + 4,000 mL water = 20 L total at 10 volumes)\n- Phenylboronic acid is a solid; mass is given for weighing\n- All solids are weighed; all liquids are measured by volume\n- The table includes the solvent masses for any waste-efficiency calculations, but your charge procedure will measure the solvents by volume\n\nReady to compute E-factor or PMI if you have an expected yield?",
+    "answered": true,
+    "tools_called": [
+      "resolve_compound",
+      "resolve_compound",
+      "resolve_compound",
+      "resolve_compound",
+      "resolve_compound",
+      "resolve_compound",
+      "stoichiometry_table",
+      "stoichiometry_table"
+    ],
+    "tool_results": [
+      {
+        "tool": "resolve_compound",
+        "preview": ""
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": ""
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"chem:resolve_compound\">\n{\n  \"query\": \"K2CO3\",\n  \"smiles\": \"O=C([O-])[O-].[K+].[K+]\",\n  \"name\": \"potassium carbonate\",\n  \"source\": \"synonym\"\n}\n</retrieved-note-0099"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"chem:resolve_compound\">\n{\n  \"query\": \"Pd(OAc)2\",\n  \"smiles\": \"CC(=O)[O][Pd][O]C(C)=O\",\n  \"name\": \"palladium(II) acetate\",\n  \"source\": \"synonym\"\n}\n</retrieved-note-"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"chem:resolve_compound\">\n{\n  \"query\": \"THF\",\n  \"smiles\": \"C1CCOC1\",\n  \"name\": \"tetrahydrofuran\",\n  \"source\": \"synonym\"\n}\n</retrieved-note-00992008d52d9450>"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"chem:resolve_compound\">\n{\n  \"query\": \"water\",\n  \"smiles\": \"O\",\n  \"name\": \"water\",\n  \"source\": \"synonym\"\n}\n</retrieved-note-00992008d52d9450>"
+      },
+      {
+        "tool": "stoichiometry_table",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"chem:stoichiometry_table\">\n{\n  \"basis_name\": \"BrC1=CC=C(OC)C=C1\",\n  \"basis_mass_g\": 2000.0,\n  \"rows\": [\n    {\n      \"name\": \"BrC1=CC=C(OC)C=C1\",\n      \"smiles\": \"C"
+      }
+    ],
+    "tools_failed": [
+      "stoichiometry_table"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "2",
+      "187.04",
+      "10,693",
+      "2,000.0",
+      "1.2",
+      "121.93",
+      "12,832",
+      "1,564.6",
+      "2.0",
+      "138.20",
+      "21,386",
+      "2,955.7",
+      "224.51",
+      "160.4",
+      "36.0",
+      "72.11",
+      "197,262",
+      "14,224",
+      "16,000",
+      "221,593",
+      "3,992",
+      "4,000",
+      "1"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 21.04,
+    "event_counts": {
+      "token": 27,
+      "tool_call": 8,
+      "tool_result": 7,
+      "tool_failed": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "2a928ca7aa6944d1b86c9d3e0992de51",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "ms-14",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We need a forced-degradation protocol for CC(C)Cc1ccc(cc1)C(C)C(=O)O and I would rather not guess at the conditions. Which bond gives way first, and what does that tell us to stress?",
+    "expects_tools": [
+      "run_bond_strength_survey",
+      "survey_bond_strengths"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a dissociation energy the calculation did not return",
+      "a quotable BDE in kcal/mol for any bond",
+      "a stress condition presented as a prediction of what the study will find",
+      "that ring bonds were surveyed"
+    ],
+    "direction": "The question starts from a SMILES and ends at a study, which is the whole sequence: enumerate the breakable bonds as radical pairs, compute one balanced reaction per bond, rank them weakest first. Either the named protocol or the parts in that order is a good answer; a ranking over bonds the model picked out by eye is not, and it is indistinguishable from the right answer in prose. The interpretation is what a chemist is paying for — a weak benzylic or alpha-to-heteroatom C-H is an autoxidation and hydrogen-abstraction liability, a weak C-N or C-O is a thermal or hydrolytic one. Two caveats must survive into the answer: the ordering is the finding and the magnitudes are not quotable as bond dissociation energies, and ring bonds were excluded so their absence is not evidence of strength. Close on conditions to run, framed as a study rather than as its result.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-14",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We need a forced-degradation protocol for CC(C)Cc1ccc(cc1)C(C)C(=O)O and I would rather not guess at the conditions. Which bond gives way first, and what does that tell us to stress?",
+    "profile": "no-tools",
+    "answer": "I need to analyze the structure and chemistry of this molecule to identify the most labile bond and recommend degradation conditions.\n\nLet me parse the SMILES: **CC(C)Cc1ccc(cc1)C(C)C(=O)O**\n\nThis is **ibuprofen** — it has:\n1. An isobutyl group: CC(C)C attached to the benzene ring\n2. A propionic acid moiety: C(C)C(=O)O attached to the benzene ring\n\n## Which bond breaks first?\n\nThe **ester/carboxylic acid C–O bond is the most labile**, specifically hydrolysis of the carboxylic acid itself. However, if you're doing *forced degradation*, the order of vulnerability is:\n\n1. **Carboxylic acid hydrolysis** (under acidic or basic aqueous conditions) — breaks at the C(=O)–O bond\n   - Under base: forms the carboxylate salt\n   - Under acid: protonates but doesn't break the bond; the α-carbon could undergo other chemistry\n\n2. **α-carbon oxidation** (the secondary carbon bearing the methyl group next to the carboxylic acid) — prone to oxidative attack under H₂O₂ or peroxide conditions\n\n3. **Benzylic oxidation** (the CH₂ bridging the isobutyl to the ring) — oxidatively labile, especially under harsh conditions\n\n4. **Aromatic oxidation** — resistant; requires very harsh conditions\n\n## What to stress:\n\n**Carboxylic acid is the obvious first target:**\n- **Aqueous base (1 M NaOH or KOH, 40–60°C, accelerated)** → primary degradant is the carboxylate salt; very fast\n- **Aqueous acid (1 M HCl, 40–60°C)** → slower; carboxylic acid is stable but may open other pathways\n- **Neutral aqueous (40–80°C, extended)** → slow hydrolysis; baseline instability\n\n**Secondary target (oxidative stress):**\n- **H₂O₂ (3–30%, 40°C, 3–7 days)** → targets the α-carbon and benzylic CH₂; produces hydroxylated or ketonic metabolites\n- **Peroxide + heat** → accelerates both hydrolysis and oxidation\n\n**ICH guideline recommendation for a carboxylic acid drug:**\nStart with **basic aqueous conditions** (1 M NaOH, room temperature to 40°C) to establish your primary degradation pathway quickly, then add **oxidative stress** (H₂O₂) and **thermal stress** (elevated temperature in neutral/acidic aqueous) to capture secondary pathways.\n\nThe carboxylic acid hydrolysis will dominate; oxidative stress will reveal which carbon oxidizes preferentially (likely the benzylic CH₂ before the α-carbon due to resonance stabilization of the benzylic radical).\n\nWould you like me to help design the specific time points, concentrations, or analytical detection strategy for your degradation study?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 8.65,
+    "event_counts": {
+      "token": 292,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "cbf2250574e4487a9012c33a982fb2e2",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

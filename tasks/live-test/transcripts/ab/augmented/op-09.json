@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "op-09",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "whats the fastest way to get a go/no-go on whether this new amine even couples? dont want to burn a week finding out it doesnt",
+    "expects_tools": [
+      "gather_evidence",
+      "similar_reactions",
+      "similar_molecules",
+      "resolve_compound",
+      "screen_hazards"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a literature or patent precedent",
+      "a yield prediction for the new amine stated as fact",
+      "this substrate will/will not couple"
+    ],
+    "direction": "Proposes one decisive small-scale experiment rather than a programme: the in-house standard conditions for the closest recorded analogue, at a scale and timescale that answers the question in a day, with an explicit success criterion decided before the run. It cites the precedent that sets those conditions and says how close the analogue actually is. Crucially it states what a negative result would and would not rule out — a failed test under one condition set is not evidence the substrate is inert — so the technician does not over-read a no-go. No invented literature.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-09",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "whats the fastest way to get a go/no-go on whether this new amine even couples? dont want to burn a week finding out it doesnt",
+    "profile": "",
+    "answer": "I need to understand what you're asking about so I can point you at the right tool for a fast answer. A couple of quick clarifications:\n\n1. **What transformation are you asking about?** — \"amine couples\" could mean a Buchwald-Hartwig amination, a reductive amination, an amide coupling, or something else. Do you have reactants and an intended product in mind?\n\n2. **Do you have any precedent in the record?** — If you've run similar couplings before (same coupling type, analogous substrates), I can search for those runs and show you what worked/didn't work, which is usually faster than computing anything.\n\n3. **What's your timeline for deciding?** — \"Go/no-go by tomorrow\" versus \"by Friday\" changes whether a fast computation is worth it versus just running a quick bench experiment.\n\n**The fastest paths are usually:**\n\n- **Search first**: If you describe the amine and the coupling type, I'll search for similar precedent (reactions using the amine, or the same transformation with analogous substrates). That's instant and grounded in what actually worked.\n- **If the record is thin**: A quick forward-reaction prediction on the proposed coupling can at least tell you whether the model recognizes the transformation and what it expects as the major product. Still not a guarantee the bench will agree, but it's a reality check in minutes.\n- **If you want computed evidence**: A reaction free energy (ΔG) on your proposed coupling tells you whether it's thermodynamically favourable at equilibrium, which rules out some dead-end proposals—but it says nothing about rate, so a favourable ΔG is not \"it'll work\" and a slightly unfavourable one is not \"it won't.\"\n\nWhat's the amine, the coupling type, and what product are you after? That'll let me give you a concrete answer.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 8.51,
+    "event_counts": {
+      "token": 19,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "1389cccddaca4c83b0a9b79543423bbe",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "op-11",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Buchwald screen, 4-bromoanisole + morpholine, NaOtBu 1.4 eq, toluene, 100 C, 8 h.\nXPhos 44%, SPhos 51%, RuPhos 71%, BINAP 23%.\nWhat ligand next, and why that one instead of just running RuPhos again?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "compute_electronic_properties"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the descriptors capture the ligands' steric bulk or bite angle",
+      "RuPhos is the global optimum",
+      "the model has data on a ligand that was never run",
+      "a yield for an untried ligand stated as known"
+    ],
+    "direction": "Treats ligand as a categorical parameter and — this is the crux — featurizes it, supplying a structure per category so the surrogate sees electronic descriptors instead of four opaque labels. It must say why: without descriptors the model's belief about a ligand nobody ran is just the average of the ones that were run, so it could never recommend a new one. It then proposes at least one untried ligand and answers the \"why not RuPhos again\" question in explore/exploit terms — re-running the best is exploitation of a region already learned, while the proposal buys information where the model is least certain. Two limits must be stated: the descriptors are electronic only, so two ligands differing mainly in bulk look similar to the model, and a wrong SMILES silently describes a different molecule.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-11",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Buchwald screen, 4-bromoanisole + morpholine, NaOtBu 1.4 eq, toluene, 100 C, 8 h.\nXPhos 44%, SPhos 51%, RuPhos 71%, BINAP 23%.\nWhat ligand next, and why that one instead of just running RuPhos again?",
+    "profile": "no-tools",
+    "answer": "I'm reading this as a Buchwald-Hartwig amination screen where you've tested four phosphine ligands on the same coupling (4-bromoanisole + morpholine, NaOtBu, toluene, 100 °C, 8 h), and RuPhos is your winner at 71% yield.\n\n**What's next and why:**\n\n**Run RuPhos again to confirm reproducibility.** This is the boring but correct answer.\n\nThe screen tells you RuPhos works best *in this single run*, but one data point—especially at 71%, which isn't \"crushing it\"—doesn't prove it's optimal. You should:\n\n1. **Repeat the RuPhos condition** to see if 71% is real or statistical noise / batch/heating variation.\n2. **Only then** branch to optimization (temperature sweep, base screen, solvent, stoichiometry, time) if you want higher yield.\n\n**Why not skip to something new?** Because:\n- You've already optimized *ligand* in the screen. Jumping to a fifth ligand assumes the screen was complete, which one screen rarely proves.\n- If RuPhos isn't reproducible, you've wasted the run.\n- If it *is* 71%, you know your baseline; tweaking other variables (heat, base, equivalents) is then meaningful.\n\n**If RuPhos *does* reproduce at ~71% and you want higher yield:**\n- Try **T-Phos** or **tBuXPhos** (sterically bulky; often superior to XPhos for hindered electrophiles like 4-haloanisoles).\n- Raise temperature to 110–120 °C.\n- Screen bases (Cs₂CO₃, K₂CO₃, KOtBu give different rates).\n- Reduce Pd (you're not ligand-loading-limited if XPhos at same [Pd] gave only 44%).\n\nWhat's your current yield target, and do you have access to other ligands already?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.98,
+    "event_counts": {
+      "token": 232,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c9c1f653743e422d9694cd77b42ee5e2",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

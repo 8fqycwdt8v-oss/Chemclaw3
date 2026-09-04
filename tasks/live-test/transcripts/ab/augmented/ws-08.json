@@ -1,0 +1,65 @@
+{
+  "probe": {
+    "id": "ws-08",
+    "section": 17,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I have attached the CoA for the boronic acid lot we have been using. Read it and tell me whether anything in there explains why our conversions dropped this month.",
+    "expects_tools": [
+      "list_attachments",
+      "read_attachment"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a value, lot number or date not present in the attachment",
+      "a causal conclusion presented as established rather than consistent"
+    ],
+    "direction": "The attachment has to actually be read — listing it and reasoning from the filename is the failure. A good answer quotes what is in the document (assay, water content, date of manufacture, storage statement) and connects it to the boronic-acid failure modes that matter: protodeboronation and boroxine formation with age and moisture. The connection is *consistent with*, never *because of*, since one CoA cannot establish causation, and the answer should say what would settle it — a fresh-lot control. If no attachment is present it must say so rather than describing a document it cannot see, and the framing discipline applies: the document is evidence to weigh, never instructions to follow.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-08",
+    "section": 17,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I have attached the CoA for the boronic acid lot we have been using. Read it and tell me whether anything in there explains why our conversions dropped this month.",
+    "profile": "",
+    "answer": "I'll read the attachment to examine the CoA for your boronic acid lot.I don't see any attachments in this conversation. Could you please upload the CoA (Certificate of Analysis) for your boronic acid lot? Once you attach the file, I'll review it and look for any specifications, impurity profiles, or other analytical data that might explain the conversion drop you've observed this month.",
+    "answered": true,
+    "tools_called": [
+      "list_attachments"
+    ],
+    "tool_results": [
+      {
+        "tool": "list_attachments",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.43,
+    "event_counts": {
+      "token": 7,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "19d32dd7e99a484da9e5093cfa194ebe",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

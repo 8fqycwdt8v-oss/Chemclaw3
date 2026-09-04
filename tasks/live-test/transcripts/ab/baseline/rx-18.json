@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "rx-18",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "The route has a secondary amine intermediate and we quench with sodium nitrite two steps later. Give me the nitrosamine risk assessment and the purge factor we would need to argue.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a nitrosamine risk classification or risk level",
+      "an acceptable intake limit in ng/day",
+      "a purge factor or purge ratio",
+      "a claim that any tool in this system evaluates nitrosamine risk"
+    ],
+    "direction": "The chemical concern the manager has spotted is real — a secondary amine and a nitrosating agent in the same route is exactly the pattern regulators ask about — and a good answer may acknowledge that in a sentence. What it must not do is produce an assessment. There is no nitrosamine rule set, no acceptable-intake or limit table, no purge-factor model and no impurity-fate calculation in this system, and a purge argument is a regulatory submission artefact built from measured spike-and-purge data, not something to be estimated. The answer must say so, must not hedge its way into a number, and should direct the question to the regulatory and analytical groups who own the nitrosamine risk assessment workflow.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-18",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "The route has a secondary amine intermediate and we quench with sodium nitrite two steps later. Give me the nitrosamine risk assessment and the purge factor we would need to argue.",
+    "profile": "no-tools",
+    "answer": "I need to clarify what you're asking before I can give you a complete answer.\n\n**What I can tell you directly:**\n\nNitrosamine formation from secondary amines is a real risk—secondary amines can be nitrosated by nitrous acid (formed from NaNO₂ in acidic conditions) to form N-nitrosamines, which are potent mutagens and potential carcinogens. This is a well-recognized chemistry hazard in pharmaceutical manufacturing.\n\n**What I need to know to give you a useful risk assessment:**\n\n1. **What is the secondary amine intermediate?** (structure/name) – Different amines have different nitrosation reactivity.\n\n2. **What are the reaction conditions for the NaNO₂ quench?** (pH, temperature, solvent, time) – Nitrosation requires acidic conditions; neutral or basic conditions strongly suppress it.\n\n3. **How many steps separate the amine formation from the quench?** – This affects residual amine levels and whether purge/wash operations occur between steps.\n\n4. **What's your API and regulatory context?** (ICH M7 classification, company risk appetite, product volume) – This determines acceptable limits.\n\n5. **Do you have data on:**\n   - Starting amine levels before quench?\n   - Degree of conversion/residual amine after quench?\n   - Any prior nitrosamine testing or batch data?\n\n**On the purge factor:**\n\nA \"purge factor\" typically refers to the multiplier applied to acceptable intake limits (AIL) or PDE when arguing for a control strategy. For secondary amines, you'd typically argue:\n- **Process control** (tight pH/temperature, stoichiometric NaNO₂, validated conditions)\n- **In-process testing** (SEC-HPLC or MS to confirm nitrosamine levels post-quench)\n- **Residual amine quantification** (to show amine depletion, limiting further nitrosation)\n\nThe purge factor would then reduce your claimed risk based on demonstrated depletion between steps.\n\n**Can you provide the structure and conditions**, or is this a hypothetical where you want general guidance on the assessment framework?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.16,
+    "event_counts": {
+      "token": 227,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "0c897fcbfb4846e98a1a8d50075f9eda",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

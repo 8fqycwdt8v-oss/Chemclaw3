@@ -1,0 +1,84 @@
+{
+  "probe": {
+    "id": "an-26",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We measured the pKa of COc1ccc(-c2ccccc2C(=O)O)cc1 experimentally and got 3.9. Log it against the prediction, and tell me how far the pKa calculator has actually been off historically before I rely on it for the next compound.",
+    "expects_tools": [
+      "report_measurement",
+      "calculator_trust",
+      "calculator_outliers",
+      "find_calculations"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an accuracy or bias figure not returned by the trust tool",
+      "quoting a bias from a sample too small to be meaningful without saying so",
+      "claiming the calculator is validated for setting specifications"
+    ],
+    "direction": "Records the measurement against the right property and molecule, then reports the calculator's measured track record — bias, spread, n — and reads `n` honestly: below the configured minimum it says the calculator is not yet calibrated rather than quoting a bias from a handful of points. Mentions uncertainty coverage if it is low, since narrow error bars are the subtler failure. Ends with what the record does and does not license.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-26",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We measured the pKa of COc1ccc(-c2ccccc2C(=O)O)cc1 experimentally and got 3.9. Log it against the prediction, and tell me how far the pKa calculator has actually been off historically before I rely on it for the next compound.",
+    "profile": "",
+    "answer": "I'll record your measurement and then show you the calculator's historical accuracy.Let me record the measurement with the correct unit:Your measurement could not be recorded and the calculator's accuracy is currently **unknown** — because the calibration ledger is disabled in this deployment.\n\nHere's what that means:\n\n- **Your measured value (3.9)** was not logged, so no comparison was made and the prediction's error on this compound is not being tracked.\n- **Historical accuracy is inaccessible.** The `calculator_trust` report shows `n=0` and all metrics as `null` — the prediction ledger has never been scored against any measurement. This is **not** evidence the calculator is accurate; it means no measurements have been recorded.\n- **Before you rely on the next prediction**, you need an operator to enable `calibration_enabled` in your deployment's configuration. Once enabled, your 3.9 measurement and future ones will be logged, and I can then show you the actual bias and error the calculator has accumulated across all measurements.\n\nIn the meantime: The GFN2-xTB pKa predictor you have access to is calibrated on ~13 reference molecules and carries roughly ±1.6 units of uncertainty for acid sites (carboxylic acids, phenols, alcohols, thiols — which is what your biaryl carboxylic acid is). Without a deployment-specific calibration ledger running, I cannot tell you how far off it has been on *your* compounds specifically, which is the number that would actually inform your decision about the next one.",
+    "answered": true,
+    "tools_called": [
+      "report_measurement",
+      "predict_pka",
+      "calculator_trust",
+      "report_measurement"
+    ],
+    "tool_results": [
+      {
+        "tool": "calculator_trust",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"calc:calculator_trust\">\n{\n  \"calc_type\": \"pka\",\n  \"n\": 0,\n  \"enabled\": false,\n  \"bias\": null,\n  \"mean_absolute_error\": null,\n  \"rmse\": null,\n  \"uncertainty_coverag"
+      },
+      {
+        "tool": "predict_pka",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"calc:predict_pka\">\n{\n  \"smiles\": \"COc1ccc(-c2ccccc2C(=O)O)cc1\",\n  \"method\": \"GFN2-xTB/ALPB-water\",\n  \"pka\": 6.078391935117551,\n  \"deprotonation_energy_kcal\": 123.1"
+      },
+      {
+        "tool": "report_measurement",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"calc:report_measurement\">\nNOT recorded. The calibration ledger is disabled in this deployment, so the measurement for COc1ccc(-c2ccccc2C(=O)O)cc1 was not stored an"
+      }
+    ],
+    "tools_failed": [
+      "report_measurement"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1.6"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 12.33,
+    "event_counts": {
+      "token": 25,
+      "tool_call": 4,
+      "tool_failed": 1,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "816c61de40ca4cb9b64c173997cef1d7",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

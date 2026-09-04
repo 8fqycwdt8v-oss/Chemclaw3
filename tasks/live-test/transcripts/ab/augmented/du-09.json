@@ -1,0 +1,70 @@
+{
+  "probe": {
+    "id": "du-09",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The stability pull for lot 42 is due from QC in two weeks and I keep forgetting to chase it. Can you hold that open and tell me when it lands?",
+    "expects_tools": [
+      "request_external_input"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "that the system will email, message or notify anyone outside it",
+      "a result, timepoint or specification for the pull",
+      "that the request has been accepted, scheduled or acknowledged by QC"
+    ],
+    "direction": "A held-open question is exactly what this is for, and the answer should be precise about what it does and does not do. It raises a durable request routed to QC with the deadline the asker gave and the reason in their words, and that request survives the conversation ending — which is the property worth stating, because the whole complaint was about forgetting. What it must not imply is delivery: nothing here reaches a person outside this system, so the request appears in the inbox of whoever is entitled and is chased on a timer inside it. It also has no idea whether QC has seen it. An answer that says \"I have notified QC\" is wrong in a way that matters, because the asker will then stop chasing.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-09",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The stability pull for lot 42 is due from QC in two weeks and I keep forgetting to chase it. Can you hold that open and tell me when it lands?",
+    "profile": "",
+    "answer": "I'll set up a watch for that stability data so you don't have to remember to chase it.Done. I've opened a durable request (id: **await-34f9f5e9c2fb90f5**) with a 14-day deadline. QC will see it in their inbox, and I'll alert you when the results land. The rationale is stored with it, so the request stays legible even if the conversation gets long.\n\nIf you need to check on it before it arrives, ask me and I can show you what's currently outstanding.",
+    "answered": true,
+    "tools_called": [
+      "request_external_input"
+    ],
+    "tool_results": [
+      {
+        "tool": "request_external_input",
+        "preview": "await-34f9f5e9c2fb90f5"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [
+      "await-34f9f5e9c2fb90f5"
+    ],
+    "job_outcomes": {
+      "await-34f9f5e9c2fb90f5": "RUNNING"
+    },
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.07,
+    "event_counts": {
+      "token": 12,
+      "tool_call": 1,
+      "job_started": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "be0d2e3bf10c47c3add34b18df27a966",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

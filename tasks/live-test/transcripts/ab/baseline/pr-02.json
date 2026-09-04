@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "pr-02",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We need to make COc1ccc(-c2ccccc2)cc1 from COc1ccc(Br)cc1 and OB(O)c1ccccc1. Nobody here has run this exact coupling. How would people normally run it — catalyst, solvent, base, temperature — so I have something to put on a first screen?",
+    "expects_tools": [
+      "predict_reaction_conditions"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a suggested condition set presented as a recommended or validated procedure",
+      "a predicted yield for any suggested condition set",
+      "a temperature quoted as a set point rather than as a bucket",
+      "a solvent proposed without saying its hazard and ICH class have not been checked"
+    ],
+    "direction": "This is the gap the whole bundle closes, so the first graded behaviour is that the system reaches for the predictor at all rather than answering \"no precedent on file\" from the ELN — the transformation is one nobody here has run, which is exactly when the precedent tools go quiet and are silent rather than wrong. A good answer returns ranked condition sets with their vote counts and contributing models, and frames them as a *starting point for a screen* rather than a procedure: these models reproduce what is common in the training literature, which is not the same as what is best, safe, or available at this site. Temperature must be read as the 10 °C bucket the voting unit actually is. The answer should say that any proposed solvent needs its hazard and ICH class checked before it reaches a plan, and should not quietly promote a suggestion into a recipe. Naming precedent tools *beside* the prediction is good practice; substituting them for it, and reporting nothing, is the failure this probe exists to catch.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pr-02",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We need to make COc1ccc(-c2ccccc2)cc1 from COc1ccc(Br)cc1 and OB(O)c1ccccc1. Nobody here has run this exact coupling. How would people normally run it — catalyst, solvent, base, temperature — so I have something to put on a first screen?",
+    "profile": "no-tools",
+    "answer": "This is a classic Suzuki-Miyaura cross-coupling of 4-bromoanisole with phenylboronic acid. Let me give you the standard conditions people use for this type of coupling.\n\n## Standard First-Screen Conditions\n\n**Catalyst:** Pd(PPh₃)₄ or Pd(dppf)Cl₂\n- Pd(PPh₃)₄ is the traditional choice and works well here\n- Pd(dppf)Cl₂ is also popular, slightly more air-stable\n- Load: 2–5 mol% is typical for aryl bromides\n\n**Base:** K₂CO₃ or Cs₂CO₃\n- K₂CO₃ is cheaper and works fine for this coupling\n- Cs₂CO₃ is preferred if you want faster kinetics or run it cold\n- Load: 1.5–3 equiv (based on bromide)\n\n**Solvent:** Toluene or DMF (or 1:1 toluene/EtOH)\n- Toluene is most common for heating; gives cleaner reactions\n- DMF works but can be harder to remove and gives more side products sometimes\n- Mixed aqueous–organic solvents (toluene/EtOH/water) also used, especially with K₂CO₃\n\n**Temperature:** 80–100 °C\n- 80 °C is a good starting point; 100 °C if you want faster kinetics\n- Microwave: 120–150 °C for 10–30 min (faster but not necessary for a first screen)\n\n**Stoichiometry (based on aryl halide):**\n- Aryl bromide: 1 equiv\n- Phenylboronic acid: 1.2–1.5 equiv\n- Base: 1.5–2 equiv\n- Catalyst: 2–5 mol%\n\n## Typical \"First Run\" Protocol\n\nA robust starting point would be:\n- 4-bromoanisole (1 equiv)\n- Phenylboronic acid (1.2 equiv)\n- Pd(PPh₃)₄ (3 mol%)\n- K₂CO₃ (2 equiv)\n- Toluene\n- 80–90 °C, 4–12 hours\n\nThis combination is well-precedented, not fussy, and should give >80% conversion. If it's slow, you can either raise the temperature, increase catalyst loading, or switch to Cs₂CO₃. If you get side products (protodeborylation, homocoupling of the boronic acid), lower the temperature or run it shorter.\n\nThe main variables to screen next (if the first run is slow or messy) would be: catalyst type → base → temperature → solvent.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 8.14,
+    "event_counts": {
+      "token": 24,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b9e019b9d1b54f8a88af97d56b0dce35",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

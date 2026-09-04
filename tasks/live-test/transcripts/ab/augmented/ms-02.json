@@ -1,0 +1,67 @@
+{
+  "probe": {
+    "id": "ms-02",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nicotinic acid, OC(=O)c1cccnc1. It has an acid and a basic nitrogen, so I do not think a single pKa tells me anything. What ionised forms are even on the table here?",
+    "expects_tools": [
+      "enumerate_protonation_states"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a pKa value for either site",
+      "a percentage or distribution across the microstates",
+      "a microstate that combines two ionisations, which the single-toggle enumeration does not produce"
+    ],
+    "direction": "The asker has already identified the amphoteric case correctly, so the useful answer is the microstate set rather than a lecture. Each ionisable site is toggled singly — the neutral parent, the carboxylate, the pyridinium — and a good answer says that plainly, including that the doubly-ionised zwitterion is not in the set and is reachable by enumerating again on a member. It should agree with the asker that a single predicted pKa does not describe this molecule and name what does: a ranking over these microstates at a stated pH. Quoting a pKa here is not wrong chemistry, it is the wrong tool, and an answer that leads with one has gone back to the single-site question the asker just ruled out.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-02",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nicotinic acid, OC(=O)c1cccnc1. It has an acid and a basic nitrogen, so I do not think a single pKa tells me anything. What ionised forms are even on the table here?",
+    "profile": "",
+    "answer": "You're right to be cautious — nicotinic acid (pyridine-3-carboxylic acid) has both an acidic carboxyl group and a basic aromatic nitrogen, so the ionization landscape is more complex than a single pKa. Let me enumerate the protonation microstates to see what forms are actually populated at different pH values.Three forms. The enumeration stopped at single-site toggles — which is the right behaviour, because combining them (deprotonating the acid *and* protonating the nitrogen) is a separate, explicit choice.\n\nSo on the table you have:\n\n1. **Neutral form** (as written): carboxylic acid protonated, pyridine N unprotonated. This is what you drew.\n2. **Carboxylate form**: acid deprotonated to COO⁻, nitrogen still neutral. Dominant at pH >> pKa(COOH).\n3. **Pyridinium form**: acid still protonated, nitrogen protonated to N⁺. Dominant at pH << pKa(N-H).\n\nWhat's *not* on this list yet is the **doubly ionized form** (COO⁻ with N⁺), which would require calling the tool again on one of these results — it is not enumerated outright because the two-site case is treated as an explicit choice, not a silent addition.\n\n**What this means for your process:** \n\n- At low pH (acidic conditions), form 3 dominates — you have the pyridinium cation, and the carboxylic acid is still neutral.\n- At intermediate pH, you're in a mixed regime where both the neutral form and the carboxylate coexist.\n- At high pH, form 2 dominates — the carboxylate anion with neutral pyridine N.\n\nIf you need to know *which* form actually controls at your working pH, I can rank these by free energy. That will tell you which is thermodynamically favoured at any pH you care about — but you'll need to tell me what that pH is, since the two equilibria are coupled and they won't favour the same form across the whole pH scale.",
+    "answered": true,
+    "tools_called": [
+      "enumerate_protonation_states"
+    ],
+    "tool_results": [
+      {
+        "tool": "enumerate_protonation_states",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"chem:enumerate_protonation_states\">\n{\n  \"smiles\": [\n    \"O=C(O)c1cccnc1\",\n    \"O=C([O-])c1cccnc1\",\n    \"O=C(O)c1ccc[nH+]c1\"\n  ],\n  \"labels\": [\n    \"as given\",\n    "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.51,
+    "event_counts": {
+      "token": 22,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d19896a594e541dc8cff7f071a4e5dcf",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}
