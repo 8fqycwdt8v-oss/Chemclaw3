@@ -1799,3 +1799,34 @@ entry in this file is about exactly this, written by me, one round earlier. Writ
 did not stop me doing it; what would have is counting before typing the sentence. **Treat any
 ratio, count or size in prose as requiring a command in the same edit.** If there is no command,
 there is no number — write "smaller" instead.
+
+## 2026-09-04 — a gate that cannot run, and a contract with two halves
+
+From the fifteen-review deployment-readiness pass (`D-2026-09-04-fifteen-fresh-contexts-over-one-tree`).
+
+**A skipped gate is invisible in a way a failing one is not, so check what a green run did not
+run.** `helm` is absent from this sandbox; twelve chart assertions skip as "helm is not installed";
+five HIGH chart defects had survived every previous review because nobody had rendered the chart.
+`tests/pg.py` has an epilogue that names its skips for exactly this reason and nothing does the same
+for helm. **Rule for myself: before reporting a suite green, read the skip list and ask what each
+skip means the run is not evidence about — then install the missing thing rather than noting it.**
+
+**A green server suite is not evidence that a client can call the server.** Every one of twenty-seven
+route tests wrote the request body the *server* expected, so an endpoint its only client could not
+call stayed green through `mypy --strict`, ten validators and 6,406 tests. **Rule: where a route's
+only caller is a companion repo, read that repo's call site and test the literal body it sends.**
+
+**A per-package check is not the gate.** Nine fixers each ran `mypy --strict` on their own `src/`
+package and reported clean; eleven errors were in `tests/`, which the real gate covers. Three more
+regressions surfaced only in the full suite. **Rule: run the project's own composite target before
+claiming done — never a scoped approximation of it.**
+
+**Verify a claim against the thing it describes, not against another document.** A `BACKLOG.md` row
+said a fix was blocked on "a matching change in `Chemclaw3_ui`" — that half had already shipped, and
+believing the row is what kept the defect alive. A fixer found it by checking the client instead.
+**Rule: a blocker written down is a claim about a commit; re-check it before accepting it.**
+
+**When a reviewer prescribes a fix, measure the prescription.** Four were wrong in this pass, one of
+them dangerously (`ABANDON` as a parent-close policy is worse than the default it replaces, not
+better). **Rule: a finding's diagnosis and its proposed remedy are two separate claims and the
+second is usually the less tested one.**
