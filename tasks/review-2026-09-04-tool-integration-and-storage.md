@@ -18,7 +18,35 @@ coordinator's own pass on the seams no single reviewer owns — the hops *betwee
 Reviews ran read-only. No repository file was modified; every probe ran from a scratch directory or
 a temp copy.
 
-## The four cross-cutting patterns
+## What this run proves
+
+Measured on this checkout, with the stack up. `tests/pg.py::migrated_db_or_skip` runs `migrate()`
+itself into a per-pid schema, so the suite never depended on the operator's `make db-migrate`
+timing.
+
+| | Result |
+| --- | --- |
+| `uv run pytest -q -rs` | **6,547 passed, 36 skipped, 0 failed**, 848.70 s, exit 0 |
+| Independent cross-check (17 chunks of 20 files) | 6,547 / 36 / 0 — identical |
+| `make lint` | `All checks passed!`; 801 files already formatted |
+| `make type` | `Success: no issues found in 801 source files` |
+| Coverage over the nine modules in scope | **93%** (repo floor 84%; whole run 92.90%) |
+
+**Postgres was worth 404 tests, and all of them executed.** A control run of the 66
+Postgres-backed files against a dead DSN gave 611 passed / 437 skipped. The residual 36 skips are
+33 helm renders plus 3 that need untruncated git history — neither class is Postgres.
+
+This does not contradict `tasks/todo.md`'s 6,551 / 4 / 0; it is a different tree (6,583 collected
+here against 6,555 there, sibling work merged today). With `helm` installed this tree would show
+6,580 / 3.
+
+Two caveats about the sweep itself, recorded because they bound what the numbers mean: sibling
+agents were mutating this checkout during it (an early `make lint` failed on two probe files that
+no longer exist; all authoritative numbers were taken after they vanished), and a first full-suite
+attempt was killed by the cgroup OOM killer at 12.4 GB anon-rss with three suites running at once.
+This box cannot run three suites concurrently.
+
+## The five cross-cutting patterns
 
 These are the finding, more than any individual row. Each is stated with the instances that
 produce it, because a pattern asserted from one example is an anecdote.
@@ -63,6 +91,18 @@ readers still serve.
 tokens** in a batch compaction is *designed* never to clear, on top of a **42,730**-token prefix
 charged unconditionally, against a **100,000**-token budget. Nothing asserts the product.
 Separately, `calc`'s inline tools wait 3,600 s on a backend behind a 600 s agent bound.
+
+### 5. A claim held only by a test
+
+Three instances, and `CLAUDE.md` already names the shape (`map_to_hpc_identity`: a guard with no
+caller, kept alive by a test that calls it directly, is a *claim* that a control exists).
+
+- The effect ledger's entire operator read path — `unsettled()`, `effects_for_session()`,
+  `Unsettled` — has **zero** callers outside `tests/test_effects.py` (H14).
+- Two guards revert with the whole suite green, one of them at 100% branch coverage while mutated
+  (M24).
+- `tests/test_tool_framing.py:329` asserts the index order of the literal list the function under
+  test returns — a constant compared with itself (L, below).
 
 ---
 
@@ -212,6 +252,21 @@ evidence"* — a paragraph that sits eleven lines below the tie-break paragraph 
 file. The subclass namespaces the catalogue key and the rebuild, not the read. Measured: after
 switching `embedding_model`, the external store returned `[('note-old-model', 0.9939)]` where
 pgvector returned `[]`. Unbounded until a reindex, and the citations resolve, so it looks correct.
+
+### H14 — The effect ledger's operator read path has no production caller
+`durable/effect_ledger.py:164` (`unsettled()`), `:181` (`effects_for_session()`) and `:193`
+(`class Unsettled`) are referenced nowhere in `src/`, the CLI, the API, `deploy/` or `infra/` —
+only from `tests/test_effects.py:120,129`. **(re-verified by the coordinator: the only two `src/`
+hits for the word are unrelated prose.)** The *write* path is live
+(`durable/connector_job.py:58`), and three docstrings claim the read is too, in the present tense:
+`:9` *"`unsettled` is the query an incident starts from"*, `:194` *"the sentence an operator needs
+beside it"*.
+
+Aggravating rather than mitigating: `operations/evidence_pack.py:282` re-implements the same read
+inline with the **opposite** ordering, and `evidence_pack.py:150` documents that its oldest-first
+ordering drops *"the ones an incident is actually about"* — the dead function is the one with
+`ORDER BY attempted_at DESC`. So the ledger has a live reader with the wrong order and a
+right-ordered reader nothing calls. In neither `BACKLOG.md` nor `DEFERRED.md`.
 
 ---
 
@@ -396,6 +451,40 @@ different question than the backend it stands in for. Second instance: deleting
 `if not keep: return []` from `PostgresNoteIndex._retire_absent_ids` also survives all 706, while
 the identical guard on the in-memory class *is* pinned.
 
+**M25 — The model never selects a tool anywhere in `make test`.**
+34 test files drive a scripted or fake chat model, with the `tool_call` authored by the test
+(`tests/test_langgraph_connectors.py:184` scripts `{"name": "echo", ...}`). The corpus that would
+test *selection* is only parsed: `tests/test_probe_coverage.py:87` asserts every agent-callable
+tool is **named** in `data/evals/probes/`, never invoked — execution is `make eval`, which needs an
+LLM and sits outside `make test`. So tool integration is proven from the `tool_call` onward and
+never from the prompt, which is precisely where M8 (the unadvertised `find_calculations`) lives and
+why nothing caught it.
+
+**M26 — Dense retrieval is proven only against a token feature-hash.**
+`embedding_provider` defaults to `"hash"` (pinned at `tests/test_config.py:96`), and
+`core/embeddings.py:13-16` states it gives *"token-overlap cosine similarity — NOT neural-semantic
+retrieval"*. `tests/test_vector_index.py:76` is nonetheless named
+`test_reindex_then_dense_search_finds_the_semantic_note` and comments "found without any
+id/substring overlap" — query and note share the tokens *epimerization*/*amide*/*coupling*, so
+token overlap is exactly what passes it. Ranking mechanics and the embedding-key staleness rule
+*are* genuinely proven; semantic behaviour is not.
+
+**M27 — Two vector adapters have never met their servers.**
+`retrieval/vectors/qdrant.py` (85% covered) and `databricks.py` (74%, the lowest module in scope)
+run only against injected fakes, and `tests/test_vector_store.py:7` says so: *"the fake agrees with
+the adapter about the calls, which is a different claim from the server agreeing with them."* H13
+lives in this family.
+
+**M28 — Three silent skip classes, and the deployment assurance under them.**
+`tests/conftest.py:438-440` calls exactly three reporters (Postgres, Temporal, public-schema
+shadowing); the authoritative run printed **no epilogue at all** for 36 real skips. 33 are helm
+renders (already `BACKLOG.md:161`, and my measurement confirms the count exactly); **3 are
+untracked** — `tests/test_migrations_are_additive.py:500,580,618` skip on truncated git history, so
+the guard that an already-shipped migration was not edited does not run here. And the ~100 chart
+tests that *don't* skip assert on template **source text**, not rendered YAML, as
+`tests/test_helm_chart.py:20-30` states outright. This sandbox's entire deployment assurance is
+grep-over-templates plus 33 skipped renders.
+
 ---
 
 ## LOW and NIT
@@ -446,6 +535,19 @@ the identical guard on the in-memory class *is* pinned.
 - **`harness.gather_section:212` sets `retrieval_failed` on any skip** and
   `ShareDocumentRetriever` skips whenever `note_type` is set, so every filtered report section on a
   share-enabled deployment renders "Some retrieval sources failed… re-run required".
+- **One tautological test and 36 that assert nothing.** `tests/test_tool_framing.py:329` asserts
+  the index order of the literal list `tool_call_middleware()` returns — it cannot fail unless
+  someone edits that literal, and proves nothing about how LangChain nests them; its value is
+  carried entirely by `tests/test_middleware_order.py`, which spies inside
+  `deepagents.graph.create_agent` and drives a real compiled graph. Separately, 36 tests contain no
+  assertion at all; most are legitimate "must not raise", but the *positive* authorization ones are
+  the weakest form available — `tests/test_authz.py:47`, `tests/test_tool_authz.py:126,142`,
+  `tests/test_plan_gate.py:387,427` each pass against a gate replaced by `pass`. Their paired
+  denial tests do use `pytest.raises`, so both directions are covered in aggregate.
+  `tests/test_plan_gate.py:427`'s docstring additionally claims a property ("the gate still fails
+  closed on the next call") the test does not check.
+- **`kg/crosslink.py:53` `notes_for_calculation` has no production caller** — already on record in
+  `D-2026-08-05-three-searches-that-disagreed-about-one-note.md:179`.
 - **The three observer middlewares are blind to a `Command`** — latent, no producer today; worth an
   absence test in the style this repository already uses.
 
@@ -516,6 +618,16 @@ ensemble. The manifest ↔ served-surface check runs against a real uvicorn for 
 no `skipif` or `xfail`. The `pyexec` sandbox held on every probe, including the `uuid.os.chdir` jail
 escape and a 4 GiB allocation.
 
+**The suite's own honesty.** Mock usage is very low — nine files touch `unittest.mock`, there are
+**zero** `assert_called` assertions in the tree, and no test in the nine modules in scope patches
+the thing under test. `tests/middleware.py` drives the real `middleware.awrap_tool_call` rather
+than re-implementing composition, and says why. Tool invocation is exercised against **real
+uvicorn, real streamable-HTTP MCP and the real client** across six files — identity headers
+actually landing, redirect-harvest refusal, body caps, request timeouts that cancel, session-per-turn
+isolation. Storage and retrieval are proven against **real pgvector**: round-trip, upsert, `find`
+parity between backends, bulk `known`, the outbox's claim/attempt/retire semantics and two-worker
+claim splitting, 8-concurrent-misses → 1 compute, and D-011 across the wire.
+
 ---
 
 ## Suggested order of work
@@ -539,8 +651,13 @@ Grouped by what a fix buys, not by severity alone.
    bound derived from the turn deadline. The invariant is already written and already tested twice;
    this is a third assertion, not a new argument.
 7. **M8** — the cheapest usability fix in the list: name `find_calculations` in `_INSTRUCTIONS`.
-8. **M24** — the two surviving mutants, and a look at whether the class is wider. A guard whose only
-   witness is 100% branch coverage is not witnessed.
+8. **H14, M24** — the claims held only by a test: give the effect ledger's read path a caller (or
+   delete it and keep the ordering fix in `evidence_pack.py`), and close the two surviving mutants.
+   A guard whose only witness is 100% branch coverage is not witnessed. Then ask whether the class
+   is wider.
+9. **M25** — the gap under all of this: nothing in `make test` ever lets a model choose a tool, so
+   every finding above about what the model is *told* (M8, M21, and the stale `dft` text) sits in a
+   region the suite structurally cannot reach.
 
 ## What this review is not evidence about
 
@@ -549,3 +666,8 @@ about the code and the dev server, not a deployed system. The `xtb` and `crest` 
 in this sandbox, so all seven of the fleet's skipped tests — and everything about those two engines
 — is stub-driven; H2's aspirin measurement is the exception, and it ran a real GFN2 calculation.
 The browser → tenant identity hop remains unproven for the reason `CLAUDE.md` already gives.
+
+Deployment assurance in this sandbox is grep-over-templates plus 33 skipped renders (M28), and no
+test in `make test` ever lets a model choose a tool (M25) — so the half of "tool usage" that is
+about *selection* is argued here from the prompt and the docstrings, not measured. `make eval` is
+where that would be measured, and it needs an LLM.
