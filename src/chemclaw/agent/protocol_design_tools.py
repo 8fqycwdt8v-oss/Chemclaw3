@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.session_store import owner_permits
@@ -28,7 +29,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tool_registry import tool
-from chemclaw.core.turn_text import get_current_user_text
+from chemclaw.core.turn_text import get_current_user_texts
 from chemclaw.protocols.checks import blockers, run_checks
 from chemclaw.protocols.diff import diff_designs
 from chemclaw.protocols.layout import LayoutError, place, smallest_plate_for
@@ -130,7 +131,22 @@ def _quote_supports(value: str, quote: str) -> bool:
     )
 
 
-def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str | None) -> None:
+def _said_somewhere(quote: str, haystacks: Sequence[str]) -> bool:
+    """Whether the chemist wrote these words, in this order, in any *one* of their messages.
+
+    Per message rather than over a joined transcript, and that is the whole reason this is a
+    function: joining the thread into one haystack would accept a quote that runs off the end of
+    one message and into the beginning of the next — words in an order nobody ever wrote, arriving
+    in the record as a quotation. Whitespace is normalised on the quote here and on each message by
+    the caller, so a re-wrapped quotation is still the same words.
+    """
+    needle = " ".join(quote.split()).lower()
+    return any(needle in haystack for haystack in haystacks)
+
+
+def require_quotes_are_verbatim(
+    request: ExperimentRequest, source_texts: tuple[str, ...] | None
+) -> None:
     """Refuse a `basis="stated"` slot whose quote is not in the chemist's own words.
 
     The whole honesty claim of the structured request rests on this: a slot marked `stated` says
@@ -139,12 +155,22 @@ def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str | N
     and nothing else is: a paraphrase is exactly what this refuses, because a paraphrase reaching
     the record as a quotation is worse than an unmarked inference.
 
-    **`source_text` is the chemist's message, and it is ambient rather than an argument.** It used
-    to be a parameter of the tool, which is the same as no check at all: a model that wanted
+    **`source_texts` is the chemist's own words, and it is ambient rather than an argument.** It
+    used to be a parameter of the tool, which is the same as no check at all: a model that wanted
     `stated` supplied a `source_text` containing its own quotes and got it, and the fabricated
     attribution landed in `experiment_protocols` indistinguishable from a real one. Measured, the
     same request was refused against the real user text and accepted against an invented one.
     `core.turn_text` carries it now, on the argument `session_context` states for the session id.
+
+    **It is the thread's user turns, not one message, and every one is a separate haystack.** This
+    tool is meant to be called "first … while correcting it is still cheap", i.e. iteratively, so
+    the constraint a chemist stated on turn 1 is usually two turns behind the "ok go ahead" that
+    triggers the intake — measured, `'24 wells'` refused against "ok go ahead" while the chemist
+    had written "24 wells, no DMF, by Friday please." in the same conversation. The messages are
+    *not* concatenated into one haystack: a quote that runs off the end of one message and into the
+    start of the next is words the chemist never wrote in that order, and joining them would accept
+    it. `core.turn_text` decides which messages those are and how far back they go; every one of
+    them was typed by a person, which is the property this check is built on.
 
     `None` means there is no turn — a unit test, an activity, any caller that is not a conversation
     — and every `stated` slot is refused, because there is no chemist to have said it. That is
@@ -164,7 +190,7 @@ def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str | N
         )
         if field.basis == "stated"
     }
-    if source_text is None:
+    if not source_texts:
         if stated:
             raise ChemclawError(
                 "these slots are marked `stated` but there is no chemist message to check them "
@@ -174,7 +200,7 @@ def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str | N
                 "judgment."
             )
         return
-    haystack = " ".join(source_text.split()).lower()
+    haystacks = [" ".join(said.split()).lower() for said in source_texts]
     slots = {
         "scale": request.scale,
         "plate_format": request.plate_format,
@@ -184,16 +210,18 @@ def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str | N
     missing = [
         f"{name}: {field.quote!r}"
         for name, field in slots.items()
-        if field.basis == "stated" and " ".join(field.quote.split()).lower() not in haystack
+        if field.basis == "stated" and not _said_somewhere(field.quote, haystacks)
     ]
     if missing:
         raise ChemclawError(
-            "these slots are marked `stated` but their quote is not in the message that started "
-            "this turn: "
+            "these slots are marked `stated` but their quote is not in anything the chemist has "
+            f"written in this conversation ({len(haystacks)} of their messages checked, this "
+            "turn's included): "
             + "; ".join(missing)
-            + ". Only that message is checkable — a quote from an earlier turn cannot be verified "
-            "here, so ask the chemist to restate it if it matters. Use basis='inferred' for your "
-            "own judgment and quote the chemist verbatim when you mark something stated."
+            + ". Only their own words are checkable — not your earlier prose, not a tool result, "
+            "and not a message older than the window this conversation keeps — so ask them to "
+            "restate it if it matters. Use basis='inferred' for your own judgment and quote the "
+            "chemist verbatim when you mark something stated."
         )
     unsupported = [
         f"{name}: value {field.value!r} is not supported by quote {field.quote!r}"
@@ -266,8 +294,9 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
     call needs.
 
     Mark each slot's `basis` honestly — `stated` obliges their verbatim words in `quote`, checked
-    against the chemist's actual message and refused if it is not there; `inferred` is your own
-    judgment and is expected; `absent` means the text did not say. Resolve species with
+    against what the chemist has written in this conversation (earlier turns included) and refused
+    if it is not there; `inferred` is your own judgment and is expected; `absent` means the text
+    did not say. Resolve species with
     `resolve_compound`; never write a SMILES from a name. `skills/protocol-generation` has the rest.
 
     Args:
@@ -284,7 +313,7 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
         ChemclawError: a `stated` slot whose quote is not in the chemist's own message, or a
             design of that ask belonging to another chemist.
     """
-    require_quotes_are_verbatim(request, get_current_user_text())
+    require_quotes_are_verbatim(request, get_current_user_texts())
     # Scoped by the actor, so two chemists phrasing one ask the same way get two designs rather
     # than one they overwrite in turn.
     design_id = design_id_for(request, owner=require_actor(), salt=salt)

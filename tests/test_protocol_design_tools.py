@@ -26,9 +26,9 @@ import chemclaw.agent.protocol_design_tools as tools
 from chemclaw.agent.authz import require_actor
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.turn_text import (
-    get_current_user_text,
-    reset_current_user_text,
-    set_current_user_text,
+    get_current_user_texts,
+    reset_current_user_texts,
+    set_current_user_texts,
 )
 from chemclaw.protocols.models import (
     ChargeLine,
@@ -60,11 +60,11 @@ def chemist_said() -> Iterator[None]:
     no longer takes the text as an argument (a haystack the model supplies is one the model can
     invent), so a test that stamped nothing would be testing the refusal path by accident.
     """
-    token = set_current_user_text(_SOURCE)
+    token = set_current_user_texts([_SOURCE])
     try:
         yield
     finally:
-        reset_current_user_text(token)
+        reset_current_user_texts(token)
 
 
 @pytest.fixture
@@ -165,7 +165,7 @@ def test_a_paraphrased_quote_is_refused_and_the_slot_is_named() -> None:
         plate_format=RequestField(value="24", basis="stated", quote="a 24-well plate")
     )
     with pytest.raises(ChemclawError, match="plate_format"):
-        tools.require_quotes_are_verbatim(request, _SOURCE)
+        tools.require_quotes_are_verbatim(request, (_SOURCE,))
 
 
 def test_a_quote_differing_only_in_whitespace_and_case_is_accepted() -> None:
@@ -174,7 +174,7 @@ def test_a_quote_differing_only_in_whitespace_and_case_is_accepted() -> None:
         plate_format=RequestField(value="24", basis="stated", quote="  24   WELLS\n"),
         deadline=RequestField(value="Friday", basis="stated", quote="by Friday"),
     )
-    tools.require_quotes_are_verbatim(request, _SOURCE)
+    tools.require_quotes_are_verbatim(request, (_SOURCE,))
 
 
 def test_an_inferred_or_absent_slot_is_never_asked_for_a_quote() -> None:
@@ -183,7 +183,7 @@ def test_an_inferred_or_absent_slot_is_never_asked_for_a_quote() -> None:
         scale=RequestField(value="100 mg", basis="inferred"),
         max_runs=RequestField(basis="absent"),
     )
-    tools.require_quotes_are_verbatim(request, _SOURCE)
+    tools.require_quotes_are_verbatim(request, (_SOURCE,))
 
 
 def test_every_quoted_slot_is_checked_and_not_just_the_first() -> None:
@@ -193,7 +193,7 @@ def test_every_quoted_slot_is_checked_and_not_just_the_first() -> None:
         scale=RequestField(value="5 g", basis="stated", quote="five grams"),
     )
     with pytest.raises(ChemclawError, match="scale"):
-        tools.require_quotes_are_verbatim(request, _SOURCE)
+        tools.require_quotes_are_verbatim(request, (_SOURCE,))
 
 
 # --- structure_experiment_request ---------------------------------------------------------------
@@ -280,7 +280,7 @@ def test_structuring_refuses_before_it_stores_anything(
 
     async def _body() -> None:
         request = _request(scale=RequestField(value="5 g", basis="stated", quote="five grams"))
-        with pytest.raises(ChemclawError, match="quote is not in the message"):
+        with pytest.raises(ChemclawError, match="not in anything the chemist has written"):
             await tools.structure_experiment_request(request)
         assert await store.read(design_id_for(request, owner=require_actor())) is None
 
@@ -921,7 +921,7 @@ def test_a_stated_slot_is_refused_when_no_chemist_spoke(store: InMemoryDesignSto
     """
 
     async def _body() -> None:
-        set_current_user_text(None)  # the autouse fixture resets it after the test
+        set_current_user_texts(None)  # the autouse fixture resets it after the test
         stated = _request(scale=RequestField(value="2 g", basis="stated", quote="24 wells, no DMF"))
         with pytest.raises(ChemclawError, match="no chemist message"):
             await tools.structure_experiment_request(stated)
@@ -934,7 +934,7 @@ def test_an_inferred_ask_needs_no_chemist_message(store: InMemoryDesignStore) ->
     """The other direction, which is what stops the refusal above from being a blanket one."""
 
     async def _body() -> None:
-        set_current_user_text(None)  # the autouse fixture resets it after the test
+        set_current_user_texts(None)  # the autouse fixture resets it after the test
         inferred = _request(scale=RequestField(value="2 g", basis="inferred"))
         payload = ProtocolReceipt.model_validate_json(
             await tools.structure_experiment_request(inferred)
@@ -954,14 +954,14 @@ def test_a_stated_quote_has_to_say_the_value_it_is_offered_for() -> None:
     `'the'`, `max_runs='96'` quoting `'Suzuki'` and `deadline='2026-09-01'` quoting `'.'`.
     """
     said = "We need to get the Suzuki on the deactivated chloride working. Try what you think."
-    token = set_current_user_text(said)
+    token = set_current_user_texts([said])
     try:
         for value, quote in (("5 g", "working"), ("96", "the"), ("2026-09-01", ".")):
             request = _request(scale=RequestField(value=value, basis="stated", quote=quote))
             with pytest.raises(ChemclawError, match="does not say their value"):
-                tools.require_quotes_are_verbatim(request, get_current_user_text())
+                tools.require_quotes_are_verbatim(request, get_current_user_texts())
     finally:
-        reset_current_user_text(token)
+        reset_current_user_texts(token)
 
 
 def test_an_honest_quote_still_passes_including_a_normalised_one() -> None:
@@ -970,7 +970,7 @@ def test_an_honest_quote_still_passes_including_a_normalised_one() -> None:
         "Run it on 250 mg of the bromide, 24 wells, and I need it by 1 September. "
         "The follow-up is five grams."
     )
-    token = set_current_user_text(said)
+    token = set_current_user_texts([said])
     try:
         for value, quote in (
             ("250 mg", "250 mg of the bromide"),
@@ -984,9 +984,9 @@ def test_an_honest_quote_still_passes_including_a_normalised_one() -> None:
             ("2026-09-01", "by 1 September"),
         ):
             request = _request(scale=RequestField(value=value, basis="stated", quote=quote))
-            tools.require_quotes_are_verbatim(request, get_current_user_text())
+            tools.require_quotes_are_verbatim(request, get_current_user_texts())
     finally:
-        reset_current_user_text(token)
+        reset_current_user_texts(token)
 
 
 def test_a_two_word_quote_is_related_to_its_value_like_any_other() -> None:
@@ -999,7 +999,7 @@ def test_a_two_word_quote_is_related_to_its_value_like_any_other() -> None:
     refuse them.
     """
     said = "We need to get the Suzuki on the deactivated chloride working. Try what you think."
-    token = set_current_user_text(said)
+    token = set_current_user_texts([said])
     try:
         for value, quote in (
             ("5 g", "you think"),
@@ -1013,9 +1013,9 @@ def test_a_two_word_quote_is_related_to_its_value_like_any_other() -> None:
             )
             request = _request(scale=RequestField(value=value, basis="stated", quote=quote))
             with pytest.raises(ChemclawError, match="does not say their value"):
-                tools.require_quotes_are_verbatim(request, get_current_user_text())
+                tools.require_quotes_are_verbatim(request, get_current_user_texts())
     finally:
-        reset_current_user_text(token)
+        reset_current_user_texts(token)
 
 
 def test_a_normalised_date_is_an_inference_and_is_refused_as_a_quotation() -> None:
@@ -1026,42 +1026,42 @@ def test_a_normalised_date_is_an_inference_and_is_refused_as_a_quotation() -> No
     The slot the chemist actually stated (`'Friday'` for "by Friday") still passes.
     """
     said = "Run it by Friday please."
-    token = set_current_user_text(said)
+    token = set_current_user_texts([said])
     try:
         tools.require_quotes_are_verbatim(
             _request(deadline=RequestField(value="Friday", basis="stated", quote="by Friday")),
-            get_current_user_text(),
+            get_current_user_texts(),
         )
         with pytest.raises(ChemclawError, match="does not say their value"):
             tools.require_quotes_are_verbatim(
                 _request(
                     deadline=RequestField(value="2026-09-01", basis="stated", quote="by Friday")
                 ),
-                get_current_user_text(),
+                get_current_user_texts(),
             )
         # …and the honest label for it is accepted with the same words.
         tools.require_quotes_are_verbatim(
             _request(
                 deadline=RequestField(value="2026-09-01", basis="inferred", quote="by Friday")
             ),
-            get_current_user_text(),
+            get_current_user_texts(),
         )
     finally:
-        reset_current_user_text(token)
+        reset_current_user_texts(token)
 
 
 def test_a_quote_stating_a_different_figure_is_refused() -> None:
     """A quote reading 'no more than 48 runs' cannot be evidence for `max_runs='96'`."""
     said = "Keep it to no more than 48 runs please."
-    token = set_current_user_text(said)
+    token = set_current_user_texts([said])
     try:
         request = _request(
             max_runs=RequestField(value="96", basis="stated", quote="no more than 48 runs")
         )
         with pytest.raises(ChemclawError, match="does not say their value"):
-            tools.require_quotes_are_verbatim(request, get_current_user_text())
+            tools.require_quotes_are_verbatim(request, get_current_user_texts())
     finally:
-        reset_current_user_text(token)
+        reset_current_user_texts(token)
 
 
 def test_restructuring_the_ask_leaves_a_drafted_design_approvable(
@@ -1092,6 +1092,7 @@ def test_restructuring_the_ask_leaves_a_drafted_design_approvable(
             actor=require_actor(),
             reason="ok",
             expected_revision=head.revision,
+            expected_status="draft",
         )
 
     asyncio.run(scenario())

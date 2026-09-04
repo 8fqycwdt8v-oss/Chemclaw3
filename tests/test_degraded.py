@@ -145,6 +145,14 @@ _EXPECTED_SUBSYSTEMS = {
     # double-booked metrics port was reported to every durable tool as "Temporal is unreachable …
     # This is an infrastructure outage" while the broker was up and answering.
     "temporal_sdk_metrics",
+    # `api/runner._earlier_user_texts`. The bounded transcript read behind `core/turn_text`'s
+    # ambient — what a `basis="stated"` quote is checked against. A store this cannot reach
+    # degrades to *no earlier words*, which is the strict direction: a truthful quote from an
+    # earlier turn is refused rather than a fabricated one accepted. Counted because the
+    # consequence is otherwise invisible on both sides — the turn answers normally, and the model
+    # is told to mark a real chemist constraint `inferred`, which is the mislabelling that check
+    # exists to prevent.
+    "stated_quote_history",
     "tool_result_store",
     "transcript_projection",
 }

@@ -1165,7 +1165,7 @@ def test_the_runner_publishes_the_ledger_the_judge_books_into() -> None:
     from chemclaw.api.runner import _turn_ambient
 
     ledger = TurnUsage()
-    with _turn_ambient("s-1", "oid-abc", frozenset({"chemist"}), False, "cid-1", ledger, "hello"):
+    with _turn_ambient("s-1", "oid-abc", frozenset({"chemist"}), False, "cid-1", ledger, ["hello"]):
         assert _ledger.get() is ledger, "the turn's ledger is not what an off-stream call finds"
     assert _ledger.get() is None, "the ledger outlived the turn that owned it"
 
