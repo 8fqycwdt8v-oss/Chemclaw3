@@ -136,12 +136,27 @@ deliberately not per-source, because two corpora containing the same molecule ar
 *labeller* is the bottleneck — a different fault, in a different pod, from a corpus that is not
 landing at all.
 
-**Metrics: know what is not there.** `chemclaw_ingest_records_total{source,outcome}` is emitted by the
-ELN sync, the document sync and the labelling pass (which reports itself as `source="labels"`, its own
-stage). **The corpus drain emits no metric of its own** — its counters live in `CorpusReport` (`read`,
-`recorded`, `skipped`) in the activity's logs and in Temporal's history. So the corpus half of a
-feeder is watched through `/schedules`, the row counts above and the job's own `verify` stage, and a
-dashboard built only on `chemclaw_ingest_*` will show a flat line for a healthy corpus feed.
+**Metrics.** `chemclaw_ingest_records_total{source,outcome}` is emitted by every ingest pass — the
+ELN sync, the document sync, the labelling pass (which reports itself as `source="labels"`, its own
+stage) and the corpus drain, which books against the **data source** it drained rather than against
+the pass, so a deployment reading several corpora gets one series each.
+
+The drain books two outcomes, and the missing third is deliberate: `ingested` for a row that
+became a `corpus_reactions` row, `rejected` for one dropped for want of a usable SMILES or a
+citation. There is no `skipped` series, because in this system's ingest vocabulary `skipped` means
+*deliberately passed over* — unchanged, oversized, an unsupported extension — and the corpus drain
+has no such population. A permanently-zero series would assert one exists. So
+`ingested + rejected` is the whole of what the pass read, and `rejected` climbing is the number
+that says a feeder regressed.
+
+An idle source books **zeros** rather than nothing, so a silent series means the drain did not run
+— which is a different fault from a drain that ran and found nothing, and the two are worth telling
+apart on a dashboard.
+
+What a record counter still cannot tell you is a feed whose source has *stopped exporting* from one
+with nothing new: both produce an empty page and both book `ingested=0, rejected=0`. That
+discriminator is the age of `corpus_cursors.updated_at` — a staleness gauge, which does not exist
+yet and is its own `BACKLOG.md` row.
 
 ### 2.4 Is the embedding the right one? — the probe nothing else does
 

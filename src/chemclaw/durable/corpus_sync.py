@@ -117,7 +117,18 @@ class CorpusSyncPlan(BaseModel):
 
 
 class CorpusSyncOutcome(BaseModel):
-    """What one run did, per source."""
+    """What one run did in total, over every corpus it drained.
+
+    **Not "per source", which is what this said and is false in three independent ways**: the list
+    holds exactly one element, `_drain`'s counters accumulate across every source and are not reset
+    when one finishes, and `CorpusReport` carries no `source` field to attribute them with. A
+    reader who believed the old sentence would have read a two-source run's totals as one source's.
+
+    Per-source attribution exists, one layer down and as telemetry rather than as a return value:
+    `ingest.labels.corpus.drain_corpus` books `chemclaw_ingest_records_total{source,outcome}`
+    against the data source it drained. Giving this model the same split is a shape change nothing
+    has asked for yet — the workflow's own caller wants the run's totals.
+    """
 
     reports: list[CorpusReport] = Field(default_factory=list)
 

@@ -346,23 +346,6 @@ topic).
       (a Temporal activity retries) and has not been reproduced. **Keep both orders; the row stays
       open only as the record that the obvious fix was tried and rejected.**
 
-- [ ] **The corpus drain is the one ingest pass with no metric** — [S].
-      `chemclaw_ingest_records_total{source,outcome}` is emitted by the ELN sync
-      (`ingest/eln/sync.py::_count_records`), the document sync
-      (`ingest/documents/sync.py::_count_records`) and the labelling pass
-      (`ingest/labels/enrich.py::_count_records`, under `source="labels"`). `ReactionCorpusWorkflow`
-      emits none: `CorpusReport`'s `read`/`recorded`/`skipped` reach the activity's log line and
-      Temporal's history, and nothing else. So a dashboard built on `chemclaw_ingest_*` shows a flat
-      line for a healthy corpus feed, and `skipped` — the count of rows dropped for no usable SMILES
-      or no citation, which is the number that says a feeder regressed — has no series at all.
-      Found while writing `docs/guides/feeder-pipelines/`, whose §2.3 has to tell an operator this in
-      prose because the metric they would otherwise reach for does not exist.
-      **The fix is the wrapper the ELN sync already uses**, one call site, with `source` naming the
-      data source rather than the pass — the three outcomes partition the rows the pass saw, exactly
-      as `ingest/documents/sync.py::_record_pass` documents for its own. Do it when a deployment actually runs
-      a corpus feeder; until then the gap costs nobody anything, which is why it is [S] and here
-      rather than done.
-
 - [ ] **Settle `pytest-xdist` on a real runner** — [S].
       The `check` job is 87% one step: `make lint type cov` was **12m06s of a 13m56s job** on
       `d8c312a`, of which lint is 1s and type 68s (measured), so ~11 min is the suite itself.
@@ -458,11 +441,17 @@ topic).
       was offered instead does not hold, and `cursor.py`'s module docstring now says so: `ReactionCorpusWorkflow`
       returns **one** report aggregated over every source at the end of the whole `continue_as_new`
       chain (`durable/corpus_sync.py::ReactionCorpusWorkflow`), not one per pass, and builds it without `has_more` — so
-      a feed whose source stopped exporting looks exactly like a feed with nothing new. Two shapes
-      would close it and they are not equivalent: a per-source outcome (fixes
-      `CorpusSyncOutcome`'s own docstring, which claims "per source" and aggregates), or a staleness
-      gauge over `corpus_cursors.updated_at` — age since the last *advance*, which is a real number
-      even when the position is opaque. **The second is now buildable and was not when this row was
+      a feed whose source stopped exporting looks exactly like a feed with nothing new.
+      **A record counter cannot close this and it was briefly thought it could.** The corpus drain
+      now emits `chemclaw_ingest_records_total{source,outcome}` per data source, which delivers the
+      per-source *visibility* half — but a stopped feed and an idle one both produce an empty page
+      and so both book `ingested=0, rejected=0`, identically. The discriminator has to be a
+      staleness gauge over `corpus_cursors.updated_at` — age since the last *advance*, a real number
+      even when the keyset position is opaque.
+      `CorpusSyncOutcome`'s docstring says "What one run did, per source" and is **false in three
+      ways** (verified): it holds one element, the counters accumulate across every source without
+      being reset when one finishes, and `CorpusReport` has no `source` field at all. Correcting
+      that sentence is owed regardless of this row. **The second is now buildable and was not when this row was
       written**: the cursor was stored on every page, so `updated_at` re-stamped on every fire and
       measured when the feed was last *looked at* rather than when it last moved.
       `D-2026-08-28-a-watermark-that-is-rewritten-has-no-age` gates that write on

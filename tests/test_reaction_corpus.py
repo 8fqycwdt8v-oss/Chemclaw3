@@ -15,6 +15,7 @@ from datetime import date
 import pytest
 
 from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
 from chemclaw.ingest.eln.warehouse.binding import CorpusBinding, load_binding
 from chemclaw.ingest.labels.corpus import drain_corpus
 from chemclaw.ingest.sources.registry import (
@@ -505,3 +506,103 @@ def test_an_unparseable_species_is_still_fingerprinted_which_is_why_only_one_err
 
     with pytest.raises(FingerprintInputError):
         ecfp_bitstring("C(((C")
+
+
+# --- the pass leaves a series behind ----------------------------------------------------------
+
+
+def _series(name: str, **labels: str) -> float:
+    """One labelled series' value, read out of the rendered exposition.
+
+    Read from the text rather than from a private dict, for the reason
+    `tests/test_datapath_observability.py` states about the same read: the exposition *is* the
+    contract with Prometheus, and a series that renders wrong is a series nobody can alert on
+    however right the in-memory number is.
+    """
+    wanted = [f'{label}="{value}"' for label, value in labels.items()]
+    for line in METRICS.render().splitlines():
+        head, _, reading = line.partition("} ")
+        if head.startswith(f"{name}{{") and all(pair in head for pair in wanted):
+            return float(reading)
+    raise AssertionError(f"no series {name}{{{', '.join(wanted)}}} in the exposition")
+
+
+def test_the_drain_books_the_rows_it_read_and_the_two_series_partition_them() -> None:
+    """The corpus drain was the one ingest pass emitting nothing, so a healthy feed read flat.
+
+    Driven over the page that holds *both* populations — one row recorded, one refused for want of
+    a product — because a page of only good rows cannot tell a partition from a coincidence. The
+    two series must sum to `read`: `_record`'s verdict is binary, so a third population appearing
+    here would mean a row was counted twice or not at all.
+
+    `rejected`, not `skipped`, and the vocabulary is the assertion: in
+    `ingest/documents/sync.py::_record_pass`'s split a row reached and not turnable into a record is
+    `rejected`, while `skipped` is one the pass deliberately passed over. The corpus has no second
+    population, so a `skipped` series here would be a claim about a population that does not exist.
+    """
+    source = "pistachio-metrics-partition"
+
+    async def _run() -> None:
+        index, warehouse, binding = InMemoryLabelIndex(), _fake(), _binding()
+        first = await drain_corpus(warehouse, binding, index, source, limit=2)
+        page = await drain_corpus(warehouse, binding, index, source, after=first.cursor, limit=2)
+
+        assert (page.read, page.recorded, page.skipped) == (2, 1, 1)
+        ingested = _series("chemclaw_ingest_records_total", source=source, outcome="ingested")
+        rejected = _series("chemclaw_ingest_records_total", source=source, outcome="rejected")
+        # Both pages, so the totals are the whole four-row release rather than the second page.
+        assert (ingested, rejected) == (3.0, 1.0)
+        assert ingested + rejected == float(first.read + page.read)
+        assert not [
+            line
+            for line in METRICS.render().splitlines()
+            if f'source="{source}"' in line and 'outcome="skipped"' in line
+        ]
+
+    asyncio.run(_run())
+
+
+def test_a_page_that_read_nothing_still_books_a_zero() -> None:
+    """A silent series has to mean the drain did not run, which needs a healthy empty page to book.
+
+    `drain_corpus` returns early when the page is empty, and that return is the one a scheduled
+    feeder hits every time a source is exhausted. If it booked nothing, "no series" would mean
+    either "the corpus is drained" or "the workflow has not fired since Tuesday" — the same silence
+    the document sync's four early returns were changed for.
+    """
+    source = "pistachio-metrics-empty"
+
+    async def _run() -> None:
+        report = await drain_corpus(
+            _fake(), _binding(), InMemoryLabelIndex(), source, after="p9", limit=2
+        )
+
+        assert (report.read, report.recorded, report.skipped) == (0, 0, 0)
+        assert _series("chemclaw_ingest_records_total", source=source, outcome="ingested") == 0.0
+        assert _series("chemclaw_ingest_records_total", source=source, outcome="rejected") == 0.0
+
+    asyncio.run(_run())
+
+
+def test_the_series_are_per_source_which_is_what_the_aggregated_outcome_cannot_say() -> None:
+    """Two corpora drained in one run are two label sets, not one sum.
+
+    `ReactionCorpusWorkflow` accumulates `CorpusSyncState`'s counters across every source it
+    drains and returns a single `CorpusReport`, which carries no `source` field — so
+    `CorpusSyncOutcome` is one number for the whole run whatever its docstring says. The counter is
+    booked inside `drain_corpus`, which is called once per source per page and is handed the name,
+    so the per-source answer exists on the metric without any change to that model.
+    """
+
+    async def _run() -> None:
+        warehouse, binding = _fake(), _binding()
+        await drain_corpus(warehouse, binding, InMemoryLabelIndex(), "pistachio-metrics-a", limit=2)
+        await drain_corpus(warehouse, binding, InMemoryLabelIndex(), "pistachio-metrics-b", limit=1)
+
+        counter = "chemclaw_ingest_records_total"
+        assert _series(counter, source="pistachio-metrics-a", outcome="ingested") == 2.0
+        assert _series(counter, source="pistachio-metrics-b", outcome="ingested") == 1.0
+        assert _series(counter, source="pistachio-metrics-a", outcome="rejected") == 0.0
+        assert _series(counter, source="pistachio-metrics-b", outcome="rejected") == 0.0
+
+    asyncio.run(_run())
