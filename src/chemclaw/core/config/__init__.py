@@ -696,10 +696,13 @@ class Settings(
     def _the_heartbeat_fits_inside_the_budget_it_reports_within(self) -> Self:
         """A heartbeat timeout outside the budget it sits under is a control that does nothing.
 
-        `background_activity_heartbeat_timeout_seconds` is the heartbeat timeout for core's three
-        long background activities — the note reindex, the retention sweep and the result-publish
-        drain — and its own comment asserts as fact that it sits "far below every start-to-close
-        budget it sits under". Nothing checked that, and both directions of getting it wrong are
+        `background_activity_heartbeat_timeout_seconds` is the heartbeat timeout for core's long
+        background activities — the note reindex, the retention sweep, the result-publish drain and
+        the artifact eviction sweep, which said "three" here until eviction became the fourth — and
+        its own comment asserts as fact that it sits "far below every start-to-close budget it sits
+        under". The `min()` below is over the budgets rather than over a count, so the guard stayed
+        correct while the sentence went stale; eviction is budgeted by `retention_timeout_seconds`,
+        which is already in it. Nothing checked that, and both directions of getting it wrong are
         silent:
 
         - **Above the budget it guards.** `CHEMCLAW_RESULT_PUBLISH_TIMEOUT_SECONDS=30` with one

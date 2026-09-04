@@ -230,6 +230,48 @@ def test_the_pass_marks_from_the_database_that_stamps_the_rows_not_from_the_brok
     asyncio.run(_run())
 
 
+def test_an_export_that_answers_with_nothing_does_not_empty_the_mirror() -> None:
+    """The sweep's second guard, and it is the one that decides which mistake this feature makes.
+
+    A snapshot export returning zero rows is two things at once: a programme with nothing committed
+    left, and a broken export — a credential that expired, a share that unmounted, a query whose
+    filter now matches nothing. The two are indistinguishable from here and they do not cost the
+    same. Keeping a row too long is visible in the mirror and corrected by the next good pass;
+    deleting the mirror wholesale is unrecoverable, because these rows exist in this table and in a
+    source that has stopped mentioning them and nowhere else this system can reach.
+
+    So an empty answer sweeps nothing, and a source that genuinely empties converges on the pass
+    after it reports its first remaining row. Only the `snapshot` half of that condition was
+    asserted: measured, deleting `commitments and` from it took a snapshot source's whole mirror
+    (`withdrawn=2`, rows `[]`) with every commitment test still green.
+
+    Driven through the activity rather than through `sweep_withdrawn`, because the guard *is* the
+    call site — `sweep_withdrawn` asked nothing about the answer and still does not.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clean()
+        await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
+        empty = await _mirror_pass(_Export([], snapshot=True))
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert empty.withdrawn == 0, (
+            f"an export that returned nothing swept {empty.withdrawn} rows; a broken export and a "
+            "finished programme look identical from here, and only one of them is recoverable"
+        )
+        assert {row.external_id for row in rows} == {"MS-1", "MS-2"}, (
+            "a snapshot source's whole mirror was deleted by a pass that read nothing"
+        )
+        # And the source that genuinely empties still converges — one pass later, on its first
+        # remaining row. That is the price of the guard, stated rather than assumed.
+        remaining = await _mirror_pass(_Export([_commitment("MS-1")], snapshot=True))
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert remaining.withdrawn == 1
+        assert {row.external_id for row in rows} == {"MS-1"}
+
+    asyncio.run(_run())
+
+
 def test_the_pass_sweeps_only_where_the_adapter_promises_a_whole_picture() -> None:
     """The sweep is wired to the claim, not to the shape of one answer.
 
