@@ -11,8 +11,10 @@ from __future__ import annotations
 
 from chemclaw.protocols.diff import diff_designs
 from chemclaw.protocols.models import (
+    Analytic,
     ChargeLine,
     EvidenceRef,
+    ExpectedOutcome,
     ExperimentDesign,
     ExperimentRequest,
     Factor,
@@ -519,3 +521,108 @@ def test_a_receipt_says_whether_its_checks_were_graded_against_a_procedure() -> 
     assert not receipt(ask, [], design_id="d", revision=2, status="draft").has_protocol
     drafted = _design(arms=[ProtocolArm(arm_id="A1")])
     assert receipt(drafted, [], design_id="d", revision=3, status="draft").has_protocol
+
+
+def test_an_expected_yield_cannot_travel_without_the_basis_it_rests_on() -> None:
+    """`ExpectedOutcome`'s own claim, which nothing checked.
+
+    Its comment says `basis` "is rendered beside the number everywhere so a figure cannot travel
+    without the reason it was believed" — a present-tense claim about a control. A chemist who
+    reads "85% yield" and carries it into a report is making a different decision depending on
+    whether that number came from a run like this one, from a tool, or from nobody at all.
+    """
+    design = _design(
+        base=ProtocolBody(
+            setpoints=Setpoints(temperature_c=25, time_h=16, solvent="THF"),
+            expected=ExpectedOutcome(yield_percent=85.0, basis="assumed"),
+        )
+    )
+    page = render_markdown(design)
+    assert "## Expected" in page
+    assert "85% yield" in page
+    assert "assumed" in page
+
+
+def test_expected_selectivity_and_detail_render_beside_the_yield_rather_than_replacing_it() -> None:
+    """Three optional parts joined into one sentence, and any of them may be empty.
+
+    The join filters empties, so the failure this guards is a comma-led or comma-trailing
+    sentence — and, worse, a selectivity silently dropped because a yield was present.
+    """
+    design = _design(
+        base=ProtocolBody(
+            setpoints=Setpoints(temperature_c=25, time_h=16, solvent="THF"),
+            expected=ExpectedOutcome(
+                yield_percent=72.5,
+                selectivity="9:1 branched:linear",
+                detail="over 16 h",
+                basis="precedent",
+            ),
+        )
+    )
+    page = render_markdown(design)
+    # The decimal point arrives backslash-escaped (valid CommonMark, renders as `72.5`), so the
+    # assertion is about the three parts and their order rather than the literal spelling.
+    line = next(ln for ln in page.splitlines() if "yield" in ln)
+    assert line.index("% yield") < line.index("9:1 branched:linear") < line.index("over 16 h")
+    assert line.endswith("*precedent*")
+
+    # Only a selectivity: the section still appears, and does not lead with a stray comma.
+    only_selectivity = _design(
+        base=ProtocolBody(
+            setpoints=Setpoints(temperature_c=25, time_h=16, solvent="THF"),
+            expected=ExpectedOutcome(selectivity="9:1", basis="predicted"),
+        )
+    )
+    text = render_markdown(only_selectivity)
+    assert "## Expected" in text
+    assert "9:1 — *predicted*" in text
+
+    # Nothing expected at all: the heading is not emitted over an empty sentence.
+    assert "## Expected" not in render_markdown(_design())
+
+
+def test_an_analytic_carries_its_timing_method_and_what_it_measures() -> None:
+    """A screen whose objective nothing measures is the commonest unanswerable plate.
+
+    `Analytic` says so in its own comment, so the four parts have to survive to the page a
+    chemist reads — dropping `measures` is what makes the plate unanswerable *after* it is run.
+    """
+    design = _design(
+        base=ProtocolBody(
+            setpoints=Setpoints(temperature_c=25, time_h=16, solvent="THF"),
+            analytics=[
+                Analytic(
+                    name="HPLC",
+                    timing="t=0, 1 h, on completion",
+                    method="C18, 254 nm",
+                    measures=["conversion", "purity"],
+                )
+            ],
+        )
+    )
+    page = render_markdown(design)
+    assert "## Analytics" in page
+    assert "**HPLC**" in page
+    assert "t=0, 1 h, on completion" in page
+    assert "C18, 254 nm" in page
+    assert "measures conversion, purity" in page
+
+
+def test_a_backtick_in_a_reaction_smiles_cannot_spill_the_rest_of_the_line() -> None:
+    """The reason `_code` exists, on the one field whose branch no test reached.
+
+    `render_markdown`'s own comment says a backtick in a SMILES closes the span and spills the
+    rest — and a SMILES is free text arriving from a request, so it is not this system's to
+    trust. The fence has to be longer than the longest run inside the value.
+    """
+    design = _design(
+        request=ExperimentRequest(
+            title="T", goal="G", mode="screen", reaction_smiles="CC``O>>CC(=O)O"
+        )
+    )
+    page = render_markdown(design)
+    line = next(ln for ln in page.splitlines() if ln.startswith("**Transformation.**"))
+    assert "CC``O>>CC(=O)O" in line
+    # A fence of three or more, so the doubled run inside cannot close it.
+    assert "```" in line
