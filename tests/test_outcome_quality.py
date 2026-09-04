@@ -115,7 +115,7 @@ def test_json_adapter_maps_date_purity_and_impurities(tmp_path: Path) -> None:
     carries no experiment date, so the adapter states none and the wrapper fills in the entry's own
     timestamp *with* the `date_source="entry"` that says where it came from. Mapping it in the
     adapter put the right value under a claim nothing downstream could tell from a chemist-entered
-    date — see `ingest/eln/json_adapter.py::_build`.
+    date — see `ingest/eln/json_adapter.py::JsonExportAdapter._build`.
     """
     entry = {
         "id": "e-1",

@@ -231,7 +231,8 @@ class JsonExportAdapter:
             # **No `performed_at`, deliberately.** This export carries no experiment date — its one
             # date field is the entry timestamp — and this adapter used to map that onto the record
             # itself, which filled the field with the right value under the wrong claim: the stamp
-            # stayed at its `"stated"` default, so `memory/progression.py::entry_dated` saw nothing
+            # stayed at its `"stated"` default, so `memory/progression.py::Progression.entry_dated`
+            # saw nothing
             # to weaken and the campaign note asserted "Runs in the order they were performed" over
             # an afternoon of transcription. `adapter.DatedIngest` supplies the same date *and* the
             # `date_source="entry"` that says where it came from, at the one construction point

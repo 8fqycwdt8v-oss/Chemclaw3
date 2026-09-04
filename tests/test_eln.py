@@ -1248,7 +1248,8 @@ def test_the_file_drop_adapters_stamp_a_date_they_read_off_the_entry_as_entry_da
     both file-drop adapters were the case it was added for: neither shipped fixture carries an
     experiment date at all — the JSON ELN's only date field is `timestamp`, the ORD record's is
     `provenance.record_created.time` — so each mapped `raw.created_at.date()` onto the record and
-    left the stamp at its `"stated"` default. `memory/progression.py::entry_dated` reads that stamp
+    left the stamp at its `"stated"` default. `memory/progression.py::Progression.entry_dated`
+    reads that stamp
     to weaken the caveat, so for the two shipped sources it was always empty and the campaign note
     asserted "Runs in the order they were performed" over an afternoon of transcription.
 

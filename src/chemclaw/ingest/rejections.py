@@ -171,7 +171,8 @@ async def record_refusals(source: str, refusals: Mapping[str, str]) -> None:
     # transaction made it do. `_storable` knows the two ways a value reaches here unwritable; the
     # database knows more — an entry id past the primary key's index-row limit is one, and no
     # rewriting of it would leave it the same id. So the fallback is the isolation
-    # `documents/sync.py::_reembed_individually` and `labels/enrich.py::_batch` already use for the
+    # `ingest/documents/sync.py::_reembed_individually` and `ingest/labels/enrich.py::_batch`
+    # already use for the
     # same reason, and it matters more here than in either: these records are already gone from the
     # corpus and the cursor has advanced past them, so this row is the last answer to "why is there
     # no such record". The eviction re-runs per row, which is N round trips on a path that only

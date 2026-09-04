@@ -10,11 +10,14 @@ infers a field the export did not state, and it has no write path back.
 """
 
 import asyncio
+import dataclasses
 import inspect
 import json
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
@@ -30,6 +33,15 @@ from tests.pg import migrated_db_or_skip
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 SOURCE = "commitments-test"
+
+
+async def _no_cursor(_key: str) -> datetime | None:
+    """Stands in for the cursor load: this file's passes always read the whole export."""
+    return None
+
+
+async def _record_cursor(_key: str, _cursor: datetime) -> None:
+    """Stands in for the cursor store, which needs no assertion here."""
 
 
 async def _clean() -> None:
@@ -112,6 +124,70 @@ def test_a_snapshot_source_converges_downward_when_a_commitment_is_withdrawn() -
         await asyncio.sleep(0.01)
         await record_commitments([_commitment("MS-1")])
         assert await commitment_sync.sweep_withdrawn(SOURCE, marked_at) == 0
+
+    asyncio.run(_run())
+
+
+def test_the_pass_sweeps_only_where_the_adapter_promises_a_whole_picture() -> None:
+    """The sweep is wired to the claim, not to the shape of one answer.
+
+    Both adapters below return the same list. The difference is the promise: one declares
+    `snapshot`, so an absent row means withdrawn and the pass removes it; the other does not, so an
+    absent row means unchanged and the pass must remove nothing. Without that distinction this
+    would delete an incremental source's whole mirror on its first quiet pass — which is a worse
+    defect than the one being fixed, since these rows exist nowhere else this system can reach.
+
+    Driven through the activity rather than through `sweep_withdrawn`, because the property is the
+    wiring: the mark comes from `activity.info().started_time`, and a sweep marked from anywhere
+    else would either delete what the pass just wrote or nothing at all.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    class _Export:
+        """A portfolio export that answers with whatever it is holding."""
+
+        def __init__(self, rows: list[Commitment], *, snapshot: bool) -> None:
+            self._rows = rows
+            self.snapshot = snapshot
+
+        async def fetch_commitments(self, since: datetime | None) -> list[Commitment]:
+            return list(self._rows)
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+
+        async def _pass(*, snapshot: bool) -> commitment_sync.CommitmentSyncResult:
+            """One mirror pass over a source now exporting MS-1 alone."""
+            await _clean()
+            await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
+            export = _Export([_commitment("MS-1")], snapshot=snapshot)
+            monkeypatched = SimpleNamespace(commitments=export)
+            with (
+                mock.patch.object(commitment_sync, "make_data_source", lambda _name: monkeypatched),
+                mock.patch.object(commitment_sync, "load_cursor", _no_cursor),
+                mock.patch.object(commitment_sync, "store_cursor", _record_cursor),
+            ):
+                # `ActivityEnvironment` reports the epoch as `started_time`, which would make
+                # the mark older than every row and sweep nothing — the harness answering the
+                # question rather than the code. A real start is what the broker supplies.
+                env = ActivityEnvironment()
+                env.info = dataclasses.replace(env.info, started_time=datetime.now(UTC))
+                return await env.run(commitment_sync.mirror_commitments_activity, SOURCE)
+
+        incremental = await _pass(snapshot=False)
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert incremental.withdrawn == 0
+        assert {row.external_id for row in rows} == {"MS-1", "MS-2"}, (
+            "an incremental source's unmentioned row was deleted; for that source an absent row "
+            "means unchanged, so this empties the mirror on the first quiet pass"
+        )
+
+        snapshotted = await _pass(snapshot=True)
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert snapshotted.withdrawn == 1
+        assert {row.external_id for row in rows} == {"MS-1"}, (
+            "a snapshot source withdrew MS-2 and the mirror still carries it"
+        )
 
     asyncio.run(_run())
 

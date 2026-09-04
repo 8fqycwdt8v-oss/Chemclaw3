@@ -437,8 +437,8 @@ def test_one_row_the_database_will_not_take_costs_only_itself() -> None:
     the value would make it storable without making it a different id.
 
     So the batch write falls back to one row at a time, the isolation
-    `documents/sync.py::_reembed_individually` and `labels/enrich.py::_batch` already use for the
-    same reason: `stale()`-shaped work that fails identically on every retry has to cost one item
+    `ingest/documents/sync.py::_reembed_individually` and `ingest/labels/enrich.py::_batch`
+    already use for the same reason: `stale()`-shaped work that fails identically on every retry has to cost one item
     rather than the pass. Here the pass is a ledger nothing will ever offer again.
     """
 
