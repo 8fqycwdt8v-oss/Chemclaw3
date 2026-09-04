@@ -1531,6 +1531,21 @@ the knowledge repo is a git repo (any clone is a backup).
 
 ## (xiv) Cut a release: pin the image to bytes
 
+**One release that crosses both repositories, and it is the sign-off route.** The core and
+`Chemclaw3_ui` are deployed separately — the UI by `oc set image` against a Deployment an operator
+created (`D-2026-08-26-a-release-is-a-descriptor-and-a-target`) — and that independence holds for
+every route but one. `POST /protocols/{id}/status` takes a **required** `expected_status` on a model
+that forbids extra fields, so the two are incompatible in *both* directions across the boundary: an
+older UI is refused 422 for omitting it, a newer UI is refused 422 for sending it to an older core.
+Nothing else on either side is affected, and no other route couples them.
+
+So deploy the pair together when crossing `D-2026-09-04-a-compare-and-set-on-the-document-is-silent-about-the-decision`.
+The field is required rather than optional deliberately: an `expected_status` nobody sends makes the
+compare-and-set always agree, which is a control that exists only in the docstring. The cost of that
+choice is this paragraph. A chemist who hits it sees a refused sign-off and loses nothing — the
+design and its `experiment_protocol_status_events` history are untouched — so the failure is loud
+and safe rather than silent.
+
 `values.yaml` ships `tag: "0.1.0"` so `helm install .` works in dev without a registry round trip.
 **A release must not deploy that tag.** A tag is a pointer: `helm rollback` to a release naming
 `0.1.0` fetches whatever `0.1.0` means now, which is the one thing a rollback must not do — and this
