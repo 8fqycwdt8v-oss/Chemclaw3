@@ -423,9 +423,12 @@ def health_url(manifest: ConnectorManifest) -> str | None:
 def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorSpec:
     """Describe one connector endpoint for the LangGraph engine (M7).
 
-    The twin of `_mcp_tool`, dispatching on the same union for the same reason: the transports
-    differ only in how the server is *reached*, and everything bounding what the agent may do with
-    it is identical on both.
+    Dispatches on the `Endpoint` union for the reason `request_timeout_seconds` and
+    `_session_kwargs` do: the transports differ only in how the server is *reached*, and everything
+    bounding what the agent may do with it is identical on both. (This docstring called itself "the
+    twin of `_mcp_tool`" from the commit that wrote it — a function that has never been defined in
+    this repository, which made a reader look for a second dispatcher over the union and find one
+    function plus its client factory.)
 
     **The HTTP client is still ours, and that is what keeps four security properties alive.**
     `httpx_client_factory` is the seam `langchain-mcp-adapters` exposes, so `connector_http_client`
@@ -466,8 +469,9 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
                 f"{endpoint.command!r} in this process; it is disabled by default because a "
                 "manifest is data. Set CHEMCLAW_CONNECTOR_STDIO_ENABLED=true to allow it."
             )
-        # No identity headers, for the same reason as `_mcp_tool`: a subprocess of our own process,
-        # under our own identity, with no request to attach them to (`connectors.identity`).
+        # No identity headers, for the same reason the HTTP branch above attaches them: a subprocess
+        # of our own process runs under our own identity, with no outbound request to attach them to
+        # (`connectors.identity`).
         return ConnectorSpec(
             name=manifest.name,
             connection=StdioConnection(

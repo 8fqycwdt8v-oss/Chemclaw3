@@ -53,9 +53,11 @@ worked** while every unit test passed. What stands in their place: `agent/langgr
 builds a compiled graph over `create_agent` — per turn, because LangGraph binds tools at
 construction and a connector session belongs to exactly one turn; turn state lives in a Postgres
 checkpointer (`agent/checkpointer.py`) on its own autocommit pool instead of being hand-built;
-the tool chain is seven `@wrap_tool_call` middlewares in the old nesting order over the *same*
+the tool chain is `@wrap_tool_call` middlewares in the old nesting order over the *same*
 extracted decision functions, so an authorization refusal or an audit row cannot depend on which
-engine ran; skills come from `deepagents.SkillsMiddleware` over a backend narrowed by the same
+engine ran — how many there are is `len(tool_call_middleware(...))`, not a word here, because this
+sentence said "seven" over a chain of ten and `langgraph_agent.py` had already deleted its own count
+for that reason; skills come from `deepagents.SkillsMiddleware` over a backend narrowed by the same
 three predicates (`agent/skill_backend.py` — the gate had to move to the backend because deepagents
 publishes skill *paths* into the prompt); the plan is `TodoListMiddleware`'s todo list, which the
 gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap is a first-party
@@ -202,10 +204,14 @@ declared window: probed at the shipped budget, a thread the policy cannot reduce
 **1** where the old arithmetic read **0**. `llm_context_window_tokens` is now a second bound rather
 than the only real one. **What it costs is stated because it is a real behavioural change**: every
 deployment's thread allowance falls by the prefix, 43% of the shipped budget, and
-`agent_tool_result_clear_trigger`'s shipped 30,000 is *below* the prefix, so it floors at 1 — clear
-every reclaimable tool result on every model call. That floor is reported at WARNING rather than
-returned silently, `tests/test_compaction.py` asserts the state, and raising the default above the
-prefix is an open decision this repository has not taken.
+`agent_tool_result_clear_trigger` shipped at 30,000, *below* the prefix, which floors the trigger at
+1 — clear every reclaimable tool result on every model call. That floor is reported at WARNING
+rather than returned silently. **The same commit then took the decision this paragraph shipped
+calling open**: the default is 73,500, above the prefix, so the shipped configuration is not floored
+and `tests/test_compaction.py` asserts *that*. Three present-tense sentences — the two in
+`agent/context_budget.py` and this one — went on saying 30,000 and "an open decision", falsified by
+their own diff, which is `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening inside
+the commit that wrote it down.
 
 **An audit against the Claude Agent SDK then added three guards and designed a fourth**
 (`D-2026-08-29-an-iteration-cap-is-not-a-cost-cap`). Most of that SDK's surface is already here and

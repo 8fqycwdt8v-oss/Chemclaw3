@@ -12,7 +12,7 @@ would bite:
 - `state` is genuinely per-session and genuinely in-process. It is the bag the disconnect rollback
   snapshots and restores (`chemclaw.api.runner`), and it is what the in-memory history provider
   writes its thread into. A dict created per call could not be either.
-- The front door caches one of these per live session (`api.state.LiveSessions`), and giving it a
+- The front door caches one of these per live session (`api.state._LiveSessions`), and giving it a
   named type is what lets the ownership gate, the turn claim and the cache all be about the same
   thing rather than about three strings that happen to be equal.
 

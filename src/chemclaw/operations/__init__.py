@@ -2,8 +2,11 @@
 
 Every other package here answers a question about the chemistry. This one answers a question about
 the *work* — which tools were used, which jobs ran, what the agent proposed and what humans decided
-about it, and where the effort went. It reads five tables that no one could *aggregate*, and it
-writes nothing.
+about it, and where the effort went. It reads the six tables no one could *aggregate* —
+`audit_events`, `job_records`, `note_proposals`, `plan_approvals`, `turn_costs` and
+`effects` — and it writes nothing. (Named rather than counted: this said "five" while the
+package read six, and a name is a thing `grep -ohE 'FROM [a-z_]+' src/chemclaw/operations/*.py`
+can check.)
 
 **The original framing here was "five tables that had writers and no readers", and that is false
 for four of them** — `cli/explain.py` reads `audit_events` and `job_records`, `publish/backfill.py`

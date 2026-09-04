@@ -1,7 +1,7 @@
 # M12 · the plan gate as a conversation — plan → approve → execute → re-gate (DARK-1).
 #
 # **A subdirectory, and that is load-bearing.** `evals/live.load_probes` globs one level, so nothing
-# in `m12/` is picked up by `make live-probes`. That is deliberate: the corpus run asks 190
+# in `m12/` is picked up by `make live-probes`. That is deliberate: the corpus run asks its
 # single-turn questions and grades them against a *direction*, while every probe here is a scripted
 # conversation scored mechanically by its own suite. Folding them together would change what the
 # corpus run measures without changing a word of what it reports.

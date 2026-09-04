@@ -234,10 +234,10 @@ def _check_classification(
 
 
 # One connector endpoint, discriminated on `transport`. A new transport is one variant here plus
-# one branch in `connectors.registry._mcp_tool`. Both variants carry `tools` — the agent-facing
-# allow-list — because it is a property of *an endpoint's* surface: nesting it here rather than
-# at the manifest's top level makes "an allow-list with no endpoint to serve it" unrepresentable
-# instead of something a validator has to catch.
+# one branch in `connectors.registry._mcp_connection`. Both variants carry `tools` — the
+# agent-facing allow-list — because it is a property of *an endpoint's* surface: nesting it
+# here rather than at the manifest's top level makes "an allow-list with no endpoint to serve
+# it" unrepresentable instead of something a validator has to catch.
 #
 # `state_changing` names the subset of `tools` that spends real resources or writes data a person
 # would care about — the ones the harness's plan gate refuses under an unapproved plan (D-167).
