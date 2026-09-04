@@ -441,6 +441,14 @@ a job whose whole body was an `echo`, and a stub is not a pipeline. Its trigger 
 its credentials — is recorded in `docs/planning/DEFERRED.md`. Migrations run as the pre-deploy Job
 (`templates/migrate-job.yaml`), never inside an app container.
 
-> **Verified offline:** pure-YAML parse + template brace-balance + `Settings` key mapping. `helm
-> template`/`kubeconform`/the image build run in CI (no helm/daemon in the dev sandbox) — this is
-> inherent to a deploy phase, not a gap in the manifests.
+> **Verified how, and where.** Pure-YAML parse, template brace-balance and `Settings` key mapping
+> run anywhere. `helm template` and `kubeconform` run wherever `helm` is on PATH — which includes
+> CI's `check` job, because the `ubuntu-latest` runner image ships Helm, so the
+> `shutil.which("helm")`-gated chart assertions have always run there even though `azure/setup-helm`
+> is pinned only in the `chart` job. **This note used to say helm runs "in CI (no helm/daemon in the
+> dev sandbox)" and read as though the sandbox was the gap.** It is not: the sandbox skips those
+> assertions silently, and installing helm there is one `curl`. What actually let five chart defects
+> through was narrower and worse — the tests rendered the *default* values and nothing else, so a
+> switch nobody flipped was a switch nobody checked. The render set is derived from `values.yaml`
+> now. A live cluster remains genuinely out of reach here, and `helm rollback` against a real API
+> server is the one thing a render cannot stand in for.

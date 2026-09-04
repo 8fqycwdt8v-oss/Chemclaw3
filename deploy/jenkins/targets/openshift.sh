@@ -144,8 +144,13 @@ adopt_leftover_hook_objects() {
       continue
     fi
     log "${kind}/${name}: adopting into release ${release} (the previous chart made it a hook)"
+    # `</dev/null` is load-bearing: without it `oc` inherits the loop's stdin — the process
+    # substitution below — drains it, and the loop ends after the first object. Measured against a
+    # live API server: the ConfigMap was adopted, the ServiceAccount was not, and `helm upgrade`
+    # then failed on the second one with the same message the whole function exists to prevent.
     "${KUBECTL}" annotate --overwrite --namespace "${NAMESPACE}" "${kind}/${name}" \
-      "meta.helm.sh/release-name=${release}" "meta.helm.sh/release-namespace=${NAMESPACE}" >/dev/null
+      "meta.helm.sh/release-name=${release}" "meta.helm.sh/release-namespace=${NAMESPACE}" \
+      >/dev/null </dev/null
   done < <("${KUBECTL}" get configmap,serviceaccount --namespace "${NAMESPACE}" \
              --selector "app.kubernetes.io/instance=${release},app.kubernetes.io/managed-by=Helm" \
              --output 'jsonpath={range .items[*]}{.kind}|{.metadata.name}|{.metadata.annotations.helm\.sh/hook}|{.metadata.annotations.meta\.helm\.sh/release-name}{"\n"}{end}' \
