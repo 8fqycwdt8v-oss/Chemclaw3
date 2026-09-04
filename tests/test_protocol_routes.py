@@ -426,7 +426,12 @@ def test_moving_a_designs_status_answers_204(
     _seed(store, _design(), status="draft")
     response = client.post(
         f"/protocols/{_DESIGN_ID}/status",
-        json={"status": "approved", "expected_revision": 1, "reason": "looks right"},
+        json={
+            "status": "approved",
+            "expected_revision": 1,
+            "expected_status": "draft",
+            "reason": "looks right",
+        },
     )
     assert response.status_code == 204
     assert response.content == b""
@@ -451,6 +456,7 @@ def test_the_reason_the_ui_makes_mandatory_is_actually_recorded(
         json={
             "status": "abandoned",
             "expected_revision": 1,
+            "expected_status": "draft",
             "reason": "the SM decomposes above 40 C",
         },
     )
@@ -473,7 +479,12 @@ def test_reading_a_design_carries_who_signed_off_on_which_revision(
     _seed(store, _design(), status="draft")
     client.post(
         f"/protocols/{_DESIGN_ID}/status",
-        json={"status": "approved", "expected_revision": 1, "reason": "80 C is right"},
+        json={
+            "status": "approved",
+            "expected_revision": 1,
+            "expected_status": "draft",
+            "reason": "80 C is right",
+        },
     )
 
     body = client.get(f"/protocols/{_DESIGN_ID}").json()
@@ -499,7 +510,12 @@ def test_a_sign_off_against_a_stale_revision_is_a_409(
 
     response = client.post(
         f"/protocols/{_DESIGN_ID}/status",
-        json={"status": "approved", "expected_revision": 1, "reason": "read revision 1"},
+        json={
+            "status": "approved",
+            "expected_revision": 1,
+            "expected_status": "draft",
+            "reason": "read revision 1",
+        },
     )
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "revision_conflict"
@@ -508,10 +524,72 @@ def test_a_sign_off_against_a_stale_revision_is_a_409(
 
     named = client.post(
         f"/protocols/{_DESIGN_ID}/status",
-        json={"status": "approved", "expected_revision": 2, "reason": "read revision 2"},
+        json={
+            "status": "approved",
+            "expected_revision": 2,
+            "expected_status": "draft",
+            "reason": "read revision 2",
+        },
     )
     assert named.status_code == 204
     assert asyncio.run(store.status_history(_DESIGN_ID))[0].revision == 2
+
+
+def test_a_sign_off_against_a_status_somebody_else_moved_is_its_own_409(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """A colleague's decision refuses the sign-off, under a code that says *which* thing moved.
+
+    `expected_revision` is a compare-and-set on the document and says nothing about the decision,
+    so alice abandoning revision 1 and bob approving revision 1 both answered 204 and the header
+    read `approved`. The code is deliberately not `revision_conflict`: the document did not change,
+    so telling a browser it did would send the chemist to a diff that shows nothing.
+    """
+    _seed(store, _design(), status="draft")
+    abandoned = client.post(
+        f"/protocols/{_DESIGN_ID}/status",
+        json={
+            "status": "abandoned",
+            "expected_revision": 1,
+            "expected_status": "draft",
+            "reason": "the SM decomposes above 40 C",
+        },
+    )
+    assert abandoned.status_code == 204
+
+    response = client.post(
+        f"/protocols/{_DESIGN_ID}/status",
+        json={
+            "status": "approved",
+            "expected_revision": 1,
+            "expected_status": "draft",
+            "reason": "looks fine to me",
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "status_conflict"
+    # And the abandonment stands: nothing was recorded and nothing was moved.
+    summary = asyncio.run(store.summary(_DESIGN_ID))
+    assert summary is not None and summary.status == "abandoned"
+    assert [event.status for event in asyncio.run(store.status_history(_DESIGN_ID))] == [
+        "abandoned"
+    ]
+
+
+def test_a_sign_off_that_names_no_status_is_refused(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """Required, not optional — an optional field nobody sends is a control only a docstring has.
+
+    Which is why `Chemclaw3_ui` sends it: `setProtocolStatus` puts `expected_status` in the body
+    and `tests/protocolClient.test.ts` asserts the exact body it sends.
+    """
+    _seed(store, _design(), status="draft")
+    response = client.post(
+        f"/protocols/{_DESIGN_ID}/status",
+        json={"status": "approved", "expected_revision": 1, "reason": "looks right"},
+    )
+    assert response.status_code == 422
 
 
 def test_a_sign_off_that_names_no_revision_is_refused(
@@ -525,7 +603,8 @@ def test_a_sign_off_that_names_no_revision_is_refused(
 
 def test_moving_an_unknown_designs_status_is_a_404(client: TestClient) -> None:
     response = client.post(
-        "/protocols/design-nothing/status", json={"status": "approved", "expected_revision": 1}
+        "/protocols/design-nothing/status",
+        json={"status": "approved", "expected_revision": 1, "expected_status": "draft"},
     )
     assert response.status_code == 404
 
@@ -537,7 +616,11 @@ def test_a_status_that_is_not_a_status_is_refused(
     assert (
         client.post(
             f"/protocols/{_DESIGN_ID}/status",
-            json={"status": "in-progress", "expected_revision": 1},
+            json={
+                "status": "in-progress",
+                "expected_revision": 1,
+                "expected_status": "draft",
+            },
         ).status_code
         == 422
     )

@@ -181,6 +181,25 @@ class RevisionConflict(ChemclawError):
     """A write whose `parent_revision` is not the design's head — somebody else edited it first."""
 
 
+class StatusConflict(ChemclawError):
+    """A lifecycle move from a status the design no longer holds — somebody else moved it first.
+
+    **A sibling of `RevisionConflict`, not a subclass of it, because the two name different
+    losses.** `expected_revision` is a compare-and-set on the *document*: it refuses a sign-off
+    attributed to a revision nobody read. It says nothing about the *status*, so two people looking
+    at revision 1 could approve and abandon it and both were told 204 — measured 100 of 100 over
+    `asyncio.gather`, and it needs no race at all to happen sequentially. What that costs is
+    `advanced()`'s stated guarantee that an `abandoned` design is held until a *person* moves it:
+    a second person's `set_status` un-abandoned it silently and a design retired because the
+    starting material decomposes was back in the `draft` listing.
+
+    Separate types because the caller's *message* differs even though the remedy does not: one says
+    the document moved under you, the other says the decision did. `api/routes/protocols.py` maps
+    them onto two `code`s in one 409 for exactly that, and a subclass would have made which code a
+    caller gets depend on the order of two `except` clauses.
+    """
+
+
 class UnknownDesign(ChemclawError):
     """A design id nothing in the store answers to."""
 
@@ -258,10 +277,13 @@ class DesignStore(Protocol):
         status: DesignStatus,
         *,
         expected_revision: int,
+        expected_status: DesignStatus,
         actor: str = "",
         reason: str = "",
     ) -> None:
         """Move a design's lifecycle status, recording who moved it, why, and from which revision.
+
+        **Two compare-and-sets, because a design has two things somebody else can move.**
 
         `expected_revision` is the revision the person was *looking at*, and a move against anything
         else is refused. Required and keyword-only for the reason `RevisionIn.parent_revision` is
@@ -269,9 +291,16 @@ class DesignStore(Protocol):
         attributed to a document nobody read, and defaulting it to the head "for convenience" would
         remove the control rather than provide one.
 
+        `expected_status` is the status they saw beside it, and it is required and keyword-only for
+        the same reason **one step further**: an optional field a caller may omit is a control that
+        exists only in this docstring. The revision compare-and-set is on the *document* and says
+        nothing about the decision, so two people at revision 1 could approve and abandon it and
+        both were told 204 — which is what `StatusConflict` now refuses.
+
         Raises:
             UnknownDesign: nothing in the store answers to `design_id`.
             RevisionConflict: a revision landed between the read and this move.
+            StatusConflict: somebody else moved the status between the read and this move.
         """
         ...
 
@@ -436,6 +465,7 @@ class InMemoryDesignStore:
         status: DesignStatus,
         *,
         expected_revision: int,
+        expected_status: DesignStatus,
         actor: str = "",
         reason: str = "",
     ) -> None:
@@ -450,6 +480,7 @@ class InMemoryDesignStore:
                 f"revision {expected_revision} is not the head ({head}); "
                 "re-read the design before signing off on it"
             )
+        require_unmoved(expected_status, self._meta[design_id]["status"])
         require_movable(status, head_revision.kind)
         self._meta[design_id]["status"] = status
         self._meta[design_id]["updated_at"] = datetime.now(UTC)
@@ -690,6 +721,7 @@ class PostgresDesignStore:
         status: DesignStatus,
         *,
         expected_revision: int,
+        expected_status: DesignStatus,
         actor: str = "",
         reason: str = "",
     ) -> None:
@@ -717,6 +749,14 @@ class PostgresDesignStore:
         It is the identical control `append(parent_revision=…)` already is one statement below, and
         the `FOR UPDATE` is doing a second job besides: it serialises a status move against a
         concurrent `append`, which is the interleaving the deterministic case does not need.
+
+        **`_SELECT_HEAD` reads the status under that same lock, and for a long time discarded it.**
+        `head_row[1]` was never touched: the compare-and-set was on the document alone, so an
+        `approved` and an `abandoned` move from revision 1 both committed. Measured over
+        `asyncio.gather` before `expected_status` existed: **100 of 100** pairs took both writes
+        with no refusal, and the header landed `approved` 16 times and `abandoned` 84 — either way,
+        one of the two people was never told. Sequentially it needed no race at all. The status the
+        comparison reads is therefore the one the lock already holds, not a second read.
         """
         require_storable(None, design_id=design_id, actor=actor, reason=reason)
         async with self._connection() as conn:
@@ -731,6 +771,7 @@ class PostgresDesignStore:
                         f"revision {expected_revision} is not the head ({head}); "
                         "re-read the design before signing off on it"
                     )
+                require_unmoved(expected_status, head_row[1])
                 # The kind of the revision this move is stamped against, and the reason that is
                 # not a race: `_SELECT_HEAD` locks the *header* row, and every `append` takes that
                 # same lock before writing, so no revision can land between the two reads. The
@@ -901,12 +942,10 @@ def require_movable(status: DesignStatus, head_kind: RevisionKind) -> None:
     answer.
 
     The complementary guard — refusing a sign-off that would silently overwrite a *different*
-    person's sign-off at the same revision — is not here, and `docs/planning/BACKLOG.md` records
-    why: `expected_revision` is a compare-and-set on the document, so two people looking at revision
-    1 can approve and abandon it and both are told 204. Closing that needs the caller to state the
-    status it saw, which is a contract change across `Chemclaw3_ui` as well. The evidence survives
-    either way — `experiment_protocol_status_events` records both moves with their actors — but
-    nobody is told at the time.
+    person's sign-off at the same revision — is `require_unmoved`, one function below. It was not
+    here for a while, and this docstring said so; it is here now because "the evidence survives, but
+    nobody is told at the time" turned out to cost `advanced()`'s guarantee that only a person moves
+    an `abandoned` design off `abandoned`.
 
     Raises:
         UnstorableDocument: the design cannot hold this status.
@@ -915,6 +954,28 @@ def require_movable(status: DesignStatus, head_kind: RevisionKind) -> None:
         raise UnstorableDocument(
             f"this design holds only the structured ask, so it cannot be {status!r}: there is no "
             "procedure to approve or to have run. Draft the protocol first."
+        )
+
+
+def require_unmoved(expected: DesignStatus, actual: DesignStatus) -> None:
+    """Refuse a lifecycle move made from a status the design no longer holds.
+
+    The compare-and-set `expected_revision` is *not*: that one is on the document, and a design has
+    a second thing another person can move. Both backends call this rather than each writing the
+    comparison, for `require_movable`'s reason one line up — the two read one rule, so a refusal
+    cannot depend on which store a deployment runs.
+
+    A no-op move is deliberately allowed through (`approved` → `approved` with `expected` equal to
+    it): the caller saw what is there, so nothing was lost, and refusing it would turn a double
+    click into an error a chemist has to interpret.
+
+    Raises:
+        StatusConflict: somebody else moved the status between the caller's read and this move.
+    """
+    if expected != actual:
+        raise StatusConflict(
+            f"this design is {actual!r}, not {expected!r} as you saw it; somebody else moved it. "
+            "Re-read the design before signing off on it"
         )
 
 

@@ -153,8 +153,15 @@ _BAD_DATA_TYPES = [
     # Listed even though no workflow writes a design today — the list is keyed by class *name*, so
     # an entry that never matches costs nothing while a missing one is a silent retry storm the day
     # somebody schedules a drafting job.
+    #
+    # `StatusConflict` joins it on the same reasoning and for a sharper reason. A stale
+    # `expected_status` is stale on every attempt, and retrying would resolve the race by
+    # discarding the decision it did not see — which is exactly the sign-off the compare-and-set
+    # was added to protect. A retried `abandoned` that silently overwrites somebody's `approved`
+    # is the defect, not the recovery.
     "LayoutError",
     "RevisionConflict",
+    "StatusConflict",
     "UnstorableDocument",
     "UnknownDesign",
     "TemplateError",
