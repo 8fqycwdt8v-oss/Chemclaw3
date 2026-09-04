@@ -478,10 +478,13 @@ startup instead. Verify a bundle standalone with `uvicorn chemclaw.connectors.<n
 **What ships today.** The bundles are `molfp` and `rxnfp` (fingerprint search), `calc` (the
 semiempirical calculators, their durable searches and the calibration ledger), `bo` (Bayesian
 optimization) and `results` (re-queueing stored calculations for an external
-results store, §(xvi)) — plus `chem` (bench chemistry over RDKit) and `safety` (the
-hazard screen), which this release **declares but does not run**: both are served by
-`Chemclaw3-mcp`, so each needs its host in `networkPolicy.egressDestinations` and its bearer
-(`CHEMCLAW_CHEM_TOKEN`, `CHEMCLAW_SAFETY_TOKEN`) provided, or every call to them is refused. The
+results store, §(xvi)) — plus `chem` (bench chemistry over RDKit), `safety` (the
+hazard screen) and `rxnpredict` (forward-reaction and reaction-condition prediction by ensemble),
+which this release **declares but does not run**: all three are served by
+`Chemclaw3-mcp`, so each needs its host in `networkPolicy.egressDestinations`, its port in
+`networkPolicy.egressPorts` — an egress rule restricts by port independently of the peer list — and
+its bearer (`CHEMCLAW_CHEM_TOKEN`, `CHEMCLAW_SAFETY_TOKEN`, `CHEMCLAW_RXNPREDICT_TOKEN`) provided,
+or every call to them is refused. The
 physics behind `calc` is served there too — `CHEMCLAW_CALC_SERVER_URL` and `CHEMCLAW_CALC_TOKEN` —
 even though the `calc` bundle's own tools, cache and durable jobs stay in this release.
 
