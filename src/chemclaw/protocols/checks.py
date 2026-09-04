@@ -439,7 +439,7 @@ def factor_levels_declared(design: ExperimentDesign) -> ProtocolCheck:
         # and `ligand` with no factor declared passed a blocker whose subject is "an arm setting a
         # level the factor does not declare", and `render`'s run sheet — which builds its columns
         # from `design.factors` — then dropped those values from the sheet the chemist runs from.
-        stray = sorted({name for arm in design.arms for name in arm.levels if not arm.control})
+        stray = sorted({name for arm in design.arms for name in arm.levels})
         if stray:
             return _fail(
                 "factor_levels_declared",
@@ -451,11 +451,21 @@ def factor_levels_declared(design: ExperimentDesign) -> ProtocolCheck:
         return _ok("factor_levels_declared", "blocker", "no factors")
     problems: list[str] = []
     for arm in design.arms:
-        if arm.control:
-            continue  # A control is deliberately outside the factor space.
         unknown = sorted(set(arm.levels) - set(declared))
         if unknown:
             problems.append(f"{arm.arm_id} sets undeclared factor(s): {', '.join(unknown)}")
+        if arm.control:
+            # **A control is outside the factor *space*, and this check is about the factor
+            # *vocabulary*.** The exemption is real for the two rules below it — a control may hold
+            # a level no factor declares (`ligand="none"`) and may leave factors unset, which is
+            # what makes it a control — and it was wrong for the rule above, in both branches. The
+            # run sheet builds its columns from `design.factors` (`render.factor_names`), so a
+            # level filed under a name nothing declares is stored in the document and read by
+            # nothing: a negative control carrying `no_catalyst="omitted"` rendered identically to
+            # the arm beside it apart from its tag, and the instruction that made it a control
+            # reached no page. `ProtocolArm`'s docstring already says a control that genuinely
+            # differs says so in `note`; this is what makes that true rather than hoped for.
+            continue
         for name, label in arm.levels.items():
             if name in declared and label not in declared[name]:
                 problems.append(

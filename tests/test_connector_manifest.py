@@ -251,6 +251,25 @@ def test_a_typo_in_the_classification_is_refused_rather_than_ignored() -> None:
         )
 
 
+def test_a_tool_listed_twice_in_one_endpoint_is_refused_where_it_is_readable() -> None:
+    """The partition collapsed `tools` to a set, so a repeat validated here and failed later.
+
+    `registry._declared_tool_names` walks the raw list, so `make connector-validate` and every
+    agent build then reported the bundle colliding with *itself* — "connector 'x' declares tool 'a',
+    which connector 'x' already provides as a tool", which is true and unactionable without reading
+    the source to learn it means "you listed `a` twice". The manifest is the only place that can
+    still see the repetition, so it is the place that names it.
+    """
+    with pytest.raises(ValidationError, match="lists tool.*more than once"):
+        HttpEndpoint.model_validate(
+            {
+                "url": "http://127.0.0.1:8899/mcp",
+                "tools": ["resolve_compound", "resolve_compound"],
+                "read_only": ["resolve_compound"],
+            }
+        )
+
+
 def test_an_unclassified_tool_refuses_to_load() -> None:
     """Silence is not "read-only": a bundle has to say, because core cannot tell.
 

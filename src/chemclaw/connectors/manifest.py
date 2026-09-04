@@ -209,6 +209,18 @@ def _check_classification(
     dry-run gate's, so the manifest that declared the least got the most.
     """
     served = set(tools)
+    # **Checked before the partition, because the partition is where the evidence is lost.** Every
+    # comparison below works on sets, so `tools: [a, a]` validates here and fails one layer up in
+    # `registry._declared_tool_names`, which walks the raw list and reports the bundle colliding
+    # with itself — a true sentence naming one connector twice, and unactionable without reading
+    # the source. This is the last place the repetition is still visible, so it is the place that
+    # says what it is.
+    if len(tools) != len(served):
+        repeated = sorted({name for name in served if tools.count(name) > 1})
+        raise ValueError(
+            f"endpoint lists tool(s) {repeated} more than once; a tool is declared once and "
+            "classified once"
+        )
     if not served:
         raise ValueError(
             "endpoint declares no tools; an endpoint that serves nothing cannot be reached, and "

@@ -900,13 +900,28 @@ def require_movable(status: DesignStatus, head_kind: RevisionKind) -> None:
     one fact rather than each deriving it, and Postgres does not have to load the document to
     answer.
 
+    **`requested` is the same rule read backwards, and it was missing.** It is the one status that
+    asserts the *absence* of a procedure — `DesignStatus` defines it as "holds only a structured
+    ask" — so a `protocol` head contradicts it exactly as a `request` head contradicts `executed`.
+    Nothing refused it: measured on both backends, an executed design moved to `requested` and
+    stayed there with a fully drafted protocol as head, so `GET /protocols?status=requested` listed
+    it among the intakes and `?status=executed` did not. Written as an `if` rather than as a second
+    frozenset beside `_NEEDS_A_PROTOCOL` because it has exactly one member and always will: the
+    other four statuses are claims about a document or about a decision, and only this one is a
+    claim that no document exists yet.
+
+    **What is still not here is a transition *order*.** Nothing forbids `abandoned → executed`, and
+    that needs the design's *current* status, which this function is not given — a signature change
+    reaching both backends, and a table of legal moves that is a product decision rather than
+    something the surrounding code implies. `docs/planning/BACKLOG.md` carries it.
+
     The complementary guard — refusing a sign-off that would silently overwrite a *different*
-    person's sign-off at the same revision — is not here, and `docs/planning/BACKLOG.md` records
-    why: `expected_revision` is a compare-and-set on the document, so two people looking at revision
-    1 can approve and abandon it and both are told 204. Closing that needs the caller to state the
-    status it saw, which is a contract change across `Chemclaw3_ui` as well. The evidence survives
-    either way — `experiment_protocol_status_events` records both moves with their actors — but
-    nobody is told at the time.
+    person's sign-off at the same revision — is not here either, and `docs/planning/BACKLOG.md`
+    records why: `expected_revision` is a compare-and-set on the document, so two people looking at
+    revision 1 can approve and abandon it and both are told 204. Closing that needs the caller to
+    state the status it saw, which is a contract change across `Chemclaw3_ui` as well. The evidence
+    survives either way — `experiment_protocol_status_events` records both moves with their actors
+    — but nobody is told at the time.
 
     Raises:
         UnstorableDocument: the design cannot hold this status.
@@ -915,6 +930,12 @@ def require_movable(status: DesignStatus, head_kind: RevisionKind) -> None:
         raise UnstorableDocument(
             f"this design holds only the structured ask, so it cannot be {status!r}: there is no "
             "procedure to approve or to have run. Draft the protocol first."
+        )
+    if status == "requested" and head_kind == "protocol":
+        raise UnstorableDocument(
+            "this design holds a procedure, so it cannot go back to 'requested', which means it "
+            "holds only the structured ask. Abandon it, or draft over it — a revision moves a "
+            "design's status by itself."
         )
 
 

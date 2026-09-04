@@ -412,14 +412,31 @@ def test_every_status_the_type_allows_is_a_status_the_schema_accepts(backend: st
     Neither can be derived from the Literal, so a sixth status added in Python would pass mypy,
     pass every in-memory test, and be rejected by Postgres at runtime — on the write, in front of a
     chemist. Driving all five through the real store is what ties the three declarations together.
+
+    **Two designs, because `require_movable` now refuses one of the five on a protocol head.**
+    `requested` means "holds only the structured ask", so a drafted design may not take it — the
+    mirror of the refusal of `executed` on an ask. The subject here is the SQL constraint rather
+    than the lifecycle, so each status is driven through a design that may legally hold it; a
+    single-design version of this test would prove the constraint by breaking the guard.
     """
 
     async def _body() -> None:
         store = await _backend(backend)
-        design_id = _id(backend, "allstatuses")
-        design = _design(arms=1)
-        await store.append(design_id, design, run_checks(design), author_kind="agent")
+        drafted_id = _id(backend, "allstatuses")
+        drafted = _design(arms=1)
+        await store.append(drafted_id, drafted, run_checks(drafted), author_kind="agent")
+        ask_id = _id(backend, "allstatusesask")
+        ask = _design(arms=0)
+        await store.append(
+            ask_id,
+            ask,
+            run_checks(ask, stage="request"),
+            author_kind="agent",
+            change_note="structured the request",
+            status="requested",
+        )
         for status in get_args(DesignStatus):
+            design_id = ask_id if status == "requested" else drafted_id
             await store.set_status(
                 design_id,
                 status,
@@ -430,8 +447,10 @@ def test_every_status_the_type_allows_is_a_status_the_schema_accepts(backend: st
             summary = await store.summary(design_id)
             assert summary is not None and summary.status == status
 
-        recorded = [event.status for event in await store.status_history(design_id)]
-        assert recorded == list(reversed(get_args(DesignStatus)))
+        on_a_protocol = [status for status in get_args(DesignStatus) if status != "requested"]
+        recorded = [event.status for event in await store.status_history(drafted_id)]
+        assert recorded == list(reversed(on_a_protocol))
+        assert [event.status for event in await store.status_history(ask_id)] == ["requested"]
 
     _run(_body)
 
@@ -763,6 +782,44 @@ def test_a_drafted_protocol_can_still_be_approved(backend: str) -> None:
         )
         header = await store.summary(_signoff)
         assert header is not None and header.status == "approved"
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_drafted_protocol_cannot_be_moved_back_to_requested(backend: str) -> None:
+    """The mirror of the guard above, and it was missing while the guard's own argument covered it.
+
+    `requested` is the one status that says the design "holds only a structured ask"
+    (`models.DesignStatus`), so a `protocol` head contradicts it exactly as a `request` head
+    contradicts `executed`. Nothing refused it: measured on both backends, an executed design moved
+    to `requested` and stayed there with a fully drafted protocol as its head, so
+    `GET /protocols?status=requested` listed it among the intakes and `?status=executed` did not.
+    `advanced()` only repaired it when the *next* revision landed.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design_id = _fresh_id(backend, "unrequest")
+        design = _design(arms=2)
+        await store.append(
+            design_id,
+            design,
+            run_checks(design),
+            author_kind="agent",
+            author="chemist-a",
+            change_note="drafted",
+        )
+        with pytest.raises(UnstorableDocument, match="holds a procedure"):
+            await store.set_status(
+                design_id,
+                "requested",
+                expected_revision=1,
+                actor="chemist-a",
+                reason="reopening the ask",
+            )
+        header = await store.summary(design_id)
+        assert header is not None and header.status == "draft"
 
     _run(_body)
 
