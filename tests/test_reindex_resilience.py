@@ -24,7 +24,9 @@ from pathlib import Path
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.retrieval.vector_index import InMemoryNoteIndex, reindex_notes
+from chemclaw.core.embeddings import embed_texts
+from chemclaw.retrieval import vector_index
+from chemclaw.retrieval.vector_index import InMemoryNoteIndex, note_embedding_key, reindex_notes
 
 _NOTE = "---\nid: {id}\ntype: reaction\ncreated_by: human\n---\n\nCoupling run {id}, 82% yield.\n"
 
@@ -64,7 +66,9 @@ def test_a_note_that_stops_parsing_is_kept_in_the_index_rather_than_retired(
     )
 
 
-def test_a_note_the_embedder_refuses_costs_its_own_batch_and_no_more(tmp_path: Path) -> None:
+def test_a_note_the_embedder_refuses_costs_its_own_batch_and_no_more(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The notes in the batches that already landed stay landed.
 
     Before batching, the single `embed_texts` call meant a refusal anywhere left nothing indexed at
@@ -76,7 +80,9 @@ def test_a_note_the_embedder_refuses_costs_its_own_batch_and_no_more(tmp_path: P
     index = InMemoryNoteIndex()
     _corpus(tmp_path, settings.note_embed_batch_size * 3)
     calls = {"n": 0}
-    real = _embed_module().embed_texts
+    # The canonical function, so the name is imported from where it is defined; the *patch*
+    # still lands on `vector_index`, because that is the namespace `reindex_notes` resolves in.
+    real = embed_texts
 
     def _refuse_the_third_batch(texts: list[str], *, cache: bool = True) -> list[list[float]]:
         calls["n"] += 1
@@ -84,14 +90,9 @@ def test_a_note_the_embedder_refuses_costs_its_own_batch_and_no_more(tmp_path: P
             raise ValueError("maximum context length is 8192 tokens")
         return real(texts, cache=cache)
 
-    module = _embed_module()
-    original = module.embed_texts
-    module.embed_texts = _refuse_the_third_batch  # type: ignore[assignment]
-    try:
-        with pytest.raises(ValueError, match="8192"):
-            asyncio.run(reindex_notes(index, notes_dir=str(tmp_path)))
-    finally:
-        module.embed_texts = original  # type: ignore[assignment]
+    monkeypatch.setattr(vector_index, "embed_texts", _refuse_the_third_batch)
+    with pytest.raises(ValueError, match="8192"):
+        asyncio.run(reindex_notes(index, notes_dir=str(tmp_path)))
 
     landed = len(asyncio.run(index.fingerprints(_key())))
     assert landed == settings.note_embed_batch_size * 2, (
@@ -99,7 +100,9 @@ def test_a_note_the_embedder_refuses_costs_its_own_batch_and_no_more(tmp_path: P
     )
 
 
-def test_an_oversized_note_is_truncated_rather_than_sent_whole(tmp_path: Path) -> None:
+def test_an_oversized_note_is_truncated_rather_than_sent_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The embedded text is bounded, so an ordinary long campaign note cannot refuse itself.
 
     24,000 characters is ~6k tokens against an 8,192-token window. Measured on the code this
@@ -113,32 +116,21 @@ def test_an_oversized_note_is_truncated_rather_than_sent_whole(tmp_path: Path) -
     (tmp_path / "small.md").write_text(_NOTE.format(id="small"), encoding="utf-8")
 
     seen: list[int] = []
-    module = _embed_module()
-    original = module.embed_texts
+    # The canonical function, so the name is imported from where it is defined; the *patch*
+    # still lands on `vector_index`, because that is the namespace `reindex_notes` resolves in.
+    real = embed_texts
 
     def _record(texts: list[str], *, cache: bool = True) -> list[list[float]]:
         seen.extend(len(text) for text in texts)
-        return original(texts, cache=cache)
+        return real(texts, cache=cache)
 
-    module.embed_texts = _record  # type: ignore[assignment]
-    try:
-        assert asyncio.run(reindex_notes(index, notes_dir=str(tmp_path))) == 2
-    finally:
-        module.embed_texts = original  # type: ignore[assignment]
+    monkeypatch.setattr(vector_index, "embed_texts", _record)
+    assert asyncio.run(reindex_notes(index, notes_dir=str(tmp_path))) == 2
 
     assert max(seen) <= settings.note_embed_max_chars
     assert len(asyncio.run(index.fingerprints(_key()))) == 2
 
 
-def _embed_module() -> object:
-    """The module object `reindex_notes` resolves `embed_texts` through, for patching in place."""
-    import chemclaw.retrieval.vector_index as module
-
-    return module
-
-
 def _key() -> str:
     """The embedding identity the index stores rows under."""
-    from chemclaw.retrieval.vector_index import note_embedding_key
-
     return note_embedding_key()
