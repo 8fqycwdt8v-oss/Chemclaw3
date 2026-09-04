@@ -572,20 +572,24 @@ def test_every_wait_started_as_a_child_names_a_parent_close_policy() -> None:
     the module — passing while asserting nothing, which is the failure mode this whole review kept
     finding. The floor below is the other half of that: an empty scan is a subset of everything.
 
-    Scoped to this package, which is where the wait's callers in `durable/` live.
-    `connectors/bo/workflows.py::_measure` starts the same child from the bundle side and needs the
-    identical option; its wait is a fortnight long, so a parent that dies there strands the
-    longest-lived row of any of them.
+    **Scoped to the whole package, because scoping it to `durable/` is what let the longest wait in
+    the tree ship without the option.** The first version of this scan walked `durable/` alone and
+    said so in a paragraph that then named the caller it was not reading —
+    `connectors/bo/workflows.py::_measure`, whose wait is a fortnight long, so a parent that dies
+    there strands the longest-lived row of any of them. A rule that names its own exception in prose
+    is not a rule, and a bundle is exactly where the next caller will be written: the wait is one
+    primitive with several callers by design, and where a caller lives is not a property this
+    guard should care about.
     """
     starters = [
         path
-        for path in (SRC / "durable").rglob("*.py")
+        for path in SRC.rglob("*.py")
         if "execute_child_workflow" in (text := path.read_text(encoding="utf-8"))
         and "AwaitAnswerWorkflow.run" in text
     ]
     assert starters, (
-        "no module in `durable/` starts the wait as a child any more — either the caller moved, in "
-        "which case this scan belongs where it went, or this guard is now asserting nothing"
+        "nothing in `src/` starts the wait as a child any more — either every caller moved to a "
+        "different primitive, or this guard is now asserting nothing"
     )
     offenders = [
         path.relative_to(SRC).as_posix()

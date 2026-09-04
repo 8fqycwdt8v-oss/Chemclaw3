@@ -209,6 +209,17 @@ class ConnectorJobInput(BaseModel):
     #: launch site — a workflow-side clamp would put a timer count under a value that can change
     #: between an execution and its replay.
     effect_approval_days: float = 3.0
+    # **Whether this job suspends on a person** (`JobSpec.awaits_answer`), copied from the manifest
+    # at the launch site on the same terms as `timeout_seconds` above. `False` — every job in this
+    # repository but one — means the job's wall clock is its compute, and the deployment's ceiling
+    # bounds it exactly as it always did.
+    #
+    # It is a separate field rather than a value of `timeout_seconds` because it is a different
+    # kind of claim: `timeout_seconds` says what this job *costs*, and this says that its elapsed
+    # time is not a measure of cost at all. `child_execution_timeout` is where the two meet.
+    #
+    # Additive and defaulted because it crosses the Temporal wire and histories are in flight.
+    awaits_answer: bool = False
 
 
 class ConnectorJobResult(BaseModel):
@@ -436,6 +447,22 @@ def wrapper_execution_timeout() -> timedelta:
     was written for. The cost of not deriving it is that a wedged *wrapper* under a short job is
     still bounded by the fleet-wide number — but the child, which is where the work is, fails
     first and the wrapper's own failure path then runs, which is the outcome that matters.
+
+    **"Strictly above whatever the child gets" now has one exception, and this is where to read
+    it.** A job declaring `awaits_answer` gets no child ceiling at all (`child_execution_timeout`),
+    so on the template path the wrapper's number is the *only* one, and a measured campaign started
+    as a template `job` step is still killed at roughly five hours — the very defect
+    `awaits_answer` removes from the direct path. That is not fixed here because it is not this
+    function's to fix: the template path bounds a *step*, and how a run whose step suspends for a
+    fortnight should be bounded is a question about `template_run_timeout_seconds`, which
+    `durable/template_job.py` and `Settings._the_template_run_ceiling_covers_one_step` own between
+    them. Stated rather than left to be rediscovered, because the direct path working is exactly
+    what makes the template path look like it must.
+
+    `_approve_effect` below is the same shape and predates it: an irreversible job's approval waits
+    up to `effect_approval_days` *inside the wrapper*, so it works on the direct path for the one
+    reason this paragraph is about — no execution timeout — and is cut off on the template path by
+    this number.
     """
     return timedelta(
         seconds=settings.connector_job_timeout_seconds
@@ -443,8 +470,10 @@ def wrapper_execution_timeout() -> timedelta:
     )
 
 
-def child_execution_timeout(declared: float | None) -> timedelta:
-    """The ceiling one connector job's child actually gets: the lower of the two claims about it.
+def child_execution_timeout(
+    declared: float | None, awaits_answer: bool = False
+) -> timedelta | None:
+    """The ceiling one connector job's child actually gets — or none, where wall clock is not cost.
 
     Two parties have a say and they are not symmetric. The deployment sets the **maximum** any job
     may run for (`connector_job_timeout_seconds`), sized off the longest job in the fleet; a bundle
@@ -461,6 +490,30 @@ def child_execution_timeout(declared: float | None) -> timedelta:
     `None` — the state of every shipped manifest — returns exactly the setting, so a job that
     declares nothing is bounded precisely as it was before this function existed.
 
+    **A job that suspends on a person gets no ceiling at all, and that asymmetry is the point.**
+    A workflow execution timeout is wall clock, and `awaits_answer` says this job spends wall
+    clock without doing work: `BoCampaignWorkflow._measure` opens an `AwaitAnswerWorkflow` for
+    `bo_measurement_deadline_days` — fourteen days, a plate turnaround — under a five-hour ceiling
+    that is 67x smaller, so the one campaign shape the durable wait exists for could not reach its
+    own deadline. Neither number is wrong and the manifest cannot reconcile them, because the one
+    lever a bundle has only moves downward.
+
+    There is no finite number that is right either, which is why this is a branch and not an
+    addend. A measured campaign's total is `(n_rounds + 1)` waits — the shipped default spec alone
+    spans 154 days — and `n_rounds` is model-authored input bounded only by `bo_max_rounds`, so any
+    ceiling wide enough to be correct is a ceiling that reaps nothing, and any narrower one is this
+    same defect at a different scale. It is also not a new posture: `ConnectorJobWorkflow`'s own
+    `_approve_effect` waits up to `effect_approval_days` and works today only because
+    `connectors/jobs.py` gives the wrapper no execution timeout either.
+
+    **What is given up, stated rather than implied.** For this one job the wall-clock reaper is
+    gone, so a bundle worker that never comes back leaves the campaign `running` instead of failing
+    it in five hours. What still bounds it: every wait is clamped at `awaiting_max_days` by
+    `open_pending_request_activity`, an unanswered wait *ends* the campaign rather than continuing
+    on a batch nobody ran, every activity carries its own start-to-close and heartbeat, and the
+    round count is refused above `bo_max_rounds` at launch. Every other job keeps the ceiling, so
+    a wedged xTB or CREST run is still reaped in hours.
+
     A module-level function rather than an expression inside `_run_child`, for the reason
     `job_record_for` above is one: everything around it needs a live Temporal server to exercise,
     and "the deployment keeps the maximum" is a property the offline suite should be able to hold
@@ -468,10 +521,13 @@ def child_execution_timeout(declared: float | None) -> timedelta:
 
     Args:
         declared: The job's own ceiling in seconds, or `None` where its manifest declared none.
+        awaits_answer: Whether the job suspends on a durable answer (`JobSpec.awaits_answer`).
 
     Returns:
-        The execution timeout to hand the child workflow.
+        The execution timeout to hand the child workflow, or `None` to leave it unbounded.
     """
+    if awaits_answer:
+        return None
     ceiling = settings.connector_job_timeout_seconds
     return timedelta(seconds=ceiling if declared is None else min(declared, ceiling))
 
@@ -780,9 +836,10 @@ class ConnectorJobWorkflow:
             # `BAD_DATA_RETRY`, so genuine transients are retried where they can be classified, and
             # a worker that dies mid-child is re-delivered by Temporal without any workflow retry.
             retry_policy=RetryPolicy(maximum_attempts=1),
-            # The lower of the deployment's ceiling and the job's own declared one — see
-            # `child_execution_timeout`. A job that declares nothing gets the setting unchanged.
-            execution_timeout=child_execution_timeout(job.timeout_seconds),
+            # The lower of the deployment's ceiling and the job's own declared one — or nothing at
+            # all for a job that suspends on a person, whose elapsed time is not its cost. See
+            # `child_execution_timeout`. A job that declares neither gets the setting unchanged.
+            execution_timeout=child_execution_timeout(job.timeout_seconds, job.awaits_answer),
         )
         return result
 

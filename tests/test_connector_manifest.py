@@ -323,6 +323,22 @@ def test_a_job_may_declare_its_own_ceiling_and_a_bad_number_is_refused() -> None
             JobSpec.model_validate({**_JOB, "timeout_seconds": bad})
 
 
+def test_a_job_cannot_both_wait_on_a_person_and_declare_what_it_costs() -> None:
+    """`awaits_answer` and `timeout_seconds` are opposite claims, so declaring both is refused.
+
+    `timeout_seconds` says what this job's whole durable run costs; `awaits_answer` says the run
+    has no wall-clock bound worth stating, because most of it is a person not having answered yet.
+    Honouring both would rebuild the defect the field was added for — `_measure`'s fortnight-long
+    wait under a ceiling sized for a CREST search — and honouring one silently would leave the
+    other looking like a control it is not. Absent by default, because every job in the tree but
+    one computes.
+    """
+    assert JobSpec.model_validate(_JOB).awaits_answer is False
+    assert JobSpec.model_validate({**_JOB, "awaits_answer": True}).awaits_answer is True
+    with pytest.raises(ValidationError, match="no wall-clock ceiling to declare"):
+        JobSpec.model_validate({**_JOB, "awaits_answer": True, "timeout_seconds": 900})
+
+
 def test_a_bad_ceiling_in_a_real_manifest_names_the_file_it_is_in(tmp_path: Path) -> None:
     """The one test here that reaches the loader, because the file name is the whole message.
 

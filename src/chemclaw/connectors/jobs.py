@@ -392,6 +392,11 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     # deployment's maximum is taken in the worker that starts the child
                     # (`durable/connector_job.py::child_execution_timeout`), not here.
                     timeout_seconds=job.timeout_seconds,
+                    # Whether this job suspends on a person, copied from the manifest on the same
+                    # terms and for the same reason as the ceiling above: `child_execution_timeout`
+                    # reads it in the worker that starts the child, and a workflow may not read a
+                    # `connector.yaml` off disk.
+                    awaits_answer=job.awaits_answer,
                     # What this job changes outside this deployment, copied from the manifest on
                     # the same terms as the two fields above — a workflow may not read a manifest
                     # off disk. Both empty for every job in this repository today, all of whose

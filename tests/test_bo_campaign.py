@@ -8,20 +8,23 @@ offline sandbox — proving a real reaction campaign runs end-to-end and resumab
 import asyncio
 import warnings
 from collections.abc import Callable, Iterator, Sequence
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
 from rdkit import Chem
 from rdkit.Chem import Crippen
 from temporalio import activity
-from temporalio.client import Client
-from temporalio.worker import Worker
+from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from chemclaw.connectors.bo.activities import evaluate_candidates, propose_initial
 from chemclaw.connectors.bo.workflows import BoCampaignWorkflow
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.chem import InvalidSmilesError
 from chemclaw.core.config import settings
+from chemclaw.durable.awaiting import AwaitAnswerWorkflow
+from chemclaw.durable.connector_job import child_execution_timeout
 from chemclaw.durable.registry import registered_activities
 from chemclaw.science.bo.benchmarks.reizman_suzuki import build_problem, load_dataset
 from chemclaw.science.bo.campaign import optimize
@@ -31,6 +34,7 @@ from chemclaw.science.bo.campaign_record import (
     campaign_store,
 )
 from chemclaw.science.bo.objectives import (
+    MEASURED_OBJECTIVE,
     MOLECULE_KEY,
     get_objective,
     molecule_library_problem,
@@ -54,7 +58,11 @@ from chemclaw.science.bo.problem import (
     require_campaign_startable,
     require_rounds_within_ceiling,
 )
-from tests.temporal_env import pydantic_client, start_env_or_skip
+from tests.temporal_env import (
+    pydantic_client,
+    start_env_or_skip,
+    start_local_env_or_skip,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -717,3 +725,173 @@ def test_a_running_campaign_records_each_round_not_only_its_ending(
         for row in ("bo-campaign-rounds:r1", "bo-campaign-rounds:r2")
         for candidate in by_job[row].candidates
     ), "a proposed candidate carries what the surrogate expected of it"
+
+
+async def _wait_started(handle: Any, *, tries: int = 400) -> None:
+    """Block until `handle` names a run the server has actually started.
+
+    A child workflow is created by its parent's *next* workflow task, so a status read taken the
+    instant the parent starts can land before the wait exists at all.
+    """
+    for _ in range(tries):
+        try:
+            await handle.describe()
+            return
+        except Exception:
+            # The handle simply does not name a run yet — the parent has not scheduled the child.
+            await asyncio.sleep(0.05)
+    raise AssertionError(f"{handle.id} never opened, so there was no wait to measure")
+
+
+async def _left_running(handle: Any, *, tries: int = 400) -> Any:
+    """Block until `handle` reaches a terminal status, and return its description."""
+    for _ in range(tries):
+        described = await handle.describe()
+        if described.status != WorkflowExecutionStatus.RUNNING:
+            return described
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{handle.id} never left RUNNING")
+
+
+def test_a_measured_campaign_outlives_the_ceiling_that_would_have_killed_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A measured campaign must survive its own wait, and must settle it when it does not.
+
+    **The defect this pins.** `_measure` suspends on `AwaitAnswerWorkflow` for
+    `bo_measurement_deadline_days` — fourteen days, a plate turnaround — inside a child that
+    `ConnectorJobWorkflow` bounds at `connector_job_timeout_seconds`, five hours. The wait was 67x
+    the ceiling above it, so the one campaign shape the durable wait was built for could not reach
+    its own deadline: five hours in the child is `TIMED_OUT`, the wrapper reports
+    `job_failed reason="Timed out"`, and every already-paid round is lost.
+
+    **Two arms, one server, because the claim is a difference.** The first arm is the shipped
+    arithmetic scaled 1:one — a real `BoCampaignWorkflow` on a real broker under the ceiling
+    `child_execution_timeout` used to hand it — and it must die with the wait still open. The second
+    is the same campaign under the bound the same function resolves now, and it must live long
+    enough to be answered. Reading either alone proves nothing: the first is only a defect because
+    the second is possible, and the second is only a fix because the first fails.
+
+    **And the first arm measures the second half of the change.** A campaign killed by anything
+    other than completing used to strand its wait: `execute_child_workflow` defaults to
+    `ParentClosePolicy.TERMINATE`, a terminate never resumes workflow code, so `run`'s
+    `except asyncio.CancelledError` — the whole reason `_settle` has a detached form — was
+    unreachable from this call site and the `pending_requests` row stayed `waiting` in every
+    entitled person's inbox for ever. `CANCELED` rather than `TERMINATED` is the deterministic
+    half of that and the one that discriminates; whether the settle itself lands before the run
+    closes is a race `tests/test_awaiting.py` declines to assert, for the reason stated there.
+
+    Real-time rather than time-skipping: an idle time-skipping server fast-forwards to the wait's
+    own deadline, which would expire both arms before either could be answered. Unsandboxed for
+    the reason `tests/test_awaiting.py` is — the deadline and the queue are read off `settings`
+    inside workflow code, and this drives them from the test.
+    """
+    ceiling = timedelta(seconds=4)
+    queue = "test-bo-measured"
+    monkeypatch.setattr(settings, "background_task_queue", queue)
+    # Long enough that neither arm expires on its own inside the test, so the only thing that can
+    # end arm one is the ceiling under test.
+    monkeypatch.setattr(settings, "bo_measurement_deadline_days", 300 / 86_400)
+
+    spec = CampaignSpec(
+        problem=build_problem(load_dataset()),
+        objective_name=MEASURED_OBJECTIVE,
+        n_initial=4,
+        n_rounds=0,
+    )
+
+    async def _run() -> None:
+        answer = [
+            Observation(params=candidate.params, value=float(i), provenance="measured")
+            for i, candidate in enumerate(await propose_initial(spec.problem, 4, spec.seed))
+        ]
+        async with await start_local_env_or_skip() as env:
+            client: Client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue=queue,
+                workflows=[BoCampaignWorkflow, AwaitAnswerWorkflow],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+                activities=[*_BO_ACTIVITIES, *_projection_stubs()],
+            ):
+                arms = {
+                    name: await client.start_workflow(
+                        BoCampaignWorkflow.run,
+                        spec.model_dump(mode="json"),
+                        id=f"bo-measured-{name}",
+                        task_queue=queue,
+                        execution_timeout=bound,
+                    )
+                    for name, bound in (
+                        ("under-the-old-ceiling", ceiling),
+                        ("under-the-resolved-bound", child_execution_timeout(None, True)),
+                    )
+                }
+                waits = {
+                    name: client.get_workflow_handle(f"{handle.id}:await:seed")
+                    for name, handle in arms.items()
+                }
+                for wait in waits.values():
+                    await _wait_started(wait)
+
+                killed = await _left_running(arms["under-the-old-ceiling"])
+                assert killed.status == WorkflowExecutionStatus.TIMED_OUT, (
+                    "the shipped ceiling did not kill the campaign, so this arm is not the defect "
+                    "it claims to reproduce"
+                )
+                stranded = await _left_running(waits["under-the-old-ceiling"])
+                assert stranded.status == WorkflowExecutionStatus.CANCELED, (
+                    f"the killed campaign left its wait {stranded.status.name}; only a "
+                    "cancellation reaches `AwaitAnswerWorkflow.run`'s own handler, which is what "
+                    "stops the `pending_requests` row saying `waiting` for the rest of the deadline"
+                )
+
+                await waits["under-the-resolved-bound"].signal(
+                    AwaitAnswerWorkflow.provide,
+                    {"answered_by": "oid-bench", "payload": {"observations": answer}},
+                )
+                envelope = await arms["under-the-resolved-bound"].result()
+                lived = await arms["under-the-resolved-bound"].describe()
+
+        result = CampaignResult.model_validate(envelope.data)
+        assert [o.value for o in result.history] == [0.0, 1.0, 2.0, 3.0], (
+            "the campaign did not run on the answer it was given, so surviving the ceiling bought "
+            "nothing"
+        )
+        assert lived.close_time is not None and lived.close_time - lived.start_time > ceiling, (
+            "the surviving arm finished inside the old ceiling, so this test would pass with the "
+            "ceiling restored and is evidence about nothing"
+        )
+
+    asyncio.run(_run())
+
+
+def _projection_stubs() -> list[Any]:
+    """The wait's four projection activities, recorded rather than written to Postgres.
+
+    `pending_requests` has its own tests; what this file needs is a wait that opens, holds and
+    settles, and a real table would make an offline run depend on a database for a property that is
+    about workflow lifetime. The open stub still has to *answer*: the real activity owns the clamp
+    against `awaiting_max_days` and returns the deadline the workflow schedules its timers against,
+    so a stub returning nothing fails the workflow on the first line that reads it.
+    """
+
+    async def _open(payload: Any) -> str:
+        request = payload["request"] if isinstance(payload, dict) else payload.request
+        days = request["deadline_days"] if isinstance(request, dict) else request.deadline_days
+        started = payload["started_at"] if isinstance(payload, dict) else payload.started_at
+        return (datetime.fromisoformat(started) + timedelta(days=float(days))).isoformat()
+
+    async def _settle(_payload: Any) -> bool:
+        return True
+
+    async def _remind(_request_id: str) -> None: ...
+
+    async def _notify(_payload: Any) -> None: ...
+
+    return [
+        activity.defn(name="open_pending_request_activity")(_open),
+        activity.defn(name="settle_pending_request_activity")(_settle),
+        activity.defn(name="record_reminder_activity")(_remind),
+        activity.defn(name="record_session_event_activity")(_notify),
+    ]
