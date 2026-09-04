@@ -49,6 +49,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError
+from temporalio.workflow import ParentClosePolicy
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
@@ -650,6 +651,24 @@ class ConnectorJobWorkflow:
                 ).model_dump(mode="json"),
                 id=f"{job_id}:approval",
                 task_queue=settings.background_task_queue,
+                # **Not the default.** `execute_child_workflow` defaults to
+                # `ParentClosePolicy.TERMINATE`, and a terminate never resumes workflow code — so
+                # a wrapper that ended any way other than by completing (its own execution
+                # timeout, an operator terminate) left the approval's `pending_requests` row
+                # `waiting` with a deadline nothing would ever act on. That row is permanent:
+                # `open_requests` keeps it in every entitled person's inbox, the answer route
+                # signals a workflow that is gone and turns the failure into a 503 telling them to
+                # try again, and `retention._NOT_PRUNED` refuses to collect it. One immortal ghost
+                # per dead job.
+                #
+                # `REQUEST_CANCEL` rather than `ABANDON`, measured in `tests/test_awaiting.py`
+                # (`test_a_wait_started_as_a_child_settles_when_its_parent_dies`):
+                # abandoning leaves the question live and answerable for the rest of
+                # `effect_approval_days`, so somebody is asked to approve a job that no longer
+                # exists and their approval releases nothing. Cancelling delivers the
+                # `asyncio.CancelledError` the wait was already written to handle — its detached
+                # settle exists for exactly this — so the row leaves the inbox as the job dies.
+                parent_close_policy=ParentClosePolicy.REQUEST_CANCEL,
             )
         )
         if outcome.state != "answered" or not outcome.payload.get("approved", False):
@@ -728,7 +747,20 @@ class ConnectorJobWorkflow:
             # metadata about the run, not a model-authored argument, and `payload` is exactly the
             # arguments the LLM filled in. A memo keeps both readable (`workflow.memo_value`)
             # without letting either become something the model can write.
-            memo={"requested_by": job.requested_by, "correlation_id": job.correlation_id},
+            # `session_id` rides beside them on the same argument, and it was the one of the three
+            # this stamped nowhere. It is what lets a bundle speak *back* to the chemist who
+            # launched the run rather than only be attributable to them:
+            # `BoCampaignWorkflow._evaluate` reads this exact key, so `_measure` built every
+            # `AwaitRequest` with an empty session and `AwaitAnswerWorkflow._push` dropped all of
+            # them on `if not request.session_id: return` — a measured campaign suspended for a
+            # fortnight with its opening notice, its reminders and its expiry notice all silently
+            # skipped. Same class of field as the other two (metadata about the run, never a
+            # model-authored argument), and the reader already existed.
+            memo={
+                "requested_by": job.requested_by,
+                "correlation_id": job.correlation_id,
+                "session_id": job.session_id,
+            },
             # A child is started once per parent *execution* — which is what `child_workflow_id`
             # names, and why rejecting duplicates is still the honest policy here: within one
             # execution a duplicate id is a bug, and across executions the id differs so a failed

@@ -207,3 +207,64 @@ def test_a_changed_reproposal_supersedes_the_open_predecessor_in_sql() -> None:
         assert untouched is not None and untouched.state is ProposalState.SUPERSEDED
 
     asyncio.run(_run())
+
+
+def test_re_proposing_a_superseded_version_reopens_it_in_sql() -> None:
+    """The `CASE` arms again, for the other state that is not a decision.
+
+    `superseded` says a newer version took the queue slot, not that anyone judged the bytes — so an
+    agent regenerating an earlier form (an ordinary miner path) must reopen that row, exactly as a
+    landed retry reopens a `failed` one. With only the `failed` arm, re-proposing v1 refreshed v1's
+    row while leaving it superseded *and* `_SUPERSEDE_OLDER` closed v2: every row superseded, the
+    review queue empty while the branch awaited review, and `mark_merged` moving nothing.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        first_id = await store.upsert(_proposal("pg-reverted", content="v1"))
+        second_id = await store.upsert(_proposal("pg-reverted", content="v2"))
+        closed = await store.read(first_id)
+        assert closed is not None and closed.state is ProposalState.SUPERSEDED
+
+        again_id = await store.upsert(
+            _proposal("pg-reverted", content="v1", reference="pr://note/again")
+        )
+
+        assert again_id == first_id  # same content, same row
+        reopened = await store.read(first_id)
+        assert reopened is not None
+        assert reopened.state is ProposalState.OPEN
+        assert reopened.reason == ""
+        assert reopened.reference == "pr://note/again"
+        newer = await store.read(second_id)
+        assert newer is not None and newer.state is ProposalState.SUPERSEDED
+        # Exactly one open row, and the webhook can close it.
+        assert await store.mark_merged(["pg-reverted"], "webhook") == 1
+
+    asyncio.run(_run())
+
+
+def test_re_proposing_a_rejected_version_does_not_close_the_live_one_in_sql() -> None:
+    """`_SUPERSEDE_OLDER` fires on the state the upsert produced, not on the one it was asked for.
+
+    Measured before the guard moved: v1 rejected, v2 open, re-propose v1 -> v1 still `rejected`
+    (correct), v2 `superseded`, and no open row for the note at all. The `CASE` refusing to reopen
+    a decision and the sweep closing the live version are the same statement disagreeing with
+    itself about what just happened.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        rejected_id = await store.upsert(_proposal("pg-rejected-sweep", content="v1"))
+        await store.decide(rejected_id, ProposalState.REJECTED, "reviewer", "not reproducible")
+        live_id = await store.upsert(_proposal("pg-rejected-sweep", content="v2"))
+
+        await store.upsert(_proposal("pg-rejected-sweep", content="v1", reference="pr://again"))
+
+        decided = await store.read(rejected_id)
+        assert decided is not None and decided.state is ProposalState.REJECTED
+        live = await store.read(live_id)
+        assert live is not None and live.state is ProposalState.OPEN
+        assert await store.mark_merged(["pg-rejected-sweep"], "webhook") == 1
+
+    asyncio.run(_run())

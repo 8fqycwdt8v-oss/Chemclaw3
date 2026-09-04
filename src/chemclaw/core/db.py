@@ -74,7 +74,14 @@ _UNNAMED_OPERATION = "unspecified"
 # `evals/retrieval._run_sync` starts one deliberately when a metric is invoked from a coroutine.
 # `agent/checkpointer.close_checkpointer` identifies the same hazard for its own pool; this is the
 # equivalent for these.
-_PoolKey = tuple[int, str, str | None]
+#
+# **The loop object, never `id(loop)`.** CPython reuses an address as soon as the object at it is
+# freed, and an ended loop is freed: six `new_event_loop()`/`close()` cycles produced four distinct
+# ids. Keying on the address therefore reintroduces exactly the hand-off hazard the loop was added
+# to the key to prevent — a live loop handed a pool built for a dead one — with no way to notice.
+# The object is its own identity, and `_forget_pools_of_ended_loops` is what keeps holding a
+# reference to it from being a leak of its own.
+_PoolKey = tuple[asyncio.AbstractEventLoop, str, str | None]
 _Pool = AsyncConnectionPool[psycopg.AsyncConnection[TupleRow]]
 _POOLS: dict[_PoolKey, _Pool] = {}
 # Pools this module did not build but this process holds: today the LangGraph checkpointer's
@@ -201,6 +208,33 @@ async def connect(
         raise _DatabaseUnavailable(f"Postgres unreachable at {_redact(dsn)}: {exc}") from exc
 
 
+def _forget_pools_of_ended_loops() -> None:
+    """Drop every pool whose event loop has ended, releasing the backends it was still holding.
+
+    Nothing used to do this, and the omission was not a slow leak but a permanent one: only
+    `pooling()`'s `finally` removed a `_POOLS` entry, and it runs once, at process shutdown. So
+    inside a pooled process every `asyncio.run` on a fresh loop built a pool, opened it to
+    `pg_pool_min_size` connections, and abandoned it for the life of the process — measured against
+    a live server as one extra `pg_stat_activity` row per short-lived loop, forever. That path is
+    ordinary rather than exotic: `evals/retrieval._run_sync` starts a loop per live metric call, and
+    `durable/eval_drift` runs `run_eval` in a thread *inside* the background worker's `pooling()`.
+
+    **Dropped, not closed, and that is the only thing available.** `psycopg_pool` schedules a
+    pool's shutdown on the loop it was opened in, so `close()` on an ended loop raises
+    `RuntimeError: Event loop is closed` — the reason `pooling()`'s `finally` skips them too.
+    Releasing the last reference is what shuts the connections: measured, the marked backend
+    disappeared from `pg_stat_activity` on the `pop` below, with no `gc.collect()` needed.
+
+    Called from the two places that ask this module what pools exist — the lookup and the readings
+    — so whichever runs first releases, and neither `chemclaw_pg_pool_max_size` (the per-process
+    half of the `pg_fleet_max_connections` budget) nor `pool_stats`' `pool_available` counts a pool
+    nothing can borrow from. A read that evicts is deliberate: the resource is tied to an owner
+    that no longer exists, and there is no other moment at which anyone learns it has gone.
+    """
+    for key in [key for key in _POOLS if key[0].is_closed()]:
+        _POOLS.pop(key, None)
+
+
 def _pool_for(dsn: str, options: str | None) -> _Pool:
     """Return this process's pool for `(dsn, options)`, constructing it on first use.
 
@@ -213,7 +247,8 @@ def _pool_for(dsn: str, options: str | None) -> _Pool:
     Keyed on the running loop as well, so a second loop builds and owns its own pool instead of
     borrowing one whose waiters it cannot be woken by — see `_POOLS`.
     """
-    key = (id(asyncio.get_running_loop()), dsn, options)
+    _forget_pools_of_ended_loops()
+    key = (asyncio.get_running_loop(), dsn, options)
     pool = _POOLS.get(key)
     if pool is None:
         pool = AsyncConnectionPool(
@@ -494,11 +529,16 @@ async def pooling() -> AsyncIterator[None]:
         # loop it was opened in, so closing one built on a *different* loop raises
         # `RuntimeError: Event loop is closed` from inside the close — after the reference would
         # otherwise have been cleared, leaving the process holding a pool nobody can close. The
-        # same hazard, and the same treatment, as `agent/checkpointer.close_checkpointer`: a pool
-        # whose loop has already ended released its connections with that loop, so dropping it
-        # leaks nothing. Production has one loop per process and closes everything it opened.
-        here = id(asyncio.get_running_loop())
-        mine = [key for key in _POOLS if key[0] == here]
+        # same hazard, and the same treatment, as `agent/checkpointer.close_checkpointer`.
+        #
+        # Dropping such a pool is what releases it, and it is worth being exact about which act
+        # does that: an ended loop does *not* take its pool's connections with it — measured, an
+        # abandoned pool held a live `pg_stat_activity` row until the reference went — so the
+        # `clear()` below is the release rather than a tidy-up after one.
+        # `_forget_pools_of_ended_loops` is the same act, performed as soon as the loop ends
+        # instead of at shutdown. Production has one loop per process and closes what it opened.
+        here = asyncio.get_running_loop()
+        mine = [key for key in _POOLS if key[0] is here]
         pools = [_POOLS.pop(key) for key in mine]
         _POOLS.clear()
         for pool in pools:
@@ -529,6 +569,7 @@ def unregister_pool(pool: Any) -> None:
 
 def _all_pools() -> list[Any]:
     """Every pool this process holds: the ones built here, plus the registered foreign ones."""
+    _forget_pools_of_ended_loops()
     return [*_POOLS.values(), *_FOREIGN_POOLS]
 
 

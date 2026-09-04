@@ -68,8 +68,25 @@ def check_env_name(key: str, value: str, *, error: type[Exception]) -> None:
 
     Called both when a manifest loads (so a typo fails at startup) and again when the connection is
     opened (so a block that reached the resolver by another route is checked once regardless).
+
+    **Blank is refused, not skipped**, and that is the half this check was missing. `token_env:`
+    with nothing after it is YAML `None` and `token_env: ""` is the empty string; every caller
+    normalises both to `""`, and while `""` was accepted the key stopped naming anything at all —
+    `connect_options` dropped the keyword and handed the driver a block with no credential in it.
+    Which failure that becomes is decided by the driver rather than by the manifest: a client whose
+    credential has a default (`api_key: str = ""`) attaches **anonymously**, and one whose
+    credential is required raises a bare `TypeError`, which `durable/publish` does not list as
+    non-retryable, so a permanently broken manifest is retried by every job that touches it. The
+    key is present because its author meant to supply a credential, so an empty one is a
+    misconfiguration to report, never an omission to infer.
     """
-    if value and not _ENV_NAME.fullmatch(value):
+    if not value:
+        raise error(
+            f"{key} names the environment variable holding the credential (like "
+            "DATABRICKS_TOKEN) and was left blank; remove the key if this connection takes no "
+            "credential, rather than leaving it empty"
+        )
+    if not _ENV_NAME.fullmatch(value):
         raise error(
             f"{key} holds the NAME of an environment variable (like DATABRICKS_TOKEN), "
             f"never its value; got {value!r}"
@@ -163,6 +180,8 @@ def connect_options(
 
     An empty variable is treated as absent: an unset secret and one set to the empty string are the
     same failure, and letting the second through would reach the database as an anonymous login.
+    An empty *name* is the same failure one level up and raises for the same reason — see
+    `check_env_name`, which owns that rule so the manifest validators refuse it at load too.
     """
     options: dict[str, Any] = {}
     for key, value in connection.items():
@@ -172,8 +191,6 @@ def connect_options(
             options[key] = value
             continue
         variable = str(value or "")
-        if not variable:
-            continue
         check_env_name(key, variable, error=error)
         register_secret_env(variable)
         # Read at call time rather than captured at import: a worker whose secret was rotated in

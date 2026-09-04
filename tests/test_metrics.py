@@ -199,6 +199,27 @@ def test_the_series_count_is_capped() -> None:
     assert metrics.value("chemclaw_tokens_total") == float(_MAX_SERIES_PER_COUNTER) + 5.0
 
 
+def test_the_dropped_series_counter_names_the_metric_that_is_undercounting() -> None:
+    """The counter that reports the cap has to say *which* metric hit it.
+
+    Its own docstring already argued for the label — "a metric that is deliberately *not* itself
+    capped, since its whole label domain is the declared metric names" — and it was incremented
+    unlabelled, so an operator alerting on it learned that something was dropping series and had to
+    go and find the one WARNING `_note_series_cap` emits per metric per process lifetime. That log
+    line nobody re-reads is exactly what the counter was added to replace, and its sibling
+    `chemclaw_gauge_read_failures_total` has carried `("metric",)` all along.
+    """
+    metrics = Metrics()
+    for index in range(_MAX_SERIES_PER_COUNTER + 3):
+        metrics.increment("chemclaw_tokens_total", 1.0, {"profile": f"p{index}"})
+
+    exposition = metrics.render()
+    assert 'chemclaw_metric_series_dropped_total{metric="chemclaw_tokens_total"} 3' in exposition
+    # And the counter that records the cap is not itself subject to it: its label domain is this
+    # module's own declared names, which is what makes it safe to label at all.
+    assert metrics.value("chemclaw_metric_series_dropped_total") == 3.0
+
+
 def test_a_swallowed_audit_sink_failure_is_counted() -> None:
     """The trail can be incomplete while tool calls keep working (SEC-3) — that must be visible.
 

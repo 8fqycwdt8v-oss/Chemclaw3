@@ -297,6 +297,12 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     # on: its cluster submission runs under a shared service identity, and `requested_by` is the
     # only thing that makes it attributable (F4-T3, D-118).
     assert result.data["requested_by"] == _ACTOR
+    # And so did the session, which is the key a bundle needs to speak *back* to the chemist.
+    # `BoCampaignWorkflow._evaluate` reads exactly this one and got `""` on every run, so a
+    # measured campaign's opening "this is waiting on you" notice, its 24-hour reminders and its
+    # final `expired` notice were all dropped by `AwaitAnswerWorkflow._push` — the campaign
+    # suspended for a fortnight and the chemist who launched it was told nothing.
+    assert result.data["session_id"] == _SESSION
     # Core PR-gated the note the connector produced; the connector never touched the graph itself.
     assert [note.id for note, _ in published] == ["fixture-benzene"]
     assert published[0][0].created_by == "agent"  # so a human must sign it off at the gate

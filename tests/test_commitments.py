@@ -69,6 +69,53 @@ def test_re_reading_a_snapshot_converges_rather_than_accumulating() -> None:
     asyncio.run(_run())
 
 
+def test_a_snapshot_source_converges_downward_when_a_commitment_is_withdrawn() -> None:
+    """Converging only *upward* is not converging, and this is the half the upsert cannot do.
+
+    A portfolio export is a snapshot, and the way a snapshot says "this is no longer committed" is
+    by not containing the row any more — a milestone descoped, a study cancelled, a deliverable
+    moved to another programme. The upsert is keyed on `(source, external_id)`, so it can add and
+    it can amend, and it has no way at all to remove: the withdrawn row kept a live state and
+    `outstanding()` kept returning it, for the life of the deployment.
+
+    Worse than merely stale, because the staleness is invisible in exactly the reading built to
+    reveal it. `outstanding()` reports `max(observed_at)` over the rows it returns, so the withdrawn
+    row travels in a list stamped with the *refreshed* rows' freshness — a manager reads a current
+    mirror that contains work nobody is doing, which is the one failure this table's whole
+    `observed_at` discipline exists to prevent.
+
+    Mark-and-sweep, marked by the activity's own start time: everything the snapshot restated is
+    newer than that, so what is older is what the source stopped saying. Guarded by the adapter
+    declaring itself a snapshot, because the sweep is only sound where the fetch is a whole picture.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clean()
+        await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
+        # The mark: everything the next pass writes lands strictly after this.
+        marked_at = datetime.now(UTC)
+        await asyncio.sleep(0.01)
+        # The next snapshot: MS-2 was withdrawn, so the source simply stops exporting it.
+        await record_commitments([_commitment("MS-1")])
+        swept = await commitment_sync.sweep_withdrawn(SOURCE, marked_at)
+
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert [row.external_id for row in rows] == ["MS-1"], (
+            "a withdrawn commitment is still outstanding, in a list whose reported freshness comes "
+            "from the rows that *were* refreshed — so it reads as current work nobody is doing"
+        )
+        assert swept == 1, f"the sweep reported {swept} rows removed"
+
+        # And a pass in which nothing was withdrawn removes nothing.
+        marked_at = datetime.now(UTC)
+        await asyncio.sleep(0.01)
+        await record_commitments([_commitment("MS-1")])
+        assert await commitment_sync.sweep_withdrawn(SOURCE, marked_at) == 0
+
+    asyncio.run(_run())
+
+
 def test_the_reading_reports_when_the_mirror_was_last_refreshed() -> None:
     """A mirror's characteristic failure is staleness, not error.
 

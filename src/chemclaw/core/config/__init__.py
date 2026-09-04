@@ -49,8 +49,8 @@ the internals of one attached thing, it belongs in that thing's manifest, not he
 
 import logging
 from typing import Self
-from urllib.parse import parse_qs, urlsplit
 
+from psycopg import ProgrammingError, conninfo
 from pydantic import model_validator
 from pydantic_settings import SettingsConfigDict
 
@@ -119,27 +119,38 @@ _TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
 PG_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 
 
-def _pg_sslmode(dsn: str) -> str:
-    """The sslmode of a libpq DSN (URL query or `key=value` form); libpq's `prefer` when absent."""
-    parsed = urlsplit(dsn)
-    query = parse_qs(parsed.query)
-    if "sslmode" in query:
-        return query["sslmode"][0].lower()
-    for part in dsn.split():
-        if part.startswith("sslmode="):
-            return part[len("sslmode=") :].strip().lower()
-    return "prefer"
+def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
+    """The host libpq will dial and the sslmode it will use, read with libpq's own parser.
 
+    **One parser, because a second spelling is a second answer.** This pair used to be hand-rolled
+    (`urlsplit` + `parse_qs` + a `dsn.split()` scan) while `core/db.py::_redact` round-tripped the
+    same strings through `conninfo_to_dict` for the reason it states — "every form psycopg accepts
+    is covered … not just the userinfo case a URL split can see". The two disagreed, and both
+    measured disagreements were in the direction that admits plaintext:
 
-def _pg_host(dsn: str) -> str:
-    """The host of a libpq DSN, lowercased; '' when it is a `host=`-keyword or socket DSN."""
-    host = urlsplit(dsn).hostname
-    if host:
-        return host.lower()
-    for part in dsn.split():
-        if part.startswith("host="):
-            return part[len("host=") :].strip().lower()
-    return ""
+    - libpq *connects* to `hostaddr` when it is set and reads `host` only as the name to verify
+      against, so `host=localhost hostaddr=10.0.0.5` took the loopback exemption while the socket
+      went over the network. `hostaddr or host` is therefore what a TLS decision is about.
+    - libpq resolves a repeated URL query parameter to its **last** occurrence and `parse_qs` to
+      its **first**, so `?sslmode=require&sslmode=disable` was checked as `require` and connected
+      as `disable`.
+
+    A DSN libpq cannot parse raises here rather than defaulting: `""` is a member of
+    `PG_LOOPBACK_HOSTS`, so *any* "could not tell" answer would exempt the connection, and nothing
+    can say what libpq would do with a string libpq will not read. It is refused as the
+    misconfiguration it is, naming the setting rather than the DSN — the value carries a password.
+    """
+    try:
+        parts = conninfo.conninfo_to_dict(dsn)
+    except ProgrammingError as exc:
+        raise ValueError(
+            f"{name} is not a connection string libpq can parse ({exc}), so nothing can say "
+            "whether it would connect with TLS. Refused under entra_required=true rather than "
+            "guessed at; the same DSN would fail at connect."
+        ) from exc
+    return str(parts.get("hostaddr") or parts.get("host") or "").lower(), str(
+        parts.get("sslmode") or "prefer"
+    ).lower()
 
 
 def require_pg_tls(dsn: str, name: str) -> None:
@@ -151,10 +162,11 @@ def require_pg_tls(dsn: str, name: str) -> None:
     enforced posture a non-loopback DSN must state `sslmode=require`/`verify-ca`/`verify-full`
     (`verify-full` recommended, with `sslrootcert=`). Loopback dev is exempt.
     """
-    if _pg_host(dsn) in PG_LOOPBACK_HOSTS or _pg_sslmode(dsn) in _TLS_SSLMODES:
+    host, sslmode = _pg_dial(dsn, name)
+    if host in PG_LOOPBACK_HOSTS or sslmode in _TLS_SSLMODES:
         return
     raise ValueError(
-        f"entra_required=true with a non-loopback {name} and sslmode={_pg_sslmode(dsn)!r}: libpq's "
+        f"entra_required=true with a non-loopback {name} and sslmode={sslmode!r}: libpq's "
         "default permits a silent plaintext fallback and verifies no certificate, and this "
         "connection carries the conversation transcripts, turn checkpoints and the audit trail. "
         "Add "
@@ -338,6 +350,12 @@ class Settings(
             require_pg_tls(self.postgres_dsn, "postgres_dsn")
             if self.postgres_migration_dsn:
                 require_pg_tls(self.postgres_migration_dsn, "postgres_migration_dsn")
+            # The third one, and the one the refusal message above literally describes: the session
+            # layer's own database holds `session_messages`, the LangGraph checkpoints, the plan
+            # approvals, the turn-cost rows and the effect ledger. Empty is not "unchecked" — it
+            # means "use `postgres_dsn`", which the first line already checked.
+            if self.session_store_dsn:
+                require_pg_tls(self.session_store_dsn, "session_store_dsn")
         if self.service_uvicorn_workers > 1:
             raise ValueError(
                 "service_uvicorn_workers>1 silently breaks five per-process guarantees until they "

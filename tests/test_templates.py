@@ -978,3 +978,30 @@ def test_both_lanes_derive_the_same_arguments_from_the_same_tool() -> None:
             takes_any_key=False,
         )
     )
+
+
+def test_the_validator_reports_an_invalid_manifest_as_a_problem_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A manifest the registry cannot load must still be *reported*, not raised through `main`.
+
+    `main` resolves the tool surface before anything else, and `_available_tools` asks the agent for
+    its tool names, which asks this registry for the `run_*` launchers — so a template whose own
+    manifest is invalid (an unknown `${inputs.x}`, a forward `${steps.y.result}`) fails inside the
+    registry load rather than inside the step checker, and the operator got a pydantic traceback.
+    The exit code was already 1, so CI was never misled; `validate_kg.main` states the rest of the
+    rule — "it must still fail; it must not fail *looking like a crash*".
+    """
+    from chemclaw.cli.validate_templates import main
+
+    (tmp_path / "forward.yaml").write_text(
+        "summary: x\ninputs:\n  - {name: smiles, type: string, description: m}\n"
+        "steps:\n  - {id: one, kind: agent, prompt: 'about ${inputs.nosuch}'}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(tmp_path))
+
+    assert main([]) == 1
+    printed = capsys.readouterr().out
+    assert "template validation failed:" in printed
+    assert "unknown 'inputs.nosuch'" in printed

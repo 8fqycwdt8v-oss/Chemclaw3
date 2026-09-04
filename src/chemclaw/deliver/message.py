@@ -82,10 +82,23 @@ class Message(BaseModel):
         Applied by the registry immediately before a driver sees it, rather than by each driver:
         a redaction every driver has to remember is a redaction the next driver forgets, and the
         one that forgets is the one that sends outside the cluster.
+
+        **Every free-text field, `recipient` included.** It was skipped, and it is free text by
+        construction — resolving an address is the driver's job, so this model cannot constrain its
+        shape — while both shipped drivers put it exactly where the body goes: the file driver
+        writes it into the file, the webhook driver POSTs it. Today's only caller passes an actor
+        id, so nothing carries a credential there yet; the point of a seam-level scrub is that the
+        guarantee does not depend on who is calling it.
+
+        `_connector_secret_envs()` is resolved once rather than per field: it reaches
+        `connectors.registry`, and asking it three times per message would import and re-derive the
+        bundle set three times for an answer that cannot differ between two fields of one message.
         """
+        extra = _connector_secret_envs()
         return self.model_copy(
             update={
-                "subject": redact_secrets(self.subject, extra_secrets=_connector_secret_envs()),
-                "body": redact_secrets(self.body, extra_secrets=_connector_secret_envs()),
+                "recipient": redact_secrets(self.recipient, extra_secrets=extra),
+                "subject": redact_secrets(self.subject, extra_secrets=extra),
+                "body": redact_secrets(self.body, extra_secrets=extra),
             }
         )

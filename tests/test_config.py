@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from chemclaw.core.config import Settings
 
@@ -381,6 +381,25 @@ def test_knowledge_path_matches_todays_default_when_note_repo_dir_is_unset() -> 
     assert settings.knowledge_path == Path(settings.knowledge_dir)
 
 
+def test_a_log_level_that_logging_will_not_accept_is_refused_at_construction() -> None:
+    """The one enum-shaped setting whose value was never checked until it was used.
+
+    Every neighbouring enum is a `Literal` and `vector_store_provider` has its own validator, so a
+    typo in any of them fails where the deployment can see it — while `CHEMCLAW_LOG_LEVEL=INFOO`
+    constructed cleanly and then killed the process at its first `configure_logging()` with a bare
+    `ValueError: Unknown level: 'INFOO'` naming neither the setting nor the variable.
+
+    Checked against `logging.getLevelNamesMapping()` rather than a `Literal`, because the accepted
+    set is the stdlib's rather than ours: `WARN` and `FATAL` are aliases a deployment may well be
+    using today, and freezing a list here would either break them or need keeping in step with a
+    module that owns the answer.
+    """
+    for accepted in ("debug", "INFO", "WARN", "FATAL", "NOTSET"):
+        assert Settings(_env_file=None, log_level=accepted).log_level  # type: ignore[call-arg]
+    with pytest.raises(ValidationError, match="log_level"):
+        Settings(_env_file=None, log_level="INFOO")  # type: ignore[call-arg]
+
+
 def test_env_example_documents_only_real_fields() -> None:
     """Every `CHEMCLAW_*` key in `.env.example` names a real `Settings` field.
 
@@ -403,6 +422,53 @@ def test_env_example_documents_every_field() -> None:
     """
     undocumented = set(Settings.model_fields) - _documented_keys()
     assert not undocumented, f"settings missing from .env.example: {sorted(undocumented)}"
+
+
+# `.env.example` fields whose shipped line deliberately differs from the code default, and why. A
+# row here is a claim that the file is *better* off saying something else; there are none today,
+# and an empty mapping is the honest state rather than a placeholder — the four divergences that
+# existed were all defects and none of them was noticed for want of this check.
+_DELIBERATE_ENV_EXAMPLE_OVERRIDES: dict[str, str] = {}
+
+
+def test_env_example_ships_the_code_defaults(tmp_path: Path) -> None:
+    """The file's own promise — "this file lists every field, at its default" — as an assertion.
+
+    The two tests above compare *names*, which is what caught a stale key; nothing compared
+    *values*, and four had drifted. Each was a real regression for anyone following the README
+    quickstart, because a `.env` copied from here is not a document, it is configuration:
+    `CHEMCLAW_LOG_FORMAT` dropped `correlation_id`/`session_id` from every line — the two fields
+    `ContextFilter` exists for — `CHEMCLAW_MCP_FACE_TOKEN_ENV=` empty made
+    `os.environ.get("", "")` the expected bearer and 401'd every request to the read-only MCP face,
+    `CHEMCLAW_NOTE_REINDEX_ENABLED=false` pinned a tri-state field whose `None` means "derive from
+    `data_sources`", and `CHEMCLAW_EVAL_AB_EPSILON=0.0` is no noise floor at all.
+
+    Compared as *parsed values* rather than as text, which is what makes it maintainable: `10` and
+    `10.0` are the same default, an absolute path a `default_factory` computes from the install
+    location is simply left unset (commented out, as `CHEMCLAW_CONNECTORS_DIR` already is), and the
+    diff a failure prints is the field rather than the line.
+    """
+    env = tmp_path / ".env"
+    env.write_text(_ENV_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
+    documented = Settings(_env_file=env)  # type: ignore[call-arg]
+    shipped = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    differing = {
+        name: (getattr(documented, name), getattr(shipped, name))
+        for name in Settings.model_fields
+        if name not in _DELIBERATE_ENV_EXAMPLE_OVERRIDES
+        and getattr(documented, name) != getattr(shipped, name)
+    }
+    assert not differing, (
+        ".env.example says it lists every field at its default, and these disagree "
+        f"(example, code): {differing}"
+    )
+    stale = sorted(
+        name
+        for name in _DELIBERATE_ENV_EXAMPLE_OVERRIDES
+        if getattr(documented, name) == getattr(shipped, name)
+    )
+    assert not stale, f"{stale} no longer differ; drop the override row"
 
 
 def test_env_example_loads_as_a_real_env_file(tmp_path: Path) -> None:
@@ -978,6 +1044,94 @@ def test_enforced_posture_refuses_a_plaintext_postgres_dsn() -> None:
         Settings(postgres_dsn="postgresql://u:p@pg.prod:5432/db", **base)
     Settings(postgres_dsn="postgresql://u:p@pg.prod:5432/db?sslmode=verify-full", **base)
     Settings(postgres_dsn="postgresql://chemclaw:chemclaw@localhost:5432/chemclaw", **base)
+
+
+def test_enforced_posture_refuses_a_plaintext_session_store_dsn() -> None:
+    """The third Postgres DSN, and the one the guard's own refusal text describes.
+
+    `session_store_dsn` is what `session_messages`, the plan approvals, the turn-cost rows and the
+    effect ledger are read and written over when a deployment splits the session layer onto its own
+    host — so "this connection carries the conversation transcripts, turn checkpoints and the audit
+    trail" is *literally* this field, and it was the one DSN the guard never looked at. Empty is
+    exempt because empty means "fall back to `postgres_dsn`", which the line above already checked.
+    """
+    base: dict[str, Any] = {
+        "_env_file": None,
+        "entra_required": True,
+        "entra_audience": "api://x",
+        "entra_tenant_id": "t",
+        "llm_provider": "openai_compatible",
+        "llm_base_url": "http://llm:8000/v1",
+        "llm_model": "m",
+        "harness_enabled": True,
+        "temporal_tls_ca": "/ca.pem",
+        "postgres_dsn": "postgresql://u:p@pg.prod:5432/db?sslmode=verify-full",
+    }
+    with pytest.raises(ValueError, match="session_store_dsn"):
+        Settings(session_store_dsn="postgresql://u:p@sessions.prod/db?sslmode=disable", **base)
+    Settings(session_store_dsn="postgresql://u:p@sessions.prod/db?sslmode=verify-full", **base)
+    Settings(session_store_dsn="", **base)
+
+
+@pytest.mark.parametrize(
+    ("why", "dsn"),
+    [
+        # libpq dials `hostaddr` when it is present; `host` then only names the certificate. A
+        # `host=`-keyword read therefore took the loopback exemption while the socket went to
+        # 10.0.0.5 over the network.
+        ("hostaddr is the host libpq dials", "host=localhost hostaddr=10.0.0.5 dbname=c user=u"),
+        # A repeated URL query parameter resolves to the *last* occurrence in libpq and to the
+        # *first* in `parse_qs`, so this connected at `disable` while the guard read `require`.
+        ("the last sslmode wins", "postgresql://u:p@pg.prod/db?sslmode=require&sslmode=disable"),
+        # Nothing can say what libpq would do with a string libpq cannot read, so it is refused
+        # rather than guessed at.
+        ("an unparseable DSN fails closed", "this is not a conninfo string"),
+    ],
+)
+def test_the_tls_guard_reads_a_dsn_the_way_libpq_does(why: str, dsn: str) -> None:
+    """Three DSNs a hand-rolled parse and libpq disagree about, every one admitting plaintext.
+
+    The guard used to re-parse the DSN itself (`urlsplit` + `parse_qs` + a `dsn.split()` scan)
+    while `core/db.py` round-tripped the same strings through `conninfo_to_dict`. A second spelling
+    of "what does this DSN say" is a second answer, and each disagreement below was in the
+    direction that let an unverified connection through.
+    """
+    base: dict[str, Any] = {
+        "_env_file": None,
+        "entra_required": True,
+        "entra_audience": "api://x",
+        "entra_tenant_id": "t",
+        "llm_provider": "openai_compatible",
+        "llm_base_url": "http://llm:8000/v1",
+        "llm_model": "m",
+        "harness_enabled": True,
+        "temporal_tls_ca": "/ca.pem",
+    }
+    with pytest.raises(ValueError):
+        Settings(postgres_dsn=dsn, **base)
+
+
+def test_the_tls_guard_still_exempts_the_forms_that_carry_no_network() -> None:
+    """A socket DSN and an IPv6 loopback URL are dev, not an unverified network connection.
+
+    Asserted beside the refusals above because reading a DSN with libpq's parser changes what the
+    exemption sees as well as what the refusal does: `postgresql:///db` has no host at all and
+    `[::1]` arrives unbracketed, and both must stay exempt or local dev under `entra_required`
+    stops booting.
+    """
+    base: dict[str, Any] = {
+        "_env_file": None,
+        "entra_required": True,
+        "entra_audience": "api://x",
+        "entra_tenant_id": "t",
+        "llm_provider": "openai_compatible",
+        "llm_base_url": "http://llm:8000/v1",
+        "llm_model": "m",
+        "harness_enabled": True,
+        "temporal_tls_ca": "/ca.pem",
+    }
+    Settings(postgres_dsn="postgresql:///chemclaw", **base)
+    Settings(postgres_dsn="postgresql://u:p@[::1]:5432/chemclaw", **base)
 
 
 # The prompt-injection envelope's nonce and the durable session store

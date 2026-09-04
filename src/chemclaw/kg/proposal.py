@@ -59,6 +59,13 @@ class ProposalState(StrEnum):
 
 DECIDED_STATES = frozenset({ProposalState.MERGED, ProposalState.REJECTED})
 
+# The states a re-proposal of byte-identical content may move a row *out of*: the two that record
+# something other than a human's judgement. Named beside `DECIDED_STATES` rather than spelled as a
+# tuple at its one use, because the rule is the enum's and not the store's — the Postgres backend
+# states the identical set as `IN ('failed', 'superseded')` in `proposal_store._UPSERT`, and a
+# future state has to be sorted into one of these two lists in both places or the backends diverge.
+_REOPENABLE_STATES = frozenset({ProposalState.FAILED, ProposalState.SUPERSEDED})
+
 
 class NoteProposal(BaseModel):
     """One submission of one note version, with its provenance and its outcome.
@@ -190,28 +197,54 @@ class InMemoryProposalStore:
                 "dependencies": proposal.dependencies,
                 "submitted_at": now,
             }
-            if existing.state is ProposalState.FAILED:
-                # The one state transition a re-proposal may make, and the Postgres `CASE` in
-                # `proposal_store._UPSERT` is its mirror. `FAILED` is not a decision — it says the
-                # submission never reached git — and the retry that finally lands carries
-                # byte-identical content, so it collapses onto this row. Leaving it `FAILED` made
-                # the record assert the opposite of what happened: the branch awaits review while
-                # every `state='open'` query skips the row, the decision route answers 409, and
-                # `mark_merged` moves nothing. A *decision* still stands: a rejected note
-                # re-proposed unchanged must not silently reopen, or the gate is defeated by
-                # re-asking.
+            if existing.state in _REOPENABLE_STATES:
+                # The state transitions a re-proposal may make, and the Postgres `CASE` in
+                # `proposal_store._UPSERT` is their mirror. Neither is a decision (see
+                # `ProposalState`), and both leave the record asserting the opposite of what
+                # happened if the row is not moved.
+                #
+                # `FAILED` says the submission never reached git, and the retry that finally lands
+                # carries byte-identical content, so it collapses onto this row. `SUPERSEDED` says
+                # a newer version took the queue slot — so an agent that regenerates an earlier
+                # form re-proposes bytes that the branch, which is per-note, now really holds.
+                # Leaving either one closed made the branch await a review the queue never showed,
+                # the decision route answer 409, and `mark_merged` move nothing.
+                #
+                # A *decision* still stands: a rejected note re-proposed unchanged must not
+                # silently reopen, or the gate is defeated by re-asking.
                 update["state"] = proposal.state
                 update["reason"] = proposal.reason
-            self._by_id[existing_id] = existing.model_copy(update=update)
+            refreshed = existing.model_copy(update=update)
+            self._by_id[existing_id] = refreshed
+            self._supersede_other_open(refreshed, keep_id=existing_id)
             return existing_id
-        # A new *open* version closes the note's previous open versions: exactly one row per
-        # note may be `open`, because the branch the reviewer merges is per-note. A `failed`
-        # record must not push a reviewable older version out of the queue. The Postgres store
-        # runs the same statement (`proposal_store._SUPERSEDE_OLDER`).
+        new_id = self._next_id
+        self._next_id += 1
+        recorded = proposal.model_copy(update={"id": new_id, "submitted_at": now})
+        self._by_id[new_id] = recorded
+        self._by_version[version] = new_id
+        self._supersede_other_open(recorded, keep_id=new_id)
+        return new_id
+
+    def _supersede_other_open(self, recorded: NoteProposal, *, keep_id: int) -> None:
+        """Close the note's other open versions once `recorded` is the open one.
+
+        Exactly one row per note may be `open`, because the branch the reviewer merges is per-note.
+        The Postgres store runs the same rule as a statement (`proposal_store._SUPERSEDE_OLDER`).
+
+        **The trigger is the state the row now has, not the state the caller asked for**, which is
+        the difference between the two backends agreeing and only appearing to. A `failed` record
+        must not push a reviewable version out of the queue — and neither must a re-proposal of a
+        *rejected* version's bytes, which arrives asking for `open`, is correctly refused above,
+        and would otherwise close the live version anyway, leaving the note with nothing awaiting
+        review. Reading the row makes both cases one condition.
+        """
+        if recorded.state is not ProposalState.OPEN:
+            return
         for other_id, other in self._by_id.items():
             if (
-                proposal.state is ProposalState.OPEN
-                and other.note_id == proposal.note_id
+                other_id != keep_id
+                and other.note_id == recorded.note_id
                 and other.state is ProposalState.OPEN
             ):
                 self._by_id[other_id] = other.model_copy(
@@ -220,11 +253,6 @@ class InMemoryProposalStore:
                         "reason": "superseded by a newer proposed version of this note",
                     }
                 )
-        new_id = self._next_id
-        self._next_id += 1
-        self._by_id[new_id] = proposal.model_copy(update={"id": new_id, "submitted_at": now})
-        self._by_version[version] = new_id
-        return new_id
 
     async def read(self, proposal_id: int) -> NoteProposal | None:
         """One proposal in full, or None when there is no such row."""

@@ -22,7 +22,7 @@ import pytest
 from pydantic import SecretStr
 
 from chemclaw.core.config import Settings, settings
-from chemclaw.core.logging import _SECRET_SETTINGS
+from chemclaw.core.logging import _SECRET_SETTINGS, redact_secrets
 
 # The three DSNs, explicitly out of the type change: 34 lines across 27 modules read one, all
 # feeding psycopg conninfo, which needs the plain string straight back. They are still redacted —
@@ -120,6 +120,39 @@ def test_the_guard_above_fires_for_a_credential_nobody_has_added_yet() -> None:
 
     added = _credential_shaped(_Later) - _credential_shaped(Settings)
     assert added == {"probe_api_key", "probe_service_token"}
+
+
+def test_every_bearer_named_by_a_setting_is_redacted_by_its_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The third shape of credential setting, invisible to both directions above by construction.
+
+    `calc_server_token_env`, `rxnlabel_server_token_env` and `mcp_face_token_env` hold a variable
+    *name*, not a value — which is why `_CREDENTIAL_NAME` deliberately does not match `_env`, and
+    why a `SecretStr` would be the wrong type for them. The consequence was that the bearer each
+    one points at was outside every mechanism: not in `_SECRET_SETTINGS` (whose members are
+    values), not a connector manifest's `token_env`, and never passed to `register_secret_env`.
+    Measured, all three survived `redact_secrets` verbatim — including the one guarding the
+    read-only MCP face and the one for the calculation backend, "the hottest and most privileged
+    connection in the system".
+
+    Driven off `Settings.model_fields` rather than the three names, so a fourth such setting is
+    covered on the day it is declared. The assertion is on the *value*, since a bearer in a log
+    line or a rendered traceback rarely arrives beside its variable name.
+    """
+    bearers = {}
+    for name in sorted(Settings.model_fields):
+        if not name.endswith("_token_env"):
+            continue
+        variable = getattr(settings, name)
+        bearers[name] = f"{variable}-s3cretVALUE0123456789"
+        monkeypatch.setenv(variable, bearers[name])
+
+    assert bearers, "no `*_token_env` setting found; this test has lost its subject"
+    leaked = sorted(
+        name for name, value in bearers.items() if value in redact_secrets(f"upstream sent {value}")
+    )
+    assert leaked == [], f"{leaked} name a bearer no log line would redact"
 
 
 def test_a_secret_str_hides_its_value_from_the_shapes_that_leak() -> None:

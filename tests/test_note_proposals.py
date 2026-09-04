@@ -688,3 +688,55 @@ def test_reconcile_names_a_merged_row_the_corpus_does_not_hold(
     missing = _run(merged_but_absent(tmp_path))
     assert [row.id for row in missing] == [absent]
     assert present != absent
+
+
+def test_re_proposing_a_superseded_version_puts_it_back_in_the_queue(
+    store: InMemoryProposalStore,
+) -> None:
+    """An agent that regenerates an earlier form must not leave the note with no open row.
+
+    `SUPERSEDED` is not a decision — its own docstring says so — and the branch is per-note, so a
+    re-proposal of v1 force-pushes v1's bytes and really is what a reviewer will be shown. Refusing
+    to reopen the row left *every* version superseded: the queue showed nothing while the PR was
+    open, and `mark_merged` — the merge webhook's only statement, scoped to open rows — moved
+    nothing, so the human who merged it was never recorded. A proposal that can never be closed.
+
+    The newer version yields the queue slot in the same act, because exactly one row per note may
+    be open (D-2026-08-27): the reopened row is now the one the branch holds.
+    """
+    first = _run(store.upsert(_proposal(content="v1")))
+    second = _run(store.upsert(_proposal(content="v2")))
+    assert _run(store.read(first)).state is ProposalState.SUPERSEDED
+
+    again = _run(store.upsert(_proposal(content="v1", reference="pr://note/reaction-1")))
+
+    assert again == first  # same content, same row — that is why it stayed stuck
+    reopened = _run(store.read(first))
+    assert reopened is not None
+    assert reopened.state is ProposalState.OPEN
+    assert reopened.reason == ""  # the supersession no longer explains a row that is live again
+    assert _run(store.read(second)).state is ProposalState.SUPERSEDED
+    assert [row.id for row in _run(store.listing(ProposalState.OPEN, "", 10, None))] == [first]
+    # And the loop closes: the webhook can only move an open row.
+    assert _run(store.mark_merged(["reaction-1"], "webhook")) == 1
+
+
+def test_re_proposing_a_rejected_version_does_not_close_the_live_one(
+    store: InMemoryProposalStore,
+) -> None:
+    """The other way to leave a note with no open row, and the same guard fixes it.
+
+    A re-proposal of rejected bytes arrives asking for `open`; the decision correctly stands. What
+    must *also* not happen is the supersede sweep firing on that ask — the note would be left with
+    a rejected row, a superseded row and nothing awaiting review, while the branch holds v2. The
+    sweep therefore triggers on the state the row now has, which is how the two backends stay in
+    step (Postgres measured: rejected + open -> rejected + superseded, open rows `[]`).
+    """
+    rejected = _run(store.upsert(_proposal(content="v1")))
+    _run(store.decide(rejected, ProposalState.REJECTED, "reviewer", "not reproducible"))
+    live = _run(store.upsert(_proposal(content="v2")))
+
+    _run(store.upsert(_proposal(content="v1", reference="pr://again")))
+
+    assert _run(store.read(rejected)).state is ProposalState.REJECTED
+    assert _run(store.read(live)).state is ProposalState.OPEN

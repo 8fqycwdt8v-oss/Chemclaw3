@@ -1017,8 +1017,15 @@ async def _prune_checkpoints(
     **A malformed `ts` fails this pass loudly, and that is the answer rather than an oversight.**
     The thread query casts `checkpoint->>'ts'` to `timestamptz`, and Postgres has no `TRY_CAST` — a
     checkpoint payload whose `ts` is missing or unparseable raises, the activity fails, and Temporal
-    surfaces it. Two things make that the right failure. `checkpoints` is last in `_PRUNABLE` and
-    every earlier table commits in its own statement, so the pass keeps the disposal it already did.
+    surfaces it. Two things make that the right failure. Every table ahead of `checkpoints` in
+    `_PRUNABLE` commits in its own statement, so the pass keeps the disposal it already did — and
+    "ahead of" is the whole claim, because `checkpoints` is *not* last. `session_owners` is, on
+    purpose, and its own entry says so forty lines up: it is the only way back to a session's rows,
+    so it may go only once every table holding them has had its turn. This sentence used to say
+    `checkpoints` was last, which made two comments in one module disagree about the order the
+    module depends on, and left the next reader inserting a table taking a false invariant from
+    whichever of them read as the more detailed. What this argument actually needs is only that the
+    disposal already done has committed, which stays true however the list grows.
     And swallowing the error would turn a data-disposal job that *cannot run* into one that reports
     success while a table grows — the exact reading `sessions_deferred` and `threads_deferred` exist
     to prevent. No guard is written for it because none has been needed: `ts` is a field of

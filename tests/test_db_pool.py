@@ -17,6 +17,7 @@ Three properties matter, and none can be proven without a live backend:
 
 import asyncio
 
+import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
@@ -258,8 +259,8 @@ def test_a_second_event_loop_gets_its_own_pool_rather_than_borrowing_a_broken_on
         async with db.pooling():
             async with db.connection(settings.postgres_dsn):
                 pass
-            here = id(asyncio.get_running_loop())
-            mine = {pool for key, pool in db._POOLS.items() if key[0] == here}
+            here = asyncio.get_running_loop()
+            mine = {pool for key, pool in db._POOLS.items() if key[0] is here}
             assert mine, "the first loop opened no pool, so this test proves nothing"
 
             def _second_loop() -> set[object]:
@@ -268,8 +269,8 @@ def test_a_second_event_loop_gets_its_own_pool_rather_than_borrowing_a_broken_on
                 async def _touch() -> set[object]:
                     async with db.connection(settings.postgres_dsn):
                         pass
-                    there = id(asyncio.get_running_loop())
-                    return {pool for key, pool in db._POOLS.items() if key[0] == there}
+                    there = asyncio.get_running_loop()
+                    return {pool for key, pool in db._POOLS.items() if key[0] is there}
 
                 return asyncio.run(_touch())
 
@@ -280,6 +281,75 @@ def test_a_second_event_loop_gets_its_own_pool_rather_than_borrowing_a_broken_on
             "the second loop was handed a pool bound to the first loop's futures; its checkouts "
             "are woken by nothing and are served only when the pool timeout expires"
         )
+
+    asyncio.run(_run())
+
+
+def test_a_pool_whose_loop_has_ended_is_neither_counted_nor_left_holding_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A short-lived loop's pool used to outlive it for the whole process, open and unusable.
+
+    Nothing removed a `_POOLS` entry except `pooling()`'s `finally`, which runs once at shutdown —
+    so every `asyncio.run` on a fresh loop inside a pooled process built a pool, opened it to
+    `pg_pool_min_size` backends, and abandoned it. That path is the ordinary one rather than a
+    corner: `evals/retrieval._run_sync` starts a loop per live metric call, and `durable/eval_drift`
+    runs `run_eval` in a thread *inside* the background worker's `db.pooling()`.
+
+    Both readings an operator has were polluted by the same entries — `_process_max_connections`
+    backs `chemclaw_pg_pool_max_size`, the per-process half of the `pg_fleet_max_connections` budget
+    the config validator enforces, and `pool_stats()` counted a dead pool's connections as
+    `pool_available`, i.e. as borrowable. And the backends were real: measured against this server,
+    one abandoned pool held one live entry in `pg_stat_activity` until the process exited.
+
+    Asserted through `pg_stat_activity` as well as through the gauges, because "the pool is
+    forgotten" and "the connection is closed" are different claims and only the second is the
+    thing the database is short of. Dropping the last reference is what closes it — the pool's own
+    `close()` cannot run on a loop that has ended, which is exactly why `pooling()` never closed
+    these.
+    """
+    monkeypatch.setattr(settings, "pg_pool_min_size", 1)
+    monkeypatch.setattr(settings, "pg_pool_max_size", 1)
+    # A distinct `application_name` so the count below sees this test's backends and no other
+    # test's or dev shell's. It also changes nothing about the pooling: `application_name` rides in
+    # the DSN, which is already part of the pool key.
+    marker = "chemclaw-dead-loop-test"
+    separator = "&" if "?" in settings.postgres_dsn else "?"
+    dsn = f"{settings.postgres_dsn}{separator}application_name={marker}"
+
+    def _marked_backends() -> int:
+        """How many server connections carry the marker, counted from outside the pool."""
+        with (
+            psycopg.connect(settings.postgres_dsn, connect_timeout=5) as conn,
+            conn.cursor() as cur,
+        ):
+            cur.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE application_name = %s", (marker,)
+            )
+            row = cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with db.pooling():
+            async with db.connection(dsn):
+                pass
+
+            def _short_lived_loop() -> None:
+                """One `asyncio.run` on its own loop — `evals/retrieval._run_sync`'s shape."""
+
+                async def _touch() -> None:
+                    async with db.connection(dsn):
+                        pass
+
+                asyncio.run(_touch())
+
+            await asyncio.to_thread(_short_lived_loop)
+            # Reading the pool surface is what notices the ended loop; nothing else has to.
+            assert db.pool_stats()["pool_size"] == 1, db.pool_stats()
+            assert db._process_max_connections() == 1
+            assert await asyncio.to_thread(_marked_backends) == 1
 
     asyncio.run(_run())
 

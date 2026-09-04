@@ -346,6 +346,29 @@ def test_a_non_positive_source_weight_is_refused_by_the_config() -> None:
     assert RetrievalSettings(retrieval_source_weights={"graph": 1.5}).retrieval_source_weights
 
 
+def test_a_non_finite_source_weight_is_refused_by_the_config() -> None:
+    """The three the positivity check cannot see, because ordering is what it rests on.
+
+    `nan <= 0` is False, so NaN walked straight through the guard that refuses `-1` — and a NaN
+    weight makes `1.0 / (k + rank / weight)` NaN for every hit the weighted source contributed,
+    which propagates into the fused score of every note it touched. `sorted` then compares those
+    keys, every comparison is False, and the ranking degenerates to the order the dicts happened to
+    be built in: the fusion still returns a list, of the right length, in an order that is not a
+    ranking. The same defect `find_matches` closed for a NaN Tanimoto threshold — refused there
+    too, and for the same reason: a value with no nearest bound cannot be clamped toward one.
+
+    `+inf` is refused on the guard's own stated grounds rather than by association. It survives
+    `weight <= 0`, and `rank / inf` is `0.0` for *every* rank, so every hit in that source fuses at
+    `1/k` — its best and its worst hit score identically. That is precisely "names no ordering at
+    all", which is what the refusal message says a rejected weight is.
+    """
+    from chemclaw.core.config.retrieval import RetrievalSettings
+
+    for weight in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValidationError, match="finite|positive"):
+            RetrievalSettings(retrieval_source_weights={"graph": weight})
+
+
 # --- STO-8, second half: relation direction and note-shape hardening -------------------------
 #
 # The shipped corpus once held twelve edges written backwards against the vocabulary's declared

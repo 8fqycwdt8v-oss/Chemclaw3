@@ -127,7 +127,7 @@ def test_a_directory_with_no_ledger_file_fails_by_name(
     than as a `KeyError` inside an open transaction — and so this test needs no server.
     """
     monkeypatch.setattr(settings, "sql_migrations_dir", str(tmp_path))
-    with pytest.raises(MigrationError, match=re.escape(str(tmp_path.resolve()))):
+    with pytest.raises(MigrationError, match=re.escape(str(tmp_path))):
         asyncio.run(migrate())
 
 

@@ -54,6 +54,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.db import connection
     from chemclaw.durable.registry import durable_activity, durable_workflow
 
+from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 # Blobs nobody has opened in `artifact_evict_idle_days`. Unconditional: an artifact that has not
@@ -122,6 +123,30 @@ def _reclaimed(rows: list[tuple[int]]) -> tuple[int, int]:
 @durable_activity("background")
 @activity.defn
 async def evict_cold_artifacts() -> EvictionOutcome:
+    """Reclaim artifact blobs, beating while the pass runs so a dead worker is noticed.
+
+    The sweep itself is `_evict_cold_artifacts`; this is the wrapper its three siblings on this
+    queue already had and it did not. `prune_expired_rows`, `reindex_notes_activity` and
+    `drain_result_publications` all beat; this ran two `DELETE`s over the whole
+    `artifact_blobs`x`calculation_artifacts` join under a ten-minute `retention_timeout_seconds`
+    and said nothing in between, so a worker that died thirty seconds in was invisible for the
+    remaining nine and a half minutes — on the one job here that runs entirely unattended.
+
+    The "opaque single call" case `durable/heartbeat.py` was extracted for: two statements the
+    database is executing, with no unit boundary to report progress at, so the honest signal is
+    "still running". No setting of its own — the activity is budgeted by `retention_timeout_seconds`
+    and `Settings._the_heartbeat_fits_inside_the_budget_it_reports_within` already keeps
+    `background_activity_heartbeat_timeout_seconds` strictly below it, so the beat cannot drift out
+    of the budget it reports within.
+    """
+    return await beating(
+        _evict_cold_artifacts(),
+        "artifact eviction sweep",
+        settings.background_activity_heartbeat_timeout_seconds,
+    )
+
+
+async def _evict_cold_artifacts() -> EvictionOutcome:
     """Reclaim artifact blobs by idle time and by size ceiling; return what was removed.
 
     Idle eviction runs first so the size pass only has to consider blobs still worth ranking. Both
@@ -170,5 +195,13 @@ class ArtifactEvictionWorkflow:
             evict_cold_artifacts,
             start_to_close_timeout=timedelta(seconds=settings.retention_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
+            # The beats the activity now sends do nothing for failure detection without this, for
+            # the reason `RetentionWorkflow` states beside the same pair of numbers: a dead worker
+            # would be noticed only when the ten-minute start-to-close budget expired. The beat
+            # interval is derived from this same setting (`durable/heartbeat.py::beating`), so the
+            # two cannot drift apart.
+            heartbeat_timeout=timedelta(
+                seconds=settings.background_activity_heartbeat_timeout_seconds
+            ),
             retry_policy=BAD_DATA_RETRY,
         )

@@ -77,7 +77,7 @@ def test_openai_compatible_path_calls_the_endpoint(monkeypatch: pytest.MonkeyPat
         def create(self, *, model: str, input: list[str]) -> Any:
             captured["model"] = model
             captured["input"] = input
-            data = [type("E", (), {"embedding": [float(i)]}) for i in range(len(input))]
+            data = [type("E", (), {"embedding": [float(i)], "index": i}) for i in range(len(input))]
             return type("R", (), {"data": data})
 
     class _FakeOpenAI:
@@ -94,6 +94,84 @@ def test_openai_compatible_path_calls_the_endpoint(monkeypatch: pytest.MonkeyPat
     assert captured["input"] == ["a", "b"]
     assert captured["init"]["base_url"] == "https://llm.internal/v1"
     assert vectors == [[0.0], [1.0]]
+
+
+def test_a_reordered_batch_is_paired_by_index_and_not_by_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every text keeps its own vector when the provider answers a batch out of order.
+
+    The OpenAI embeddings response carries a per-item `index` precisely because `data` order is not
+    part of the contract, and batching servers reorder: vLLM, TEI and gateway proxies all do. Read
+    positionally, a reordered batch assigns each text its neighbour's vector — and nothing
+    downstream can see it. `embed_texts` pairs the vectors with the de-duplicated texts by `zip(...,
+    strict=True)`, which catches a *count* mismatch and cannot see a *permutation*; the stored
+    vectors are then all wrong, `embedding_key` still reads as current, and the only symptom is bad
+    recall, which is what `embedding_config_key`'s docstring calls corrupting every similarity
+    silently.
+    """
+    _use_settings(
+        monkeypatch,
+        embedding_provider="openai_compatible",
+        embedding_model="internal-embed",
+        # A distinct endpoint per test on purpose: `_openai_client` is an `lru_cache` keyed on the
+        # transport config, so two tests sharing a `base_url` would share one client — and
+        # therefore each other's fake.
+        llm_base_url="https://llm-reordering.internal/v1",
+    )
+
+    class _ReorderingEmbeddings:
+        """Answers correctly, in the reverse order — every item still carrying its own index."""
+
+        def create(self, *, model: str, input: list[str]) -> Any:
+            data = [type("E", (), {"embedding": [float(i)], "index": i}) for i in range(len(input))]
+            return type("R", (), {"data": list(reversed(data))})
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            self.embeddings = _ReorderingEmbeddings()
+
+    fake_openai = type(sys)("openai")
+    fake_openai.OpenAI = _FakeOpenAI  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    assert provider.embed_texts(["a", "b", "c"]) == [[0.0], [1.0], [2.0]]
+
+
+def test_a_batch_whose_indices_are_not_its_own_positions_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sorting is only a fix while `index` says what it is supposed to say.
+
+    A provider that omits the field, repeats a value, or numbers a chunk against the whole request
+    leaves `sorted` stable — which is arrival order again, silently. The corruption this prevents
+    is unrecoverable and invisible once written, so an index set that is not the chunk's own
+    positions is refused rather than sorted on trust.
+    """
+    _use_settings(
+        monkeypatch,
+        embedding_provider="openai_compatible",
+        embedding_model="internal-embed",
+        llm_base_url="https://llm-flat-index.internal/v1",
+    )
+
+    class _FlatIndexEmbeddings:
+        """Numbers every item 0 — the shape a stable sort cannot tell from a correct answer."""
+
+        def create(self, *, model: str, input: list[str]) -> Any:
+            data = [type("E", (), {"embedding": [float(i)], "index": 0}) for i in range(len(input))]
+            return type("R", (), {"data": data})
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            self.embeddings = _FlatIndexEmbeddings()
+
+    fake_openai = type(sys)("openai")
+    fake_openai.OpenAI = _FakeOpenAI  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    with pytest.raises(ValueError, match="index"):
+        provider.embed_texts(["a", "b"])
 
 
 def test_openai_compatible_half_config_is_rejected_at_build_time() -> None:

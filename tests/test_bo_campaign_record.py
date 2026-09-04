@@ -33,6 +33,7 @@ from chemclaw.science.bo.campaign_record import (
     read_campaign_thread,
     record_suggestion,
 )
+from chemclaw.science.bo.objectives import molecule_library_problem
 from chemclaw.science.bo.problem import (
     Candidate,
     CategoricalParameter,
@@ -601,6 +602,97 @@ def test_a_recased_or_padded_spelling_is_the_same_campaign() -> None:
         }
     )
     assert campaign_id_for(perturbed) == reference
+
+
+def test_two_libraries_whose_smiles_differ_only_in_case_are_two_campaigns() -> None:
+    """The bound on the fold: case is chemistry in a SMILES, so the fold must not reach one.
+
+    `molecule_library_problem` makes the canonical SMILES *itself* the category label, and SMILES
+    spells an aromatic atom in lower case — `C1CCNCC1` is piperidine, `c1ccncc1` is pyridine, and
+    `str.casefold` maps them onto one string. Measured before this: two chemists screening those two
+    libraries got one campaign id, the second was told their campaign was not new, its decision
+    space overwrote the first's, and `read_campaign_thread` then handed whoever resumed either one
+    the other's observations. That is the "seeded with observations from a different campaign"
+    failure `_space_of`'s descriptor rule exists to prevent, arriving through the label instead.
+    """
+    piperidine = molecule_library_problem(["C1CCNCC1", "CCO"])
+    pyridine = molecule_library_problem(["c1ccncc1", "CCO"])
+    assert piperidine.parameters[0].categories != pyridine.parameters[0].categories
+    assert campaign_id_for(piperidine) != campaign_id_for(pyridine)
+
+
+def test_a_spelling_of_one_molecule_is_the_same_campaign_as_another() -> None:
+    """And the fold's *purpose* survives on the same labels: one molecule is one campaign.
+
+    A label that is a structure is reduced by RDKit rather than by `str.casefold`, which is the
+    same act on the right data type — `OCC` and `CCO` are one molecule, so a space that names it
+    either way is one campaign, exactly as `THF` and `thf` are.
+
+    Built by hand rather than through `molecule_library_problem`, which canonicalizes its library on
+    the way in: routing through it would assert RDKit's idempotence rather than this rule.
+    """
+
+    def library(ethanol: str) -> OptimizationProblem:
+        return OptimizationProblem(
+            parameters=[CategoricalParameter(name="molecule", categories=[ethanol, "c1ccncc1"])],
+            objectives=[Objective(name="log_s", direction="maximize")],
+        )
+
+    assert campaign_id_for(library("OCC")) == campaign_id_for(library("CCO"))
+
+
+def test_labels_that_fold_onto_each_other_keep_their_own_spellings() -> None:
+    """A fold that merges two of one space's *own* labels is not a canonicalisation of it.
+
+    `structures` is keyed by the category labels, so folding `L1` and `l1` onto one key does not
+    merely lose a distinction — the dict comprehension building the identity payload **drops an
+    entry**, and two genuinely different label→SMILES maps hash to the same shortened one. Measured
+    before this: `{"L1": "CCO", "l1": "CCN"}` and `{"L1": "c1ccccc1", "l1": "CCN"}` were one
+    campaign, one feature space silently standing in for the other.
+
+    The labels are kept exact only where the fold would merge them, which is why this costs the
+    ordinary spaces nothing — asserted directly above by the baseline ids.
+    """
+
+    def ligands(structures: dict[str, str]) -> OptimizationProblem:
+        return OptimizationProblem(
+            parameters=[
+                CategoricalParameter(
+                    name="ligand", categories=sorted(structures), structures=structures
+                )
+            ],
+            objectives=[Objective(name="yield", direction="maximize")],
+        )
+
+    assert campaign_id_for(ligands({"L1": "CCO", "l1": "CCN"})) != campaign_id_for(
+        ligands({"L1": "c1ccccc1", "l1": "CCN"})
+    )
+
+
+def test_an_exclusion_naming_one_molecule_is_not_the_exclusion_naming_another() -> None:
+    """The same rule on the other half of the identity, where the labels are re-typed too.
+
+    `_canonical` folds an exclusion's options because they are category labels a model re-emits —
+    and they are category labels, so when they name molecules the fold is wrong there for the
+    identical reason. Over a library holding both, "never piperidine in THF" and "never pyridine in
+    THF" are different campaigns; the space alone cannot tell them apart, because it holds both.
+    """
+
+    def excluding(molecule: str) -> OptimizationProblem:
+        return OptimizationProblem(
+            parameters=[
+                CategoricalParameter(name="molecule", categories=["C1CCNCC1", "c1ccncc1"]),
+                CategoricalParameter(name="solvent", categories=["THF", "DMF"]),
+            ],
+            objectives=[Objective(name="yield", direction="maximize")],
+            constraints=[
+                ExcludeConstraint(
+                    parameters=["molecule", "solvent"], options=[[molecule], ["THF"]]
+                )
+            ],
+        )
+
+    assert campaign_id_for(excluding("C1CCNCC1")) != campaign_id_for(excluding("c1ccncc1"))
 
 
 def test_the_legacy_spelling_hashes_to_the_same_id_as_the_new_one() -> None:

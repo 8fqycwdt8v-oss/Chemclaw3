@@ -619,3 +619,25 @@ def test_a_channel_that_cannot_be_built_is_not_counted_as_a_destination_outage(
         "an unbuildable channel was counted as a destination outage, which is the conflation "
         "that made a permanent misconfiguration read as a transient one"
     )
+
+
+def test_a_secret_in_the_recipient_is_scrubbed_like_one_in_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seam's rule is "every message is redacted once, in the registry" — every free-text field.
+
+    `recipient` was the one it skipped. It is free text by construction — the address a driver
+    resolves, whose shape only the driver knows — and both shipped drivers put it where the body
+    goes: `FileDeliveryDriver` writes it into the file, `WebhookDeliveryDriver` POSTs it. Today's
+    only caller passes an actor id, so nothing carries a credential there yet; the guarantee is
+    supposed to be a property of the seam rather than of who happens to be calling it.
+    """
+    from chemclaw.deliver.message import Message
+
+    secret = "sk-connector-token-abc123"
+    monkeypatch.setenv("CHEMCLAW_CALC_MCP_TOKEN", secret)
+
+    scrubbed = Message(recipient=f"chemist@example.com {secret}", subject="s", body="b").redacted()
+
+    assert secret not in scrubbed.recipient
+    assert "***" in scrubbed.recipient
