@@ -1,60 +1,58 @@
-# Deployment-readiness review and hardening — 2026-09-04
+# Backlog analysis — 2026-09-04 (session 2)
 
-Branch `claude/code-review-hardening-lchtz5`. Goal: prove the tree is deployable, robust and
-maintainable, and fix what proves it is not. Every finding is a claim about a commit, so every
-finding carries a command and its output or it does not ship.
+Selected from `docs/planning/BACKLOG.md` after re-reading all 44 open rows. Criterion: closable
+here, with evidence, this session. The environment's `API-KEY` was probed first (one Haiku call,
+200) because three rows are blocked exactly while it is down.
 
-## Method
+## Selected
 
-Fifteen fresh-context reviews, each with its own scope and no shared belief about the tree, over a
-running stack (`dockerd` + `make up` + `make db-migrate`) so the Postgres-backed half of the suite
-was evidence rather than a skip. Six cross-cutting sweeps, eight per-package reads, one asking
-whether the suite can fail. Then nine fixers on disjoint file territories, each required to
-reproduce a finding at `HEAD` before fixing it and to write the failing test first.
+- [x] **Half the probe corpus tests one tool** (§5) — wire and *run* the tool-utility A/B arm over
+      bucket A with the cheapest model (Haiku 4.5). Blocked-on-credential row; the credential answers
+      today, so the measurement is owed today.
+- [x] **`core/fulltext.py`'s tokeniser can revert to the exact bug its own comment names** (§3) —
+      three surviving mutants get tests that kill them; the three modules join `[tool.mutmut]`.
+- [x] **`tests/pg.py`'s `TEST_SCHEMA` recycles pids** (§3).
+- [x] **33 rendered-chart tests are gated on an unpinned `helm` the `check` job never installs** (§3).
 
-## Steps
+## Deliberately not taken
 
-- [x] Baseline `make lint type test`: **6,406 passed, 1 failed, 17 skipped**.
-- [x] Wave 1 — fifteen reviews. **78 findings, 26 HIGH.**
-- [x] Wave 2 — triage; every fix reproduced at `HEAD` first. Several findings did not survive that
-      and were dropped; two reviewer-proposed fixes were measured and **rejected in favour of
-      something else** (see Review).
-- [x] Wave 3 — fixes, each with a test that fails before and passes after.
-- [x] Wave 4 — five ADRs, two `BACKLOG.md` rows closed, seven opened, full gate, PR.
+- **A stalled append-only feed has no first-party signal** — its own trigger (a deployment running an
+  `append_only:` source) is not met; no shipped binding sets it.
+- **`delete_session` and the owner prune take two rows in opposite orders** — the row records a fix
+  already tried and rejected; it is a note, not work.
+- **Memory records; it does not change what the next turn does** — blocked on deployment history,
+  and the measurement it wanted is already a shipped command.
 
 ## Review
 
-**Result: `make lint type test` green — 6,551 passed, 4 skipped, 0 failed.** From a baseline of
-6,406 passed / 1 failed / 17 skipped: +145 tests, the failure fixed, and thirteen fewer skips
-because `helm` was installed.
+**What shipped.** Four rows closed or halved, and two defects found by trying to do the work.
 
-**What the method got right.** Installing `helm` was the single highest-yield act of the session.
-Twelve chart assertions skip in this sandbox as "helm is not installed", the epilogue this
-repository built to make skips loud does not cover that one, and five HIGH chart defects had
-survived every previous review because nobody had ever rendered the chart. A gate that cannot run
-is not a gate.
+1. **The tool-utility A/B exists and has been run** — `make live-ab`, a control profile with
+   `tool_names: []`, 221 probes, 442 turns, ~29 minutes, `claude-haiku-4-5-20251001` on both arms.
+   ChemToolAgent's finding reproduces on this corpus: bucket A tools **helped 31%, hurt 23%**, and
+   **19** questions the toolless model correctly declined came back fabricated. Bucket C came out
+   the other way and falsified the hypothesis it was built on. A tool-armed turn costs **30.6x** a
+   toolless one. `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter` +
+   `docs/archive/tool-utility-2026-09-04.md`.
+2. **Three mutants killed** — `core/fulltext.py`'s `_WORD`, `templates/resolve._WHOLE`'s anchors,
+   and a `_NOT_A_QUANTITY` test whose fixture never reached the mechanism it was named after. Each
+   mutation was applied, run, observed failing, and reverted; the three modules joined
+   `[tool.mutmut] source_paths`.
+3. **`TEST_SCHEMA` is a uuid** rather than a recyclable pid, and **`helm` is installed in CI's
+   `check` job** behind a single `HELM_VERSION` pin both jobs read, with a skip epilogue in the
+   shape `tests/pg.py` already had — so 33 rendered-chart tests stop skipping silently.
 
-Requiring reproduction-before-fix paid for itself repeatedly. Fixers rejected reviewer prescriptions
-on measurement four times: `ABANDON` as a parent-close policy is *worse* than the default, not
-better; writing an ingest record before its index rows breaks the invariant the replay-skip rests
-on; a 503-on-`None` for the plan routes would 503 every new conversation, because a healthy
-checkpointer and an outage are byte-identical there; and `Component.attributes` cannot hold
-per-product yields because nothing renders them for outcomes.
+**Two defects the work uncovered, both fixed here.** `infra/live/processes.sh` hardcoded
+`chem safety` as its fleet bundles, so the `rxnpredict` bundle wired earlier the same day failed
+the front door on every `make live-up` — the list is now derived from the two manifests that
+already declare the set. And `evals/live_judge.py` honoured `llm_base_url` while ignoring
+`llm_tls_ca_bundle`, so grading died at TLS against exactly the internal gateway that setting
+exists for; it now reuses the agent's own `_tls_http_client`.
 
-**What the method missed, and what caught it.** Each fixer ran `mypy --strict` over its own `src/`
-package and reported clean; the gate runs `mypy src examples tests`, and eleven errors were in the
-tests. Then the full suite found three regressions this branch itself introduced — a new error class
-not registered non-retryable, a new `DELETE` with no grant, and `core/config` acquiring a
-module-scope `psycopg` import that the datasource-isolation seam forbids transitively. All three
-were caught by gates this repository had already built. A per-package check is not the gate.
+**What was not taken, and why it is not a gap.** `plan_execute_utility` still scores four invented
+floats. Folding tool-utility data into a metric named for *planning* would trade an honest gap for
+a mislabelled number, so the eval-gate row stays open with one fewer excuse.
 
-**The finding no in-repo review could have produced**: `StatusIn` is `extra="forbid"` and the
-shipped `Chemclaw3_ui` has always sent `expected_status`, so **every protocol sign-off from the UI
-was a 422** — while twenty-seven route tests, `mypy --strict`, ten validators and a 6,406-test suite
-stayed green, because each test wrote the body the *server* expected.
-
-**Open, and named so its absence is not read as an answer**: no OpenShift cluster and no real
-Temporal broker beyond the dev server, so the live edges in `docs/planning/BACKLOG.md` stand. A
-rendered chart is not a deployed one. Seven new rows are queued, three of them mutants that survive
-— `core/fulltext.py`'s tokeniser can revert to the exact bug its own comment names while 349
-retrieval tests stay green and it measures 100% line and branch coverage doing it.
+**The one number here that is an estimate rather than a measurement** is the judge's share of the
+bill: `live_judge.py` counts its own usage nowhere, so ~$5 of the run's ~$13 is inferred from
+prompt sizes. The front door's half is exact, from its own per-profile counters.

@@ -140,11 +140,16 @@ def test_a_code_span_or_a_wikilink_in_an_answer_is_not_a_quantity_claim() -> Non
 
     Both are real from gr-18. The wikilink is scored as a citation by `_score_citations`; counting
     its trailing 0019 as a number too would have one id answer two different questions.
+
+    A prior version of this fixture (`Clc1ccc(S(=O)(=O)F)cc1` / `...deoxyfluorination-0019`) never
+    actually reached `_NOT_A_QUANTITY`: every digit in it already touched a letter or a
+    slug-hyphen, which `_NUMBER`'s own lookbehinds exclude regardless of `_NOT_A_QUANTITY` — so
+    deleting `_NOT_A_QUANTITY` left this test green. The `2020` runs below are free-standing digits
+    inside a code span and a wikilink respectively (bounded by whitespace, not by a letter or a
+    hyphen), so only the span-stripping keeps them out — deleting `_NOT_A_QUANTITY` makes both
+    reappear and this assertion fails.
     """
-    answer = (
-        "**40% yield:** `Clc1ccc(S(=O)(=O)F)cc1` with DBU, see "
-        "[[reaction-nielsen-deoxyfluorination-0019]] — dipole 4.56 D."
-    )
+    answer = "**40% yield:** `raw log 2020` with DBU, see [[note 2020 loose]] — dipole 4.56 D."
     assert stated_numerals(answer) == ["40", "4.56"]
 
 

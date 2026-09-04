@@ -135,19 +135,6 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **`core/fulltext.py`'s tokeniser can revert to the exact bug its own comment names, and 349
-      tests stay green** — [M], found 2026-09-04 by the review that asked whether this suite can
-      fail. Mutating `_WORD` to `[a-z0-9]+` makes `Suzuki` tokenise as `uzuki`, and the retrieval
-      suite — 349 tests across 22 files — passes. `reference_tokens`, `reference_terms` and
-      `core.fulltext` appear in **zero** test files; the module measures 100% line and branch
-      coverage while its mutant survives, which is the clearest statement available that a global
-      coverage floor is blind to this. Two more survived the same probe:
-      `templates/resolve._WHOLE` can lose its anchors with 77 template tests green (a step argument
-      would silently drop the text around its reference), and
-      `test_a_code_span_or_a_wikilink_in_an_answer_is_not_a_quantity_claim` passes with
-      `_NOT_A_QUANTITY` deleted, because its fixture never reaches the mechanism the test is named
-      after. None of the three is in `[tool.mutmut] source_paths`.
-
 - [ ] **The two eval gates score literals written in their own case files** — [M], same review.
       11 of 13 baseline metrics are read from the case file rather than computed, so a metric that
       stops measuring and answers "perfect" passes both `make eval-strict` and
@@ -157,12 +144,6 @@ topic).
 - [ ] **`make kg-validate`'s two store-backed arms have no input in the shipped corpus** — [S], same
       review. 0 reaction citations and 0 `calc_refs` in the committed knowledge corpus, so the half
       of the validator its own docstring says CI runs is dead on every CI run.
-
-- [ ] **33 rendered-chart tests are gated on an unpinned `helm` the `check` job never installs** —
-      [S], found 2026-09-04. The pinned v3.13.0 covers only the `chart` job. There is no skip
-      epilogue for helm, unlike the one `tests/pg.py` has for Postgres — and this pass found **five
-      HIGH chart defects** that had survived earlier reviews precisely because nobody had rendered
-      the chart. See `D-2026-09-04-fifteen-fresh-contexts-over-one-tree`.
 
 - [ ] **The detached settle of a cancelled `AwaitAnswerWorkflow` is racy** — [M], found 2026-09-04
       while fixing the stranded-row HIGH. `ParentClosePolicy.REQUEST_CANCEL` is strictly better than
@@ -176,11 +157,6 @@ topic).
       `WHERE` to accept `'answered'` **plus** an archive so attribution is not blanked: a migration
       keyed `(request_id, run_id)`, its `infra/sql/README.md` row, an INSERT grant, and a disposal
       decision in `durable/retention.py`.
-
-- [ ] **`tests/pg.py`'s `TEST_SCHEMA` recycles pids** — [S], observed 2026-09-04 as a real flake on
-      a shared dev database: six leaked `chemclaw_test_*` schemas were sitting in it, and a run
-      whose pid matches one inherits its rows. CI's throwaway container is unaffected, which is why
-      it has never been seen there.
 
 
 - [ ] **A timed-out parse still runs to completion on the worker thread** — [L]. **The cheap half
@@ -684,24 +660,27 @@ only holds defects can only ever restore the system to what it already intended 
       descriptors changes what the model should send — so this is per-paragraph judgment: rationale
       moves to a `#` comment, guidance stays in the docstring. **And it does not ship until the live
       lane can show every probe still reaching its tool**, because a cheaper prompt that stops
-      finding tools is a regression with a good-looking metric. Blocked on the live-lane row in § 1.
+      finding tools is a regression with a good-looking metric. **The before-figure now exists**:
+      `make live-ab`'s 2026-09-04 run reached the expected tool on **133 of the 171** probes that
+      name one, per-probe in `tasks/live-test/transcripts/ab/evidence.json`, so the comparison this
+      was blocked on is a re-run rather than a new instrument.
 
-- [ ] **Half the probe corpus tests one tool** — [S]. `gather_evidence` is in `expects_tools` for
-      **125 of 288** probes (re-counted 2026-08-29; 124/261 on 2026-08-27, 116/232 on 2026-08-25 —
-      the corpus keeps growing and the concentration is not shrinking with it, 43% against 47%);
-      `find_notes` 96; `expand_note` 60; bucket C is **48** probes against bucket A's 169; the
-      tail is thin. Two consequences worth separating: the corpus mostly measures one retrieval path,
-      and ChemToolAgent's finding — that tool augmentation **does not consistently beat the base
-      LLM**, and hurts on general chemistry questions — cannot be reproduced here. Bucket C scores
-      restraint but never runs the same question tool-free for comparison. `evals/ab.py::compare_tool_utility`
-      is already written and already registered as `plan_execute_utility`; an A/B arm over bucket A
-      is mostly wiring.
+- [ ] **Half the probe corpus tests one tool** — [S], and only the *concentration* half is still
+      open. `gather_evidence` is in `expects_tools` for **125 of 288** probes (re-counted
+      2026-08-29; 124/261 on 2026-08-27, 116/232 on 2026-08-25 — the corpus keeps growing and the
+      concentration is not shrinking with it, 43% against 47%); `find_notes` 96; `expand_note` 60;
+      bucket C is **48** probes against bucket A's 169; the tail is thin. So the corpus still mostly
+      measures one retrieval path, and widening it is what remains here.
 
-      **Blocked on a working model credential** — see "This environment's `API-KEY` comes and goes"
-      below in this section, not §4 (which has no credential row) — and the mock cannot stand in:
-      `cli.mock_llm` emits scripted tool calls without *choosing* them in response to a question, so
-      both arms of any comparison would measure the script. Measured 2026-08-25 through the real
-      lane: expected-tool-reached 0/3.
+      **The second consequence is closed and it was the one blocked on a credential.**
+      `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter` builds the arm
+      (`make live-ab`, a control profile with `tool_names: []`) and runs it over all 221 bucket-A
+      and bucket-C probes: ChemToolAgent's finding reproduces — on bucket A tools **helped 31% and
+      hurt 23%**, with 19 questions the toolless model correctly declined turned into fabricated
+      ones — and bucket C came out the *other* way, falsifying the hypothesis it was built on. The
+      record is `docs/archive/tool-utility-2026-09-04.md`. What that run is not evidence about is a
+      deployment's own model: it measured `claude-haiku-4-5-20251001`, and re-running on a site's
+      model is one command.
 
 - [ ] **No external benchmark has ever been run** — [M]. `make eval` gates 23 metric values over 15
       case files (re-counted 2026-08-27; one has been added since the 2026-08-25 figure of 14), a
@@ -762,8 +741,11 @@ only holds defects can only ever restore the system to what it already intended 
       list, so a destination with no matching port still drops), and the token obligation in the
       comment `chem` already models.
 
-- [ ] **This environment's `API-KEY` comes and goes, and three rows are blocked exactly while it is
-      down** — [S], and it is operational rather than code. Measured 2026-08-25:
+- [ ] **This environment's `API-KEY` comes and goes, and two rows are blocked exactly while it is
+      down** — [S], and it is operational rather than code. It was three until 2026-09-04, when the
+      credential answered and the tool-utility A/B was built and run through it in one session
+      (`D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter`) — which is the row's own
+      prescription working: probe first, then measure in the same session. Measured 2026-08-25:
       `anthropic.AuthenticationError: 401` with and without the session's `ANTHROPIC_BASE_URL`
       cleared. **Re-measured 2026-08-27: the same variable answers** (a haiku call returned 200; the
       day's verifier-margin run spent ~120 calls through it), so present-and-rejected is a *state*
