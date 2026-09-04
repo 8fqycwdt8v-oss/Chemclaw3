@@ -92,6 +92,20 @@ mint_probe_token() {
 }
 export CHEMCLAW_SESSION_STORE="${CHEMCLAW_SESSION_STORE:-postgres}"
 export CHEMCLAW_CONNECTORS_REQUIRED="${CHEMCLAW_CONNECTORS_REQUIRED:-true}"
+# **The bundles this lane serves, in one place, because two lists drift.** `start_fleet_bundles`
+# starts these and `CHEMCLAW_CONNECTORS_ENABLED` declares them, and with
+# `CHEMCLAW_CONNECTORS_REQUIRED=true` above, a bundle enabled but not started is a front door that
+# refuses to boot. That is exactly what happened when `rxnpredict` was wired in as a
+# declaration-only bundle: `registry.enabled()` is "discovery is enablement until you say
+# otherwise", so an eighth bundle appeared in every fresh checkout, this lane still started two,
+# and `make live-up` died with `ConnectorsUnavailable: rxnpredict (unreachable)`. Naming the set
+# here and iterating *it* is what stops the next bundle doing the same — this lane opts in per
+# server rather than inheriting the default surface, because a torch-backed predictor is a
+# deliberate thing to start, not something a checkout should acquire.
+LANE_BUNDLES="${LANE_BUNDLES:-chem safety}"
+# `os.pathsep`, not a comma — `connectors_enabled_list` splits on it, and a comma arrives as one
+# unknown connector name whose error message reads like a typo rather than a separator mistake.
+export CHEMCLAW_CONNECTORS_ENABLED="${CHEMCLAW_CONNECTORS_ENABLED:-$(printf '%s' "$LANE_BUNDLES" | tr ' ' ':')}"
 # Traces, when something is listening for them. `make phoenix-up` puts an OTLP receiver on 4317;
 # with nothing there the exporter retries in the background and the run is unaffected, which is why
 # this is a probe rather than a flag somebody has to remember. Content stays suppressed:
@@ -249,7 +263,8 @@ start_fleet_bundles() {
   local python="$1" fleet_python="$2"
 
   local name port
-  for name in chem safety; do
+  # The one list, from the export above — never a second spelling of it.
+  for name in $LANE_BUNDLES; do
     port="$(fleet_port "$python" "$name")" || die "no port in $MCP_REPO/manifests/$name/connector.yaml"
     # The same variable name on both sides, which is the manifest's `token_env` and the whole
     # reason a dev token works here: core reads it to send, the server reads it to verify.
@@ -436,9 +451,27 @@ up() {
   # assembler, the middleware stack, budget admission, the audit sink and the session store all sit
   # between the socket and the agent, and the in-process scripted client in `tests/` bypasses every
   # one of them — its own docstring records passing green while production failed 100% of the time.
-  if [ "${CHEMCLAW_LLM_BASE_URL:-}" = "http://127.0.0.1:8820/v1" ]; then
+  #
+  # **Which gateway this lane runs against is asked of the code that decides it.** The test is
+  # `Settings`' own resolved `llm_base_url` — the value the front door and every worker below will
+  # actually dial, from this same environment — against the address `cli/mock_llm` serves. Neither
+  # string is written here.
+  #
+  # It used to compare `$CHEMCLAW_LLM_BASE_URL` against the mock's address transcribed into this
+  # file, and that broke the moment the address became a `Settings` *default*: no shell in this
+  # lane sets that variable (`Makefile`'s `live-up` is a bare `bash infra/live/processes.sh up`),
+  # so the condition was false, the mock never started, and the front door came up pointed at a
+  # closed port while the line below named the gateway as though it were serving. The defect is
+  # the transcription, not the particular string — `tests/test_config.py` now fails if either
+  # address is written into this script again.
+  local llm_base_url mock_base_url
+  llm_base_url="$("$python" -c \
+    'from chemclaw.core.config import settings; print(settings.llm_base_url)')" \
+    || die "could not resolve the model gateway address — see the error above"
+  mock_base_url="$("$python" -c 'from chemclaw.cli.mock_llm import MOCK_BASE_URL; print(MOCK_BASE_URL)')"
+  if [ "$llm_base_url" = "$mock_base_url" ]; then
     start mock-llm "$python" -m chemclaw.cli.mock_llm
-    wait_for mock-llm "http://127.0.0.1:8820/__mock/stats"
+    wait_for mock-llm "${mock_base_url%/v1}/__mock/stats"
   fi
 
   # **The front door always starts now, and the `llm_configured` gate that used to guard it is
@@ -461,7 +494,7 @@ up() {
   done
   wait_for api "http://127.0.0.1:$API_PORT/readyz"
   log "live stack up. front door: http://127.0.0.1:$API_PORT · logs: $LIVE_DIR"
-  log "  model gateway: ${CHEMCLAW_LLM_BASE_URL:-http://127.0.0.1:8820/v1}"
+  log "  model gateway: $llm_base_url"
   log "  from another terminal, first: eval \"\$(bash infra/live/processes.sh env)\""
 }
 

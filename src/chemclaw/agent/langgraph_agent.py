@@ -367,7 +367,13 @@ def _middleware(
     A prompt-caching entry sat here until the collapse to one gateway
     (`D-2026-09-04-a-gateway-is-the-only-provider`): `cache_control` breakpoints are one vendor's
     spelling with no counterpart on an OpenAI-compatible endpoint, so with the vendor client gone
-    there is nothing to splice and nothing upstream composes to replace.
+    it marked nothing. **What was deleted is this repository's replacement of an upstream entry,
+    not the entry** — `deepagents.graph` calls `append_prompt_caching_middleware`
+    unconditionally, so `AnthropicPromptCachingMiddleware` is still the last member of every
+    compiled chain (`tests/test_middleware_order.py` pins it there). It is constructed with
+    `unsupported_model_behavior="ignore"` and no-ops on a `ChatOpenAI`, which is why removing the
+    replacement changed no behaviour; the sentence is here because "gone" and "no longer ours"
+    read the same in a diff and are not the same claim about what runs.
 
     Exactly one entry is a replacement, and it is the security-critical one.
     **`FilesystemMiddleware` is composed by upstream unconditionally**, over the same backend,

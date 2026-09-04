@@ -752,10 +752,12 @@ rather than a fault. `cache_read` is the number that says whether caching is hap
 A `prompt_caching_middleware` marked the static prefix with Anthropic's `cache_control` breakpoints
 on the dev provider; the collapse to one OpenAI-compatible gateway removed the second client and
 took that with it (`D-2026-09-04-a-gateway-is-the-only-provider`). The mechanism was never reachable
-from the production path anyway — `langchain_openai` contains **zero** occurrences of
-`cache_control` against `langchain_anthropic`'s 74 — so what changed is that the *dev* path lost a
-saving the production path never had. Whether a prefix is cached is now entirely the gateway's
-decision, and these counters are how you find out.
+from the production path anyway: `cache_control` is a vendor spelling, and the gateway client is
+the one that does not know it — `grep -rc cache_control` over the two installed packages returns
+**zero** for `langchain_openai` against dozens for `langchain_anthropic` (62 on 1.6.1, but the
+count is not the point and goes stale on the next bump; the zero is). So what changed is that the
+*dev* path lost a saving the production path never had. Whether a prefix is cached is now entirely
+the gateway's decision, and these counters are how you find out.
 
 Two caveats that make the saving smaller than a naive prefix measurement suggests, both of which
 cost this review a wrong estimate:
@@ -1255,7 +1257,8 @@ on the tools and data dashboards, taking `histogram_quantile(0.95, …)` over ea
 `_bucket` series: `chemclaw_tool_duration_seconds` **by `tool`** — that label is what makes "which
 tool is slow" answerable at all, and it did not exist until this pass — then
 `chemclaw_model_call_duration_seconds` — the gateway's own latency, unlabelled because there is
-one endpoint — then `chemclaw_evidence_source_seconds` by source. Slow turns hold admission permits, so this tends to precede `ChemclawTurnsShed`.
+one endpoint — then `chemclaw_evidence_source_seconds` by source. Slow turns hold admission
+permits, so this tends to precede `ChemclawTurnsShed`.
 
 #### ChemclawTurnsTimingOut
 `warning`. Someone waited out `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` and got nothing. If

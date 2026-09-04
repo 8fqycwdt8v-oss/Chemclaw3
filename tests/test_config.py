@@ -76,15 +76,73 @@ def test_the_default_gateway_is_the_mock_on_this_machine() -> None:
     There is no `llm_provider` field to assert; that is the point, and
     `test_no_provider_field_survives` is what says so.
     """
-    from chemclaw.cli.mock_llm import MOCK_PORT
+    from chemclaw.cli.mock_llm import MOCK_BASE_URL
 
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert settings.llm_base_url == f"http://127.0.0.1:{MOCK_PORT}/v1"
+    assert settings.llm_base_url == MOCK_BASE_URL
     assert settings.llm_model == "mock"
     # Unset, not 0.0: current frontier models reject an explicit temperature outright, so a
     # default of 0.0 made the shipped config fail every live turn with a 400.
     assert settings.llm_temperature is None
     assert settings.llm_max_tokens == 4096
+
+
+def test_the_live_lane_enables_exactly_the_bundles_it_starts() -> None:
+    """One list, because two drift and the front door is what notices.
+
+    `CHEMCLAW_CONNECTORS_REQUIRED` defaults to `true` in this lane, so a bundle that is *enabled*
+    but not *started* is not a warning — it is `ConnectorsUnavailable` and a front door that
+    refuses to boot. That is not hypothetical: wiring `rxnpredict` in as a declaration-only bundle
+    turned `registry.enabled()`'s "discovery is enablement until you say otherwise" into an eighth
+    bundle in every fresh checkout, while the lane went on starting two, and `make live-up` died.
+
+    So the lane names its set once in `LANE_BUNDLES`, derives `CHEMCLAW_CONNECTORS_ENABLED` from
+    it, and iterates *it* rather than a second spelling. This asserts the derivation exists rather
+    than the membership: which bundles the lane runs is its own choice, and a hardcoded pair here
+    would be the very duplicate this test forbids one file over.
+    """
+    script = (
+        Path(__file__).resolve().parent.parent / "infra" / "live" / "processes.sh"
+    ).read_text()
+
+    assert "LANE_BUNDLES=" in script, "the lane must name its bundle set once"
+    assert "for name in $LANE_BUNDLES; do" in script, (
+        "start_fleet_bundles must iterate LANE_BUNDLES rather than a second list of names"
+    )
+    assert '"$LANE_BUNDLES"' in script and "CHEMCLAW_CONNECTORS_ENABLED" in script, (
+        "CHEMCLAW_CONNECTORS_ENABLED must be derived from LANE_BUNDLES, not written out again"
+    )
+    # `connectors_enabled_list` splits on `os.pathsep`; a comma arrives as one unknown connector
+    # whose error reads like a typo rather than a separator mistake.
+    assert "tr ' ' ':'" in script, "the separator must be os.pathsep, not a comma"
+
+
+def test_the_live_lane_does_not_transcribe_the_gateway_address_into_shell() -> None:
+    """`infra/live/processes.sh` must ask this config for the gateway, never carry a copy of it.
+
+    The lane decides whether to start `cli/mock_llm` by comparing the *resolved* `llm_base_url`
+    against `MOCK_BASE_URL`, both read out of the interpreter it is about to launch every process
+    with. It used to compare `$CHEMCLAW_LLM_BASE_URL` against the address written out in the
+    script — which was true for as long as an operator had to set that variable, and false from
+    the moment `D-2026-09-04-a-gateway-is-the-only-provider` made it a `Settings` default that
+    nothing in the lane sets. Measured on `make live-up`: the mock never started, the front door
+    came up pointed at a closed port, and the run log named the gateway as though it were serving.
+
+    An absence test, because the failure is a *duplication* rather than a wrong value: the copy
+    agreed with the default on the day it was written, and a shell string cannot be re-derived
+    when the Python one moves. `.env.example` is deliberately not covered — a documented mirror of
+    every setting is what that file is for, and nothing branches on it.
+    """
+    from chemclaw.cli.mock_llm import MOCK_BASE_URL
+
+    script = Path(__file__).resolve().parent.parent / "infra" / "live" / "processes.sh"
+    text = script.read_text(encoding="utf-8")
+    for address in {MOCK_BASE_URL, Settings(_env_file=None).llm_base_url}:  # type: ignore[call-arg]
+        assert address not in text, (
+            f"{script.name} writes out {address!r}, which this config also defines. Read it from "
+            "`Settings`/`cli.mock_llm` instead — a shell copy of a Python default is exactly how "
+            "the lane came to start a front door pointed at a mock it did not start."
+        )
 
 
 def test_no_provider_field_survives() -> None:
@@ -273,16 +331,17 @@ def test_the_shipped_defaults_boot() -> None:
     )
 
 
-def test_openai_compatible_embeddings_require_endpoint_and_model() -> None:
-    """The embedding provider reuses `llm_base_url`; selecting it half-configured fails early."""
-    with pytest.raises(ValueError, match="llm_base_url"):
-        Settings(  # type: ignore[call-arg]
-            _env_file=None,
-            llm_base_url="",
-            embedding_provider="openai_compatible",
-            embedding_model="internal-embed",
-        )
-    with pytest.raises(ValueError, match="embedding_model"):
+def test_openai_compatible_embeddings_require_a_model_name() -> None:
+    """Selecting the endpoint embedder without naming its model fails at startup, in its own words.
+
+    The endpoint half is *not* asserted here, because this validator does not own it: an empty
+    `llm_base_url` is refused unconditionally by `_gateway_is_addressed`, which is declared first
+    and therefore raises before this one runs. This test used to pass `llm_base_url=""` and match
+    on `"llm_base_url"` — which is the other validator's message, so it stayed green with the
+    embedding branch deleted. Matching the embedding validator's own wording is what makes it a
+    test of the embedding validator (`test_a_blanked_gateway_address_is_refused` covers the rest).
+    """
+    with pytest.raises(ValueError, match="requires embedding_model"):
         Settings(  # type: ignore[call-arg]
             _env_file=None,
             llm_base_url="https://llm.internal/v1",

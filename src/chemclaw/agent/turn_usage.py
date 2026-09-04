@@ -103,8 +103,14 @@ def graph_usage_tokens(chunk: Any) -> TurnUsage:
     `ephemeral_1h_input_tokens` before the flat `cache_creation`, because `langchain_anthropic`
     publishes a cache write under both and **zeroes the flat key** when the per-TTL breakdown is
     present — so the obvious read booked 21,325 written tokens as full-price input on every cold
-    prefix. That is a fact about a reader this repository no longer installs: `ChatOpenAI` publishes
-    the flat key only, which `tests/test_upstream_surface.py` pins. Expect the value to be 0 on most
+    prefix. That is a fact about a reader nothing here can reach any more, which is a narrower
+    claim than "no longer installed": `langchain_anthropic` is still in the resolved closure
+    (`deepagents` requires it) and is imported on every agent build. What changed is that nothing
+    constructs a `ChatAnthropic` — `build_chat_model` is the one builder and always passes a model
+    — so the usage this function reads can only come from `ChatOpenAI`, which publishes the flat
+    key only. `tests/test_llm_provider.py::test_no_first_party_module_imports_the_anthropic_sdk`
+    is the guard on that, and `tests/test_upstream_surface.py` pins the key names. Expect the
+    value to be 0 on most
     gateways — an OpenAI-compatible endpoint caches implicitly and many report no write count at
     all — and read `chemclaw_cache_read_tokens_total` for whether caching is happening.
 

@@ -281,8 +281,11 @@ up() {
   # that needs a real model behind the address.
   if [ -n "${CHEMCLAW_LLM_BASE_URL:-}" ]; then
     export CHEMCLAW_LLM_API_KEY="${CHEMCLAW_LLM_API_KEY:-$(printenv 'API-KEY' 2>/dev/null || true)}"
-    log "model gateway: $CHEMCLAW_LLM_BASE_URL (model: ${CHEMCLAW_LLM_MODEL:-unset})"
+    # The refusal first: the log line below would otherwise print `model: unset` and the next
+    # statement would kill the run *because* it is unset — a diagnostic that only ever appears
+    # beside the fatal error explaining it.
     [ -n "${CHEMCLAW_LLM_MODEL:-}" ] || die "CHEMCLAW_LLM_BASE_URL is set but CHEMCLAW_LLM_MODEL is not"
+    log "model gateway: $CHEMCLAW_LLM_BASE_URL (model: $CHEMCLAW_LLM_MODEL)"
   else
     log "no CHEMCLAW_LLM_BASE_URL — running against the local mock LLM on 127.0.0.1:8820."
     log "  set CHEMCLAW_LLM_BASE_URL + CHEMCLAW_LLM_MODEL to drive a real gateway instead."

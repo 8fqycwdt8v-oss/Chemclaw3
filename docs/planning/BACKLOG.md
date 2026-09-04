@@ -76,9 +76,31 @@ topic).
   and it is **not** free: `trust_env=False` also stops httpx reading `SSL_CERT_FILE` /
   `SSL_CERT_DIR`, so a deployment relying on an env-supplied trust store would break. That is a
   behavioural change for every deployment behind a corporate proxy and wants its own ADR rather
-  than riding along with the collapse. `core/netguard` bounds the *destination host* and would not
-  see this: a proxy is dialled at its own address, which a deployment that configures one has
-  legitimately allowlisted.
+  than riding along with the collapse.
+  **`core/netguard` is a partial mitigation rather than a bystander, and a first telling of this
+  row said otherwise.** Measured, with the guard armed on `{127.0.0.1, localhost,
+  gateway.internal}`: `evil-proxy.example` and `corp-proxy.internal` are both refused at
+  `getaddrinfo`, and a bare `203.0.113.9:3128` at `connect` — so an `HTTPS_PROXY` naming a host
+  outside the derived allowlist does not get out. What the guard cannot see is a proxy the
+  deployment has *legitimately* allowlisted (`CHEMCLAW_EGRESS_ALLOW`, or a corporate proxy sharing
+  a host with declared infrastructure), where nothing distinguishes the operator's intent from an
+  env var somebody else set. That residual case, plus the guard being disableable
+  (`CHEMCLAW_EGRESS_GUARD_ENABLED=false`), is what keeps this row open.
+
+- [ ] **The gateway boot guard reaches one process, and the worker is the other one** — [M],
+  opened by `D-2026-09-04-a-gateway-is-the-only-provider`. `_refuse_unconfigured_llm_gateway` and
+  `_refuse_unauthenticated_exposure` are called only from `api/app.py`, so a background worker
+  never runs either — and `durable/template_activities.py` builds a graph inside an activity, so a
+  worker pod *does* make model calls to `llm_base_url`. The chart is not affected (verified:
+  `helm template` renders `CHEMCLAW_LLM_BASE_URL` into `chemclaw-config`, and 9 Deployments plus 3
+  Jobs `envFrom` it), so this bites a non-Helm or partially-overridden deployment, which gets a
+  silent loopback dial in the worker where the front door would have refused to boot.
+  **Not a one-liner, which is why it is a row.** The guard's signal is `service_host` being
+  non-loopback — a property of a *bind*, and a worker does not bind. Extending it means deciding
+  what "exposed" means for a process that only makes outbound calls, which is a design question.
+  The front-door-only scope is pre-existing (`_refuse_unauthenticated_exposure` has always been
+  that way); what is new is that the ADR's argument — "loudly at boot rather than loudly on the
+  first turn" — only holds for one of the two process kinds.
 
 - [ ] **A standing plan approval authorizes any state-changing tool, not the plan's steps** — [L],
   from the 2026-08 security review (proven live). `plan_gate.enforce_plan_approval` refuses a

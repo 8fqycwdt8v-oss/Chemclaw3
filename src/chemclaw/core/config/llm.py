@@ -262,24 +262,23 @@ class LlmSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _embedding_provider_config(self) -> Self:
-        """`openai_compatible` embeddings need the shared endpoint and a model name.
+        """`openai_compatible` embeddings need a model name — the endpoint is already required.
 
-        The embedding path reuses the LLM transport (`llm_base_url`), so the pair must be rejected
+        The embedding path reuses the LLM transport, so a half-configured pair has to be rejected
         at startup instead of surfacing as an opaque connection error on the first note-index or
-        query embedding deep in the retrieval path. `embedding_model` has no default — no gateway
-        serves embeddings under a name this repository can guess — so this is the half that
-        actually fires; `llm_base_url` is re-checked here because a deployment that blanked it
-        would otherwise reach the SDK's public host from this seam as well as from the chat one.
+        query embedding deep in the retrieval path. `embedding_model` is the whole check:
+        it has no default, because no gateway serves embeddings under a name this repository
+        can guess.
+
+        **`llm_base_url` is deliberately not re-checked here, and saying so is the point.** It was,
+        with a docstring claiming the re-check caught a deployment that blanked it — and the branch
+        could never run: `_gateway_is_addressed` above is unconditional and declared first, so
+        pydantic raises on an empty base URL before this validator is reached, whatever the
+        embedding provider is. The test that covered it passed on the *other* validator's message.
+        Nothing is weakened by the removal; the surviving check is strictly the wider one.
         """
-        if self.embedding_provider == "openai_compatible":
-            required = (
-                ("llm_base_url", self.llm_base_url),
-                ("embedding_model", self.embedding_model),
+        if self.embedding_provider == "openai_compatible" and not self.embedding_model:
+            raise ValueError(
+                "embedding_provider='openai_compatible' requires embedding_model to be set"
             )
-            missing = [name for name, value in required if not value]
-            if missing:
-                raise ValueError(
-                    f"embedding_provider='openai_compatible' requires "
-                    f"{', '.join(missing)} to be set"
-                )
         return self

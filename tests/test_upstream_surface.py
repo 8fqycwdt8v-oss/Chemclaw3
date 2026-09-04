@@ -781,8 +781,11 @@ def test_the_gateway_client_still_publishes_cache_tokens_under_the_two_flat_keys
     `langchain_anthropic` publishes a write under `ephemeral_5m_input_tokens` /
     `ephemeral_1h_input_tokens` *and zeroes the flat key* when it does, so `turn_usage` carried a
     `_cache_creation` that read the per-TTL pair first. This client does not emit those keys at
-    all, and with the collapse to one gateway
-    (`D-2026-09-04-a-gateway-is-the-only-provider`) no installed reader does — so the helper was a
+    all, and with the collapse to one gateway (`D-2026-09-04-a-gateway-is-the-only-provider`)
+    nothing *constructs* the reader that does — `langchain_anthropic` stays in the resolved
+    closure because `deepagents` requires it, and is imported on every agent build, but
+    `build_chat_model` always passes a model and no `ChatAnthropic` is ever built
+    (`test_no_first_party_module_imports_the_anthropic_sdk` is the guard). So the helper was a
     control with nothing to control. If a future `langchain_openai` starts publishing them, this
     goes red and the helper comes back rather than the tokens quietly moving to `input`.
     """
@@ -812,6 +815,59 @@ def test_the_gateway_client_still_publishes_cache_tokens_under_the_two_flat_keys
         "when it does, so agent/turn_usage needs the `_cache_creation` helper back"
     )
 
+    # **The flatness is conditional, and the condition is a request parameter.** With
+    # `service_tier` set to `priority` or `flex`, the same function prefixes both keys —
+    # `flex_cache_read`, `priority_cache_creation` — and `turn_usage` reads the bare names only,
+    # so on those tiers every cache read would be booked as full-price input and
+    # `turn_costs.cache_write_tokens` would sit at zero on a deployment that writes a cache every
+    # turn. Latent rather than live: nothing in this repository sets `service_tier`, there is no
+    # setting for it, and `ChatOpenAI` defaults it to `None` — which is what the second assertion
+    # pins. Asserted rather than fixed because a `startswith` read in `turn_usage` would be a
+    # guess about a tier nobody here can select; whoever adds the setting gets this failure and
+    # the reason with it.
+    tiered = _create_usage_metadata(
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 200,
+            "total_tokens": 1200,
+            "prompt_tokens_details": {"cached_tokens": 700, "cache_write_tokens": 100},
+        },
+        "flex",
+    )
+    tiered_details = tiered["input_token_details"]
+    assert "cache_read" not in tiered_details and "flex_cache_read" in tiered_details, (
+        "langchain_openai changed how service_tier prefixes the cache keys; agent/turn_usage "
+        "reads the bare names, so a tiered deployment's cache reads would be billed as input"
+    )
+    from langchain_openai import ChatOpenAI
+
+    assert ChatOpenAI(model="x", api_key="k").service_tier is None, (  # type: ignore[arg-type]
+        "ChatOpenAI now defaults service_tier to a value; agent/turn_usage reads the unprefixed "
+        "cache keys and would silently stop finding them"
+    )
+
+
+def test_a_message_still_flattens_its_content_blocks_through_a_text_property() -> None:
+    """`BaseMessage.text` is a property, and `evals/live_judge.py` reads it as one.
+
+    `judge_outcome` does `str(response.text).strip()` and then looks for a JSON object in it. If
+    upstream turns `text` back into a *method* — it has been both — `str(<bound method>)` is
+    `"<bound method BaseMessage.text of ...>"`, which contains no `{`, so **every** probe returns
+    `ungraded` with a reason quoting a bound method. That is the exact mislabelling the module
+    header exists to prevent: an ungraded verdict is supposed to mean the judge could not decide,
+    not that the harness could not read the reply. Nothing raises, and a full grading run reports
+    a clean sweep of non-answers.
+
+    Asserted on the class rather than on an instance, because an instance's `.text` is a string
+    either way and a string is exactly what the broken read produces.
+    """
+    from langchain_core.messages import BaseMessage
+
+    assert isinstance(BaseMessage.text, property), (
+        "BaseMessage.text is no longer a property; evals/live_judge.py reads `response.text` as "
+        "one and would grade every probe `ungraded` off the repr of a bound method"
+    )
+
 
 def test_the_pinned_versions_are_the_ones_these_assertions_were_measured_against() -> None:
     """A floor, not a ceiling — so a bump is loud once and then accepted deliberately.
@@ -828,6 +884,10 @@ def test_the_pinned_versions_are_the_ones_these_assertions_were_measured_against
         "langgraph": (1, 2, 10),
         "deepagents": (0, 7, 5),
         "langchain-mcp-adapters": (0, 3, 2),
+        # The two clients the gateway seam actually reads shapes off: `langchain-openai` for the
+        # usage keys above, `langchain-core` for `BaseMessage.text` being a property.
+        "langchain-openai": (1, 6, 0),
+        "langchain-core": (1, 6, 0),
     }
     for package, floor in measured.items():
         found = tuple(int(part) for part in version(package).split(".")[:3])
