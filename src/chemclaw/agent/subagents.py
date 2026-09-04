@@ -129,9 +129,10 @@ Every tool of this system's that you hold only reads. You cannot start a durable
 knowledge note, record an answer, ask the chemist a question, or call an external connector tool;
 the agent that spawned you can do all of those, and the right way to make one happen is to say so
 in your report. You do hold file tools that write, and a file you write is **not** private to you:
-it crosses back to the agent that spawned you along with your report, so treat anything you put in
-one as something you are handing over. Do not describe work as started, scheduled or arriving
-later: nothing you can reach starts anything."""
+it crosses back to the agent that spawned you along with your report, and it stays there — the
+conversation you were spawned from can read it again on a later turn, long after you are gone. So
+treat anything you put in one as something you are handing over for keeps. Do not describe work as
+started, scheduled or arriving later: nothing you can reach starts anything."""
 
 
 def governed_roster(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:

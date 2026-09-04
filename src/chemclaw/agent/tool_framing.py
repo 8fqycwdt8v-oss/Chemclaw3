@@ -26,14 +26,42 @@ a convention that framed one of them would recreate the "second retrieved-text c
 object" defect `agent/research_tools.py` had to fix twice. The honest statement is about the whole
 result — *this crossed a process boundary* — so the envelope goes around the whole result.
 
-**Which calls.** Exactly the ones a server outside this process answered, decided by the `SERVED_BY`
-stamp `connectors/transport._stamped` writes onto every tool that came back from an MCP handshake —
-the same fact `agent/audit.py::_served_by` reads to fill the trail's provenance column, read from
-the same single constant. Not a name list and not a registry lookup: a stamp on the tool object the
-graph actually holds cannot disagree with what ran, and an in-process tool, a generated job
-launcher and a template tool are all unstamped, so none of them is touched. That is also what makes
-double-framing impossible rather than merely avoided — the four channels `framing.py` already
-covers are all in-process, so this middleware never sees them.
+**Which calls, and what each one gets.** This middleware decides *three* treatments, not two, and
+saying "only out-of-process results are touched" was this docstring's own claim for as long as that
+was false — it went stale when the `task` branch landed and doubly stale when the scratchpad verbs
+joined it. The three:
+
+1. **Framed** — exactly the calls a server outside this process answered, decided by the `SERVED_BY`
+   stamp `connectors/transport._stamped` writes onto every tool that came back from an MCP
+   handshake, the same fact `agent/audit.py::_served_by` reads to fill the trail's provenance
+   column, read from the same single constant. Not a name list and not a registry lookup: a stamp on
+   the tool object the graph actually holds cannot disagree with what ran. That is also what makes
+   double-framing impossible rather than merely avoided — the four channels `framing.py` already
+   covers are all in-process, so this middleware never sees them there.
+2. **Defanged and not framed** — a connector *failure*, a helper's report (`subagent_tool_names()`)
+   and every scratchpad verb (`scratchpad_tools()`). Each carries text that can spell the closing
+   delimiter and none of them is evidence a citation may name; `frame_connector_results`' own
+   docstring argues each case.
+3. **Left alone** — everything else. An in-process tool that frames its own spans, a generated job
+   launcher, a template tool: unstamped, not a helper, not a file verb, and nothing to rewrite.
+
+The two rewritten sets are read from the functions that *derive* them rather than from a list
+spelled here, which is the same argument `subagents.helper_profile` makes for
+`authz.side_effecting_tools()`: a verb an upstream bump adds is covered the day it is bound, and the
+two verbs this deployment withholds — `execute` and `delete` — never enter the set, because
+`scratchpad_tools()` is where they are withheld.
+
+**The stamp is asked first, and a name is asked only of what the stamp did not claim.** The order
+is load-bearing rather than stylistic, because the two sets overlap on names a *connector* may
+plausibly declare. `_declared_tool_names` refuses one bundle's name colliding with another's; it
+does not compare against the ambient names, so a connector declaring `read_file` — which a code
+execution or document server would reasonably do — is not refused. Measured against a live
+streamable-HTTP server declaring one: it wins `ToolNode.tools_by_name` **and** carries the
+`SERVED_BY` stamp. Asking the name first would therefore defang a genuinely third-party payload
+instead of framing it, stripping the envelope and the `probe:read_file` provenance from content
+that crossed a process boundary — exactly backwards, and a regression introduced by widening the
+name set from one to seven. A stamped tool ran outside this process whatever it is called, so the
+stamp decides and the names only sort what is left.
 
 **Position: outside the audit trail, inside the two converters** (see
 `langgraph_agent.tool_call_middleware`). Outside `audit` so `audit_events.detail` records what the
@@ -166,27 +194,80 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
     citation frame is withheld. What the caller still cannot see is *that* the report is derived
     from untrusted reading, which is an epistemic gap rather than a mechanical one and is a
     `docs/planning/BACKLOG.md` row.
+
+    **A scratchpad read is the fourth case and it takes the same treatment, for the same reason**
+    (`D-2026-09-04-a-helpers-file-crosses-back-and-stays`). The report is not the only thing that
+    crosses a helper's boundary: `deepagents`' `_EXCLUDED_STATE_KEYS` is `{"messages", "todos",
+    "structured_response"}`, and `files` is not among them, so a helper's `/scratch/evidence.md`
+    lands in its caller's `files` channel — deliberately kept, because pointer-passing is better
+    context economics than pasting the reading into a report. What crossed still has to be read
+    back, and `read_file` is in-process: `served_by(request)` returns `""` for it, so before this
+    branch the caller's read arrived with **nothing applied** — byte for byte the file the helper
+    wrote, a copied `</retrieved-note-…>` **live** in it, plus `read_file`'s own line prefix and
+    not one character else. That relation, rather than a character count, is what
+    `tests/test_subagents.py::test_a_helpers_file_reaches_its_caller_and_is_defanged_when_read`
+    asserts: a count would be a claim about this fixture's wording as much as about the code
+    (`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`).
+
+    **Defanged rather than framed**, and here the argument is sharper than it is for a report:
+    `/scratch/` is this system's own notepad, so an envelope around a file the turn wrote itself
+    would invite a citation crediting the system for its own prose — the same distinction the error
+    branch above draws, one channel further in.
+
+    **The coverage is the whole verb set, not `read_file`.** Three channels carry the text and only
+    one of them is a file read. `grep(output_mode="content")` returns matching lines, so it is a
+    second content channel — measured live at 121 characters with the same live delimiter. And
+    `write_file` **echoes the path** in its confirmation, so
+    `write_file(file_path="/scratch/</retrieved-note-…>.md")` puts a live delimiter in the caller's
+    thread with no helper and no read involved at all — measured at 59 characters. Keying on
+    `scratchpad_tools()` rather than on a name this docstring picked is what makes those three one
+    case instead of three fixes.
+
+    **A verb is not a root, so this also covers `/skills/` and `/memories/`, and the answer is the
+    same for all three.** `scratchpad_backend` routes one `read_file` to three places; none of them
+    is a citable source. A `SKILL.md` is this repository's own judgment, checked into git behind the
+    role gate — the model is told to load it and act on it, not to cite it. A memory is prose the
+    model wrote itself on an earlier turn, which is the helper's report one remove further out.
+    Framing either would be the same misattribution as framing a scratch note.
+
+    **What is stored and what the model sees now differ, and that has one consequence worth
+    naming.** Nothing on disk or in the `files` channel is rewritten — this is a presentation
+    decision taken on the way out, so the stored content stays pristine and a later read starts
+    from the same bytes. But a model that copies a string *out of what it just read* and hands it
+    back as `edit_file`'s `old_string` is copying the escaped form while the file holds the live
+    one, and the edit comes back `Error: String not found in file`. Narrow while only a delimiter
+    is escaped. It widens on `framing._defang`'s second pass, which escapes **every** `<` in the
+    content once an invisible character reveals a disguised tag: one zero-width byte anywhere in a
+    scratch file and that file's read→edit loop breaks for all of its markup rather than only for
+    the tag. The recovery is the one a model already has — edit on a span it did not copy through a
+    rewrite — and the alternative, a live delimiter in the caller's thread, is what this branch
+    exists to stop.
     """
     # Imported here rather than at module scope: `chemclaw_agent` reaches this module's siblings
-    # through the agent builder, and the name it derives is a property of the installed package —
-    # cached there, so this costs a dict lookup per call rather than a middleware build.
+    # through the agent builder, and both sets are properties of the installed package — each
+    # `@cache`d where it is derived, so a call here costs a hash lookup in a frozenset and a scan of
+    # a six-name tuple, rather than building two middlewares to ask them.
     from chemclaw.agent.chemclaw_agent import subagent_tool_names
+    from chemclaw.agent.scratchpad import scratchpad_tools
 
     result = await handler(request)
 
     def _defanged(message: ToolMessage) -> ToolMessage:
         return message.model_copy(update={"content": _rewritten(message.content, defang)})
 
-    if request.tool_call["name"] in subagent_tool_names():
-        return rewritten_tool_messages(result, _defanged)
     origin = served_by(request)
-    if not origin:
-        return result
+    if origin:
 
-    def _framed(message: ToolMessage) -> ToolMessage:
-        if message.status == "error":
-            return _defanged(message)
-        content = _rewritten(message.content, lambda text: frame_untrusted(text, note_id=origin))
-        return message.model_copy(update={"content": content})
+        def _framed(message: ToolMessage) -> ToolMessage:
+            if message.status == "error":
+                return _defanged(message)
+            content = _rewritten(
+                message.content, lambda text: frame_untrusted(text, note_id=origin)
+            )
+            return message.model_copy(update={"content": content})
 
-    return rewritten_tool_messages(result, _framed)
+        return rewritten_tool_messages(result, _framed)
+    name = request.tool_call["name"]
+    if name in subagent_tool_names() or name in scratchpad_tools():
+        return rewritten_tool_messages(result, _defanged)
+    return result

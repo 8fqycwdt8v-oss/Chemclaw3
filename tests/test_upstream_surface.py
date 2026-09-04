@@ -106,6 +106,70 @@ def test_a_subagent_still_cannot_see_the_parent_s_todos() -> None:
     )
 
 
+def test_a_subagents_files_still_cross_into_its_callers_state() -> None:
+    """The affordance three docstrings now describe, asserted as the absence that makes it true.
+
+    `_return_command_with_state_update` copies every helper state key *except* those in
+    `_EXCLUDED_STATE_KEYS` into the caller's update. `files` is not among them, so a helper's
+    `/scratch/evidence.md` reaches its caller — kept deliberately
+    (`D-2026-09-04-a-helpers-file-crosses-back-and-stays`), because a pointer costs a caller less
+    than the reading behind it.
+
+    Asserted as an absence, in the shape this file's other absence assertions use, so that upstream
+    *adding* `files` to the set turns this red rather than silently retiring three paragraphs. What
+    would go stale: `agent/langgraph_agent._subagents`' bullet on the store, the clause in
+    `subagents.HELPER_BRIEF` telling a helper its files are handed over, and the scratch branch of
+    `agent/tool_framing.frame_connector_results` — which would then be defanging a channel a helper
+    can no longer reach. The framing itself would still be needed for a caller's own writes, so a
+    red here is a prose correction, never an instruction to delete the branch.
+    """
+    from deepagents.middleware.subagents import _EXCLUDED_STATE_KEYS
+
+    assert "files" not in _EXCLUDED_STATE_KEYS, (
+        "subagents no longer pass `files` back to their caller. agent/langgraph_agent._subagents, "
+        "agent/subagents.HELPER_BRIEF and agent/tool_framing.frame_connector_results all describe "
+        "a helper's file crossing back and staying; re-read "
+        "docs/decisions/D-2026-09-04-a-helpers-file-crosses-back-and-stays.md before editing them"
+    )
+
+
+def test_read_file_still_has_no_video_route_this_deployment_could_reach() -> None:
+    """A fifth text channel out of `read_file`, live the day one transitive dependency arrives.
+
+    `read_file` on a video does not return a `ToolMessage`. It returns a `Command` whose
+    `update["messages"]` carries a `ToolMessage` *and* a synthetic `HumanMessage` whose first
+    content block is `{"type": "text", "text": _video_window_header(path, …)}` — and that header
+    interpolates the caller-supplied path verbatim.
+    `agent/tool_result_shape.rewritten_tool_messages` rewrites `ToolMessage`s only, so nothing in
+    `agent/tool_framing.py` would touch that block: the
+    same shape as the path echo `D-2026-09-04-a-helpers-file-crosses-back-and-stays` closed for
+    `write_file`, reopened on a message class the rewriter does not visit.
+
+    It is unreachable here only because `video_dependencies_available()` requires **both** `av` and
+    `PIL.Image`, and `av` is not installed — while Pillow already arrives transitively with RDKit,
+    so a single new transitive dependency turns the route on with nothing in this repository
+    changed and nothing to notice. That is exactly the condition an absence assertion is for: this
+    goes red on the dependency bump rather than on the incident.
+
+    Asserting the *predicate* rather than the header, because the header is upstream's prose and
+    the predicate is the gate — imported from `deepagents.middleware._video`, its definition site
+    and the one `filesystem.py` itself imports, rather than through `filesystem`'s re-export, which
+    is not in that module's `__all__`. Do not fix the video path in response to a red here — decide
+    first whether this deployment wants a video route at all; if it does, the fix is in
+    `agent/tool_result_shape.py` (which message classes a rewrite visits), not in a name list.
+    """
+    from deepagents.middleware._video import video_dependencies_available
+
+    assert not video_dependencies_available(), (
+        "`av` and Pillow are both installed, so deepagents' read_file now has a video route whose "
+        "synthetic HumanMessage carries the caller's path in a text block. "
+        "agent/tool_result_shape.rewritten_tool_messages visits ToolMessages only, so "
+        "agent/tool_framing.frame_connector_results does not defang it — read "
+        "docs/decisions/D-2026-09-04-a-helpers-file-crosses-back-and-stays.md and decide whether "
+        "this deployment wants that route before installing the dependency"
+    )
+
+
 def test_the_skills_middleware_still_caches_under_skills_metadata() -> None:
     """`ReloadingSkillsMiddleware` re-declares exactly this channel, and nothing else.
 

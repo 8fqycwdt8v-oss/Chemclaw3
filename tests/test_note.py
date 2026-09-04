@@ -2,12 +2,21 @@
 
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from pydantic import ValidationError
 
+import chemclaw.kg.note as note_module
 from chemclaw.core.errors import ChemclawError
-from chemclaw.kg.note import Note, NoteError, mentioned_ids, parse_note, read_note
+from chemclaw.kg.note import (
+    Note,
+    NoteError,
+    external_record_id,
+    mentioned_ids,
+    parse_note,
+    read_note,
+)
 
 
 def test_is_current_honors_validity_window() -> None:
@@ -201,3 +210,39 @@ def test_mentioned_ids_deduplicates_and_keeps_first_seen_order() -> None:
     """Same contract as `cited_ids`, so the two readers stay interchangeable to a caller."""
     text = '{"id": "a-note"} {"id": "b-note"} {"id": "a-note"} [[b-note]] [[c-note]]'
     assert mentioned_ids(text) == ["a-note", "b-note", "c-note"]
+
+
+def test_external_record_id_strips_whichever_prefix_matched() -> None:
+    """The strip is driven by the constant, so growing the namespace cannot break the lookup.
+
+    `EXTERNAL_ID_PREFIXES` is a *tuple* and has one entry today, which is exactly what makes a
+    hand-rolled `removeprefix("reaction-")` look correct while being a latent defect: it reads
+    the constant's only current value rather than the constant. Driving the function over a
+    two-entry tuple is what tells the two apart — a hand-rolled strip returns the id with the
+    second prefix still attached, and the store is then queried for something that cannot exist.
+    """
+    with mock.patch.object(note_module, "EXTERNAL_ID_PREFIXES", ("reaction-", "measurement-")):
+        assert external_record_id("reaction-EXP-1001") == "EXP-1001"
+        assert external_record_id("measurement-EXP-1001") == "EXP-1001"
+    # An id in no external namespace is returned whole, so a graph note id survives the call.
+    assert external_record_id("rxn-suzuki-biaryl") == "rxn-suzuki-biaryl"
+
+
+def test_no_reader_hand_rolls_the_external_id_strip() -> None:
+    """`external_record_id` has one definition, and this is what keeps it the only one.
+
+    Its own docstring names the hand-rolled form as the defect it exists to prevent, and two
+    readers spelled it anyway — `agent.graph_tools.expand_note` and `agent.protocol_tools`, both
+    of which already imported from this module. Prose did not stop that and a type checker
+    cannot see it, so the rule is a scan: nothing outside this module's own docstring may strip
+    an external prefix by literal.
+    """
+    src = Path(__file__).resolve().parent.parent / "src" / "chemclaw"
+    offenders = [
+        path.relative_to(src).as_posix()
+        for path in src.rglob("*.py")
+        if path.name != "note.py"
+        for prefix in note_module.EXTERNAL_ID_PREFIXES
+        if f'removeprefix("{prefix}")' in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], f"hand-rolled external-id strip, use external_record_id(): {offenders}"

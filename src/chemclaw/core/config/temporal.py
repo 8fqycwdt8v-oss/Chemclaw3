@@ -91,15 +91,16 @@ class TemporalSettings(BaseSettings):
     # never finishes is worse than a failed one: it skips every subsequent fire of that job family,
     # indefinitely, and a skipped fire is not an error anywhere. The ceiling ends that wedge.
     #
-    # **It does not make the kill visible, and this comment used to say it did.** `ScheduleHealth`
-    # carries no run outcome and `ScheduleInfo` does not supply one — `recent_actions` names the
-    # workflow and when it started, and a status would cost a `describe` per schedule on the front
-    # door's own event loop. Measured against a live broker: with the ceiling, a schedule whose
-    # every run is killed reports `runs_total` climbing, `last_run` advancing, `running_now` 0 and
-    # `skipped_overlap` 0 — byte-identical to a healthy job, while the wedge it replaces had a
-    # distinctive signature on that surface (`last_run` frozen, `running_now` stuck at 1,
-    # `skipped_overlap` climbing). So the kill is visible in the Temporal UI's per-workflow status
-    # and nowhere else here; surfacing it on `describe_schedules` is an open item.
+    # **It does not make the kill visible on its own**, and for a while nothing here did.
+    # `ScheduleInfo` supplies no outcome — `recent_actions` names the workflow and when it started,
+    # and there is no failure counter — so with the ceiling, a schedule whose every run is killed
+    # reported `runs_total` climbing, `last_run` advancing, `running_now` 0 and `skipped_overlap` 0,
+    # byte-identical to a healthy job, while the wedge it replaces had a distinctive signature on
+    # that surface (`last_run` frozen, `running_now` stuck at 1, `skipped_overlap` climbing). The
+    # kill was therefore visible in the Temporal UI's per-workflow status and nowhere else here.
+    # `ScheduleHealth.last_outcome` closes that: `durable/schedules.py::_last_outcome` describes the
+    # newest recent action that is not still running — one extra bounded lookup per schedule — and
+    # reports Temporal's own `TIMED_OUT` for a run this ceiling killed.
     #
     # A day, because none of these jobs legitimately runs for one, and what a terminated run costs
     # differs per job rather than being uniformly small: the ELN sync is cursored in `sync_cursors`

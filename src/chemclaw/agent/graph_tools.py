@@ -26,7 +26,7 @@ from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.kg.analytics import GraphGaps, analyze
 from chemclaw.kg.git_submitter import default_submitter
 from chemclaw.kg.graph import build_graph, load_notes, neighborhood, note_in
-from chemclaw.kg.note import Note, Relation, resolves_outside_graph
+from chemclaw.kg.note import Note, Relation, external_record_id, resolves_outside_graph
 from chemclaw.kg.pr_gate import propose_note
 from chemclaw.kg.relations import DEFAULT_RELATION
 from chemclaw.kg.search import query_terms, term_coverage
@@ -237,7 +237,7 @@ async def _expand_record(note_id: str) -> NoteView:
     `created_by` is reported as `agent` because a program rendered the file, which is what that
     field has always meant; it no longer implies anything is waiting for review.
     """
-    record = await default_record_store().read(note_id.removeprefix("reaction-"))
+    record = await default_record_store().read(external_record_id(note_id))
     if record is None:
         raise ChemclawError(f"no reaction record with id {note_id!r}")
     return NoteView(

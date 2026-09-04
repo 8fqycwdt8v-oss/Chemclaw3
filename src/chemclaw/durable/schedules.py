@@ -29,8 +29,11 @@ from pydantic import BaseModel
 from temporalio.client import (
     Client,
     Schedule,
+    ScheduleActionExecution,
+    ScheduleActionExecutionStartWorkflow,
     ScheduleActionStartWorkflow,
     ScheduleAlreadyRunningError,
+    ScheduleInfo,
     ScheduleIntervalSpec,
     ScheduleOverlapPolicy,
     SchedulePolicy,
@@ -406,6 +409,16 @@ class ScheduleHealth(BaseModel):
     previous run was still going (the SKIP policy from gap SCH-3). A steadily climbing value means
     the job no longer fits inside its interval, which is the early warning that a corpus has
     outgrown its cadence.
+
+    **`last_outcome` is the field that makes a dead job distinguishable from a quiet one**, and
+    every other field on this model was measured to be blind to it. A schedule whose every run is
+    killed by `schedule_run_timeout_seconds` reports `runs_total` climbing, `last_run` advancing,
+    `running_now` 0 and `skipped_overlap` 0 — the same six values a healthy job reports, because
+    Temporal's `ScheduleInfo` carries no outcome anywhere: `recent_actions` names the workflow and
+    when it started, and there is no failure counter beside `num_actions_skipped_overlap`. The
+    wedge the ceiling replaced *did* have a signature here (`last_run` frozen, `running_now` stuck
+    at 1, `skipped_overlap` climbing), so the ceiling was a real fix that moved the failure to a
+    surface that said nothing.
     """
 
     schedule_id: str
@@ -415,6 +428,13 @@ class ScheduleHealth(BaseModel):
     runs_total: int = 0
     skipped_overlap: int = 0
     running_now: int = 0
+    # Temporal's own `WorkflowExecutionStatus` name for the newest run that has *finished* —
+    # `COMPLETED`, `FAILED`, `TIMED_OUT`, `TERMINATED`, `CANCELED`. Empty means no run has
+    # finished yet (a first fire still in flight, or a Schedule that never fired); `unknown`
+    # means the run could not be described, and `note` says why. It is deliberately not
+    # "the status of the run `last_run` names": a run still in flight has no outcome, and
+    # `running_now` is already the field that says one is in flight.
+    last_outcome: str = ""
     note: str = ""
 
 
@@ -437,6 +457,12 @@ async def describe_schedules(client: Client | None = None) -> list[ScheduleHealt
     `describe()` takes no `retry` argument.
 
     `gather` preserves order, so the report is still in plan order.
+
+    Each schedule now costs **two** bounded lookups rather than one — the schedule's own
+    `describe`, then one `describe` of its newest finished run to recover the outcome
+    `ScheduleInfo` does not carry (`_last_outcome`). Both are bounded by the same probe budget and
+    the schedules still run concurrently, so the sweep's worst case is
+    `2 x connector_health_timeout_seconds` rather than a per-schedule sum.
     """
     connection = client if client is not None else await connect()
     return list(await asyncio.gather(*(_describe(connection, job) for job in planned_schedules())))
@@ -462,8 +488,66 @@ async def _describe(connection: Client, job: PlannedSchedule) -> ScheduleHealth:
     entry.skipped_overlap = info.num_actions_skipped_overlap
     entry.running_now = len(list(info.running_actions or []))
     recent = list(info.recent_actions or [])
-    if recent:
-        entry.last_run = recent[-1].started_at
-    else:
+    if not recent:
         entry.note = "no run recorded yet"
+        return entry
+    entry.last_run = recent[-1].started_at
+    entry.last_outcome, entry.note = await _last_outcome(connection, info)
     return entry
+
+
+def _workflow_id(execution: ScheduleActionExecution) -> str:
+    """The workflow id a schedule action started, or `""` for an action shape we cannot read.
+
+    `ScheduleActionExecution` is a base class and `ScheduleActionExecutionStartWorkflow` is its
+    only member today, so this is one `isinstance` rather than a cast: a future action kind that
+    does not start a workflow drops out of the outcome lookup instead of raising in a health probe.
+    """
+    return (
+        execution.workflow_id if isinstance(execution, ScheduleActionExecutionStartWorkflow) else ""
+    )
+
+
+async def _last_outcome(connection: Client, info: ScheduleInfo) -> tuple[str, str]:
+    """The newest *finished* run's status, and a note when it could not be read.
+
+    **Exactly one extra `describe` per schedule, and the in-flight runs are excluded without
+    spending any.** `ScheduleInfo.running_actions` already names the workflow ids Temporal
+    considers still running, so the newest recent action that is *not* in that set is the newest
+    run with an outcome — no describe is spent discovering that a run is unfinished, and there is
+    no lookback window to tune. The cost of `describe_schedules` is therefore two bounded
+    `describe` calls per planned schedule, still one `gather` across schedules; the bound is
+    `connector_health_timeout_seconds`, the same probe budget the schedule lookup above uses,
+    because this is the same probe on the same event loop and a second knob could only disagree
+    with it.
+
+    **Described without a `run_id`, which is the whole reason this reports anything useful.**
+    Four of the scheduled jobs drain by `continue_as_new` (`corpus_sync`, `document_sync`,
+    `label_sync`, `eln_sync`), and a chain shares one workflow id, so describing the id alone
+    answers with the chain's *tail*. `recent_actions[i].action.first_execution_run_id` addresses
+    the chain's *head*, which is `CONTINUED_AS_NEW` for every chained job whatever happened
+    afterwards. Measured against a live broker on a three-hop chain killed by its run timeout:
+    the id alone reported `TIMED_OUT`, the first run id reported `CONTINUED_AS_NEW` — so the
+    obvious field on the action is precisely the one that would report a killed drain as normal.
+
+    A run whose retention has expired no longer describes; that is `unknown` with the reason in
+    `note`, never an exception, because one unreadable run must not end the sweep for the other
+    ten schedules.
+    """
+    in_flight = {_workflow_id(action) for action in (info.running_actions or [])}
+    finished = [
+        result
+        for result in (info.recent_actions or [])
+        if _workflow_id(result.action) and _workflow_id(result.action) not in in_flight
+    ]
+    if not finished:
+        return "", ""
+    try:
+        described = await asyncio.wait_for(
+            connection.get_workflow_handle(_workflow_id(finished[-1].action)).describe(),
+            settings.connector_health_timeout_seconds,
+        )
+    except Exception as exc:
+        return "unknown", f"run outcome unavailable ({type(exc).__name__}) — retention expired?"
+    status = described.status
+    return ("unknown" if status is None else status.name), ""
