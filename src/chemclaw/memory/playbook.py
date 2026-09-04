@@ -92,7 +92,6 @@ def find_playbook_candidates(
             "cross-project recurrence cannot be counted without one",
             len(successes),
         )
-    reactions = successes
     fingerprints = reaction_fingerprints(projected)
     project_of = {r.reaction_id: r.project for r in projected if r.reaction_id in fingerprints}
 

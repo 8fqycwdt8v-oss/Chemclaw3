@@ -50,7 +50,11 @@ def mine_corpus(reactions: list[OrdReaction]) -> list[Observation]:
 
     A cluster with no `FAILURE` in it is not emitted at all: `INCONCLUSIVE` means aborted,
     mis-charged or never assayed, which per `OutcomeClass` carries no evidence about the chemistry,
-    so "nothing here succeeded" would read as a finding where there is none.
+    so "nothing here succeeded" would read as a finding where there is none. **The same rule
+    decides the cross-project count**, which is the tier's whole premise: a project that has only
+    ever returned inconclusive runs has not failed at this, so it is not one of the projects the
+    recurrence spans. It stays in `evidence_note_ids` and in the aside, because it is a merged
+    record and part of the cluster's shape — what it may not do is be the second project.
 
     Deterministic: same corpus in, same observations out, ordered by cluster anchor.
     """
@@ -88,12 +92,20 @@ def mine_corpus(reactions: list[OrdReaction]) -> list[Observation]:
 
     observations: list[Observation] = []
     for cluster in cluster_by_similarity(fingerprints, settings.playbook_similarity_threshold):
-        projects = sorted({p for member in cluster if (p := project_of.get(member))})
-        if len(projects) < 2:
-            # One project repeating itself is episodic, which the campaign layer already covers.
-            continue
         failures = [m for m in cluster if outcome_of.get(m) is OutcomeClass.FAILURE]
         if not failures:
+            continue
+        # **Over the failures, not over the cluster** — the cluster holds `INCONCLUSIVE` members by
+        # construction, and the sentence below counts only the failures, so a project set taken
+        # over the whole cluster made the two halves of one claim disagree. Measured: one failure
+        # in alpha beside two never-assayed runs in beta read as "failed in 1 run across 2 projects
+        # (alpha, beta)" and cleared both shipped promotion thresholds, so `observation_jobs`
+        # opened a playbook PR whose body copies that sentence to a reviewer verbatim. An
+        # inconclusive run is exactly the thing `OutcomeClass` says carries no evidence about the
+        # chemistry, so it cannot be the second project that makes a recurrence a recurrence.
+        projects = sorted({p for member in failures if (p := project_of.get(member))})
+        if len(projects) < 2:
+            # One project repeating itself is episodic, which the campaign layer already covers.
             continue
         inconclusive = [m for m in cluster if outcome_of.get(m) is OutcomeClass.INCONCLUSIVE]
         aside = (

@@ -686,9 +686,7 @@ def test_an_exclusion_naming_one_molecule_is_not_the_exclusion_naming_another() 
             ],
             objectives=[Objective(name="yield", direction="maximize")],
             constraints=[
-                ExcludeConstraint(
-                    parameters=["molecule", "solvent"], options=[[molecule], ["THF"]]
-                )
+                ExcludeConstraint(parameters=["molecule", "solvent"], options=[[molecule], ["THF"]])
             ],
         )
 
