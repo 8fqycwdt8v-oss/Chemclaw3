@@ -93,9 +93,10 @@ moved into the chart and its test: a number written in prose is a number that go
   startup with a validation error naming the stale field — and that is true of a key in a *dotenv
   file* and false of the environment. pydantic-settings' `EnvSettingsSource` looks up only the names
   it has fields for, so a `CHEMCLAW_*` variable that matches nothing is never seen, let alone
-  rejected: `CHEMCLAW_A_KEY_ONLY_V2_KNOWS=1` boots cleanly, and a ConfigMap is exactly how config
-  arrives in-cluster. So a stale export is silently ignored rather than loud, and the same silence
-  is what makes a rolled-back or hand-edited ConfigMap quiet rather than obvious.
+  rejected: a `CHEMCLAW_`-prefixed variable matching no field boots cleanly, and a ConfigMap is
+  exactly how config arrives in-cluster. So a stale export is silently ignored rather than loud,
+  and the same silence is what makes a rolled-back or hand-edited ConfigMap quiet rather than
+  obvious.
 - **`CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` is the ceiling the whole deployment may put on the
   shared LLM endpoint** (D-2026-08-01-a-per-process-cap-multiplied-by-a-number-nobody-wrote-down).
   The admission cap is per-process by design, so the load that endpoint really sees is
