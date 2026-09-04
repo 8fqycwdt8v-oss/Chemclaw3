@@ -243,10 +243,16 @@ load_profiles()
 #: `HEAD`: `default` is **42,505** (was written as 42,458), the old basis is **34,379** (written as
 #: 34,399, which was a transcription error rather than a stale reading — nothing ever measured
 #: 34,399), the gap between them is **8,126** (written as 8,059) and the seven middleware tools are
-#: **2,636** (written as 2,569). The ceiling is untouched: 43,500 still holds with 995 to spare, and
-#: the load-bearing property — headroom under one `propose_knowledge_note` — survives the
-#: correction. **Nothing about the mechanism changed; the numbers moved because they were taken
-#: again.**
+#: **2,636** (written as 2,569). **Nothing about the mechanism changed; the numbers moved because
+#: they were taken again.**
+#:
+#: **And the same sentence then said \"995 to spare\" for six days, which is the defect one
+#: paragraph up, committed by the paragraph that names it.** Re-measured 2026-09-04: `default` is
+#: **42,717**, so the headroom was 783 rather than 995 — drifted by merges this file never saw.
+#: The load-bearing property is what survives a re-measurement and the number is not: the ceiling
+#: holds with less headroom than one `propose_knowledge_note` costs, which is the property every
+#: raise above was chosen for, and `_report` prints the day's figure so nobody has to trust this
+#: comment for it.
 CEILINGS: dict[str, int] = {"__default__": 43_500}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
@@ -268,9 +274,26 @@ MAX_SINGLE_TOOL_TOKENS = 900
 #: `ProtocolBody` is 922 tokens with every description already one line, so a 900-token bound cannot
 #: be met by a tool that authors a procedure; what would meet it is deleting the schema, which
 #: trades constrained generation for context on the call where a malformed argument costs most.
-#: `docs/planning/BACKLOG.md` carries the row for revisiting it, and the honest trigger is a
-#: provider that `$ref`s a repeated model instead of inlining it — which would cut every entry here
-#: at once and is a measurement to take rather than a change to make.
+#: **The escape this comment used to name — a conversion that `$ref`s a repeated model instead of
+#: inlining it — was measured on 2026-09-04 and is closed against.** It is available: installed
+#: `langchain_core` is 1.6.0 and has no switch (`_convert_json_schema_to_openai_function` calls
+#: `dereference_refs` and pops `$defs` unconditionally), but `bind_tools` converts each tool with
+#: `convert_to_openai_tool`, whose \"already in OpenAI function format\" branch copies a dict's
+#: `parameters` verbatim — so a `$defs` schema is deliverable with no upstream patch. It costs
+#: tokens rather than saving them. Over these ten, built the same way the shipped path is built:
+#: inline **13,326**, `$defs`/`$ref` **13,438** — **+112, and every one of the ten worse**. Seven
+#: of the ten reference each nested model exactly once, so the `$defs` wrapper buys back no
+#: duplication at all; the three that do repeat one (`RequestField` 4x, `Setpoints` and
+#: `SpeciesRole` 2x) still come out level or worse.
+#:
+#: **The mechanism is the reason, and it is the 2026-08-28 fix above running in reverse.**
+#: `dereference_refs` merges a `$ref` with its siblings and lets the *field's* `description`
+#: override the referenced model's, which is exactly what makes one shared `Field(description=…)`
+#: suppress a nested class docstring: `SpeciesRole`'s ships **zero** times in what is sent today.
+#: Under `$defs` there is no field to override it and it returns, once, at 223 tokens. The
+#: isolated figure is wider still — +391 with titles stripped from both arms, because upstream's
+#: `_rm_titles` does not recurse into lists, so hoisting a model out of an `anyOf` into `$defs`
+#: also strips titles the inline arm keeps, a saving that has nothing to do with refs.
 #:
 #: **Re-measured 2026-08-29 on the bound basis, and six names arrived without anything being
 #: added.** Every figure below grew (`draft_experiment_protocol` 2,419 → 2,568), and six tools that
@@ -289,8 +312,12 @@ KNOWN_OVERSIZED: dict[str, int] = {
     # `maxItems`. `structure_experiment_request` also lost `source_text` and gained the sentence
     # that makes its `salt` docstring true, and those two cancel to nothing measurable here — the
     # ADR's "net +7" was taken on the raw-callable basis this file has since abandoned.
-    "draft_experiment_protocol": 2_590,
-    "structure_experiment_request": 1_075,
+    # Re-derived 2026-09-04 and both had drifted with nothing saying so — 2,590 → 2,738 and
+    # 1,075 → 1,095 — which is why `test_the_recorded_cost_of_a_known_oversized_tool_is_still_true`
+    # below now exists. The +148 is a schema change on a branch that never touched this file; the
+    # +20 is wording. Until that test, this dict was prose: a claim about somebody's afternoon.
+    "draft_experiment_protocol": 2_738,
+    "structure_experiment_request": 1_095,
     "rank_species": 1_094,
     "rank_species_across_solvents": 1_039,
     "compute_reaction_energy": 1_018,
@@ -298,6 +325,20 @@ KNOWN_OVERSIZED: dict[str, int] = {
     "refine_ensemble": 984,
     "profile_rotation": 936,
 }
+
+#: How far a `KNOWN_OVERSIZED` figure may drift before it has to be re-recorded.
+#:
+#: **Two-sided, because both directions are a lie of the same kind.** A figure that has grown is
+#: debt nobody re-priced; one that has shrunk is a narrowing whose commit did not claim it, and the
+#: file's own rule is that lowering a bound is what proves a reduction happened.
+#:
+#: **5% rather than an exact match**, because an exact match fails on every docstring edit and gets
+#: bumped without thought — the same argument the ceiling comment makes one screen up. Every entry
+#: here is over 900 tokens, so the band is never narrower than ~45 tokens: a clearer sentence
+#: passes, and the two drifts this constant was written after (+148, +5.7% and +20, +1.9%) sit one
+#: either side of it, which is the split intended. A whole-prefix growth that hides *between* the
+#: bands is still caught by the ceiling above.
+OVERSIZED_TOLERANCE = 0.05
 
 
 def _count(text: str) -> int:
@@ -450,6 +491,39 @@ def test_no_single_tool_schema_dominates_the_floor() -> None:
     assert not fixed, (
         f"{fixed} no longer exceed {MAX_SINGLE_TOOL_TOKENS} tokens — delete them from "
         "KNOWN_OVERSIZED. A debt list that outlives the debt reads as live state."
+    )
+
+
+def test_the_recorded_cost_of_a_known_oversized_tool_is_still_true() -> None:
+    """`KNOWN_OVERSIZED`'s numbers are a measurement, and a measurement nobody repeats is prose.
+
+    The sibling test above checks *membership* only, so for as long as this file has existed the
+    figures beside each name were unasserted: re-derived on 2026-09-04, `draft_experiment_protocol`
+    had drifted 2,590 → 2,738 and `structure_experiment_request` 1,075 → 1,095, with nothing red and
+    nothing said. That is `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` happening
+    inside the file that exists to prevent it, one level down from the ceiling it does assert.
+
+    **What this asserts is a band, not equality** — see `OVERSIZED_TOLERANCE` for why, and why it is
+    two-sided. Whoever trips it re-records the number in the same commit that moved it; that is the
+    whole remedy, and the message carries the value to paste.
+    """
+    _, parts = _floor("default")
+    drifted = {}
+    for name, recorded in KNOWN_OVERSIZED.items():
+        live = parts.get(f"tool:{name}")
+        if live is None:
+            continue  # No longer bound at all; the membership test above is what reports that.
+        if abs(live - recorded) > recorded * OVERSIZED_TOLERANCE:
+            drifted[name] = (recorded, live)
+    assert not drifted, (
+        "these KNOWN_OVERSIZED figures are no longer what the tool costs, by more than "
+        f"{OVERSIZED_TOLERANCE:.0%}: "
+        + ", ".join(
+            f"{name} recorded {rec} but measures {live} ({live - rec:+})"
+            for name, (rec, live) in sorted(drifted.items())
+        )
+        + ". Re-record them in the same commit that moved them, and say in the pull request what "
+        "moved them — a figure nobody re-derives is a claim about the afternoon it was taken."
     )
 
 

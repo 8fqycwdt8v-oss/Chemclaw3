@@ -38,6 +38,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from chemclaw.core.chem import InvalidSmilesError, standard_smiles
+from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.ingest.eln.warehouse import sql
 from chemclaw.ingest.eln.warehouse.binding import CorpusBinding, FieldBinding
 from chemclaw.ingest.eln.warehouse.driver import Warehouse
@@ -143,6 +144,41 @@ async def drain_corpus(
     Every write is an id-keyed upsert of the *record* phase only, so re-draining an unchanged
     release is a no-op and a row already labelled keeps its labels — `LabelIndex.record` holds that
     rule, and it is what makes a stopped drain resumable at any point with no bookkeeping.
+
+    Every pass — including one that read nothing — books its rows on
+    `chemclaw_ingest_records_total{source,outcome}`; see `_drained` for the outcome vocabulary
+    and why it is the same one the other three ingest passes use.
+    """
+    report = await _drain_page(
+        warehouse,
+        binding,
+        index,
+        source,
+        molecules=molecules,
+        reactions=reactions,
+        after=after,
+        limit=limit,
+    )
+    _drained(source, report)
+    return report
+
+
+async def _drain_page(
+    warehouse: Warehouse,
+    binding: CorpusBinding,
+    index: LabelIndex,
+    source: str,
+    *,
+    molecules: CorpusMolecules | None = None,
+    reactions: FingerprintStore | None = None,
+    after: str = "",
+    limit: int | None = None,
+) -> CorpusReport:
+    """Read one page and write it, and account for nothing.
+
+    Split out so that `drain_corpus` has exactly one return and the metric cannot be missed by a
+    path added later — the shape `ingest/documents/sync.py::sync_share` uses `_index_slice` for,
+    and which this file previously argued for in prose while keeping two explicit call sites.
     """
     page = limit if limit is not None else binding.fetch_limit
     statement, params = sql.corpus_statement(binding, warehouse.placeholder, after, page)
@@ -206,6 +242,61 @@ async def drain_corpus(
             report.read,
         )
     return report
+
+
+def _drained(source: str, report: CorpusReport) -> None:
+    """Book what this pass did on `chemclaw_ingest_records_total`, whatever it did.
+
+    **Two outcomes, not three, and they partition `read` exactly**: `_record`'s verdict is binary,
+    so `recorded + skipped == read` by construction and the two series sum to the rows the page
+    saw. The document sync's third outcome — `skipped`, in its vocabulary a candidate the pass
+    deliberately did not process — has no population here: a corpus row is never held back, and
+    re-draining a release re-records it rather than passing over it. Minting a permanently-zero
+    series would be a claim that such a population exists. `ingest/labels/enrich.py` books the same
+    two for the same reason.
+
+    **A dropped row is `rejected`, and that word is load-bearing.** In the vocabulary
+    `ingest/documents/sync.py::_record_pass` fixes, `rejected` is what was reached and could not be
+    turned into a row, and `skipped` is what was deliberately passed over. `CorpusReport.skipped`
+    counts rows carrying no usable reaction SMILES, key or citation — deterministic bad data, which
+    is `rejected` — so booking it under its own field name would make one series mean two different
+    things across the four ingest passes, which is worse than the flat line this closes.
+
+    `unfingerprintable` is deliberately not an outcome: those rows *are* recorded and are already
+    counted under `ingested`. It is a property of a row that landed, not a fate that competes with
+    landing, and adding it would put one row in two series. `tests/test_reaction_corpus.py` asserts
+    the rendered label set is exactly these two rather than asserting the absence of one word, so
+    that mutation fails a test instead of merely contradicting this paragraph — it survived one
+    written the other way.
+
+    Every return of `drain_corpus` passes through `_drained`, including the one that read nothing,
+    so a source with no new rows books a zero rather than nothing: the whole point of the counter
+    is that a silent series means the drain did not run, which it cannot mean if a healthy empty
+    page is also silent. That is structural rather than remembered — `sync_share` extracts
+    `_index_slice` for the same reason, and this used to be two explicit call sites, where a third
+    return added later would have dropped the booking with nothing failing.
+
+    Two `record_metric` calls rather than a loop over a helper. The loop needed one only to satisfy
+    ruff `B023`, and the helper it needed carried a docstring saying it existed because "a lambda
+    closing over a loop variable is bound late — where every update lands on the last outcome".
+    That is false here and was measured false: `record_metric` invokes the callable synchronously
+    inside the iteration, so the inline form books 7 and 3 correctly. Written out, there is no
+    loop, no `B023`, and no rationale to be wrong about.
+    """
+    record_metric(
+        lambda m: m.increment(
+            "chemclaw_ingest_records_total",
+            report.recorded,
+            {"source": source, "outcome": "ingested"},
+        )
+    )
+    record_metric(
+        lambda m: m.increment(
+            "chemclaw_ingest_records_total",
+            report.skipped,
+            {"source": source, "outcome": "rejected"},
+        )
+    )
 
 
 def _collect_fingerprint(

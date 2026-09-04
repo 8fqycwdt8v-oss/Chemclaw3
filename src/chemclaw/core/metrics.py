@@ -443,11 +443,34 @@ _COUNTERS: dict[str, str] = {
     # indistinguishable from a quiet one.
     #
     # So a flat zero on the two counters above means "never *reduced*", and this is what separates
-    # the two readings of that. It is the leading indicator of a hard context-length failure, and
-    # the only one this system has.
+    # the two readings of that.
+    #
+    # **What it is a leading indicator *of*, and this line has now been wrong in both directions.**
+    # The comparison is the thread against `agent_context_token_budget` as
+    # `context_budget.effective_trigger` converts it, and that conversion charges the request's own
+    # prefix — instructions, the skills listing, every bound tool schema, measured at 43,175
+    # estimated tokens on `default` on 2026-09-04. It used to charge it only where
+    # `llm_context_window_tokens` was declared, and no deployment declares one, so this counter was
+    # comparing a thread against a number the prefix had never met: measured through a compiled
+    # graph, the edits left 90,030 estimated thread tokens beside that prefix, 137,301 went at a
+    # 128k model, and this counter stayed **flat**. The line here then said so, which was the
+    # correct reading of a broken arithmetic rather than of a broken counter.
+    #
+    # The prefix is charged unconditionally now, so a tick is a request the policy could not bring
+    # inside the configured *request* budget — in every configuration, with or without a declared
+    # window. Measured on the same fixture: the cut goes to 45,015 and the counter is silent
+    # because the request now fits, and a thread the policy genuinely cannot cut that far ticks it
+    # where the old arithmetic read clean — 0 -> 1 at the shipped budget with no window declared,
+    # which `test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window` holds.
+    # A flat zero is therefore evidence that every request stayed inside
+    # `agent_context_token_budget`; whether that is the provider's real limit is what
+    # `llm_context_window_tokens` still decides, and declaring it makes this the leading indicator
+    # of a context-length failure rather than of a spend overrun.
     "chemclaw_context_unreducible_total": (
-        "Model calls over a context trigger that the policy could not reduce — the leading "
-        "indicator of a context-length failure at the provider."
+        "Model calls whose whole request — this call's prefix plus the thread — stayed over "
+        "agent_context_token_budget after the context policy had reduced all it could. Where "
+        "llm_context_window_tokens is declared the budget is additionally capped by what the model "
+        "can hold, so a tick is the leading indicator of a context-length failure at the provider."
     ),
     # Counted rather than only logged because the *rate* is the signal: one truncated result is a
     # tool answering a broad question, and a tool that truncates on every call is one whose own

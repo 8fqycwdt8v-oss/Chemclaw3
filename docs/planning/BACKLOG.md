@@ -292,34 +292,22 @@ topic).
       `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`, which deleted 1,442 lines of
       exactly this.
 
-- [ ] **No deployment declares a context window, and the overrun indicator cannot see the prefix**
-      — [M], found reviewing `D-2026-08-28-the-budget-is-the-control-not-the-trigger` after it
-      merged, and it is that change that made a latent gap live.
-      `context_budget.effective_trigger` subtracts the request's own prefix from the budget **only**
-      `if window:`; `llm_context_window_tokens` defaults to 0, `.env.example` ships 0, and
-      `grep -rn CONTEXT_WINDOW deploy/ infra/ docs/guides/runbook.md` returns nothing. So the ~30k
-      prefix — instructions, the skills listing, every tool schema — is never charged against
-      `agent_context_token_budget`.
-      While the group floor shipped at 12 an ordinary thread sat at ~4k and this could not bite.
-      With the floor off the window fills the budget by design, so a request measures **~135,700
-      estimated tokens** (99,924 thread + 35,773 prefix) against a configured 100,000 — over a
-      128k model window, and at this repository's own measured 2.2x ratio for structured chemistry
-      payloads, well over 200,000 billed.
-      **And the one thing that would say so reads clean.** `compaction._record_overrun` compares
-      the *thread* against the thread's budget, which the window edit has just cut to fit by
-      construction, so `chemclaw_context_unreducible_total` moved by **0** on exactly that request
-      — while its own docstring calls it "the only leading indicator this system has for a
-      context-length failure". `agent_context_calibration_min_calls = 20` also pins the ratio at
-      1.0 for the first twenty model calls of every process, i.e. every pod restart.
-      Three candidate fixes and they are not equivalent, which is why this is a row rather than a
-      patch: declare `llm_context_window_tokens` in `deploy/` (cheapest, and it needs a number
-      nobody here knows); subtract `prefix_tokens()` unconditionally (changes what
-      `agent_context_token_budget` *means* — thread spend becomes request spend — which is
-      `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget`'s decision to revisit, not a review
-      pass's); or add a window-aware arm to `_record_overrun` so the indicator at least fires where
-      a window is declared. **The first two are a decision with an owner.**
-
-
+- [ ] **A third reducer sits above the compaction group and no prose mentions it** — [S], found
+      2026-09-04 while measuring the context-window row. deepagents' `FilesystemMiddleware`
+      silently offloads oversized *message content*: probed, a 500,001-character `HumanMessage`
+      reached the model as a 1,293-character pointer reading "Message content too large and was
+      saved to the filesystem at: /conversation_history/….md". `agent/compaction.py` describes two
+      reducers — upstream's `ClearToolUsesEdit` for tool results and this repository's conversation
+      window — and this is a third, above both, that none of its prose names.
+      Two consequences worth separating before anything is built. It means a single oversized
+      group can no longer be the unreducible shape, so `chemclaw_context_unreducible_total`'s
+      reading depends on a mechanism nobody here decided on. And an offloaded message becomes a
+      *file*, which is the surface
+      `D-2026-09-04-a-helpers-file-crosses-back-and-stays` just finished defanging on read — worth
+      checking whether the pointer's own path and the offloaded body round-trip through that
+      treatment, since the content is a chemist's message rather than a helper's notes.
+      One probe, not a measurement pass: what is owed first is the threshold, whether it is
+      configurable, and whether it fires on any real turn.
 
 - [ ] **`delete_session` and the owner prune take two rows in opposite orders** — [S], not
       reproduced. `_session_delete_statements` deletes `session_turns` then `session_owners`;
@@ -345,23 +333,6 @@ topic).
       correctness bug, and the deadlock is one statement wide, self-healing on the retention side
       (a Temporal activity retries) and has not been reproduced. **Keep both orders; the row stays
       open only as the record that the obvious fix was tried and rejected.**
-
-- [ ] **The corpus drain is the one ingest pass with no metric** — [S].
-      `chemclaw_ingest_records_total{source,outcome}` is emitted by the ELN sync
-      (`ingest/eln/sync.py::_count_records`), the document sync
-      (`ingest/documents/sync.py::_count_records`) and the labelling pass
-      (`ingest/labels/enrich.py::_count_records`, under `source="labels"`). `ReactionCorpusWorkflow`
-      emits none: `CorpusReport`'s `read`/`recorded`/`skipped` reach the activity's log line and
-      Temporal's history, and nothing else. So a dashboard built on `chemclaw_ingest_*` shows a flat
-      line for a healthy corpus feed, and `skipped` — the count of rows dropped for no usable SMILES
-      or no citation, which is the number that says a feeder regressed — has no series at all.
-      Found while writing `docs/guides/feeder-pipelines/`, whose §2.3 has to tell an operator this in
-      prose because the metric they would otherwise reach for does not exist.
-      **The fix is the wrapper the ELN sync already uses**, one call site, with `source` naming the
-      data source rather than the pass — the three outcomes partition the rows the pass saw, exactly
-      as `ingest/documents/sync.py::_record_pass` documents for its own. Do it when a deployment actually runs
-      a corpus feeder; until then the gap costs nobody anything, which is why it is [S] and here
-      rather than done.
 
 - [ ] **Settle `pytest-xdist` on a real runner** — [S].
       The `check` job is 87% one step: `make lint type cov` was **12m06s of a 13m56s job** on
@@ -458,11 +429,14 @@ topic).
       was offered instead does not hold, and `cursor.py`'s module docstring now says so: `ReactionCorpusWorkflow`
       returns **one** report aggregated over every source at the end of the whole `continue_as_new`
       chain (`durable/corpus_sync.py::ReactionCorpusWorkflow`), not one per pass, and builds it without `has_more` — so
-      a feed whose source stopped exporting looks exactly like a feed with nothing new. Two shapes
-      would close it and they are not equivalent: a per-source outcome (fixes
-      `CorpusSyncOutcome`'s own docstring, which claims "per source" and aggregates), or a staleness
-      gauge over `corpus_cursors.updated_at` — age since the last *advance*, which is a real number
-      even when the position is opaque. **The second is now buildable and was not when this row was
+      a feed whose source stopped exporting looks exactly like a feed with nothing new.
+      **A record counter cannot close this and it was briefly thought it could.** The corpus drain
+      now emits `chemclaw_ingest_records_total{source,outcome}` per data source, which delivers the
+      per-source *visibility* half — but a stopped feed and an idle one both produce an empty page
+      and so both book `ingested=0, rejected=0`, identically. The discriminator has to be a
+      staleness gauge over `corpus_cursors.updated_at` — age since the last *advance*, a real number
+      even when the keyset position is opaque.
+      **The second is now buildable and was not when this row was
       written**: the cursor was stored on every page, so `updated_at` re-stamped on every fire and
       measured when the feed was last *looked at* rather than when it last moved.
       `D-2026-08-28-a-watermark-that-is-rewritten-has-no-age` gates that write on
@@ -682,54 +656,6 @@ only holds defects can only ever restore the system to what it already intended 
       re-measured on the bound basis when the row is worked. What does not change is why it is
       blocked: the saving is still partly in endpoint tools no offline floor can see, and it still
       needs the skill gate beside the allow-list.
-
-- [ ] **Ten `KNOWN_OVERSIZED` tools are one defect wearing ten names** — [M], and the honest
-      trigger is upstream rather than here. Each takes a **domain document** as its argument — a
-      BoFire campaign declaration, the note frontmatter contract, a structured ask, a laboratory
-      procedure, a job spec — and `convert_to_openai_tool` inlines every nested pydantic model in
-      full rather than emitting `$defs` and `$ref`. Measured 2026-08-28 while narrowing the protocol
-      pair from 6,231 tokens to 3,380: `SpeciesRole`'s class docstring shipped **three times** in one
-      schema and `RequestField`'s **four times**, purely because the same model appears at several
-      fields. A `$ref`-emitting conversion would cut every entry at once and touch no first-party
-      code.
-
-      **It said four until the basis was corrected, and the extra six are the same defect, not new
-      debt.** The 2026-08-29 re-baseline measured the tools the graph *binds* rather than the
-      callables the registry holds, and six that read as under `MAX_SINGLE_TOOL_TOKENS` were over it
-      all along — `rank_species` 885 as a callable, **1,094** as the object the model is sent, and
-      likewise `rank_species_across_solvents`, `compute_reaction_energy`, `survey_bond_strengths`,
-      `refine_ensemble` and `profile_rotation`. Nothing was added; the six were invisible for eleven
-      weeks to the test written to catch exactly them. It widens this row rather than changing it:
-      the entries are still nested-model inlining, and the job specs make the `$defs` question
-      *more* worth answering, not less.
-
-      **So the row is a measurement, not a rewrite.** What is owed first: does the installed
-      `langchain_core` have a switch for it, and do the providers this deployment targets accept a
-      `$defs`/`$ref` parameter schema? Both are one script. The alternative fix — taking the payload
-      as a JSON string or a scratchpad path — is **rejected on the record** in
-      `tests/test_context_floor.py`: it drops the schema to ~150 tokens and takes constrained
-      generation with it, on exactly the calls where a malformed argument is most expensive.
-      Anchors: `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
-      `science/bo/problem.py`.
-
-      **A big schema costs graph-build time as well as prompt tokens — and the larger half of that
-      was fixed on `main` while this row was being written** (2026-08-29). The four protocol tools
-      raised the per-turn compile by **30 ms (209 → 239, +14%) for four tools out of ~98**, isolated
-      by deleting the import that registers them, and profiling put **79% of the whole build** in
-      `langchain_core.tools.convert.tool` → `validate_arguments` → `create_model`: every build
-      re-derived a pydantic model from every tool's signature, so build time was proportional to
-      schema size exactly as prompt cost is.
-
-      **That is history rather than an open item.** `agent/tool_schema.py::as_structured_tool` now
-      converts each registered callable once per process, keyed on the function object, and the
-      merged tree measures **38.7 ms** with all four protocol tools present — so the build-time
-      half of this row is closed, and the bound in
-      `tests/test_langgraph_connectors.py::test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget`
-      came *down* to 250 rather than up. It is recorded here because the
-      finding still holds where the cache cannot reach: a tool's schema is still generated once,
-      and the *prompt* cost above is unchanged and paid every turn. Anchors:
-      `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
-      `science/bo/problem.py`.
 
 - [ ] **A truthful `stated` quote from an earlier turn cannot be represented** — [S], found
       2026-08-30 by the fresh-context review of the agent surface. `require_quotes_are_verbatim`

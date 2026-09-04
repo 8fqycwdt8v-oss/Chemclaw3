@@ -182,12 +182,30 @@ compaction counter, while `core/metrics.py` documented a flat zero as "never ove
 configured budgets are **billed**-token budgets, converted by a ratio `agent/context_budget.py`
 measures from the provider's own `input_tokens` and clamps so it can only tighten; the newest
 tool-call batch is never cleared and clearing stops at the trigger; `agent/tool_result_size.py`
-bounds one result head-and-tail with a notice that names itself as system text;
-`chemclaw_context_unreducible_total` is the leading indicator of a context-length failure;
-`llm_context_window_tokens` bounds the budget against this request's *measured* prefix; `turn_costs`
+bounds one result head-and-tail with a notice that names itself as system text; `turn_costs`
 records whether the policy acted; and `chemclaw_connector_tool_schema_tokens` measures the half of
 the prefix `tests/test_context_floor.py` cannot ratchet, because an endpoint tool's schema comes
 from a server this repository does not build.
+
+**One line of that arithmetic was wrong for a whole class of deployment, and
+`D-2026-09-04-a-budget-that-excludes-the-prefix-is-not-a-budget` changed what a budget *means* to
+fix it**, revisiting `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` on purpose.
+`effective_trigger` subtracted the request's own prefix — instructions, the skills listing and every
+bound tool schema — only `if window:`, and `llm_context_window_tokens` defaults to 0 with no value in
+`deploy/`, `infra/` or `.env.example`. So in every shipped configuration ~43,175 estimated tokens
+left on every model call charged against nothing: measured end to end, a thread the policy cut to
+its 90,030-token budget went out as a **137,301-token request at a 128k model** with
+`chemclaw_context_unreducible_total` flat. The prefix is now charged unconditionally, which makes
+`agent_context_token_budget` a bound on **request** spend rather than on *thread* spend — the same
+thread cuts to 45,015 and the request to 92,286 — and makes that counter meaningful without a
+declared window: probed at the shipped budget, a thread the policy cannot reduce far enough ticks it
+**1** where the old arithmetic read **0**. `llm_context_window_tokens` is now a second bound rather
+than the only real one. **What it costs is stated because it is a real behavioural change**: every
+deployment's thread allowance falls by the prefix, 43% of the shipped budget, and
+`agent_tool_result_clear_trigger`'s shipped 30,000 is *below* the prefix, so it floors at 1 — clear
+every reclaimable tool result on every model call. That floor is reported at WARNING rather than
+returned silently, `tests/test_compaction.py` asserts the state, and raising the default above the
+prefix is an open decision this repository has not taken.
 
 **An audit against the Claude Agent SDK then added three guards and designed a fourth**
 (`D-2026-08-29-an-iteration-cap-is-not-a-cost-cap`). Most of that SDK's surface is already here and

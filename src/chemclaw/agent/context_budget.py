@@ -27,15 +27,26 @@ conversation group dropped early.
 **Nothing knew what the model could hold.** There was no context-window number anywhere in the
 tree — the ceiling was discovered from a `BadRequestError` after the request had been assembled,
 sent and rejected. `llm_context_window_tokens` is that number, 0 when a deployment cannot state it,
-and `effective_trigger` derives the budget from `window - prefix - output reservation` when it can.
+and `effective_trigger` caps the budget at `window - output reservation` when it can.
 
-**The prefix has to be measured per request, which is why there is a contextvar here.** The
-conversation budget's whole job is to keep `prefix + thread + output` under the window, and the
-prefix — the system message plus every bound tool schema — is ~28,000 tokens on the default profile
-and sits entirely outside the budget. A `ContextEdit` cannot see it: upstream's protocol hands
-`apply` a message list and a counter and nothing else. A middleware can, so `MeasureRequestPrefix`
-publishes it and the edits read it — the same shape `agent/turn_flags.py` and
-`agent/repeat_guard.py` already use for a fact that belongs to the call in flight.
+**The prefix has to be measured per request, which is why there is a contextvar here, and it is
+charged whether or not a window is declared.** The system message, the skills listing and every
+bound tool schema are part of the request the provider bills and are not in the thread — 43,175
+estimated tokens on the `default` profile, measured 2026-09-04 — so a budget that does not charge
+them bounds nothing the provider sees. Charging it only under a declared window, which is what
+D-2026-08-28 shipped, meant charging it against nothing in every real deployment: measured end to
+end, a thread the policy cut to its 90,030-token budget left as a 137,301-token request. So
+`effective_trigger` subtracts it unconditionally, and `agent_context_token_budget` is therefore a
+bound on **request** spend rather than on thread spend. A `ContextEdit` cannot see the prefix:
+upstream's protocol hands `apply` a message list and a counter and nothing else. A middleware can,
+so `MeasureRequestPrefix` publishes it and the edits read it — the same shape `agent/turn_flags.py`
+and `agent/repeat_guard.py` already use for a fact that belongs to the call in flight.
+
+**What that costs, stated rather than discovered.** At a fixed configured budget every deployment's
+thread allowance falls by the prefix, and a configured budget *below* the prefix leaves a trigger of
+1, which means "reduce on every model call". Shipped, `agent_tool_result_clear_trigger` is 30,000
+against a 43,175-token prefix, so it is in exactly that state; `_note_floored_trigger` is why it
+says so rather than arriving silently.
 
 **And the turn's own context record lives here** rather than on the repeat guard's watch, which is
 where `peak_reclaimed` sat because compaction had nowhere else to put it. Two per-turn ambients
@@ -56,6 +67,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from chemclaw.core.config import settings
+from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.metrics_bridge import degraded
 
@@ -193,18 +205,98 @@ def reset_calibration() -> None:
 METRICS.bind_gauge("chemclaw_context_estimator_ratio", estimator_ratio)
 
 
+#: `(configured, prefix, window)` triples whose trigger has already floored and been reported.
+#: A floor is a *configuration* fault rather than an event: it is constant for a deployment's
+#: settings and bound tool surface, so it is said once per distinct triple instead of on every
+#: model call of every turn. Capped because a caller passing arbitrary budgets — a test sweep, a
+#: future per-profile budget — would otherwise mint a triple per call and grow this without bound.
+_REPORTED_FLOORS: set[tuple[int, int, int]] = set()
+_FLOOR_LOCK = threading.Lock()
+_MAX_REPORTED_FLOORS = 64
+
+
+def _note_floored_trigger(configured: int, prefix: int, window: int) -> None:
+    """Say, once, that a configured budget left the thread nothing and the trigger floored at 1.
+
+    **A trigger of 1 is not a budget, it is "reduce on every model call".** The edit reading it
+    compares a thread against 1 estimated token, which every non-empty thread exceeds, so
+    `ClearOlderToolResultsEdit` replaces every reclaimable tool result on every call and the
+    conversation window cuts back to its newest group. That is a defensible thing for a deployment
+    to have asked for and an indefensible thing for it to arrive at silently — which is precisely
+    what happens when the prefix is charged unconditionally and a configured budget is smaller than
+    the prefix. Shipped, `agent_tool_result_clear_trigger` is 30,000 and the `default` profile's
+    prefix measured 43,175 on 2026-09-04, so this is the default configuration's state rather than
+    a corner.
+
+    WARNING rather than a counter, and the choice is about what an operator can do with it. The
+    condition is static — the same for every turn of a process, decided by two settings and the
+    bound tool surface — so a rate carries no information a single line does not, and this
+    repository's own `tests/test_deploy_chart.py` obliges every declared series to earn a panel or
+    an alert. The line names both numbers and the setting to move, which is the whole remedy.
+
+    Args:
+        configured: The configured budget in billed tokens, as passed to `effective_trigger`.
+        prefix: This request's measured prefix in estimated tokens, 0 off the request path.
+        window: `llm_context_window_tokens`, 0 when the deployment declares none.
+    """
+    key = (configured, prefix, window)
+    with _FLOOR_LOCK:
+        if key in _REPORTED_FLOORS or len(_REPORTED_FLOORS) >= _MAX_REPORTED_FLOORS:
+            return
+        _REPORTED_FLOORS.add(key)
+    log_event(
+        logger,
+        "context.trigger_floored",
+        "a configured context budget of %d billed tokens leaves nothing for the thread once this "
+        "request's %d-token prefix (and a declared window of %d) is charged against it, so the "
+        "trigger floors at 1 and the edit reading it reduces on every model call: raise the "
+        "setting above the prefix, or shrink the bound tool surface",
+        configured,
+        prefix,
+        window,
+        level=logging.WARNING,
+        configured_tokens=configured,
+        prefix_tokens=prefix,
+        window_tokens=window,
+    )
+
+
+def reset_floor_reports() -> None:
+    """Forget which floors have been reported. Tests only — a process says each of these once."""
+    with _FLOOR_LOCK:
+        _REPORTED_FLOORS.clear()
+
+
 def effective_trigger(configured: int) -> int:
     """The trigger to compare an *estimated* token count against, given a budget in billed tokens.
 
-    Two corrections, and either may be inert:
+    Three corrections, and the middle one may be inert:
 
     - **The unit.** `configured` is what the deployment is willing to spend in billed tokens; the
       edits count in the estimator's unit; `estimator_ratio` is the measured conversion, and it is
       1.0 until the process has seen enough calls to say otherwise.
     - **The window.** When `llm_context_window_tokens` is declared, the thread may not have more
-      room than the model has left after this request's own prefix and the output reservation. The
-      smaller of the two budgets wins, so declaring a large window never *raises* what a deployment
-      asked to spend.
+      room than the model has left after the output reservation. The smaller of the two budgets
+      wins, so declaring a large window never *raises* what a deployment asked to spend.
+    - **The prefix, and it is charged whether or not a window is declared.** The system message,
+      the skills listing and every bound tool schema are part of the request and are not in the
+      thread, so a budget that does not charge them is not a bound on anything the provider sees.
+
+    **That last subtraction changes what `agent_context_token_budget` means, deliberately.** It was
+    a bound on *thread* spend; it is now a bound on *request* spend, and the difference is the
+    prefix — 43,175 estimated tokens on the `default` profile on 2026-09-04, which is 43% of the
+    shipped 100,000. `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` charged it only
+    `if window:`, and no deployment declares one, so in the shipped configuration the prefix was
+    charged against nothing: measured end to end, a thread the policy cut to 90,030 estimated
+    tokens went out as a 137,301-token request with the overrun indicator flat. The reason this is
+    the right subtraction rather than an extra one is that both numbers are in the same request:
+    what the provider counts is `prefix + thread`, and only one of the two was ever budgeted.
+
+    The prefix is counted in the estimator's unit and subtracted from a budget in the provider's.
+    That is deliberate rather than sloppy: the prefix is instructions, a skills listing and tool
+    schemas, and those are the content on which the two units agree — 1.04x measured over the whole
+    default prefix. The thread is where they do not, and the thread is exactly what is left after
+    the subtraction, so dividing by the ratio afterwards converts the half that needs converting.
 
     Args:
         configured: The configured budget, in billed tokens (`agent_context_token_budget` or
@@ -212,20 +304,22 @@ def effective_trigger(configured: int) -> int:
 
     Returns:
         The estimated-token count above which the edit should act. Never below 1: an edit whose
-        trigger reached 0 would fire on an empty thread, and the failure a floor of one leaves is
-        the honest one — a request too large for its window is sent and refused by the provider,
-        which `agent/model_calls.py` classifies and tells the chemist.
+        trigger reached 0 would fire on an empty thread, and raising instead would fail the turn
+        from inside a middleware, which is the worse trade. A floor is reported once by
+        `_note_floored_trigger` rather than returned silently, because with the prefix charged
+        unconditionally the floor is reachable from a plain misconfiguration and not only from the
+        window corner it used to need.
     """
     budget = float(configured)
     window = settings.llm_context_window_tokens
     if window:
-        # The prefix is counted in the estimator's unit and compared against a window in the
-        # provider's. That is deliberate rather than sloppy: the prefix is instructions, a skills
-        # listing and tool schemas, and those are the content on which the two units agree — 1.04x
-        # measured over the whole default prefix. The thread is where they do not, and the thread is
-        # what the ratio below converts.
-        budget = min(budget, float(window - prefix_tokens() - settings.llm_max_tokens))
-    return max(1, int(budget / estimator_ratio()))
+        budget = min(budget, float(window - settings.llm_max_tokens))
+    prefix = prefix_tokens()
+    trigger = int((budget - float(prefix)) / estimator_ratio())
+    if trigger < 1:
+        _note_floored_trigger(configured, prefix, window)
+        return 1
+    return trigger
 
 
 def _tool_name(tool: Any) -> str:

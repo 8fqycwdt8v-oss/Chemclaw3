@@ -122,16 +122,20 @@ class LlmSettings(BaseSettings):
     # contains no `effort`, and the assertion it described is the one that missed all of the above.
     llm_effort: Literal["low", "medium", "high"] | None = None
     # **The model's context window, and until this existed no number anywhere in this tree was
-    # one.** `agent_context_token_budget` is 100,000 by fiat, the ~28,000-token static prefix sits
-    # *outside* it, and neither was ever compared to what the endpoint will actually accept: the
-    # whole handling of the ceiling was retrospective, in `classify_model_failure`, after the
-    # request had been assembled, sent and rejected.
+    # one.** `agent_context_token_budget` is 100,000 by fiat, and neither it nor the static prefix
+    # was ever compared to what the endpoint will actually accept: the whole handling of the ceiling
+    # was retrospective, in `classify_model_failure`, after the request had been assembled, sent and
+    # rejected.
     #
     # 0 means undeclared, which is the honest default for an endpoint whose window this repository
-    # cannot know — and it keeps today's behaviour exactly. Set it, and the conversation window's
-    # budget becomes `window - (this request's own measured prefix) - llm_max_tokens`, floored at
-    # the configured budget rather than replacing it: the smaller of what the deployment asked for
-    # and what the model can hold (`agent/context_budget.py::effective_trigger`).
+    # cannot know. Set it, and the conversation budget becomes the smaller of the configured budget
+    # and `window - llm_max_tokens` — and this request's own measured prefix comes off whichever
+    # wins (`agent/context_budget.py::effective_trigger`). **Declaring it is no longer what makes
+    # the prefix count**, which is the correction worth reading here: that used to be true, no
+    # deployment declared a window, and the ~43,000-token prefix was therefore charged against
+    # nothing in every shipped configuration. It is charged unconditionally now, so this setting
+    # does the one job its name says — bound the budget by what the endpoint can actually hold —
+    # and is a *second* bound rather than the only real one.
     #
     # Per deployment rather than per `model_routes` entry, because the routes name *tasks* and the
     # window is a property of the endpoint every task shares. A deployment that routes tasks across

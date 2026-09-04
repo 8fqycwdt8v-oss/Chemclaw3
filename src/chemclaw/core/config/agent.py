@@ -73,7 +73,7 @@ class AgentSettings(BaseSettings):
     skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
     # Conversation context management (`agent/compaction.py`). The agent keeps a session thread and
     # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a
-    # long chat would grow unbounded. Compaction runs only when the included context exceeds
+    # long chat would grow unbounded. Compaction runs only when the whole *request* exceeds
     # `agent_context_token_budget` (measured with a char/4 estimator — no external tokenizer),
     # then reclaims tokens cheapest-first: replace stale tool results with a short placeholder
     # (keeping the newest `agent_keep_last_tool_groups` verbatim), then cut older conversation back
@@ -121,6 +121,25 @@ class AgentSettings(BaseSettings):
     #
     # The one thing that is never dropped is the newest group, because an empty message list is
     # rejected by the provider (`agent/compaction.py`).
+    #
+    # **This is a budget on the whole *request*, not on the thread, and that changed deliberately.**
+    # `context_budget.effective_trigger` subtracts this request's own prefix — the system message,
+    # the skills listing and every bound tool schema — from the number below before the edits see
+    # it, whether or not `llm_context_window_tokens` is declared. D-2026-08-28 charged the prefix
+    # only under a declared window and no deployment declares one, so the ~43,000 tokens that leave
+    # on every model call were budgeted against nothing: measured 2026-09-04, a thread the policy
+    # cut to its 90,030-token budget left as a 137,301-token request at a 128k model.
+    #
+    # What that costs an existing deployment is the prefix, exactly: at the 100,000 below and a
+    # 43,175-token prefix the thread gets **56,825** estimated tokens where it used to get 100,000,
+    # so a session that never compacted may now compact, and one that compacted may compact
+    # earlier. That is the intended trade — the alternative is a bound that does not bound — but it
+    # is a behavioural change and not a no-op.
+    #
+    # **A value at or below the prefix is not a budget.** `effective_trigger` floors at 1, which
+    # means "reduce on every model call", and it says so once at WARNING rather than returning it
+    # silently (`context_budget._note_floored_trigger`). The clear trigger below is in that state at
+    # its shipped default; see the paragraph there.
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=0, ge=0)
@@ -141,7 +160,30 @@ class AgentSettings(BaseSettings):
     # Above the budget it would be pointless — the window would already have fired — so the
     # validator in `Settings` refuses that rather than letting a deployment set a number that
     # silently means "unchanged".
-    agent_tool_result_clear_trigger: int = Field(default=30_000, ge=1)
+    #
+    # **73,500 is a request budget, and it is the old 30,000 re-expressed in the new unit rather
+    # than a retuning.** When this field meant *thread* spend, 30,000 was the band above — an
+    # order of magnitude below the budget, so clearing runs early and often. Charging the prefix
+    # made 30,000 mean something else entirely: the `default` prefix measures ~43,175, so
+    # `effective_trigger` subtracted it, floored at 1, and the lossless edit cleared every
+    # reclaimable tool result on **every model call**, keeping only the newest batch. That is not
+    # a tuning anybody chose; it is what a thread number reads as once the unit changes underneath
+    # it.
+    #
+    # The replacement is derived, not invented: `tests/test_context_floor.py`'s ratchet **ceiling**
+    # (43,500 — the bound, deliberately, rather than today's measurement, so this number does not
+    # move every time a tool schema does) plus the 30,000 of thread the old default intended.
+    # Anything above the prefix restores the band; this one restores it to the same *thread*
+    # allowance the setting has always had, which is why it is a translation rather than a new
+    # decision about how much evidence the model keeps.
+    #
+    # The floor it used to hit is still reachable — a deployment that lowers this below its own
+    # prefix gets it — so it stays loud rather than silent: one WARNING per process
+    # (`context.trigger_floored`) naming both numbers and the remedy, since the condition is static
+    # and a rate would carry nothing a line does not. `tests/test_compaction.py` asserts both the
+    # floor and this default's clearance above the ratchet ceiling, so the day a tool surface grows
+    # past it, that test says so instead of the behaviour changing quietly.
+    agent_tool_result_clear_trigger: int = Field(default=73_500, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Measured against a real BPE tokenizer on this repository's own
@@ -162,6 +204,18 @@ class AgentSettings(BaseSettings):
     # move a budget. The factor only ever *tightens* the trigger (it is clamped at 1.0 below), so
     # the worst a mismeasurement can do is compact earlier than needed — never send a request the
     # policy thinks is smaller than it is, which is the failure being closed.
+    #
+    # **The sample floor and the prefix subtraction do not interact, and that is worth stating
+    # because it looks as though they must.** For the first `min_calls` model calls of a process
+    # the ratio reads 1.0, so the *thread* half of both triggers is uncalibrated — but the prefix
+    # comes off *before* the division and is therefore exact from the first call. Whether a trigger
+    # floors at all is likewise all but ratio-free: the condition is `configured - prefix < ratio`,
+    # so the two answers can only differ inside a band as wide as the ratio itself, which the clamp
+    # caps at 4 tokens (swept, at a 43,175-token prefix only 43,176..43,179 flip). So a pod restart
+    # no longer means "the largest single component of the request is unbudgeted until call 21"; it
+    # means the thread's unit conversion warms up, over a smaller thread than before. Measured, the
+    # warm-up swing in the thread allowance shrinks with it: 100,000 -> 45,454 tokens between an
+    # uncalibrated and a 2.2x-calibrated process before, 56,825 -> 25,829 after.
     agent_context_calibration_enabled: bool = True
     agent_context_calibration_min_calls: int = Field(default=20, ge=1)
     # Ceiling on the factor, so a pathological sample cannot collapse the budget. 4.0 is well above

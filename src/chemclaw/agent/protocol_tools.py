@@ -3,9 +3,10 @@
 `similar_reactions` answers "have we run a transformation like this?" with ids and Tanimoto scores;
 `gather_evidence` returns 240-character excerpts. Neither is a protocol. To read one the agent calls
 `expand_note`, which returns the whole body — and that is right for one protocol and wrong for
-twenty: twenty are twenty model round-trips against the loop cap, and past
-`agent_context_token_budget` the compaction policy reclaims the earliest by replacing them with a
-placeholder that takes their citations with them.
+twenty: twenty are twenty model round-trips against the loop cap, and once the *request* crosses
+`agent_context_token_budget` — which charges this call's own ~43,000-token prefix before the thread
+gets a look in — the compaction policy reclaims the earliest by replacing them with a placeholder
+that takes their citations with them.
 
 `condense_protocols` is the call for the many case. It reads each protocol **once and whole** —
 the unit is never a fraction of a procedure — and returns one comparison instead of twenty bodies.

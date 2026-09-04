@@ -184,7 +184,13 @@ class ClearOlderToolResultsEdit(ContextEdit):
     """
 
     trigger: int
-    """Billed tokens above which older tool results are cleared (`effective_trigger` converts)."""
+    """Billed tokens the whole *request* may cost before older tool results are cleared.
+
+    `effective_trigger` converts it: it subtracts this request's own prefix and divides by the
+    measured estimator ratio, so the number compared against `count_tokens` here is what is left
+    for the thread. A configured value at or below the prefix leaves nothing and floors at 1,
+    which is the shipped `agent_tool_result_clear_trigger`'s state — see that setting's comment.
+    """
 
     keep: int
     """Floor on the newest results kept verbatim. The newest batch raises it when it is wider."""
@@ -307,10 +313,11 @@ class KeepLastConversationGroupsEdit(ContextEdit):
     """
 
     trigger: int = 100_000
-    """Billed tokens above which the window is applied — and the ceiling it cuts back to.
+    """Billed tokens the whole *request* may cost — and, less the prefix, the ceiling it cuts to.
 
-    Converted to the estimator's unit by `effective_trigger`, and clamped there by a declared
-    context window; it is not compared to `count_tokens` directly.
+    Converted to the estimator's unit by `effective_trigger`, which also subtracts this request's
+    own prefix and clamps against a declared context window; it is not compared to `count_tokens`
+    directly.
 
     A ceiling rather than a target: `keep` may take the cut further, and did so on every ordinary
     thread while it defaulted to 12.
@@ -338,9 +345,10 @@ class KeepLastConversationGroupsEdit(ContextEdit):
 
         **`self.trigger` is a budget in billed tokens and `count_tokens` counts estimated ones**, so
         the two are reconciled by `effective_trigger` rather than compared directly — which is what
-        they used to be. That function also subtracts this request's own prefix from a declared
-        context window, so the number below is what the *model* has room for rather than what the
-        configuration hoped it had (`agent/context_budget.py`).
+        they used to be. That function also subtracts this request's own prefix, whether or not a
+        window is declared, so the number below is what is left for the *thread* after the system
+        message, the skills listing and every bound tool schema have been paid for
+        (`agent/context_budget.py`).
         """
         budget = effective_trigger(self.trigger)
         if count_tokens(messages) <= budget:
@@ -663,8 +671,32 @@ def _record_overrun(request: ModelRequest[Any], sent: int) -> None:
     The comparison is the window edit's own: the thread being sent, against the budget that edit
     was given. So this fires when the policy has finished and the request is still over — whether
     it reclaimed nothing at all or reclaimed plenty and could not reach the line. Both are the same
-    fact for an operator, and it is the only leading indicator this system has for a context-length
-    failure.
+    fact for an operator.
+
+    **What that fact is evidence *of* is now the same thing in every configuration, and it was not
+    before.** `effective_trigger` used to charge this request's own prefix against the budget only
+    `if window:`. Nothing declares a window, so this counter was comparing a thread against a number
+    the prefix had never met — measured on 2026-09-04 through a compiled graph, the edits left
+    90,030 estimated thread tokens beside a 43,175-token prefix, 137,301 went at a 128k model, and
+    this counter read **flat**. Not a defect in the counter: it reported truthfully on an
+    arithmetic that had left the largest part of the request out.
+
+    The prefix is charged unconditionally now, so `budget` below is what the *request* may cost and
+    a tick is a request the policy could not bring inside it. Re-measured on the same thread: the
+    cut goes to 45,015, the request to 92,286, and this stays silent because there is nothing to
+    report — while a thread the policy genuinely cannot cut that far ticks it where the old
+    arithmetic read clean — **0 before, 1 after**, at the shipped budget with no window declared,
+    which `tests/test_compaction.py` now holds rather than only records here. What
+    `llm_context_window_tokens` still decides is whether that budget is also known to fit the
+    endpoint; declared, a tick is the leading indicator of a context-length failure at the provider
+    rather than of a spend overrun.
+
+    **The window-aware arm this function was once going to grow is still not built, and for a
+    better reason than before.** Swept over (window, prefix, reservation, budget, ratio),
+    `sent <= effective_trigger(budget)` implies `prefix + sent * ratio <= budget` — and, where a
+    window is declared, that the request fits it — in every combination except the degenerate corner
+    where the prefix exhausts the budget outright, where the trigger floors at 1 so any real thread
+    ticks anyway. `tests/test_context_budget.py` holds that sweep.
 
     Once per turn, for the same reason every other number here is high-water marked: the edits are
     non-destructive, so a standing overrun is re-derived on every model call of the turn.
