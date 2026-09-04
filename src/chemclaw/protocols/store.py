@@ -183,6 +183,20 @@ class RevisionConflict(ChemclawError):
     """A write whose `parent_revision` is not the design's head — somebody else edited it first."""
 
 
+class StatusConflict(ChemclawError):
+    """A sign-off whose `expected_status` is not the design's current one.
+
+    The complement of `RevisionConflict`, and it exists because that one does not cover this case:
+    `expected_revision` is a compare-and-set on the *document*, so two people looking at revision 1
+    can approve it and abandon it and both are told 204. The evidence survives either way —
+    `experiment_protocol_status_events` records both moves with their actors — but nobody is told at
+    the time, which is the whole point of a sign-off.
+
+    It also catches the cheaper case: a lost response, retried, arriving after somebody else moved
+    the design on.
+    """
+
+
 class UnknownDesign(ChemclawError):
     """A design id nothing in the store answers to."""
 
@@ -261,6 +275,7 @@ class DesignStore(Protocol):
         status: DesignStatus,
         *,
         expected_revision: int,
+        expected_status: DesignStatus | None = None,
         actor: str = "",
         reason: str = "",
     ) -> None:
@@ -444,6 +459,7 @@ class InMemoryDesignStore:
         status: DesignStatus,
         *,
         expected_revision: int,
+        expected_status: DesignStatus | None = None,
         actor: str = "",
         reason: str = "",
     ) -> None:
@@ -461,7 +477,9 @@ class InMemoryDesignStore:
         # The design's current status, from the same dict the move is about to write — the
         # in-memory counterpart of the header column Postgres reads under its row lock. Nothing
         # yields between this read and the write, so there is no window to close here.
-        require_movable(self._meta[design_id]["status"], status, head_revision.kind)
+        current: DesignStatus = self._meta[design_id]["status"]
+        require_current_status(current, expected_status)
+        require_movable(current, status, head_revision.kind)
         self._meta[design_id]["status"] = status
         self._meta[design_id]["updated_at"] = datetime.now(UTC)
         self._status_events.setdefault(design_id, []).append(
@@ -701,6 +719,7 @@ class PostgresDesignStore:
         status: DesignStatus,
         *,
         expected_revision: int,
+        expected_status: DesignStatus | None = None,
         actor: str = "",
         reason: str = "",
     ) -> None:
@@ -747,6 +766,7 @@ class PostgresDesignStore:
                 # not a race: `_SELECT_HEAD` locks the *header* row, and every `append` takes that
                 # same lock before writing, so no revision can land between the two reads. The
                 # revisions table is append-only, so the row this finds cannot change either.
+                require_current_status(current, expected_status)
                 await cur.execute(_SELECT_HEAD_KIND, (design_id, head))
                 kind_row = await cur.fetchone()
                 # Anything that is not provably `protocol` is treated as `request`, so a header
@@ -942,6 +962,28 @@ _LEGAL_MOVES: dict[DesignStatus, frozenset[DesignStatus]] = {
 }
 
 
+def require_current_status(current: DesignStatus, expected: DesignStatus | None) -> None:
+    """Refuse a sign-off written against a status the design has since left.
+
+    One function so the two backends cannot disagree, and checked *before* `require_movable` because
+    "somebody moved this while you were reading" is the more actionable answer: the caller's next
+    step is to re-read and decide again, not to pick a different target status.
+
+    `None` means the caller did not say what it saw, and is allowed — every in-tree caller other
+    than the front door moves a design it has just created, and making them read a status back would
+    be ceremony rather than a control. The route requires it, which is where the concurrent humans
+    are.
+
+    Raises:
+        StatusConflict: the design is no longer in the status the caller signed off against.
+    """
+    if expected is not None and expected != current:
+        raise StatusConflict(
+            f"the design is {current!r}, not the {expected!r} you signed off against; "
+            "re-read it before deciding again"
+        )
+
+
 def require_movable(current: DesignStatus, status: DesignStatus, head_kind: RevisionKind) -> None:
     """Refuse a lifecycle move the design cannot support, naming why.
 
@@ -992,16 +1034,10 @@ def require_movable(current: DesignStatus, status: DesignStatus, head_kind: Revi
     here fails on the first move rather than being silently movable anywhere.
 
     The complementary guard — refusing a sign-off that would silently overwrite a *different*
-    person's sign-off at the same revision — is not here either, and `docs/planning/BACKLOG.md`
-    records why: `expected_revision` is a compare-and-set on the document, so two people looking at
-    revision 1 can approve and abandon it and both are told 204. Closing that needs the caller to
-    state the status it saw — an `expected_status`, which would also take a lost-response repeat
-    before it reached the table above. That row calls it "a contract change across `Chemclaw3_ui` as
-    well"; measured 2026-09-04 against the client's `main`, the panel **already sends
-    `expected_status`** and already handles a `status_conflict` 409, so the change left is this
-    side's alone. The evidence
-    survives either way — `experiment_protocol_status_events` records both moves with their actors
-    — but nobody is told at the time.
+    person's sign-off at the same revision — is `require_current_status`, which runs before this
+    one. It is separate because the two answer different questions: this table says whether the move
+    is legal at all, and that one says whether the design is still where the person thought it was.
+    `expected_revision` covers neither, being a compare-and-set on the *document*.
 
     Raises:
         UnstorableDocument: the design cannot hold this status.
