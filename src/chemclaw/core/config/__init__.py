@@ -50,7 +50,6 @@ the internals of one attached thing, it belongs in that thing's manifest, not he
 import logging
 from typing import Self
 
-from psycopg import ProgrammingError, conninfo
 from pydantic import model_validator
 from pydantic_settings import SettingsConfigDict
 
@@ -157,6 +156,13 @@ def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
     can say what libpq would do with a string libpq will not read. It is refused as the
     misconfiguration it is, naming the setting rather than the DSN — the value carries a password.
     """
+    # Imported inside the function, not at module scope. `core/config` is reached by
+    # `ingest/sources/registry`, and `tests/test_datasource_isolation.py` asserts that asking which
+    # sources to ingest imports **no** third-party driver — a manifest is two strings and should
+    # cost two strings. Reading a DSN the way libpq reads it is worth a driver import; doing it at
+    # import time would put psycopg behind every caller of `settings`.
+    from psycopg import ProgrammingError, conninfo
+
     try:
         parts = conninfo.conninfo_to_dict(dsn)
     except ProgrammingError as exc:
