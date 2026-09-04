@@ -78,7 +78,7 @@ from typing import Any
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 
-from chemclaw.agent.framing import defang, frame_untrusted
+from chemclaw.agent.framing import defang, envelope_delimiters, frame_untrusted
 from chemclaw.agent.tool_result_shape import rewritten_tool_messages
 from chemclaw.connectors.transport import SERVED_BY
 
@@ -145,11 +145,67 @@ def _rewritten(content: Any, rewrite: Callable[[str], str]) -> Any:
 
 def _rewritten_block(block: Any, rewrite: Callable[[str], str]) -> Any:
     """One content block with its text span rewritten, or the block unchanged."""
+    if not _carries_text(block):
+        return block
     if isinstance(block, str):
-        return rewrite(block) if block else block
-    if isinstance(block, dict) and isinstance(block.get("text"), str) and block["text"]:
-        return {**block, "text": rewrite(block["text"])}
-    return block
+        return rewrite(block)
+    return {**block, "text": rewrite(block["text"])}
+
+
+def _carries_text(block: Any) -> bool:
+    """Whether this block has a non-empty text span — i.e. whether there is anything to rewrite.
+
+    One predicate rather than a condition spelled twice, because `_framed_content` has to ask the
+    same question a second time: it needs to know which blocks the envelope's two halves ride on,
+    and that is exactly the set `_rewritten_block` would touch. A block with no span is an image or
+    an embedded resource; an empty one is a citation to nothing.
+    """
+    if isinstance(block, str):
+        return bool(block)
+    return isinstance(block, dict) and isinstance(block.get("text"), str) and bool(block["text"])
+
+
+def _framed_content(content: Any, origin: str) -> Any:
+    """`content` inside **one** envelope naming `origin`, whatever shape it arrived in.
+
+    **One result, one envelope — which is what this module's docstring has always argued for and
+    what the code did not do.** A connector result is `str | list[block]`, and the list arm framed
+    *each* block: the envelope is a constant per block (~90 characters for a short connector name)
+    and the block count is bounded by nothing, so what the model read was `text + 90 x blocks`
+    while `agent/tool_result_size.bound_tool_results` — nested inside this middleware — had
+    measured and capped only the text. Measured: 20,000 blocks of 2 characters is 40,000
+    characters, comfortably under the 60,000-character ceiling so nothing was cut, and the result
+    reached the model at **1,840,000** characters, 46x its measured size and over four times the
+    whole configured request budget.
+
+    Framing the result once removes that term rather than accounting for it, and it loses nothing:
+    the id repeated on every block was the same id every time, and the provider renders a block
+    list in sequence, so an envelope opened on the first span and closed on the last is one
+    envelope to the model as well as to `kg.note.mentioned_ids`.
+
+    **Every span is still defanged, and that is what makes one envelope safe.** The two delimiters
+    ride on the first and last text spans, so a *middle* span able to spell the closing delimiter
+    would end the envelope early and put everything after it outside the frame — which is the
+    forgery the envelope exists to close, arriving through the shape rather than through the
+    content. Neutralisation is per span; only the citation frame is shared.
+    """
+    if isinstance(content, str):
+        return frame_untrusted(content, note_id=origin) if content else content
+    if not isinstance(content, list):
+        return content
+    spans = [index for index, block in enumerate(content) if _carries_text(block)]
+    if not spans:
+        # Nothing to frame, and an envelope around nothing is a citation to nothing.
+        return content
+    opening, closing = envelope_delimiters(origin)
+    first, last = spans[0], spans[-1]
+
+    def _rewrite(index: int) -> Callable[[str], str]:
+        head = opening if index == first else ""
+        tail = closing if index == last else ""
+        return lambda text: f"{head}{defang(text)}{tail}"
+
+    return [_rewritten_block(block, _rewrite(index)) for index, block in enumerate(content)]
 
 
 @wrap_tool_call
@@ -261,10 +317,7 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
         def _framed(message: ToolMessage) -> ToolMessage:
             if message.status == "error":
                 return _defanged(message)
-            content = _rewritten(
-                message.content, lambda text: frame_untrusted(text, note_id=origin)
-            )
-            return message.model_copy(update={"content": content})
+            return message.model_copy(update={"content": _framed_content(message.content, origin)})
 
         return rewritten_tool_messages(result, _framed)
     name = request.tool_call["name"]

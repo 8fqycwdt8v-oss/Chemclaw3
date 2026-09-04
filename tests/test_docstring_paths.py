@@ -102,30 +102,40 @@ _CROSS_REPO = re.compile(
 # unresolved — a set small enough to read one by one, which is what a gate's findings have to be.
 _QUALIFIED = re.compile(r"`(chemclaw(?:\.[A-Za-z_][A-Za-z0-9_]*)+)`")
 
+
 # Dotted `chemclaw.*` names that are not Python and never were. Two kinds, both real: Helm values
 # paths (`chemclaw.image`, `chemclaw.knowledgeMounts` — the chart's own value tree) and
 # OpenTelemetry span names (`chemclaw.turn`, `chemclaw.tool`, `chemclaw.db`). They share a prefix
 # with the package and nothing else. An explicit list rather than a camelCase heuristic, for
 # `_REMOVED`'s reason: adding an entry should cost a review conversation.
-_NOT_PYTHON = frozenset(
-    {
-        "chemclaw.config",
-        "chemclaw.connectorUrls",
-        "chemclaw.connectorsEnabled",
-        "chemclaw.db",
-        "chemclaw.env",
-        "chemclaw.image",
-        "chemclaw.knowledgeMounts",
-        "chemclaw.knowledgePublishPath",
-        "chemclaw.mcp",
-        "chemclaw.migrationEnv",
-        "chemclaw.pooledProcesses",
-        # An Entra app-role name, which shares the prefix because the tenant names
-        # roles after the application ("Alice holding `chemclaw.sharedrive.reader`").
-        "chemclaw.sharedrive.reader",
-        "chemclaw.tool",
-        "chemclaw.turn",
-    }
+def _helm_helpers() -> frozenset[str]:
+    """Every `chemclaw.<name>` the chart defines as a template helper.
+
+    Derived rather than listed. These share Python's dotted shape and none of its meaning, so the
+    qualified-name check has to skip them — and the hand-written list this replaces went stale the
+    first time a chart fix cited a helper that was not on it, failing four files at once for prose
+    that was entirely correct. The chart is the only thing that knows what it defines, so it is
+    asked.
+    """
+    tpl = _REPO_ROOT / "deploy" / "helm" / "chemclaw" / "templates" / "_helpers.tpl"
+    return frozenset(re.findall(r'define\s+"(chemclaw\.[A-Za-z0-9_.]+)"', tpl.read_text()))
+
+
+_NOT_PYTHON = (
+    frozenset(
+        {
+            # Metric and log namespaces, which are not helpers and not modules either.
+            "chemclaw.config",
+            "chemclaw.db",
+            "chemclaw.mcp",
+            "chemclaw.tool",
+            "chemclaw.turn",
+            # An Entra app-role name, which shares the prefix because the tenant names
+            # roles after the application ("Alice holding `chemclaw.sharedrive.reader`").
+            "chemclaw.sharedrive.reader",
+        }
+    )
+    | _helm_helpers()
 )
 
 # Where a pointer is allowed to resolve, in the order a reader would try them: inside the package,

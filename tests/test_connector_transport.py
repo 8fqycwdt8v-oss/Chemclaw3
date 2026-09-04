@@ -597,6 +597,84 @@ def test_building_a_connector_app_does_not_reconfigure_process_logging() -> None
         root.removeHandler(sentinel)
 
 
+def _call_tool_wrapper_depth(fn: object) -> int:
+    """How many `_call_tool` wrappers `ToolManager.call_tool` is currently buried under.
+
+    Walked through the closure cells rather than `__wrapped__`, because neither patch in
+    `connectors/server.py` uses `functools.wraps` — each closes over the callable it replaced, which
+    is exactly the chain this counts.
+    """
+    depth = 0
+    while True:
+        nested = [
+            cell.cell_contents
+            for cell in getattr(fn, "__closure__", None) or ()
+            if _cell_holds_a_call_tool(cell)
+        ]
+        depth += 1
+        if not nested:
+            return depth
+        fn = nested[0]
+
+
+def _cell_holds_a_call_tool(cell: Any) -> bool:
+    """Whether a closure cell holds one of our own `call_tool` replacements (empty cells do not)."""
+    try:
+        held = cell.cell_contents
+    except ValueError:
+        return False
+    return callable(held) and getattr(held, "__name__", "") == "_call_tool"
+
+
+def test_building_two_apps_over_one_server_does_not_wrap_call_tool_twice() -> None:
+    """Both `call_tool` patches reassign unconditionally; the hook beside them guards against that.
+
+    Measured: one `connector_app` leaves a stack two deep, a second leaves it four. Benign today —
+    each wrapper is idempotent in effect — and unbounded, which is the part that is not: a process
+    building N apps over one server pays 2N wrappers per tool call, binds and resets the caller
+    contextvars N times, and re-enters the error sanitiser's `__cause__` walk at every layer.
+    `_publish_tool_results` already marks what it has wrapped for exactly this reason ("a process
+    that builds two apps over one server does not wrap twice"), one line further down.
+    """
+    server = FastMCP("double-wrap-probe")
+
+    @server.tool()
+    async def ping(value: str) -> str:
+        """Echo."""
+        return value
+
+    manager = server._tool_manager
+    connector_app(server, name="double-wrap-probe")
+    once = _call_tool_wrapper_depth(manager.call_tool)
+    connector_app(server, name="double-wrap-probe")
+    assert _call_tool_wrapper_depth(manager.call_tool) == once
+
+
+def test_an_unauthenticated_callers_own_path_does_not_reach_the_log_unbounded(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The refusal happens *before* any credential is checked, so the path is the caller's string.
+
+    The front door fixed exactly this and recorded the measurement: `request.url.path` on the
+    no-bearer branch reached 6,054 characters, straight into `SecretRedactingFilter`, whose scan is
+    linear in the record's length, with the logging lock held. The connector transport serves every
+    bundle *and* the read-only MCP face and was still logging the raw path.
+    """
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("CHEMCLAW_PROBE_CONNECTOR_TOKEN", "s3cret-token-value")
+    monkeypatch.setattr(
+        "chemclaw.connectors.server._declared_bearer_env",
+        lambda name: "CHEMCLAW_PROBE_CONNECTOR_TOKEN",
+    )
+    app = connector_app(FastMCP("clip-probe"), name="clip-probe")
+    with caplog.at_level(logging.WARNING, logger="chemclaw.connectors.server"):
+        with TestClient(app) as client:
+            assert client.post("/mcp/" + "a" * 6000, json={}).status_code == 401
+    (refusal,) = [record for record in caplog.records if "unauthenticated" in record.getMessage()]
+    assert len(refusal.getMessage()) < 400, refusal.getMessage()[:200]
+
+
 def test_a_deliberate_domain_error_still_reaches_the_caller_unchanged() -> None:
     """The other half of the same fix: a `ValueError`-family message must not be swallowed too.
 

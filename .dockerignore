@@ -1,0 +1,25 @@
+# Keep the build context lean and secret-free (plan F6-T1).
+#
+# At the repository root, not beside the Containerfile, and that is the only placement that works.
+# Every builder `deploy/jenkins/lib/image.sh` supports — docker, buildah, podman, kaniko — reads the
+# ignore file from the **root of the build context**, and both call sites pass the repository root
+# as the context (`.github/workflows/image.yml`, `image.sh`'s `build_and_push`). BuildKit alone also
+# honours `<dockerfile>.dockerignore`, so `deploy/Containerfile.dockerignore` would tidy this next to
+# the Containerfile and leave three of the four builders ignoring it. It lived at `deploy/` for a
+# long time, where nothing reads one at all: the context was the whole 6.9 GB tree, `.venv` and
+# `.git` included, uploaded to a shared builder under kaniko.
+.git
+.github
+**/__pycache__
+**/*.pyc
+.venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+tests
+docs
+*.md
+!README.md
+.env
+*.pem
+*.key

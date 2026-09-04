@@ -32,9 +32,15 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
 - **Plain secrets are the exceptions, not the model.** Each is a credential for a system that does
   not speak Entra, and the set is `values.yaml`'s `secrets.keys` — declared there with the argument
   for each one written beside it, and pinned by `tests/test_helm_chart.py`. The Temporal mTLS certs
-  are the one that is not env: they mount as files. Everything that *can* federate does: **Workload
-  Identity Federation** (F4-T2) annotates the pod's ServiceAccount so its projected token is
-  exchanged for an Entra token, with no client secret at rest.
+  are the one that is not env: they mount as files. **Workload Identity Federation is not one of the
+  controls here**, and this paragraph used to say it was: F4-T2 built the token exchange, nothing
+  ever called it, and `D-2026-08-15` deleted it along with OBO and the HPC identity bridge. What
+  survives is inert scaffolding — an `azure.workload.identity/client-id` annotation on the
+  ServiceAccount (`values.yaml`) and an `azure.workload.identity/use: "true"` label on every pod
+  template — kept because a site that wires the Azure webhook up itself is one values file away from
+  a federation path, and removed the day nobody wants that. Nothing under `src/` reads
+  `AZURE_FEDERATED_TOKEN_FILE` or exchanges a projected token, so every credential in
+  `secrets.keys` is at rest as a secret today.
   (This section said "only three" from F6-T6, then "five", while the real number reached six —
   which is the whole reason the count now lives in the chart and the test rather than in this
   sentence. It had already said so, in the sentence after the one that restated it.)
@@ -82,9 +88,15 @@ moved into the chart and its test: a number written in prose is a number that go
   loud warning) and belongs in local dev only. Under `entra_required`, `CHEMCLAW_ENTRA_TENANT_ID`
   and `CHEMCLAW_ENTRA_AUDIENCE` must also be set — a half-configured identity setup fails fast at
   startup rather than at the first request.
-- **`CHEMCLAW_ENTRA_CLIENT_ID` no longer exists.** `Settings` is `extra="forbid"`, so a stale export
-  of the removed field aborts startup with a validation error naming it. Drop it from any inherited
-  ConfigMap/env before upgrading.
+- **`CHEMCLAW_ENTRA_CLIENT_ID` no longer exists. Drop it before upgrading, because nothing will
+  tell you if you don't.** This entry used to promise the opposite — that `extra="forbid"` aborts
+  startup with a validation error naming the stale field — and that is true of a key in a *dotenv
+  file* and false of the environment. pydantic-settings' `EnvSettingsSource` looks up only the names
+  it has fields for, so a `CHEMCLAW_*` variable that matches nothing is never seen, let alone
+  rejected: a `CHEMCLAW_`-prefixed variable matching no field boots cleanly, and a ConfigMap is
+  exactly how config arrives in-cluster. So a stale export is silently ignored rather than loud,
+  and the same silence is what makes a rolled-back or hand-edited ConfigMap quiet rather than
+  obvious.
 - **`CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` is the ceiling the whole deployment may put on the
   shared LLM endpoint** (D-2026-08-01-a-per-process-cap-multiplied-by-a-number-nobody-wrote-down).
   The admission cap is per-process by design, so the load that endpoint really sees is

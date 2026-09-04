@@ -54,6 +54,12 @@ class FixtureJobWorkflow:
                 "subject": subject,
                 "ran": True,
                 "requested_by": workflow.memo_value("requested_by", ""),
+                # And the session, for the same reason and off the same memo. Read here because
+                # `BoCampaignWorkflow._evaluate` reads it — a measured campaign's whole "this is
+                # waiting on you" notice is addressed by it — and it was the one of the three keys
+                # core forgot to stamp, so every such notice was dropped by
+                # `AwaitAnswerWorkflow._push`'s `if not request.session_id: return`.
+                "session_id": workflow.memo_value("session_id", ""),
             },
             note=Note(
                 id=f"fixture-{subject}",

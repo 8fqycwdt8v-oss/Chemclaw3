@@ -423,6 +423,42 @@ def test_factor_levels_declared_exempts_a_control_arm() -> None:
     assert factor_levels_declared(design).passed
 
 
+def test_factor_levels_declared_blocks_a_control_arm_naming_a_factor_nothing_declares() -> None:
+    """The exemption is from the factor *space*, never from the factor *vocabulary*.
+
+    `render`'s run sheet builds its columns from `design.factors`, so a level filed under a name no
+    factor declares is stored in the document and read by nothing: a negative control carrying
+    `no_catalyst="omitted"` rendered byte for byte like the arm beside it apart from the
+    `*(negative)*` tag, and the instruction that makes it a control appeared nowhere on the page
+    the chemist runs from. That is the failure `render.py`'s own comments describe for the
+    atmosphere and pressure columns.
+    """
+    design = _design(
+        factors=_two_factors(),
+        arms=[
+            ProtocolArm(arm_id="A1", levels={"ligand": "XPhos", "base": "K3PO4"}),
+            ProtocolArm(
+                arm_id="C1",
+                control="negative",
+                levels={"ligand": "XPhos", "no_catalyst": "omitted"},
+            ),
+        ],
+    )
+    verdict = factor_levels_declared(design)
+    assert not verdict.passed and verdict.severity == "blocker"
+    assert "C1 sets undeclared factor(s): no_catalyst" in verdict.detail
+
+
+def test_factor_levels_declared_blocks_a_control_arm_setting_levels_with_no_factors_at_all() -> (
+    None
+):
+    """The no-factors branch exempted controls too — and it is where *every* name is undeclared."""
+    design = _design(arms=[ProtocolArm(arm_id="C1", control="negative", levels={"solvent": "THF"})])
+    verdict = factor_levels_declared(design)
+    assert not verdict.passed
+    assert "does not declare: solvent" in verdict.detail
+
+
 # --- arms_are_distinct --------------------------------------------------------------------------
 
 

@@ -338,3 +338,67 @@ def test_the_republish_walk_beats_and_is_bounded_below_the_job_ceiling(
         f"beats={beats}"
     )
     assert any("still running" in beat for beat in beats)
+
+
+def test_the_eviction_sweep_beats_inside_the_budget_it_reports_within(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one background sweep on this queue that had no heartbeat at all.
+
+    `prune_expired_rows`, `reindex_notes_activity` and `drain_result_publications` are its three
+    siblings and every one of them beats; `evict_cold_artifacts` ran two unbounded `DELETE`
+    statements over the whole `artifact_blobs`x`calculation_artifacts` join under a ten-minute
+    `retention_timeout_seconds` and reported nothing in between. So a worker killed thirty seconds
+    into a pass was invisible for the remaining nine and a half minutes, on a job whose entire
+    purpose is to run unattended on a Schedule.
+
+    No new setting: the activity is already budgeted by `retention_timeout_seconds`, and
+    `Settings._the_heartbeat_fits_inside_the_budget_it_reports_within` already keeps
+    `background_activity_heartbeat_timeout_seconds` strictly below it — so the beat this asserts is
+    covered by the guard that already exists rather than by one more number to keep in step.
+
+    Both halves, exactly as the republish walk above: the arguments the workflow hands the
+    activity, and that the sweep actually beats while it runs.
+    """
+    from chemclaw.core.config import settings
+    from chemclaw.durable import artifact_eviction
+
+    captured: dict[str, Any] = {}
+
+    async def _capture(*args: Any, **kwargs: Any) -> artifact_eviction.EvictionOutcome:
+        captured.update(kwargs)
+        return artifact_eviction.EvictionOutcome()
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _capture)
+    asyncio.run(artifact_eviction.ArtifactEvictionWorkflow().run())
+
+    budget = timedelta(seconds=settings.retention_timeout_seconds)
+    assert captured["start_to_close_timeout"] == budget
+    assert captured["heartbeat_timeout"] == timedelta(
+        seconds=settings.background_activity_heartbeat_timeout_seconds
+    ), (
+        "the eviction sweep carries no heartbeat timeout, so the beats below buy nothing: a dead "
+        f"worker is noticed only when {budget} of start-to-close budget expires"
+    )
+    assert captured["heartbeat_timeout"] < budget, (
+        "a heartbeat timeout at or above the budget it sits under can never fire first"
+    )
+
+    # --- and the sweep itself beats -------------------------------------------------------
+    beats: list[str] = []
+    monkeypatch.setattr(activity, "heartbeat", lambda *a: beats.append(str(a)))
+    monkeypatch.setattr(settings, "background_activity_heartbeat_timeout_seconds", 4.0)
+    monkeypatch.setattr(settings, "artifact_evict_idle_days", 30)
+
+    async def _slow_pass() -> artifact_eviction.EvictionOutcome:
+        await asyncio.sleep(1.3)
+        return artifact_eviction.EvictionOutcome(idle_blobs=1, idle_bytes=2)
+
+    monkeypatch.setattr(artifact_eviction, "_evict_cold_artifacts", _slow_pass)
+    outcome = asyncio.run(artifact_eviction.evict_cold_artifacts())
+
+    assert outcome.idle_blobs == 1, "the wrapper swallowed the pass's own result"
+    assert beats, (
+        "a sweep that scans the whole blob store must beat *while it runs*, not only at the start"
+    )
+    assert any("still running" in beat for beat in beats)

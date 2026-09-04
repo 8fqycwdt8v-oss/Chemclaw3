@@ -26,6 +26,7 @@ from chemclaw.protocols.models import (
     ExperimentDesign,
     ExperimentRequest,
     ProtocolArm,
+    RevisionKind,
 )
 from chemclaw.protocols.store import (
     DesignStore,
@@ -37,6 +38,7 @@ from chemclaw.protocols.store import (
     UnstorableDocument,
     advanced,
     default_design_store,
+    require_movable,
 )
 from tests.pg import migrated_db_or_skip
 
@@ -423,29 +425,51 @@ def test_every_status_the_type_allows_is_a_status_the_schema_accepts(backend: st
     Neither can be derived from the Literal, so a sixth status added in Python would pass mypy,
     pass every in-memory test, and be rejected by Postgres at runtime — on the write, in front of a
     chemist. Driving all five through the real store is what ties the three declarations together.
+
+    **Two designs, because `require_movable` now refuses one of the five on a protocol head.**
+    `requested` means "holds only the structured ask", so a drafted design may not take it — the
+    mirror of the refusal of `executed` on an ask. The subject here is the SQL constraint rather
+    than the lifecycle, so each status is driven through a design that may legally hold it; a
+    single-design version of this test would prove the constraint by breaking the guard.
     """
 
     async def _body() -> None:
         store = await _backend(backend)
-        design_id = _id(backend, "allstatuses")
-        design = _design(arms=1)
-        await store.append(design_id, design, run_checks(design), author_kind="agent")
-        held: DesignStatus = "draft"
+        drafted_id = _id(backend, "allstatuses")
+        drafted = _design(arms=1)
+        await store.append(drafted_id, drafted, run_checks(drafted), author_kind="agent")
+        ask_id = _id(backend, "allstatusesask")
+        ask = _design(arms=0)
+        await store.append(
+            ask_id,
+            ask,
+            run_checks(ask, stage="request"),
+            author_kind="agent",
+            change_note="structured the request",
+            status="requested",
+        )
+        # What each design currently holds, so every move can state the status it saw. Per design
+        # rather than one value, because the ask exists to carry `requested` past the SQL constraint
+        # and stays there while the drafted design walks the rest.
+        held: dict[str, DesignStatus] = {drafted_id: "draft", ask_id: "requested"}
         for status in get_args(DesignStatus):
+            design_id = ask_id if status == "requested" else drafted_id
             await store.set_status(
                 design_id,
                 status,
                 expected_revision=1,
-                expected_status=held,
+                expected_status=held[design_id],
                 actor="chemist-a",
                 reason=f"moving to {status}",
             )
             summary = await store.summary(design_id)
             assert summary is not None and summary.status == status
-            held = status
+            held[design_id] = status
 
-        recorded = [event.status for event in await store.status_history(design_id)]
-        assert recorded == list(reversed(get_args(DesignStatus)))
+        on_a_protocol = [status for status in get_args(DesignStatus) if status != "requested"]
+        recorded = [event.status for event in await store.status_history(drafted_id)]
+        assert recorded == list(reversed(on_a_protocol))
+        assert [event.status for event in await store.status_history(ask_id)] == ["requested"]
 
     _run(_body)
 
@@ -905,6 +929,245 @@ def test_a_drafted_protocol_can_still_be_approved(backend: str) -> None:
         )
         header = await store.summary(_signoff)
         assert header is not None and header.status == "approved"
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_drafted_protocol_cannot_be_moved_back_to_requested(backend: str) -> None:
+    """The mirror of the guard above, and it was missing while the guard's own argument covered it.
+
+    `requested` is the one status that says the design "holds only a structured ask"
+    (`models.DesignStatus`), so a `protocol` head contradicts it exactly as a `request` head
+    contradicts `executed`. Nothing refused it: measured on both backends, an executed design moved
+    to `requested` and stayed there with a fully drafted protocol as its head, so
+    `GET /protocols?status=requested` listed it among the intakes and `?status=executed` did not.
+    `advanced()` only repaired it when the *next* revision landed.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design_id = _fresh_id(backend, "unrequest")
+        design = _design(arms=2)
+        await store.append(
+            design_id,
+            design,
+            run_checks(design),
+            author_kind="agent",
+            author="chemist-a",
+            change_note="drafted",
+        )
+        with pytest.raises(UnstorableDocument, match="holds a procedure"):
+            await store.set_status(
+                design_id,
+                "requested",
+                expected_revision=1,
+                expected_status="draft",
+                actor="chemist-a",
+                reason="reopening the ask",
+            )
+        header = await store.summary(design_id)
+        assert header is not None and header.status == "draft"
+
+    _run(_body)
+
+
+#: The lifecycle table as the decision states it, written out here rather than imported from the
+#: store. A test that reads the store's own map proves the code agrees with itself and nothing else;
+#: this is the decided table, so a row edited by accident fails on this side.
+#:
+#: Every self-transition (`X -> X`) is legal on top of these and is deliberately *not* written into
+#: the rows: it is one rule about retries rather than five decisions about the lifecycle.
+_LEGAL_MOVES_AS_DECIDED: dict[str, set[str]] = {
+    "requested": {"draft", "abandoned"},
+    "draft": {"approved", "abandoned"},
+    "approved": {"executed", "draft", "abandoned"},
+    "executed": {"abandoned"},
+    "abandoned": {"draft"},
+}
+
+#: The start states each head kind can actually hold. A `protocol` head cannot be `requested` (the
+#: document rule refuses it) and a `request` head cannot be `approved` or `executed` (same rule,
+#: read the other way), so the store matrix below drives 35 of the 25 pairs rather than all of them
+#: — the two it cannot reach, `approved -> requested` and `executed -> requested`, are covered
+#: against `require_movable` itself.
+_PROTOCOL_HEAD_STATES: tuple[DesignStatus, ...] = ("draft", "approved", "executed", "abandoned")
+_REQUEST_HEAD_STATES: tuple[DesignStatus, ...] = ("requested", "draft", "abandoned")
+
+
+def _order_permits(current: str, target: str) -> bool:
+    """What the decided table says about one move, self-transitions included."""
+    return target == current or target in _LEGAL_MOVES_AS_DECIDED[current]
+
+
+def _document_permits(target: str, head_kind: str) -> bool:
+    """What the *other* half of `require_movable` says: a status against the head it describes."""
+    if target in ("approved", "executed"):
+        return head_kind == "protocol"
+    if target == "requested":
+        return head_kind == "request"
+    return True
+
+
+def _route_to(head_kind: str, state: DesignStatus) -> tuple[DesignStatus, ...]:
+    """The moves that put a fresh design in `state` — every one of them legal under the table.
+
+    A fixture that had to make an illegal move to set up its start state would be proving the
+    absence of the guard while testing for its presence.
+    """
+    start = "draft" if head_kind == "protocol" else "requested"
+    if state == start:
+        return ()
+    if state == "executed":
+        return ("approved", "executed")
+    return (state,)
+
+
+def test_every_pair_of_statuses_is_decided_by_the_transition_table() -> None:
+    """All 25 (from, to) pairs, driven on the head kind that leaves the *order* rule under test.
+
+    `require_movable` answers two questions — is this status true of the document, and is this move
+    legal from where the design is — so each pair here is driven on a head the first question has
+    nothing to say about: `approved` and `executed` need a `protocol` head, `requested` needs a
+    `request` one. Any refusal reaching these assertions is therefore the table's, and the message
+    is checked for both status names so a document-rule refusal cannot pass as agreement.
+    """
+    for current in get_args(DesignStatus):
+        for target in get_args(DesignStatus):
+            head_kind: RevisionKind = "request" if target == "requested" else "protocol"
+            if _order_permits(current, target):
+                require_movable(current, target, head_kind)
+                continue
+            with pytest.raises(UnstorableDocument) as refusal:
+                require_movable(current, target, head_kind)
+            message = str(refusal.value)
+            assert current in message and target in message, (
+                f"the refusal of {current!r} -> {target!r} names neither where the design is nor "
+                f"where it was asked to go: {message!r}"
+            )
+
+
+def test_the_transition_table_covers_every_status_the_type_allows() -> None:
+    """A sixth `DesignStatus` with no row in the table is a design nothing can move.
+
+    The same tie `test_every_status_the_type_allows_is_a_status_the_schema_accepts` makes between
+    the Literal and the two SQL `CHECK` constraints, one declaration along. The table is indexed on
+    the *current* status, so a status the table does not know is a `KeyError` in front of a chemist
+    — driving each status's self-transition is what forces that index for all five.
+    """
+    for status in get_args(DesignStatus):
+        head_kind: RevisionKind = "request" if status == "requested" else "protocol"
+        require_movable(status, status, head_kind)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_both_backends_decide_every_reachable_lifecycle_move_identically(backend: str) -> None:
+    """The table as a matrix, through `set_status`, on a real store of each kind.
+
+    A rule that holds on one backend and not the other is not a rule — `InMemoryDesignStore` is what
+    a deployment without Postgres runs on — and the order rule needs the design's *current* status,
+    which is read from a different place on each side: a dict here, the header row already locked
+    `FOR UPDATE` there. Measured before this guard: `abandoned -> executed` and `draft -> executed`
+    were both accepted on both backends, so a design retired because the starting material
+    decomposes could be marked run, and a protocol nobody signed off could be marked run.
+
+    A refused move must also leave the header where it was, which is the half a store could get
+    wrong on its own: raising after the UPDATE would refuse the caller and move the design anyway.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        for head_kind, states, arms in (
+            ("protocol", _PROTOCOL_HEAD_STATES, 2),
+            ("request", _REQUEST_HEAD_STATES, 0),
+        ):
+            for current in states:
+                for target in get_args(DesignStatus):
+                    design_id = _fresh_id(backend, f"move-{head_kind[:4]}-{current}-{target}")
+                    design = _design(arms=arms)
+                    await store.append(
+                        design_id,
+                        design,
+                        [],
+                        author_kind="agent",
+                        status="draft" if arms else "requested",
+                    )
+                    # `expected_status` is required, so the walk states what it is leaving at
+                    # every step — which is also what makes the refusal below unambiguous: a
+                    # `StatusConflict` here would mean the fixture drifted, not that the table
+                    # refused, and the two raise different types.
+                    seen: DesignStatus = "draft" if arms else "requested"
+                    for step in _route_to(head_kind, current):
+                        await store.set_status(
+                            design_id, step, expected_revision=1, expected_status=seen
+                        )
+                        seen = step
+                    where = f"{head_kind} head, {current} -> {target}"
+                    if _order_permits(current, target) and _document_permits(target, head_kind):
+                        await store.set_status(
+                            design_id,
+                            target,
+                            expected_revision=1,
+                            expected_status=seen,
+                            actor="chemist-a",
+                        )
+                        summary = await store.summary(design_id)
+                        assert summary is not None and summary.status == target, where
+                        continue
+                    with pytest.raises(UnstorableDocument):
+                        await store.set_status(
+                            design_id,
+                            target,
+                            expected_revision=1,
+                            expected_status=seen,
+                            actor="chemist-a",
+                        )
+                    summary = await store.summary(design_id)
+                    assert summary is not None and summary.status == current, (
+                        f"the move was refused and the header moved anyway ({where})"
+                    )
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_repeated_sign_off_is_a_no_op_rather_than_a_refusal(backend: str) -> None:
+    """Every `X -> X` is legal, and this is the reason the table permits them.
+
+    `Chemclaw3_ui`'s sign-off panel renders a *Mark X* button for all five statuses whatever the
+    design's current one is, so `approved -> approved` is one click away by construction — and a
+    move whose response is lost is reported to the chemist as "The status was not recorded" when it
+    may well have been, so pressing again is the ordinary recovery. Forbidding the repeat would turn
+    a button the client offers into a 422 on the one screen where the answer is "it already worked".
+
+    The event row is still written, which is the half worth asserting: a repeat is somebody acting a
+    second time, and `experiment_protocol_status_events` is the record of who moved a design and
+    why. A store that made the repeat a silent no-op would lose the second act.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design_id = _fresh_id(backend, "retry")
+        await store.append(design_id, _design(arms=1), [], author_kind="agent", status="draft")
+        # Both clicks state `draft`, because that is what the panel was showing when the chemist
+        # pressed the button twice — a retry does not re-read. The second one therefore exercises
+        # `require_unmoved` *and* the table's self-transition together, which is the case that would
+        # break if either forbade it.
+        for reason in ("clicked approve", "clicked approve again"):
+            await store.set_status(
+                design_id,
+                "approved",
+                expected_revision=1,
+                expected_status="draft" if reason.endswith("approve") else "approved",
+                actor="chemist-a",
+                reason=reason,
+            )
+        summary = await store.summary(design_id)
+        assert summary is not None and summary.status == "approved"
+        assert [event.reason for event in await store.status_history(design_id)] == [
+            "clicked approve again",
+            "clicked approve",
+        ]
 
     _run(_body)
 

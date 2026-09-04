@@ -51,8 +51,12 @@ CREATE TABLE IF NOT EXISTS property_definition (
     -- Which of `property_value`'s three value columns is correct for this name. A projection that
     -- writes `converged` as the number 1.0 is a registry violation rather than a plausible number.
     value_kind      VARCHAR(16)  NOT NULL DEFAULT 'number',
-    -- Where the quantity attaches, so a per-atom value written as a calculation-scope scalar is a
-    -- detectable error rather than a stored one.
+    -- **Which table this quantity's values live in**, so a per-atom value written as a
+    -- calculation-scope scalar is a detectable error rather than a stored one. 'calculation' names
+    -- `property_value` and covers *both* of that table's row scopes -- a reaction's delta-G is a
+    -- fact about the run and a species' absolute Gibbs energy is a fact about one member, and
+    -- `property_value.scope_kind` below is what tells those apart. The other values name the tables
+    -- that are not `property_value`: 'site', 'point', 'conformer', 'candidate'.
     scope_kind      VARCHAR(16)  NOT NULL DEFAULT 'calculation',
     definition      VARCHAR(2000) NOT NULL,
     -- A property that turned out to be wrong is deprecated, never deleted: rows already carry it,

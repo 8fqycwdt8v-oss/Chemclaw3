@@ -788,7 +788,7 @@ all described it, and nothing could have told you.
 | the line is absent from `/metrics` | You are not scraping this process | Not a compaction signal at all: `core/metrics.py` pre-seeds every declared counter, so both names render at `0` from the first scrape of a process that has served nothing. An absent line means the worker's `/metrics` port is unscraped (`CHEMCLAW_WORKER_METRICS_PORT`), not that the policy is unwired. |
 | rising steadily, `reclaimed` large per compaction | Long sessions are routinely over budget | Expected on a deployment with real chemists. Read it against `chemclaw_turn_duration_seconds`: reduction is cheap (sub-millisecond to ~6 ms per call), so a slow turn is not this. |
 | rising on almost every call | The budget is below this deployment's normal turn | Raise `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET` toward the model's real context window. Compacting a thread that would have fit spends estimator passes and drops context for nothing. |
-| rising on **every** call, from the first one | A configured trigger is below this request's own prefix, so it floors at 1 — "reduce on every model call" | Grep the process for `context.trigger_floored`, a WARNING naming the setting, its value and the measured prefix. Both context settings are budgets on the whole *request*: the system message, the skills listing and every bound tool schema come off them before the thread gets anything, and that prefix measured 43,175 estimated tokens on `default` on 2026-09-04. The shipped `CHEMCLAW_AGENT_TOOL_RESULT_CLEAR_TRIGGER=30000` is in this state; raise it above the prefix (and keep it at or below the budget, which startup enforces). |
+| rising on **every** call, from the first one | A configured trigger is below this request's own prefix, so it floors at 1 — "reduce on every model call" | Grep the process for `context.trigger_floored`, a WARNING naming the setting, its value and the measured prefix. Both context settings are budgets on the whole *request*: the system message, the skills listing and every bound tool schema come off them before the thread gets anything, and that prefix measured 43,175 estimated tokens on `default` on 2026-09-04. The shipped `CHEMCLAW_AGENT_TOOL_RESULT_CLEAR_TRIGGER` is 73,500, above that prefix, so a shipped deployment is **not** in this state and this row means someone lowered it; raise it back above the prefix (and keep it at or below the budget, which startup enforces). |
 
 Per-model attribution for the same spend **is not on this surface, and is no longer missing**. The
 old framework emitted `gen_ai.client.token.usage` labelled by request model, response model,
@@ -879,14 +879,23 @@ routes on `CHEMCLAW_WORKER_METRICS_PORT` (default 9000, the `metrics` container 
 
 ```
 kubectl port-forward deploy/chemclaw-background-worker 9000:9000
-curl -s localhost:9000/readyz    # 200 = polling, 503 = the worker is not running
+curl -s localhost:9000/readyz    # 200 = the worker object is running (see the caveat below)
 curl -s localhost:9000/metrics   # this pod's counters, gauges and histograms
 ```
 
-- **`/readyz` is 503 but the pod is up.** The Temporal worker is not polling — a lost broker
-  connection, or a shutdown that has begun. It is deliberately *not* a liveness signal: restarting
-  on it would turn an ordinary reconnect into a crash loop, so the pod stays and reports honestly.
-  Check the broker before the worker.
+- **`/readyz` 200 is not evidence that the broker is reachable, and this section used to say it
+  was.** The predicate is `worker.is_running` (`durable/serve.py`), which is a *lifecycle* flag:
+  true from the moment `worker.run()` is entered until shutdown, and the SDK's retry loop holds it
+  true straight through a total broker outage. Measured on 2026-09-04 against a severed connection:
+  every `poll_workflow_task_queue` failing with `ConnectionRefused` while `/readyz` answered
+  `200 {"status":"ready"}` for as long as the worker was left running. **So during a suspected
+  broker incident, probe the broker, never the worker's readiness** — and treat a rollout that
+  "completed" in that window as unproven. Cold start is not affected: a worker that cannot reach
+  the broker at startup exits 1 and crash-loops, which is correct.
+- **`/readyz` is 503 but the pod is up.** The worker object is not running — a shutdown that has
+  begun, or a failure before the poll loop started. It is deliberately *not* a liveness signal:
+  restarting on it would turn an ordinary reconnect into a crash loop, so the pod stays and reports
+  honestly. Check the broker before the worker.
 - **`/healthz` stops answering.** The event loop is wedged, almost always by a blocking call inside
   an activity, and the kubelet restarts the pod after `failureThreshold` (2 minutes by default —
   generous, because a false restart mid-job costs more than a slow true one). The metric to read
@@ -1235,9 +1244,13 @@ so. Start at §(x-b) step 1.
 #### ChemclawWorkerNotPolling
 `critical`, and rendered only when `monitoring.temporalSdkMetrics.enabled` is on. A worker is up and
 answering its probes while asking Temporal for no work, so jobs queue and nothing runs them. This is
-the gap the worker's probes leave *on purpose*: `/readyz` is deliberately not a liveness signal,
-because restarting on a lost broker connection would turn an ordinary reconnect into a crash loop.
-Check `/readyz` on the named pod (§(x)) and the broker before restarting anything.
+the gap the worker's probes leave: `/readyz` is deliberately not a liveness signal, because
+restarting on a lost broker connection would turn an ordinary reconnect into a crash loop — **and
+it does not currently report a lost broker connection at all**, since its predicate is the
+lifecycle flag `worker.is_running` (see §(x)). So `/readyz` on the named pod is not a second
+opinion here: check the **broker** before restarting anything, and read the pod's own
+`chemclaw_degraded_total{subsystem="jobs_in_flight"}`, which is the one worker-side series a broker
+outage does move.
 
 ### chemclaw.turns — the answer itself
 
@@ -1443,6 +1456,16 @@ recovery is:
 kubectl logs job/chemclaw-migrate            # the hook is kept on failure, so the logs are there
 helm rollback chemclaw                       # or `helm upgrade --install` again once the cause is fixed
 ```
+
+**What `helm rollback` does and does not undo.** It restores the release manifest — every Deployment
+and Service, and `chemclaw-config`, the ConfigMap the pods read, which is an ordinary tracked
+resource for exactly this reason. (It was a Helm hook once, and hooks are not release state: a
+rollback reverted the pods and left the new release's configuration live, so a release rolled back
+from `connectors.bo.enabled=false` restored the `bo` pods while `CHEMCLAW_CONNECTORS_ENABLED` still
+omitted `bo` and the capability stayed dark.) It does **not** undo a data conversion:
+`chemclaw-convert` is a `post-upgrade` hook whose backfill rewrites `session_messages` rows, and
+neither rollback nor uninstall re-runs or reverses it — which is also why this chart must not be
+deployed with `helm upgrade --atomic` (`deploy/jenkins/targets/openshift.sh` does not).
 
 **The Job says a migration was edited after being applied.** `MigrationError`, and the fix is never
 to edit the file back: `schema_migrations` records a checksum precisely so an in-place change is

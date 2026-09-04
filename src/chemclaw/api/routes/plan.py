@@ -13,6 +13,7 @@ needs and why it is not the one the in-turn card uses.
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Request
 from starlette.responses import Response
@@ -21,12 +22,18 @@ from chemclaw.agent.plan_approval_store import ApprovalStore
 from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, gate_applies, plan_identity
 from chemclaw.agent.plan_state import session_todos
 from chemclaw.agent.profiles import get_profile
+from chemclaw.agent.session_store import SessionOwnerStore, encode_session_cursor
 from chemclaw.api.deps import CurrentSession, CurrentUser
 from chemclaw.api.schemas import PendingPlan, PendingPlansOut, PlanDecisionIn, PlanStatusOut
-from chemclaw.api.state import state
+from chemclaw.api.state import SessionOwners, state
 from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# One row of the ownership listing, as `SessionOwners.list_for_owner` returns it:
+# `(session_id, created_at, updated_at, title, profile)`. Named here rather than repeated at
+# each signature — it is the shape `_owned_sessions` pages over and `pending_plans` unpacks.
+_OwnedSession = tuple[str, datetime, datetime, str | None, str | None]
 
 
 @dataclass(frozen=True)
@@ -97,6 +104,41 @@ def _plan_gated(profile_name: str | None) -> bool:
             profile_name,
         )
         return True
+
+
+async def _owned_sessions(
+    owners: SessionOwners, oid: str | None, budget: int
+) -> tuple[int, list[_OwnedSession]]:
+    """Every session of the caller's the inbox could still spend its scan budget on.
+
+    Returns how many sessions were enumerated and, of those, the plan-gated ones in listing order
+    (newest activity first) — the two numbers `considered` and `gated` report.
+
+    **The loop stops when another page could not change the answer**, which is what keeps it
+    bounded: once more than `budget` gated sessions are in hand, every further page would only add
+    rows past the scan ceiling, and `unread` already says the answer is partial. A short page ends
+    it too — that is the listing running out, and the only case where the inbox can honestly claim
+    to have seen everything.
+
+    A registry that is not the durable store answers one call and is done: `page_for_owner` lives
+    on `SessionOwnerStore` rather than on the `SessionOwners` protocol, and `GET /sessions` makes
+    the same split for the same reason — a front door handed some other registry through
+    `create_app(owner_store=...)` can answer a listing but not resume one.
+    """
+    if not isinstance(owners, SessionOwnerStore):
+        rows = await owners.list_for_owner(oid)
+        return len(rows), [row for row in rows if _plan_gated(row[4])]
+    considered = 0
+    gated: list[_OwnedSession] = []
+    cursor: str | None = None
+    while True:
+        page = await owners.page_for_owner(oid, after=cursor)
+        considered += len(page)
+        gated.extend(row for row in page if _plan_gated(row[4]))
+        if len(page) < settings.service_max_listed_sessions or len(gated) > budget:
+            return considered, gated
+        session_id, _created_at, updated_at = page[-1][:3]
+        cursor = encode_session_cursor(updated_at, session_id)
 
 
 async def get_plan(
@@ -179,6 +221,21 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
     checkpointer that serializes them against every concurrent turn on the pod. `unread` counts
     what was left — including a session whose checkpoint could not be read at all, which is an
     unknown plan rather than an absent one.
+
+    **The listing is paged through, not read once**, and that is the one bound this route must not
+    inherit. `service_max_listed_sessions` became a *page* when `X-Next-Cursor` was added to
+    `GET /sessions`; this reader stayed on the first call, so `considered` was a page count
+    presented as a population and `unread` counted only what the scan budget skipped *inside* that
+    page. The failure is not an inaccurate field: an unanswered plan means the conversation takes
+    no further turns, so its `updated_at` never moves and it never rises back above the page
+    boundary — a chemist whose blocked plan sits on an older conversation is told "nothing is
+    waiting on you" for good. Measured at a page of 2 over five owned sessions:
+    `{"plans": [], "considered": 2, "gated": 2, "unread": 0}`.
+
+    Paging costs one indexed keyset statement per page and stops as soon as the *scan* budget can
+    no longer be spent — so the loop is bounded by the work the route was already allowed to do,
+    and the query it repeats is the cheap half. The expensive half is unchanged: still at most
+    `service_max_plan_scans` checkpointer reads, still serialized behind one lock.
     """
     owners = state(request).session_owners
     if owners is None:
@@ -186,9 +243,8 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
         # `GET /sessions` returns under `session_store="memory"`. `gated=0` tells the surface this
         # is a property of the deployment rather than of the caller's work.
         return PendingPlansOut(plans=[], considered=0, gated=0, unread=0)
-    sessions = await owners.list_for_owner(principal.oid)
-    gated = [row for row in sessions if _plan_gated(row[4])]
     budget = settings.service_max_plan_scans
+    considered, gated = await _owned_sessions(owners, principal.oid, budget)
     unread = len(gated) - min(len(gated), budget)
     approvals = state(request).plan_approvals
     plans: list[PendingPlan] = []
@@ -207,7 +263,7 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
                     plan=read.todos,
                 )
             )
-    return PendingPlansOut(plans=plans, considered=len(sessions), gated=len(gated), unread=unread)
+    return PendingPlansOut(plans=plans, considered=considered, gated=len(gated), unread=unread)
 
 
 async def decide_plan(

@@ -22,6 +22,7 @@ Postgres-backed, because a ledger nothing durably wrote is the thing this replac
 
 import asyncio
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,10 @@ from chemclaw.core.config import settings
 from chemclaw.ingest import rejections
 from chemclaw.ingest.eln.ord_adapter import DEFAULT_LEDGER_SOURCE as LEDGER_SOURCE
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
-from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
+from chemclaw.ingest.eln.records import (
+    InMemoryReactionRecordStore,
+    PostgresReactionRecordStore,
+)
 from chemclaw.ingest.eln.sync import IngestSummary
 from chemclaw.ingest.rejections import IngestRejection, record_refusals, refusals_matching
 from chemclaw.retrieval.evidence import EvidenceChunk
@@ -172,6 +176,13 @@ async def _rows(source: str) -> list[tuple[str, str, datetime, datetime, int]]:
             (source,),
         )
         return [(r[0], r[1], r[2], r[3], r[4]) for r in await cursor.fetchall()]
+
+
+async def _forget_records(source: str) -> None:
+    """Drop the transcriptions one drain wrote (test isolation, not a product path)."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM reaction_records WHERE ingest_source = %s", (source,))
+        await conn.commit()
 
 
 async def _clear(source: str) -> None:
@@ -371,6 +382,126 @@ def test_a_long_refusal_message_is_cut_and_says_so() -> None:
         rows = await _rows(source)
         assert len(rows[0][1]) < 1_000 and "truncated" in rows[0][1]
         await _clear(source)
+
+    asyncio.run(_run())
+
+
+def test_a_refusal_carrying_a_nul_byte_is_stored_rather_than_losing_the_batch() -> None:
+    """A NUL in a refusal's own words must cost that character, never the batch's ledger.
+
+    Postgres refuses a NUL byte in a `text` value outright, and a refusal reason is `str(exc)` over
+    a record an export wrote — a `ValidationError` renders the offending `input_value=` verbatim,
+    so an ordinary ELN free-text field carrying one arrives here inside the reason. The whole
+    batch used to be one `executemany` in one transaction, so that one character discarded every
+    row of it: the records were already gone from the corpus, the cursor had already advanced past
+    them, and the ledger was the only remaining answer to "why is there no such record".
+
+    The id is sanitised on the same terms, and it is the harder half to argue: stripping a
+    character changes the key the row is filed under. It is still the right trade — a row filed
+    under the closest spelling the database can hold answers the question, and no row answers
+    nothing — and the reason field carries the source's own words beside it.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        source = "test-poisoned-source"
+        await _clear(source)
+
+        await record_refusals(
+            source,
+            {
+                "well-1": "yield_percent 119.43 exceeds 100",
+                "well-2": "input_value=quenched with brine\x00 and dried",
+                "well\x00-3": "no product recorded",
+            },
+        )
+
+        rows = await _rows(source)
+        assert [row[0] for row in rows] == ["well-1", "well-2", "well-3"], (
+            "one unstorable character must not cost the other refusals their ledger rows"
+        )
+        assert "\x00" not in rows[1][1] and "quenched with brine" in rows[1][1], (
+            "the refusal's own words survive; only the byte the database cannot hold is dropped"
+        )
+        await _clear(source)
+
+    asyncio.run(_run())
+
+
+def test_one_row_the_database_will_not_take_costs_only_itself() -> None:
+    """The belt-and-braces half: a row no sanitiser can repair must not take its neighbours.
+
+    `_storable` knows two ways a value cannot be stored; the database knows more. An entry id
+    larger than a third of a buffer page cannot go into the `(source, entry_id)` primary key at
+    all — an export keying its rows on a payload blob produces exactly that — and no rewriting of
+    the value would make it storable without making it a different id.
+
+    So the batch write falls back to one row at a time, the isolation
+    `ingest/documents/sync.py::_reembed_individually` and `ingest/labels/enrich.py::_batch`
+    already use for the same reason: `stale()`-shaped work that fails identically on every retry
+    has to cost one item rather than the pass. Here the pass is a ledger nothing will ever
+    offer again.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        source = "test-unindexable-source"
+        await _clear(source)
+        # Random hex rather than a repeated character: Postgres compresses an index entry before
+        # it measures it, so `"x" * 100_000` fits the btree happily and would test nothing.
+        unindexable = os.urandom(4_000).hex()
+
+        await record_refusals(
+            source,
+            {
+                "well-1": "yield_percent 119.43 exceeds 100",
+                unindexable: "an id no index can hold",
+                "well-2": "no product recorded",
+            },
+        )
+
+        assert [row[0] for row in await _rows(source)] == ["well-1", "well-2"], (
+            "the row the database refuses is lost alone; the two it would take must be recorded"
+        )
+        await _clear(source)
+
+    asyncio.run(_run())
+
+
+def test_a_nul_in_an_export_reaches_the_ledger_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two halves of the NUL fix compose, which is the only place that can be shown.
+
+    `ingest/eln/records.py` refuses the record, so the entry becomes an ordinary per-entry
+    rejection instead of a `psycopg.DataError` that escapes the sync loop — and the reason it
+    hands over is a `ValidationError` rendering `input_value=`, so the refusal's own words carry
+    the NUL forward into the ledger write, where `_storable` takes it out. Either half alone leaves
+    a record that was seen, refused and unrecorded.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        source = "ord-nul"
+        await _clear(source)
+        drop = _ord_source(monkeypatch, tmp_path, source)
+        # The real record store, against `_ord_source`'s in-memory default: the write Postgres
+        # refuses is the whole point, and an in-memory store takes a NUL happily.
+        monkeypatch.setattr(eln_sync, "_record_store", PostgresReactionRecordStore)
+        payload = _ord_payload("poisoned-well", 42.0)
+        payload["notes"] = {"procedure_details": "Quenched with brine\x00 and dried."}
+        (drop / "poisoned-well.json").write_text(json.dumps(payload), encoding="utf-8")
+        _write(drop, "clean-well", 42.0)
+
+        summary = await _drain(source)
+
+        assert summary.ingested == ["clean-well"], "one poisoned entry may not cost the batch"
+        assert [entry.entry_id for entry in summary.rejected] == ["poisoned-well"]
+        rows = await _rows(source)
+        assert [row[0] for row in rows] == ["poisoned-well"]
+        assert "NUL" in rows[0][1] and "\x00" not in rows[0][1]
+        await _clear(source)
+        await _forget_records(source)
 
     asyncio.run(_run())
 

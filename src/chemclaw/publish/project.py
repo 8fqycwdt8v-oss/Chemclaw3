@@ -160,14 +160,27 @@ def _member_for(
 
     Handing each copy the next unclaimed member of that role restores the invariant the ordinals
     exist for: one member, one set of per-species facts, one id.
+
+    **The molecule is the member's own SMILES, and `compound_id` is not consulted at all.** It was,
+    and it was consulted *first*: `compound_id` hashes the **standardized** structure, so two
+    members that are tautomers of one another — or an acid and its conjugate base — are one value
+    to it, the exact-SMILES branch behind it was never reached, and matching degenerated back to
+    the list position this function exists to avoid. Measured on 2,4-pentanedione with its species
+    listed enol-first: each species' electronic energy was attached to the other member, both
+    plausible numbers in the same unit and nothing downstream able to notice.
+
+    Reordering the two would have left a branch that cannot run. `_species_members` is the only
+    producer of the members this is called with, and it fills both fields from a single `_identify`
+    call — which returns an id only when the SMILES parsed — so a member here carrying an id and no
+    SMILES cannot arise. A producer that breaks that invariant will see its species match nothing
+    and be told so by the caller's warning, which is the right failure: the coarse identifier is
+    what silently attached the wrong energies, and it must not be the fallback for its own defect.
     """
-    identifier, canonical = _identify(species.get("smiles"))
+    canonical = _identify(species.get("smiles"))[1]
     role = species.get("role")
     for member in members:
         if member.role != role or member.ordinal in claimed:
             continue
-        if member.compound_id and identifier and member.compound_id == identifier:
-            return member.ordinal
         if member.smiles and member.smiles == canonical:
             return member.ordinal
     return None
@@ -841,9 +854,20 @@ def _species_distribution(
         _fact("species_enumerated", payload.get("enumerated"), ""),
         _text("distribution_kind", payload.get("kind")),
         _text("reaction_level", payload.get("level")),
+        # **The gap to the runner-up, not the winner's own relative energy.** This published
+        # `species[0]["relative_kcal"]`, which is 0.0 by construction: the composer computes each
+        # species' energy relative to the lowest and then sorts the ranking by it, so element 0 is
+        # always the minimum. Every distribution therefore carried one calculation-scope zero,
+        # wearing the method uncertainty as though a measurement had been made, and naming no
+        # species — so "every tautomer set with a gap above 2 kcal/mol", the question this fact
+        # exists for, matched nothing, ever.
+        #
+        # Element 1's relative energy is the discrimination the ranking actually rests on, and it
+        # is the number the uncertainty beside it makes a decision out of. Absent for a set of one:
+        # nothing was ranked, which is not a gap of zero.
         _fact(
-            "relative_energy",
-            species[0].get("relative_kcal"),
+            "species_gap",
+            species[1].get("relative_kcal") if len(species) > 1 else None,
             "kcal/mol",
             uncertainty=uncertainty,
             uncertainty_kind="reported" if uncertainty is not None else "",

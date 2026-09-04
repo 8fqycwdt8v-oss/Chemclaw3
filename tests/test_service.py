@@ -154,6 +154,38 @@ def test_a_database_outage_drains_the_pod_without_restarting_it(
         assert client.get("/healthz").status_code == 200
 
 
+def test_a_raising_connector_sweep_still_answers_a_readiness_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Connector health is *reported, never gating* — so it must not be able to fail the probe.
+
+    `_probe_database` catches its own failures and returns `False`; `_sweep_connectors` caught
+    nothing and leaned entirely on `probe_connectors`'s "never raises" docstring. That promise
+    covers the gathered probes, not the loop above them (`enabled()`, `health_url`,
+    `bundle_queue`) or a `_probe_queues` failure outside its own except clause. Measured with the
+    sweep replaced by a raiser: `readyz` answered **500** with
+    `{"detail": "The request could not be completed due to an internal error."}` — a hard failure
+    on the pod's readiness probe, draining it, from a signal this route's own docstring says must
+    not gate, and with no diagnosis for the operator running `curl`.
+
+    Whether the shipped sweep *can* raise is not what this pins; it pins the half the route owns.
+    """
+    monkeypatch.setattr(settings, "session_store", "memory")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+
+    async def _raises() -> Any:
+        raise RuntimeError("the connector registry could not be read")
+
+    monkeypatch.setattr("chemclaw.api.app.probe_connectors", _raises)
+    with _client(_FakeAgent()) as client:
+        res = client.get("/readyz")
+        again = client.get("/readyz")
+
+    assert res.status_code == 200, f"an unmeasurable connector fleet failed the pod: {res.text}"
+    assert res.json()["status"] == "ready"
+    assert again.status_code == 200, "the failure was cached into a permanently unready pod"
+
+
 def test_readyz_does_not_probe_a_database_a_memory_deployment_does_not_have(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

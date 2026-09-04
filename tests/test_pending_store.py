@@ -31,9 +31,9 @@ async def _clean() -> None:
 
 async def _open(
     request_id: str, *, asked_of: str = "", days: float = 7.0, run_id: str = "run-1"
-) -> None:
-    """Open one wait with this file's requester."""
-    await pending_store.open_request(
+) -> bool:
+    """Open one wait with this file's requester, returning whether it claimed the row."""
+    return await pending_store.open_request(
         request_id=request_id,
         kind="measurement",
         subject="run the four conditions",
@@ -242,6 +242,60 @@ def test_a_retry_of_the_opening_activity_does_not_disturb_a_settled_row() -> Non
         assert stored is not None
         assert (stored.state, stored.answered_by) == ("answered", "u-2"), (
             "a retry of the opening activity resurrected a wait that was already answered"
+        )
+
+    asyncio.run(_run())
+
+
+def test_an_opening_write_that_could_not_claim_the_row_says_so() -> None:
+    """The verdict `open_request` used to throw away, and the 90-day ghost that cost.
+
+    `_OPEN` is a *guarded* upsert, and the guard refuses one case on purpose: a re-ask of a
+    question somebody already **answered**, because reopening blanks `answered_by` and `answer`
+    and this table is in `retention._NOT_PRUNED` as "the attribution for an answer that released a
+    durable workflow" — the only record of it there is. Refusing is right. Refusing *in silence*
+    was not: `open_request` returned `None`, so the workflow could not tell "this projection is
+    mine" from "this projection belongs to a cycle that ended", and went on to wait against a row
+    reading `answered`. `open_requests` filters `state = 'waiting'`, so the new wait appeared in
+    nobody's inbox; the answer route read the stale state and returned 409 naming somebody else's
+    answer; and its own `settle_request` was refused too, so it ran blind to its whole deadline —
+    clamped at `awaiting_max_days`, which is 90 days — and left the row still reading `answered`.
+
+    Three verdicts, because the guard has to tell three cases apart and only one of them is a
+    conflict: a first open claims the row, a *retry* of the same run still holds it however the
+    row has since settled (an at-least-once activity must be replayable), and a different run
+    meeting an answered row does not hold it and must be told so.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        request_id = "req-claim"
+        await _clean()
+
+        assert await _open(request_id, run_id="run-1") is True, (
+            "the first open did not claim the row it just wrote"
+        )
+        await pending_store.settle_request(
+            request_id, state="answered", answered_by="u-9", answer={"value": 1}
+        )
+        assert await _open(request_id, run_id="run-1") is True, (
+            "a retry of the opening activity was told it lost a row that is still its own run's; "
+            "an at-least-once activity would fail every time it was redelivered"
+        )
+
+        assert await _open(request_id, run_id="run-2") is False, (
+            "a re-ask met an answered row, wrote nothing, and was told nothing — so the wait runs "
+            "to its deadline invisible in every inbox and refused by the answer route"
+        )
+        stored = await pending_store.get_request(request_id)
+        assert stored is not None
+        assert (stored.state, stored.answered_by, stored.answer) == (
+            "answered",
+            "u-9",
+            {"value": 1},
+        ), (
+            "the refused open destroyed the previous cycle's attribution, which is the one thing "
+            "this table exists to keep"
         )
 
     asyncio.run(_run())

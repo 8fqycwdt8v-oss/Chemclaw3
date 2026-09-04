@@ -50,6 +50,28 @@ egress_flags() {
   return 1
 }
 
+# The sibling posture, and the reason this function exists at all: the chart has *two* refusals and
+# this script only knew about one, so every `helm upgrade --install` from here died in
+# `templates/config.yaml` with "retention: set exactly one of ...". Same shape as `egress_flags`
+# deliberately — honour a values file that states either key, otherwise require the operator to say
+# out loud that unbounded growth is what they meant — because the two guards make the same argument
+# and an operator who has met one should recognise the other.
+retention_flags() {
+  local values_file="$1"
+  if [ -n "${values_file}" ] && grep -qE '^\s*(windows|unboundedGrowthAccepted):' "${values_file}"; then
+    return 0
+  fi
+  if [ "${ACCEPT_UNBOUNDED_GROWTH:-false}" = "true" ]; then
+    printf -- '--set retention.unboundedGrowthAccepted=true'
+    return 0
+  fi
+  echo "the release states no retention posture: put retention.windows in the values file (the" \
+       "CHEMCLAW_RETENTION_* day windows this deployment keeps history for), or set" \
+       "ACCEPT_UNBOUNDED_GROWTH=true to say the durable tables may grow forever." \
+       "The chart will not render without one." >&2
+  return 1
+}
+
 apply_helm() {
   local name chart release image digest values extra
   name="$1"
@@ -58,7 +80,16 @@ apply_helm() {
   image="$(jq -r --arg n "${name}" '.components[$n].image' "${DESCRIPTOR}")"
   digest="$(jq -r --arg n "${name}" '.components[$n].digest' "${DESCRIPTOR}")"
   values="$(jq -r --arg n "${name}" '.components[$n].values // ""' "${DESCRIPTOR}")"
-  read -r -a extra <<<"$(egress_flags "${values}")"
+  # One assignment each, before the `read`, and that is load-bearing twice over. `read -r -a x
+  # <<<"$(f)"` takes its exit status from `read`, so a refusing posture check printed its message and
+  # the script carried on to a helm error naming a template instead of the missing posture; a plain
+  # assignment propagates the substitution's status under `set -e`. And *two* substitutions in one
+  # assignment would take only the last one's status, so a refused egress posture beside an accepted
+  # retention posture would pass — which is the same silent-fallthrough one line up.
+  local egress retention
+  egress="$(egress_flags "${values}")"
+  retention="$(retention_flags "${values}")"
+  read -r -a extra <<<"${egress} ${retention}"
 
   local args=(upgrade --install "${release}" "${chart}"
               --namespace "${NAMESPACE}"
@@ -73,10 +104,22 @@ apply_helm() {
     helm "${args[@]}" --dry-run
   else
     log "${release}: upgrading to ${digest}"
-    # `--wait --atomic`: a release that never becomes ready is rolled back rather than left half
-    # applied. The front door's terminationGracePeriod is derived from the turn timeout, so a
+    # `--wait` and deliberately **not** `--atomic`, which this chart forbids at the point of the
+    # annotation that makes it wrong (`templates/migrate-job.yaml`, and the ledger row of
+    # D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step).
+    #
+    # `chemclaw-convert` is a `post-upgrade` hook precisely so a failed stored-message backfill does
+    # not roll a healthy release back: the pass rewrites `session_messages` rows into a shape the
+    # *previous* release's reader raises on, and Helm neither undoes a data conversion nor re-runs
+    # the hook. `--atomic` rolls back on any failed hook, so a backfill that merely runs past its
+    # `activeDeadlineSeconds` would take the whole release with it and leave converted rows behind a
+    # reader that cannot read them. Without it, Helm still reports the failed Job — the release
+    # stays up, both message shapes stay readable, and the pass is resumable.
+    #
+    # The rollout itself is still waited on, so a release that never becomes ready fails the
+    # pipeline. The front door's terminationGracePeriod is derived from the turn timeout, so a
     # rolling update is minutes by design — hence the generous default timeout above.
-    helm "${args[@]}" --wait --atomic
+    helm "${args[@]}" --wait
   fi
 }
 

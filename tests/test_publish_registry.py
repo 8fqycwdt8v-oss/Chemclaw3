@@ -16,6 +16,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.publish import project as projection
@@ -26,6 +27,7 @@ from chemclaw.publish.properties import (
     definition_for,
     to_canonical,
 )
+from chemclaw.publish.record import PropertyFact
 
 
 def test_every_canonical_unit_is_reachable_within_its_dimension() -> None:
@@ -267,3 +269,48 @@ def test_the_sink_gate_checks_every_discovered_sink_not_only_the_enabled_ones(
     finally:
         discovered.cache_clear()
     assert found and "NoSuchClassAtAll" in found[0], found
+
+
+def test_a_quantity_registered_for_another_table_cannot_be_written_as_a_scalar() -> None:
+    """`scope_kind` is a control, not a comment — the claim its own definition makes.
+
+    Nothing compared a fact's property against its declaration: not the projectors, not the row
+    builder, not the SQL driver. So the `property_definition` rows a site ships — the table a
+    consumer joins to decide *where to look* for a quantity — asserted a placement nothing kept.
+    Measured, one shipped projection disagreed with it: every species distribution wrote
+    `relative_energy`, registered per-conformer, as a calculation-scope scalar.
+
+    `calculation` names the scalar table and covers both of its row scopes, which is why the seven
+    per-species facts a reaction publishes at `member` scope are not violations — a species' own
+    Gibbs energy is a `property_value` row, and `FactScope` on the row says which kind.
+    """
+    conformer_scoped = next(
+        name for name, definition in REGISTRY.items() if definition.scope_kind == "conformer"
+    )
+
+    with pytest.raises(ValidationError, match="belong in that table"):
+        PropertyFact(property=conformer_scoped, value=1.0, unit="kcal/mol")
+
+
+def test_every_projected_scalar_is_registered_for_the_scalar_table() -> None:
+    """The same rule over every shape this system produces, not only the one that broke it.
+
+    The validator above cannot be reached by a projector that never runs in a unit test, so this
+    drives all of them — a new calculator writing a per-atom quantity into the scalar table fails
+    here the day it ships.
+    """
+    from tests.test_publish_projection import _cases
+
+    for kind, calc_type, _model, payload in _cases():
+        record = projection.project(
+            calc_ref=f"{calc_type}@v:a:b", calc_type=calc_type, payload=payload, payload_kind=kind
+        )
+        for fact in record.properties:
+            assert definition_for(fact.property).scope_kind == "calculation", (
+                f"{kind} publishes {fact.property!r} as a scalar, but the registry declares it at "
+                f"{definition_for(fact.property).scope_kind!r} scope"
+            )
+        for site in record.sites:
+            assert definition_for(site.property).scope_kind == "site"
+        for point in record.points:
+            assert definition_for(point.property).scope_kind == "point"

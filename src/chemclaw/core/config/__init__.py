@@ -49,7 +49,6 @@ the internals of one attached thing, it belongs in that thing's manifest, not he
 
 import logging
 from typing import Self
-from urllib.parse import parse_qs, urlsplit
 
 from pydantic import model_validator
 from pydantic_settings import SettingsConfigDict
@@ -118,28 +117,63 @@ __all__ = [
 _TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
 PG_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 
+# `durable/connector_job.py::_FINISH_STEPS`, restated because it cannot be imported.
+#
+# `ConnectorJobWorkflow` is bounded by `wrapper_execution_timeout()` — its child's whole ceiling
+# plus one activity's wall clock for each of the four things the wrapper still owes after that
+# child returns (the durable record, the results offer, the note PR-gate, the session push-back).
+# That number is what a template `job` step is actually bounded by, and
+# `_the_template_run_ceiling_covers_one_step` below has to clear it.
+#
+# It is a literal here and a literal there because `chemclaw.core` imports no sibling
+# (`tests/test_layering.py`, `core/README.md`), so this module cannot call the function that owns
+# the arithmetic. A restatement nothing checks would be the duplication moved rather than removed,
+# so `tests/test_template_job_step.py` asserts the two constants agree *and* that the full
+# identity `wrapper_execution_timeout() == connector_job_timeout_seconds + activity_timeout_seconds
+# * _WRAPPER_FINISH_STEPS` still holds — a fifth post-child step turns that red instead of leaving
+# this validator clearing a bound 30 s short.
+_WRAPPER_FINISH_STEPS = 4
 
-def _pg_sslmode(dsn: str) -> str:
-    """The sslmode of a libpq DSN (URL query or `key=value` form); libpq's `prefer` when absent."""
-    parsed = urlsplit(dsn)
-    query = parse_qs(parsed.query)
-    if "sslmode" in query:
-        return query["sslmode"][0].lower()
-    for part in dsn.split():
-        if part.startswith("sslmode="):
-            return part[len("sslmode=") :].strip().lower()
-    return "prefer"
 
+def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
+    """The host libpq will dial and the sslmode it will use, read with libpq's own parser.
 
-def _pg_host(dsn: str) -> str:
-    """The host of a libpq DSN, lowercased; '' when it is a `host=`-keyword or socket DSN."""
-    host = urlsplit(dsn).hostname
-    if host:
-        return host.lower()
-    for part in dsn.split():
-        if part.startswith("host="):
-            return part[len("host=") :].strip().lower()
-    return ""
+    **One parser, because a second spelling is a second answer.** This pair used to be hand-rolled
+    (`urlsplit` + `parse_qs` + a `dsn.split()` scan) while `core/db.py::_redact` round-tripped the
+    same strings through `conninfo_to_dict` for the reason it states — "every form psycopg accepts
+    is covered … not just the userinfo case a URL split can see". The two disagreed, and both
+    measured disagreements were in the direction that admits plaintext:
+
+    - libpq *connects* to `hostaddr` when it is set and reads `host` only as the name to verify
+      against, so `host=localhost hostaddr=10.0.0.5` took the loopback exemption while the socket
+      went over the network. `hostaddr or host` is therefore what a TLS decision is about.
+    - libpq resolves a repeated URL query parameter to its **last** occurrence and `parse_qs` to
+      its **first**, so `?sslmode=require&sslmode=disable` was checked as `require` and connected
+      as `disable`.
+
+    A DSN libpq cannot parse raises here rather than defaulting: `""` is a member of
+    `PG_LOOPBACK_HOSTS`, so *any* "could not tell" answer would exempt the connection, and nothing
+    can say what libpq would do with a string libpq will not read. It is refused as the
+    misconfiguration it is, naming the setting rather than the DSN — the value carries a password.
+    """
+    # Imported inside the function, not at module scope. `core/config` is reached by
+    # `ingest/sources/registry`, and `tests/test_datasource_isolation.py` asserts that asking which
+    # sources to ingest imports **no** third-party driver — a manifest is two strings and should
+    # cost two strings. Reading a DSN the way libpq reads it is worth a driver import; doing it at
+    # import time would put psycopg behind every caller of `settings`.
+    from psycopg import ProgrammingError, conninfo
+
+    try:
+        parts = conninfo.conninfo_to_dict(dsn)
+    except ProgrammingError as exc:
+        raise ValueError(
+            f"{name} is not a connection string libpq can parse ({exc}), so nothing can say "
+            "whether it would connect with TLS. Refused under entra_required=true rather than "
+            "guessed at; the same DSN would fail at connect."
+        ) from exc
+    return str(parts.get("hostaddr") or parts.get("host") or "").lower(), str(
+        parts.get("sslmode") or "prefer"
+    ).lower()
 
 
 def require_pg_tls(dsn: str, name: str) -> None:
@@ -151,10 +185,11 @@ def require_pg_tls(dsn: str, name: str) -> None:
     enforced posture a non-loopback DSN must state `sslmode=require`/`verify-ca`/`verify-full`
     (`verify-full` recommended, with `sslrootcert=`). Loopback dev is exempt.
     """
-    if _pg_host(dsn) in PG_LOOPBACK_HOSTS or _pg_sslmode(dsn) in _TLS_SSLMODES:
+    host, sslmode = _pg_dial(dsn, name)
+    if host in PG_LOOPBACK_HOSTS or sslmode in _TLS_SSLMODES:
         return
     raise ValueError(
-        f"entra_required=true with a non-loopback {name} and sslmode={_pg_sslmode(dsn)!r}: libpq's "
+        f"entra_required=true with a non-loopback {name} and sslmode={sslmode!r}: libpq's "
         "default permits a silent plaintext fallback and verifies no certificate, and this "
         "connection carries the conversation transcripts, turn checkpoints and the audit trail. "
         "Add "
@@ -338,6 +373,12 @@ class Settings(
             require_pg_tls(self.postgres_dsn, "postgres_dsn")
             if self.postgres_migration_dsn:
                 require_pg_tls(self.postgres_migration_dsn, "postgres_migration_dsn")
+            # The third one, and the one the refusal message above literally describes: the session
+            # layer's own database holds `session_messages`, the LangGraph checkpoints, the plan
+            # approvals, the turn-cost rows and the effect ledger. Empty is not "unchecked" — it
+            # means "use `postgres_dsn`", which the first line already checked.
+            if self.session_store_dsn:
+                require_pg_tls(self.session_store_dsn, "session_store_dsn")
         if self.service_uvicorn_workers > 1:
             raise ValueError(
                 "service_uvicorn_workers>1 silently breaks five per-process guarantees until they "
@@ -532,26 +573,60 @@ class Settings(
 
     @model_validator(mode="after")
     def _the_template_run_ceiling_covers_one_step(self) -> Self:
-        """The same rule again, on the template run and the step it has to contain.
+        """The same rule again, on the template run and the longest step it has to contain.
 
         `templates/registry.py` starts `TemplateWorkflow` with `template_run_timeout_seconds` as an
-        execution timeout, and the longest thing inside it is one step at
-        `template_step_timeout_seconds`. A run ceiling at or below the step budget kills the
-        procedure inside its own first step — with a bare `WorkflowExecutionTimedOut` naming
-        neither setting, and with the per-step timeout that was *meant* to fire made unreachable,
-        so `agent_step_retry`'s attempts become a number that can never be spent.
+        execution timeout. A run ceiling at or below the longest step's budget kills the procedure
+        inside that step — with a bare `WorkflowExecutionTimedOut` naming neither setting, and with
+        the per-step timeout that was *meant* to fire made unreachable, so `agent_step_retry`'s
+        attempts become a number that can never be spent.
+
+        **A step's budget is not one number, and this rule read the wrong one for the kind of step
+        that costs the most.** `template_step_timeout_seconds` (900 s) is the `start_to_close` of an
+        `agent` or a `tool` step, both of which are activities. A `job` step is not an activity: it
+        starts `ConnectorJobWorkflow` as a child under `wrapper_execution_timeout()`
+        (`durable/template_job.py`), which is `connector_job_timeout_seconds` plus the wrapper's
+        four post-child steps — 18,120 s against a run ceiling of 7,200 s when this was measured.
+        So a CREST search well inside its own budget ended the whole run as a silent `TIMED_OUT`:
+        an execution timeout is not delivered to workflow code, so `TemplateWorkflow`'s `except
+        BaseException -> _notify_failure` never ran, the chemist was told nothing on the session
+        stream, and the connector child was terminated with its parent before it could write its
+        own `job_records` failure row. Seven of the nine shipped templates have a `job` step.
+
+        Only `connector_job_timeout_seconds` can move to close that: its own floor is the CREST
+        search plus the activity's overhead (`_the_job_ceiling_covers_the_activity_it_bounds`), so
+        raising the run ceiling is the one direction available.
 
         Strictly greater rather than at least, because equality is the defect. Only one step is
         required rather than N: how many steps a template has is a property of a YAML file this
         object cannot see, so the honest machine-checkable floor is "a single step fits", and the
         setting's own comment carries the sizing advice for a longer procedure.
         """
-        if self.template_run_timeout_seconds <= self.template_step_timeout_seconds:
+        # The max over the budgets a *step* can carry, the shape
+        # `_the_job_ceiling_covers_the_activity_it_bounds` already uses one level down: naming one
+        # step kind is how this rule came to be checking 900 s against an 18,120 s bound. A new
+        # step kind with its own ceiling gets covered by being added here.
+        job_step = (
+            self.connector_job_timeout_seconds
+            + self.activity_timeout_seconds * _WRAPPER_FINISH_STEPS
+        )
+        longest, budget = max(
+            (
+                (self.template_step_timeout_seconds, "template_step_timeout_seconds"),
+                (
+                    job_step,
+                    "connector_job_timeout_seconds + activity_timeout_seconds x "
+                    f"{_WRAPPER_FINISH_STEPS}, the ceiling a `job` step carries",
+                ),
+            )
+        )
+        if self.template_run_timeout_seconds <= longest:
             raise ValueError(
                 f"template_run_timeout_seconds={self.template_run_timeout_seconds} does not cover "
-                f"the step it bounds: one step may take {self.template_step_timeout_seconds}s "
-                "(template_step_timeout_seconds), so the run would time out inside its own first "
-                "step. Raise the run ceiling above it, or lower the step budget."
+                f"the step it bounds: one step may take {longest}s ({budget}), so the run would "
+                "time out inside that step — as a bare TIMED_OUT that reaches neither the chemist "
+                "nor the job record, because a workflow execution timeout is not delivered to "
+                f"workflow code. Raise the run ceiling above {longest}, or lower that budget."
             )
         return self
 

@@ -173,7 +173,14 @@ def _conditions(reaction: OrdReaction) -> ProcessConditions | None:
     )
     # An explicit field check rather than a `model_dump(exclude_none=True)`: serializing the whole
     # model to ask whether any of it is set is work for an answer the fields already give.
-    return conditions if any(dict(conditions).values()) else None
+    #
+    # **`is not None`, never truthiness.** Every field here is an optional number or an optional
+    # string, so a bare `any(...)` over the values asks whether any of them is *non-zero* — and
+    # `ProcessConditions` is explicit that "absent means 'not recorded', never 'zero'". A 0 °C ice
+    # bath, a 0% yield (a complete failure, the case `OutcomeClass` exists to preserve) and a 0 h
+    # hold each recorded a setpoint; under the old predicate all three stored a NULL column while
+    # the body below still rendered the bullet, so the prose and the number disagreed.
+    return conditions if any(value is not None for value in dict(conditions).values()) else None
 
 
 def _principal_product(reaction: OrdReaction) -> str | None:

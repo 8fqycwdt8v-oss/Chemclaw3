@@ -211,7 +211,7 @@ def test_a_stranger_cannot_write_to_someone_elses_design(
         {
             "status": "executed",
             "expected_revision": 1,
-            "expected_status": "draft",
+            "expected_status": "approved",
             "reason": "ran it",
         }
         if path == "status"
@@ -303,7 +303,7 @@ def test_a_refused_design_write_is_recorded_on_the_server_side(
         {
             "status": "executed",
             "expected_revision": 1,
-            "expected_status": "draft",
+            "expected_status": "approved",
             "reason": "ran it",
         }
         if path == "status"
@@ -333,7 +333,7 @@ def test_a_write_to_an_unknown_design_is_recorded_as_well(
                 json={
                     "status": "executed",
                     "expected_revision": 1,
-                    "expected_status": "draft",
+                    "expected_status": "approved",
                     "reason": "ran it",
                 },
             )

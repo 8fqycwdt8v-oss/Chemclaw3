@@ -34,8 +34,9 @@ from temporalio import activity, workflow
 
 from chemclaw.agent.authz import AuthorizationError
 from chemclaw.connectors.registry import ConnectorError, enabled
-from chemclaw.core.config import settings
+from chemclaw.core.config import _WRAPPER_FINISH_STEPS, settings
 from chemclaw.core.logging import ContextFilter
+from chemclaw.durable.connector_job import _FINISH_STEPS, wrapper_execution_timeout
 from chemclaw.durable.registry import registered_activities
 from chemclaw.durable.template_activities import (
     JobStepInput,
@@ -477,6 +478,59 @@ def test_the_run_ceiling_must_be_able_to_contain_one_step() -> None:
     with pytest.raises(ValidationError) as caught:
         Settings(template_step_timeout_seconds=900.0, template_run_timeout_seconds=900.0)
     assert "template_run_timeout_seconds" in str(caught.value)
+
+
+def test_the_run_ceiling_must_be_able_to_contain_one_job_step() -> None:
+    """The same rule against the bound a `job` step actually carries, which is not the step budget.
+
+    `template_step_timeout_seconds` bounds an `agent` or a `tool` step. A `job` step is bounded by
+    `wrapper_execution_timeout()` — `connector_job_timeout_seconds` plus the four post-child steps
+    the wrapper still owes — which shipped at 18,120 s inside a run ceiling of 7,200 s, so one
+    legitimate CREST search ended the whole procedure as a bare `TIMED_OUT`: an execution timeout is
+    not delivered to workflow code, so `TemplateWorkflow`'s `except BaseException ->
+    _notify_failure` never ran, the chemist got nothing on the session stream, and the connector
+    child was terminated with its parent before it could write its own failure row. The validator
+    that exists for this relation was checking the one number that does not bound a `job` step.
+
+    Two halves, and both are needed. The pair must be *refused* when inverted — otherwise the
+    default is the only thing standing between a deployment and a silent run — and the **shipped**
+    defaults must clear the bound, because a validator whose own defaults violate it refuses every
+    process at import.
+    """
+    from chemclaw.core.config import Settings
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(template_run_timeout_seconds=7200.0)
+    message = str(caught.value)
+    assert "template_run_timeout_seconds" in message
+    assert "connector_job_timeout_seconds" in message
+
+    assert settings.template_run_timeout_seconds > wrapper_execution_timeout().total_seconds(), (
+        "the shipped run ceiling cannot contain one job step, so seven of the nine shipped "
+        "templates can end as a silent TIMED_OUT"
+    )
+
+
+def test_the_configs_restatement_of_the_wrapper_ceiling_cannot_drift() -> None:
+    """`core` may not import `durable`, so the config restates `_FINISH_STEPS`. This pins the pair.
+
+    `tests/test_layering.py` enforces that `chemclaw.core` imports no sibling, so the validator
+    above cannot call `wrapper_execution_timeout()` and has to spell its arithmetic out again. A
+    restatement nothing checks is the duplication moved rather than removed: add a fifth
+    post-child step to `ConnectorJobWorkflow` and the validator would go on clearing a bound that
+    is 30 s short, which is exactly the silent inversion it was written to end.
+
+    Asserted twice on purpose. The constants must agree — that is the readable failure — and the
+    whole identity must hold, so that a change to the *shape* of `wrapper_execution_timeout` (a new
+    term, a different budget) is caught too and not just a change to its count.
+    """
+    assert _WRAPPER_FINISH_STEPS == _FINISH_STEPS, (
+        "core/config restates durable/connector_job.py::_FINISH_STEPS because it may not import it"
+    )
+    assert wrapper_execution_timeout().total_seconds() == (
+        settings.connector_job_timeout_seconds
+        + settings.activity_timeout_seconds * _WRAPPER_FINISH_STEPS
+    )
 
 
 def test_a_failed_template_step_wakes_the_session_and_names_which_step(

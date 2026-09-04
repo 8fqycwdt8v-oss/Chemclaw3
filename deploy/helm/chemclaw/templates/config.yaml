@@ -1,25 +1,41 @@
-{{- /* The ConfigMap, ServiceAccount and Secret are also pre-install/pre-upgrade hooks with a */ -}}
-{{- /* weight (-10) BELOW the migrate Job (-5): on a fresh install, hooks run before ordinary */ -}}
-{{- /* resources, so without this the migrate hook would start before its ConfigMap/SA exist */ -}}
-{{- /* (review finding). `before-hook-creation` refreshes them each run; they persist for the app. */ -}}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ include "chemclaw.name" . }}-config
-  labels:
-    {{- include "chemclaw.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-weight": "-10"
-    "helm.sh/hook-delete-policy": before-hook-creation
 {{- /* The retention posture must be stated, exactly as the egress posture must
        (D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob): every window in `Settings`
        defaults to disabled, so a chart that rendered without asking shipped tables that grow for
-       the deployment's lifetime under a comment naming retention as the bound. */ -}}
+       the deployment's lifetime under a comment naming retention as the bound. Evaluated here at
+       the top of the file so *any* render refuses, not only one that reaches a particular
+       document. */ -}}
 {{- if eq (empty .Values.retention.windows) (empty .Values.retention.unboundedGrowthAccepted) }}
 {{- fail "retention: set exactly one of `retention.windows` (the CHEMCLAW_RETENTION_* day windows this release keeps history for) or `retention.unboundedGrowthAccepted: true` (the durable tables grow forever, which is not a safe end state but is now a stated one). Neither is set, or both are." }}
 {{- end }}
-data:
+{{- /* **This file renders the configuration twice, and the duplication is the fix.**
+
+       All of it used to be a single `pre-install,pre-upgrade` hook. Helm does not record hook
+       resources in the release manifest, so they are not what `helm rollback` restores and not what
+       `helm uninstall` removes — and `helm rollback` runs only `pre-rollback`/`post-rollback` hooks,
+       which this chart declares none of. Measured against a real API server: a rollback reverted
+       every Deployment (including its `checksum/config` annotation, so every pod restarted) while
+       the ConfigMap those pods read still held the *new* release's values, and Helm printed
+       "Rollback was a success!". The sharpest instance is a connector: rolling back a release that
+       set `connectors.bo.enabled=false` restored `chemclaw-connector-bo`'s Deployment and Service
+       while `CHEMCLAW_CONNECTORS_ENABLED` still omitted `bo` — the pods run and the capability
+       stays dark.
+
+       So the objects the *pods* read are ordinary tracked resources now, and the pre-install
+       migrate Job — which Helm runs before any ordinary resource exists — gets its own hook-scoped
+       copies. Two objects cannot share a name across that boundary (Helm refuses to adopt a hook
+       into the manifest), so the rename is the load-bearing part rather than the annotation.
+
+       The hook copies are rendered from the same values in the same release, so they cannot
+       disagree with the tracked ones; on an *upgrade* they are also the more correct source, since
+       at `pre-upgrade` the tracked ConfigMap still holds the previous release's values. They carry
+       `hook-succeeded` so they are gone once the migration is done, and the `post-install`/
+       `post-upgrade` Jobs read the tracked objects instead — by then the manifest is applied, and
+       `chemclaw-convert` runs as the runtime role against the release that is now live.
+
+       The `data:` body is a `define` for the ordinary reason: two copies of it would be two
+       configurations that only have to agree. `chemclaw.configChecksum` hashes this whole file, so
+       every key still reaches the pod annotation that forces the rollout. */ -}}
+{{- define "chemclaw.configData" -}}
   {{- range $key, $value := .Values.config }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}
@@ -70,6 +86,31 @@ data:
          `CHEMCLAW_CALC_BACKEND_MAX_CONCURRENT_REQUESTS` exists to catch. `0` when this release
          runs no calc worker, because then it dispatches no durable calculation at all. */}}
   CHEMCLAW_CALC_FLEET_WORKER_PROCESSES: {{ include "chemclaw.calcWorkerProcesses" . | quote }}
+{{- end -}}
+{{- /* The configuration the running pods read: an ordinary resource, so the release owns it. */ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "chemclaw.configMapName" . }}
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+data:
+{{- include "chemclaw.configData" . }}
+---
+{{- /* The same configuration for the pre-install/pre-upgrade migrate Job, under a name of its own.
+       Weight -10 is below the Job's -5, because hook weights are the only ordering there is. */ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "chemclaw.hookConfigMapName" . }}
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+data:
+{{- include "chemclaw.configData" . }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -77,16 +118,42 @@ metadata:
   name: {{ .Values.serviceAccount.name }}
   labels:
     {{- include "chemclaw.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-weight": "-10"
-    {{- toYaml .Values.serviceAccount.annotations | nindent 4 }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 {{- /* No component calls the Kubernetes API, so the projected API token is not mounted into any pod
        using this account. Explicit `false` rather than an omission: the cluster default is to mount
        it, so leaving this out is the insecure posture. */}}
 automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+---
+{{- /* And the identity the pre-install Job runs as, for the same reason its ConfigMap needs one: on
+       a fresh install the account above does not exist yet, and a Job pod naming an absent
+       ServiceAccount is never admitted — it would sit unscheduled until `activeDeadlineSeconds`.
+       Same annotations and the same refusal of the API token: this is the runtime account's twin
+       for the seconds a release takes, not a wider one. */ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "chemclaw.hookServiceAccountName" . }}
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    {{- toYaml .Values.serviceAccount.annotations | nindent 4 }}
+automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
 {{- if .Values.secrets.create }}
 ---
+{{- /* The one object here that stays a hook, deliberately. Every value in it is the literal
+       `CHANGE-ME`, so there is nothing for a rollback to restore and nothing for an uninstall to
+       leak; it exists only so a dev install has slots to fill, and `secrets.create` defaults to
+       false because a real deployment fills them from an ExternalSecret/SealedSecret the chart
+       never renders. Tracked instead, it would be created *after* the pre-install migrate Job that
+       mounts these keys non-optionally, so a fresh `helm install --set secrets.create=true` would
+       wedge that Job in `CreateContainerConfigError` until its deadline — trading a rollback defect
+       nobody can observe here for an install defect anyone would. */ -}}
 apiVersion: v1
 kind: Secret
 metadata:

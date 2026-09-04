@@ -23,8 +23,10 @@ One HTTP surface closes both, which is why they are one module and not two:
   stops answering and the kubelet restarts the pod. That is the failure "the process is up" cannot
   see.
 - `GET /readyz` — readiness, delegated to a `ready` callable rather than assumed. For a Temporal
-  worker that is `worker.is_running`, so a worker that has not started polling, or has stopped, is
-  reported not-ready instead of being asserted alive by a comment.
+  worker that is `worker.is_running` **and** a recent answer from the broker, because the first
+  alone is a lifecycle flag: it is true from the moment `run()` is entered until shutdown, so it
+  stayed true through a total broker outage and this route answered `ready` while every poll failed
+  — the exact claim it exists to falsify. See `durable/job_metrics.broker_seen_recently`.
 - `GET /metrics` — the same registry the front door renders, now with a reader.
 
 Unauthenticated, exactly like the front door's three: a kubelet cannot present a token and a scrape
@@ -123,7 +125,9 @@ async def worker_http(*, component: str, ready: Callable[[], bool]) -> AsyncIter
             health payloads so a probe response identifies the pod that answered it.
         ready: Called per readiness probe. Cheap and non-blocking — it runs on the worker's event
             loop, so a predicate that does I/O would make the probe part of the problem it reports
-            on. `worker.is_running` is the intended shape.
+            on. `worker.is_running and broker_seen_recently()` is the intended shape — the
+            lifecycle flag alone reports a severed worker as ready, which is measured in
+            `durable/serve.py`.
 
     Yields:
         Once the port is bound and accepting.

@@ -517,6 +517,24 @@ convertJob:
   # release without touching the pods, and the rows it did convert stay readable.
   activeDeadlineSeconds: 1800
 
+# The Temporal Schedules hook (`post-install,post-upgrade`, `schedules-job.yaml`). Its own block for
+# the same reason `convertJob` has one: the three hooks bound different work, and this one bounds a
+# handful of gRPC calls rather than DDL or a row count.
+schedulesJob:
+  # `apply_schedules` reconciles rather than accumulates, so a retry re-runs the whole (idempotent)
+  # reconciliation. Three attempts covers a frontend that is still coming up behind the rollout this
+  # hook waits for.
+  backoffLimit: 3
+  # Five minutes, and the reason it must exist at all is a *hang* rather than a failure —
+  # `backoffLimit` bounds only the latter. `chemclaw.cli.schedules` connects to Temporal and then
+  # calls `list_schedules`/`create_schedule`, and temporalio's `DEFAULT_RPC_TIMEOUT` is `None`: a
+  # frontend that completes the gRPC handshake and then stalls leaves this pod running forever and
+  # the release pinned in `pending-upgrade`, blocking every later `helm upgrade`. (A refused or
+  # blackholed frontend does terminate — measured at ~35 s — which is why this went unnoticed.)
+  # The work itself is a few RPCs against a Temporal that the rollout has already proven reachable,
+  # so five minutes is generous for the work and short next to the recovery it avoids.
+  activeDeadlineSeconds: 300
+
 resources:
   service:
     # Raised from 1 CPU. The front door does real CPU work off its event loop now (RDKit, cache-key
@@ -546,12 +564,6 @@ resources:
 
 # Non-secret config → ConfigMap → CHEMCLAW_* env. Keys mirror chemclaw/config.Settings exactly.
 config:
-  # Where the calculation server lives. **Stated rather than left to the code default**, which is a
-  # loopback address (`http://127.0.0.1:8860/mcp`) chosen for a dev process — so before this key
-  # existed, a `helm install` produced a `calc` bundle whose every tool and all five durable jobs
-  # raised `CalcServerError` against nothing, on a chart that named no host, no token and no egress
-  # rule for the wire every one of those calls now crosses.
-  CHEMCLAW_CALC_SERVER_URL: "http://chemclaw3-mcp-calc:8860/mcp"
   CHEMCLAW_LLM_PROVIDER: "openai_compatible"
   CHEMCLAW_LLM_BASE_URL: "http://internal-llm.llm.svc:8000/v1"
   CHEMCLAW_LLM_MODEL: "gpt-oss"
@@ -606,7 +618,16 @@ config:
   # listens on — silently, because the pod's own `/healthz` never touches it and the probes stay
   # green. Named `chemclaw3-mcp-calc` for the same reason `connectors.chem.url` /
   # `connectors.safety.url` name their siblings: whatever Service the sibling repo's chart gives
-  # its `calc` server in this namespace.
+  # its `calc` server in this namespace — and stating it here is also what puts a host on the wire
+  # every one of those calls crosses, which the NetworkPolicy's egress destinations then have to
+  # name.
+  #
+  # **One occurrence, and that is the point.** This key was declared twice in this block, top and
+  # bottom, and a YAML mapping with a duplicate key is not an error to any parser here: Helm and
+  # `yaml.safe_load` both silently keep the last. So an operator who edited the *other* one — the
+  # one that sat directly under its own explanation of why the key exists — rendered a ConfigMap
+  # that still named this address, and hit exactly the failure that explanation described.
+  # `tests/test_helm_chart.py::test_no_values_key_is_declared_twice` is what keeps it at one.
   CHEMCLAW_CALC_SERVER_URL: "http://chemclaw3-mcp-calc:8860/mcp"
   # How long this repository's calc client may wait on that server, stated here rather than left to
   # the code default for one reason: **the chart derives a connector pod's shutdown ceiling from
@@ -1200,9 +1221,16 @@ monitoring:
 # offering a footgun, not a knob). Only the one setting that is *not* part of that profile, and
 # that genuinely cannot be defaulted on, lives here.
 securityContext:
-  # Off because the calculation workers shell out to xtb/crest, which need writable scratch; with
-  # no scratch volume provisioned this trades an admission failure for a runtime failure. Turn it
-  # on once the deployment mounts an emptyDir over the process's temp directory.
+  # Off, and the reason written here for a long time had already expired: it said the calculation
+  # workers shell out to xtb/crest and need writable scratch. They do not — those binaries left with
+  # the physics (`D-2026-08-16-the-physics-leaves-the-cache-stays`), `deploy/Containerfile` records
+  # their removal, and no `src/` module invokes either any more.
+  #
+  # The live blocker is `/tmp`, which no volume covers: `deploy/knowledge-sync.sh` writes its
+  # heartbeat and its `GIT_ASKPASS` helper there in every pod that runs the sync sidecar. So turning
+  # this on still trades an admission failure for a runtime one — just for a different process than
+  # the comment claimed, which is why the two are worth telling apart. Flip it together with an
+  # `emptyDir` mounted at `/tmp`, never on its own.
   readOnlyRootFilesystem: false
 
 # What happens to the durable tables' history — a posture this chart refuses to leave unstated,

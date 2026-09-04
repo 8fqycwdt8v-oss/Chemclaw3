@@ -297,6 +297,12 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     # on: its cluster submission runs under a shared service identity, and `requested_by` is the
     # only thing that makes it attributable (F4-T3, D-118).
     assert result.data["requested_by"] == _ACTOR
+    # And so did the session, which is the key a bundle needs to speak *back* to the chemist.
+    # `BoCampaignWorkflow._evaluate` reads exactly this one and got `""` on every run, so a
+    # measured campaign's opening "this is waiting on you" notice, its 24-hour reminders and its
+    # final `expired` notice were all dropped by `AwaitAnswerWorkflow._push` — the campaign
+    # suspended for a fortnight and the chemist who launched it was told nothing.
+    assert result.data["session_id"] == _SESSION
     # Core PR-gated the note the connector produced; the connector never touched the graph itself.
     assert [note.id for note, _ in published] == ["fixture-benzene"]
     assert published[0][0].created_by == "agent"  # so a human must sign it off at the gate
@@ -533,3 +539,104 @@ def test_the_declared_ceiling_travels_from_the_manifest_to_the_launch(
 
     (started,) = launched
     assert started.timeout_seconds == 20.0
+
+
+# A job that suspends on a *person* is the one shape the asymmetry above cannot express, and the
+# three tests below are why the ceiling grew a second argument. These run offline, because the
+# arithmetic that makes the pair impossible is arithmetic over two shipped settings.
+
+
+def test_a_measured_campaigns_wait_does_not_fit_under_the_deployments_job_ceiling() -> None:
+    """The arithmetic first, because the fix reads as over-engineering without it.
+
+    `BoCampaignWorkflow._measure` suspends a measured campaign on `AwaitAnswerWorkflow` for
+    `bo_measurement_deadline_days` — a plate turnaround, two working weeks. The child holding that
+    wait is bounded by `connector_job_timeout_seconds`, five hours, sized off the longest *job* in
+    the fleet (a CREST search). One wait is 67x the whole ceiling above it, so the feature could
+    not survive its own wait: five hours in, the campaign child is `TIMED_OUT`, the wrapper reports
+    `job_failed reason="Timed out"`, and every already-paid round is lost.
+
+    Neither number is wrong on its own and no manifest can reconcile them: `JobSpec.timeout_seconds`
+    may only *lower* the ceiling, so the one lever a bundle has moves the wrong way.
+
+    Pinned as a strict inequality over the shipped defaults rather than as the ratio, because the
+    ratio is a fact about one commit and the inequality is the reason the branch below exists — an
+    operator who raised the ceiling past a fortnight would still not want it for the other jobs.
+    """
+    assert settings.bo_measurement_deadline_days * 86_400 > settings.connector_job_timeout_seconds
+
+
+def test_a_job_that_suspends_on_a_person_is_not_bounded_by_a_compute_ceiling() -> None:
+    """`awaits_answer` removes the wall-clock ceiling, and removes it for that job only.
+
+    A workflow execution timeout is wall clock, and a job that suspends on a durable answer spends
+    wall clock without doing work. There is no finite number that is right for it either: a
+    measured campaign's total is `(n_rounds + 1)` waits, so the shipped default spec alone
+    (`n_rounds=10`) legitimately spans 154 days, and any ceiling large enough for that is a ceiling
+    that no longer reaps anything. So the job carries none — which is exactly what
+    `ConnectorJobWorkflow` itself already runs on for `_approve_effect`, whose three-day approval
+    works only because the direct launcher gives the wrapper no execution timeout either.
+
+    The second assertion is the half that makes this safe to ship: every job that did *not* declare
+    it keeps the deployment's ceiling unchanged, so the reaper that exists for a wedged xTB or CREST
+    job is not traded away to make a fortnight-long wait expressible.
+    """
+    assert child_execution_timeout(None, awaits_answer=True) is None
+    assert child_execution_timeout(None) == timedelta(
+        seconds=settings.connector_job_timeout_seconds
+    )
+
+
+def test_the_suspension_declaration_travels_from_the_manifest_to_the_started_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The producer half, end to end: manifest -> launch input -> the child's `execution_timeout`.
+
+    Two hops, and forgetting either one fails nothing at runtime — the job simply keeps the global
+    ceiling and the declaration looks like it worked, which is the failure
+    `test_the_declared_ceiling_travels_from_the_manifest_to_the_launch` was written for one field
+    earlier. Driven through the real generated tool for the first hop and the real workflow body for
+    the second, so what is asserted is the wiring rather than a value passed by hand.
+    """
+    _fixture_job_tool(monkeypatch)
+    (manifest,) = enabled()
+    (job,) = manifest.jobs
+    assert not job.awaits_answer, "the fixture bundle's job computes; the copy below makes it wait"
+    waiting = build_job_tool(manifest.name, job.model_copy(update={"awaits_answer": True}))
+
+    launched: list[ConnectorJobInput] = []
+
+    class _Client:
+        """The one method a launch calls, capturing the input the wrapper will be started with."""
+
+        async def start_workflow(self, _run: Any, arg: ConnectorJobInput, **kwargs: Any) -> Any:
+            launched.append(arg)
+            return SimpleNamespace(id=str(kwargs["id"]))
+
+    async def _connect() -> _Client:
+        return _Client()
+
+    monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
+    params: type[BaseModel] = waiting.__annotations__["params"]
+    asyncio.run(waiting(params(subject="benzene"), "why the tests run it"))
+
+    (started,) = launched
+    assert started.awaits_answer is True
+
+    starts: list[dict[str, Any]] = []
+
+    async def _child(*_args: Any, **kwargs: Any) -> ConnectorJobResult:
+        starts.append(kwargs)
+        return ConnectorJobResult(summary="done")
+
+    async def _nothing(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(workflow, "info", lambda: _CeilingInfo())
+    monkeypatch.setattr(workflow, "now", lambda: datetime(2026, 9, 4, tzinfo=UTC))
+    monkeypatch.setattr(workflow, "execute_child_workflow", _child)
+    monkeypatch.setattr(workflow, "execute_activity", _nothing)
+
+    asyncio.run(ConnectorJobWorkflow().run(started))
+    (start,) = starts
+    assert start["execution_timeout"] is None

@@ -276,6 +276,48 @@ def test_a_pasted_secret_in_an_env_key_is_refused_whatever_the_key_is_called() -
         load_binding(binding)
 
 
+@pytest.mark.parametrize("written_as", ["", None])
+def test_an_env_key_left_blank_is_refused_rather_than_dropped(written_as: str | None) -> None:
+    """A key present and empty is a credential the author meant to supply, not one they omitted.
+
+    `access_token_env:` with nothing after it is YAML `None`, and `access_token_env: ""` is the
+    empty string; both were accepted by every validator and then made the credential *vanish* —
+    `connect_options` omitted the keyword entirely, so the driver was constructed without it. What
+    that reaches depends only on the driver's signature, and both outcomes are worse than a refused
+    manifest: a client whose credential has a default (`api_key: str = ""`, the ordinary vendor
+    shape) attaches **anonymously**, and one whose credential is required raises a bare `TypeError`
+    out of the constructor — which is not in `durable/publish`'s non-retryable list, so a
+    permanently broken manifest is retried by every job that touches it. That is the exact failure
+    the signature check beside it was added to prevent, and the signature check cannot see this one:
+    it binds the stripped name as `""` before the omission happens.
+    """
+    binding = _ingest()
+    binding["connection"] = {"driver": "acme.vec:Milvus", "access_token_env": written_as}
+
+    with pytest.raises(BindingError, match="left blank|NAME of an environment variable"):
+        load_binding(binding)
+
+
+def test_a_blank_env_key_fails_where_the_options_are_built_too() -> None:
+    """The same rule at the second gate, for the manifest no CI run ever bound.
+
+    A deployment mounts its own source directory, so the credentials are re-checked where they are
+    actually resolved rather than only where a manifest loads. Asserted against `connect_options`
+    because that is the function the credential used to disappear inside: it returned the address
+    keys and nothing else, and every later step — the signature check included — then saw a block
+    that looked complete.
+    """
+    from chemclaw.core.connect import connect_options
+
+    block = {
+        "driver": "acme.vec:Milvus",
+        "uri": "acme://v:9000",
+        "api_key_env": "",
+    }
+    with pytest.raises(BindingError, match="left blank"):
+        connect_options(block, error=BindingError, what="warehouse connection")
+
+
 def test_a_connection_key_the_driver_will_not_take_is_caught_offline() -> None:
     """The gate that replaced `extra="forbid"`: bound against the callable, with nothing connected.
 

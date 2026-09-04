@@ -6,9 +6,10 @@ cross-section validators; fields, env names and defaults are exactly as they wer
 sections shared a single module (D-072 mixins, split per D-156).
 """
 
+import logging
 from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -167,6 +168,14 @@ class ObservabilitySettings(BaseSettings):
     # Extra hosts the guard permits, comma-separated, on top of the destinations derived from the
     # other settings. Empty by default and empty in the shipped chart; each entry is a deliberate,
     # reviewed exception (a mirror, a licence server) in the same spirit as `MCP_EGRESS_ALLOW`.
+    #
+    # **And one class that is not an exception at all: a destination a *manifest* names.** The
+    # derivation reads this settings object, so it cannot see the `connection:` block of a
+    # `datasource.yaml`, a `sink.yaml` or a delivery channel — the warehouse ELN's host, a result
+    # sink's, an external vector store reached through `module:callable`. A deployment that
+    # attaches one must name its host here, or the guard refuses its own configured database. That
+    # is a real limit of "derived from the settings the process dials", written down because
+    # `netguard`'s docstring reads as though nothing needs naming by hand.
     egress_allow: str = ""
     # The OTLP collector endpoint (plan F6-T5). Bridged into `OTEL_EXPORTER_OTLP_ENDPOINT` when
     # set, so the exporter's own precedence still applies; empty in dev (no collector). Config, so
@@ -235,6 +244,33 @@ class ObservabilitySettings(BaseSettings):
     # scrape interval buys nothing at all, since every scrape would miss. 0 restores the
     # scan-every-scrape behaviour.
     knowledge_age_scan_ttl_seconds: float = Field(default=300.0, ge=0.0)
+
+    @field_validator("log_level")
+    @classmethod
+    def _log_level_is_one_logging_accepts(cls, value: str) -> str:
+        """Refuse a level name `logging` will not take, here rather than at the first log line.
+
+        This was the one enum-shaped setting with no check: `session_store`, `llm_provider`,
+        `hnsw_iterative_scan`, `harness_autonomy` and `crest_effort` are all `Literal`s and
+        `vector_store_provider` has its own validator, so a typo in any of them fails where a
+        deployment can act on it. `CHEMCLAW_LOG_LEVEL=INFOO` instead constructed cleanly and killed
+        the process at its first `configure_logging()` with `ValueError: Unknown level: 'INFOO'` —
+        loud, but naming neither the setting nor the environment variable that caused it.
+
+        Resolved through `logging.getLevelNamesMapping()` rather than declared as a `Literal`,
+        because the accepted set belongs to the stdlib: it carries the `WARN` and `FATAL` aliases a
+        deployment may already be using, and a list written here would have to be kept in step with
+        a module that owns the answer. Upper-cased on the way in for the same reason
+        `configure_logging` upper-cases it — `debug` is what an operator types.
+        """
+        level = value.strip().upper()
+        if level not in logging.getLevelNamesMapping():
+            raise ValueError(
+                f"log_level={value!r} is not a level `logging` accepts, so this deployment would "
+                "construct and then die at its first log line. Use one of "
+                f"{sorted(logging.getLevelNamesMapping())} (CHEMCLAW_LOG_LEVEL)"
+            )
+        return level
 
     @model_validator(mode="after")
     def _the_two_metrics_ports_are_not_the_same_port(self) -> Self:

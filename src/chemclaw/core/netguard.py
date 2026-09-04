@@ -172,6 +172,19 @@ def derive_allowed(settings: Any) -> frozenset[str]:
     dial: a moved LLM endpoint or a new connector updates both at once. Loopback needs no entry
     (`_is_loopback` covers it), so the dev defaults (Postgres/Temporal/calc on localhost) add
     nothing here.
+
+    **The walk below is hand-written and the coverage is not.** "It cannot drift" was a claim about
+    this list, and two settings had already drifted out of it; `tests/test_netguard.py` now gives
+    every `Settings` field whose name ends in a destination word a sentinel host and asserts each
+    one arrives here or is named there as somebody else's socket, so the next such field fails on
+    the day it is declared rather than in a deployment that split its session store.
+
+    A *manifest*-supplied host — a warehouse ELN's `connection:`, a result sink's, a delivery
+    channel's, an external vector store reached through `module:callable` — is still not derived
+    from anything, because it is not on this object at all: those blocks are the deployment's own
+    file. Such a destination has to be named in `egress_allow`, and that is a real limit rather
+    than an oversight, written down here because the docstring above used to read as though nothing
+    needed naming.
     """
     hosts: set[str] = set()
 
@@ -190,8 +203,16 @@ def derive_allowed(settings: Any) -> frozenset[str]:
     add(settings.postgres_dsn, dsn=True)
     if getattr(settings, "postgres_migration_dsn", ""):
         add(settings.postgres_migration_dsn, dsn=True)
+    # The split session database, empty when it is the same server as `postgres_dsn`. Missing here
+    # until 2026-09-04, and the shape of that omission is worth keeping in mind for the next
+    # destination: an allowlist gap is not a hole, it is an *outage* — a deployment that follows the
+    # chart's own `sessionStoreDsn` secret had every durable-session write refused by its own
+    # process, as an `OSError` psycopg reports as a connection failure with nothing naming egress.
+    if getattr(settings, "session_store_dsn", ""):
+        add(settings.session_store_dsn, dsn=True)
     add(settings.temporal_address)
     add(settings.calc_server_url)
+    add(settings.rxnlabel_server_url)
     for url in getattr(settings, "connector_urls", {}).values():
         add(url)
     if getattr(settings, "entra_required", False):

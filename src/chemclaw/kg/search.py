@@ -1,7 +1,8 @@
 """What a note's text *is* for a substring search, and how a query is split against it.
 
 One definition, in layer 4, because there were three. `agent.graph_tools.find_notes` searched
-`id + type + compound_smiles + tags + body`; `retrieval.vector_index.note_text` — which is what
+`id + type + compound_smiles + tags + body`; `retrieval.vector_index`'s own note-text
+builder, since consolidated into `search_text` below — which is what
 `GraphRetriever`, the dense embedding and the lexical tsvector all read — searched `id + tags +
 body`; `durable.digest` built a third by untyped `getattr` and matched the whole query as one
 phrase. Each of the three carried a docstring asserting it agreed with the others.

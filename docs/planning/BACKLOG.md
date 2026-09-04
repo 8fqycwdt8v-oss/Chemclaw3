@@ -135,6 +135,54 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
+- [ ] **`core/fulltext.py`'s tokeniser can revert to the exact bug its own comment names, and 349
+      tests stay green** — [M], found 2026-09-04 by the review that asked whether this suite can
+      fail. Mutating `_WORD` to `[a-z0-9]+` makes `Suzuki` tokenise as `uzuki`, and the retrieval
+      suite — 349 tests across 22 files — passes. `reference_tokens`, `reference_terms` and
+      `core.fulltext` appear in **zero** test files; the module measures 100% line and branch
+      coverage while its mutant survives, which is the clearest statement available that a global
+      coverage floor is blind to this. Two more survived the same probe:
+      `templates/resolve._WHOLE` can lose its anchors with 77 template tests green (a step argument
+      would silently drop the text around its reference), and
+      `test_a_code_span_or_a_wikilink_in_an_answer_is_not_a_quantity_claim` passes with
+      `_NOT_A_QUANTITY` deleted, because its fixture never reaches the mechanism the test is named
+      after. None of the three is in `[tool.mutmut] source_paths`.
+
+- [ ] **The two eval gates score literals written in their own case files** — [M], same review.
+      11 of 13 baseline metrics are read from the case file rather than computed, so a metric that
+      stops measuring and answers "perfect" passes both `make eval-strict` and
+      `make eval-baseline-check`. These run in `make ci`, so this is a gate that cannot fail in the
+      way it exists to fail.
+
+- [ ] **`make kg-validate`'s two store-backed arms have no input in the shipped corpus** — [S], same
+      review. 0 reaction citations and 0 `calc_refs` in the committed knowledge corpus, so the half
+      of the validator its own docstring says CI runs is dead on every CI run.
+
+- [ ] **33 rendered-chart tests are gated on an unpinned `helm` the `check` job never installs** —
+      [S], found 2026-09-04. The pinned v3.13.0 covers only the `chart` job. There is no skip
+      epilogue for helm, unlike the one `tests/pg.py` has for Postgres — and this pass found **five
+      HIGH chart defects** that had survived earlier reviews precisely because nobody had rendered
+      the chart. See `D-2026-09-04-fifteen-fresh-contexts-over-one-tree`.
+
+- [ ] **The detached settle of a cancelled `AwaitAnswerWorkflow` is racy** — [M], found 2026-09-04
+      while fixing the stranded-row HIGH. `ParentClosePolicy.REQUEST_CANCEL` is strictly better than
+      the alternatives (all three measured against a live broker), but the settle is scheduled from
+      an already-cancelling workflow and landed on some runs and not others under a 15 s grace, so
+      "the row always leaves the inbox" is not guaranteed. `asyncio.shield`, or a `due_at` reaper.
+      `durable/awaiting.py`.
+
+- [ ] **A legitimate re-ask of an answered question now fails loudly rather than waiting blind** —
+      [M], the deliberate half-fix in `durable/pending_store.py`. Making it work needs `_OPEN`'s
+      `WHERE` to accept `'answered'` **plus** an archive so attribution is not blanked: a migration
+      keyed `(request_id, run_id)`, its `infra/sql/README.md` row, an INSERT grant, and a disposal
+      decision in `durable/retention.py`.
+
+- [ ] **`tests/pg.py`'s `TEST_SCHEMA` recycles pids** — [S], observed 2026-09-04 as a real flake on
+      a shared dev database: six leaked `chemclaw_test_*` schemas were sitting in it, and a run
+      whose pid matches one inherits its rows. CI's throwaway container is unaffected, which is why
+      it has never been seen there.
+
+
 - [ ] **A timed-out parse still runs to completion on the worker thread** — [L]. **The cheap half
       is closed**: `ingest/documents/sync.py::_parse_changed` now bounds its `asyncio.to_thread`
       with the front door's own `attachment_parse_timeout_seconds` and counts the outcome as
@@ -162,24 +210,6 @@ topic).
       helper, and `agent/scratchpad.py` is where the permission set that would carry one already
       lives. `durable/retention.py` prunes checkpoints by thread, so the row is about the size of
       what accumulates between prunes rather than about an unbounded leak.
-
-- [ ] **A connector may claim an ambient tool's name, and only the ordering of one branch
-      decides what happens** — [S], opened by `D-2026-09-04-a-helpers-file-crosses-back-and-stays`,
-      which found it while widening the defang set from one name to seven.
-      `connectors/registry._declared_tool_names` refuses one bundle's tool name colliding with
-      *another bundle's*, and never compares against the names this process binds itself. Measured
-      against a live streamable-HTTP server declaring a tool named `read_file`: it **wins
-      `ToolNode.tools_by_name` and carries the `SERVED_BY` stamp**. So a deployment can enable a
-      connector that silently shadows a filesystem verb.
-      Nothing is broken today, and the reason is one line's order: `frame_connector_results` asks
-      the stamp *before* it asks the name, so genuine out-of-process output is framed with its
-      provenance rather than defanged as this system's own notepad.
-      `test_a_connector_tool_named_like_a_local_verb_is_framed_not_defanged` pins that and fails
-      under the other order. What is open is the collision itself — six of the seven scratchpad
-      verbs are ordinary English words, so the namespace this repository binds is exactly the one
-      a third-party server is most likely to land on. The fix is a startup check comparing a
-      bundle's declared names against the ambient set, in the registry that already refuses the
-      bundle-versus-bundle case.
 
 - [ ] **A caller cannot tell that a helper's report is derived from untrusted reading**
       — [M], opened by `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`, which

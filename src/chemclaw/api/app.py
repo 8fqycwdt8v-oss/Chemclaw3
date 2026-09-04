@@ -233,8 +233,21 @@ def create_app(
     # `ExceptionMiddleware` (so the 401s, 404s, 422s and 429s the handlers produce are recorded as
     # the responses they are). See `_RequestObservability`.
     _add_request_observability(app)
-    _add_security_headers(app)
+    # **The body cap goes on before the header stamper, so it ends up inside it.** Installed the
+    # other way round, `BodySizeLimit` sat *above* `_SecurityHeaders` and answers its 413 without
+    # ever calling down — so that response carried no CSP, no `nosniff`, no `X-Frame-Options`, no
+    # HSTS and no correlation id, while `_add_security_headers` claims them "on every response
+    # (including static files and errors)" and `_RequestObservability` claims "Every response gets
+    # one". A CORS preflight was missing the same five. Both are client-facing responses a chemist
+    # may have to quote an id for.
+    #
+    # What the old order bought is unchanged: the cap still answers *above* the access log, which
+    # is why `test_an_oversized_body_leaves_a_log_line_as_well_as_a_count` asserts on
+    # `chemclaw.core.asgi`'s own WARNING rather than on an `http.request` record.
     _add_body_size_limit(app)
+    _add_security_headers(app)
+    # Outermost, and correctly so: a preflight is answered before anything else looks at the
+    # request, and it now passes back through the stamper on the way out.
     _add_cors(app)
     # One handler rather than a try/except per route: every route that touches durable session
     # state can hit the pool, and `chemclaw.db` already funnels both "no database" and "no free

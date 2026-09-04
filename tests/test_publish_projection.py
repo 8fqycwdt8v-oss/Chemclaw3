@@ -129,6 +129,34 @@ def _reaction() -> ReactionEnergyResult:
     )
 
 
+def _distribution(species: list[tuple[str, str, float, float]]) -> SpeciesDistribution:
+    """A ranked species set from `(smiles, label, relative_kcal, population)` tuples.
+
+    Built from the tuples rather than from a fixed fixture because what the distribution tests turn
+    on is *which species* are in it — two enumerations of one substance, or a set with a single
+    member — and each of those is one line here.
+    """
+    return SpeciesDistribution(
+        kind="microstates",
+        method="GFN2-xTB",
+        solvent="water",
+        temperature_k=298.15,
+        level="standard",
+        species=[
+            RankedSpecies(
+                smiles=smiles,
+                label=label,
+                relative_kcal=relative,
+                population=population,
+                electronic_energy_hartree=-1.0,
+            )
+            for smiles, label, relative, population in species
+        ],
+        enumerated=len(species),
+        uncertainty_kcal=1.5,
+    )
+
+
 def _microstate() -> MicrostatePka:
     """A macrostate pKa: two sampled ensembles reduced to one number.
 
@@ -1066,3 +1094,123 @@ def test_a_fact_reported_in_a_non_canonical_unit_is_converted_before_it_is_publi
     # The identity path, so the assertion above cannot be satisfied by converting everything.
     same = projection._fact("reaction_delta_g", -12.5, "kcal/mol")
     assert same is not None and same.value == -12.5 and same.reported_value == -12.5
+
+
+def test_two_tautomers_are_two_members_and_two_subjects() -> None:
+    """`compound_id` deliberately collapses tautomers; a subject must not.
+
+    `core.chem.compound_id` hashes the *standardized* SMILES — salts stripped, charges neutralized,
+    one tautomer per set — because it is the knowledge-graph join key and "is this the same
+    substance" is the question it answers. `Subject.subject_id` hashed that id first, so for every
+    `SpeciesDistribution` (whose members are by definition species that differ only in the ways
+    standardization erases) two different enumerations produced one `subject_id`. Measured on
+    malonic acid: `{H2A, HA-}` at pH 4 and `{H2A, A2-}` at pH 9 both hashed to
+    `sub_3b69df0cbdef7041`, and since `subject_member`'s key is `(subject_id, ordinal)`, publishing
+    the second **overwrote** the first's members — the store then said both runs were about the
+    pH-9 set, and `GROUP BY subject_id` grouped two incomparable calculations.
+
+    The member's own SMILES is what identifies a species, so that is what the hash reads first.
+    """
+    ph4 = _distribution([("OC(=O)CC(=O)O", "H2A", 0.0, 0.6), ("[O-]C(=O)CC(=O)O", "HA-", 0.4, 0.4)])
+    ph9 = _distribution(
+        [("OC(=O)CC(=O)O", "H2A", 0.0, 0.7), ("[O-]C(=O)CC(=O)[O-]", "A2-", 0.9, 0.3)]
+    )
+    records = [
+        project(
+            calc_ref=ref,
+            calc_type="calc.microstates",
+            payload=payload.model_dump(mode="json"),
+            payload_kind="SpeciesDistribution",
+        )
+        for ref, payload in (("job-ph4", ph4), ("job-ph9", ph9))
+    ]
+
+    assert records[0].subject_id != records[1].subject_id
+    # And the collapse the old hash rested on is still real, which is why this needed a fix at all.
+    from chemclaw.core.chem import compound_id
+
+    assert compound_id("[O-]C(=O)CC(=O)O") == compound_id("[O-]C(=O)CC(=O)[O-]")
+
+
+def test_a_reaction_between_tautomers_attaches_each_energy_to_its_own_member() -> None:
+    """The same collapse, one function further on: `_member_for` matched on `compound_id` first.
+
+    Two members that are tautomers of one another carry one `compound_id`, so the coarse branch
+    matched whichever was unclaimed and the exact-SMILES branch was never reached — degenerating
+    to the list-position matching the function exists to prevent. Measured on 2,4-pentanedione with
+    its species listed enol-first: each species' electronic energy landed on the other member.
+    """
+    record = project(
+        calc_ref="rxn-tautomers",
+        calc_type="reaction.energy",
+        payload={
+            "reactants": ["CC(=O)CC(C)=O", "CC(=O)C=C(C)O"],
+            "products": ["O"],
+            "method": "GFN2-xTB",
+            "delta_e_kcal": -1.0,
+            "species": [
+                {
+                    "smiles": "CC(=O)C=C(C)O",
+                    "role": "reactant",
+                    "electronic_energy_hartree": -111.0,
+                },
+                {
+                    "smiles": "CC(=O)CC(C)=O",
+                    "role": "reactant",
+                    "electronic_energy_hartree": -222.0,
+                },
+            ],
+        },
+        payload_kind="ReactionEnergyResult",
+    )
+    by_ordinal = {member.ordinal: member for member in record.subject.members}
+    energies = {
+        by_ordinal[f.member_ordinal].smiles: f.value
+        for f in record.properties
+        if f.property == "electronic_energy" and f.member_ordinal is not None
+    }
+    assert energies == {"CC(=O)C=C(C)O": -111.0, "CC(=O)CC(C)=O": -222.0}
+
+
+def test_a_species_distribution_publishes_the_gap_and_not_a_constant_zero() -> None:
+    """`species[0].relative_kcal` is 0.0 by construction, so publishing it answered nothing.
+
+    The producer (`connectors/calc/compose.py`) computes each species' energy relative to the
+    lowest and then sorts the ranking by that number, so element 0 is always the minimum and its
+    relative energy is always exactly zero. Every tautomer, microstate and stereoisomer
+    distribution therefore published one calculation-scope `relative_energy = 0` — carrying the
+    method uncertainty beside it as if a measurement had been made, and naming no species — so
+    "every tautomer set whose gap exceeds 2 kcal/mol" returned nothing, ever.
+
+    What that fact was reaching for is the *discrimination*: how far the runner-up sits above the
+    winner, which is the number a chemist compares against the method uncertainty before reading a
+    ranking as decided. It is published under its own name, because `relative_energy` is registered
+    as a per-conformer quantity and is not what this is.
+    """
+    record = project(
+        calc_ref="tautomers",
+        calc_type="calc.rank_species",
+        payload=_distribution(
+            [("CC(=O)CC(C)=O", "keto", 0.0, 0.9), ("CC(=O)C=C(C)O", "enol", 3.7, 0.1)]
+        ).model_dump(mode="json"),
+        payload_kind="SpeciesDistribution",
+    )
+    facts = {f.property: f for f in record.properties}
+
+    assert "relative_energy" not in facts
+    assert facts["species_gap"].value == pytest.approx(3.7)
+    assert facts["species_gap"].unit == "kcal/mol"
+    # The uncertainty is meaningful here, which is the whole point: 3.7 against 1.5 is a decision.
+    assert facts["species_gap"].uncertainty == pytest.approx(1.5)
+
+
+def test_a_single_species_distribution_publishes_no_gap() -> None:
+    """Absent stays absent: with nothing to rank against, there is no discrimination to state."""
+    record = project(
+        calc_ref="one-species",
+        calc_type="calc.rank_species",
+        payload=_distribution([("CC(=O)CC(C)=O", "keto", 0.0, 1.0)]).model_dump(mode="json"),
+        payload_kind="SpeciesDistribution",
+    )
+
+    assert "species_gap" not in {f.property for f in record.properties}

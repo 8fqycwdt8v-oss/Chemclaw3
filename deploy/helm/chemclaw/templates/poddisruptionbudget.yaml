@@ -13,13 +13,18 @@
        number that matters is how many conversations one drain can end, and that is what
        `maxUnavailable` bounds.
 
-       **Deliberately not the workers.** `workers.background.replicas: 1` is a hard singleton — the
-       PR-gate checkout lock is host-local (D-069) — and a PDB over a singleton is the classic
-       footgun: `minAvailable: 1` makes it un-evictable and blocks every node drain in the cluster
-       forever, while `maxUnavailable: 1` permits exactly what no PDB permits. Neither is worth
-       rendering. The singleton itself is the real availability gap, it needs the distributed lock,
-       and it stays an open backlog row rather than being papered over with a policy object that
-       would make things worse. Connector servers run `replicas: 1` for the same reason. */ -}}
+       **Deliberately not the workers.** `workers.background.replicas: 1` is a hard singleton, and
+       the reason is the one `values.yaml` gives rather than the D-069 checkout lock this comment
+       used to name — that lock is a Postgres advisory lock across pods now, and what still pins the
+       count is `NoteReindexWorkflow` retiring `note_index` rows against *this pod's* knowledge
+       checkout (`D-2026-08-27-what-a-second-background-worker-would-race-on`). A PDB over a
+       singleton is the classic footgun either way: `minAvailable: 1` makes it un-evictable and
+       blocks every node drain in the cluster forever, while `maxUnavailable: 1` permits exactly
+       what no PDB permits. Neither is worth rendering. The singleton itself is the real
+       availability gap, and it stays an open backlog row rather than being papered over with a
+       policy object that would make things worse. (The connector servers also run one replica, and
+       *not* for that reason — an MCP server here is stateless; that is a capacity default, not an
+       invariant, which is why the same sentence should not cover both.) */ -}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

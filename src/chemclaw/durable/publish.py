@@ -60,6 +60,11 @@ _BAD_DATA_TYPES = [
     # transient: the parent has taken no turn, so there is no thread to copy, and retrying finds
     # exactly the same absence — nothing about waiting makes a checkpoint appear.
     "SessionForkError",
+    # A sign-off written against a status the design has since left (`protocols/store.py`). The one
+    # conflict in this list that a retry makes *worse* rather than merely useless: the design has
+    # already moved, so the answer will not change until a person re-reads it and decides again,
+    # which is the whole content of the refusal.
+    "StatusConflict",
     "ElnMappingError",
     "ElnFormatError",
     "OrdFormatError",

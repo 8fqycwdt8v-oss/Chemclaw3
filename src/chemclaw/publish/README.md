@@ -36,7 +36,10 @@ multi-compound systems, reactions and conformer ensembles alike.
 are all "an identity plus 1..N members with roles". `subject_id` is a content hash that deliberately
 **excludes** solvent, temperature and method — which is what turns "compare this reaction across
 every solvent we ran it in" into a `GROUP BY` on one column instead of a fuzzy join over two text
-arrays.
+arrays. It identifies each member by that member's **own SMILES**, and falls back to `compound_id`
+only for a member that carries none: `compound_id` hashes the *standardized* structure, so it
+cannot tell a tautomer from its partner or an acid from its conjugate base, which is exactly the
+distinction every species distribution turns on (`Subject.subject_id` carries the measurement).
 
 **A calculation's identity excludes who asked for it.** Two chemists running the same calculation
 share one `calc_ref` and produce two publication rows. Putting the actor on the calculation would

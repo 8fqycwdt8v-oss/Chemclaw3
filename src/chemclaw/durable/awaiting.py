@@ -47,6 +47,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 from temporalio import activity, workflow
+from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
@@ -165,7 +166,7 @@ async def open_pending_request_activity(payload: _OpenInput) -> str:
         days=max(0.0, min(payload.request.deadline_days, settings.awaiting_max_days))
     )
     due_at = datetime.fromisoformat(payload.started_at) + deadline
-    await pending_store.open_request(
+    claimed = await pending_store.open_request(
         request_id=payload.request_id,
         kind=payload.request.kind,
         subject=payload.request.subject,
@@ -177,6 +178,24 @@ async def open_pending_request_activity(payload: _OpenInput) -> str:
         due_at=due_at,
         run_id=payload.run_id,
     )
+    if not claimed:
+        # **The one refusal the projection makes, said out loud.** `pending_store._OPEN` will not
+        # reopen a row somebody *answered*, because the reopen blanks the attribution that table is
+        # kept for — and until this branch existed the workflow was not told, so it waited against
+        # a row reading `answered`: absent from `open_requests`, refused 409 by the answer route,
+        # unable to settle itself at the end, for the ninety days `awaiting_max_days` allows.
+        # Failing here is not this system declining to ask twice; the id is what collided, and
+        # `request_id_for` keys on (kind, subject, asked_of) alone, so the way to ask a genuinely
+        # new question is to say something the previous one did not.
+        #
+        # Non-retryable because no number of attempts changes whose answer is in that row, and
+        # because `BAD_DATA_RETRY` would otherwise spend `activity_max_attempts` on it.
+        raise ApplicationError(
+            f"{payload.request_id!r} already holds an answer from an earlier ask, which reopening "
+            "would erase, so this wait was not opened — it would have been invisible in every "
+            "inbox and unanswerable until it expired. Vary the subject to ask a new question.",
+            non_retryable=True,
+        )
     return due_at.isoformat()
 
 

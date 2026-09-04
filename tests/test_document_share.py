@@ -345,6 +345,31 @@ def test_the_share_is_indexed_and_every_refusal_is_counted(
     assert report.embedded_chunks > 0
 
 
+def test_unrelated_empty_files_are_each_their_own_document(
+    share: dict[str, Any], counted_embeddings: list[int], tmp_path: Path
+) -> None:
+    """Identity is the content, and "no content" is not content unrelated files can share.
+
+    An empty workbook, a placeholder `.txt`, a `.docx` with no paragraphs: `SyncReport.empty`
+    counts them, so they are a real population on a departmental share rather than a curiosity.
+    Every one of them hashed to the same `doc_id`, so `known_documents` folded them into a single
+    logical document, `deduplicated` counted all but the first as copies of it, and `CITATION_SQL`'s
+    `min(f.path)` would name one arbitrary path for all of them. Harmless for retrieval today —
+    such a document carries no chunks and can never be a hit — and wrong by the size of that
+    population for anything reasoning per `doc_id`.
+    """
+    # Three formats, three different files, one shared extraction: the empty string.
+    (tmp_path / "SOPs" / "placeholder.txt").write_bytes(b"")
+    (tmp_path / "Projects" / "beta-9" / "tbd.docx").write_bytes(_docx_bytes([]))
+    (tmp_path / "Projects" / "beta-9" / "blank.xlsx").write_bytes(_xlsx_bytes({"Limits": []}))
+    index = InMemoryDocumentIndex()
+    report = asyncio.run(sync_share(SOURCE, load_binding(share), index))
+
+    assert report.empty == 3
+    # Still exactly the one duplicate the fixture share carries on purpose (`report-copy.pdf`).
+    assert report.deduplicated == 1, "three empty files are three documents, not one and two copies"
+
+
 def test_the_same_document_in_two_folders_is_embedded_once(
     share: dict[str, Any], counted_embeddings: list[int]
 ) -> None:

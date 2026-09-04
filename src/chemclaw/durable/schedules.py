@@ -100,6 +100,14 @@ OWNED_SCHEDULE_IDS = frozenset(
         "document-sync",
         "reaction-labels",
         "reaction-corpus",
+        # Planned since the commitment mirror shipped and missed by the audit that caught
+        # `result-publish` two lines below — because the guard that audit strengthened enabled
+        # eleven jobs against a floor of eleven, and this is the twelfth. Same consequence: a
+        # deployment that declares a `commitments:` half, gets the Schedule, and later drops the
+        # source from `CHEMCLAW_DATA_SOURCES` keeps firing `CommitmentSyncWorkflow` daily against
+        # a registry that returns nothing, through every subsequent `helm upgrade`, with no log
+        # line saying so.
+        "commitment-mirror",
         # Planned since the result sinks shipped and registered here only after an audit found it
         # missing: `_prune` computes `OWNED_SCHEDULE_IDS - planned_ids`, so a deployment that set
         # `CHEMCLAW_RESULT_SINKS`, got the Schedule, and later cleared the setting kept firing

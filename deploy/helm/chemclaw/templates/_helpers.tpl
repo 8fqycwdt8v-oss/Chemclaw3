@@ -169,7 +169,7 @@ imagePullSecrets:
   value: {{ .Values.workerMetricsPort | quote }}
 {{- if .Values.monitoring.temporalSdkMetrics.enabled }}
 {{- /* The Temporal SDK's own Prometheus exporter, and it is bound *here* rather than only
-       declared. The chart already opened a `temporal-metrics` container port and pointed a
+       declared. The chart already opened a `temporal-sdk` container port and pointed a
        PodMonitor endpoint at it, and nothing set the variable that makes the SDK listen on it —
        so turning the switch on gave every worker a declared, scraped, permanently-down target,
        which `ChemclawTargetDown` would then report forever. A port with nothing behind it is
@@ -216,8 +216,13 @@ ports:
          than a route on `chemclaw.core.worker_http` — so it cannot share the port above. Declared
          here and scraped by the second `podMetricsEndpoint` in `podmonitor.yaml`, both under the
          one switch, because a port declared with nothing bound to it is a permanently-down scrape
-         target and `ChemclawTargetDown` would then report it forever. */}}
-  - name: temporal-metrics
+         target and `ChemclawTargetDown` would then report it forever.
+
+         `temporal-sdk` rather than the obvious `temporal-metrics`, which is 16 characters: a
+         container port name is an `IANA_SVC_NAME` and Kubernetes rejects anything over 15. Nothing
+         in the render gate enforces that — `kubeconform` passed it — so turning this switch on made
+         every worker Deployment in the chart invalid at apply, all four at once. */}}
+  - name: temporal-sdk
     containerPort: {{ .Values.monitoring.temporalSdkMetrics.port }}
 {{- end }}
 startupProbe:
@@ -320,9 +325,28 @@ topologySpreadConstraints:
 {{- end -}}
 
 {{- /* The common envFrom (the whole non-secret ConfigMap) + the mTLS volume mount. */ -}}
+{{- /* The three names `config.yaml` renders, defined once because two of them are a *pair*: the
+       objects the pods read and the hook-scoped copies the pre-install migrate Job reads. They must
+       differ — Helm refuses to adopt a hook resource into the release manifest, so a shared name is
+       a release that stops installing — and the reason they exist at all is in `config.yaml`'s own
+       header. Written here rather than interpolated at each use so that "which ConfigMap does this
+       container read" has one answer per phase instead of a string repeated in six templates. */ -}}
+{{- define "chemclaw.configMapName" -}}{{ include "chemclaw.name" . }}-config{{- end -}}
+{{- define "chemclaw.hookConfigMapName" -}}{{ include "chemclaw.name" . }}-config-hook{{- end -}}
+{{- define "chemclaw.hookServiceAccountName" -}}{{ include "chemclaw.name" . }}-hooks{{- end -}}
+
 {{- define "chemclaw.envFrom" -}}
 - configMapRef:
-    name: {{ include "chemclaw.name" . }}-config
+    name: {{ include "chemclaw.configMapName" . }}
+{{- end -}}
+
+{{- /* The same, for the `pre-install`/`pre-upgrade` hook Job only. Helm applies ordinary resources
+       *after* every pre-install hook has completed, so on a fresh install the ConfigMap above does
+       not exist when that Job runs; on an upgrade it exists and holds the previous release's
+       values, which is the wrong configuration to migrate with. Both are answered by the copy. */ -}}
+{{- define "chemclaw.hookEnvFrom" -}}
+- configMapRef:
+    name: {{ include "chemclaw.hookConfigMapName" . }}
 {{- end -}}
 
 {{- /* The pod annotation that makes a ConfigMap change actually reach the pods.
@@ -694,6 +718,15 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- $total = .Values.service.autoscaling.maxReplicas | int -}}
 {{- end -}}
 {{- $total = add $total (.Values.workers.background.replicas | int) -}}
+{{- /* The face too, when it is enabled. It runs `connectors/server.py` over the in-process
+       read-only tool set — knowledge search, fingerprint search, precedent lookup — so it opens a
+       pool per replica exactly like the front door does. Omitted here, ten face replicas put 80
+       connections on the database that the declared ceiling did not know about, and the startup
+       guard checks the *declared* number, so it could not fire: the first sign was the runtime
+       `ChemclawFleetAboveItsConnectionCeiling` alert, after the pods were up. */ -}}
+{{- if .Values.mcpFace.enabled -}}
+{{- $total = add $total (.Values.mcpFace.replicas | int) -}}
+{{- end -}}
 {{- range $name, $cfg := .Values.connectors -}}
 {{- if $cfg.enabled -}}
 {{- /* `not $cfg.url` for the same reason the Deployment is guarded on it: an externally hosted

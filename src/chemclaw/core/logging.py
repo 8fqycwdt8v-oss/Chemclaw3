@@ -652,6 +652,32 @@ _SECRET_SETTINGS = (
     "framing_envelope_secret",
 )
 
+# The settings that hold a credential's *variable name* rather than its value. The value inventory
+# above cannot reach them and is right not to try: `calc_server_token_env` is a string like
+# `"CHEMCLAW_CALC_TOKEN"`, and redacting *that* would scrub the variable name out of every line
+# that helpfully tells an operator which credential to set. What is secret is what the named
+# variable holds, which is one indirection further out.
+#
+# Nothing covered that indirection, so the three bearers this process actually sends — the
+# calculation backend's, the labelling server's, and the only credential guarding the read-only MCP
+# face — were outside every mechanism at once: absent from `_SECRET_SETTINGS` because they are not
+# values, absent from the connector manifests' `token_env` list because they are not connectors,
+# and never passed to `register_secret_env` because nothing reading them said so. The structural
+# patterns still caught an `Authorization:` header or a `NAME=value` assignment; a bearer quoted on
+# its own in an upstream error message went out verbatim.
+#
+# **Derived from the suffix, and that is the opposite decision to `_SECRET_SETTINGS`' hand-written
+# list — because it is a different question.** Deriving *which settings hold a secret value* by name
+# would sweep in this very suffix and miss the next credential whose name does not match. Deriving
+# *which settings name a variable* is exact: `_token_env` is the suffix a field uses to say so, and
+# there is nothing else it could mean. The field names are read once at import (they are static);
+# only the three attribute reads happen per record, because `_secret_values` runs on every line and
+# a 400-field scan there would be a real cost.
+_TOKEN_ENV_SUFFIX = "_token_env"
+_SECRET_ENV_SETTINGS: tuple[str, ...] = tuple(
+    sorted(name for name in type(settings).model_fields if name.endswith(_TOKEN_ENV_SUFFIX))
+)
+
 # The git push credential for the knowledge-sync sidecar (`deploy/knowledge-sync.sh`). It has no
 # `Settings` field — nothing in this process reads it as config, only the sidecar script does —
 # but `_helpers.tpl` ranges over every secret key for every component, so it sits in this process's
@@ -1052,6 +1078,15 @@ def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...
         # from a manifest usually has no field behind it at all. `_configured_by` is the fallback
         # for the `.env` posture, where the value never reaches `os.environ`.
         _consider(os.environ.get(env_name, "") or _configured_by(env_name))
+    # The bearers a `*_token_env` setting names. `os.environ` only, with no `_configured_by`
+    # fallback, and that is a fact about these names rather than a shortcut: the variable they name
+    # is `CHEMCLAW_`-prefixed and is *not* a `Settings` field, so `model_config`'s `extra="forbid"`
+    # refuses it outright in a `.env` file — `Settings()` will not construct at all. The value can
+    # therefore only ever arrive through the process environment, and skipping the fallback is what
+    # keeps this per-record: measured, `_configured_by` was 7.0 us of the 7.7 us these three added
+    # to a call that costs ~7.6 us without them.
+    for name in _SECRET_ENV_SETTINGS:
+        _consider(os.environ.get(str(getattr(settings, name, "") or ""), ""))
     return tuple(sorted(values, key=len, reverse=True))
 
 

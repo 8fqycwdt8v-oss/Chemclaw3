@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from chemclaw.ingest.eln.adapter import RawEntry
+from chemclaw.ingest.eln.adapter import DatedIngest, RawEntry
 from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 from chemclaw.ingest.eln.ord import Component, Impurity, OrdReaction, Role
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
@@ -109,7 +109,14 @@ def test_a_reaction_without_impurities_renders_no_empty_section() -> None:
 
 
 def test_json_adapter_maps_date_purity_and_impurities(tmp_path: Path) -> None:
-    """The free-text ELN source populates all three (gap KNW-1/KNW-2 end to end)."""
+    """The free-text ELN source populates all three (gap KNW-1/KNW-2 end to end).
+
+    Through `DatedIngest`, because the date is the seam's rather than the adapter's: this export
+    carries no experiment date, so the adapter states none and the wrapper fills in the entry's own
+    timestamp *with* the `date_source="entry"` that says where it came from. Mapping it in the
+    adapter put the right value under a claim nothing downstream could tell from a chemist-entered
+    date — see `ingest/eln/json_adapter.py::JsonExportAdapter._build`.
+    """
     entry = {
         "id": "e-1",
         "timestamp": "2026-03-01T09:00:00Z",
@@ -126,10 +133,10 @@ def test_json_adapter_maps_date_purity_and_impurities(tmp_path: Path) -> None:
         "operator": "aj",
     }
     (tmp_path / "e-1.json").write_text(json.dumps(entry))
-    adapter = JsonExportAdapter(str(tmp_path))
+    adapter = DatedIngest(JsonExportAdapter(str(tmp_path)))
     raw = RawEntry(entry_id="e-1", created_at=datetime(2026, 3, 1, 9, tzinfo=UTC), payload=entry)
     reaction = adapter.map_to_ord(raw)
-    assert reaction.performed_at == date(2026, 3, 1)
+    assert reaction.performed_at == date(2026, 3, 1) and reaction.date_source == "entry"
     assert reaction.purity_percent == 98.4
     assert [i.name for i in reaction.impurities] == ["des-methyl"]
 
@@ -160,7 +167,11 @@ def test_json_adapter_skips_an_unidentifiable_impurity_without_losing_the_reacti
 
 
 def test_ord_adapter_maps_date_and_purity(tmp_path: Path) -> None:
-    """The structured ORD source reads PURITY through the same measurement path as YIELD."""
+    """The structured ORD source reads PURITY through the same measurement path as YIELD.
+
+    Through `DatedIngest` for the reason the JSON case above gives: an ORD record's only date is
+    `provenance.record_created.time`, which is when the record was written.
+    """
     message = {
         "reaction_id": "ord-1",
         "inputs": {
@@ -188,13 +199,13 @@ def test_ord_adapter_maps_date_and_purity(tmp_path: Path) -> None:
         ],
         "provenance": {"record_created": {"time": {"value": "2026-03-01T09:00:00Z"}}},
     }
-    adapter = OrdJsonAdapter(str(tmp_path))
+    adapter = DatedIngest(OrdJsonAdapter(str(tmp_path)))
     raw = RawEntry(
         entry_id="ord-1", created_at=datetime(2026, 3, 1, 9, tzinfo=UTC), payload=message
     )
     reaction = adapter.map_to_ord(raw)
     assert reaction.yield_percent == 90.0
     assert reaction.purity_percent == 97.5
-    assert reaction.performed_at == date(2026, 3, 1)
+    assert reaction.performed_at == date(2026, 3, 1) and reaction.date_source == "entry"
     # ORD does not model an impurity profile directly; guessing one would be worse than none.
     assert reaction.impurities == []

@@ -1,7 +1,7 @@
 """What this system did, read back out of the record it already keeps.
 
 Every table read here has been written since the system was built, and none of them could be read
-*across*. `PostgresAuditStore` exposes `record` and `flush` and nothing else; the grant matrix hands
+*across*. `PostgresAuditSink` exposes `record` and `flush` and nothing else; the grant matrix hands
 the runtime principal `SELECT` on every table and nothing aggregated with it. So the trail proved
 what happened and could not answer a question about it — which is why "who else has used this
 playbook", "how many hazard flags did the group raise last quarter" and "how much of that note was

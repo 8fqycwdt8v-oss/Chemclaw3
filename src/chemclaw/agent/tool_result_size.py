@@ -1,4 +1,4 @@
-"""Bound what one tool result may put in front of the model, because nothing else did.
+"""Bound what one model call's tool results may put in front of the model, because nothing did.
 
 **The gap.** `connector_max_request_bytes` caps what this system *sends* a capability server. There
 was no cap in the other direction — not at the transport, not in the middleware chain, not anywhere
@@ -13,6 +13,25 @@ tool's ceiling, `document_read_max_chars` and `calc_find_max_results` x `calc_fi
 — come to 100,077 estimated tokens, one over the budget, and ~224,000 billed. Both edits ran. Both
 reclaimed nothing. Adding the static prefix, that is a ~245,000-token request assembled entirely
 from numbers this system chose for itself.
+
+**The unit is the batch, and for a long time it was the result — which bounded nothing.** The
+argument above is about what the edits cannot reclaim, and what they cannot reclaim is not one
+result: `ClearOlderToolResultsEdit` raises `keep` to `newest_batch_size(messages)` so the *whole*
+newest batch survives, and the conversation window clamps its cut at the newest group. Both are
+right — that evidence has not been read yet — and both are exactly why a fan-out escaped a
+per-result ceiling. Nothing capped how many results one assistant message produces, so the bound
+was the product of two numbers chosen a hundred lines apart in `core/config/agent.py`: 60,000
+characters and eight parallel calls, 480,000 characters, ~120,000 estimated tokens before the
+~43,000-token prefix. Measured on the compiled graph, a batch of results each at the ceiling sent
+**164,229** estimated tokens at a width of 8 and **345,735** at 20, against a 100,000 budget, with
+`chemclaw_context_compactions_total` at 0 because there was nothing older to clear.
+`agent_max_parallel_tool_calls` is not the missing bound either: it is LangGraph's
+`max_concurrency`, so twenty calls still return twenty results.
+
+So `agent_max_tool_result_chars` is divided by the batch's width. A lone call — which is nearly
+every call — gets the whole ceiling exactly as before; a batch shares it. The share is even rather
+than first-come, which costs a narrow result the chance to lend its slack to a wide one and buys
+the property that what the model reads does not depend on which tool returned first.
 
 **Why a middleware and not a smaller number in each tool's config.** Those per-tool ceilings are
 right and stay: each is an argument about what *that* tool should return, made where the tool's
@@ -44,6 +63,7 @@ from typing import Any
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 
+from chemclaw.agent.audit import metric_tool_name
 from chemclaw.agent.tool_result_shape import rewritten_tool_messages
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
@@ -137,8 +157,14 @@ def _kept(spans: list[str], limit: int, notice: str) -> list[str]:
         available = spans[index][len(heads[index]) :]
         tails[index] = available[-tail_budget:] if tail_budget < len(available) else available
         tail_budget -= len(tails[index])
+    # `max(last_head, 0)` rather than `last_head`, because a head budget of 0 leaves it at -1 and
+    # no index would match: below a limit of 2, `int(limit * 3/5)` is 0, the head loop breaks
+    # before its first iteration and the notice — this module's one contract — was discarded, so
+    # the result was silently shortened instead. `agent_max_tool_result_chars` is `ge=0`, so a
+    # deployment can reach that, and `bounded_content` reaches it deliberately whenever the limit
+    # is smaller than the sentence explaining the cut.
     return [
-        heads[index] + (notice if index == last_head else "") + tails[index]
+        heads[index] + (notice if index == max(last_head, 0) else "") + tails[index]
         for index in range(len(spans))
     ] or [notice]
 
@@ -169,6 +195,22 @@ def bounded_content(content: Any, tool: str, limit: int) -> tuple[Any, int]:
     Separated from the middleware so the arithmetic can be exercised on a value rather than through
     a graph — the property worth testing is that both ends survive and the middle does not.
 
+    **The notice is charged against `limit`, not added to it**, so what comes back is at most
+    `limit` characters and the name of this function is true of its result. It used to keep exactly
+    `limit` and then insert a 313-character notice, which for an overshoot smaller than the notice
+    *grew* the payload: measured at the shipped ceiling, 60,001 characters in and **60,313 out**,
+    312 more than the tool returned, with the truncation counter incremented and the notice's own
+    arithmetic ("1 of 60,001 characters removed") true of the cut and false of the effect. An exact
+    ceiling is also what lets `bound_tool_results` divide one into shares.
+
+    Its length is measured at the notice's *widest* form — `removed` can never exceed `total`, so
+    that bounds the digits — and the sentence the model actually reads is then built from the real
+    numbers. Solving the circularity exactly would cost a fixed point to save three characters.
+
+    **A result shorter than the notice is left alone**, which is where this module's two rules meet:
+    a cut is never silent, and a bound never grows what it bounds. Below that length cutting cannot
+    reclaim anything, so there is no cut and no notice is owed.
+
     Returns:
         The bounded content and the number of characters removed (0 when nothing was).
     """
@@ -176,13 +218,49 @@ def bounded_content(content: Any, tool: str, limit: int) -> tuple[Any, int]:
     total = sum(len(span) for span in spans)
     if limit <= 0 or total <= limit:
         return content, 0
-    kept = _kept(spans, limit, _notice(tool, total - limit, total))
-    return _rebuilt(content, kept), total - limit
+    widest = len(_notice(tool, total, total))
+    if total <= widest:
+        return content, 0
+    kept = max(limit - widest, 0)
+    removed = total - kept
+    return _rebuilt(content, _kept(spans, kept, _notice(tool, removed, total))), removed
+
+
+def batch_width(request: Any) -> int:
+    """How many tool calls the assistant message that asked for *this* one made.
+
+    The denominator of the share below, and the number nothing was dividing by. It is read off the
+    message rather than counted from the state's tool results, for the reason
+    `plan_gate.rewrite_todos_in_batch` gives for the same walk: `ToolNode` hands each call a
+    runtime built from one pre-batch snapshot, so the originating `AIMessage` is the only place the
+    *other* calls running right now are visible — the results do not exist yet.
+
+    1 when the message cannot be found rather than 0 or a guess: off the request path (a middleware
+    driven directly, `agent/tool_invocation.py`'s no-graph fold) there is no batch, and one call
+    getting the whole ceiling is exactly today's behaviour.
+
+    Args:
+        request: The tool-call request the middleware chain is running.
+
+    Returns:
+        The number of calls in this call's batch, never below 1.
+    """
+    messages = (getattr(request, "state", None) or {}).get("messages") or []
+    this_call = request.tool_call.get("id")
+    for message in reversed(messages):
+        calls = getattr(message, "tool_calls", None) or []
+        if any(call.get("id") == this_call for call in calls):
+            return max(len(calls), 1)
+    return 1
 
 
 @wrap_tool_call
 async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any:
-    """Cut an oversized tool result to `agent_max_tool_result_chars` before the model reads it.
+    """Cut an oversized result to its batch's share of `agent_max_tool_result_chars`.
+
+    **The share, not the whole ceiling**, because what the two context edits cannot reclaim is the
+    newest *batch* — see the module docstring for the measurement. `batch_width` is the divisor and
+    it is 1 for a lone call, so this is unchanged for nearly every call a turn makes.
 
     Every tool, not only an out-of-process one: the two results that measured this defect —
     `read_document` and `find_calculations` — are both in-process, so a cap keyed on the
@@ -201,25 +279,38 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
     """
     result = await handler(request)
     tool = str(request.tool_call["name"])
+    # **The metric label is the served name, never the model's string**, and `core/metrics.py`
+    # already claimed it was ("a tool name here is one the registry served, never a string a caller
+    # invented"). It was not: `ToolNode` dispatches an unregistered name through this chain, its
+    # not-a-valid-tool error echoes that name back, and the echo is over the ceiling whenever the
+    # name is — so an invented name of 90,000 characters minted a **90,054-character**
+    # `chemclaw_tool_results_truncated_total{tool=…}` line on an unauthenticated `/metrics`, one
+    # series per invented name. The same clamp `agent/audit.metric_tool_name` applies two
+    # middlewares away, reused rather than re-derived; the notice the model reads keeps the raw
+    # name, because a result must say which call it belongs to.
+    label = metric_tool_name(request, tool)
+
+    ceiling = settings.agent_max_tool_result_chars
+    # The batch's share, never below 1: 0 is the deployment's own "no cap" and a share that rounded
+    # to it would restore the unbounded behaviour exactly where the batch is widest.
+    limit = max(ceiling // batch_width(request), 1) if ceiling else 0
 
     def _bounded(message: ToolMessage) -> ToolMessage:
-        content, removed = bounded_content(
-            message.content, tool, settings.agent_max_tool_result_chars
-        )
+        content, removed = bounded_content(message.content, tool, limit)
         if not removed:
             return message
         record_metric(
-            lambda m: m.increment("chemclaw_tool_results_truncated_total", 1.0, {"tool": tool})
+            lambda m: m.increment("chemclaw_tool_results_truncated_total", 1.0, {"tool": label})
         )
         log_event(
             logger,
             "tool_result.truncated",
-            "cut %d characters from the %s result to stay inside the per-result ceiling",
+            "cut %d characters from the %s result to stay inside this batch's share of the ceiling",
             removed,
             tool,
             tool=tool,
             characters_removed=removed,
-            ceiling=settings.agent_max_tool_result_chars,
+            ceiling=limit,
         )
         return message.model_copy(update={"content": content})
 

@@ -171,11 +171,23 @@ async def graph_events(
             # **A non-empty namespace means "below the root", and that is the only attribution
             # available here.** `events.py` states that `""` *means* the main agent, and every turn
             # this repository runs is one. Without the namespace test, every helper the `task` tool
-            # runs had its tool calls, its results and its plan emitted as the supervisor's: its
-            # output joined `ToolCallTrace.outputs` and the parent session's fetchable `result_ref`
-            # indistinguishably, and its `write_todos` surfaced as a root `PlanEvent` that
-            # *replaced* the supervisor's — so under `plan_only` the checklist a chemist approved
-            # could be the helper's rather than the turn's.
+            # runs had its tool calls, its results and its plan emitted as the supervisor's, and
+            # its `write_todos` surfaced as a root `PlanEvent` that *replaced* the supervisor's —
+            # so under `plan_only` the checklist a chemist approved could be the helper's rather
+            # than the turn's.
+            #
+            # **What the test does and does not withhold, because this comment used to overstate
+            # it.** It claimed a helper's output no longer "joined `ToolCallTrace.outputs` and the
+            # parent session's fetchable `result_ref` indistinguishably". It still does: `trace`
+            # and `exchanges` are passed below the root unconditionally, so a helper's
+            # `ToolMessage` calls `trace.returned(...)` on the parent's shared trace, its full
+            # result is stored against the *parent* session's blobs, and it is appended to the
+            # exchanges `runner._record_transcript` writes. Only the event attribution and the plan
+            # are actually withheld — and `TranscriptToolCall` carries no `agent` field, so the
+            # live stream marks those calls `subagent` and a reload attributes them to nobody.
+            # Whether a helper's evidence *should* stay in the parent's grounding corpus (it is
+            # what `score_answer` grades against) is an open decision; what is not open is that a
+            # comment must not claim a separation the code does not make.
             #
             # The same rule the token branch above already applies, for the same reason: the
             # specialist's *name* is not in the namespace under any dispatch that routes through the
