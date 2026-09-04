@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "pl-34",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Rebalance the group between the two programmes for next quarter — who should move, when, and what does that do to the delivery dates on each side?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any named person, role or assignment",
+      "any allocation split, percentage, start date or delivery-date change",
+      "that a reallocation plan has been produced or could be produced from held data"
+    ],
+    "direction": "Every input is missing at once: no people, no skills or expertise directory, no current allocation, no capacity model, no delivery dates. The answer must decline the whole task rather than produce a plausible-looking split (\"shift roughly 30% of effort\") that a manager could act on. Naming a person would be the worst outcome, since no personnel data exists to name from and any name would be invented. Offering the chemistry-side input a manager could actually use — what the corpus says about where each programme's technical risk sits — is a good close.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-34",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Rebalance the group between the two programmes for next quarter — who should move, when, and what does that do to the delivery dates on each side?",
+    "profile": "",
+    "answer": "I don't have the information I need to answer this question because the system I have access to holds no project, programme, capacity, headcount or timeline data.\n\nWhat I *can* reach:\n- **Commitments outstanding in the portfolio systems** — what was promised and when, per owner and source\n- **What chemistry is holding up each programme** — which notes, calculations or compounds each commitment depends on\n- **Who has used which tools** — patterns in how this system gets called across projects\n\nWhat I *cannot* see:\n- Team rosters, FTE allocation, skill matrices, or current headcount\n- Project schedules, critical paths, dependencies between programmes\n- Resource-loading plans, burn-down charts, or capacity forecasts\n- Any names, titles, reporting lines or organizational structure\n\n**If you want to check portfolio commitments**, I can show you what's outstanding and what chemistry each one rests on — that might inform the rebalancing conversation. Would that help?\n\nAlternatively, if you have a specific chemistry question about either programme — \"we're blocked on the coupling solvent screen on PRJ-114\" or \"the API synthesis needs a degradant profile\" — I can gather the evidence and either propose the next steps or compute what is missing. That kind of blocking issue is often what *should* drive a rebalance anyway.\n\nWhich would be useful?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.29,
+    "event_counts": {
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "44cf921d890a4047b259f5cf1d9628f5",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

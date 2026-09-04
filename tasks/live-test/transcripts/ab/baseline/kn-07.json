@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "kn-07",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Can I run the EDC coupling in 2-MeTHF instead of DMF? What's it cost me?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a yield number not present in the retrieved notes",
+      "a note id that was not retrieved",
+      "a regulatory or solvent-class designation the notes do not state"
+    ],
+    "direction": "Yes, at about 5 points, with the measured numbers from opt-amide-solvent and/or interaction-solvent-swap-question: 81% DMF, 79% MeCN, 76% 2-MeTHF on the same substrate. A strong answer adds the recorded process argument for making the swap anyway — 2-MeTHF is bio-derived, is not a reprotoxin, and separates from water, which removes the DMF work-up entirely. Cites at least one note id.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-07",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Can I run the EDC coupling in 2-MeTHF instead of DMF? What's it cost me?",
+    "profile": "no-tools",
+    "answer": "I can answer this from general chemistry knowledge, but I should be clear about what would need to be measured or confirmed for your specific case.\n\n**The Short Answer:**\nYes, EDC coupling can run in 2-MeTHF, but you're trading **reaction rate and conversion** for **solvent safety and cost**.\n\n**What You're Trading:**\n\n1. **Reaction Rate & Conversion**: DMF is a much better solvent for EDC coupling because:\n   - It's a polar aprotic solvent that solvates the nucleophile (amine or alcohol) exceptionally well, activating it\n   - 2-MeTHF is much less polar and less solvating; coupling will be **substantially slower** and may not reach the same final conversion\n   - You'll likely need longer reaction times, elevated temperature, or higher equivalents of reagents\n\n2. **Solvent Cost**: 2-MeTHF is considerably **cheaper** than DMF (roughly 1/3 to 1/5 the cost depending on grade and volume)\n\n3. **Safety/Regulatory**: 2-MeTHF is far preferable:\n   - DMF is flagged as a reproductive hazard (Germ Cell Mutagen Cat. 2, Reproductive Toxicant Cat. 1B in many jurisdictions)\n   - 2-MeTHF has a much better safety profile\n   - Regulatory/pharmaceutical contexts increasingly disfavor DMF\n\n**What You Need to Actually Know:**\n- **Have you run this coupling before?** If so, baseline times and yields in DMF will let you estimate the 2-MeTHF penalty\n- **Scale and throughput**: Can you afford longer reaction times?\n- **Your substrate**: Some substrates are more sensitive to solvent than others—nucleophilicity of your amine/alcohol matters\n- **Temperature flexibility**: Can you run warm (40–60 °C) to compensate?\n\n**Practical Approach:**\nRun a small parallel test with your actual substrate, starting at the same conditions as your DMF baseline (or slightly warmer in 2-MeTHF), and measure conversion at your standard time point. You'll then know the real cost for your case.\n\nIs this for a discovery or process context? That might shift whether the trade-off makes sense for you.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.8,
+    "event_counts": {
+      "token": 24,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d7854d5331b74b37b7fec1ee53da6bee",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

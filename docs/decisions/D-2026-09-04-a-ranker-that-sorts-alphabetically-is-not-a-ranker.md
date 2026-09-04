@@ -27,6 +27,15 @@ because the pieces disagree with each other, and nothing measured the disagreeme
   renders as `!'78'` — an exclusion matching nearly every *other* row. A cryogenic temperature was
   reachable by no query at all. Decimals diverged the other way, with the in-memory reference
   over-matching. `core/fulltext.py` had zero test files while measuring 100% coverage.
+
+  **The tokeniser mutant this was found through was closed independently on `main` (#308) while
+  this branch was open, and that is worth recording rather than quietly merging.** Both branches
+  wrote a `tests/test_fulltext.py`; the merge keeps both, because they are different *kinds* of
+  test and each is blind to the other's defect. The offline suite pins the tokeniser against
+  mutation and cannot see whether the proxy and the server agree — every one of its assertions
+  passed while the numeric divergence above was live. Only a test that asks both backends the same
+  question can see that class, which is the argument the module's own docstring has been making
+  about this rule since the first time its two halves disagreed.
 - **A transient parse failure deleted derived-index rows** — 40 of 100 broken notes retired 40 rows.
 - **One oversized note froze both derived legs indefinitely**, because every changed note was
   embedded in one call and the `tsvector` is written in the same `INSERT`.

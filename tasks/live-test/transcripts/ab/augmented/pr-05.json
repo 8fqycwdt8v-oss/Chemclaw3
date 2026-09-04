@@ -1,0 +1,65 @@
+{
+  "probe": {
+    "id": "pr-05",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Before I let anyone quote a predicted product in a report, I want to know what is actually behind these predictions in our deployment. Which models are running, which are not, and why not?",
+    "expects_tools": [
+      "list_available_models"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a model roster recited from general knowledge rather than read from the deployment",
+      "a count of running predictors that the tool did not report",
+      "a claim that a predictor is unavailable without the reason the deployment gave"
+    ],
+    "direction": "A governance question with a mechanical answer, and the graded behaviour is that the system *asks the deployment* instead of describing the software. A good answer lists the predictors this build knows about, which of them this deployment will answer with, and for each one that it will not, the reason the tool gives — a predictor can fail to load (a missing optional dependency) or be switched off by configuration, and those are different facts with different remedies. Each entry carries a citation, so an answer that attributes a prediction to the paper behind the model rather than to \"the server\" is doing the thing this tool exists for. The trap is answering from memory of what open reaction predictors exist: any roster not taken from this deployment is exactly the claim a manager asking this question is trying to avoid. The honest closing point is the one the server's own docstring makes — a deployment that expected five predictors and installed one still returns an answer wearing the word \"consensus\".",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pr-05",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Before I let anyone quote a predicted product in a report, I want to know what is actually behind these predictions in our deployment. Which models are running, which are not, and why not?",
+    "profile": "",
+    "answer": "I'll check what product-prediction models are available in your deployment and their status.This is important information: **your deployment currently has zero forward product predictors running and zero condition predictors running.**\n\nHere's what is installed but not available:\n\n**Forward Predictors (product prediction):**\n- `reaction_t5_v2` — missing the `transformers` library\n- `t5chem` — missing the `t5chem` library and model weights\n- `molecular_transformer` — missing `onmt` and model checkpoint\n- `megan` — missing `dgl` and model/repo\n- `graphrxn` — missing `torch` and model/repo\n- `chemformer` — missing `transformers` and model checkpoint\n\n**Condition Predictors (reagent/solvent/catalyst selection):**\n- `rxn_insight` — missing the `rxn_insight` library\n- `parrot` — missing `torch` and model\n- `reagents_mt` — missing `onmt` and model\n- `two_stage_dnn` — missing `torch` and model\n- `askcos_condition` — missing `askcos-core`\n\n**What this means for your reports:**\n\nAny call to `predict_forward_reaction` or `predict_reaction_conditions` will fail immediately — there is no consensus ensemble, because there are no models to ensemble. You cannot quote a predicted product or suggested conditions from this system until at least one forward and one condition predictor are installed.\n\nThe common missing dependency is `torch` (needed for 3 of 6 forward predictors and 3 of 5 condition predictors). Several also need the core ML library (`transformers`, `onmt`, `dgl`) plus the model weights/checkpoints themselves.\n\n**Next step:** Your deployment operator needs to install one or more of these predictor packages and download/place their model checkpoints before anyone should cite a prediction in a report. Until then, recommendations about products and conditions must come from the knowledge graph (precedent reactions, similar runs) and calculations (reaction energy, property predictions), never from these models.\n\nWould you like me to help frame this for your team, or do you need details on what to install?",
+    "answered": true,
+    "tools_called": [
+      "list_available_models"
+    ],
+    "tool_results": [
+      {
+        "tool": "list_available_models",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnpredict:list_available_models\">\n{\n  \"forward\": [\n    {\n      \"name\": \"reaction_t5_v2\",\n      \"kind\": \"forward\",\n      \"available\": false,\n      \"description\": \""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 11.95,
+    "event_counts": {
+      "token": 23,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d56f7b135f5b4ccc844072d381b08be5",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

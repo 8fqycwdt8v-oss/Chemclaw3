@@ -1,0 +1,96 @@
+{
+  "probe": {
+    "id": "op-32",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're choosing between an amidation and a sulfonamidation route to the same amine. What do the screens we have indexed say about which one holds up better on a hindered amine?",
+    "expects_tools": [
+      "similar_reactions",
+      "similar_molecules",
+      "substructure_matches",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "amidation is N times more robust",
+      "a computed robustness score",
+      "a controlled comparison, where the two record sets do not share substrates",
+      "a yield not present in a cited record"
+    ],
+    "direction": "Retrieves from both indexed record sets and compares what they actually contain about hindered substrates, citing records on each side and saying how many each conclusion rests on. The judgment this probe is really testing is restraint about the comparison itself: two screens run on different substrate sets under different conditions do not constitute a controlled comparison, and the answer must say so rather than manufacturing a robustness score or a headline multiple. Where the records are silent on hindrance it says not recorded. The genuinely useful output is a statement of what each set does support, plus the one experiment that would actually decide it — the same hindered amine run under both.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-32",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're choosing between an amidation and a sulfonamidation route to the same amine. What do the screens we have indexed say about which one holds up better on a hindered amine?",
+    "profile": "",
+    "answer": "I'll search the knowledge graph for screen data comparing amidation and sulfonamidation on hindered amines.The knowledge graph holds no notes comparing amidation and sulfonamidation screens. Let me search the indexed reaction corpus for precedent on both transformations with hindered amines.**The reaction fingerprint index has not been built**, so the indexed reaction searches cannot answer your question. That is a gap in coverage, not evidence that nothing exists — the record might well hold both screens, but they are not searchable by structure right now.\n\nLet me try a text search for screens that mention these transformations by name.The knowledge graph currently holds no distilled notes comparing amidation and sulfonamidation outcomes on hindered amines, and the reaction fingerprint index is not yet built, so I cannot retrieve precedent directly from your indexed data.\n\n**What I can offer instead:**\n\nTo ground a route choice, I need one of two things from you:\n\n1. **Do you have specific hindered amine substrates** you are considering? If you name them (or give SMILES), I can:\n   - Check whether either reaction has been run on that structure before in your corpus\n   - Compute the electronic properties of both product structures (partial charges, dipole, reactivity descriptors) to reason about their likely behaviour\n   - If you have run either transformation and recorded conditions/outcomes, I can build a mini-optimization problem and suggest where the two differ most\n\n2. **Or, do you have screening data already** — from the ELN or from prior work — showing amidation and sulfonamidation runs on secondary/hindered amines? If so, share the conditions and outcomes, and I can:\n   - Synthesize what changed between the two route outcomes\n   - Propose what to vary next to understand which bottleneck matters most\n   - Help design a head-to-head screen on a candidate substrate to settle the comparison\n\nWhich would help most for your decision?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "similar_reactions",
+      "similar_reactions",
+      "find_notes",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 14.75,
+    "event_counts": {
+      "token": 25,
+      "tool_call": 6,
+      "evidence_source": 2,
+      "tool_result": 6,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "7ab242f7ace841bc8c5f6b47798721cb",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

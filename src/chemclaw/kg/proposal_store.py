@@ -50,10 +50,10 @@ _COLUMNS = (
 # the queue slot, not that a human judged the old bytes — and it was left out of this arm, which
 # made the *identical* failure reachable by an ordinary path. An agent that regenerates an earlier
 # form (a miner re-running, a chemist re-asking) re-proposes v1 after v2: the row refreshes while
-# staying `superseded`, and `_SUPERSEDE_OLDER` below then closes v2 because the incoming state is
-# `open`. Every row superseded, nothing in the review queue, and a branch really holding v1's bytes
-# that no merge can ever close. Reopening it is what makes the record match the branch, and the
-# newer version yielding its slot is the same one-open-row-per-note rule stated the other way.
+# staying `superseded`, and `_SUPERSEDE_OTHER_OPEN` below then closes v2 because the incoming
+# state is `open`. Every row superseded, nothing in the review queue, and a branch really holding
+# v1's bytes that no merge can ever close. Reopening it is what makes the record match the branch,
+# and the newer version yielding its slot is the same one-open-row-per-note rule the other way.
 #
 # `reason` follows `state` so a reopened row does not keep explaining itself with a git error, or a
 # supersession, that no longer applies.
@@ -102,13 +102,18 @@ WHERE note_id = %s AND content_hash = %s AND state IN ('merged', 'rejected')
 ORDER BY id DESC LIMIT 1
 """
 
-# A freshly-upserted version closes the note's previous open versions (migration 058 says why).
+# A freshly-upserted version closes the note's *other* open versions (migration 058 says why).
 # Scoped by id rather than content hash so the statement is correct on the refresh path too — the
 # row the upsert just returned must never supersede itself.
-_SUPERSEDE_OLDER = """
+#
+# **"Another", not "a newer".** The rule is one open row per note, and since a re-proposal of an
+# older version's bytes may reopen a `superseded` row, the row this closes can be the newer of the
+# two: v1, v2, re-propose v1 leaves v2 superseded by v1. The reason is what a reviewer reads in the
+# compliance table, so it says what the statement does rather than what its first caller did.
+_SUPERSEDE_OTHER_OPEN = """
     UPDATE note_proposals
        SET state = 'superseded',
-           reason = 'superseded by a newer proposed version of this note'
+           reason = 'superseded by another proposed version of this note'
      WHERE note_id = %s AND state = 'open' AND id <> %s
 """
 
@@ -214,7 +219,7 @@ class PostgresProposalStore:
             # makes the two halves agree about what just happened, and it is also what makes the
             # reopened-`superseded` path sweep without a second condition to keep in step.
             if row is not None and row["state"] == ProposalState.OPEN.value:
-                await cursor.execute(_SUPERSEDE_OLDER, (proposal.note_id, int(row["id"])))
+                await cursor.execute(_SUPERSEDE_OTHER_OPEN, (proposal.note_id, int(row["id"])))
             await conn.commit()
         return int(row["id"]) if row is not None else 0
 

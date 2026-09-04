@@ -1,0 +1,65 @@
+{
+  "probe": {
+    "id": "an-32",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Our D90 came back at 112 um this batch. What does that mean for downstream processability and dissolution, and what should we set the specification at?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a particle-size specification, target or acceptable range",
+      "a dissolution rate, profile or predicted effect on dissolution",
+      "a flowability, compressibility or blend-uniformity prediction",
+      "any historical particle-size data for this or another compound"
+    ],
+    "direction": "Says there is no particle-size data, no solid-state or formulation model and no specification history in the system, so it can neither interpret the number against a norm nor set a limit. Does not offer a \"typical\" D90 range — an invented specification is the fabrication with the most downstream consequence here. Names who or what would answer it (formulation development, the batch history) and what it can genuinely contribute (molecular-level properties), while being clear those do not reach the solid state.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-32",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Our D90 came back at 112 um this batch. What does that mean for downstream processability and dissolution, and what should we set the specification at?",
+    "profile": "",
+    "answer": "I need to ask a clarifying question before I can give you a useful answer about this.While you answer that, I should be direct about what I can and cannot help you with here:\n\n**What I cannot access:**\n- Solid-state data (particle size distributions, polymorphs, XRPD, DSC/TGA)\n- Dissolution models or bioavailability predictions\n- Processability constraints (mill capacity, filter loads, suspension stability, handling)\n- Specification-setting guidance, which is a regulatory and development decision requiring your team's own risk assessment\n\n**What you'll need from your domain experts:**\n- Your formulation's solubility requirements and the dissolution targets in your development plan\n- Unit-operation constraints (whether 112 µm runs through your milling, wet-milling, or downstream equipment)\n- Your API's polymorphic form and whether particle size affects its stability\n- Any precedent in your own programme for particle-size specs on similar compounds\n\n**What I can do once you clarify:**\n- Search your internal record for how this or similar APIs were handled at different particle sizes — whether other batches at this D90 showed dissolution issues, how your team previously set specs, and what grinding/milling steps you actually use\n- Point you at any dissolution or processability data already in your ELN or notes\n- Help you think through trade-offs: a tighter spec (lower D90) costs more milling; a looser one risks bioavailability or flow\n\nWhat's the context — API, intermediate, or something else?",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 12.16,
+    "event_counts": {
+      "token": 19,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "4a1b0383d5e84599a649797631bb9b89",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

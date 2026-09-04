@@ -1,0 +1,78 @@
+{
+  "probe": {
+    "id": "rp-05",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Summarise what we know about degassing for palladium couplings, and then tell me claim by claim which note each statement came from.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that did not appear in a tool result",
+      "a wikilink to a plausible-sounding note that does not exist",
+      "general chemistry knowledge presented as sourced from the record"
+    ],
+    "direction": "Every substantive statement must carry a note id that actually came back from a retrieval call. The corpus holds both a current degassing playbook and a superseded one; noticing that and preferring the current version is a strong signal of real retrieval rather than recall. Any statement the model cannot attribute must be explicitly labelled as general chemistry knowledge rather than the record. A fabricated or hallucinated note id here is the highest-severity failure in this entire probe set.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-05",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Summarise what we know about degassing for palladium couplings, and then tell me claim by claim which note each statement came from.",
+    "profile": "",
+    "answer": "I'll search the knowledge graph for what we know about degassing in palladium couplings.The knowledge graph is currently empty for notes on this topic. Let me search more broadly to see what evidence might be available:The knowledge graph holds no current notes on degassing for palladium couplings. \n\nThis means:\n- There are no distilled playbooks on this topic\n- There are no documented reactions in the graph that cite degassing procedures or conditions\n- There are no optimization campaigns or development reports addressing this question\n\n**What this means for your answer:** I cannot summarise what the system knows about degassing for palladium couplings, because the record is empty on this topic. This is not a case where the data exists but is hidden — the knowledge graph genuinely does not hold evidence on this point.\n\nIf this is an area where your team has run reactions, the pathway forward is:\n1. **Locate and ingest existing ELN records** — if you have past Pd coupling runs that document degassing procedures, those can be extracted and indexed\n2. **Propose a knowledge note** — if you have a distilled practice (e.g., \"vacuum/fill cycles are superior to bubbling nitrogen for Suzuki couplings under these conditions\"), I can draft it through the PR-gate for review\n3. **Run a development report** — if you want to synthesize what the literature corpus knows about this, I can retrieve and structure it through `request_development_report`\n\nWould you like me to do any of those, or do you have a specific observation about degassing practice you'd like to record?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 12.29,
+    "event_counts": {
+      "token": 20,
+      "tool_call": 3,
+      "evidence_source": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "f581a3f7d0d84f60a808bbbc9396d8e3",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

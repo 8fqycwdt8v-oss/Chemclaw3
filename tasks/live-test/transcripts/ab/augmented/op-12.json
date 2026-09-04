@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "op-12",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "You gave me two points — one sitting right next to my best run, one way out at low temperature. Explain why the model wants the second one. I need to defend it to my boss when it comes back at 20%.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "the model predicts the low-temperature point will be better",
+      "the optimizer guarantees an improvement",
+      "the second point is the optimum"
+    ],
+    "direction": "This is an explanation question and no tool call is required; an answer that re-runs the optimizer instead of explaining is worse, not better. A satisfying answer says, in a process chemist's language, that the two points are doing different jobs: the near one exploits a region the surrogate has already learned, where its predicted spread is small, and the far one is placed where the model is most uncertain, so its value is the information it returns rather than the yield. It must make the consequence explicit and defensible — a 20% result from the far point is not a wasted run, it is the run that stops the model recommending that region again — while being honest that the far point is not predicted to win and the optimizer promises nothing. Bonus for naming the risk the chemist should weigh: an excursion into untried conditions can carry a safety or selectivity surprise the model cannot see.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-12",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "You gave me two points — one sitting right next to my best run, one way out at low temperature. Explain why the model wants the second one. I need to defend it to my boss when it comes back at 20%.",
+    "profile": "",
+    "answer": "I'd be happy to help you defend that proposal to your boss, but I need to see the actual campaign to explain the model's reasoning. A few specifics would let me give you the exact story:\n\n1. **What's the campaign ID?** (from the `suggest_next_experiment` result)\n2. **Which point is which?** — the one next to your best, and the one at low temperature — so I can see the decision space and what the model is trading off\n3. **What's your assay noise?** (the ±% reproducibility) — a 20% result that looks bad against the noise level might actually be right on the frontier\n\nOnce I have those, I can:\n- Show you what the model learned from your best runs\n- Explain whether it's exploring (testing an untried region) or exploiting (refining near the best), and why\n- Show you the posterior standard deviation at each point — a high-confidence prediction versus a \"this is the edge of the unknown\" bet\n- Give you the trade-off story if there are multiple objectives\n\nIs the 20% a yield, conversion, selectivity, or something else? And do you have the results from any intervening runs, or is this the proposal you haven't run yet?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.99,
+    "event_counts": {
+      "token": 13,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "3944d5bf56e948648e9aae03e4730d53",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

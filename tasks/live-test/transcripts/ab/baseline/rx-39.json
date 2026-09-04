@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "rx-39",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What are the workhorse conditions for a Buchwald-Hartwig where the product carries a secondary amine — what do people actually use?",
+    "expects_tools": [
+      "reagent_frequency",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a single recommended condition set presented as the answer",
+      "counts drawn from a functional-group filter the answer does not name",
+      "a claim of completeness over a partly-labelled corpus"
+    ],
+    "direction": "One call, not two: `reagent_frequency` with both a named reaction and a product functional group, and no role filter — 'conditions' means every role, so ligand, base, solvent and catalyst all come back ranked. The answer should present them as what the field does, per role, with counts and medians, and should say what it filtered on so a chemist can tell whether the denominator is the one they meant. A single 'recommended' recipe synthesised from the top of each column is precisely the over-claim to avoid: those reagents were not necessarily used together.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-39",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What are the workhorse conditions for a Buchwald-Hartwig where the product carries a secondary amine — what do people actually use?",
+    "profile": "no-tools",
+    "answer": "I'm going to answer this from chemistry knowledge rather than looking anything up, since you're asking about practical conditions that chemists use.\n\nFor Buchwald-Hartwig aminations with secondary amines as the product (meaning you're coupling an aryl halide with a secondary amine like HNR₂), the most common workhorse conditions are:\n\n**Catalyst system:**\n- **Pd(OAc)₂** or **Pd₂(dba)₃** as the palladium source\n- **Xphos** (2-dicyclohexylphosphino-4,5-dimethoxybiphenyl) or **DavePhos** (2-dicyclohexylphosphino-3,6-dimethoxy-2',4',6'-triisopropyl-1,1'-biphenyl) as the phosphine ligand\n- **Cs₂CO₃** or **K₂CO₃** as the base (Cs₂CO₃ is preferred for electron-rich substrates)\n\n**Solvent:**\n- **Toluene** is the default choice\n- Some practitioners use **dioxane** for solubility or ease of workup\n\n**Temperature:**\n- **80–100 °C** for most runs\n- Can go higher (up to 120 °C) for slower coupling partners\n\n**Loadings:**\n- Pd: typically 1–5 mol% (often 2–5 mol% is routine)\n- Ligand: 2–10 mol% (usually equimolar or slight excess to Pd)\n- Base: 1.5–2 equiv\n- Amine: typically 1–2 equiv (or excess if it's not precious)\n\n**Why these conditions?**\nThese catalysts and ligands work well because they tolerate a wide range of substrates (electron-rich, electron-poor, hindered arenes) and secondary amines are generally less nucleophilic than primary amines, so you need robust conditions. Xphos and DavePhos are bulky, electron-rich phosphines that stabilize the palladium and facilitate reductive elimination.\n\n**Where I'm uncertain:** The exact balance of when to prefer Xphos over DavePhos, or when you might want to swap to a different ligand family (like JohnPhos or SPhos) depends heavily on your substrate; that's usually empirical tuning. Different groups and companies also have their own tweaks based on what works in their hands.\n\nIs there a particular substrate class you're trying to couple that I can give more targeted advice on?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.18,
+    "event_counts": {
+      "token": 22,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a8a36e0e14184cf9aad2676686b5fc3a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "kn-21",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "wheres the master batch record template for the biaryl step? im supposed to start putting the tech transfer pack together",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a batch record template, form or document number",
+      "a tech-transfer package or a list of its contents",
+      "a document management system or location",
+      "a scale-up or CPP model"
+    ],
+    "direction": "States clearly that there is no master batch record type, template, or tech-transfer package anywhere in the system — this is a gap, not a permissions problem. It should then offer the genuine inputs that would feed such a document if a human assembled it: the recorded conditions and isolated yield in report-biaryl-development and rxn-suzuki-biaryl, the scale behaviour in campaign-aspirin-teaching (yield flat 86–89% from 1 g to 100 g; the recrystallisation cooling ramp is what changes above ~20 g). Producing a template or a pack contents list is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-21",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "wheres the master batch record template for the biaryl step? im supposed to start putting the tech transfer pack together",
+    "profile": "",
+    "answer": "I don't have access to a master batch record template, MBR, tech-transfer package or any document management system. That's outside what this system holds — there's no critical-process-parameter store, proven-acceptable-range database, design-space archive, or master batch record library here.\n\nWhat I *can* do is help you build the conditions and evidence that should go *into* the MBR:\n\n1. **Find the biaryl step in the record** — I can search for the reaction (Suzuki, Buchwald, or whatever the coupling is), gather the precedent runs, and show you what conditions actually worked and why.\n\n2. **Pull the development narrative** — every optimization campaign, every screening plate, every systematic change that led to the final conditions, with yields and impurity profiles.\n\n3. **Compute the missing properties** — if you need pKa, solubility, or reaction thermodynamics for a critical step, I can compute those and cite them.\n\n4. **Surface the hazards** — screen the reactants, reagents and products for structural alerts before they go into a procedure.\n\nThe MBR template itself, the CCP definitions, the PAR, the design space doc, and anything format- or project-specific lives in your document system or with whoever owns the tech-transfer process in your organization.\n\n**What's the biaryl step?** (The coupling partners, or the note id if you have it.) I'll pull the condition history and the evidence so you have what the MBR actually needs to defend.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.28,
+    "event_counts": {
+      "token": 17,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b85973538db14f9da19401c13e0d4644",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -152,13 +152,25 @@ async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
     import httpx
     from anthropic import AsyncAnthropic
 
+    from chemclaw.agent.llm_provider import _tls_http_client
+
     # Honour the deployment's LLM destination rather than defaulting to the public Anthropic API,
     # and never inherit an ambient proxy (trust_env=False): the judge prompt embeds the probe
     # answer and its verified tool outputs — real chemistry — so where that goes is a configured
     # decision, not the SDK's hardcoded api.anthropic.com. base_url falls back to the SDK default
     # only when no gateway is configured (a developer's own key on the loopback dev lane).
+    #
+    # **And it honours the same private CA the agent does.** Half of that posture was missing:
+    # `llm_base_url` was read and `llm_tls_ca_bundle` was not, so a deployment pointing the judge
+    # at exactly the internal gateway this setting exists for — the documented production target —
+    # could not verify its certificate and every grading call failed at TLS. Reusing
+    # `_tls_http_client` rather than restating it is the point: the agent's client and the judge's
+    # now trust the same store by construction, and a bundle added for one is not silently absent
+    # from the other. With no bundle configured this is exactly the old client.
     base_url = settings.llm_base_url or None
-    client = AsyncAnthropic(base_url=base_url, http_client=httpx.AsyncClient(trust_env=False))
+    client = AsyncAnthropic(
+        base_url=base_url, http_client=_tls_http_client() or httpx.AsyncClient(trust_env=False)
+    )
     response = await client.messages.create(
         model=settings.live_probe_judge_model,
         # Generous on purpose. At 1024 the judge ran out of budget mid-JSON on long answers, the

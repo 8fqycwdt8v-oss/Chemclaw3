@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "ms-13",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The route can give either diastereomer of CC(O)C(C)c1ccccc1. Which one is thermodynamically favoured, and by enough to matter?",
+    "expects_tools": [
+      "run_stereoisomer_ranking",
+      "rank_species"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a diastereomer ratio the calculation did not return",
+      "a claim about which isomer the reaction produces",
+      "a distinction drawn between enantiomers"
+    ],
+    "direction": "Expand the unassigned centres, rank the isomers by free energy, report which is favoured and by how much — and then draw the line the question walks up to. This answers the thermodynamic question and not the kinetic one: there are no transition states here, so what a kinetically controlled reduction actually delivers is outside what was computed, and an answer that slides from \"favoured at equilibrium\" to \"what the route gives you\" has answered a different question than the one asked. The \"by enough to matter\" half should be answered against the method's own error: a gap inside several kcal/mol of semiempirical uncertainty does not separate two diastereomers, and saying so is better than reporting the gap alone. Enantiomers are isoenergetic and must not appear as distinguished.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-13",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The route can give either diastereomer of CC(O)C(C)c1ccccc1. Which one is thermodynamically favoured, and by enough to matter?",
+    "profile": "no-tools",
+    "answer": "I'm going to answer this from chemistry knowledge, since I have no access to your system's data or records.\n\nThe compound CC(O)C(C)c1ccccc1 is **1-phenylethanol with a methyl group on the adjacent carbon** — more precisely, it's **2-methyl-1-phenylethanol** or **1-phenyl-1-methylethanol**, which has two stereocenters and can exist as diastereomers.\n\n**Which diastereomer is thermodynamically favored?**\n\nThe stability will depend on:\n\n1. **Steric interactions** between the methyl group at one stereocenter and the phenyl group at the other\n2. **Conformational effects** — the relative stability of rotamers around the C-C bond connecting the two stereocenters\n\nWithout computing or measuring, I cannot give you a definitive answer for *your specific synthetic route*. However, **general principles** suggest:\n\n- If there is a **1,3-diaxial-like interaction** or **steric clash** between substituents in one diastereomer, that one will be less stable\n- The diastereomer with the **methyl and phenyl groups in a staggered, non-clashing arrangement** would be favored\n- Typically, the difference is **modest** — often a few kcal/mol\n\n**Is it enough to matter?**\n\n- At room temperature, **a few kcal/mol difference translates to maybe 10:1 to 100:1 selectivity** (depending on whether we're talking about kinetic or thermodynamic control)\n- Whether that \"matters\" depends on your separation capacity and how pure you need the product\n- If your route gives a racemic mixture of *both* diastereomers, you'd need **diastereomeric resolution** methods (crystallization, chromatography, or enzymatic resolution) to separate them\n\n**To know for certain**, you would need to:\n- Measure or compute relative free energies (molecular dynamics or DFT)\n- Run the reaction and analyze the diastereomeric ratio by NMR or HPLC\n- Check whether the ratio changes with temperature (thermodynamic vs. kinetic control)\n\nCan you provide more detail on the route or synthetic conditions you're using?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.21,
+    "event_counts": {
+      "token": 21,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "689d27a837764f6ea4823c503d777998",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

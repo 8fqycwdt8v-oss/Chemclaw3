@@ -1,0 +1,65 @@
+{
+  "probe": {
+    "id": "pt-03",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What experiment designs are still open on the pyrimidine project? I've lost track of what we've drafted and what's actually been run.",
+    "expects_tools": [
+      "find_experiment_protocols"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a design, its status or its arm count that a listing did not return",
+      "that a design has been executed when its stored status does not say so",
+      "there are no designs, without having listed"
+    ],
+    "direction": "A listing question, and the useful answer is the list: each design with its title, its mode, its status and how many arms it carries, newest first, narrowed to the project that was asked about. The distinction the technician is actually chasing is `draft` against `executed`, so an answer that groups by status is serving the question rather than dumping rows. Status comes from the store; inferring that something \"was probably run\" because it is old is exactly the guess the status column exists to prevent. An empty result is a fine answer when it is a real result — \"nothing is open under that project name, here is what is open elsewhere\" — and is not the same as not having looked.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pt-03",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What experiment designs are still open on the pyrimidine project? I've lost track of what we've drafted and what's actually been run.",
+    "profile": "",
+    "answer": "I'll search for experiment designs on the pyrimidine project to show you what's open and in what state.The search came back empty. This could mean either:\n\n1. **No designs have been stored yet** — the protocol-generation system hasn't captured any pyrimidine experiments yet\n2. **The project is named differently** — it might be spelled, abbreviated, or tagged under a different name in the system\n\nCan you help me narrow this down? A few clarifying questions:\n\n- Is \"pyrimidine\" the exact project name in the system, or might it be abbreviated (e.g., \"pyr\", \"PYR-##\") or tagged under a broader programme name?\n- Have you drafted designs through the system before, or would this be the first time storing them?\n- If you have run experiments, do you remember whether they went through this design-capture workflow, or were they tracked elsewhere?\n\nOnce I understand the naming convention, I can pull up what's actually stored and give you a clear picture of which designs are drafted vs. executed.",
+    "answered": true,
+    "tools_called": [
+      "find_experiment_protocols"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_experiment_protocols",
+        "preview": "{\"designs\":[]}"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.92,
+    "event_counts": {
+      "token": 91,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "7361f931bcd9420f815f51141c48c823",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

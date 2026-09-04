@@ -22,6 +22,7 @@ Most of these run offline. The one that needs a real server proves the end the o
 argue about: that the run *terminates*.
 """
 
+import ast
 import asyncio
 import logging
 from collections.abc import Iterator
@@ -33,10 +34,17 @@ from pydantic import ValidationError
 from temporalio import activity, workflow
 
 from chemclaw.agent.authz import AuthorizationError
-from chemclaw.connectors.registry import ConnectorError, enabled
+from chemclaw.connectors.manifest import JobSpec
+from chemclaw.connectors.registry import ConnectorError, enabled, find_job
 from chemclaw.core.config import _WRAPPER_FINISH_STEPS, settings
 from chemclaw.core.logging import ContextFilter
-from chemclaw.durable.connector_job import _FINISH_STEPS, wrapper_execution_timeout
+from chemclaw.durable import template_activities
+from chemclaw.durable.connector_job import (
+    _FINISH_STEPS,
+    ConnectorJobInput,
+    child_execution_timeout,
+    wrapper_execution_timeout,
+)
 from chemclaw.durable.registry import registered_activities
 from chemclaw.durable.template_activities import (
     JobStepInput,
@@ -132,6 +140,86 @@ def test_a_declared_job_resolves_to_its_connector_and_queue(fixture_bundle: str)
     assert resolved.workflow and resolved.task_queue
     # And the *validated* payload, so the workflow cannot start a child with the raw arguments.
     assert resolved.payload == {"subject": "benzene"}
+
+
+def _template_path_job_input_fields() -> set[str]:
+    """Which `ConnectorJobInput` fields `TemplateWorkflow`'s literal actually names.
+
+    Read off the AST rather than by substring, because this module argues for its fields in prose
+    beside them: a comment naming a field it forgot to pass would satisfy a `in source` check,
+    which is precisely the failure being guarded.
+    """
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "durable" / "template_job.py"
+    ).read_text()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "ConnectorJobInput":
+            return {keyword.arg for keyword in node.keywords if keyword.arg}
+    raise AssertionError("durable/template_job.py no longer builds a ConnectorJobInput literal")
+
+
+def test_every_manifest_field_the_job_wrapper_reads_survives_the_template_path(
+    fixture_bundle: str,
+) -> None:
+    """A field the template path drops is a field that silently means something else on it.
+
+    Three have now gone missing this way. `session_id` and `correlation_id` went first, and the
+    comment left behind said in as many words that this is the shape to watch for. `awaits_answer`
+    then went the same way one merge later: `ResolvedJob` did not declare it, so a template `job`
+    step handed `ConnectorJobInput` the default and the child got the five-hour fleet ceiling —
+    measured, `direct awaits_answer=True child execution_timeout=None` against `template
+    awaits_answer=False child execution_timeout=5:00:00` for the same manifest, on the one job
+    whose own wait is fourteen days.
+
+    The set is **derived**, not listed: what a manifest declares (`JobSpec`) intersected with what
+    the wrapper reads (`ConnectorJobInput`) is exactly the set that has to survive resolution, so a
+    sixth such field is in this check the day it is declared rather than the day someone remembers
+    to add it here. Both halves of the path are asserted, because the two failures are independent
+    — a field can be missing from `ResolvedJob`, or present there and not passed on.
+    """
+    declared = set(JobSpec.model_fields) & set(ConnectorJobInput.model_fields)
+    assert declared, "the intersection is empty; this test has stopped asking anything"
+    missing = declared - set(ResolvedJob.model_fields)
+    assert not missing, (
+        f"{sorted(missing)} is declared on a manifest and read by ConnectorJobInput but is not "
+        "carried by ResolvedJob, so the template path silently substitutes its default"
+    )
+    not_passed = declared - _template_path_job_input_fields()
+    assert not not_passed, (
+        f"TemplateWorkflow builds its ConnectorJobInput without {sorted(not_passed)}, so a job "
+        "launched from a template is configured differently from the same job launched from chat"
+    )
+    # And the resolver fills them from the manifest rather than leaving the model's defaults.
+    _connector, job = find_job(fixture_bundle)
+    resolved = asyncio.run(authorize_job_step(_step(fixture_bundle, subject="benzene")))
+    assert {field: getattr(resolved, field) for field in declared} == {
+        field: getattr(job, field) for field in declared
+    }
+
+
+def test_a_job_that_waits_on_a_person_is_unbounded_as_a_template_step_too(
+    monkeypatch: pytest.MonkeyPatch, fixture_bundle: str
+) -> None:
+    """The child ceiling the dropped field decided, asserted on the number rather than the wiring.
+
+    `awaits_answer` exists because wall clock is not cost for a job that suspends on a plate:
+    `child_execution_timeout` hands such a job no execution timeout at all, since the shipped
+    campaign opens waits totalling 154 days under a five-hour ceiling. That reasoning applied only
+    to the chat launcher for as long as `ResolvedJob` did not carry the field.
+
+    The fixture bundle's job does not declare it — no in-tree fixture does — so the declaration is
+    substituted at `find_job`, which is where the manifest enters this activity. That keeps the
+    subject the *resolution*: everything after the substitution is the shipped path.
+    """
+    connector, job = find_job(fixture_bundle)
+    waiting = job.model_copy(update={"awaits_answer": True})
+    monkeypatch.setattr(template_activities, "find_job", lambda _name: (connector, waiting))
+    resolved = asyncio.run(authorize_job_step(_step(fixture_bundle, subject="benzene")))
+    assert resolved.awaits_answer is True
+    assert child_execution_timeout(resolved.timeout_seconds, resolved.awaits_answer) is None, (
+        "a job that suspends on a durable answer was handed a wall-clock ceiling because it "
+        "reached the child through a template step instead of a chat turn"
+    )
 
 
 def test_an_unknown_job_fails_the_activity_naming_what_is_declared() -> None:

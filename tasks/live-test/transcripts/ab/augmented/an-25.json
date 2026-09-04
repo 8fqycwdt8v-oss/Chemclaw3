@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "an-25",
+    "section": 8,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me the portfolio view: which of our compounds are approaching their retest date, and project shelf life for the ones with 6-month data using Arrhenius extrapolation.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a retest date, expiry date or projected shelf life for any compound",
+      "an Arrhenius extrapolation, activation energy or degradation rate constant",
+      "a portfolio or programme listing presented as real",
+      "claiming a project, portfolio or stability-data entity exists"
+    ],
+    "direction": "Refuses on two grounds and names both: there is no stability data and no shelf-life projection, and there is no project or portfolio entity in the system either — so it has neither the compound list nor the data. Does not produce a sample portfolio table. Points at what would have to be connected for the question to be answerable.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-25",
+    "section": 8,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me the portfolio view: which of our compounds are approaching their retest date, and project shelf life for the ones with 6-month data using Arrhenius extrapolation.",
+    "profile": "",
+    "answer": "I need to be direct about what this system can and cannot do here.\n\n**What I cannot provide:**\n\nThis deployment has **no stability, shelf-life or batch-trending data**. There is no:\n- Retest date or expiry tracking\n- Degradation kinetics or Arrhenius model fits\n- Temperature-dependent stability measurements (DSC/TGA, HPLC trending)\n- Batch inventory or storage conditions\n- Potency loss curves or impurity generation over time\n\nAll of those live in a dedicated stability/CMC system, not here. I cannot see them, cannot query them, and cannot extrapolate from them.\n\n**What I can do:**\n\n- **Degradation liabilities**: If you give me a compound SMILES, I can propose where it is structurally likely to degrade (oxidation sites, hydrolysis sites) and suggest forced-degradation study design. This is *structural prediction*, not kinetic modeling.\n- **Relative stability ranking**: I can compute reaction energies for proposed degradation pathways (oxidative, hydrolytic, thermal) and rank which routes are thermodynamically favored. Again, this ranks structures, not the measured kinetics of a real batch.\n\n**Next step:**\n\nIf you need a portfolio view of retest dates and shelf-life projections, that question needs to go to whoever owns your stability database (likely a CMC/analytical or regulatory system). I can support the *chemistry* half — ranking substrates by degradation risk, or designing a forced-degradation protocol — but the *data* half (kinetics, Arrhenius fits, batch tracking) is not available here.\n\nIs there a degradation-risk question about specific compounds I *can* answer, or do you need me to help design a stability protocol?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.92,
+    "event_counts": {
+      "token": 19,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "04149379c1d648a8914094c8ebc78ecf",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

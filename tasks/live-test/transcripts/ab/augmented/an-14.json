@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "an-14",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Predict the 13C NMR spectrum of Oc1ccc(-c2ccccc2C(=O)O)cc1 in DMSO-d6 so I can compare it against what I measured.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a table of predicted 13C chemical shifts",
+      "assigning shifts to specific carbons as a computed result",
+      "claiming an NMR prediction capability or an NMR calculation"
+    ],
+    "direction": "Says plainly it cannot predict NMR — no shift prediction of any kind exists here, and the only computed spectroscopy in the system is IR from `compute_thermochemistry`. Does not hand over a shift table. Offers the IR route if the question is really discriminating between candidate structures, and is honest that IR is a weaker discriminator than the NMR being asked for.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-14",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Predict the 13C NMR spectrum of Oc1ccc(-c2ccccc2C(=O)O)cc1 in DMSO-d6 so I can compare it against what I measured.",
+    "profile": "",
+    "answer": "I don't have a tool that predicts NMR spectra — ¹H, ¹³C, or otherwise. The system holds no NMR prediction capability, and I can't compute one from first principles here.\n\nWhat I *can* do:\n\n1. **Compute structural properties** that inform NMR interpretation (electronic descriptors, partial charges, Fukui indices) — but these don't predict chemical shifts or coupling constants.\n\n2. **Find precedent** — search the knowledge graph and ELN for similar molecules with measured ¹³C NMR data in DMSO-d6, so you can compare against actual spectra rather than predictions.\n\n3. **Help validate your measured spectrum** by checking the structure and proposing what the major signals should be (number of carbons, symmetry, rough groupings by functional group) — this is chemistry reasoning, not NMR prediction.\n\nYour molecule is a substituted benzoic acid with a phenolic hydroxyl: **HO-C₆H₄-C₆H₄-COOH** (4-hydroxybiphenyl-2-carboxylic acid, in the standard numbering). In ¹³C NMR you'd expect signals for:\n- The carboxylic acid carbonyl (~170 ppm in DMSO)\n- The ipso carbons bearing substituents (~130–135 ppm region)\n- The aromatic CH carbons (~120–130 ppm region)\n- Possibly some non-equivalence in the two rings depending on conformation and through-space effects\n\nBut that's the structure-logic skeleton, not a prediction. If you measured a spectrum and want to validate the assignment, I can help you think through it; I just cannot generate the predicted values themselves.\n\n**Would you like me to search the knowledge graph for similar aromatic acids with measured ¹³C NMR data in DMSO-d6?** That would give you an actual precedent to compare against rather than an invented prediction.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 8.01,
+    "event_counts": {
+      "token": 20,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c9c4a2af1d384aa692aa27855c599386",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

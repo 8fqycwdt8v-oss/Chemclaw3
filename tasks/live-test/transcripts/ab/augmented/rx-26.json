@@ -1,0 +1,90 @@
+{
+  "probe": {
+    "id": "rx-26",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are taking the biaryl coupling from 5 g to kilo lab. Have we run anything like this at scale before, and what went wrong when we did?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "similar_reactions",
+      "expand_note",
+      "find_past_jobs"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a scale, batch size or campaign history the record does not contain",
+      "a predicted yield at the larger scale",
+      "an equipment or facility reference"
+    ],
+    "direction": "Precedent retrieval is the capability being tested and it should be exercised properly: the seed record for this coupling (4-bromoanisole and phenylboronic acid, Pd(OAc)2 1.5 mol%, K2CO3, THF/water 4:1, 80 °C, 12 h, degassed, 76% isolated), the two failure modes and the ligand-before-temperature playbook. The scale-relevant reading of the protodeboronation failure is the one to draw out: it was found because assay conversion improved while isolated yield fell, which is exactly the way a scale-up gets misread. Must be honest that the record carries laboratory-scale runs with little or no scale metadata, so 'have we run this at scale' is answered by 'here is what we have, and it is not at scale'. Should name the degassing playbook, since oxygen control is the thing that genuinely changes character on scale-up.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-26",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are taking the biaryl coupling from 5 g to kilo lab. Have we run anything like this at scale before, and what went wrong when we did?",
+    "profile": "",
+    "answer": "I'll search for precedent on scaling biaryl couplings, particularly any larger-scale runs that could inform what you might encounter.The searches came back empty. Let me broaden the search to capture biaryl couplings in general and any scale-up work:The record is empty on this project. Let me be direct about what that means:\n\n**There is no precedent on file** for biaryl couplings at any scale in this system's corpus — no notes, no past campaigns, no optimization runs, and nothing in the commitment queue. The knowledge graph is currently empty (sources_skipped tells me the repo directory itself has no notes yet).\n\nThis means:\n- No record of what worked or what went wrong at larger scales\n- No stored conditions or procedure for this transformation\n- No failure modes or observations from previous attempts\n\n**What I can offer instead:**\n\n1. **Are there reactions recorded in an ELN?** If your team has run this before but the records haven't been ingested into this system yet, I can search the external corpus if you point me to it. The system currently has nothing indexed.\n\n2. **General scale-up hazards for biaryl couplings** (which I know from chemistry, not this record): \n   - Heat management on exothermic additions (base, reagent additions)\n   - Mixing/mass-transfer limitations as volume increases\n   - Solvent selection becomes tighter (low-boiling reagent-delivery solvents at small scale may not fit larger jacketing/vacuum limits)\n   - Cooling capacity becomes the constraint if the reaction is exothermic\n   - Ligand/catalyst loadings and their solubility in process solvents\n\n3. **What I'd need to help you properly:**\n   - The substrate structures, coupling partner, and product SMILES\n   - Your 5 g protocol: solvent, temperature, time, catalyst, base, any additives\n   - Any observations from those 5 g runs (thermal profile, full conversion time, impurity profile)\n\nOnce you give me those, I can search external literature precedent (conditions_for_similar_reaction), compute any thermodynamics you want to understand, and help draft a scaled protocol grounded in what the record holds plus prediction.\n\nWhat's the reaction you're scaling?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_past_jobs",
+      "gather_evidence",
+      "find_past_jobs",
+      "review_commitments"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "review_commitments",
+        "preview": "{\"mirrored_at\": null, \"linked_to_science\": 0, \"commitments\": []}"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 15.79,
+    "event_counts": {
+      "token": 29,
+      "tool_call": 5,
+      "evidence_source": 2,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c087e3c6f79c4ad3bd39dc9793ae3ed5",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

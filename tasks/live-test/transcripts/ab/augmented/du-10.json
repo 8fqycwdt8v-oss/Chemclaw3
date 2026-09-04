@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "du-10",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What are we still waiting on, and how long has any of it been outstanding?",
+    "expects_tools": [
+      "check_pending_requests"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that this is a complete list of the team's open work",
+      "an item nobody raised through this system",
+      "a person's workload, capacity or responsiveness"
+    ],
+    "direction": "Answerable, with one boundary that has to be stated rather than implied. The inbox holds every question *this system* raised and is still waiting on, with what was asked, why, who it is routed to, when it is due and how many times it has been chased — so ordering by deadline and naming what is overdue is a real answer. The boundary is scope: it knows nothing about work raised anywhere else, so presenting it as the group's outstanding items would be a list that looks complete and is not. A request routed to nobody in particular is waiting on whoever is entitled, not on nobody, and should not be reported as unassigned in a way that implies it has been dropped.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-10",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What are we still waiting on, and how long has any of it been outstanding?",
+    "profile": "",
+    "answer": "I'll check what requests are still outstanding in this system.You have **one outstanding request**:\n\n| Item | Details |\n|------|---------|\n| **Request ID** | await-34f9f5e9c2fb90f5 |\n| **What's being asked** | Stability pull results for lot 42 |\n| **Kind** | Measurement |\n| **Rationale** | QC stability testing for lot 42; needed to assess shelf-life performance and inform formulation/storage decisions |\n| **Created** | 2026-09-04 |\n| **Due** | 2026-09-18 (14 days from creation) |\n| **Outstanding** | ~14 days (as of today, assuming current date is around 2026-09-18) |\n| **Reminders sent** | 0 |\n| **Status** | Still waiting |\n\nThe request is routed to whoever is entitled to answer (no specific person assigned), and it hasn't been chased yet. If the due date has passed, this should be escalated to whoever manages QC stability testing for lot 42.",
+    "answered": true,
+    "tools_called": [
+      "check_pending_requests"
+    ],
+    "tool_results": [
+      {
+        "tool": "check_pending_requests",
+        "preview": "[{\"request_id\": \"await-34f9f5e9c2fb90f5\", \"kind\": \"measurement\", \"asked_of\": \"\", \"requested_by\": \"dev-user\", \"session_id\": \"be0d2e3bf10c47c3add34b18df27a966\", \"state\": \"waiting\", \"due_at\": \"2026-09-18"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "42",
+      "2026",
+      "0"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 8.56,
+    "event_counts": {
+      "token": 20,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a704ee47c89449ee84096e4fe2ac4d34",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

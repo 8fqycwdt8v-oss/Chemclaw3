@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "ws-06",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What am I currently signed up to hear about? I set a few of these up weeks ago and I have stopped trusting that they are still live.",
+    "expects_tools": [
+      "list_watches"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a watch that does not exist",
+      "a delivery history, read receipt or notification that was sent"
+    ],
+    "direction": "A plain read of this asker's subscriptions. The distrust in the question is the thing to answer: say what is registered and what each one is watching, and if the answer is nothing, say nothing — a manager who believes three watches are live and has none is exactly the person this probe exists for. It must not claim anything about whether notifications were *delivered*; the register records subscriptions, not deliveries, and conflating the two is how the answer becomes reassuring and wrong.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-06",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What am I currently signed up to hear about? I set a few of these up weeks ago and I have stopped trusting that they are still live.",
+    "profile": "no-tools",
+    "answer": "I don't have access to your account settings, subscriptions, or notification preferences. I can't see what alerts, notifications, or updates you've signed up for.\n\nTo find out what you're currently subscribed to, you would need to:\n\n1. **Check your account settings** directly in whatever system you're using (email, platform, app, etc.)\n2. **Look for a \"Notifications\" or \"Subscriptions\" section** in your user profile\n3. **Check your email** for confirmation messages or subscription summaries\n4. **Contact the service's support team** if you can't locate your subscriptions\n\nIf you're asking about a specific system or platform you use for chemistry work, let me know which one and I can give you more specific guidance on where to find your subscription settings.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.69,
+    "event_counts": {
+      "token": 7,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "0461ba2bc48a435b91a38257479e5028",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

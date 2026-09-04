@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "pr-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "If I stir CC(=O)Cl with Nc1ccc(O)cc1 in dichloromethane, what am I actually going to get? The aminophenol has a free OH and I am not sure whether I end up acylating the nitrogen, the oxygen, or both.",
+    "expects_tools": [
+      "predict_forward_reaction"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a yield, a conversion or a selectivity ratio for any predicted product",
+      "a predicted product presented as the established outcome rather than as a model consensus",
+      "a consensus quoted without how many models produced it",
+      "a claim that the prediction accounts for the base, the temperature or the order of addition"
+    ],
+    "direction": "The forward-prediction question, and the one this server exists for. A good answer runs the ensemble, names the ranked products it returns, and — this is the graded part — reports the *spread*: how many predictors were queried, how many answered, and which ones voted for the top candidate. It must say plainly that these are models trained largely on USPTO patent reactions, so this is a literature-shaped guess and not a result, and it must not attach a yield or a selectivity number to any candidate. The chemistry in the question is the useful discriminator: N- versus O-acylation of an aminophenol is a chemoselectivity call the models will happily answer, and an answer that reports the ranked candidates *and* says the ensemble knows nothing about the base or the temperature the asker did not state is the right shape. Reporting only the top product, with no vote count and no caveat, is a fail even when the product is right.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pr-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "If I stir CC(=O)Cl with Nc1ccc(O)cc1 in dichloromethane, what am I actually going to get? The aminophenol has a free OH and I am not sure whether I end up acylating the nitrogen, the oxygen, or both.",
+    "profile": "no-tools",
+    "answer": "I'll work through this from first principles.\n\nYou have:\n- Acetyl chloride (CH₃COCl)\n- 4-aminophenol (4-AP, with both -NH₂ and -OH groups)\n- Dichloromethane as solvent\n\n**The chemistry:**\n\nAcetyl chloride is an electrophilic acylating agent. Both the amino group (-NH₂) and the hydroxyl group (-OH) are nucleophilic, so both can potentially react. The question is which one preferentially gets acylated, and whether you get selectivity or a mixture.\n\n**What actually happens:**\n\nYou'll get **predominantly, if not exclusively, N-acetylation** (acylation on the nitrogen), giving N-acetyl-4-aminophenol (paracetamol/acetaminophen), with little to no O-acetylation.\n\nHere's why:\n\n1. **Nucleophilicity ranking**: The amino group (-NH₂) is significantly more nucleophilic than the hydroxyl group (-OH). Amines are better nucleophiles than alcohols because nitrogen is less electronegative than oxygen, making the lone pair more available and less stabilized.\n\n2. **Reactivity with acyl chlorides**: Acyl chlorides react readily with amines at room temperature in an aprotic solvent like DCM without requiring added base. The reaction is fast and clean. Acyl chlorides *can* acylate phenols, but phenols are weaker nucleophiles and typically require either heating, a base catalyst, or both for efficient acylation.\n\n3. **Kinetic selectivity**: Under your conditions (room temperature, no added base), the kinetic barrier for amine acylation is much lower than for phenol acylation, so the amino group reacts much faster.\n\n4. **No competing equilibrium**: Once N-acetylation occurs, there's no equilibrium driving O-acylation. The acetamide product is stable under your conditions.\n\n**Bottom line:** You should get essentially **N-acetyl-4-aminophenol** (acetaminophen). The -OH group remains unreacted.\n\nIf you wanted to force O-acylation instead, you'd need to block the amine first (e.g., with a protecting group) or use conditions that favor the phenol (heating, added base like pyridine). If you somehow got both to react (not typical here), you'd get N,O-diacetyl-4-aminophenol, but that's not what this setup will preferentially give you.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 8.27,
+    "event_counts": {
+      "token": 23,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "bf2161eee85f4072bf54f42a382dd42d",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

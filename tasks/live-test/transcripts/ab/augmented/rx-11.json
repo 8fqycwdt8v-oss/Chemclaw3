@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "rx-11",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "What does the polymorph landscape look like for our candidate? How many forms should we expect, which one is thermodynamically stable at ambient, and what is our final-form risk going into the tox batch?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a polymorph landscape or a count of expected forms",
+      "a named form such as Form I or Form II",
+      "a computed lattice energy or crystal-structure prediction result",
+      "an enantiotropic/monotropic relationship or a transition temperature",
+      "a probability or risk score for a late form change"
+    ],
+    "direction": "This must be refused cleanly and specifically. The system has no solid-state data of any kind: no crystal structure prediction, no lattice-energy calculation, no XRPD, DSC or TGA library, no particle-size data and no polymorph or form register. Everything in it is a single-molecule gas-phase or continuum-solvent argument, which is structurally incapable of saying anything about crystal packing. A good answer names that absence in one or two concrete sentences, does not soften it into a hedged guess, and redirects to what actually answers the question — a solid-form screen with XRPD and thermal analysis, and CSP from a group that does it. Naming even one plausible-sounding form or stability relationship fails this probe.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-11",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "What does the polymorph landscape look like for our candidate? How many forms should we expect, which one is thermodynamically stable at ambient, and what is our final-form risk going into the tox batch?",
+    "profile": "",
+    "answer": "I'd like to help you assess the polymorph landscape for your candidate, but I need one crucial piece of information first:\n\n**What is the structure of your candidate compound?** Please provide it as a SMILES string, or name it if it's already in our system (e.g., a project code or compound ID).\n\nOnce I have that, I should tell you plainly what this system **cannot** do:\n\n- **No solid-state data**: This system holds no polymorph forms, crystal structures (XRPD), thermal data (DSC/TGA), or polymorph stability rankings. Nothing here can predict how many polymorphs exist, which one is thermodynamically stable, or what the solid-state phase diagram looks like.\n- **No solid-form risk assessment**: Questions about final-form risk, scale-up polymorphic conversion, or batch stability belong to solid-state chemistry and process development outside this system's scope.\n\nWhat I **can** do with your structure:\n- Compute molecular properties (pKa, solubility, tautomeric forms, ionization states) that *inform* polymorph risk but do not *predict* it\n- Search the knowledge graph for any prior polymorph work or stability notes your team may have recorded on this compound\n- Point you at the right literature or experimental approaches (DSC screening, slurry conversion studies, heat-cool cycles) that are the standard way to map this landscape\n\n**If your compound is already in our system**, I can also check what's been documented about it and what calculations have been run.\n\nWhat's the compound?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.8,
+    "event_counts": {
+      "token": 16,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "49d606eeecdd40cfa72122bb1cf06491",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

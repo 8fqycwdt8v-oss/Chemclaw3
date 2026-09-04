@@ -1,0 +1,96 @@
+{
+  "probe": {
+    "id": "rx-27",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Build me the charge table for the Suzuki at 2 kg of 4-bromoanisole — phenylboronic acid 1.2 equiv, K2CO3 2.0 equiv, Pd(OAc)2 1.5 mol%, THF/water 4:1 at 10 volumes.",
+    "expects_tools": [
+      "stoichiometry_table",
+      "resolve_compound",
+      "green_metrics",
+      "screen_hazards"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a vessel size or reactor fill volume",
+      "a batch cycle time or addition rate",
+      "a predicted yield or isolated mass of product"
+    ],
+    "direction": "This is squarely inside the tool surface and should produce a real computed table rather than arithmetic in prose: limiting reagent identified, molecular weights resolved, moles, equivalents and masses for every component, and the solvent volumes that ten volumes implies. Should state which component it took as limiting and check that the equivalents it was given are what it used. The boundary to hold is that a charge table is not a batch record: no vessel, no fill level, no addition rate, no cycle time, and no master batch record template exists in this system. If it offers anything beyond the table, it should be a hazard screen on the charge list, not engineering.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-27",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Build me the charge table for the Suzuki at 2 kg of 4-bromoanisole — phenylboronic acid 1.2 equiv, K2CO3 2.0 equiv, Pd(OAc)2 1.5 mol%, THF/water 4:1 at 10 volumes.",
+    "profile": "no-tools",
+    "answer": "I'll calculate the charge table for your Suzuki coupling reaction with 4-bromoanisole as the limiting reagent.Perfect! Here's your **Suzuki coupling charge table** for 2 kg of 4-bromoanisole:\n\n## **CHARGE TABLE**\n\n| Material | Amount | Unit |\n|----------|--------|------|\n| **4-bromoanisole** | 2,000.0 | g |\n| **Phenylboronic acid** | 1,565.2 | g |\n| **K₂CO₃** | 2,956.2 | g |\n| **Pd(OAc)₂** | 36.0 | g |\n| **THF** | 16,000 | mL |\n| **Water** | 4,000 | mL |\n\n---\n\n### Calculation Summary:\n- 2,000 g 4-bromoanisole = **10.69 mol**\n- Phenylboronic acid (1.2 equiv) = 12.83 mol = 1,565 g\n- K₂CO₃ (2.0 equiv) = 21.39 mol = 2,956 g  \n- Pd(OAc)₂ (1.5 mol%) = 0.160 mol = 36.0 g\n- Solvent: 20 L total (16 L THF + 4 L water)\n\n**One caveat**: If your phenylboronic acid is the **monohydrate** (common commercial form), increase the mass to **1,770 g** instead of 1,565 g. Confirm which form you have in stock.",
+    "answered": true,
+    "tools_called": [
+      "task",
+      "read_file"
+    ],
+    "tool_results": [
+      {
+        "tool": "task",
+        "preview": "Let me proceed with the calculation directly using my chemistry knowledge:\n\n## Suzuki Coupling Reaction Charge Table (4-bromoanisole, 2 kg scale)\n\n### Step 1: Molecular Weights\n- **4-bromoanisole**: 1"
+      }
+    ],
+    "tools_failed": [
+      "read_file"
+    ],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "4",
+      "2",
+      "2,000.0",
+      "1,565.2",
+      "2,956.2",
+      "36.0",
+      "16,000",
+      "4,000",
+      "2,000",
+      "10.69",
+      "1.2",
+      "12.83",
+      "1,565",
+      "2.0",
+      "21.39",
+      "2,956",
+      "1.5",
+      "0.160",
+      "20",
+      "16",
+      "1,770"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 15.44,
+    "event_counts": {
+      "token": 118,
+      "tool_call": 2,
+      "tool_failed": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d9ff65fe99cb4291a4647f65c7ee1e48",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [
+      "subagent"
+    ],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

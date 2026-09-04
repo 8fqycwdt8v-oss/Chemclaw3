@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "pl-32",
+    "section": 16,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Which of our workstreams are at risk of missing their milestone dates, and which ones should I escalate this week?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any milestone, due date, risk rating or escalation recommendation",
+      "any workstream identified as at risk or on track",
+      "that risk could be inferred from activity in the corpus"
+    ],
+    "direction": "No milestones, no dates, no plan, no workstream entity — nothing to assess risk against. A tempting wrong answer infers risk from how recently notes were written or how many experiments a topic has; the answer must not do that, because activity in a note corpus is not evidence about a delivery plan, and presenting it as such would be a fabricated risk register. Saying clearly that the system has no view of plans or dates is the whole requirement.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-32",
+    "section": 16,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Which of our workstreams are at risk of missing their milestone dates, and which ones should I escalate this week?",
+    "profile": "no-tools",
+    "answer": "I don't have access to your workstreams, milestone dates, or project tracking data. I'm a chemistry assistant without tools to query project management systems, ELN records, or internal databases.\n\nTo help you identify at-risk workstreams, you would need to:\n\n1. **Check your project management system directly** (Jira, Asana, Monday.com, or whatever you use) for milestone dates and current status\n2. **Review team dashboards** that track progress against timelines\n3. **Pull the relevant data** and share it with me if you'd like me to help analyze or prioritize escalations\n\nIf you have specific workstream data you'd like to share and discuss, I'm happy to help you think through prioritization, but I can't retrieve it myself from your systems.\n\nIs there something chemistry-related I can help you with instead, or would you like to discuss how to structure workstream risk assessment?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.48,
+    "event_counts": {
+      "token": 9,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "8195597fea2e437ba18015060a6e265d",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

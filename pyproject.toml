@@ -369,20 +369,28 @@ fail_under = 84
 #
 # **Scoped to the invariant-bearing modules, not the tree.** A full-repository run is thousands of
 # mutants over an hours-long suite, and most of them land in code where a surviving mutant means
-# nothing (a log message, a docstring-shaped constant). These seven are where a silently-wrong
-# answer is expensive: the authorization gate, the PR-gate and the note schema behind it, the
-# calculation cache's identity, the budget guard, the durable audit sink, and `runner_trace.py` —
-# which shipped a real defect on 2026-08-04 and is therefore the best available test of whether
-# its own tests are any good.
+# nothing (a log message, a docstring-shaped constant). The count here is not written down for the
+# reason the rest of this repository does not write down counts that drift — read the list. What it
+# covers: the authorization gate, the PR-gate and the note schema behind it, the calculation cache's
+# identity, the budget guard, the durable audit sink, `runner_trace.py` (which shipped a real defect
+# on 2026-08-04 and is therefore the best available test of whether its own tests are any good), the
+# offline lexical proxy both hybrid indexes share (`core/fulltext.py` — found 2026-09-04 by the
+# review that asked whether this suite can fail: a mutant reverting `_WORD` to its own comment's
+# named-bad ASCII-only spelling survived 349 green tests), the template resolver's whole-string
+# anchor (`templates/resolve.py`, same review), and the quantity-grounding module the same review's
+# fixture-reach probe found undertested (`core/quantities.py`).
 [tool.mutmut]
 source_paths = [
     "src/chemclaw/agent/authz.py",
     "src/chemclaw/agent/audit_store.py",
     "src/chemclaw/api/budget.py",
     "src/chemclaw/api/runner_trace.py",
+    "src/chemclaw/core/fulltext.py",
+    "src/chemclaw/core/quantities.py",
     "src/chemclaw/kg/note.py",
     "src/chemclaw/kg/pr_gate.py",
     "src/chemclaw/science/calc/store.py",
+    "src/chemclaw/templates/resolve.py",
 ]
 # `also_copy` is what the mutant run sees besides the sources: mutmut copies the mutated files into
 # `mutants/` and runs pytest there, so anything the suite reads has to come along. That is close to

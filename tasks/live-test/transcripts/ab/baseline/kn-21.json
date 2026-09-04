@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "kn-21",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "wheres the master batch record template for the biaryl step? im supposed to start putting the tech transfer pack together",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a batch record template, form or document number",
+      "a tech-transfer package or a list of its contents",
+      "a document management system or location",
+      "a scale-up or CPP model"
+    ],
+    "direction": "States clearly that there is no master batch record type, template, or tech-transfer package anywhere in the system — this is a gap, not a permissions problem. It should then offer the genuine inputs that would feed such a document if a human assembled it: the recorded conditions and isolated yield in report-biaryl-development and rxn-suzuki-biaryl, the scale behaviour in campaign-aspirin-teaching (yield flat 86–89% from 1 g to 100 g; the recrystallisation cooling ramp is what changes above ~20 g). Producing a template or a pack contents list is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-21",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "wheres the master batch record template for the biaryl step? im supposed to start putting the tech transfer pack together",
+    "profile": "no-tools",
+    "answer": "I don't have access to your programme's records or files, so I can't tell you where the master batch record template for the biaryl step is located.\n\nTo find it, you'd typically want to check:\n\n1. **Your project management system** (Sharepoint, Confluence, Teams, etc.) — search for \"master batch record\" + \"biaryl\"\n2. **The tech transfer or scale-up folder** in your shared drive — these templates are usually stored centrally\n3. **Ask your process development or manufacturing team** — they may have a standard template or know where it's kept\n4. **Check with whoever's leading the tech transfer** — they'll know which version is current and approved\n\nIf your lab uses this system (the ELN/graph mentioned in my instructions), the template might be stored here, but I'd need you to search the system directly since I can't browse it myself.\n\nOnce you have the template, the typical contents of a master batch record for a biaryl coupling would include reagent specifications, stoichiometry, solvent, temperature, pressure, timing, workup procedure, and acceptance criteria — but the exact format should match whatever your organization requires.\n\nIs there anything else about the biaryl chemistry itself I can help with while you track down the template?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.13,
+    "event_counts": {
+      "token": 12,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "674e0129ed994db6a30f7bf7c078410f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

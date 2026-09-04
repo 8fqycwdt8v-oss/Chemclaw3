@@ -648,7 +648,7 @@ def test_a_changed_reproposal_supersedes_the_open_predecessor(
     old = _run(store.read(first))
     new = _run(store.read(second))
     assert old is not None and old.state is ProposalState.SUPERSEDED
-    assert "newer proposed version" in (old.reason or "")
+    assert "another proposed version" in (old.reason or "")
     assert new is not None and new.state is ProposalState.OPEN
 
     # The webhook moves only the live version.
@@ -716,7 +716,12 @@ def test_re_proposing_a_superseded_version_puts_it_back_in_the_queue(
     assert reopened is not None
     assert reopened.state is ProposalState.OPEN
     assert reopened.reason == ""  # the supersession no longer explains a row that is live again
-    assert _run(store.read(second)).state is ProposalState.SUPERSEDED
+    closed = _run(store.read(second))
+    assert closed.state is ProposalState.SUPERSEDED
+    # The rule this implements is one-open-row-per-note, not newest-wins: v1 is *older* than the
+    # row it just closed, so a reason claiming otherwise is a false sentence in the compliance
+    # table a reviewer reads.
+    assert "newer" not in closed.reason, closed.reason
     assert [row.id for row in _run(store.listing(ProposalState.OPEN, "", 10, None))] == [first]
     # And the loop closes: the webhook can only move an open row.
     assert _run(store.mark_merged(["reaction-1"], "webhook")) == 1

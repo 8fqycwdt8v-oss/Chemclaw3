@@ -1,0 +1,65 @@
+{
+  "probe": {
+    "id": "ws-07",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Stop telling me about the biaryl scope campaign. It finished, and the updates are just noise now.",
+    "expects_tools": [
+      "stop_watching",
+      "list_watches"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that other watches were removed",
+      "that the campaign itself was closed, archived or altered"
+    ],
+    "direction": "Unsubscribing is the whole ask, and the failure mode is a silent no-op that reads as success. A good answer removes that one watch, names it back, and confirms the others are untouched. The second thing it must not do is act on the campaign: \"stop telling me about it\" is about the subscription, not the work, and an answer that closes or archives the campaign has done something the asker did not authorise. If no such watch exists, say so rather than confirming a removal.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-07",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Stop telling me about the biaryl scope campaign. It finished, and the updates are just noise now.",
+    "profile": "",
+    "answer": "I'll stop watching for updates on the biaryl scope campaign.I don't see a watch active for \"biaryl scope campaign\" right now. The only standing watch I have on record for you is on \"aryl methyl ether demethylation\".\n\nIs the watch you want to stop under a different name — maybe \"biaryl\", \"scope\", or something else — or has it already been removed? If you can give me the exact query text from when you set it up, I can stop it for you.",
+    "answered": true,
+    "tools_called": [
+      "list_watches"
+    ],
+    "tool_results": [
+      {
+        "tool": "list_watches",
+        "preview": "[Subscription(id=1, owner='dev-user', query='aryl methyl ether demethylation', note_type='compound', last_seen_at=datetime.datetime(2026, 9, 4, 20, 0, 27, 641736, tzinfo=zoneinfo.ZoneInfo(key='Etc/UTC"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.0,
+    "event_counts": {
+      "token": 7,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c4bf1a11945d4934acf52a9012ab02fd",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

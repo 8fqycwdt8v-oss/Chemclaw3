@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "rx-14",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I recrystallised my product and got 88%. My colleague got 88% on the same step but took it through a silica plug. Are those the same number? How should I write it up?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "propose_knowledge_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a purity value for either sample",
+      "a claim that the two yields are comparable"
+    ],
+    "direction": "There is a distilled rule in the record for exactly this — an 88% after recrystallisation and an 88% after a plug are not the same number, and comparing them across notebooks is the most common way a scale-up target turns out to be unreachable — and a good answer retrieves it rather than reasoning from first principles. Should say why the two differ (a recrystallisation rejects impurities and costs yield; a plug removes baseline and keeps close-running impurities), that the yield is meaningless without the purity and the assay method that produced it, and that every reaction note in this corpus states the purification alongside the yield. Concrete write-up guidance: yield, purification, purity and how purity was measured, in one line.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-14",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I recrystallised my product and got 88%. My colleague got 88% on the same step but took it through a silica plug. Are those the same number? How should I write it up?",
+    "profile": "",
+    "answer": "I need to understand what those yields measure and whether they're comparable before you commit them to writing.\n\n**The critical difference:** A recrystallisation yield is the mass of solid recovered after crystallisation and filtration, divided by the mass of crude material charged. A silica-plug yield is the mass of compound eluting from the plug, divided by the mass charged — and a plug measures recovery through a purification step, not a crystallisation event.\n\nThese are answering *different* questions:\n- Your 88% says: \"Of the crude I had, 88% came back as crystals.\" That's a crystallisation efficiency.\n- Your colleague's 88% says: \"Of the crude I had, 88% came through the silica as purified material.\" That's a purification recovery.\n\n**Why they look the same but aren't:**\n- A recrystallisation yield includes selectivity — you're leaving impurities behind in the mother liquor. If your crude was 90% pure, an 88% recovery of *solid* could mean you recovered nearly all the desired compound while rejecting most of the impurities, which is much better than it sounds.\n- A silica-plug yield is a separation efficiency. If your crude was also 90% pure and your colleague got 88% through, some product was left on the silica (adsorption loss) and/or some impurities came through. The \"88%\" number alone doesn't tell you which.\n\n**How to write it up without burying the difference:**\n\nState both the purity and the yield, and name the method. Something like:\n- \"The crude product (X mmol, estimated YY% purity by LCMS) was recrystallised from [solvent], affording 88% recovery (ZZZ mg) of pure product.\"\n- \"The crude product was purified by silica chromatography, affording 88% recovery (XXX mg) of pure product.\"\n\nIf you have purity data on your crude and on the isolated product, that's the number that actually compares between methods — it tells a reader whether you enriched the material or just separated it.\n\n**For the write-up to be clear:**\n- Report the **mass** (not just %) so a reader can check the math and see the scale.\n- Report **purity before and after** if you have it (LCMS, NMR integration, whatever your lab uses). That's what makes two 88% numbers comparable.\n- Name the method so it is unambiguous which kind of 88% you mean.\n\nDo you have purity data on either the crude material or the isolated product? If you do, that's the number that settles whether the two routes are equivalent.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 10.69,
+    "event_counts": {
+      "token": 25,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "f876c5b19bb6495196a4666572633068",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

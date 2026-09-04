@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "gr-05",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where are the holes in what we know about the benzamide coupling onto 3-bromopyridine?",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a gap list with no reference to what the existing records do cover",
+      "an implied dataset, assay or study that is not in the corpus"
+    ],
+    "direction": "96 records exist and their mean yield is around 8% with a maximum in the forties — a screen that mostly failed is a real and useful thing to say. Naming the absence is the deliverable here: what was never varied, what has no replicate, what has no observation attached.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-05",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where are the holes in what we know about the benzamide coupling onto 3-bromopyridine?",
+    "profile": "no-tools",
+    "answer": "I don't have access to your programme's records, ELN, or reaction graph, so I cannot search for existing work on benzamide coupling onto 3-bromopyridine. I'm answering from first principles only.\n\nTo give you a useful answer about the gaps in knowledge, I would need to see:\n\n1. **What coupling methods have been tried** (Ni-catalyzed, Pd-catalyzed, thermal, photochemical, etc.)\n2. **What conditions have been varied** (temperature, solvent, base, ligand, catalyst loading, time)\n3. **What outcomes were observed** (yields, selectivity, side products, reproducibility)\n4. **What was recorded vs. what was skipped** (e.g., do you have NMR of intermediates? Mechanistic data? Thermal profiles?)\n\nIf you have ELN entries, experimental notes, or a reaction note on this transformation already in the system, I can help you:\n- Extract and systematize what's known\n- Flag what conditions/variables remain untested\n- Identify whether variations in one factor (e.g., base choice) were explored in isolation or confounded with others\n- Spot gaps where a claim rests on a single experiment vs. replicated results\n\n**Can you share the relevant ELN entry, reaction note, or set of experiments you're working from?** Then I can give you a concrete map of the holes.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.07,
+    "event_counts": {
+      "token": 14,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d3c726b96f454aa0893017679a0ec63e",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

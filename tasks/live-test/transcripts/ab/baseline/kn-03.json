@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "kn-03",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "EDC coupling in DCM gave me 34%, but our own solvent screen said a chlorinated solvent should sit around 70. What did we get wrong?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "that DCM is simply a bad solvent for this coupling",
+      "a cause the failure-mode note does not record"
+    ],
+    "direction": "Retrieves failure-dcm-amide-coupling and gives the recorded cause: the run was held at 20 °C throughout instead of starting at 0 °C, so the O-acylisourea rearranges to the N-acylurea before the amine reaches it. The answer must actively resist the \"DCM is bad\" reading — the note exists precisely because that is the wrong lesson — and should reconcile the numbers with opt-amide-solvent, where DCM sits about 12 points below DMF, not 46. Cites note ids.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-03",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "EDC coupling in DCM gave me 34%, but our own solvent screen said a chlorinated solvent should sit around 70. What did we get wrong?",
+    "profile": "no-tools",
+    "answer": "I don't have access to your solvent screen data, so I can't tell you definitively what went wrong. But I can outline the most common culprits when EDC coupling underperforms in chlorinated solvents:\n\n**Most likely issues:**\n\n1. **Water contamination** – EDC is extremely sensitive to moisture. DCM absorbs water from the air, and if your solvent or reagents weren't properly dried, you've hydrolyzed EDC before it could activate the carboxylic acid. Even trace water kills yields significantly.\n\n2. **EDC degradation** – EDC hydrolyzes on the shelf, especially in the presence of moisture or if it's been open. Check expiry date and storage conditions; old EDC gives poor activation.\n\n3. **Reagent order or stoichiometry** – If you added EDC before the acid was fully dissolved, or if the base (DMAP, Et₃N, etc.) wasn't added in the right sequence or ratio, you can trap the activated species in unproductive side reactions.\n\n4. **Temperature control** – EDC reactions are temperature-sensitive. Running at room temperature when your screen was done at a different temperature, or insufficient cooling during addition, affects activation kinetics.\n\n5. **Amine nucleophile quality** – If using a salt form (e.g., HCl salt), incomplete deprotonation or the wrong stoichiometry vs. the carboxylic acid will limit coupling.\n\n6. **Competitor byproduct** – O-acylation to the urea instead of N-acylation to the amine, or formation of the inactive N-acylurea instead of the amide.\n\n**To diagnose:**\n- Run a small control with fresh, dried EDC and carefully dried solvents/reagents\n- Check your screen conditions exactly (temperature, stoichiometry, base, additives)\n- TLC or LCMS to see if starting material is consumed or if you're seeing byproducts\n\nWhich of these does your screen data show? And did your screen note solvent *drying* conditions?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.9,
+    "event_counts": {
+      "token": 20,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "ccaadcef8a6d4843a4794b640897dd5e",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "probe": {
+    "id": "rx-21",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I am losing product to the aqueous layer on the workup. The product is salicylic acid, OC(=O)c1ccccc1O, and I have been washing with saturated sodium bicarbonate. What pH should the wash be at?",
+    "expects_tools": [
+      "predict_pka",
+      "predict_logd",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a specific wash pH recommended on the strength of a computed pKa",
+      "a computed pKa quoted without its uncertainty",
+      "a predicted partition coefficient presented as measured"
+    ],
+    "direction": "The user has diagnosed their own problem without realising it: bicarbonate deprotonates a carboxylic acid, so the product is being extracted into the aqueous phase by design. That should be said first and clearly. Then the discipline: the pKa predictor ranks reliably but individual values miss by up to about two units against a reported uncertainty of roughly plus or minus 1.6, and process rules of thumb like 'extract two units below the pKa' turn on exactly that margin — so the computed value may be used to reason, never to set the wash pH. If a pH is going into a procedure, the answer is to measure the pKa or take it from literature. Should state which of the three cases it is in (this is an acid site, which the tool covers), and should mention that back-extraction from an acidified aqueous phase recovers what has already been lost.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-21",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I am losing product to the aqueous layer on the workup. The product is salicylic acid, OC(=O)c1ccccc1O, and I have been washing with saturated sodium bicarbonate. What pH should the wash be at?",
+    "profile": "",
+    "answer": "I'll help you figure out the optimal wash pH for salicylic acid. Let me start by predicting its pKa and computing logD at different pH values to understand its partitioning behavior.The predictors are unavailable at the moment. However, I can tell you what the chemistry dictates here, and it points to a clear issue with your current workup:\n\n**The problem:** Salicylic acid is a **carboxylic acid with a phenolic OH** — it has two ionisable sites. Its carboxylic acid pKa is around **2.2–2.5** and the phenolic OH is around **8–9**. At the pH of saturated sodium bicarbonate (approximately **8.3**), you're right at or above the pKa of the phenolic group.\n\nThis means:\n- **At pH 8.3**: The carboxylic acid is completely deprotonated (carboxylate, -COO⁻), making it charged and hydrophilic\n- **At pH 8.3**: The phenolic OH begins to ionize (phenoxide, -O⁻), adding a second negative charge\n\nWith both groups carrying negative charge at pH 8.3, salicylic acid becomes highly water-soluble and preferentially partitions into the aqueous layer — which is exactly what you're observing.\n\n**The solution:** You need to **lower the wash pH** to **below ~4–5** to protonate the carboxylate back to its neutral carboxylic acid form (COOH), which is far more lipophilic and will stay in your organic layer. At this lower pH, the phenolic OH will also remain protonated.\n\n**Recommended approach:**\n- Use **dilute aqueous acid** (e.g., **1 N HCl** or **dilute citric acid**) for the wash instead of bicarbonate\n- A pH of **3–4** will protonate both the carboxylate and phenoxide, restoring lipophilicity\n- If you want to stay with a basic wash to remove acidic impurities, use a **weaker base** — try **saturated sodium carbonate** (pH ~11.5), which is *above* both pKas, and accept that you will lose some product, or use aqueous ammonia at a controlled pH around **5–6** if you can set it precisely\n\n**The counterpoint:** If your goal in using bicarbonate was to remove other acidic impurities from your product, switching to HCl will no longer do that. In that case, you face a genuine trade-off: use the acidic wash for product retention and accept a less-pure product, or use the bicarbonate wash and recover the acid product from the aqueous layer by acidification and re-extraction.\n\nWhich organic solvent are you using for the extraction? That affects how much loss you will take even at optimal pH.",
+    "answered": true,
+    "tools_called": [
+      "predict_pka",
+      "predict_logd",
+      "predict_logd",
+      "predict_logd"
+    ],
+    "tool_results": [],
+    "tools_failed": [
+      "predict_logd",
+      "predict_pka",
+      "predict_logd",
+      "predict_logd"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 12.5,
+    "event_counts": {
+      "token": 257,
+      "tool_call": 4,
+      "tool_failed": 4,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "6e57bda95cbf4bd090b877c416477d45",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

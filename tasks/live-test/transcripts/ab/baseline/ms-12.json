@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "ms-12",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What is the dominant charge state of OC(=O)c1cccnc1 at pH 7.4? It is amphoteric so I do not trust a single pKa here, and I need to know what is actually in solution before I argue about solubility.",
+    "expects_tools": [
+      "run_microspecies_profile",
+      "rank_species"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a microstate population the calculation did not return",
+      "a predicted pKa presented as the answer to which species dominates",
+      "a solubility value, which was not asked for and not computed"
+    ],
+    "direction": "The amphoteric case is exactly where the single-site predictor refuses and where the microstate profile earns its cost, and the asker has said so. A good answer enumerates the microstates and ranks them in water at the stated pH, by either route, and reports the dominant form as a structure rather than as a word. The zwitterion question should be addressed explicitly, since single-site toggling does not produce the doubly-ionised form and a reader will assume it was considered. It is a correct and useful answer to add that a single predicted pKa would not have covered this and why. Reaching for the fast pKa predictor and presenting its number as the speciation answer is the failure this probe exists to catch.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-12",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What is the dominant charge state of OC(=O)c1cccnc1 at pH 7.4? It is amphoteric so I do not trust a single pKa here, and I need to know what is actually in solution before I argue about solubility.",
+    "profile": "no-tools",
+    "answer": "I'll work through this systematically from first principles.\n\n**The molecule: OC(=O)c1cccnc1** is isonicotinic acid (pyridine-4-carboxylic acid, also known as niacin/vitamin B3).\n\n**Ionizable groups:**\n1. The carboxylic acid (pKa ≈ 1.8–2.0)\n2. The pyridine nitrogen (pKa for protonation ≈ 4.8–5.0)\n\n**At pH 7.4**, let's evaluate each:\n\n| Group | pKa | pH relative to pKa | State at pH 7.4 |\n|-------|-----|-------------------|-----------------|\n| COOH | ~1.9 | pH >> pKa (7.4 >> 1.9) | **Deprotonated: COO⁻** |\n| Pyridinium (N-H⁺) | ~4.9 | pH >> pKa (7.4 >> 4.9) | **Deprotonated: neutral N** |\n\n**The dominant species at pH 7.4 is the zwitterion with:**\n- Charge state: **−1** (singly anionic)\n- Structure: O=C(O⁻)c1cccnc1 (carboxylate anion, neutral pyridine)\n\nThe pyridine's pKa of ~4.9 is for *protonation* of the neutral nitrogen. At pH 7.4 (2.5 pH units above this pKa), the equilibrium strongly favors the unprotonated (neutral) pyridine form. The carboxylic acid is completely deprotonated below pH 4.\n\n**For your solubility argument:** The dominant species is a **zwitterionic monoanion** (−1 charge). This is actually lower solubility than fully charged forms, but the anionic character will still reduce solubility compared to a neutral species. The neutral form (both COOH and pyridine-N protonated) exists only in vanishingly small amounts at pH 7.4 and is unlikely to dominate your solubility unless you have unusual circumstances.\n\nIf you need this for a specific context (precipitation, crystallization, formulation), the anionic character and potential for hydrogen bonding via the residual hydroxyl-like oxygen are the key factors.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 6.43,
+    "event_counts": {
+      "token": 19,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "aeac3796bb4244888f46be173a3bf8d0",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

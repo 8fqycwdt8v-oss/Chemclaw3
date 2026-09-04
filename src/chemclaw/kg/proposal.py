@@ -239,7 +239,10 @@ class InMemoryProposalStore:
         """Close the note's other open versions once `recorded` is the open one.
 
         Exactly one row per note may be `open`, because the branch the reviewer merges is per-note.
-        The Postgres store runs the same rule as a statement (`proposal_store._SUPERSEDE_OLDER`).
+        The Postgres store runs the same rule as a statement
+        (`proposal_store._SUPERSEDE_OTHER_OPEN`), down to the reason it writes: "another", not "a
+        newer" — a re-proposal of an older version reopens its row and closes the *newer* one, so
+        the sentence a reviewer reads must describe the rule rather than the first caller of it.
 
         **The trigger is the state the row now has, not the state the caller asked for**, which is
         the difference between the two backends agreeing and only appearing to. A `failed` record
@@ -259,7 +262,7 @@ class InMemoryProposalStore:
                 self._by_id[other_id] = other.model_copy(
                     update={
                         "state": ProposalState.SUPERSEDED,
-                        "reason": "superseded by a newer proposed version of this note",
+                        "reason": "superseded by another proposed version of this note",
                     }
                 )
 

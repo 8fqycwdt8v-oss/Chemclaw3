@@ -23,7 +23,7 @@ swap them for in-memory stores.
 from datetime import UTC, datetime, timedelta
 
 from temporalio import activity, workflow
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, is_cancelled_exception
 
 with workflow.unsafe.imports_passed_through():
     from pydantic import BaseModel
@@ -387,14 +387,23 @@ class ElnSyncWorkflow:
                 # their cursors advanced — a warehouse that was down for a week silently stopped
                 # the file-drop sources ingesting too.
                 #
-                # `ActivityError` and not `Exception`: this catches an activity that failed after
-                # its retry policy was spent, which is the case that is about *this source*. A
-                # cancellation, a `continue_as_new` or a defect in the workflow's own code below is
-                # about the run, and swallowing those here would turn the drain into something that
-                # cannot be stopped and cannot fail. Bad data never reaches here at all — it
-                # rejects and continues inside `sync_entries`, which is what `BAD_DATA_RETRY`
-                # exists to keep true.
-                #
+                # **A cancel is not a source failure, and narrowing the catch does not separate
+                # them.** This clause used to say that catching `ActivityError` rather than
+                # `Exception` was itself what kept a cancellation out — it is not. Temporal
+                # delivers a workflow cancellation to the awaiting `execute_activity` as exactly
+                # this type, with a `temporalio.exceptions.CancelledError` cause, so the narrow
+                # catch swallowed it: measured, a cancelled drain dropped the source in flight,
+                # synced the rest and ended COMPLETED, and the SDK's `uncancel` after an absorbed
+                # cancel meant no later activity was cancelled either. `is_cancelled_exception` is
+                # the SDK's own predicate for this conditional and covers the `ActivityError`-with-
+                # `CancelledError`-cause shape, so nothing here restates a shape upstream owns; the
+                # re-raise is what makes the run end CANCELLED rather than successful. What the old
+                # comment was right about is the boundary: a `continue_as_new` and a defect in the
+                # workflow's own code below are about the run and are not raised inside this `try`
+                # at all, and bad data never reaches here — it rejects and continues inside
+                # `sync_entries`, which is what `BAD_DATA_RETRY` exists to keep true.
+                if is_cancelled_exception(exc):
+                    raise
                 # The source is dropped rather than retried in-loop: its cursor is untouched, so
                 # the next scheduled run resumes it from exactly where it stopped, and a source
                 # that is down stays down for one run rather than spinning this loop against it.

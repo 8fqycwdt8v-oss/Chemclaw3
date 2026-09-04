@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "op-32",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're choosing between an amidation and a sulfonamidation route to the same amine. What do the screens we have indexed say about which one holds up better on a hindered amine?",
+    "expects_tools": [
+      "similar_reactions",
+      "similar_molecules",
+      "substructure_matches",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "amidation is N times more robust",
+      "a computed robustness score",
+      "a controlled comparison, where the two record sets do not share substrates",
+      "a yield not present in a cited record"
+    ],
+    "direction": "Retrieves from both indexed record sets and compares what they actually contain about hindered substrates, citing records on each side and saying how many each conclusion rests on. The judgment this probe is really testing is restraint about the comparison itself: two screens run on different substrate sets under different conditions do not constitute a controlled comparison, and the answer must say so rather than manufacturing a robustness score or a headline multiple. Where the records are silent on hindrance it says not recorded. The genuinely useful output is a statement of what each set does support, plus the one experiment that would actually decide it — the same hindered amine run under both.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-32",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're choosing between an amidation and a sulfonamidation route to the same amine. What do the screens we have indexed say about which one holds up better on a hindered amine?",
+    "profile": "no-tools",
+    "answer": "I don't have access to your indexed screens or any database of your organization's results. I can't retrieve or search your experimental data, notes, or screen outcomes.\n\nWhat I can do is answer from chemistry knowledge:\n\n**General principles for hindered amines:**\n\n- **Amidations** (acyl + amine → amide) typically become slower and lower-yielding as amine steric hindrance increases. Tertiary and secondary amines are more difficult than primary. Hindered amines can be particularly challenging because they suffer from both reduced nucleophilicity (electronic) and slower approach to the acyl electrophile (steric).\n\n- **Sulfonamidations** (sulfonyl chloride or anhydride + amine → sulfonamide) often tolerate steric hindrance somewhat better in practice. The geometry and electronics differ—the nitrogen is less sterically shielded in the transition state, and the sulfonyl electrophile can be tuned more easily (e.g., with electron-withdrawing groups on sulfur). Secondary amines form sulfonamides reasonably well; tertiary amines are more challenging for both routes but sulfonamidation still sometimes wins.\n\n**However**, the answer depends heavily on:\n- How hindered your specific amine is\n- Which coupling reagents/conditions you've tested\n- Your substrate's other functional groups\n- What \"holds up better\" means to you (yield? selectivity? scalability?)\n\nTo get a real answer, you'd need to search your own screen results. If you can point me to files or notes containing those screens, I can help you interpret them.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.98,
+    "event_counts": {
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "42edef2ddeca400e8b6e7be876a6529f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

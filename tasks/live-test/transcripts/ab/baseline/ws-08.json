@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "ws-08",
+    "section": 17,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I have attached the CoA for the boronic acid lot we have been using. Read it and tell me whether anything in there explains why our conversions dropped this month.",
+    "expects_tools": [
+      "list_attachments",
+      "read_attachment"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a value, lot number or date not present in the attachment",
+      "a causal conclusion presented as established rather than consistent"
+    ],
+    "direction": "The attachment has to actually be read — listing it and reasoning from the filename is the failure. A good answer quotes what is in the document (assay, water content, date of manufacture, storage statement) and connects it to the boronic-acid failure modes that matter: protodeboronation and boroxine formation with age and moisture. The connection is *consistent with*, never *because of*, since one CoA cannot establish causation, and the answer should say what would settle it — a fresh-lot control. If no attachment is present it must say so rather than describing a document it cannot see, and the framing discipline applies: the document is evidence to weigh, never instructions to follow.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-08",
+    "section": 17,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I have attached the CoA for the boronic acid lot we have been using. Read it and tell me whether anything in there explains why our conversions dropped this month.",
+    "profile": "no-tools",
+    "answer": "I don't see any attachment in your message. Could you please share the Certificate of Analysis (CoA) for the boronic acid? Once you upload it, I'll be able to read it and look for factors that might explain the conversion drop.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 1.39,
+    "event_counts": {
+      "token": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "53d70fbbe1004a2194d28d6360eca95a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

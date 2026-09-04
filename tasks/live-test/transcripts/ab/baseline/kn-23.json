@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "kn-23",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "An auditor wants proof that a computed number in one of our reports wasn't edited after the fact. What do I actually show them?",
+    "expects_tools": [
+      "find_calculations",
+      "list_artifacts",
+      "fetch_artifact"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an audit entry, hash or timestamp it did not retrieve",
+      "a compliance certification or validated-system status",
+      "that re-running the job proves the number was not edited",
+      "an inspection or audit outcome"
+    ],
+    "direction": "Names what actually exists and is honest about its limit. Three things: the append-only audit trail, which records who ran what and when; the database grant behind it, which gives the application INSERT and neither UPDATE nor DELETE, so the credential that writes a row cannot rewrite it; and the calculation store, which keys a result by method, version and input hash and persists it once, so the number in the report resolves to a stored record and its artifact. The limit must be said out loud rather than left implied: there is no cryptographic proof that a row was never edited — a database owner can still change one — so what is on offer is a controlled record, not tamper-evidence. The distinguishing move is still saying explicitly that \"we can re-run the job and get the same number\" is reproducibility, a different claim from integrity. Any specific hash, id or timestamp must be one it retrieved.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-23",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "An auditor wants proof that a computed number in one of our reports wasn't edited after the fact. What do I actually show them?",
+    "profile": "no-tools",
+    "answer": "You're asking a practical question about audit evidence for computational integrity. Here's what actually demonstrates that a number wasn't edited after the fact:\n\n## What Actually Works\n\n**The computation itself, reproducibly executed:**\n- Show the raw input data (with timestamps/hashes if available)\n- Show the formula or algorithm applied\n- Re-run the calculation in front of the auditor (or provide step-by-step evidence they can verify)\n- This proves *where* the number came from, not just that it's correct now\n\n**Immutable record of when it was created:**\n- Commit hash in version control (Git) with timestamp\n- Cryptographic hash of the file at report generation time\n- Signed PDF or digitally signed document with timestamp\n- Database audit log showing when the value was inserted\n- Any of these proves the number existed at that specific time in that specific form\n\n**What does NOT prove it wasn't edited:**\n- The number being \"round\" or \"sensible\"\n- It matching expectations\n- It being in a locked cell in Excel (trivially breakable)\n- Claims about \"we never edit reports\"\n\n## What to Actually Show the Auditor\n\n1. **The derivation trail**: If the number is computed from other values, show those values with their sources\n2. **Version control history**: If using Git, show the commit that introduced that number\n3. **Timestamp evidence**: When was it generated? Can you prove it was before the audit question arose?\n4. **Reproducibility**: Provide the code/spreadsheet/calculation so they can re-compute it independently\n5. **Change log**: If the system tracks edits, show that the number wasn't modified after initial entry\n\nThe strongest proof is: **cryptographic commitment (hash/signature) + reproducible computation from frozen inputs**. Without one of those, you're relying on trust in your process, which is weaker.\n\nWhat format is your report in, and how is it generated?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.29,
+    "event_counts": {
+      "token": 20,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "ab55d3e4bbc143c7a20c1233d1d8604a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

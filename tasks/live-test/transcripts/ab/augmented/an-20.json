@@ -1,0 +1,76 @@
+{
+  "probe": {
+    "id": "an-20",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Did we already compute anything on Oc1ccc(-c2ccccc2C(=O)O)cc1? If there is a stored vibrational spectrum I want the band list rather than a recompute.",
+    "expects_tools": [
+      "find_calculations",
+      "list_artifacts",
+      "fetch_artifact"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "quoting band positions from memory rather than from a fetched artifact",
+      "claiming a stored calculation exists without a lookup returning it",
+      "presenting an empty artifact list as a missing calculation"
+    ],
+    "direction": "Looks up the calculation store, reports what was actually run (calculator, version, when), lists the artifacts and reads the spectrum file rather than describing it. If there is nothing stored, says so plainly and offers to run it. Distinguishes \"no calculation\" from \"a calculation that produced no artifacts\", and if the fetch was truncated says the values came from part of the file.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-20",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Did we already compute anything on Oc1ccc(-c2ccccc2C(=O)O)cc1? If there is a stored vibrational spectrum I want the band list rather than a recompute.",
+    "profile": "",
+    "answer": "I'll search for any stored calculations on that molecule and check for a vibrational spectrum.That search found a pKa calculation but no thermochemistry. Let me search specifically for thermochemistry/vibrational spectrum results:No thermochemistry result on file. Here's what we have:\n\n**Stored calculation:**\n- **pKa (acid)**: 6.10 ± 1.6 (GFN2-xTB, site is the carboxylic acid)\n  - Computed 2026-09-04\n\n**No vibrational spectrum** is stored for this molecule. The only calculation in the record is the pKa, so if you need the IR band list, it will require a fresh `compute_thermochemistry` run. That will optimize the geometry and compute a full Hessian for the spectrum, alongside the free-energy thermochemistry.\n\nDo you want me to run it?",
+    "answered": true,
+    "tools_called": [
+      "find_calculations",
+      "find_calculations"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_calculations",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"calc:find_calculations\">\n{\n  \"calc_ref\": \"pka@GFN2-xTB+tblite-0.7.0/rdkit-2026.3.5/h2/alpb-water/cal-0.28733:-29.3116/base-0.241396:-22.1843/u-1.6:1.0/opt-GFN2-xTB"
+      },
+      {
+        "tool": "find_calculations",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "6.10",
+      "1.6",
+      "2026"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.74,
+    "event_counts": {
+      "token": 21,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "48d526e364644cc3a107c4d8939154e1",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

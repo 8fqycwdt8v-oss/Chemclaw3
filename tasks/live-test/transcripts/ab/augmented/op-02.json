@@ -1,0 +1,75 @@
+{
+  "probe": {
+    "id": "op-02",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I've got to plan a week on the EDC/HOBt coupling for a new acid. One experiment a day, I'm the only one on it. What should the week actually be, and in what order?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions",
+      "propose_knowledge_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "I have scheduled or booked anything",
+      "instrument or bench time has been reserved",
+      "these results are what you will get"
+    ],
+    "direction": "Recognises this as the day-by-day progression question rather than a surrogate-model optimization, and says which it chose and why. Reads the in-house record first — the amide-coupling additive playbook and the DCM amide-coupling failure mode — and proposes an ordered sequence where each day tests one thing, with a falsifiable expectation stated for each, so a result either way tells the technician something. Later days are explicitly contingent on earlier outcomes rather than fixed. Offers the plan as a proposal a human approves, not as plan-of-record, and never implies anything was booked or scheduled.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-02",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I've got to plan a week on the EDC/HOBt coupling for a new acid. One experiment a day, I'm the only one on it. What should the week actually be, and in what order?",
+    "profile": "",
+    "answer": "I need to gather what you and the record actually know about EDC/HOBt couplings — your substrate, your amine partner, how they've behaved before, what worked and what didn't — so I can propose a real week rather than a generic one.\n\nLet me search for precedent on EDC/HOBt couplings and see what the record holds:The knowledge graph holds nothing on EDC/HOBt couplings yet. That means I'm working from your background knowledge and general chemistry, plus whatever you can tell me about *this* acid and the amine you're coupling to it.\n\nTo build a real week, I need to know:\n\n1. **The acid structure** (SMILES or name) — is it electron-rich or electron-poor? hindered? does it have other reactive groups?\n2. **The amine partner** (SMILES or name) — primary, secondary? aliphatic or aromatic? steric bulk?\n3. **The intended product** — what are you actually making?\n4. **What you already know** — have you tried coupling this acid before? How did it go? Any solvent, ratio, or temperature that helped or hurt?\n5. **Your scale and targets** — how much product do you need, and what yield/purity do you consider a win?\n\nWith those, I can:\n- Compute which partner is the regioselectivity risk (if any)\n- Search for EDC/HOBt runs on related substrates to borrow conditions from\n- Propose a rational progression: solvent/base screen → ratio optimization → temperature/time refinement → scale or workup if needed\n- Explain why each experiment tests what the previous one left open\n\nWithout that, any week I propose is a generic one that misses your actual bottleneck.\n\n**What can you give me?**",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 12.63,
+    "event_counts": {
+      "token": 24,
+      "tool_call": 2,
+      "evidence_source": 1,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "42573440c7c34a6682f30afe93935f51",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

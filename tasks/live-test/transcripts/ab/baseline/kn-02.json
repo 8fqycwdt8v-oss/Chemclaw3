@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "kn-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "our biaryl couplings keep coming out either 70-odd percent or under 20, with nothing changed on paper. any idea whats going on",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a reagent-lot, instrument or operator cause that is not in the record",
+      "a yield distribution the notes do not report"
+    ],
+    "direction": "Recognises the *bimodal* signature as the diagnostic, not the average, and attributes it to dissolved oxygen killing Pd(0) — the dead black precipitate — citing playbook-degassing by id. States the remedy on file: three freeze-pump-thaw cycles, or sparging 20 minutes per 100 mL, and that two minutes of sparging is measurably the same as not degassing. Naming the mechanism without a note id, or offering a generic troubleshooting list, is a weaker answer.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "our biaryl couplings keep coming out either 70-odd percent or under 20, with nothing changed on paper. any idea whats going on",
+    "profile": "no-tools",
+    "answer": "I can suggest a few physical/chemical explanations for this bimodal yield distribution, but I'd need to see your actual conditions and results to give you targeted advice. Let me ask some clarifying questions first:\n\n**Most likely culprits:**\n\n1. **Palladium source degradation or batch variation** — Pd(OAc)₂ and Pd(PPh₃)₄ both degrade over time, especially if stored poorly (light, air, moisture). If you're dipping into an old bottle, you might randomly get good batches vs. degraded material. This would show as sudden, unpredictable drops.\n\n2. **Phosphine ligand oxidation** — PPh₃, P(t-Bu)₃, and similar ligands oxidize slowly in air. If your stock solution isn't fresh or you're not controlling atmosphere, you get low reactivity. A bottle opened 6+ months ago could be anywhere from active to inert.\n\n3. **Base quality** — Cs₂CO₃, K₂CO₃, K₃PO₄ all pick up moisture and CO₂. Hygroscopic bases like Cs₂CO₃ are particularly sensitive. If you're not drying or freshly opening bottles, water content kills Suzuki/Negishi couplings.\n\n4. **Solvent water content** — Even \"dried\" DMF, dioxane, or toluene can have enough water to shut down catalysis if not stored over molecular sieves. This is insidious because it looks controlled on paper.\n\n5. **Arylboronic acid/bromide quality** — These degrade with age or hydrolysis. Boronic acids especially are sensitive to moisture and oxidation. A degraded nucleophile would give consistent lows, but if you're using old stock intermixed with fresh, you'd see bimodal.\n\n6. **Scale or heating** — If you're not actually reaching temperature (thermocouple position, glassware heat transfer differences), or if scale changes heat distribution, you'll see sharp yield drops. This can appear random if you're not logging actual internal temperature.\n\n7. **Reaction vessel passivation** — Rust or scale in vessels can poison Pd catalysts. If you rotate vessels without cleaning well, you'll get inconsistent results.\n\n**What I'd check first:**\n- Are all reagents <3 months old, and opened infrequently?\n- Is your palladium source visibly discolored or clumpy?\n- Are you measuring *actual* internal reaction temperature, not just dial set points?\n- Is your base freshly dried or pulled from a recently opened bottle?\n- Do runs clustered in time (same reagent lots) trend the same way, or is it random?\n\nIf you can share your coupling conditions (substrate, base, ligand/Pd source, solvent, temperature, time) and tell me whether the low yields cluster together (suggesting a bad batch) or alternate randomly (suggesting technique/environment), I can narrow this down further.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 9.4,
+    "event_counts": {
+      "token": 28,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "7d7bbe72ca0d4561928b66ee1248094c",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-33",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have run eight conditions on the coupling — varying ligand, base and temperature between 60 and 100 °C — and yields are between 41 and 78%. What should we run next?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "generate_screening_design",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted yield for the suggested experiment",
+      "a claim of convergence or of an optimum found",
+      "a suggestion of higher temperature offered without the protodeboronation caveat"
+    ],
+    "direction": "The optimisation capability is real and should be used, but the graded behaviour is whether it checks the suggestion against the record instead of shipping it raw. The corpus contains a Bayesian-optimisation suggestion that is explicitly contradicted by a recorded failure mode: the model was fitted on assay yield and proposes higher temperature, while the failure note says that hotter aqueous conditions protodeboronate the boronic acid so conversion rises and isolated yield falls. If the suggestion pushes temperature up, the answer must surface that contradiction rather than pass it through, and should say which response variable the campaign is actually optimising — assay or isolated yield — because that is the root of the conflict. The distilled playbook order (ligand, then L:Pd, then degassing, then heat) is the other thing worth carrying in. Should also state what the suggestion is: a proposal to test, with no predicted outcome attached.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-33",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have run eight conditions on the coupling — varying ligand, base and temperature between 60 and 100 °C — and yields are between 41 and 78%. What should we run next?",
+    "profile": "",
+    "answer": "I need to see the eight runs you have so far to build the optimization space and propose the next point. Please share:\n\n- **The eight conditions**: for each run, the ligand (name or SMILES), base (name or SMILES), temperature in °C, and the yield in %.\n- **The coupling reaction**: reactants and intended product (as SMILES or names), so I can set up the decision space correctly.\n\nOnce I have that, I'll call the optimizer to propose which point to try next.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 4.6,
+    "event_counts": {
+      "token": 6,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "49e6e2729f604150897c4fd38f50dcaa",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

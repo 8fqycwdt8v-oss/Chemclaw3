@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "rp-22",
+    "section": 13,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Where are we on the submission package overall — what percentage is complete, and will we make the filing date?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a completion percentage or fraction",
+      "a filing date, milestone date, or an assessment of whether a date will be met",
+      "a count or status list of package sections or deliverables",
+      "a claim that a project, programme or document-package entity exists"
+    ],
+    "direction": "Bucket C, and firmly so: there is no project entity, no programme, no timeline, no deliverable tracking and no document package anywhere in the system — it holds chemistry knowledge notes, calculations and jobs. Any percentage or date would be invented outright. The right answer says that in a couple of sentences, states what it genuinely can tell a manager (which chemistry evidence exists and where the record is thin), and sends the schedule question to the project management system. Offering find_knowledge_gaps as the nearest useful thing is a plus, not a requirement.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-22",
+    "section": 13,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Where are we on the submission package overall — what percentage is complete, and will we make the filing date?",
+    "profile": "no-tools",
+    "answer": "I don't have access to your submission package records, project management system, or filing timeline. I'm a chemistry assistant without tools to query your programme's data or documents.\n\nTo answer this properly, I'd need you to provide:\n\n1. **The target filing date**\n2. **Current status of each component** (e.g., which sections are done, in draft, or not started)\n3. **Any known blockers or dependencies** that might affect the timeline\n\nIf you have a submission plan document, project tracker, or status summary you can share, I can help you assess the gaps and risk to the filing date. Alternatively, if there are specific chemistry questions holding up sections of the submission, I can address those directly.\n\nWhat information can you provide about the current state?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.73,
+    "event_counts": {
+      "token": 8,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b1c726af398444dba643e685ed8953c5",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

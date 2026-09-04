@@ -1,0 +1,120 @@
+{
+  "probe": {
+    "id": "kn-18",
+    "section": 15,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Can you turn what we know about stalled Pd couplings into something a new chemist can just follow, step by step?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "propose_knowledge_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that a newly drafted playbook already exists in the knowledge base",
+      "a step not supported by a retrieved note",
+      "a note id that was not retrieved"
+    ],
+    "direction": "Finds that playbook-pd-cross-coupling-scope already encodes this and gives its ordered rule rather than inventing a parallel one: bulkier biaryl phosphine → higher L:Pd → degas harder → only then more heat, with the reason (oxidative addition responds to ligand sterics far more than to temperature, and heat accelerates boronic-acid decomposition — see failure-aqueous-protodeboronation). Proposing a refinement through the PR-gate is welcome, and must be described as pending human review. Presenting a fresh invention while ignoring the existing playbook is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-18",
+    "section": 15,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Can you turn what we know about stalled Pd couplings into something a new chemist can just follow, step by step?",
+    "profile": "",
+    "answer": "I'll search what the record holds about stalled Pd couplings, then distill it into a step-by-step troubleshooting guide.The knowledge graph holds nothing on stalled Pd couplings yet — this is a domain where a playbook would be valuable but hasn't been written.\n\nLet me check what this system has *computed* on Pd chemistry, and check if there's past optimization work we can learn from:The record has no prior optimization campaigns on Pd couplings or calculations that would inform a troubleshooting guide. This is a good case for distilling general domain knowledge into a reusable structure.\n\nLet me load the deep-research and protocol-generation skills to compose a step-by-step guide grounded in what the record *does* hold, and what general chemistry supports:Based on the empty record and these skill instructions, I should draft a **troubleshooting guide as a knowledge note** since this is a reusable diagnostic framework, not a one-off protocol. This becomes something the next chemist can search and follow step-by-step.\n\nLet me propose it through the PR-gate:I've hit a system issue trying to save this to the knowledge graph, but I can deliver the guide to you directly. Here's what I've composed — a **step-by-step diagnostic framework** for a new chemist facing a stalled Pd coupling:\n\n---\n\n## **Troubleshooting Stalled Pd-Catalyzed Couplings: 9-Step Diagnostic**\n\nWhen a Pd coupling stops before expected conversion, **follow each step as a hypothesis test**. If it fires, you have an answer; if not, move to the next.\n\n### **Step 1: Confirm the coupling is actually stalled**\n- **Action:** TLC/HPLC every 30 min for 2 h.\n- **If rising:** Let it run.  \n- **If plateaued:** Proceed to Step 2.\n\n### **Step 2: Check for O₂ poisoning**\n- **Action:** Re-run a small aliquot under fresh inert gas.\n- **If conversion jumps:** Your inert is compromised (peroxide, water, trace O₂). Use fresh gas and dry glassware.\n- **If no change:** Proceed to Step 3.\n\n### **Step 3: Test for ligand degradation**\n- **Action:** Filter the crude mixture to remove Pd black. Add fresh catalyst + fresh ligand. Stir 30 min.\n- **If conversion resumes:** Ligand decomposed. Use dried solvent, heat-dried base (100 °C, 2 h), and consider adding TBAB or catalytic PPh₃.\n- **If no restart:** Proceed to Step 4.\n\n### **Step 4: Test for product inhibition**\n- **Action:** Spike a fresh parallel reaction with 0.5 equiv product before adding starting material. Compare rates.\n- **If spiked reaction stalls faster:** Product inhibits Pd(0). Switch to bulkier phosphine (XPhos, SPhos, DPEphos) or try Ni(0) instead.\n- **If no difference:** Proceed to Step 5.\n\n### **Step 5: Replenish base**\n- **Action:** Add 0.25 equiv fresh base in portions; stir 15 min each.\n- **If conversion resumes:** Base was consumed or hydrolyzed. Next time: oven-dry base at 100 °C for 2 h before weighing. Use K₃PO₄ if less hygroscopic base works for your chemistry.\n- **If no restart:** Proceed to Step 6.\n\n### **Step 6: Add fresh coupling partner**\n- **Action:** Add 1 equiv fresh aryl halide (or organometallic). Stir 15 min.\n- **If conversion jumps:** A partner was limiting. Check purity (NMR, GC) and titer (iodometric for Grignard, ¹¹B NMR for boron reagents).\n- **If no restart:** Proceed to Step 7.\n\n### **Step 7: Check for phosphine oxidation**\n- **Action:** Add 10 mol % secondary phosphine (PPh₃ if you used DPPf). Stir 15 min.\n- **If conversion resumes:** Ligand was oxidized. Next time: freeze-pump-thaw solvent; use Pd(II) pre-catalysts with NHC ligands (more stable); or add TCEP or formic acid as reducing agent.\n- **If no restart:** Proceed to Step 8.\n\n### **Step 8: Identify byproducts**\n- **Action:** GC-MS or HPLC-MS at the stall point. Look for dimer, reduced arene, or novel peaks.\n- **If byproducts found:** A side reaction competes. Raise temperature (if product is stable), switch to hindered ligand, or use different base.\n- **If none identified:** Proceed to Step 9.\n\n### **Step 9: Revisit solvent and temperature**\n- **Action:** \n  - If ≤80 °C, raise 20 °C; stir 30 min.  \n  - If >100 °C, lower 20 °C (suspect thermal decomposition).  \n  - Try a mixed solvent (DMF/water 9:1, toluene/DME 1:1).\n- **If conversion improves at higher T:** Kinetics are slow. Use a more active catalyst or more reactive nucleophile.\n- **If better at lower T:** Product/substrate is thermally unstable. Use lower T or a faster catalyst (Buchwald-type NHC).\n\n---\n\n### **When to abandon**\n\nIf none of these steps restart your coupling:\n\n1. **Compute ΔG** of the transformation to check if it's downhill. A positive ΔG at room temperature means you're fighting the equilibrium.\n2. **Check literature precedent** for your exact aryl halide + nucleophile pair.\n3. **Consider alternative transformations:** aryl triflates, iodides, or a different nucleophile class (organotin, organoboronic ester, organozinc vs. what you tried).\n\n---\n\nThis is a **diagnostic protocol anyone on your team can follow without expertise**. Each step is a yes/no fork, and the positive outcomes tell them exactly what went wrong and what to do next.\n\nWould you like me to expand any step, or integrate this into your system as a stored design?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence",
+      "find_past_jobs",
+      "find_calculations",
+      "read_file",
+      "read_file",
+      "propose_knowledge_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "find_calculations",
+        "preview": ""
+      },
+      {
+        "tool": "read_file",
+        "preview": "  1  ---\n  2  name: deep-research\n  3  description: >-\n  4    How to answer any open-ended process-R&D question — about any output (yield, purity,\n  5    impurities), any process detail or observation"
+      },
+      {
+        "tool": "read_file",
+        "preview": "  1  ---\n  2  name: protocol-generation\n  3  description: >-\n  4    Use when the chemist asks for a protocol, a procedure, a recipe or conditions to run — \"how\n  5    should I run this coupling\", \"wri"
+      }
+    ],
+    "tools_failed": [
+      "propose_knowledge_note"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "9",
+      "1",
+      "30",
+      "2",
+      "3",
+      "100",
+      "4",
+      "0",
+      "5",
+      "15",
+      "6",
+      "7",
+      "10",
+      "8",
+      "80",
+      "20"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 60.24,
+    "event_counts": {
+      "token": 529,
+      "tool_call": 8,
+      "evidence_source": 3,
+      "tool_result": 7,
+      "tool_failed": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "88b387ac97734262843249b5b15a89d3",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

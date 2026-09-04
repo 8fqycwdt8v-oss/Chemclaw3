@@ -1,0 +1,80 @@
+{
+  "probe": {
+    "id": "rx-19",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We see a des-methyl impurity in the final API. Which step in the route is most likely putting it there, and is there anything in our record that already points at it?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "similar_molecules",
+      "substructure_matches"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a definitive attribution of the impurity to one step",
+      "a level or percentage for the impurity at any step",
+      "a fabricated route step that the retrieved record does not contain"
+    ],
+    "direction": "Should work the record rather than speculate freely: find the steps that introduce or carry the methyl group, follow the precursor/product relations between compound and reaction notes, and separate two distinct origins — carried in with a starting material or reagent lot versus generated in a step under the conditions used. Should name the conditions that plausibly demethylate (strong base or nucleophile on an aryl methyl ether, acid and heat, high temperature with a nucleophilic halide) and map them onto steps the record actually shows. Must be explicit about which links are supported by a retrieved note and which are its own hypothesis, and must name the experiment that settles it — spiking, or assaying the intermediate at each step. If the record is too thin, say that rather than filling in a route.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-19",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We see a des-methyl impurity in the final API. Which step in the route is most likely putting it there, and is there anything in our record that already points at it?",
+    "profile": "",
+    "answer": "I'll help you track down the likely source of the des-methyl impurity. Let me start by searching your record for any evidence of demethylation issues and any notes on your synthesis route.Your record holds no existing notes on des-methyl impurities or demethylation issues. That means we're starting without a documented precedent, but I can reason about where demethylation is most likely to happen in a synthesis route and what the risks are.\n\n**To give you the most precise answer, I need to know:**\n\nWhat is your API structure (or at least the methyl group(s) it carries), and what are the key synthetic steps? Even if you just name them — \"Grignard on ketone, then oxidation, then Williamson ether, then final deprotection\" — that tells me which steps expose a methyl to the conditions that could cleave it.\n\nIn the meantime, here's what the chemistry tells us about demethylation risk:\n\n**Most common sources of demethylation (in rough order of likelihood in a synthesis):**\n\n1. **Oxidative cleavage** (especially if your route includes hyperoxidizing conditions — e.g., permanganate, bleach, H₂O₂ with acid catalyst)\n   - Aromatic ethers are vulnerable, especially electron-rich ones\n   - Aliphatic ethers less so, but possible under forcing conditions\n\n2. **Acidic cleavage** (HBr, HI, or Lewis acids like BBr₃)\n   - Ethers in general; aromatic ones more resistant than aliphatic\n   - If your route includes a deprotection using these, the methyl ether can compete\n\n3. **Thermal degradation** (high-temperature reactions, reflux with a protic acid)\n   - Aliphatic ethers especially vulnerable\n   - Aromatic methyl ethers (e.g., anisole derivatives) more stable\n\n4. **Reductive cleavage** (rarely, under forcing hydrogenation with a Ni or Pd catalyst over certain substrates)\n   - Less common but worth checking if you use a metal catalyst under harsh conditions\n\n5. **Photodegradation or peroxide formation** (during storage if exposed to light/air)\n   - More likely a problem during final API handling than in-synthesis\n\nCan you share:\n- **The API structure** (SMILES or a drawing)?\n- **The synthetic route** (key transformations, in order)?\n- **Where in the route you first see the des-methyl impurity** (after which step)?\n\nOnce I have that, I can:\n1. Run a computed degradation analysis to identify which methyl groups are most susceptible and to which conditions\n2. Search your historical data for similar substrates or reactions that might show demethylation precedent\n3. Point you at the specific step most likely to be the culprit",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 12.31,
+    "event_counts": {
+      "token": 27,
+      "tool_call": 3,
+      "evidence_source": 2,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "139f48fb079947959993357ebac746ec",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

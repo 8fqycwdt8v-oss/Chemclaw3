@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "an-29",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Which residual solvents from our route need controlling, at what limits, and should I be running headspace GC or ICP-MS for each of them?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "an ICH Q3C class assignment or concentration limit in ppm",
+      "a validated analytical technique assignment presented as retrieved from a method store",
+      "claiming a residual-solvent limits table exists in the system"
+    ],
+    "direction": "Says there is no residual-solvent limits table and no analytical method store, so it cannot supply limits or a method. It may correct the premise of the technique question — ICP-MS is for elemental impurities, headspace GC for volatile organics — since that is general knowledge offered as such, not a fabricated lookup. Can identify which solvents the route uses if asked to retrieve the route, and says so, while keeping limits firmly out of scope.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-29",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Which residual solvents from our route need controlling, at what limits, and should I be running headspace GC or ICP-MS for each of them?",
+    "profile": "no-tools",
+    "answer": "I don't have access to your route, your residual solvent method, or your product specifications. I'm a chemistry assistant without a database of your programme's records.\n\nTo answer this properly, I need to know:\n\n1. **Which solvents are in your route?** (list the solvents used in synthesis, workup, crystallization, etc.)\n2. **What is your drug substance or final product?** (to check relevant pharmacopeial limits)\n3. **Which regulatory guidance applies?** (ICH Q3C is standard for pharmaceuticals; food/cosmetics/other have different limits)\n\nOnce you tell me those, I can advise on:\n\n- **Which solvents need control** (ICH classifies them as Class 1, 2a, 2b, or 3)\n- **Concentration limits** (mg/L or ppm, from ICH Q3C tables)\n- **Which analytical method for each solvent**:\n  - **Headspace GC** detects volatile solvents (most Class 1 & 2 solvents, typical range 5–5000 ppm)\n  - **ICP-MS** detects inorganic residues and metals (not organic solvents—this would only apply if you're concerned about catalytic metal residues or inorganic salts)\n\n**Are you perhaps asking about residual metal catalysts or inorganic impurities?** If so, ICP-MS is the right tool. If you mean organic solvents (benzene, toluene, DCM, etc.), headspace GC is standard.\n\nProvide the route details and I can give you a specific control strategy.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.49,
+    "event_counts": {
+      "token": 16,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "e764e1e2dac84df3a074fc75f63c1cc6",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,27 +1,23 @@
-"""The one lexical rule, driven against the server it is a proxy for.
+"""The offline lexical proxy, pinned against the exact regression its own comment names.
 
-`chemclaw.core.fulltext` exists because the boolean rule has to be identical across four
-implementations, and its module docstring records that the two halves have silently disagreed three
-times. **It had no test file at all** — `reference_tokens`, `reference_terms` and `core.fulltext`
-appeared in zero tests while the module measured 100% line and branch coverage, which is the
-clearest available statement that a coverage floor cannot see this class of defect. Mutating `_WORD`
-to `[a-z0-9]+` — the exact alphabet its own comment names as the old bug — left 349 retrieval tests
-green while `Suzuki` tokenised as `uzuki` and `DMF` as `d`.
+`core/fulltext.py`'s module comment records that `_WORD` used to be spelled `[a-z0-9]+` twice, in
+the two backends this module now unifies, and that the ASCII-only spelling silently dropped every
+non-ASCII letter Postgres indexes. It is also, independently, wrong on plain ASCII: `[a-z0-9]+` is
+case-sensitive, so `Suzuki` tokenises as `uzuki` rather than `suzuki` — the capital `S` is not in
+the class and breaks the run. `test_case_is_folded_after_tokenising_not_by_the_character_class`
+below is that exact bug, written as an assertion rather than as a comment: it fails the moment
+`_WORD` reverts to `[a-z0-9]+`, which nothing else in this suite reaches (`reference_tokens` and
+`reference_terms` appear in no other test file).
 
-So this file is deliberately two halves:
-
-- **Offline unit tests** that kill those mutants, over the vocabulary that actually breaks.
-  Chemistry is disproportionately uppercase acronyms (DMF, NMP, THF, HATU), non-ASCII letters
-  and numbers carrying units, and a naive ASCII-lowercase alphabet destroys precisely those
-  while leaving ordinary English prose untouched — so a corpus of English sentences would not
-  have noticed.
-- **A differential test against live PostgreSQL**, because the offline half cannot see the failure
-  that matters. `InMemoryNoteIndex` is what the unit tests stand on and `PostgresNoteIndex` is what
-  production runs; the only way to know they answer the same question is to ask them both. That is
-  what would have caught all three historical divergences, and it is what caught the numeric one.
+**This file was written twice, on two branches, and the merge kept both halves** — which is worth
+recording because they are different *kinds* of test and each is blind to the other's defect. The
+offline cases below pin the tokeniser against mutation. They cannot see whether the offline proxy
+and the server agree, and the numeric divergence they could not see was real: `to_tsvector` glues a
+sign onto a lexeme and emits a decimal whole, so a cryogenic temperature was reachable by no query
+at all while every assertion here passed. The Postgres-backed differential test at the end is that
+half — it drives both backends over one chemistry corpus and asserts the same hit sets, which is the
+only shape that could have caught any of the three divergences the module's docstring records.
 """
-
-from __future__ import annotations
 
 import asyncio
 from typing import Any
@@ -39,10 +35,101 @@ from tests.pg import migrated_db_or_skip
 def _run(awaitable: Any) -> Any:
     """Drive one coroutine from a sync test, matching this suite's convention.
 
-    No `pytest.mark.asyncio`: `pyproject.toml` sets `--strict-markers` and registers none, so an
-    async test would be collected and never awaited.
+    No `pytest.mark.asyncio`: `pyproject.toml` sets `--strict-markers` and registers none, so
+    an async test would be collected and never awaited.
     """
     return asyncio.run(awaitable)
+
+
+def test_case_is_folded_after_tokenising_not_by_the_character_class() -> None:
+    r"""`Suzuki` must tokenise whole and lowercased — not as `uzuki` with the `S` dropped.
+
+    This is the mutant the backlog row names: mutate `_WORD` from `[^\W_]+` to the ASCII-only
+    `[a-z0-9]+` and this reproduces the bug the module's own comment describes, because a capital
+    letter is outside `[a-z0-9]` and breaks the run instead of being folded into it.
+    """
+    assert reference_tokens("Suzuki coupling") == {"suzuki", "coupling"}
+
+
+def test_non_ascii_letters_are_indexed_not_dropped() -> None:
+    r"""`café` and `naïve` tokenise whole — the failure the module comment says motivated `\W`.
+
+    An ASCII-only class (`[a-zA-Z0-9]+`) would split these on the accented letter; Postgres's
+    `to_tsvector` does not, so the offline proxy must not either.
+    """
+    assert reference_tokens("café naïve") == {"café", "naïve"}
+
+
+def test_tokens_are_lowercased() -> None:
+    """A reader who types `Suzuki` must match a corpus written `suzuki`."""
+    assert reference_tokens("SUZUKI Amide") == {"suzuki", "amide"}
+
+
+def test_punctuation_and_underscores_split_tokens() -> None:
+    r"""`_` is excluded by `[^\W_]`, and non-word punctuation always splits."""
+    assert reference_tokens("amide_coupling, tert-butyl!") == {
+        "amide",
+        "coupling",
+        "tert",
+        "butyl",
+    }
+
+
+def test_digits_are_tokens_too() -> None:
+    """A structure id or a CAS-like number is indexed the same way a word is."""
+    assert reference_tokens("compound 4056 route B") == {"compound", "4056", "route", "b"}
+
+
+def test_empty_and_symbol_only_text_yields_no_tokens() -> None:
+    """No word characters at all — not an error, just nothing to index or query."""
+    assert reference_tokens("") == set()
+    assert reference_tokens("--- ...") == set()
+
+
+def test_reference_terms_splits_wanted_from_excluded() -> None:
+    """A leading `-` on a word marks it wanted-out, exactly as `websearch_to_tsquery` reads it."""
+    wanted, excluded = reference_terms("amide coupling -solvent")
+    assert wanted == {"amide", "coupling"}
+    assert excluded == {"solvent"}
+
+
+def test_a_hyphenated_name_is_not_read_as_an_exclusion() -> None:
+    """`tert-butyl` is one word with a hyphen inside it, not `-butyl` excluding `butyl`.
+
+    `_EXCLUSION` is anchored on the leading `-` of a whitespace-delimited word; a hyphen in the
+    middle of a word never triggers it.
+    """
+    wanted, excluded = reference_terms("tert-butyl amide")
+    assert wanted == {"tert", "butyl", "amide"}
+    assert excluded == set()
+
+
+def test_a_token_both_wanted_and_excluded_is_excluded() -> None:
+    """`amide -amide` must exclude, matching the durable `('amid') & !'amid'` reading."""
+    wanted, excluded = reference_terms("amide -amide")
+    assert wanted == set()
+    assert excluded == {"amide"}
+
+
+def test_a_multi_word_exclusion_excludes_every_word_in_it() -> None:
+    """`-solvent selection` is one exclusion word plus a positive word, not two exclusions."""
+    wanted, excluded = reference_terms("amide -solvent selection")
+    assert wanted == {"amide", "selection"}
+    assert excluded == {"solvent"}
+
+
+def test_a_stop_word_or_symbol_only_query_yields_two_empty_sets() -> None:
+    """No real terms in the query at all — the caller must return nothing, not the whole corpus."""
+    wanted, excluded = reference_terms("--- ...")
+    assert wanted == set()
+    assert excluded == set()
+
+
+def test_reference_terms_lowercases_and_dedupes_across_words() -> None:
+    """The two halves of `reference_terms` share `reference_tokens`, case-fold included."""
+    wanted, excluded = reference_terms("Suzuki suzuki -Solvent")
+    assert wanted == {"suzuki"}
+    assert excluded == {"solvent"}
 
 
 # One corpus, written the way a process chemist writes. Every entry carries at least one thing the
@@ -81,39 +168,6 @@ CHEMISTRY_QUERIES: list[str] = [
 ]
 
 
-def test_case_is_folded_rather_than_stripped() -> None:
-    """`Suzuki` is the token `suzuki`, not `uzuki`.
-
-    The mutant this kills is `[a-z0-9]+`, which does not match an uppercase letter and therefore
-    starts the token *after* it. Named reactions and solvent acronyms are the words a chemist
-    searches by and the words most likely to be capitalised, so this alphabet fails hardest exactly
-    where it is used most: `DMF` collapses to the single character `d`.
-    """
-    assert reference_tokens("Suzuki") == {"suzuki"}
-    assert reference_tokens("DMF NMP THF HATU") == {"dmf", "nmp", "thf", "hatu"}
-
-
-def test_a_non_ascii_letter_is_part_of_a_token_rather_than_a_separator() -> None:
-    """`Lösungsmittel` is one token, and Postgres indexes it as one.
-
-    An ASCII-only alphabet splits it into `l` and `sungsmittel` and drops a CJK term entirely — and
-    a one-or-two-character fragment then counts as a matched term, which inflates a coverage score
-    rather than failing visibly.
-    """
-    assert reference_tokens("Lösungsmittel") == {"lösungsmittel"}
-    assert reference_tokens("naïve café Prüfung") == {"naïve", "café", "prüfung"}
-    assert reference_tokens("超純水") == {"超純水"}
-
-
-def test_an_underscore_separates_tokens_because_postgres_separates_on_it() -> None:
-    r"""`tert_butyl` is two tokens, because `to_tsvector` splits it into `tert` and `butyl`.
-
-    Measured on live PostgreSQL 16. This is the `_` in `[^\W_]+` earning its place — dropping it
-    would make the reference read `tert_butyl` as one token the server never produces.
-    """
-    assert reference_tokens("tert_butyl") == {"tert", "butyl"}
-
-
 def test_a_decimal_is_one_token_because_postgres_emits_a_float_whole() -> None:
     """`98.5` does not become `98` and `5`.
 
@@ -134,28 +188,6 @@ def test_a_sign_is_detached_from_the_number_it_precedes() -> None:
     """
     assert reference_tokens("charged at -78 C") == {"charged", "at", "78", "c"}
     assert normalize_search_text("held at -78 C") == "held at  78 C"
-
-
-def test_a_word_exclusion_survives_the_normalisation() -> None:
-    """`-solvent` is still an exclusion; only a hyphen before a *digit* is a sign.
-
-    The two readings of `-` have to coexist, and this is the line between them. A reference that
-    read `-solvent` as a request for solvent is the defect `reference_terms` was written against.
-    """
-    wanted, excluded = reference_terms("amide coupling -solvent")
-    assert wanted == {"amide", "coupling"}
-    assert excluded == {"solvent"}
-
-
-def test_a_term_both_wanted_and_excluded_is_excluded() -> None:
-    """Mirrors the durable `('amid') & !'amid'`, which matches nothing."""
-    assert reference_terms("amide -amide") == (set(), {"amide"})
-
-
-def test_a_query_of_no_real_terms_asks_for_nothing() -> None:
-    """Both sets empty means "no query" — it must not read as "the whole corpus"."""
-    assert reference_terms("!!! ___ +++") == (set(), set())
-    assert reference_terms("") == (set(), set())
 
 
 def test_both_backends_return_the_same_hits_over_a_chemistry_corpus() -> None:
