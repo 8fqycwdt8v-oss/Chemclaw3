@@ -252,6 +252,20 @@ connectors:
     # bearer on `/mcp` itself, so a missing credential is a refused call rather than an open one.
     server: true
     url: http://chemclaw3-mcp-chem:8858/mcp
+  rxnpredict:
+    # Reaction and condition prediction by ensemble (`Chemclaw3-mcp`'s `servers/rxnpredict`, port
+    # 8857). The same shape as `chem` and `safety` above, for the same reason and with the same two
+    # operator obligations: no Deployment and no Service render, the host needs a
+    # `networkPolicy.egressDestinations` entry *and* `networkPolicy.egressPorts.rxnpredict`, and
+    # `CHEMCLAW_RXNPREDICT_TOKEN` has to be provided or every call is refused.
+    #
+    # **On, because the six tools are read-only predictors and the capability was unreachable
+    # without this line.** Enablement is not a claim that the server is up: with no address
+    # reachable the connector fails its health probe and its tools degrade, which is the same
+    # posture every other externally-hosted bundle here already has.
+    enabled: true
+    server: true
+    url: http://chemclaw3-mcp-rxnpredict:8857/mcp
   calc:
     enabled: true
     server: true
@@ -841,6 +855,11 @@ secrets:
     chemToken: "CHEMCLAW_CHEM_TOKEN"
     safetyToken: "CHEMCLAW_SAFETY_TOKEN"
     calcToken: "CHEMCLAW_CALC_TOKEN"
+    # The fourth of exactly that kind, and the paragraph above applies to it verbatim: the
+    # `rxnpredict` bundle's manifest names this variable with `token_env`, `_EnvBearerAuth` reads it
+    # per request, and unset means `MissingConnectorCredential` on the first prediction rather than
+    # a degraded one.
+    rxnpredictToken: "CHEMCLAW_RXNPREDICT_TOKEN"
     # The four bundles **we** host, each authenticating its own `/mcp` (D-2026-08-20). Until they
     # declared a credential the NetworkPolicy was the only thing between any pod in the namespace
     # and a tool that starts durable expensive work — and a NetworkPolicy selects peers, not paths.
@@ -1249,6 +1268,11 @@ networkPolicy:
     chem: 8858
     safety: 8859
     calc: 8860
+    # The reaction/condition predictor (`connectors.rxnpredict.url` above), on exactly the terms
+    # the three lines above describe: plain HTTP on its own port, so `egressPorts.https` does not
+    # cover it, and without an entry here an operator who adds the host to `egressDestinations`
+    # still has every packet dropped — the misreading this chart used to ship.
+    rxnpredict: 8857
   # WHERE those ports may be dialled. Empty renders `to: []`, which in a NetworkPolicy means
   # **any destination** — so with this unset, TCP/443 from every pod to the whole internet is
   # permitted. The addresses are deployment-specific and a chart cannot invent your Postgres CIDR,

@@ -47,7 +47,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.logging import configure_logging
-from chemclaw.core.turn_text import reset_current_user_text, set_current_user_text
+from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_texts
 
 _EXIT_WORDS = {"exit", "quit", ":q"}
 
@@ -117,7 +117,12 @@ def _build_cli_agent(
     )
 
 
-async def converse(agent: Any, prompt: str, session_id: str = _CLI_SESSION_ID) -> str:
+async def converse(
+    agent: Any,
+    prompt: str,
+    session_id: str = _CLI_SESSION_ID,
+    earlier: Sequence[str] = (),
+) -> str:
     """Run one turn on the graph under `session_id` and return its text answer.
 
     Reusing one `session_id` across successive calls is what makes the CLI a multi-turn
@@ -125,6 +130,9 @@ async def converse(agent: Any, prompt: str, session_id: str = _CLI_SESSION_ID) -
     one left. Which store that is, and how long it lasts, is `checkpointer.process_checkpointer`'s
     decision — and until that function existed this sentence was false, because the graph was built
     with no checkpointer at all and every turn started empty.
+
+    `earlier` is the operator's previous prompts in this REPL, oldest first; see the comment on the
+    stamp below for why the CLI's window is the process rather than a stored transcript.
 
     **The `session=` parameter is gone, and so is the reason it was mandatory.** Under MAF the
     harness middleware raised "ToolApprovalMiddleware requires an AgentSession" on a session-less
@@ -136,14 +144,22 @@ async def converse(agent: Any, prompt: str, session_id: str = _CLI_SESSION_ID) -
     # system — and `protocols` refuses a `basis="stated"` quote it cannot check against one
     # (`core.turn_text`). Reset in a `finally` so a failed turn does not leak one prompt into the
     # next.
-    token = set_current_user_text(prompt)
+    #
+    # **`earlier` is what keeps this consistent with the front door**, which reads the thread's
+    # user turns out of the session transcript so a constraint stated two turns ago is still
+    # quotable. This CLI writes no transcript — it drives the graph, and `_record_transcript` is
+    # the runner's — so its thread memory for this purpose is the process it is running in: the
+    # REPL passes what has been typed into it. The bound is `core.turn_text`'s in both cases, so
+    # what counts as the chemist's own words is the same on either surface; only how far back each
+    # can see differs, and this one sees less.
+    token = set_current_user_texts([*earlier, prompt])
     try:
         result = await agent.ainvoke(
             turn_input(prompt),
             turn_config(session_id),
         )
     finally:
-        reset_current_user_text(token)
+        reset_current_user_texts(token)
     return answer_text(result)
 
 
@@ -214,6 +230,13 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
         "Chemclaw CLI — type a question, '/plan', '/approve', or 'exit' to quit.",
         file=sys.stderr,
     )
+    # What the operator has typed at this prompt, in order — this CLI's stand-in for the session
+    # transcript the front door reads back. The two operator commands are not in it: `/plan` and
+    # `/approve` are instructions to the terminal rather than words said to the agent, and a
+    # `basis="stated"` slot quoting `'/approve'` would attribute a UI action to a chemist. Kept
+    # whole rather than trimmed here, because the window belongs to `core.turn_text` and a second
+    # copy of a bound is a bound that can disagree with itself.
+    said: list[str] = []
     while True:
         try:
             prompt = input("chemclaw> ").strip()
@@ -228,7 +251,12 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
             if prompt.lower() in _PLAN_COMMANDS:
                 print(await _plan_command(prompt, actor, saver), file=sys.stderr)
                 continue
-            print((await converse(agent, prompt)).strip())
+            answer = (await converse(agent, prompt, earlier=said)).strip()
+            # Recorded only once the turn answered, which is the front door's rule rather than a
+            # convenience: `api.runner._record_transcript` writes nothing for a turn that produced
+            # no answer, so a failed turn leaves no quotable words there either.
+            said.append(prompt)
+            print(answer)
         except Exception as exc:  # keep the session alive across a single failed turn
             print(f"error: {exc}", file=sys.stderr)
 

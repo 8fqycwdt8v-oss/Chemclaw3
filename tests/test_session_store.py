@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, message_to_dict
+from psycopg.types.json import Jsonb
 
 from chemclaw.agent.chemclaw_agent import history_provider
 from chemclaw.agent.message_migration import LANGCHAIN_SHAPE
@@ -35,6 +36,7 @@ from chemclaw.core.identity_context import (
     set_current_correlation_id,
 )
 from chemclaw.core.metrics import METRICS
+from tests.legacy_rows import legacy_text
 from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
 # The counter that separates "one unreadable legacy row" from "the reader is broken for everyone".
@@ -449,6 +451,109 @@ def test_a_row_that_will_not_convert_is_marked_as_recovered_rather_than_passing_
     decoded = message_from_row(message_to_dict(HumanMessage(content="hello")), LANGCHAIN_SHAPE)
     assert not is_degraded_render(decoded), "a decoded row must not be marked as a guess"
     assert decoded.content == "hello"
+
+
+def test_the_bounded_user_read_returns_the_chemists_own_words_and_only_those() -> None:
+    """`recent_user_texts` is the other read of this table, and it answers a different question.
+
+    `get_messages` renders a whole conversation for a person and must never grow a `LIMIT`; this
+    one fills `core/turn_text`'s ambient — what a `basis="stated"` quote may be checked against —
+    and is bounded because it runs once per turn on the answer path. The filter is the whole
+    property: a tool result quoted back as the chemist's own words is the fabrication that check
+    exists to refuse, and a tool-heavy turn is where a naive "last N rows" would find nothing but
+    them.
+    """
+
+    async def _run() -> None:
+        writer = await _provider_or_skip()
+        session_id = "sess-stated-quote-window"
+        await _clear(session_id)
+        for turn in range(4):
+            await writer.save_messages(
+                session_id,
+                [
+                    HumanMessage(content=f"turn {turn}: 24 wells, no DMF"),
+                    AIMessage(
+                        content="checking",
+                        tool_calls=[{"name": "t", "args": {}, "id": f"c-{turn}"}],
+                    ),
+                    ToolMessage(content="the plate holds 384 wells", tool_call_id=f"c-{turn}"),
+                    AIMessage(content="I would use 96 wells"),
+                ],
+            )
+
+        reader = PostgresHistoryProvider()
+        assert await reader.recent_user_texts(session_id, limit=10) == [
+            f"turn {turn}: 24 wells, no DMF" for turn in range(4)
+        ], "the read returned something other than the chemist's own messages, in order"
+        # Bounded, and the bound keeps the *newest* — an older constraint falling out of the window
+        # is a refusal a chemist can act on; a newer one falling out is the turn in flight going
+        # unquotable.
+        assert await reader.recent_user_texts(session_id, limit=2) == [
+            "turn 2: 24 wells, no DMF",
+            "turn 3: 24 wells, no DMF",
+        ]
+        assert await reader.recent_user_texts(session_id, limit=0) == []
+        assert await reader.recent_user_texts(None, limit=10) == []
+
+    asyncio.run(_run())
+
+
+def test_an_unstamped_legacy_row_is_not_offered_as_the_chemists_own_words() -> None:
+    """The conservative half of a rule about evidence, and it is a rule about *producers*.
+
+    An unstamped row is MAF (`message_from_row`), written by an engine whose history provider was
+    called on every run rather than once after the answer — so what carried the `user` role there
+    is not the set this system can now say a person typed. It still renders in the transcript,
+    which is a different promise: a reader is being shown a conversation, not being handed evidence
+    to grade an attribution against.
+    """
+
+    async def _run() -> None:
+        writer = await _provider_or_skip()
+        session_id = "sess-stated-quote-legacy"
+        await _clear(session_id)
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)",
+                    (session_id, Jsonb(legacy_text("user", "24 wells, no DMF"))),
+                )
+        await writer.save_messages(session_id, [HumanMessage(content="ok go ahead")])
+
+        reader = PostgresHistoryProvider()
+        assert [type(m) for m in await reader.get_messages(session_id)] == [
+            HumanMessage,
+            HumanMessage,
+        ], "the legacy row stopped rendering in the transcript, which is a separate promise"
+        assert await reader.recent_user_texts(session_id, limit=10) == ["ok go ahead"]
+
+    asyncio.run(_run())
+
+
+def test_the_in_memory_provider_answers_the_bounded_read_the_same_way() -> None:
+    """A check that behaves differently under `session_store="memory"` is a check with a bypass."""
+
+    async def _run() -> None:
+        provider = InMemoryHistoryProvider()
+        state: dict[str, Any] = {}
+        await provider.save_messages(
+            "sess-mem",
+            [
+                HumanMessage(content="24 wells, no DMF"),
+                AIMessage(content="I would use 96 wells"),
+                HumanMessage(content="ok go ahead"),
+            ],
+            state=state,
+        )
+        assert await provider.recent_user_texts("sess-mem", limit=10, state=state) == [
+            "24 wells, no DMF",
+            "ok go ahead",
+        ]
+        assert await provider.recent_user_texts("sess-mem", limit=1, state=state) == ["ok go ahead"]
+        assert await provider.recent_user_texts("sess-mem", limit=10, state=None) == []
+
+    asyncio.run(_run())
 
 
 def test_a_stored_message_carries_the_correlation_id_of_the_turn_that_wrote_it() -> None:

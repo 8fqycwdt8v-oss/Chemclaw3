@@ -252,6 +252,31 @@ class AgentSettings(BaseSettings):
     # written under a shared prefix would be one nobody can erase and everybody can read
     # (`agent/scratchpad.memory_namespace`).
     agent_memory_enabled: bool = False
+    # **How much of the chemist's own conversation stays quotable** — the ambient
+    # `core/turn_text.py` binds and `agent/protocol_design_tools.require_quotes_are_verbatim`
+    # checks a `basis="stated"` slot against.
+    #
+    # It carried exactly the message that started the turn in flight, while
+    # `structure_experiment_request` tells the model to call it "first … while correcting it is
+    # still cheap" — iteratively, across turns. Measured: a chemist who wrote "24 wells, no DMF, by
+    # Friday please." on turn 1 and "ok go ahead" on turn 3 had the intake refused, because
+    # `'24 wells'` is not in "ok go ahead". So an honest `stated` was unrepresentable on the
+    # ordinary path, and the remedy the refusal prescribed recorded a real chemist constraint as a
+    # model inference.
+    #
+    # **Two currencies, because either alone is unbounded in the other** — the
+    # `agent_keep_last_conversation_groups` lesson, and the reason `protocol_digest_*` is a pair.
+    # The front door accepts `service_max_message_chars` (100,000) in one message, so a turn count
+    # bounds no memory at all: 20 turns is up to 2 MB held in a contextvar for the turn's whole
+    # duration and scanned on every `stated` slot.
+    #
+    # `agent_stated_quote_turns` counts the chemist's *earlier* messages; the turn in flight is
+    # always quotable and is never counted here, so `0` is exactly the behaviour this widening
+    # replaced. `agent_stated_quote_chars` bounds the whole window, that message included — and it
+    # cannot take that message away, because a bound that could would make a configuration
+    # silently stricter than the narrow version it replaced.
+    agent_stated_quote_turns: int = Field(default=20, ge=0)
+    agent_stated_quote_chars: int = Field(default=20_000, ge=1)
     # Local testing CLI (`agents.cli`). The CLI is a developer affordance for driving the agent
     # from a terminal; the production ingress is Teams/Copilot with native Entra-ID SSO
     # (architektur.md §7), not this. Because Entra enforcement defaults off in dev

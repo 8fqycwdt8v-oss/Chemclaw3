@@ -21,6 +21,7 @@ from chemclaw.agent.plan_approval_store import InMemoryPlanApprovalStore
 from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, plan_identity
 from chemclaw.cli import chat as cli
 from chemclaw.core.config import settings
+from chemclaw.core.turn_text import get_current_user_texts
 
 
 def test_admin_identity_is_the_configured_actor_holding_the_configured_roles(
@@ -138,6 +139,48 @@ def test_successive_turns_continue_one_thread() -> None:
     asyncio.run(cli.converse(agent, "first"))
     asyncio.run(cli.converse(agent, "second"))
     assert seen == [cli._CLI_SESSION_ID, cli._CLI_SESSION_ID]
+
+
+def test_the_repl_carries_what_the_operator_typed_into_the_next_turns_ambient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI's half of the `basis="stated"` window, and it is a bypass if it differs.
+
+    The front door widens the quotable ambient to the thread's user turns by reading the session
+    transcript (`api.runner._earlier_user_texts`). This CLI writes no transcript, so its window is
+    the process: the REPL keeps what has been typed and hands it to `converse`. A terminal on which
+    a chemist's constraint from two prompts ago is unquotable, while the same conversation through
+    the front door accepts it, is one surface grading an attribution differently from the other.
+
+    The two operator commands stay out of it: `/plan` and `/approve` are instructions to the
+    terminal, and a `stated` slot quoting `'/approve'` would record a UI action as something a
+    chemist said.
+    """
+    seen: list[tuple[str, ...] | None] = []
+
+    class _Message:
+        content = "ok"
+
+    class _Agent:
+        async def ainvoke(self, _state: object, _config: object) -> dict[str, object]:
+            seen.append(get_current_user_texts())
+            return {"messages": [_Message()]}
+
+    typed = iter(["24 wells, no DMF, by Friday please.", "/plan", "ok go ahead", "exit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(typed))
+    monkeypatch.setattr(cli, "_plan_command", _plan_answer)
+
+    asyncio.run(cli._repl(_Agent(), "admin@localhost", None))
+
+    assert seen == [
+        ("24 wells, no DMF, by Friday please.",),
+        ("24 wells, no DMF, by Friday please.", "ok go ahead"),
+    ]
+
+
+async def _plan_answer(_prompt: str, _actor: str, _saver: object) -> str:
+    """What `/plan` prints, stubbed — the REPL test is about the ambient, not the plan store."""
+    return "(no plan yet)"
 
 
 # --- `/approve` decides on a plan, or refuses — the same question the HTTP route asks -----------

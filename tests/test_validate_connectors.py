@@ -315,13 +315,29 @@ def test_a_declared_but_unserved_tool_is_unverifiable_for_a_bundle_we_do_not_run
     check's identical blind spot.
     """
     from chemclaw.cli.validate_connectors import _served_tool_problems, unverified_tool_surfaces
+    from chemclaw.connectors.registry import discovered
 
     manifest = ConnectorManifest.model_validate(_MANIFEST)
     absent = ModuleNotFoundError("No module named 'chemclaw.connectors.probe.server'")
     absent.name = "chemclaw.connectors.probe.server.tools"
     with mock.patch("chemclaw.connectors.registry.importlib.import_module", side_effect=absent):
         assert _served_tool_problems(manifest) == []
-    # The shipped tree: both declared-not-run bundles, with the tools nothing here can verify.
+    # **The shipped set is derived, not typed out.** This assertion named `chem` and `safety`
+    # because those were the two declared-not-run bundles the day it was written, so wiring a
+    # third (`rxnpredict`) turned a correct manifest into a red gate. That is the same defect
+    # `tests/test_deploy_chart.py`'s all-disabled arm carried, one file over and found in the same
+    # change — a test that enumerates a set the tree owns stops testing its property and starts
+    # testing its own vintage.
+    #
+    # The property is: a bundle is unverifiable here exactly when it declares an endpoint and
+    # ships no `server/` package for anything to ask.
+    expected = {
+        name
+        for name, (bundle, manifest) in discovered().items()
+        if manifest.endpoint is not None and not (bundle / "server").is_dir()
+    }
+    assert expected, "no declared-not-run bundle in the tree, so this test proves nothing"
     unverified = unverified_tool_surfaces()
-    assert set(unverified) == {"chem", "safety"}, unverified
+    assert set(unverified) == expected, unverified
+    # One concrete tool, so the mapping is not merely present but populated.
     assert "screen_hazards" in unverified["safety"]

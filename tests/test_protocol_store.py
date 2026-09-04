@@ -32,6 +32,7 @@ from chemclaw.protocols.store import (
     InMemoryDesignStore,
     PostgresDesignStore,
     RevisionConflict,
+    StatusConflict,
     UnknownDesign,
     UnstorableDocument,
     advanced,
@@ -317,7 +318,11 @@ def test_set_status_on_an_unknown_design_is_refused(backend: str) -> None:
         store = await _backend(backend)
         with pytest.raises(UnknownDesign, match="no design"):
             await store.set_status(
-                _id(backend, "ghost"), "approved", expected_revision=1, actor="chemist-a"
+                _id(backend, "ghost"),
+                "approved",
+                expected_revision=1,
+                expected_status="draft",
+                actor="chemist-a",
             )
 
     _run(_body)
@@ -331,7 +336,13 @@ def test_set_status_moves_a_design_a_write_never_would(backend: str) -> None:
         # An arm, because `require_movable` refuses `approved` on a design holding only the ask —
         # and the revision's `kind` is derived from the document, so the two cannot disagree.
         await store.append(design_id, _design(arms=1), [], author_kind="agent", status="draft")
-        await store.set_status(design_id, "approved", expected_revision=1, actor="chemist-a")
+        await store.set_status(
+            design_id,
+            "approved",
+            expected_revision=1,
+            expected_status="draft",
+            actor="chemist-a",
+        )
         summary = await store.summary(design_id)
         assert summary is not None and summary.status == "approved"
 
@@ -373,7 +384,7 @@ def test_the_one_automatic_status_transition_and_the_two_that_are_not(backend: s
         second = await store.summary(design_id)
         assert second is not None and second.status == "draft"
 
-        await store.set_status(design_id, "approved", expected_revision=2)
+        await store.set_status(design_id, "approved", expected_revision=2, expected_status="draft")
         await store.append(
             design_id,
             _design(arms=1),
@@ -389,7 +400,7 @@ def test_the_one_automatic_status_transition_and_the_two_that_are_not(backend: s
             "for a document nobody signed off"
         )
 
-        await store.set_status(design_id, "abandoned", expected_revision=3)
+        await store.set_status(design_id, "abandoned", expected_revision=3, expected_status="draft")
         await store.append(
             design_id,
             _design(arms=1),
@@ -419,16 +430,19 @@ def test_every_status_the_type_allows_is_a_status_the_schema_accepts(backend: st
         design_id = _id(backend, "allstatuses")
         design = _design(arms=1)
         await store.append(design_id, design, run_checks(design), author_kind="agent")
+        held: DesignStatus = "draft"
         for status in get_args(DesignStatus):
             await store.set_status(
                 design_id,
                 status,
                 expected_revision=1,
+                expected_status=held,
                 actor="chemist-a",
                 reason=f"moving to {status}",
             )
             summary = await store.summary(design_id)
             assert summary is not None and summary.status == status
+            held = status
 
         recorded = [event.status for event in await store.status_history(design_id)]
         assert recorded == list(reversed(get_args(DesignStatus)))
@@ -475,6 +489,7 @@ def test_a_status_move_records_which_revision_it_was_made_against(backend: str) 
             design_id,
             "approved",
             expected_revision=1,
+            expected_status="draft",
             actor="chemist-a",
             reason="80 C is the precedent",
         )
@@ -513,10 +528,20 @@ def test_status_history_is_newest_first_and_empty_before_any_move(backend: str) 
         assert await store.status_history(design_id) == []
 
         await store.set_status(
-            design_id, "approved", expected_revision=1, actor="chemist-a", reason="fine"
+            design_id,
+            "approved",
+            expected_revision=1,
+            expected_status="draft",
+            actor="chemist-a",
+            reason="fine",
         )
         await store.set_status(
-            design_id, "executed", expected_revision=1, actor="chemist-b", reason="ran it Tuesday"
+            design_id,
+            "executed",
+            expected_revision=1,
+            expected_status="approved",
+            actor="chemist-b",
+            reason="ran it Tuesday",
         )
         events = await store.status_history(design_id)
         assert [event.status for event in events] == ["executed", "approved"]
@@ -721,6 +746,7 @@ def test_a_design_holding_only_the_ask_cannot_be_marked_executed(backend: str) -
                     _askonly,
                     refused,
                     expected_revision=1,
+                    expected_status="requested",
                     actor="chemist-a",
                     reason="ran it",
                 )
@@ -729,11 +755,126 @@ def test_a_design_holding_only_the_ask_cannot_be_marked_executed(backend: str) -
             _askonly,
             "abandoned",
             expected_revision=1,
+            expected_status="requested",
             actor="chemist-a",
             reason="not going ahead",
         )
         header = await store.summary(_askonly)
         assert header is not None and header.status == "abandoned"
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_two_people_at_one_revision_cannot_both_decide(backend: str) -> None:
+    """The defect `expected_status` closes, driven the way it actually happens: sequentially.
+
+    `expected_revision` is a compare-and-set on the *document*, so it was silent about the
+    decision. Measured before this: alice abandoning revision 1 and bob approving revision 1 both
+    returned, and the header read `approved` — 100 of 100 pairs over `asyncio.gather` as well, with
+    the header landing 16 `approved` / 84 `abandoned`. No race is needed; reading a design,
+    thinking, and clicking is enough.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design_id = _id(backend, "two-deciders")
+        await store.append(design_id, _design(arms=1), [], author_kind="agent", status="draft")
+
+        await store.set_status(
+            design_id,
+            "abandoned",
+            expected_revision=1,
+            expected_status="draft",
+            actor="alice",
+            reason="the SM decomposes above 40 C",
+        )
+        with pytest.raises(StatusConflict, match="not 'draft' as you saw it"):
+            await store.set_status(
+                design_id,
+                "approved",
+                expected_revision=1,
+                expected_status="draft",
+                actor="bob",
+                reason="looks fine to me",
+            )
+
+        header = await store.summary(design_id)
+        assert header is not None and header.status == "abandoned", (
+            "a design retired because the starting material decomposes must not come back into "
+            "the draft listing because a second person had it open"
+        )
+        # And the refusal is not a quieter move: nothing was recorded either.
+        assert [event.status for event in await store.status_history(design_id)] == ["abandoned"]
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_the_status_a_caller_saw_is_the_one_it_moves_from(backend: str) -> None:
+    """Bob is refused, re-reads, and decides again — the whole remedy, in one test.
+
+    The complement of the refusal above, and the reason `require_unmoved` lets a no-op through:
+    a caller that names the status actually on the design is exactly the caller that has read it.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design_id = _id(backend, "re-read")
+        await store.append(design_id, _design(arms=1), [], author_kind="agent", status="draft")
+        await store.set_status(
+            design_id, "approved", expected_revision=1, expected_status="draft", actor="alice"
+        )
+
+        # Bob re-reads: the design is `approved`, and naming that is what lets him decide again.
+        await store.set_status(
+            design_id, "executed", expected_revision=1, expected_status="approved", actor="bob"
+        )
+        # A no-op move is not a conflict — a double click is not an error a chemist must interpret.
+        await store.set_status(
+            design_id, "executed", expected_revision=1, expected_status="executed", actor="bob"
+        )
+
+        header = await store.summary(design_id)
+        assert header is not None and header.status == "executed"
+        assert len(await store.status_history(design_id)) == 3
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_stale_revision_is_reported_before_a_stale_status(backend: str) -> None:
+    """Both compare-and-sets are stale at once whenever a revision lands on a decided design.
+
+    `advanced()` demotes an `approved` design to `draft` when a revision arrives, so a caller
+    holding revision 1 / `approved` is wrong about both. The document is the bigger loss and its
+    remedy is a diff, so that is the refusal the caller is given.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design_id = _id(backend, "both-stale")
+        await store.append(design_id, _design(arms=1), [], author_kind="agent", status="draft")
+        await store.set_status(
+            design_id, "approved", expected_revision=1, expected_status="draft", actor="alice"
+        )
+        await store.append(
+            design_id,
+            _design(arms=2),
+            [],
+            author_kind="human",
+            parent_revision=1,
+            change_note="a second arm",
+        )
+
+        with pytest.raises(RevisionConflict, match="is not the head"):
+            await store.set_status(
+                design_id,
+                "executed",
+                expected_revision=1,
+                expected_status="approved",
+                actor="bob",
+            )
 
     _run(_body)
 
@@ -758,6 +899,7 @@ def test_a_drafted_protocol_can_still_be_approved(backend: str) -> None:
             _signoff,
             "approved",
             expected_revision=1,
+            expected_status="draft",
             actor="chemist-a",
             reason="the precedent holds",
         )
@@ -853,8 +995,20 @@ def test_page_selects_a_revision_and_orders_the_two_histories(backend: str) -> N
             parent_revision=1,
             change_note="a second arm",
         )
-        await store.set_status(design_id, "approved", expected_revision=2, actor="chemist-a")
-        await store.set_status(design_id, "executed", expected_revision=2, actor="chemist-b")
+        await store.set_status(
+            design_id,
+            "approved",
+            expected_revision=2,
+            expected_status="draft",
+            actor="chemist-a",
+        )
+        await store.set_status(
+            design_id,
+            "executed",
+            expected_revision=2,
+            expected_status="approved",
+            actor="chemist-b",
+        )
 
         head = await store.page(design_id)
         assert head is not None

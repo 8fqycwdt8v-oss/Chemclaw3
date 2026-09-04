@@ -11,7 +11,9 @@ load-bearing, made it grow without bound, made a half-written turn a poison pill
 mechanisms necessary that are now gone (a disconnect rollback, a read-time orphan repair, and a
 compaction pass over the stored rows). Turn state lives in the LangGraph checkpointer now. What is
 written here is written once, by `chemclaw.api.runner._record_transcript`, after the answer exists;
-what reads it is `GET /sessions/{id}/messages` and the audit trail's join, both for a person.
+what reads it is `GET /sessions/{id}/messages` and the audit trail's join, both for a person — and,
+since the `basis="stated"` window was widened to the thread, `recent_user_texts`, which is not for a
+person and is bounded accordingly.
 
 This is the conversation layer, deliberately separate from Temporal job state (D-002) and the
 calculation cache. A message is stored as LangChain's own `message_to_dict()`, so the column is a
@@ -35,6 +37,14 @@ the read repaired tool-call pairings and wrote the repair back. It is now a rend
 reader is a person reloading a conversation, and a transcript that silently omits its own beginning
 does not look truncated — it looks like the conversation started later than it did.
 
+**It is a rule about that read, not about this table**, and `recent_user_texts` is what makes the
+distinction load-bearing rather than pedantic. That one answers "what has this chemist written" for
+`core/turn_text`'s ambient, runs once per turn on the answer path, and is bounded in SQL by the
+chemist's own rows and by a configured window — because its reader is a check rather than a person,
+and a check reading a whole conversation to grade one quote is a cost every turn pays. Two reads,
+two bounds, one table; putting a `LIMIT` on the first to serve the second is what this pair exists
+to prevent.
+
 **The table is bounded by `durable/retention.py`, by age, and by nothing else.** A compaction pass
 used to shrink it too, applying the model's context-window policy (`keep_last_conversation_groups`)
 to the stored rows. That was right while the rows were the model's context and wrong the moment they
@@ -47,7 +57,7 @@ pairing components (`droppable_rows`, D-145).
 import base64
 import binascii
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime
 from functools import cache
@@ -102,6 +112,36 @@ def is_degraded_render(message: BaseMessage) -> bool:
     speaker, whatever label it happens to carry.
     """
     return DEGRADED_RENDER in message.additional_kwargs
+
+
+def chemist_words(messages: Iterable[BaseMessage]) -> list[str]:
+    """Only the messages a *person* typed, as plain text, in the order they were said.
+
+    The filter behind `core/turn_text`'s ambient, and the reason widening a `basis="stated"` quote
+    to the thread costs the anti-spoofing property nothing: what makes a quote evidence is that the
+    model cannot have written it, so an assistant turn, a tool result and a recovered row are all
+    excluded here rather than at the two call sites.
+
+    Three exclusions, each for its own reason:
+
+    - **not a `HumanMessage`** — the model's own prose quoted back as the chemist's words is
+      exactly the fabrication the check exists to refuse;
+    - **a recovered row** (`is_degraded_render`) — its speaker is a *guess* made by
+      `_degraded_class` from a label on a row that would not decode, and a guess cannot be
+      evidence about a person;
+    - **non-string content** — a block list is the assistant's wire shape; nothing writes a
+      chemist's message as one, so a row carrying it is not the thing this returns.
+
+    Two callers, which is why it is a function rather than a comprehension in each: the durable
+    provider filters rows it has just decoded, and the in-memory one filters the messages it kept.
+    """
+    return [
+        message.content
+        for message in messages
+        if isinstance(message, HumanMessage)
+        and isinstance(message.content, str)
+        and not is_degraded_render(message)
+    ]
 
 
 def message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
@@ -264,6 +304,29 @@ _INSERT = (
 # rule.
 SELECT_SESSION_ROWS = (
     "SELECT id, message, message_shape FROM session_messages WHERE session_id = %s ORDER BY id"
+)
+
+# The chemist's own words in one thread, newest first — the bounded read behind `core/turn_text`'s
+# ambient, and deliberately *not* `SELECT_SESSION_ROWS` with a `LIMIT` bolted on. That read's
+# no-`LIMIT` rule is a rendering rule (a person reloading a conversation must not be shown a
+# transcript that silently omits its own beginning); this one has a different reader and a
+# different bound, and conflating them would put a cap on the transcript to serve a check.
+#
+# **Filtered in SQL rather than in Python, because the rows this skips are the expensive ones.** A
+# turn writes one human row and two more per tool call, each carrying a whole tool result, so a
+# `LIMIT n` over all rows would detoast megabytes of JSONB to find a handful of typed sentences —
+# and could return no human row at all for a tool-heavy turn, which is the same defect as a bound
+# in the wrong currency. `(session_id, id)` (migration 008) serves the scan; the two predicates are
+# a filter on top of it.
+#
+# `message_shape` is pinned to the LangChain shape rather than left open: an unstamped row is MAF
+# (`message_from_row`), written by an engine whose provider was called on every run rather than
+# once after the answer, so what carried the `user` role there is not the set this system can now
+# say a person typed. Excluding them is the conservative half of a rule about evidence.
+_SELECT_RECENT_USER_ROWS = (
+    "SELECT message, message_shape FROM session_messages "
+    "WHERE session_id = %s AND message_shape = %s AND message->>'type' = 'human' "
+    "ORDER BY id DESC LIMIT %s"
 )
 
 # The per-session turn claim (D-121). One statement, so the check and the take cannot be
@@ -572,6 +635,42 @@ class PostgresHistoryProvider:
                 await cur.execute(SELECT_SESSION_ROWS, (session_id,))
                 rows = await cur.fetchall()
         return [message_from_row(row[1], row[2]) for row in rows]
+
+    async def recent_user_texts(
+        self,
+        session_id: str | None,
+        *,
+        limit: int,
+        state: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """The chemist's own last `limit` messages in this thread, oldest first.
+
+        **A different read from `get_messages`, on purpose.** That one renders a whole conversation
+        for a person and must never grow a `LIMIT`; this one answers "what has this chemist
+        written", for `core/turn_text`'s ambient, and is bounded because it runs on the turn's hot
+        path once per turn. Both facts are in the module docstring above; the rule there is about
+        the transcript, not about the table.
+
+        Args:
+            session_id: The thread. Unknown or `None` returns nothing, which every reader treats
+                as "no chemist spoke" rather than as a waiver.
+            limit: How many of the chemist's messages to return, newest kept.
+            state: Ignored — this provider deliberately keeps nothing in the session's state, and
+                the parameter is here so both providers answer the same call.
+
+        Returns:
+            Their messages oldest first, so the caller can append the turn in flight and have the
+            conversation in the order it was said.
+        """
+        if not session_id or limit <= 0:
+            return []
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_SELECT_RECENT_USER_ROWS, (session_id, LANGCHAIN_SHAPE, limit))
+                rows = await cur.fetchall()
+        # Reversed because the query orders newest-first to make the `LIMIT` mean "the most recent
+        # ones"; a conversation reads the other way.
+        return chemist_words(message_from_row(row[0], row[1]) for row in reversed(rows))
 
     async def save_messages(
         self,
@@ -911,6 +1010,23 @@ class InMemoryHistoryProvider:
             return []
         stored = state.get(self._KEY) or []
         return list(stored)
+
+    async def recent_user_texts(
+        self,
+        session_id: str | None,
+        *,
+        limit: int,
+        state: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """The chemist's own last `limit` messages in this session's state, oldest first.
+
+        The durable provider's counterpart, over the thread this one keeps in `state` — same
+        filter, same order, same bound, so a deployment on the memory store and one on Postgres
+        answer a `basis="stated"` quote the same way.
+        """
+        if state is None or limit <= 0:
+            return []
+        return chemist_words(state.get(self._KEY) or [])[-limit:]
 
     async def save_messages(
         self,

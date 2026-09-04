@@ -49,6 +49,7 @@ from chemclaw.protocols.models import (
 )
 from chemclaw.protocols.store import (
     RevisionConflict,
+    StatusConflict,
     UnknownDesign,
     UnstorableDocument,
     default_design_store,
@@ -134,6 +135,13 @@ class StatusIn(BaseModel):
     # not say what it approved is the one that gets attributed to a document nobody read. A
     # colleague saving while a chemist thinks is the ordinary case, not the exotic one.
     expected_revision: int = Field(ge=1)
+    # The status the person saw beside that revision. Required for the reason above one step
+    # further: `expected_revision` is a compare-and-set on the *document*, so it is silent about
+    # the decision — two people looking at revision 1 could approve and abandon it and both were
+    # told 204 (measured 100/100 over `asyncio.gather`; sequentially it needs no race at all). An
+    # *optional* field nobody sends would be a control that exists only in a docstring, so this is
+    # required and `Chemclaw3_ui` sends it.
+    expected_status: DesignStatus
     # **Recorded, which it was not.** `Chemclaw3_ui`'s status panel labels this "recorded with the
     # move", disables every button until it is filled in, and confirms "the move is recorded
     # against you with the reason you wrote" — and `set_status` took no `reason` at all, so the one
@@ -357,6 +365,7 @@ async def post_status(
             design_id,
             body.status,
             expected_revision=body.expected_revision,
+            expected_status=body.expected_status,
             actor=principal.oid or "",
             reason=body.reason,
         )
@@ -368,6 +377,15 @@ async def post_status(
         # a write against a revision exactly as an edit is.
         raise HTTPException(
             status_code=409, detail={"code": "revision_conflict", "message": str(exc)}
+        ) from exc
+    except StatusConflict as exc:
+        # The same 409 and the same remedy, under its own `code`, because the caller needs to know
+        # *which* thing moved: `revision_conflict` means the document changed under them and the
+        # diff is worth reading, `status_conflict` means somebody else already decided and the
+        # question is whether to override them. One code for both would have made a browser say
+        # "the design was edited" about a colleague's sign-off.
+        raise HTTPException(
+            status_code=409, detail={"code": "status_conflict", "message": str(exc)}
         ) from exc
     except ChemclawError as exc:
         # No `pragma: no cover` and no claim that this cannot happen: the comment here said "the
