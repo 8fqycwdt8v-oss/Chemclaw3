@@ -1467,6 +1467,54 @@ omitted `bo` and the capability stayed dark.) It does **not** undo a data conver
 neither rollback nor uninstall re-runs or reverses it — which is also why this chart must not be
 deployed with `helm upgrade --atomic` (`deploy/jenkins/targets/openshift.sh` does not).
 
+**Rolling back *across* that move is the one rollback that is not routine.** A revision installed
+before `chemclaw-config` and the ServiceAccount became tracked has neither object in its manifest,
+so Helm deletes both while restoring Deployments that name them — and prints "Rollback was a
+success!". Both now carry `helm.sh/resource-policy: keep`, which Helm reads off the live object at
+deletion time, so they survive it; measured on k3s v1.29.9, with the annotation the same rollback
+leaves both standing and the pods start. What survives is the **newer** release's configuration,
+because the target revision has none to restore — so after a rollback past that boundary, check it:
+
+```
+helm history chemclaw -n <ns>                       # is the target revision from the older chart?
+kubectl -n <ns> get configmap chemclaw-config -o yaml   # this is the newer release's data
+```
+
+Prefer rolling *forward* across that boundary. Note the cost the annotation buys this with:
+`helm uninstall` now leaves those two objects behind, which is what the older chart did.
+
+### `helm upgrade` refuses: "exists and cannot be imported into the current release"
+
+```
+Error: UPGRADE FAILED: Unable to continue with update: ServiceAccount "chemclaw" in namespace
+"<ns>" exists and cannot be imported into the current release: invalid ownership metadata;
+annotation validation error: missing key "meta.helm.sh/release-name" ...
+```
+
+**Expected, once, for every release installed before `chemclaw-config` and the runtime
+ServiceAccount became tracked resources.** On the previous chart both were `pre-install,pre-upgrade`
+hooks with `hook-delete-policy: before-hook-creation`, so they persist between releases — and Helm
+creates hook resources with a plain `Create`, so they carry no ownership annotations. The current
+chart claims those same two names in the manifest, and Helm will not adopt an unowned object.
+
+Nothing is half-applied: this is a prepare-time refusal, before any hook runs, and
+`helm upgrade --dry-run` refuses identically. `deploy/jenkins/targets/openshift.sh` performs the
+adoption itself (and reports it without acting when `DRY_RUN=true`, its default), so the pipeline
+path needs nothing here. For a hand-run `helm upgrade`, adopt the two objects and re-run:
+
+```
+kubectl -n <ns> annotate --overwrite configmap/chemclaw-config serviceaccount/chemclaw \
+  meta.helm.sh/release-name=<release> meta.helm.sh/release-namespace=<ns>
+kubectl -n <ns> label --overwrite configmap/chemclaw-config serviceaccount/chemclaw \
+  app.kubernetes.io/managed-by=Helm        # already set by the old chart; harmless if unchanged
+helm upgrade --install <release> deploy/helm/chemclaw -n <ns> ...
+```
+
+Adopt only objects your own previous release created — check `helm.sh/hook` and
+`app.kubernetes.io/instance=<release>` on them first (`kubectl get -o yaml`). An object that
+collides for any other reason is somebody else's, and taking it over is a decision rather than a
+step.
+
 **The Job says a migration was edited after being applied.** `MigrationError`, and the fix is never
 to edit the file back: `schema_migrations` records a checksum precisely so an in-place change is
 loud. Add a new numbered file that makes the change forward.
