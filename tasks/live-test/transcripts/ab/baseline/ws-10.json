@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "ws-10",
+    "section": 7,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The conformer set you gave me for the amide earlier was from a quick search and I do not trust the relative energies. Tighten it up before I use those populations in a report.",
+    "expects_tools": [
+      "run_conformer_refinement",
+      "sample_conformers"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a refined energy or population presented before the refinement has returned",
+      "that the earlier numbers were wrong rather than lower-confidence"
+    ],
+    "direction": "A refinement request against work already done, so the first thing a good answer establishes is *which* ensemble — it should look for the earlier result rather than starting a fresh search and quietly substituting it. Then it launches the refinement and says plainly that this is a durable job: what was submitted, that populations will move, and that it will report when it lands. Quoting refined numbers in the same breath as launching the job is the failure this probe is shaped to catch. Saying the earlier set was \"quick\" rather than \"wrong\" is the right register — the asker is upgrading confidence, not correcting an error.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-10",
+    "section": 7,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The conformer set you gave me for the amide earlier was from a quick search and I do not trust the relative energies. Tighten it up before I use those populations in a report.",
+    "profile": "no-tools",
+    "answer": "I don't have any record of a previous conformer search or the amide you're referring to. This appears to be our first interaction, so I have no earlier output to tighten up.\n\nTo help you refine conformer energies, I need:\n\n1. **Which amide?** (structure, SMILES, or name)\n2. **What method was used originally?** (e.g., force field, semi-empirical, DFT + functional/basis set)\n3. **What level would you consider trustworthy for a report?** (e.g., MMFF94, PM6, ωB97X-D/6-31G*)\n4. **Do you have the original output or structures?** (I can help interpret or re-run)\n\nOnce you provide these details, I can advise on a more rigorous approach—typical workflows for amide conformer analysis involve:\n- Conformational search at a low level to find all reasonable geometries\n- Re-optimization at a higher level (DFT with dispersion correction is standard)\n- Frequency calculation to verify minima and get thermal corrections\n- Population weighting via Boltzmann distribution\n\nWhat's the amide, and which computational resource do you have access to?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.98,
+    "event_counts": {
+      "token": 12,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d9fbc00b12a947d8b1a11c2a1e43fafe",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

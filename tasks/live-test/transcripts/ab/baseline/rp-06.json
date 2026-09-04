@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "rp-06",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Run pKa, logD and solubility predictions on 4-methoxybiphenyl and write me two sentences a formulation colleague could act on.",
+    "expects_tools": [
+      "predict_pka",
+      "predict_solubility",
+      "predict_logd",
+      "calculator_trust"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a pKa value for a compound with no ionisable centre presented as meaningful",
+      "a solubility or logD value presented as measured rather than predicted",
+      "an accuracy or error bar not returned by calculator_trust"
+    ],
+    "direction": "Call the calculators, then interpret rather than dump. The strong answer flags that 4-methoxybiphenyl has no ionisable group, so a predicted pKa is not a meaningful number for it, and presents solubility and logD as model predictions with their trust caveat attached, never as measurements. Two plainly worded, actionable sentences. Reporting a confident pKa for this substrate without comment is the miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-06",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Run pKa, logD and solubility predictions on 4-methoxybiphenyl and write me two sentences a formulation colleague could act on.",
+    "profile": "no-tools",
+    "answer": "I don't have access to prediction tools or molecular property databases. I can't run pKa, logD, or solubility predictions directly.\n\nHowever, I can tell you what to expect from 4-methoxybiphenyl based on its structure:\n\n**pKa**: ~10–11 for the methoxy phenolic OH (if considering it as a weak acid); the biphenyl system itself won't ionize at physiological pH.\n\n**logD/logP**: Approximately 4–5, making it quite lipophilic (the biphenyl core dominates). At physiological pH, logD ≈ logP since there's no ionizable group in the physiological range.\n\n**Solubility**: Very low in water—likely <1 µM at 25 °C—due to high lipophilicity and rigid aromatic structure. It will have good solubility in organic solvents and lipid membranes.\n\n**For your formulation colleague**, here are two actionable sentences:\n\n1. **This compound is highly lipophilic with minimal aqueous solubility**—formulation should prioritize lipid-based vehicles (lipid nanoparticles, self-emulsifying drug delivery systems, or solid lipid nanoparticles) or solubilization strategies like surfactant-based solutions or amorphous solid dispersions.\n\n2. **No ionizable groups exist in the physiological pH range, so pH adjustment won't improve solubility**—focus instead on particle size reduction, supersaturation strategies, or co-solvent approaches if oral bioavailability is the target.\n\nIf you need validated predictions, use tools like ChemAxon's pKa/logD calculator, Simulations Plus, or other ADME prediction software.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 5.85,
+    "event_counts": {
+      "token": 186,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "3a456318f919473e8cfe5b374b07c6b1",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

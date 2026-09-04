@@ -1,0 +1,67 @@
+{
+  "probe": {
+    "id": "kn-08",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where is our knowledge actually thin? I mean places where we've run plenty and never distilled anything out of it.",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a gap, count or statistic that the tool did not return",
+      "a note id that was not retrieved",
+      "a project or programme that does not appear in the corpus"
+    ],
+    "direction": "Calls find_knowledge_gaps and reports what it actually returns — counts per note type, isolated/unlinked notes, evidence with no distilled playbook, the most-cited hub notes, dangling links — rather than reasoning about the corpus from memory. Every number quoted must be the tool's. A satisfying answer turns at least one gap into a concrete next action: the note that should be written, or the run that should be done.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-08",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where is our knowledge actually thin? I mean places where we've run plenty and never distilled anything out of it.",
+    "profile": "",
+    "answer": "I'll check the knowledge graph for gaps — places with evidence but no distilled playbook or guidance.The knowledge graph is currently empty — no notes have been merged yet. This means there's nothing on file to be thin or thick about; the record itself is sparse rather than undistilled.\n\nThat said, if you have a sense of what you've been running — a reaction type, a substrate class, a process challenge — I can check whether evidence *exists* that hasn't been written up yet:\n\n- **In the ELN/calculation record**: `find_past_jobs` shows every campaign, calculation and report anyone has run, even ones that didn't become notes. A thick record of failures or runs with no distilled lesson is the most common kind of thin spot.\n\n- **By transformation**: `similar_reactions` on a reaction SMILES will find past runs of that same transformation, and `conditions_for_similar_reaction` gathers what actually worked. If you see 10+ runs with scattered outcomes but no playbook note linking them, that's undistilled evidence worth knowing.\n\n- **By structure**: `substructure_matches` on a functional group shows everything bearing it, and `substrate_precedent` shows which ones were actually used. A group with plenty of members but no coherent strategy is thin knowledge.\n\nWhat area would help most to expose? A coupling type you've been screening, a functional group you keep modifying, a process step with wide variation?",
+    "answered": true,
+    "tools_called": [
+      "find_knowledge_gaps"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_knowledge_gaps",
+        "preview": "total_notes=0 isolated_note_ids=[] type_counts={} tags_without_distillation=[] most_cited=[] dangling_links=[]"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.01,
+    "event_counts": {
+      "token": 22,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "149056fd276f42df9172b4e7461b052f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

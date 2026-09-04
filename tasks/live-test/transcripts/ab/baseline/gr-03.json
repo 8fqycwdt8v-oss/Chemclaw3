@@ -1,0 +1,83 @@
+{
+  "probe": {
+    "id": "gr-03",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Have we ever coupled anything that looks like BrC1=CC=C(OC)C=C1 before?",
+    "expects_tools": [
+      "similar_reactions",
+      "substructure_matches",
+      "similar_molecules",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "'no prior work found' or equivalent, when 264 records on this exact halide are seeded",
+      "a count of matching records stated without any identifier a reader could check"
+    ],
+    "direction": "4-bromoanisole is one of fifteen aryl halides on the seeded Buchwald-Hartwig amination plates, with 264 records behind it and two sibling halides (the chloride and the iodide of the same anisole) on the same grid. A good answer finds them, says roughly how many and what varied, and points at something identifiable. A \"no\" here is a retrieval defect, not an honest absence.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-03",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Have we ever coupled anything that looks like BrC1=CC=C(OC)C=C1 before?",
+    "profile": "no-tools",
+    "answer": "I'll search for that structure in your project records.The exact SMILES string `BrC1=CC=C(OC)C=C1` doesn't appear in your records. However, let me search more broadly for the structure itself—4-bromoanisole or similar aryl bromides that might be written with different SMILES representations:Based on my searches, **there's no record of 4-bromoanisole** (the structure you've drawn) appearing in your project records—at least not under common names or that exact SMILES string.\n\nThat said, your system may have it stored under:\n- A different SMILES representation (regioisomers like ortho or meta, or different canonicalization)\n- A catalog or supplier number if it was purchased\n- Embedded in a larger reaction scheme\n\nIf you'd like me to search for related aryl halides or coupling reactions more broadly, I can do that. Or if you can point me to specific project folders or reaction notebooks, I can look there directly.",
+    "answered": true,
+    "tools_called": [
+      "grep",
+      "grep",
+      "grep",
+      "grep"
+    ],
+    "tool_results": [
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found\n\nNote: grep matches literal text, not regex, so characters like `|`, `.*`, and `\\.` are searched verbatim. Search for the literal text you need instead; for `|` alternation, run a sep"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 8.27,
+    "event_counts": {
+      "token": 14,
+      "tool_call": 4,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "4a9288efe2b14e6996e83bca4a580ddc",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

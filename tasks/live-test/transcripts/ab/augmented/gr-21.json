@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "gr-21",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much do you trust your own solubility numbers on molecules like these?",
+    "expects_tools": [
+      "calculator_trust",
+      "calculator_outliers",
+      "find_calculations"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a confidence statement with no reference to recorded calculations or measurements",
+      "a validation study, benchmark or error statistic that was not retrieved"
+    ],
+    "direction": "Introspects over what has actually been computed and measured rather than describing the method's reputation. \"There are no measurements to compare against\" is a strong answer if it is true; a confident accuracy claim with nothing behind it is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-21",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much do you trust your own solubility numbers on molecules like these?",
+    "profile": "",
+    "answer": "I don't have a molecule to evaluate yet — you've written \"molecules like these\" but I can't see what structures you're referring to. Could you share the SMILES, a name, or an attached structure?\n\nOnce you do, I can give you a specific answer by checking `calculator_trust` on the solubility model, which will tell me:\n\n- **Bias**: whether the model runs systematically high or low\n- **Mean absolute error and RMSE**: how far off it typically is\n- **Uncertainty coverage**: whether the stated error bars are actually wide enough\n- **Sample size**: how many measured values the ledger holds\n\nI can also run `calculator_outliers` to see whether the model fails systematically on a particular class of molecule — e.g., it might be well-behaved on neutrals and consistently off on ionisable compounds, and an average would hide that.\n\nSo: share the structure(s), and I'll tell you exactly what the record says about the model's track record on molecules like them.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.17,
+    "event_counts": {
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "9077021be3fe4c0bb09f1605a91d04ea",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

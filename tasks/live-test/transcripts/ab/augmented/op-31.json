@@ -1,0 +1,99 @@
+{
+  "probe": {
+    "id": "op-31",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I commit the team to a ligand screen — what don't we know that we should? Point me at the actual holes in what we hold on Pd cross-coupling.",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that does not exist",
+      "the literature does not cover this",
+      "a gap in the science, asserted from a gap in the graph"
+    ],
+    "direction": "Answers from the graph rather than reciting generic chemistry gaps: names specific structural holes it can actually see — a transformation with no failure-mode note attached, a compound referenced but with no linked reaction, a playbook with no run supporting it — and for each, the experiment or note that would close it. The distinction that matters: a gap in what *we have recorded* is not a gap in what is *known*, and the answer must not slide from one to the other. Prioritising the gaps by what a ligand screen would actually depend on is the good version.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-31",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I commit the team to a ligand screen — what don't we know that we should? Point me at the actual holes in what we hold on Pd cross-coupling.",
+    "profile": "",
+    "answer": "I'll search the record systematically to identify what we actually know about Pd cross-coupling and what gaps remain — the things that could derail a ligand screen or leave you running blindly.The knowledge graph is empty — nothing has been written about Pd couplings in your system yet. Let me check whether the ELN holds any stored reaction data on Pd couplings directly:This is the critical finding: **your corpus has not been indexed yet**. That means we cannot answer any of these questions from your own runs:\n\n## What We Cannot See (Because Indexing Hasn't Run)\n\n1. **Substrate scope**: What aryl halides, boronic acids, or coupling partners have you actually run? Which ones failed or gave low yields?\n2. **Ligand precedent**: Which specific ligands have your teams used? Which performed best on which substrates?\n3. **Base and solvent patterns**: What combinations have worked in practice? Are there systematic failures (e.g., a solvent that always gives impurities, a base that never works)?\n4. **Functional-group compatibility**: Have you mapped which protecting groups, heteroatomic groups, or sensitive functionality survive your conditions?\n5. **Catalyst loading and turnover**: What minimum Pd loading works? Have you measured turnover numbers or found cases where less is more?\n6. **Reaction time and temperature profiles**: What is the minimum time and temperature for complete conversion on different substrates?\n7. **Scale effects**: Does a condition that works on 1 mmol fail on 10 g? Have you seen stirring or addition-rate dependencies?\n8. **Reproducibility variance**: Which transformations are rock-solid and which have batch-to-batch drift?\n\n## What You *Can* Design Around (Without Your Data)\n\nBefore you commit resources to a ligand screen, you need to answer these **before running wells**:\n\n**The substrate question** (foundational):\n- What is the **actual substrate** for this screen? You need a specific aryl halide and a coupling partner — not a class, a molecule.\n- Has this exact transformation (or something very close) been run anywhere in your organization? If yes, that is your baseline.\n- What is the **failure mode** you are solving? (Low yield? Selectivity issue? Incompatible functional groups? Slow reaction?)\n\n**The ligand question** (what the screen actually tests):\n- Why this ligand set? Are you testing a hunch, or did precedent point here?\n- What is a **working condition** you are trying to beat? (You need a positive control — a ligand/base/solvent combo that gives ≥60% yield. Without it, you cannot tell if a zero is a real failure or a broken assay.)\n- Are the ligands **featurizable**? (Buried volume, electronic descriptors — so the optimizer can learn from one ligand about its neighbours, rather than treating each as an opaque label.)\n\n**The technical question** (what actually changes):\n- Will you hold **catalyst, base, solvent, temperature, time constant** and vary only the ligand?\n- Or are you also exploring base/solvent (multifactorial)? If so, the screen becomes 2–3× larger.\n- How will you **measure the outcome**? (LCMS yield? Isolated yield? Purity?) This determines error bars and whether a 40% yield is real or noise.\n\n## What You Should Do Now (Before the Screen)\n\n1. **Retrieve your own precedent**: Ask your colleagues or the ELN directly (outside this system) for 3–5 successful Pd couplings on similar substrates with ligands in the proposed screen. That becomes your **baseline** — the optimizer will know what \"good\" looks like.\n\n2. **Compute relative ligand properties** (fast, cost-free):\n   - If your ligands are molecules (biarylphosphinea, N-heterocyclic carbenes, etc.), I can compute electronic descriptors (HOMO/LUMO, dipole, partial charges) for each, which lets the optimizer extrapolate across the set rather than treating each as independent.\n   - This is the difference between \"run a few more combinations\" feeling random and the model saying \"here is what we should try next because the descriptor space suggests it.\"\n\n3. **Screen the substrate** (before the ligand screen):\n   - A single **control experiment**: One ligand (any that has worked before) + your substrate + standard conditions.\n   - If this fails, the substrate — not the ligand — is the problem. Stop the ligand screen.\n   - If it works, use that yield as your baseline target.\n\n4. **Define your decision space precisely** before I design the plate:\n   - Ligands: (list them by name or draw them)\n   - Base: (one, or a set?)\n   - Solvent: (one, or a set?)\n   - Temperature: (one, or a range?)\n   - Catalyst: (Pd source, loading — constant?)\n   - Readout: (LCMS or isolated yield? Threshold for \"pass\"?)\n\nOnce you give me those specifics and a baseline condition that works, I can draft a concrete plate design (with controls, replicates, run-order randomization, and the reasoning for every well).\n\n**The holes right now**: Your organization's own data on Pd couplings is not indexed. That means the screen will be designed blind to what has already worked or failed in your own labs. Get that baseline in the room before you commit the team.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence",
+      "find_past_jobs",
+      "similar_reactions",
+      "conditions_for_similar_reaction",
+      "reagent_frequency"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      },
+      {
+        "tool": "conditions_for_similar_reaction",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:conditions_for_similar_reaction\">\n{\n  \"question\": \"conditions for reactions similar to c1ccccc1B(O)O.c1ccc(Cl)cc1>>[c1ccc(-c2ccccc2)cc1]\",\n  \"hits\": [],\n  \"c"
+      },
+      {
+        "tool": "reagent_frequency",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:reagent_frequency\">\n{\n  \"agents\": [],\n  \"reactions_in_scope\": 0,\n  \"coverage\": {\n    \"labelled\": 0,\n    \"total\": 0,\n    \"sources\": [],\n    \"verdict\": \"NO ROW"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 26.49,
+    "event_counts": {
+      "token": 61,
+      "tool_call": 7,
+      "evidence_source": 3,
+      "tool_result": 7,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "aa69cb4d58184c6d803326f46ad582c1",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

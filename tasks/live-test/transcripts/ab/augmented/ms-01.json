@@ -1,0 +1,68 @@
+{
+  "probe": {
+    "id": "ms-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Our filing draws the intermediate as the hydroxypyridine, Oc1ccccn1, but the crystal structure paper draws the pyridone. Before anyone argues about which is right — what forms can this thing actually exist as? I want the list, not a verdict yet.",
+    "expects_tools": [
+      "enumerate_tautomers"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a population, ratio or dominant form, which needs a calculation this question did not ask for",
+      "a tautomer that the enumeration did not return",
+      "that the enumeration settles which form the crystal contains"
+    ],
+    "direction": "The ask is explicitly the enumeration and explicitly not the ranking, which is the whole distinction this part of the surface is built on. A good answer builds the species set with the structural enumerator, reports each form as a SMILES a chemist can read back, and stops there — then names what would settle it (a free-energy ranking over this set) as the next step rather than performing it in prose. Saying that the enumeration is a graph operation with no chemistry in it, so it says which forms are possible and nothing about which is present, is the sentence that makes the answer useful. Asserting \"it is mostly the pyridone\" from memory is the failure here even though it is the textbook answer: nothing was computed, and the same reflex on a compound with no textbook entry produces a number out of nowhere.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Our filing draws the intermediate as the hydroxypyridine, Oc1ccccn1, but the crystal structure paper draws the pyridone. Before anyone argues about which is right — what forms can this thing actually exist as? I want the list, not a verdict yet.",
+    "profile": "",
+    "answer": "I'll enumerate the tautomeric forms of this molecule so you have the complete set before deciding which one to take to anyone.Here's the complete list of tautomers this molecule can exist as:\n\n1. **2-hydroxypyridine** (`Oc1ccccn1`) — the form your filing draws\n2. **2-pyridone** (`O=c1cccc[nH]1`) — the form the crystal structure paper draws\n3. **4-pyridone** (`O=C1CC=CC=N1`) — a third tautomer with the carbonyl at the 4-position and the proton on nitrogen\n\nAll three are prototropic isomers — the proton migrates between the oxygen and nitrogen across the aromatic ring. This is exactly the kind of mobile-proton question where you need to know all the forms exist before asking which one dominates.\n\nIf you want to know which one actually dominates at your conditions (in solution, as a solid, or at a particular pH), I can rank them by free energy. Just say whether you want them ranked in solution (and what solvent), in the gas phase, or both.",
+    "answered": true,
+    "tools_called": [
+      "enumerate_tautomers"
+    ],
+    "tool_results": [
+      {
+        "tool": "enumerate_tautomers",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"chem:enumerate_tautomers\">\n{\n  \"smiles\": [\n    \"Oc1ccccn1\",\n    \"O=C1CC=CC=N1\",\n    \"O=c1cccc[nH]1\"\n  ],\n  \"labels\": [],\n  \"count\": 3,\n  \"parent\": \"Oc1ccccn1\"\n}\n</"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.82,
+    "event_counts": {
+      "token": 13,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "77e6b2efe108419daea3cc4b6d151e1e",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

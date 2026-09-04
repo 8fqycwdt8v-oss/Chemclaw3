@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "rp-18",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Structure what we know about the Suzuki step into four buckets — starting materials and their sources, reaction conditions, known failure modes, and controls. Cite each entry.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "resolve_compound",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a control strategy, specification limit or critical parameter range not present in a retrieved note",
+      "an uncited entry presented in the same list as cited entries without being distinguished",
+      "a supplier, grade or material source that the record does not contain"
+    ],
+    "direction": "Retrieval then structuring is what this system is for. Expect the compound notes (4-bromoanisole, phenylboronic acid, Pd(OAc)2, THF), the Suzuki reaction note, the aqueous protodeboronation failure mode and the degassing playbook, each wikilinked under the right heading. The \"controls\" bucket is genuinely thin in the corpus and the honest move is to mark it unsupported rather than invent specification limits — the harness does exactly this and the answer should mirror it. \"Sources\" of starting materials is another likely empty bucket and should be reported empty. Mixing a cited and an uncited entry in one list without flagging which is which is a fail.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-18",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Structure what we know about the Suzuki step into four buckets — starting materials and their sources, reaction conditions, known failure modes, and controls. Cite each entry.",
+    "profile": "no-tools",
+    "answer": "I don't have access to any retrieved notes, uploaded attachments, or programme records about your Suzuki step. To give you a properly cited answer, I would need to see:\n\n1. **Your ELN entries** or reaction notes documenting this Suzuki coupling\n2. **Any development reports** or optimization data you've collected\n3. **Specific failure cases** you've documented\n4. **Control experiments** you've run\n\nCould you share the relevant notes or data, either by uploading a file or pointing me to the specific ELN entries? Once I have that evidence, I can structure it into the four buckets you've described with full citations to each claim.\n\nAlternatively, if you're asking for a *general* Suzuki coupling framework (not specific to your work), I can sketch that from chemistry knowledge — but it wouldn't cite *your* results, only textbook conditions. Which would be more useful?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.74,
+    "event_counts": {
+      "token": 10,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "5454595a9f2a4e609dae6d8d1048b1f3",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

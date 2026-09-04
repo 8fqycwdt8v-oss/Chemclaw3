@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-19",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We see a des-methyl impurity in the final API. Which step in the route is most likely putting it there, and is there anything in our record that already points at it?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "similar_molecules",
+      "substructure_matches"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a definitive attribution of the impurity to one step",
+      "a level or percentage for the impurity at any step",
+      "a fabricated route step that the retrieved record does not contain"
+    ],
+    "direction": "Should work the record rather than speculate freely: find the steps that introduce or carry the methyl group, follow the precursor/product relations between compound and reaction notes, and separate two distinct origins — carried in with a starting material or reagent lot versus generated in a step under the conditions used. Should name the conditions that plausibly demethylate (strong base or nucleophile on an aryl methyl ether, acid and heat, high temperature with a nucleophilic halide) and map them onto steps the record actually shows. Must be explicit about which links are supported by a retrieved note and which are its own hypothesis, and must name the experiment that settles it — spiking, or assaying the intermediate at each step. If the record is too thin, say that rather than filling in a route.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-19",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We see a des-methyl impurity in the final API. Which step in the route is most likely putting it there, and is there anything in our record that already points at it?",
+    "profile": "no-tools",
+    "answer": "I'd be happy to help you track down the source of the des-methyl impurity, but I need more information to search your records effectively.\n\nCould you provide:\n\n1. **The API structure** – what is the final compound? (name, structure, or SMILES)\n2. **The des-methyl impurity structure** – which methyl group is being lost? (or a structure/SMILES)\n3. **The synthetic route** – what are the key steps? (or a reference to where it's documented in your system)\n\nOnce I have these, I can:\n- Search your ELN and reaction records for evidence of this impurity or demethylation at different steps\n- Look for reaction conditions that are known to cause demethylation\n- Identify which step(s) are most plausible based on chemistry and your data\n\nIf your route or API identity is sensitive, even a placeholder structure with the methyl group location marked would help me search more accurately.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.06,
+    "event_counts": {
+      "token": 8,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "07e8a835a5f6461e800037d6cab4c7b8",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

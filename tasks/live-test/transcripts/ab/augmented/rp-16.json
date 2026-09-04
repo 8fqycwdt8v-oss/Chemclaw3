@@ -1,0 +1,80 @@
+{
+  "probe": {
+    "id": "rp-16",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I need to pull together the development history of the amide coupling step for a regulatory submission section — everything we've done, each item traceable to where it came from.",
+    "expects_tools": [
+      "request_development_report",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a completed submission section or CTD module presented as ready to file",
+      "a source note id that was not returned by a retrieval call",
+      "a regulatory-format template or required-section list held by the system",
+      "a report note that was created when the report job did not run"
+    ],
+    "direction": "This is the report harness's home ground: decompose into narrow sections, retrieve per section, cite every item with a wikilink to its source note, and mark a section with no evidence as unsupported rather than filling it. If request_development_report is called, what the answer says about that job must match what became of it — a real id and a job described as running if it started, a plainly-worded failure if it did not — never a quiet degradation into uncited prose presented as the report. A gather_evidence-based cited assembly, explicitly labelled as source material for a submission rather than as a submission section, is a strong answer. Every claim must be checkable against its link in one pass — that traceability is the entire deliverable here.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-16",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I need to pull together the development history of the amide coupling step for a regulatory submission section — everything we've done, each item traceable to where it came from.",
+    "profile": "",
+    "answer": "I'll help you build a cited development history for the amide coupling step. This is exactly the case for a development report — a structured narrative where every claim traces back to a source note.\n\nLet me first search for what the record holds on amide couplings, then set up a report framework to gather the evidence systematically.The knowledge graph currently holds no notes on amide couplings. Before building a report from nothing, let me search more broadly to see what development work exists in the system — past jobs, campaigns, or computations that might feed into this:The record is currently empty on amide couplings — no reactions, campaigns, calculations or reports have been logged yet.\n\nBefore I draft a report structure, I need to clarify what you want to pull together:\n\n**What exists to report on?**\n- Do you have amide coupling runs already completed (in an ELN, lab notebook, or earlier conversation in this system)?\n- Are there specific substrates, coupling conditions, or outcomes you want the report to cover?\n- Is this for a particular API, or a general amidation procedure?\n\n**What should the regulatory section show?**\n- Route optimization (conditions screened, outcomes)?\n- Scalability or process development steps?\n- Impurity studies or degradation pathways?\n- Yield, purity, and selectivity trends across batches or conditions?\n\nOnce you point me at the data — either by describing what you've run, or by giving me the project/compound name so I can search for existing records — I can structure a development report that traces every claim back to its source note and builds a coherent narrative ready for submission.\n\n**I can use `request_development_report` to pull this together systematically once I know what sections matter most to you.** That tool retrieves evidence per section across every internal source, so a regulatory history is exactly its target use case.\n\nWhat does your amide coupling development look like?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "find_past_jobs"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 13.8,
+    "event_counts": {
+      "token": 25,
+      "tool_call": 3,
+      "tool_result": 3,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a4551bbbc7214ee9921a263c32edd90b",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

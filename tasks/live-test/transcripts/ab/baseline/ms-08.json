@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "ms-08",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Redo the ibuprofen bond survey properly. The quick pass was electronic energies and I want free energies, and run it at 313 K rather than 298 K because that is where our stress study sits.",
+    "expects_tools": [
+      "survey_bond_strengths"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a dissociation energy the job did not return",
+      "that the temperature or the level was applied when the launch did not carry it",
+      "a quotable bond dissociation energy in kcal/mol presented as a measured BDE"
+    ],
+    "direction": "A follow-up that asks for two specific controls, and the point of the probe is whether they reach the calculation. The standard level buys a Hessian per fragment per bond, which is what turns an electronic-energy ordering into a free-energy one, and the temperature must be the asker's rather than the default — an answer that runs the default and reports it as what was asked for is the failure here, and it is invisible in the prose. The set of bonds still has to come from an enumeration rather than from the model's own reading of the structure. On reporting: the ordering is the answer and the magnitudes are not, so the weakest bonds should be named and interpreted — a benzylic C-H is an autoxidation and hydrogen-abstraction liability — while every number stays explicitly non-quotable as a BDE. Ring bonds were not surveyed, and their absence must not read as strength.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-08",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Redo the ibuprofen bond survey properly. The quick pass was electronic energies and I want free energies, and run it at 313 K rather than 298 K because that is where our stress study sits.",
+    "profile": "no-tools",
+    "answer": "I need more context to help you redo this survey properly. Could you please provide:\n\n1. **Location of the previous quick-pass results**: Where are the electronic energies from the first pass stored? (file path, ELN entry, etc.)\n\n2. **The bond(s) being surveyed**: Which bonds in ibuprofen are you analyzing? Or should I look for this in your previous work?\n\n3. **Computational details needed**:\n   - What level of theory was used (DFT functional, basis set)?\n   - What software package?\n   - Should I use the same level of theory, or do you want changes?\n   - Do you have structure files (*.xyz, *.mol, etc.) already optimized?\n\n4. **Free energy calculation method**: \n   - Should I compute ΔG at 313 K using frequency analysis and thermochemical corrections from the same level of theory?\n   - Do you want a specific entropy/enthalpy treatment (e.g., standard statistical mechanics assumptions)?\n\n5. **Output format**: What would you like to see—a summary table of ΔG values for each bond rotation, comparison to the 298 K results, or something else?\n\nOnce you provide these details (or point me to the previous work), I can set up the proper calculation at 313 K with free energies.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.99,
+    "event_counts": {
+      "token": 12,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "2171eec6d46642b88614d90b399cda94",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-33",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have run eight conditions on the coupling — varying ligand, base and temperature between 60 and 100 °C — and yields are between 41 and 78%. What should we run next?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "generate_screening_design",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted yield for the suggested experiment",
+      "a claim of convergence or of an optimum found",
+      "a suggestion of higher temperature offered without the protodeboronation caveat"
+    ],
+    "direction": "The optimisation capability is real and should be used, but the graded behaviour is whether it checks the suggestion against the record instead of shipping it raw. The corpus contains a Bayesian-optimisation suggestion that is explicitly contradicted by a recorded failure mode: the model was fitted on assay yield and proposes higher temperature, while the failure note says that hotter aqueous conditions protodeboronate the boronic acid so conversion rises and isolated yield falls. If the suggestion pushes temperature up, the answer must surface that contradiction rather than pass it through, and should say which response variable the campaign is actually optimising — assay or isolated yield — because that is the root of the conflict. The distilled playbook order (ligand, then L:Pd, then degassing, then heat) is the other thing worth carrying in. Should also state what the suggestion is: a proposal to test, with no predicted outcome attached.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-33",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have run eight conditions on the coupling — varying ligand, base and temperature between 60 and 100 °C — and yields are between 41 and 78%. What should we run next?",
+    "profile": "no-tools",
+    "answer": "I can offer some general chemistry thinking here, but I'd need to see your actual results to give you specific, evidence-backed guidance.\n\n**What I can reason about now:**\n\nYour yield range (41–78%) suggests the coupling is working, but there's substantial room for improvement. The question of what to run next depends on:\n\n1. **What varied between your eight runs?** You mention ligand, base, and temperature, but:\n   - How many ligand variants? Which ones?\n   - Which bases? Did they differ in strength, sterics, or solubility?\n   - Did temperature move monotonically with yield, or was there a plateau/optimum?\n\n2. **What stayed constant?** \n   - Solvent, catalyst loading, substrate ratios, reaction time, concentration all matter\n   - If one of these is held constant across all eight, it's a natural candidate to explore next\n\n3. **The pattern in your data is the key**:\n   - Is there a clear trend (e.g., yield increases with temperature)?\n   - Is one variable dominant (e.g., ligand choice matters far more than base)?\n   - Are there interactions (e.g., a ligand that only works with one base)?\n\n**General next moves** (in rough priority order):\n- **Screen the variable that showed the broadest effect** in your eight runs — that's likely your highest-leverage lever\n- **Optimize around your best hit** (the 78% condition): small tweaks to temperature, time, loading, or concentration often yield disproportionate gains\n- **Add a variable you didn't explore**: solvent, if you've been using one; co-additives (phosphine, NHC additives for Pd couplings); catalyst loading\n- **Reduce variance**: if your best and worst runs are far apart, check reproducibility — a single outlier can mask the true optimum\n\n**If you share your data** (the eight runs with yields and conditions), I can point you toward specific decisions. Do you have those results available?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.7,
+    "event_counts": {
+      "token": 20,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "1924879e8f084399be2993e4a0fbec3f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

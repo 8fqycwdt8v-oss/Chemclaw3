@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "rx-31",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "For the tech transfer to the plant, which parameters are the critical process parameters, what is the proven acceptable range for each, and can you put the transfer package together?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a CPP or CQA designation",
+      "a proven acceptable range or design space",
+      "a tech-transfer package, master batch record or its contents",
+      "a timeline, resourcing or capacity statement"
+    ],
+    "direction": "Three separate absences and the answer should name them separately. There is no CPP or CQA model and no criticality assessment in this system; there is no design-space or proven-acceptable-range capability, and a PAR is a regulatory claim built from executed ranging studies rather than something to be nominated; and there is no tech-transfer package type, no master batch record template, and no project, programme, capacity, staffing or timeline data anywhere in the system. A good answer says all of that without hedging, and is careful to distinguish it from what the system genuinely can do — propose and analyse designed experiments over chemical variables, which is an input to a criticality assessment and not the assessment. Offering to help design the ranging experiments is the right redirect; nominating even one parameter as critical is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-31",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "For the tech transfer to the plant, which parameters are the critical process parameters, what is the proven acceptable range for each, and can you put the transfer package together?",
+    "profile": "",
+    "answer": "I appreciate the specificity of your question, but I need to be direct about what this system can and cannot provide.\n\n**What I cannot do:**\n\nThis deployment has no access to:\n- **Critical process parameters (CPPs)** — which process variables require tight control\n- **Proven acceptable ranges (PARs)** — the validated operating windows for those parameters\n- **Design space** — the multidimensional region of safe operating conditions\n- **Tech-transfer package components** — master batch records, scale-up protocols, equipment specifications, regulatory filings, or any of the documentation that moves a process from R&D to manufacturing\n\nThese are governance and regulatory domains that live outside the chemistry knowledge base. They require:\n- A formal design-of-experiments (DoE) campaign run at your manufacturing scale, not at lab or pilot scale\n- Statistical risk assessment and failure-mode analysis\n- Equipment qualification and process validation at the plant\n- Regulatory submission and approval (ICH Q2, Q3, Q7, Q11 depending on your jurisdiction)\n- Sign-off from process engineering, quality assurance, and regulatory affairs\n\n**What I can do to support your tech transfer:**\n\nI can help you *build the evidence* that will inform those parameters:\n\n1. **Gather precedent** — find every optimization run and screening campaign already in the record for this process, and read them in order to show which factors actually moved the output\n2. **Identify sensitive ranges** — compute how outcome (yield, purity, selectivity) changes with the key variables (temperature, time, stoichiometry, solvent ratio) using our Bayesian optimizer\n3. **Generate a screening design** — propose a factorial or response-surface experiment to map the safe operating region\n4. **Document robustness** — help you design experiments to test the process against realistic variations (supplier, equipment, personnel, seasonal effects)\n5. **Cite everything** — every number in the report traces back to the lab runs or computations that produced it, so your process validation package rests on auditable evidence\n\n**What I need from you to start:**\n\n- Which molecule/transformation is this for?\n- What are the *current* conditions you are running at lab scale?\n- What outputs matter most (yield, purity, selectivity, cost, time, safety)?\n- Are there known failure modes — batches that failed, impurities that appeared, or conditions that caused runaway heat?\n- What constraints does the plant have (vessel size, cooling capacity, feed rate, solvent inventory)?\n\nOnce I have that, I can gather the record, propose experiments that will tighten the ranges, and assemble a development report that your process team can hand to validation. That report will be the foundation for your CPPs and PARs, even though I cannot write those documents myself.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 12.5,
+    "event_counts": {
+      "token": 29,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "2ee9f690276d409d99de47e7b33aa8d0",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

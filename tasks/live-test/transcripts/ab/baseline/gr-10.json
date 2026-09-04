@@ -1,0 +1,73 @@
+{
+  "probe": {
+    "id": "gr-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're starting the same C-N coupling on a new aryl chloride next month. Given the screening we already have, what should the first eight experiments be?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "start_optimization_campaign",
+      "gather_evidence",
+      "generate_screening_design"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the proposed conditions described as validated, recommended or expected to work",
+      "a predicted yield for any proposed point",
+      "historic runs used as the prior without saying which and how many"
+    ],
+    "direction": "Thousands of records on this exact transformation are available as a prior. A good answer turns them into observations, proposes points, and lands the result as a proposal a human runs — with the reasoning for the decision space visible. Silently ignoring the historic data and proposing a generic grid is the weak outcome.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're starting the same C-N coupling on a new aryl chloride next month. Given the screening we already have, what should the first eight experiments be?",
+    "profile": "no-tools",
+    "answer": "I need to see what C-N coupling screening you already have. Let me search for relevant ELN entries and reaction data.I don't have access to your existing screening data or ELN records. To advise you properly on the first eight experiments for your new aryl chloride C-N coupling, I would need to see:\n\n1. **What you've already screened**: Which catalysts, ligands, bases, solvents, temperatures, and coupling partners have you tested?\n2. **What worked best**: Which conditions gave the best conversion, yield, and selectivity?\n3. **What failed or was suboptimal**: Any obvious dead ends or variables that didn't matter?\n4. **The substrate differences**: How does the new aryl chloride differ from what you screened on (electronics, steric bulk, heteroatom substitution)?\n\n**Without that context, here's what a rational eight-experiment plan typically looks like for testing a new substrate:**\n\n1. **Lead conditions from prior screening** (most promising from your previous work)\n2. **Repeat of lead at different scale/concentration** (to validate)\n3. **Slight solvent variation** (if prior screening was narrow, or if substrate solubility differs)\n4. **Ligand swap** (second-best ligand from prior screening, in case substrate reactivity shifts)\n5. **Base variation** (if pH or basicity seemed marginal before)\n6. **Temperature adjustment** (slightly higher if conversion was incomplete; lower if selectivity was poor)\n7. **Catalyst loading variation** (halving or doubling the amount)\n8. **Coupling partner variation** OR **additive test** (depending on what your prior screening identified as the next limiting factor)\n\nIf you can share your prior screening results—ideally as a file or link to your ELN records—I can give you a much more specific design.",
+    "answered": true,
+    "tools_called": [
+      "grep",
+      "grep"
+    ],
+    "tool_results": [
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.89,
+    "event_counts": {
+      "token": 19,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "4621e35f8c534b089d28a3dd3603ed00",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "kn-05",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "quick one — is 2 min of sparging enough before we drop the catalyst in? thats what the old sop said",
+    "expects_tools": [
+      "find_notes",
+      "expand_note",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that two-minute sparging is current practice",
+      "a note id that was not retrieved",
+      "a degassing procedure the playbook does not state"
+    ],
+    "direction": "Answers no, and cites playbook-degassing for the current procedure: three freeze-pump-thaw cycles or 20 minutes of sparging per 100 mL. Critically, it should recognise the two-minute rule as the *retired* playbook-degassing-old and say it was superseded in mid-2025 — treating the two as equally current, or quietly averaging them, is the failure this probe is for.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-05",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "quick one — is 2 min of sparging enough before we drop the catalyst in? thats what the old sop said",
+    "profile": "no-tools",
+    "answer": "I can't answer that directly without knowing:\n\n1. **What reaction** you're running (what are the reactants?)\n2. **What catalyst** you're adding\n3. **What solvent** you're sparging with (inert gas? which one?)\n4. **Why you're sparging** — is it to displace air/oxygen, remove volatiles, create an inert atmosphere, or something else?\n5. **What the vessel conditions are** — volume, headspace, sparger design\n\nTwo minutes is a *time*, but the question that matters is **how completely** you've displaced whatever needs displacing. That depends on the sparging rate (volume of gas per minute), the vessel geometry, and how much you need to remove.\n\nThe old SOP might be fine if it was validated for your exact setup and reaction conditions — but I can't verify that without those details. If you're running something new or in a different vessel, you'd ideally want to either:\n\n- Run a simple tracer test (e.g., measure residual O₂ or N₂ with a probe after sparging)\n- Check if there's a rule of thumb in the lit for your specific catalyst (some are oxygen-sensitive, some aren't)\n- Ask whoever wrote the original SOP why 2 min was chosen\n\nWhat's the reaction and catalyst?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.99,
+    "event_counts": {
+      "token": 14,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "995e3e62e622453494c02d544009c5ce",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

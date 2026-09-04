@@ -1,0 +1,70 @@
+{
+  "probe": {
+    "id": "ws-05",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Forget what I told you about DMF — the filing team came back and it is fine after all, and I do not want that constraint sitting there shaping your suggestions.",
+    "expects_tools": [
+      "forget_preference",
+      "recall_preferences"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that the preference had never been recorded, if it had",
+      "that anything beyond the named preference was removed"
+    ],
+    "direction": "A retraction, and it has to actually take effect rather than be agreed to. A good answer removes the DMF entry, confirms specifically what was removed, and leaves everything else alone — over-deleting is as bad as not deleting, because the asker cannot see the store. If no such preference is on file the answer says that instead of confirming a deletion that did not happen. Offering to re-check what remains is the natural close.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-05",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Forget what I told you about DMF — the filing team came back and it is fine after all, and I do not want that constraint sitting there shaping your suggestions.",
+    "profile": "",
+    "answer": "I don't have a record of you telling me about a DMF constraint on this conversation — I can only see back to the start of this session, and nothing in that history mentions DMF or a filing constraint.\n\nIf you set a preference about DMF in an earlier session, I can forget it now. Let me check what preferences are currently stored for you:Found it. I'll forget that constraint now:Done. DMF is no longer excluded from my suggestions. Going forward, if a Bayesian-optimization campaign, a screening design, or a protocol recommendation would benefit from DMF, I'll include it as a candidate — and if it comes up as the model's top suggestion, I'll present it without the caveat that it was off the table.",
+    "answered": true,
+    "tools_called": [
+      "recall_preferences",
+      "forget_preference"
+    ],
+    "tool_results": [
+      {
+        "tool": "recall_preferences",
+        "preview": "[Preference(key='solvent_exclusion_DMF', value='Project decision: do not use DMF. REACH authorisation complexity is considered a greater burden than accepting a yield penalty. This constraint applies "
+      },
+      {
+        "tool": "forget_preference",
+        "preview": "Forgot solvent_exclusion_DMF for this chemist."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 8.94,
+    "event_counts": {
+      "token": 12,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "5c938951837846e0bf2704ad9ae6f694",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

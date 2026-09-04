@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "an-09",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What is the ionisation state of Nc1ccc(O)cc1C(=O)O across pH 2 to 8? I need to know which species I am actually injecting.",
+    "expects_tools": [
+      "predict_pka",
+      "predict_logd"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "reporting one pKa as 'the pKa of the compound' when the molecule has more than one site",
+      "constructing a modified structure to get at the basic site and reporting the result as this compound's",
+      "a speciation percentage presented as accurate to better than the model's stated uncertainty"
+    ],
+    "direction": "Recognises this is amphoteric: the tool returns the acid site (the phenol or carboxylic acid) and silently skips the basic aniline nitrogen. Says which site the returned value belongs to, that the other site was not evaluated, and that the compound may be zwitterionic — for which the neutral-form model is the wrong physical picture. Gives the qualitative speciation picture across the range, flags that the exact crossover pH needs measurement, and does not edit the structure to force a second number.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-09",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What is the ionisation state of Nc1ccc(O)cc1C(=O)O across pH 2 to 8? I need to know which species I am actually injecting.",
+    "profile": "no-tools",
+    "answer": "I'll work through the ionisation state of this molecule (salicylic acid with a nitrile group at position 2) across pH 2–8.\n\n**Structure:** The SMILES `Nc1ccc(O)cc1C(=O)O` describes a molecule with:\n- An amino group (–NH₂) at position 1\n- A hydroxyl group (–OH) at position 3\n- A carboxylic acid group (–C(=O)O) at position 1 (ortho to the amino group)\n\nLet me correct that reading: the connectivity gives us **2-aminosalicylic acid** (o-aminobenzoic acid):\n- NH₂ at position 2\n- OH (phenolic) at position 1\n- COOH at position 1\n\nActually, parsing more carefully: `Nc1ccc(O)cc1C(=O)O` means:\n- N (amino) attached to the ring at position 1\n- c positions 2,3,4 with O (hydroxyl) at position 4\n- c positions 5,6 \n- C(=O)O (carboxylic acid) at position 1\n\nSo: **4-aminosalicylic acid** (4-aminosalicylic acid or PAS):\n- NH₂ at position 1\n- OH at position 2  \n- COOH at position 1\n\n**Ionisable groups and pKₐ values** (literature, 4-aminosalicylic acid):\n- **Carboxylic acid (–COOH)**: pKₐ ≈ **2.5–3.0**\n- **Phenolic –OH**: pKₐ ≈ **8.5–9.0**\n- **Aromatic –NH₃⁺** (conjugate acid of NH₂): pKₐ ≈ **4.5–5.0** (this is the pKₐ of the ammonium form; the NH₂ is the conjugate base)\n\n**Species across pH 2–8:**\n\n| pH | Species present | Structure notes |\n|---|---|---|\n| **pH 2** | HOOC–C₆H₃(OH)–NH₃⁺ | COOH protonated; phenol protonated; aniline protonated |\n| **pH 3–4** | –OOC–C₆H₃(OH)–NH₃⁺ (mainly) | COOH deprotonated (pKₐ 2.5); NH₃⁺ still dominates |\n| **pH 4.5** | –OOC–C₆H₃(OH)–NH₃⁺ / –OOC–C₆H₃(OH)–NH₂ (mixture) | Near pKₐ of NH₃⁺; mixture of protonated and neutral aniline |\n| **pH 5–8** | –OOC–C₆H₃(OH)–NH₂ (mainly) | COOH fully deprotonated; NH₃⁺ deprotonated; phenol still protonated |\n| **pH 8.5+** | –OOC–C₆H₃(O⁻)–NH₂ | Phenolic OH begins to deprotonate |\n\n**What you're actually injecting:**\n\n- **At pH 2**: Zwitterion with net charge ≈ 0 (–COOH neutral, –OH neutral, –NH₃⁺ positive)\n- **At pH 3–5**: **Zwitterion, net charge +1** (–COO⁻, –OH, –NH₃⁺) — this is the dominant injectable species if your buffer is around pH 4\n- **At pH 6–8**: **Anion, net charge −1** (–COO⁻, –OH, –NH₂) — this is the dominant injectable species at physiological pH\n\nThe **pKₐ of the amino group is critical**: if your buffer is much below pH 5, the amine is protonated and you have a +1 species; above pH 5, the amine is neutral and you have a −1 species.\n\n**To be certain for your application, you need:**\n1. The exact **pH of your injection buffer or solvent**\n2. The precise **pKₐ values** for this specific molecule in your solvent (literature values are in water; organic solvents shift these significantly)\n3. Whether you care about **net charge** (affects ionspray/MS source behavior) or individual **protonation state**\n\nWhich pH are you using, and is this for LC–MS, HPLC, or another technique?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 11.97,
+    "event_counts": {
+      "token": 32,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "e4a7c0ddeae546fcabdbacda7abf2b8d",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

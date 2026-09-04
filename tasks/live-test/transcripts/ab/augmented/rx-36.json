@@ -1,0 +1,72 @@
+{
+  "probe": {
+    "id": "rx-36",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which ligands have actually been used for Buchwald-Hartwig aminations in the corpus, and how often?",
+    "expects_tools": [
+      "reagent_frequency",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a recommendation of the most frequent ligand as the best one for a new substrate",
+      "a share or percentage quoted without the number of reactions behind it",
+      "a claim that a ligand was never used, from an unlabelled or capped selection"
+    ],
+    "direction": "`reagent_frequency(named_reaction=..., roles=['ligand'])` is the whole answer, and the graded behaviour is how the table is read. Popularity is the field's default, not a recommendation — the answer must say so. Counts must appear beside the number of reactions in scope, because three of four is not evidence. A null median yield means nobody recorded one and must not render as zero. And the coverage sentence has to reach the reader: a ligand absent from a partly-labelled corpus may simply live in an unlabelled row.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-36",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which ligands have actually been used for Buchwald-Hartwig aminations in the corpus, and how often?",
+    "profile": "",
+    "answer": "I'll search the corpus for ligands used in Buchwald-Hartwig aminations.The labelled reaction index does not hold any Buchwald-Hartwig entries with recorded ligands. This does **not** mean the chemistry hasn't been done or that ligands weren't used — it means either:\n\n1. **No reactions were labelled as \"Buchwald-Hartwig\"** in the reaction-label index (they may be stored under a different name or without that formal classification), or\n2. **The ligand role was not recorded** on those reactions when they were ingested.\n\nLet me try a broader search to see if similar amination reactions are in the corpus:The reaction fingerprint index is not built, so the similarity search could not run. This means **the corpus cannot currently be queried for Buchwald-Hartwig reactions by structure**.\n\n## Summary\n\n**The answer to your question cannot be given from the current state of the indexed corpus:**\n\n- The **reaction-label index** holds no labelled Buchwald-Hartwig entries with recorded ligands\n- The **reaction fingerprint index** is not populated, so structure-based similarity search is not available\n\nThis does not mean your programme has never run Buchwald-Hartwig aminations or that ligands were never recorded — it means the stored reactions have not yet been indexed in a way that supports this query. \n\n**To answer this question, you would need:**\n1. **Labelled reactions** in the corpus tagged as Buchwald-Hartwig or C-N coupling\n2. **Ligand roles recorded** on those reactions during ingestion\n3. An **indexed reaction fingerprint** so similar transformations can be found by structure\n\nIf you have individual ELN entries or notes for Buchwald-Hartwig runs, I can search those directly or help you retrieve specific reaction details — just point me to the project, reaction note id, or transformation you'd like to explore.",
+    "answered": true,
+    "tools_called": [
+      "reagent_frequency",
+      "similar_reactions"
+    ],
+    "tool_results": [
+      {
+        "tool": "reagent_frequency",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:reagent_frequency\">\n{\n  \"agents\": [],\n  \"reactions_in_scope\": 0,\n  \"coverage\": {\n    \"labelled\": 0,\n    \"total\": 0,\n    \"sources\": [],\n    \"verdict\": \"NO ROW"
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 17.31,
+    "event_counts": {
+      "token": 25,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "0d68537b454342bba45d18ac4afafcf4",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

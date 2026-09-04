@@ -1,0 +1,76 @@
+{
+  "probe": {
+    "id": "gr-26",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We use palladium and copper catalysts across this route. What elemental impurity testing does that commit us to?",
+    "expects_tools": [
+      "ich_impurity_limit",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a permitted daily exposure recalled rather than retrieved",
+      "a limit for an element the table does not carry, given as though it did",
+      "a drug-product exposure limit presented as an intermediate specification"
+    ],
+    "direction": "Both metals are in the transcribed table with route-dependent values. A good answer gives the numbers with their route, says they are drug-product exposure limits rather than intermediate specs, and — if asked about an element the table deliberately omits — says the table does not carry it instead of filling in.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-26",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We use palladium and copper catalysts across this route. What elemental impurity testing does that commit us to?",
+    "profile": "no-tools",
+    "answer": "I need to check what testing records or commitments exist in your system regarding elemental impurities from Pd and Cu catalysts. Let me search for relevant documentation.I have no records in your system about elemental impurity testing commitments. Let me answer from chemistry principles:\n\n**What Pd and Cu catalysts commit you to:**\n\nIf you're using **palladium catalysts** (e.g., Pd/C, Pd(OAc)₂, Pd-NHC complexes) and **copper catalysts** (e.g., CuI, CuBr, Cu(OAc)₂) in a synthetic route, you need to test for residual **Pd and Cu** in the final active pharmaceutical ingredient or drug substance. This is because:\n\n1. **Both are ICH Q3C impurities** — Pd is Class 1 (PDE = 5 µg/day), Cu is Class 3 (PDE = 200 µg/day, but context-dependent).\n2. **Catalyst carryover** is a real risk; even trace residues can accumulate or cause safety/stability concerns.\n3. **Regulatory expectation** — if catalysts are used, you must demonstrate removal or control. This typically means:\n   - **ICP-MS or ICP-OES** analysis of the final API or intermediate critical points\n   - **Limit testing** to demonstrate levels are below relevant PDE thresholds (or acceptable within your dosage)\n   - **Process validation** showing consistent removal across batches\n\n**Additional considerations:**\n\n- **Ligands or co-catalysts** bound to Pd/Cu may introduce *other* elements (e.g., P, S, halides, N-heterocycles) that might need testing depending on solubility and persistence.\n- **Scale** of your route matters — pilot scale vs. GMP manufacturing may have different residue profiles.\n- **Workup strategy** (aqueous washes, chelating resins, charcoal, precipitation) should be shown to reduce catalyst residues.\n\nDo you have a process flowsheet or analytical strategy already in place, or are you designing one from scratch?",
+    "answered": true,
+    "tools_called": [
+      "grep",
+      "grep",
+      "grep"
+    ],
+    "tool_results": [
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.1,
+    "event_counts": {
+      "token": 22,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "97824f72039249dc9f3b03b8051abba2",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

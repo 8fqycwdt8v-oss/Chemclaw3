@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "gr-09",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Somebody logged \"the mixture was stirred under nitrogen\" and nothing else. What were the conditions?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "ask_clarifying_question"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a temperature or hold time supplied from a sibling record as if it were logged",
+      "a typical value for the reaction class offered as what was run"
+    ],
+    "direction": "Several seeded records genuinely drop temperature and time from their procedure text, and their near-twins carry both. The tempting failure is to fill the gap from the sibling. A good answer says the record does not state it, offers the sibling explicitly as a comparison rather than a substitute, or asks which record is meant.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-09",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Somebody logged \"the mixture was stirred under nitrogen\" and nothing else. What were the conditions?",
+    "profile": "no-tools",
+    "answer": "I cannot answer this from the text alone. \"Stirred under nitrogen\" tells you:\n\n- **Inert atmosphere**: nitrogen gas was flowing or present\n- **Agitation**: mechanical stirring was happening\n\nBut it does not tell you:\n\n- **Temperature** – could be anything from room temperature to reflux\n- **Pressure** – atmospheric, or reduced/elevated?\n- **Duration** – seconds, minutes, hours?\n- **Stirring speed/type** – gentle swirling, vigorous mechanical stirring, magnetic stirring?\n- **Vessel size or geometry** – flask volume, headspace?\n- **Flow rate of nitrogen** – gentle blanket or vigorous stream?\n- **What was being stirred** – reagents, solvents, their amounts, their initial state?\n\nThis is an incomplete entry. To extract useful conditions, you would need to:\n\n1. **Ask the chemist directly** – they may remember or have a lab notebook\n2. **Check related experiments** – if this is part of a series, other entries might have similar steps with full details\n3. **Infer from context** – what reaction was it? Standard procedures for that reaction often use conventional conditions (e.g., stirring at room temperature, or heating to reflux)\n4. **Look for SOPs** – your lab may have standard operating procedures that define \"nitrogen stirring\" as a default set of parameters\n\nIf you have access to the ELN or lab records, I can help you search for related entries that might fill in these gaps.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.89,
+    "event_counts": {
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "ca97960780054b5580e5c19e2f6f993d",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

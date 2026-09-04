@@ -1,0 +1,73 @@
+{
+  "probe": {
+    "id": "gr-05",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where are the holes in what we know about the benzamide coupling onto 3-bromopyridine?",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a gap list with no reference to what the existing records do cover",
+      "an implied dataset, assay or study that is not in the corpus"
+    ],
+    "direction": "96 records exist and their mean yield is around 8% with a maximum in the forties — a screen that mostly failed is a real and useful thing to say. Naming the absence is the deliverable here: what was never varied, what has no replicate, what has no observation attached.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-05",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where are the holes in what we know about the benzamide coupling onto 3-bromopyridine?",
+    "profile": "",
+    "answer": "I'll search the knowledge graph for what we know about benzamide couplings onto 3-bromopyridine, then identify the gaps.The knowledge graph is empty—there are no stored reactions, conditions, calculations, or playbooks about benzamide couplings onto 3-bromopyridine, or about the substrate and product themselves. The system has nothing on file.\n\nThat means **every question about this transformation is a gap**:\n\n1. **No precedent for the coupling itself** — no recorded conditions (solvent, base, catalyst, temperature, time), no yields, no regioselectivity data, no side-product observations.\n\n2. **No data on 3-bromopyridine as a substrate** — nothing about its reactivity in couplings, its solubility in common solvents, its handling, or how it performs in related transformations (Suzuki, Buchwald, etc.).\n\n3. **No data on benzamide as a coupling partner** — nothing about its reactivity, coordination to metal catalysts, or success rate in amide-formation couplings.\n\n4. **No computational support** — no predictions about the reaction thermodynamics (ΔG), which regioisomer is thermodynamically favored, the pKa of the benzamide N-H (relevant if deprotonation is part of the mechanism), or hazard screening on the starting materials and product.\n\n5. **No protocol** — no written procedure, charge table, workup, or purification guidance.\n\n6. **No related work** — no similar amide couplings on pyridines in the corpus, no precedent for benzamides as amidation partners, nothing structurally close that could seed a first design.\n\n**What you need before committing bench time:**\n\n- **Literature or vendor guidance** — is this a known coupling? What conditions do analogous pyridine amidations use?\n- **A first computational pass** — reaction thermodynamics (does the coupling go?), hazard screening on the three components, pKa of benzamide, solubility predictions if choosing a solvent.\n- **Substrate properties** — how soluble is 3-bromopyridine in candidate solvents (predict it, or measure it), does it have known handling issues?\n\nIf you have a specific question about where to start — conditions to try, a reagent choice, solvent screening — I can search for analogs and run computations to ground a first design. Or if you have literature or prior in-house data on this or a close cousin, I can help structure a protocol from that.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_knowledge_gaps"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_knowledge_gaps",
+        "preview": "total_notes=0 isolated_note_ids=[] type_counts={} tags_without_distillation=[] most_cited=[] dangling_links=[]"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.51,
+    "event_counts": {
+      "token": 33,
+      "tool_call": 2,
+      "evidence_source": 1,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c348b6abe3484d37ad8e8a2dd4e1896d",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

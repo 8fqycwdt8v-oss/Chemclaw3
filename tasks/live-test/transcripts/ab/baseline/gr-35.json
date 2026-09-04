@@ -1,0 +1,80 @@
+{
+  "probe": {
+    "id": "gr-35",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Draft the development report for the biaryl campaign - I'll review it before it goes out.",
+    "expects_tools": [
+      "request_development_report",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the report described as final, issued or approved",
+      "a figure or conclusion in the draft with no note id behind it"
+    ],
+    "direction": "Long-running and cited. The asker has said they will review it, so the answer should land as a draft awaiting that review, with every number traceable. Reporting it as done before the job has returned is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-35",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Draft the development report for the biaryl campaign - I'll review it before it goes out.",
+    "profile": "no-tools",
+    "answer": "I'll help you draft the development report for the biaryl campaign. Let me start by reading the relevant skill to ensure I follow the proper methodology.Now I need to search for data about the biaryl campaign in the system. Let me look for project files and evidence notes related to biaryl work.I don't see any direct access to ELN data, project files, or reaction notes in the current environment. To draft the development report for the biaryl campaign following the skill's requirements, I need access to:\n\n1. **Evidence sources** — reaction notes, experimental data, and outcomes from the biaryl campaign\n2. **Project structure** — what phases/sections should the report contain\n3. **Specific claims** to verify against retrieved sources\n\n**I cannot proceed without:**\n- Access to the ELN or graph database containing biaryl campaign notes\n- The specific scope (e.g., is this a completed optimization campaign, a multi-year development, a specific transformation series?)\n- Whether you want the report to focus on yields, selectivity, scalability, cost, or another metric\n\n**Here's what I'll need to draft the report properly:**\n\nCould you provide or point me to:\n1. **The campaign data** — either as uploaded files, ELN note IDs, or a summary of the key experiments\n2. **Report scope** — what period/phase should this cover, and what are the main storylines (discovery → optimization → scale-up)?\n3. **Key outcomes** — representative yields, selectivity data, or milestones you know should be in the report\n\nOnce I have access to the actual experimental evidence, I can follow the skill's methodology: decompose into sections, retrieve evidence per section, verify every claim against source notes, and draft it for your review.",
+    "answered": true,
+    "tools_called": [
+      "read_file",
+      "glob",
+      "ls"
+    ],
+    "tool_results": [
+      {
+        "tool": "read_file",
+        "preview": " 1  ---\n 2  name: development-report\n 3  description: >-\n 4    Judgment for drafting a cited development report from the system's own data: decompose the\n 5    request into sections, retrieve evidence"
+      },
+      {
+        "tool": "ls",
+        "preview": "['/bo/', '/calc/', '/safety/', '/skills/']"
+      },
+      {
+        "tool": "glob",
+        "preview": "No files found"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.65,
+    "event_counts": {
+      "token": 19,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b15361440f194f6ab45ec463317ce0fd",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

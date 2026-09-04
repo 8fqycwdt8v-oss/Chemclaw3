@@ -1,0 +1,89 @@
+{
+  "probe": {
+    "id": "kn-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "our biaryl couplings keep coming out either 70-odd percent or under 20, with nothing changed on paper. any idea whats going on",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a reagent-lot, instrument or operator cause that is not in the record",
+      "a yield distribution the notes do not report"
+    ],
+    "direction": "Recognises the *bimodal* signature as the diagnostic, not the average, and attributes it to dissolved oxygen killing Pd(0) — the dead black precipitate — citing playbook-degassing by id. States the remedy on file: three freeze-pump-thaw cycles, or sparging 20 minutes per 100 mL, and that two minutes of sparging is measurably the same as not degassing. Naming the mechanism without a note id, or offering a generic troubleshooting list, is a weaker answer.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "our biaryl couplings keep coming out either 70-odd percent or under 20, with nothing changed on paper. any idea whats going on",
+    "profile": "",
+    "answer": "I'll help you track down what's causing these erratic yields. Let me search for your biaryl coupling data and see what the record actually shows.The record isn't returning any biaryl-coupling notes yet. Let me check for past reactions and jobs to see what conditions and outcomes you actually have on file:Let me try with a proper reaction SMILES format:The reaction fingerprint index isn't populated yet. **Here's what I can tell you now:** a yield that swings from ~70% to <20% with no changes on paper points to something **real** changing outside the written record. In biaryl couplings, the culprits are usually:\n\n1. **Solvent/solvent batch** — water content or impurities in THF, DMF, dioxane, etc. are the classic silent killer here. Even 0.5-1% water can tank a Pd coupling.\n\n2. **Reagent quality** — particularly palladium catalyst condition (Pd on charcoal vs. in solution, age, or storage) and phosphine ligand (air-oxidized back to phosphine oxide). Boronic acids/esters notoriously hydrolyze if stored wet.\n\n3. **Stirring and mixing** — incomplete dissolution or phase separation, especially if you switched equipment or solvent volumes changed slightly (affecting surface area or mixing efficiency).\n\n4. **Base identity or age** — wrote \"K₂CO₃\" both times but actually used K₂CO₃·2H₂O one run, or it's moisture-absorbed from the air. Same mass ≠ same molar amount.\n\n5. **Order of addition or temperature control** — if the coupling is sensitive to premature oxidation of the Pd(0) or to local concentration spikes (overoxidation to Pd(II)), small drift in how fast you add or where temperature sat could cause it.\n\n6. **Arylhalide reactivity** — if you're using **different halide or different aryl substrate** between runs, that would show the huge swing even at otherwise identical conditions, but you said \"nothing changed on paper\" — so check whether a run used bromide vs. iodide, or ortho/meta/para regioisomer.\n\n**To pin it down, I need:**\n- The **exact substrate pair** (SMILES or names for the aryl halide + coupling partner) for the good runs vs. the bad ones\n- The **full condition set**: palladium source, ligand, base, solvent, ratio/equivalents, temperature, time, any atmosphere\n- **Dates or batch info** on the solvent and reagents — especially the Pd and ligand\n- Whether **solvent was distilled, dried, deoxygenated** or just used as-supplied\n\nOnce you supply those, I can search the record for precedent, check for computed solvent effects, and build a picture of what's actually drifting.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "find_past_jobs",
+      "similar_reactions",
+      "similar_reactions"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      }
+    ],
+    "tools_failed": [
+      "similar_reactions"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "0"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 18.23,
+    "event_counts": {
+      "token": 35,
+      "tool_call": 5,
+      "evidence_source": 1,
+      "tool_result": 4,
+      "tool_failed": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d40f7ab9212848e7979051359788a498",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

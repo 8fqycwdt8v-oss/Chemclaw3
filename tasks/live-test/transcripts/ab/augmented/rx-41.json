@@ -1,0 +1,73 @@
+{
+  "probe": {
+    "id": "rx-41",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We want to run Brc1ccccc1.NC1CCCCC1>>c1ccc(NC2CCCCC2)cc1. Has this transformation been done, and under what conditions?",
+    "expects_tools": [
+      "conditions_for_similar_reaction",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a set of conditions presented as recommended rather than as recorded precedent",
+      "a predicted yield for the proposed reaction",
+      "a precedent quoted without its citation",
+      "a claim of no precedent from an empty neighbour set, without saying the index may hold none"
+    ],
+    "direction": "The transformation question, not the product one: the query names the whole reaction, so DRFP neighbours are what precedent means here — a Suzuki making the same biaryl is a product neighbour and is not this reaction. `conditions_for_similar_reaction` is the single call; `conditions_for_similar_product` would answer a different question and `similar_reactions` searches this organisation's own ELN rather than the literature corpus, which is a different denominator and a different citation. The graded behaviours are the two the corpus tools share: recorded is not recommended, and an empty result is not a negative finding — the coverage sentence has to reach the reader. One caveat is specific to this tool and worth crediting: the index excludes the agent slot, so a query naming ligand or solvent scores below a real precedent, and an answer that widened the query that way should say so rather than report no hits.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-41",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We want to run Brc1ccccc1.NC1CCCCC1>>c1ccc(NC2CCCCC2)cc1. Has this transformation been done, and under what conditions?",
+    "profile": "",
+    "answer": "I'll search for precedent on this transformation — an aniline arylation with cyclohexylamine.The reaction fingerprint index and the labelled reaction corpus have not been populated on this deployment, so the search could not run. **This is not evidence that the transformation has not been done** — the question was not answered because the indexed sources are empty. Report this to an operator to populate them if available.\n\nWithout the indexed corpus, I can offer general guidance on this transformation:\n\n**The reaction:** Arylation of cyclohexylamine by bromobenzene is a secondary amine coupling — a nucleophilic aromatic substitution or a palladium-catalysed cross-coupling. The major decision is which catalyst system to use.\n\n**Common condition spaces for similar aryl-amine couplings:**\n\n- **Buchwald-Hartwig catalysis** (Pd/NHC or Pd/phosphine + base): typical temperatures 80–140 °C, bases are K₂CO₃, Cs₂CO₃, or a more hindered base like KOtBu or t-BuONa. Ligands commonly used include X-Phos, SPhos, or other electron-rich phosphines.\n- **Nucleophilic aromatic substitution** (SNAr): requires electron-withdrawing groups on the arene to activate it. Bromobenzene without EWGs has low SNAr reactivity, so this is unlikely to be practical.\n- **Copper catalysis**: Cu(I) with phenanthroline or TMEDA ligands, heat (80–120 °C), can effect arylation of secondary amines.\n\nTo narrow the space, I'd need to know: Do you have runs of this exact coupling on file, or of similar substrates (other bromoarenes with secondary amines)? That would point toward which method your group has validated.",
+    "answered": true,
+    "tools_called": [
+      "similar_reactions",
+      "conditions_for_similar_reaction"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      },
+      {
+        "tool": "conditions_for_similar_reaction",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:conditions_for_similar_reaction\">\n{\n  \"question\": \"conditions for reactions similar to Brc1ccccc1.NC1CCCCC1>>c1ccc(NC2CCCCC2)cc1\",\n  \"hits\": [],\n  \"coverage\""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.88,
+    "event_counts": {
+      "token": 26,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "2ae164755af34f24be632aec9490e56a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

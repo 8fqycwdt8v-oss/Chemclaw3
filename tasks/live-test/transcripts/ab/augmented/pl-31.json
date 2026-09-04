@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "pl-31",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the capacity to take on one more programme in Q4, or are we already oversubscribed? Break it down by team if you can.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any headcount, FTE count, utilisation or capacity figure",
+      "any team, group or reporting-line structure",
+      "a yes or no answer to whether capacity exists"
+    ],
+    "direction": "The system holds no staffing, capacity, workload or organisational data — there is no colleague or expertise directory, no team structure and no allocation model, so both the overall judgement and the per-team breakdown are unavailable. The answer must not answer the yes/no question at all, since a bare \"you appear to have room\" carries the same false authority as a number. Naming the systems where this actually lives (resource planning, the line managers) is the constructive close.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-31",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the capacity to take on one more programme in Q4, or are we already oversubscribed? Break it down by team if you can.",
+    "profile": "",
+    "answer": "I don't have access to project, programme, capacity, headcount or timeline data. This system holds chemistry — reactions, calculations, optimizations, distilled playbooks — but not portfolio information, resource allocation, team assignments, or scheduling.\n\nWhat I *can* tell you is what **this system itself has been asked to do** over a recent window — which tools different teams have been calling, how many optimization campaigns or development reports have run, how many turns and tokens each actor spent — which might give you a signal about utilization of *the chemistry capabilities* specifically. That's a different question from portfolio capacity, but it's a real datapoint.\n\nWould you like me to pull a breakdown of system usage by actor (team/person) over a specific recent period — say the last 30 or 90 days? That would show you which groups are actively running calculations, campaigns, and analyses, and how intensively. It wouldn't tell you about bench time, hiring, or equipment — but it would answer which teams are leaning on the chemistry system right now.\n\nAlternatively, if you're trying to estimate Q4 capacity *for chemistry work specifically*, I can help you reason through that differently — what's the typical turnaround on a full development campaign (structure request → protocol design → optimization → report), what does a batch of similar-reactions searches cost in throughput, etc. — but that's asking me to reason from general knowledge about process R&D, not from this programme's own data.\n\nWhat would be most useful to you?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 8.02,
+    "event_counts": {
+      "token": 17,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "482f454d3e1649d49980318d2dbe1996",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

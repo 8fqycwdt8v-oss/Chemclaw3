@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "kn-23",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "An auditor wants proof that a computed number in one of our reports wasn't edited after the fact. What do I actually show them?",
+    "expects_tools": [
+      "find_calculations",
+      "list_artifacts",
+      "fetch_artifact"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an audit entry, hash or timestamp it did not retrieve",
+      "a compliance certification or validated-system status",
+      "that re-running the job proves the number was not edited",
+      "an inspection or audit outcome"
+    ],
+    "direction": "Names what actually exists and is honest about its limit. Three things: the append-only audit trail, which records who ran what and when; the database grant behind it, which gives the application INSERT and neither UPDATE nor DELETE, so the credential that writes a row cannot rewrite it; and the calculation store, which keys a result by method, version and input hash and persists it once, so the number in the report resolves to a stored record and its artifact. The limit must be said out loud rather than left implied: there is no cryptographic proof that a row was never edited — a database owner can still change one — so what is on offer is a controlled record, not tamper-evidence. The distinguishing move is still saying explicitly that \"we can re-run the job and get the same number\" is reproducibility, a different claim from integrity. Any specific hash, id or timestamp must be one it retrieved.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-23",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "An auditor wants proof that a computed number in one of our reports wasn't edited after the fact. What do I actually show them?",
+    "profile": "",
+    "answer": "This is exactly the question the audit trail is built to answer — and exactly where its limits matter.\n\nHere's what you can show:\n\n**What the trail records:**\nEvery calculation this system ran is in an append-only database with:\n- The tool called (e.g. `compute_reaction_energy`)\n- The exact inputs and parameters\n- The result returned\n- Timestamp, actor (which account), correlation ID, deployment version\n- Latency\n\nThat entry cannot be updated or deleted — only the database owner has the privilege to write to the append-only log at all, and that privilege does not include editing or deleting rows. So if a computation appears in the trail, that specific result was returned at that specific time by that specific tool on that specific input.\n\n**What you can regenerate:**\nIf the inputs are deterministic (SMILES, solvent name, etc.), you can re-run the identical job and get the same number back — that's reproducibility. The job id `get_durable_job_status` returns when you re-run it will be identical to the first one because the key is `(calculator, version, input, parameters)`. So \"we ran this on date X and got Y; we ran it again today and got Y again\" is proof of reproducibility, which is a different but related claim.\n\n**Where it stops:**\n- **The trail is not tamper-evident.** It is append-only by database privilege, not by cryptography. A database administrator could still edit a row if they had a reason to — the privilege that writes the log cannot delete from it, but the database owner can do anything. So the trail proves \"this system did not edit this row\" (the application architecture prevents it), not \"this row was never edited by anyone.\"\n- **The trail records what the system did, not the whole decision.** It knows the calculation ran and what it returned. It does not know whether someone outside the system took that number, changed it in Excel, and put it in the report. The audit trail of *this system* is not the audit trail of your document.\n- **A note the agent wrote passed the PR-gate but is still an inference.** If the number ended up in the knowledge graph, `expand_note` shows you when it was merged and who approved it — that's the human checkpoint — but the note's `calc_refs` field is the connection back to the stored calculation. The note itself can be audited the same way: it is in the graph with a merge timestamp, and the PR that proposed it is the evidence trail.\n\n**What to show the auditor:**\n\n1. **The calculation in the trail:** Take the report's stated value, search for it with `find_calculations` (filtered by date range and input if you have them), and show the matching entry with its timestamp, tool, inputs, and result. Quote the correlation ID — that ties it to the turn in which it happened.\n\n2. **Reproducibility:** Re-run the identical calculation with `get_durable_job_status` on the original job id (or repeat the call if inputs are known). If it returns the same number, that's proof the calculation is stable.\n\n3. **The note in the knowledge graph (if applicable):** If the number was proposed as knowledge, `expand_note` on that note id shows when it was submitted (created_by, merged timestamp) and by whom, plus the `calc_refs` pointing back to the stored calculation. The PR that proposed it is the human decision checkpoint.\n\n4. **What changed between then and now:** The deployment version in the trail entry is its own timestamp — if the calculator binary or library updated since the original run, a re-run might give a slightly different number from a newer version. That difference is not \"editing\" — it is a version change you can see in the record.\n\n**The sentence to give them:**\n\n> \"The calculation was performed on [date] by [tool] on inputs [list them], returned [value], and is recorded in our append-only audit trail at [correlation ID]. We cannot edit that entry — only the database owner could, and the application prevents it. We can reproduce it today by re-running the same calculation, which confirms the result is deterministic on the inputs. The number entered the report on [date] via [note/direct citation], and [was/was not] edited after that point according to [document audit trail, Git history, etc. — that is your side].\"\n\nThe key distinction: **You can prove this system didn't edit it. You cannot prove nobody edited it after it left the system.** That is what your document version control has to show.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 18.02,
+    "event_counts": {
+      "token": 52,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "7cda86973d39435db2f4e13256a048a7",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

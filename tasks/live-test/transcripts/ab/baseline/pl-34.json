@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "pl-34",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Rebalance the group between the two programmes for next quarter — who should move, when, and what does that do to the delivery dates on each side?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any named person, role or assignment",
+      "any allocation split, percentage, start date or delivery-date change",
+      "that a reallocation plan has been produced or could be produced from held data"
+    ],
+    "direction": "Every input is missing at once: no people, no skills or expertise directory, no current allocation, no capacity model, no delivery dates. The answer must decline the whole task rather than produce a plausible-looking split (\"shift roughly 30% of effort\") that a manager could act on. Naming a person would be the worst outcome, since no personnel data exists to name from and any name would be invented. Offering the chemistry-side input a manager could actually use — what the corpus says about where each programme's technical risk sits — is a good close.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-34",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Rebalance the group between the two programmes for next quarter — who should move, when, and what does that do to the delivery dates on each side?",
+    "profile": "no-tools",
+    "answer": "I don't have access to:\n- Your team roster or current group assignments\n- Project schedules or delivery dates\n- The two programmes' workloads, dependencies, or capacity constraints\n- Staffing levels, skill mixes, or role requirements\n\n**To answer this properly, I would need you to provide:**\n\n1. **Current state**: Who is in each programme now, and in what roles?\n2. **Capacity**: How many people (or FTE) does each programme have, and what's planned for next quarter?\n3. **Delivery dates**: What are the committed milestones for each programme?\n4. **Dependencies**: Are there blockers or critical-path tasks that would be affected by moving people?\n5. **Skills**: Which roles are interchangeable, and where are the constraints (e.g., specialists who can't easily be replaced)?\n6. **Workload forecast**: What's the expected workload for each programme next quarter?\n\nOnce you share that, I can help you think through:\n- Who could move without breaking either programme\n- The timing (when in the quarter)\n- The impact on delivery dates and risk\n\nDo you have that information ready to share, or would it be easier to point me at a document or system where I can access it?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.99,
+    "event_counts": {
+      "token": 11,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "73cb5a0740284165afa0812be5239638",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

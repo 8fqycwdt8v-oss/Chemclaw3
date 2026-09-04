@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "pr-04",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "For the amidation of CC(=O)O with NCc1ccccc1, I want one predictor's raw condition suggestions rather than the blended answer — take rxn_insight alone and show me what it proposes, so I can see how much of the consensus is coming from it.",
+    "expects_tools": [
+      "predict_conditions_single_model"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "one predictor's condition set presented as the ensemble's consensus",
+      "a predicted yield for the suggested conditions",
+      "a claim about how much of the consensus this model contributed, computed from this call alone"
+    ],
+    "direction": "The condition-side counterpart of pr-03 and the same judgement: this is interrogating a model, not answering a chemistry question. The answer must return that one predictor's ranked condition sets, in Celsius, and say so explicitly. The trap worth grading is the second half of the ask — \"how much of the consensus is coming from it\" cannot be answered by a single-model call, which returns no vote weights and no other model's output; answering it requires the ensemble call beside this one, and inventing a contribution share from one predictor's ranking is a fabrication. Saying what the call can and cannot settle, and offering the ensemble call as the way to settle the rest, is the right shape.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pr-04",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "For the amidation of CC(=O)O with NCc1ccccc1, I want one predictor's raw condition suggestions rather than the blended answer — take rxn_insight alone and show me what it proposes, so I can see how much of the consensus is coming from it.",
+    "profile": "",
+    "answer": "I'll call rxn_insight directly to see what it proposes for this amidation.The deployment doesn't have rxn_insight loaded. Let me check what condition predictors are actually available:Unfortunately, this deployment has **no condition predictors loaded at all** — every conditions model is unavailable due to missing optional dependencies. `rxn_insight` specifically reports `ModuleNotFoundError: No module named 'rxn_insight'`, meaning it has not been installed or set up here.\n\nThe same is true for forward predictors (product prediction) — all six are missing required packages.\n\nThis means:\n- `predict_reaction_conditions` (the consensus blend) cannot run either\n- `predict_conditions_single_model` cannot call `rxn_insight` \n- I cannot show you what rxn_insight alone would propose for this amidation\n\nThe deployment operator would need to install the rxn_insight package and dependencies to make it available. This is a configuration issue on the deployment side, not a permission or access boundary on your account.",
+    "answered": true,
+    "tools_called": [
+      "predict_conditions_single_model",
+      "list_available_models"
+    ],
+    "tool_results": [
+      {
+        "tool": "list_available_models",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnpredict:list_available_models\">\n{\n  \"forward\": [\n    {\n      \"name\": \"reaction_t5_v2\",\n      \"kind\": \"forward\",\n      \"available\": false,\n      \"description\": \""
+      }
+    ],
+    "tools_failed": [
+      "predict_conditions_single_model"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.73,
+    "event_counts": {
+      "token": 101,
+      "tool_call": 2,
+      "tool_failed": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "758d27ea3eae433d8fb983f541b07843",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

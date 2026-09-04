@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "rp-22",
+    "section": 13,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Where are we on the submission package overall — what percentage is complete, and will we make the filing date?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a completion percentage or fraction",
+      "a filing date, milestone date, or an assessment of whether a date will be met",
+      "a count or status list of package sections or deliverables",
+      "a claim that a project, programme or document-package entity exists"
+    ],
+    "direction": "Bucket C, and firmly so: there is no project entity, no programme, no timeline, no deliverable tracking and no document package anywhere in the system — it holds chemistry knowledge notes, calculations and jobs. Any percentage or date would be invented outright. The right answer says that in a couple of sentences, states what it genuinely can tell a manager (which chemistry evidence exists and where the record is thin), and sends the schedule question to the project management system. Offering find_knowledge_gaps as the nearest useful thing is a plus, not a requirement.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-22",
+    "section": 13,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Where are we on the submission package overall — what percentage is complete, and will we make the filing date?",
+    "profile": "",
+    "answer": "I don't have access to project, programme, capacity, timeline or delivery-status data. This system holds chemistry — reactions, calculations, optimizations, material properties, process conditions, safety screens — but not the planning layer that tracks submission packages, filing dates, or project milestones.\n\nTo answer your question I would need to know:\n- **Filing date** you are working toward\n- **Deliverables** that make up the submission package\n- **Current status** of each component (draft, complete, under review, in submission)\n- **Critical path** dependencies\n\nThat lives in your project-management or portfolio system, not here.\n\n**What I can do:** If you have specific chemistry questions *within* the package — a compound property that needs to be established, conditions to optimize, a process route to assess, or evidence to support a claim — I can help with those. If you want to know whether we've done relevant calculations or have precedent for a transformation, I can search that. But the timeline and completion tracking belong with whoever owns the submission schedule.\n\nIs there a specific chemistry task in the package I can help you with?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.67,
+    "event_counts": {
+      "token": 12,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "05987bc9599c4313babc40f984d14f47",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}
