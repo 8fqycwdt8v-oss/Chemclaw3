@@ -93,7 +93,6 @@ def client(store: InMemoryDesignStore) -> Iterator[TestClient]:
 
 def _seed(store: InMemoryDesignStore, design: ExperimentDesign, **kwargs: Any) -> None:
     """Put one revision in the store the way the agent tool would have."""
-    kwargs.setdefault("kind", "protocol")
     kwargs.setdefault("author_kind", "agent")
     asyncio.run(store.append(_DESIGN_ID, design, run_checks(design), **kwargs))
 
@@ -323,7 +322,7 @@ def test_correcting_the_ask_is_stored_as_a_request_and_graded_as_one(
     real blocker depends on.
     """
     ask = _design(arms=0, cited=False)
-    _seed(store, ask, kind="request", status="requested")
+    _seed(store, ask, status="requested")
 
     response = client.post(
         f"/protocols/{_DESIGN_ID}/revisions",
@@ -400,7 +399,7 @@ def test_drafting_a_procedure_onto_a_requested_design_advances_it(
     path too — and it is the transition the hard-coded `kind="protocol"` used to fire on an edit
     that added no procedure at all.
     """
-    _seed(store, _design(arms=0, cited=False), kind="request", status="requested")
+    _seed(store, _design(arms=0, cited=False), status="requested")
 
     response = client.post(
         f"/protocols/{_DESIGN_ID}/revisions",

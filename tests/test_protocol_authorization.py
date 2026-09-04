@@ -21,7 +21,9 @@ route does, so these tests run the **enforced** posture — which is the one a d
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -33,6 +35,7 @@ from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.routes import protocols as routes
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.metrics import METRICS
 from chemclaw.protocols.checks import run_checks
 from chemclaw.protocols.models import (
     EvidenceRef,
@@ -101,7 +104,6 @@ def test_a_turn_cannot_draft_onto_another_chemists_design(
             DESIGN_ID,
             design,
             run_checks(design),
-            kind="protocol",
             author_kind="agent",
             author=ALICE,
             parent_revision=0,
@@ -140,7 +142,6 @@ def test_the_owner_can_still_draft_onto_their_own_design(
             DESIGN_ID,
             design,
             run_checks(design),
-            kind="request",
             author_kind="agent",
             author=ALICE,
             parent_revision=0,
@@ -176,7 +177,6 @@ def store(monkeypatch: pytest.MonkeyPatch) -> InMemoryDesignStore:
             DESIGN_ID,
             design,
             run_checks(design),
-            kind="protocol",
             author_kind="agent",
             author=ALICE,
             parent_revision=0,
@@ -218,6 +218,7 @@ def test_a_stranger_cannot_write_to_someone_elses_design(
     assert "another chemist" in response.json()["detail"]
     # Nothing was recorded — the trail is what a lab record rests on.
     assert asyncio.run(store.status_history(DESIGN_ID)) == []
+
     header = asyncio.run(store.summary(DESIGN_ID))
     assert header is not None and header.head_revision == 1
 
@@ -246,3 +247,73 @@ def test_a_reviewer_reaches_another_chemists_design(
             json={"status": "abandoned", "expected_revision": 1, "reason": "SM decomposes"},
         )
     assert response.status_code == 204
+
+
+@contextmanager
+def _refusal_records() -> Iterator[list[logging.LogRecord]]:
+    """Every `authz.refused` record `deps` emits, collected off that logger directly.
+
+    Not `caplog`: `create_app()` configures logging on startup and replaces the handler pytest
+    installs, so the fixture comes back empty while the WARNING is plainly on stderr. Attaching to
+    the named logger is the reading that survives whatever the app does to the root.
+    """
+    collected: list[logging.LogRecord] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if getattr(record, "event", "") == "authz.refused":
+                collected.append(record)
+
+    logger = logging.getLogger("chemclaw.api.deps")
+    handler = _Collect(level=logging.WARNING)
+    logger.addHandler(handler)
+    try:
+        yield collected
+    finally:
+        logger.removeHandler(handler)
+
+
+@pytest.mark.parametrize("path", ["status", "revisions"])
+def test_a_refused_design_write_is_recorded_on_the_server_side(
+    store: InMemoryDesignStore, enforced: None, path: str
+) -> None:
+    """The 403 discloses that the design exists; only the server can say **who tried**.
+
+    `deps._refuse` writes a metric and a WARNING for every session and proposal refusal, and this
+    gate raised inline: no log line, no metric, on both write routes. A scan of design ids was
+    therefore indistinguishable from ordinary traffic on the one surface where the distinction
+    between "no such design" and "not yours" survives at all.
+    """
+    body: dict[str, Any] = (
+        {"status": "executed", "expected_revision": 1, "reason": "ran it"}
+        if path == "status"
+        else _revision_body(_design())
+    )
+    before = METRICS.value("chemclaw_authz_refusals_total")
+    with _refusal_records() as records:
+        for client in _client(Principal(oid="mallory-oid")):
+            response = client.post(f"/protocols/{DESIGN_ID}/{path}", json=body)
+    assert response.status_code == 403
+    assert METRICS.value("chemclaw_authz_refusals_total") == before + 1
+    assert len(records) == 1
+    assert getattr(records[0], "resource", "") == "design"
+    assert getattr(records[0], "status", 0) == 403
+    assert getattr(records[0], "actor", "") == "mallory-oid"
+
+
+def test_a_write_to_an_unknown_design_is_recorded_as_well(
+    store: InMemoryDesignStore, enforced: None
+) -> None:
+    """The other raise site in the same gate, and it was silent for the same reason."""
+    before = METRICS.value("chemclaw_authz_refusals_total")
+    with _refusal_records() as records:
+        for client in _client(Principal(oid="mallory-oid")):
+            response = client.post(
+                "/protocols/design-nothing/status",
+                json={"status": "executed", "expected_revision": 1, "reason": "ran it"},
+            )
+    assert response.status_code == 404
+    assert METRICS.value("chemclaw_authz_refusals_total") == before + 1
+    assert len(records) == 1
+    assert getattr(records[0], "resource", "") == "design"
+    assert getattr(records[0], "status", 0) == 404

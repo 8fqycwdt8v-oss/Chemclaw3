@@ -51,6 +51,7 @@ from chemclaw.protocols.models import (
     DesignSummary,
     ExperimentDesign,
     ProtocolCheck,
+    RevisionKind,
     StatusEvent,
 )
 
@@ -185,18 +186,25 @@ class UnknownDesign(ChemclawError):
 
 
 class UnstorableDocument(ChemclawError):
-    """A design carrying bytes no text column can hold — a NUL, or a C0 control character.
+    """A write this store will not take, that the caller can fix — the 422 of this module.
 
-    Postgres `text` and `jsonb` reject `\u0000` outright, and psycopg raises it as an untyped
-    `DataError`/`UntranslatableCharacter` from inside the driver. Measured before this existed: a
-    NUL anywhere in a browser-supplied design — the notes field, the title, the change note — was a
-    **500** with a correlation id and nothing a caller could act on, while the in-memory backend
-    accepted it, so the two backends disagreed about whether the write was possible.
+    Two families, and the docstring named only the first for as long as the second existed:
 
-    Refused here rather than sanitised, because a chemist did not type a NUL: silently stripping it
-    would store a document that is not the one that was sent. `ingest.eln.sync` strips control
-    characters on the *ingest* path for the opposite reason — there the bytes come from somebody
-    else's database and there is no author to refuse.
+    **Bytes no text column can hold** — a NUL, or a C0 control character, or an unpaired UTF-16
+    surrogate. Postgres `text` and `jsonb` reject `\u0000` outright, and psycopg raises it as an
+    untyped `DataError`/`UntranslatableCharacter` from inside the driver. Measured before this
+    existed: a NUL anywhere in a browser-supplied design — the notes field, the title, the change
+    note — was a **500** with a correlation id and nothing a caller could act on, while the
+    in-memory backend accepted it, so the two backends disagreed about whether the write was
+    possible. Refused rather than sanitised, because a chemist did not type a NUL: silently
+    stripping it would store a document that is not the one that was sent. `ingest.eln.sync` strips
+    control characters on the *ingest* path for the opposite reason — there the bytes come from
+    somebody else's database and there is no author to refuse.
+
+    **A status the design cannot support** — `require_movable`, which refuses `approved` or
+    `executed` on a design holding only the structured ask. Same exception because it is the same
+    answer to the caller: the request as sent cannot be stored, the reason is in the message, and
+    the fix is theirs. Both reach the routes as a 422.
     """
 
 
@@ -210,7 +218,6 @@ class DesignStore(Protocol):
         design: ExperimentDesign,
         checks: Sequence[ProtocolCheck],
         *,
-        kind: str,
         author_kind: AuthorKind,
         author: str = "",
         parent_revision: int = 0,
@@ -292,7 +299,6 @@ class InMemoryDesignStore:
         design: ExperimentDesign,
         checks: Sequence[ProtocolCheck],
         *,
-        kind: str,
         author_kind: AuthorKind,
         author: str = "",
         parent_revision: int = 0,
@@ -310,13 +316,14 @@ class InMemoryDesignStore:
             session_id=session_id,
             correlation_id=correlation_id,
         )
+        kind = revision_kind(design)
         existing = self._revisions.get(design_id, [])
         head = existing[-1].revision if existing else 0
         _require_head(design_id, head, parent_revision)
         revision = DesignRevision(
             design_id=design_id,
             revision=head + 1,
-            kind=kind,  # type: ignore[arg-type]
+            kind=kind,
             author_kind=author_kind,
             author=author,
             parent_revision=head,
@@ -487,7 +494,6 @@ class PostgresDesignStore:
         design: ExperimentDesign,
         checks: Sequence[ProtocolCheck],
         *,
-        kind: str,
         author_kind: AuthorKind,
         author: str = "",
         parent_revision: int = 0,
@@ -533,6 +539,7 @@ class PostgresDesignStore:
             session_id=session_id,
             correlation_id=correlation_id,
         )
+        kind = revision_kind(design)
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_HEAD, (design_id,))
@@ -549,7 +556,7 @@ class PostgresDesignStore:
                 revision = DesignRevision(
                     design_id=design_id,
                     revision=head + 1,
-                    kind=kind,  # type: ignore[arg-type]
+                    kind=kind,
                     author_kind=author_kind,
                     author=author,
                     parent_revision=head,
@@ -724,11 +731,18 @@ class PostgresDesignStore:
                         f"revision {expected_revision} is not the head ({head}); "
                         "re-read the design before signing off on it"
                     )
-                # Inside the same transaction and under the same `FOR UPDATE`, so the kind read
-                # here is the kind of the revision this move is stamped against.
+                # The kind of the revision this move is stamped against, and the reason that is
+                # not a race: `_SELECT_HEAD` locks the *header* row, and every `append` takes that
+                # same lock before writing, so no revision can land between the two reads. The
+                # revisions table is append-only, so the row this finds cannot change either.
                 await cur.execute(_SELECT_HEAD_KIND, (design_id, head))
                 kind_row = await cur.fetchone()
-                require_movable(status, str(kind_row[0]) if kind_row else "")
+                # Anything that is not provably `protocol` is treated as `request`, so a header
+                # naming a head revision whose row this read does not find fails *closed* rather
+                # than waving an `executed` through on a document nobody can see.
+                require_movable(
+                    status, "protocol" if kind_row and kind_row[0] == "protocol" else "request"
+                )
                 await cur.execute(_SET_STATUS, {"status": status, "design_id": design_id})
                 await cur.execute(
                     _INSERT_STATUS_EVENT,
@@ -766,15 +780,22 @@ class PostgresDesignStore:
         gives the whole block one snapshot, which is what "the history comes back in the same call"
         was always supposed to mean. Nothing here writes, and a read-only transaction cannot take a
         serialization failure, so there is no retry to write.
+
+        **The revision clause is `read`'s, spelled the same way, because `or 0` is not `is None`.**
+        This selected on `(%s = 0 OR revision = %s)` over `revision or 0`, so `page(design_id, 0)`
+        answered with the **head** here and `None` on the in-memory store — a backend divergence in
+        the one method written to remove one, and reachable from a client that sends `revision=0`.
+        There is no revision 0: `DesignRevision.revision` is `ge=1` and `parent_revision=0` is the
+        word for "nothing", so `None` is the honest answer on both.
         """
+        clause = "AND revision = %(revision)s " if revision is not None else ""
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                 await cur.execute(
                     f"SELECT {_REVISION_COLUMNS} FROM experiment_protocol_revisions "
-                    "WHERE design_id = %s AND (%s = 0 OR revision = %s) ORDER BY revision DESC "
-                    "LIMIT 1",
-                    (design_id, revision or 0, revision or 0),
+                    "WHERE design_id = %(design_id)s " + clause + "ORDER BY revision DESC LIMIT 1",
+                    {"design_id": design_id, "revision": revision},
                 )
                 head_row = await cur.fetchone()
                 if head_row is None:
@@ -814,7 +835,7 @@ def _status_event(row: Any) -> StatusEvent:
 _RETIRED_BY_A_REVISION: frozenset[DesignStatus] = frozenset({"approved", "executed"})
 
 
-def advanced(current: DesignStatus, kind: str) -> DesignStatus:
+def advanced(current: DesignStatus, kind: RevisionKind) -> DesignStatus:
     """The status a design has after a revision of `kind` lands on it.
 
     A design that held only a structured ask becomes a `draft` the moment a protocol revision
@@ -841,12 +862,33 @@ def advanced(current: DesignStatus, kind: str) -> DesignStatus:
     return "draft" if current in _RETIRED_BY_A_REVISION else current
 
 
+def revision_kind(design: ExperimentDesign) -> RevisionKind:
+    """The word for what this revision *is*, read off the document rather than taken on trust.
+
+    It used to be an argument, and the three callers derived it separately — which is the shape
+    `has_protocol` exists to prevent and which failed exactly where a duplicated predicate always
+    does, on the path where the two inputs come apart. `structure_experiment_request` deliberately
+    carries a drafted procedure forward when a chemist corrects the ask, and it stamped
+    `kind="request"` regardless. `require_movable` reads this column to decide whether a design has
+    a procedure to approve, so a corrected ask made a fully drafted plate **permanently
+    un-approvable and un-executable**: every arm, step and charge line present, and the store
+    refusing the sign-off with "this design holds only the structured ask". The document was right
+    and only the word for it was wrong, so nothing on the page hinted at the contradiction.
+
+    Deriving it here is what makes the column true by construction: `kind` is `has_protocol` as it
+    stood when the revision was written, which is what `advanced` and `require_movable` have always
+    said they were reading. There is no caller that legitimately wants the other word — a document
+    holding a procedure is a protocol whatever the tool that stored it was called.
+    """
+    return "protocol" if design.has_protocol else "request"
+
+
 #: The statuses that assert something about a *procedure*. A design holding only a structured ask
 #: has no procedure, so neither word can be true of it.
 _NEEDS_A_PROTOCOL: frozenset[DesignStatus] = frozenset({"approved", "executed"})
 
 
-def require_movable(status: DesignStatus, head_kind: str) -> None:
+def require_movable(status: DesignStatus, head_kind: RevisionKind) -> None:
     """Refuse a lifecycle move the design cannot support, naming why.
 
     Nothing tied a status to the document it is a statement about, so `set_status("executed")` on a

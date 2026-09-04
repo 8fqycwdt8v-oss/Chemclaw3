@@ -605,13 +605,21 @@ class PostgresHistoryProvider:
 
 
 def owner_permits(owner: str | None, actor: str | None) -> bool:
-    """Whether a stored session owner lets `actor` reach that session — the one ownership rule.
+    """Whether a stored owner lets `actor` reach the row — the one ownership rule.
 
-    **One definition, because there are now two callers and they must not drift.** The HTTP layer
-    resolves ownership for `/sessions/{id}/…` (`api/deps._owner_authorizes`, which delegates here)
-    and the agent resolves it for a tool handed an explicit session id
-    (`agent/evidence_tools.assemble_evidence_pack`). A second copy of this predicate is how one
-    surface ends up stricter than the other, and the loose one is the one that matters.
+    **One definition, because there are now three callers and they must not drift.** The HTTP layer
+    resolves ownership for `/sessions/{id}/…` (`api/deps._owner_authorizes`, which delegates here
+    and which `chemclaw/api/routes/protocols.py` reaches for a design as well); the agent resolves
+    it for a tool handed an explicit session id
+    (`agent/evidence_tools.assemble_evidence_pack`); and it resolves it again for a tool handed an
+    explicit `design_id` (`agent/protocol_design_tools._require_writable`). A second copy of this
+    predicate is how one surface ends up stricter than the other, and the loose one is the one that
+    matters.
+
+    The subject is no longer only a session, and the docstring said "two" and named the session pair
+    for a release after the third caller landed. `owner` is whatever column records who opened the
+    row — `session_owners.owner` or `experiment_protocols.opened_by` — and the rule below reads
+    neither table, which is what lets it be one rule.
 
     The dev/enforced split is deliberate and is `_is_reviewer`'s, applied to ownership: with
     `entra_required` off there is no real actor, so an owner-less row degrades open exactly as

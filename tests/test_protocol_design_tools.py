@@ -589,7 +589,12 @@ def test_restructuring_the_ask_keeps_the_protocol_it_was_drafted_into(
 
         head = await store.read(opened.design_id)
         assert head is not None
-        assert head.kind == "request"
+        # **`protocol`, and this line asserted `request` until the word cost a sign-off.** `kind` is
+        # `has_protocol` as it stood when the revision was written, which is what `require_movable`
+        # reads to decide whether there is a procedure to approve — so a revision carrying a whole
+        # plate forward under the word `request` made the design permanently un-approvable. The tool
+        # no longer names it; `store.revision_kind` derives it from the document.
+        assert head.kind == "protocol"
         # The correction landed…
         assert head.design.request == corrected
         # …and the protocol it was drafted into is still there, whole.
@@ -961,18 +966,86 @@ def test_a_stated_quote_has_to_say_the_value_it_is_offered_for() -> None:
 
 def test_an_honest_quote_still_passes_including_a_normalised_one() -> None:
     """The half this must not cost: a real constraint pushed into `inferred` is the same defect."""
-    said = "Run it on 250 mg of the bromide, 24 wells, and I need it by Friday."
+    said = (
+        "Run it on 250 mg of the bromide, 24 wells, and I need it by 1 September. "
+        "The follow-up is five grams."
+    )
     token = set_current_user_text(said)
     try:
         for value, quote in (
             ("250 mg", "250 mg of the bromide"),
             ("24", "24 wells"),
-            # The chemist stated a deadline and the model normalised it; the quote carries no
-            # figures, so the value's are not required to appear in it.
-            ("2026-09-01", "by Friday"),
+            # A figure the chemist wrote in words. This is the half the check must not cost: a
+            # chemist who wrote "five grams" stated the scale, and refusing it would push a real
+            # constraint into `inferred`, which is this check's own failure running backwards.
+            ("5 g", "five grams"),
+            # Digits compared as numbers rather than as strings, so a zero-padded field in the
+            # value meets the same figure written plainly in the prose.
+            ("2026-09-01", "by 1 September"),
         ):
             request = _request(scale=RequestField(value=value, basis="stated", quote=quote))
             tools.require_quotes_are_verbatim(request, get_current_user_text())
+    finally:
+        reset_current_user_text(token)
+
+
+def test_a_two_word_quote_is_related_to_its_value_like_any_other() -> None:
+    """The quote's *length* was never what made the four fabrications fabrications.
+
+    The first fix related value to quote only when the quote was one word (`len(words) < 2`), so
+    the same four limits went straight back into the record on two-word quotes drawn from the same
+    message — measured, all four accepted and stored as the chemist's own words. Every quote here
+    is genuinely present in the text, so the verbatim half passes and only the support rule can
+    refuse them.
+    """
+    said = "We need to get the Suzuki on the deactivated chloride working. Try what you think."
+    token = set_current_user_text(said)
+    try:
+        for value, quote in (
+            ("5 g", "you think"),
+            ("96", "deactivated chloride"),
+            ("2026-09-01", "Try what"),
+            ("96", "what you"),
+        ):
+            assert " ".join(quote.split()).lower() in said.lower(), (
+                "the quote has to be in the message, or the verbatim check refuses it first and "
+                "this test proves nothing about the support rule"
+            )
+            request = _request(scale=RequestField(value=value, basis="stated", quote=quote))
+            with pytest.raises(ChemclawError, match="does not say their value"):
+                tools.require_quotes_are_verbatim(request, get_current_user_text())
+    finally:
+        reset_current_user_text(token)
+
+
+def test_a_normalised_date_is_an_inference_and_is_refused_as_a_quotation() -> None:
+    """`'by Friday'` used to support `deadline='2026-09-01'`, and it states no such thing.
+
+    Turning a weekday into an ISO date needs today's date, which the chemist did not supply — so
+    this is an inference, and `basis="inferred"` records it with the same quote and loses nothing.
+    The slot the chemist actually stated (`'Friday'` for "by Friday") still passes.
+    """
+    said = "Run it by Friday please."
+    token = set_current_user_text(said)
+    try:
+        tools.require_quotes_are_verbatim(
+            _request(deadline=RequestField(value="Friday", basis="stated", quote="by Friday")),
+            get_current_user_text(),
+        )
+        with pytest.raises(ChemclawError, match="does not say their value"):
+            tools.require_quotes_are_verbatim(
+                _request(
+                    deadline=RequestField(value="2026-09-01", basis="stated", quote="by Friday")
+                ),
+                get_current_user_text(),
+            )
+        # …and the honest label for it is accepted with the same words.
+        tools.require_quotes_are_verbatim(
+            _request(
+                deadline=RequestField(value="2026-09-01", basis="inferred", quote="by Friday")
+            ),
+            get_current_user_text(),
+        )
     finally:
         reset_current_user_text(token)
 
@@ -989,3 +1062,36 @@ def test_a_quote_stating_a_different_figure_is_refused() -> None:
             tools.require_quotes_are_verbatim(request, get_current_user_text())
     finally:
         reset_current_user_text(token)
+
+
+def test_restructuring_the_ask_leaves_a_drafted_design_approvable(
+    store: InMemoryDesignStore,
+) -> None:
+    """The head's `kind` is `has_protocol`, so carrying a protocol forward must carry the word too.
+
+    `structure_experiment_request` stamped `kind="request"` unconditionally while deliberately
+    carrying the drafted procedure forward, and `require_movable` reads that column to decide
+    whether a design has a procedure to approve. So correcting the ask on a drafted design made it
+    permanently un-approvable and un-executable: the document held every arm, every step and every
+    charge line, and the store refused the sign-off saying "this design holds only the structured
+    ask". Nothing on the page hinted at the contradiction, because the *document* was right.
+    """
+
+    async def scenario() -> None:
+        opened = await _open()
+        await _draft(opened.design_id, opened.revision)
+        # A correction to the ask that is not part of the id, so it lands on this design.
+        await _open(_request(plate_format=RequestField(value="24", basis="inferred")))
+        head = await store.read(opened.design_id)
+        assert head is not None
+        assert head.design.has_protocol, "the procedure must survive a restructured ask"
+        assert head.kind == "protocol", "the head names a procedure, so its kind has to say so"
+        await store.set_status(
+            opened.design_id,
+            "approved",
+            actor=require_actor(),
+            reason="ok",
+            expected_revision=head.revision,
+        )
+
+    asyncio.run(scenario())

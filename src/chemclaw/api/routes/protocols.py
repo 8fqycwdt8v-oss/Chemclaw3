@@ -29,7 +29,13 @@ from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.api.auth import Principal
-from chemclaw.api.deps import CurrentUser, _is_reviewer, _owner_authorizes
+from chemclaw.api.deps import (
+    DESIGN,
+    CurrentUser,
+    _is_reviewer,
+    _owner_authorizes,
+    record_refusal,
+)
 from chemclaw.core.errors import ChemclawError
 from chemclaw.protocols.checks import run_checks
 from chemclaw.protocols.diff import DesignDiff, diff_designs
@@ -231,9 +237,15 @@ async def _require_writable(design_id: str, principal: Principal) -> None:
     """
     header = await default_design_store().summary(design_id)
     if header is None:
+        record_refusal(DESIGN, "unknown design", principal, design_id, status=404)
         raise HTTPException(status_code=404, detail=f"no design {design_id!r}")
     if _owner_authorizes(header.opened_by, principal) or _is_reviewer(principal):
         return
+    # The record, which this gate did not write. A 403 discloses that the design exists, so unlike
+    # the session routes the response is not the thing being protected — but "who tried to write to
+    # whose design" is still only knowable from the server side, and both raise sites here were
+    # silent: no log line, no metric, a scan indistinguishable from ordinary traffic.
+    record_refusal(DESIGN, "another chemist's design", principal, design_id, status=403)
     raise HTTPException(
         status_code=403,
         detail=f"{design_id} was opened by another chemist; writing to it needs a review role",
@@ -264,15 +276,14 @@ async def post_revision(
         raise HTTPException(
             status_code=404, detail=f"no design {design_id!r} at revision {body.parent_revision}"
         )
-    # **The kind and the stage are derived from the document, not assumed.** This route serves the
-    # ADR's second hole — an artefact the chemist can correct *before* the expensive work — and the
-    # first version hard-coded `kind="protocol"` and graded at the protocol stage, so correcting an
-    # ask recorded a protocol revision, flipped a design with no procedure in it to `draft`, and
-    # reported `is_a_protocol` and `evidence_present` as blockers on it. That is exactly the failure
-    # `_REQUEST_STAGE` was introduced to prevent, reintroduced on the human path: a blocker that
-    # fires on the normal path is a blocker a reader learns to ignore, which is the property the one
-    # real blocker depends on. `has_protocol` is the single definition all three callers now read.
-    kind = "protocol" if body.document.has_protocol else "request"
+    # **The stage is derived from the document, not assumed.** This route serves the ADR's second
+    # hole — an artefact the chemist can correct *before* the expensive work — and the first version
+    # graded at the protocol stage unconditionally, so correcting an ask reported `is_a_protocol`
+    # and `evidence_present` as blockers on a design with no procedure in it. That is exactly the
+    # failure `_REQUEST_STAGE` was introduced to prevent, reintroduced on the human path: a blocker
+    # that fires on the normal path is a blocker a reader learns to ignore, which is the property
+    # the one real blocker depends on. The revision's `kind` is the same question and is no longer
+    # any caller's to answer — `store.revision_kind` derives it from `has_protocol` there.
     checks = run_checks(
         body.document, stage="protocol" if body.document.has_protocol else "request"
     )
@@ -287,7 +298,6 @@ async def post_revision(
             design_id,
             body.document,
             checks,
-            kind=kind,
             author_kind="human",
             author=principal.oid or "",
             parent_revision=body.parent_revision,

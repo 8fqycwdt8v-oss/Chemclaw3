@@ -835,6 +835,35 @@ sent.
 at all — the note is still recoverable, because a `failed` row keeps the rendered content:
 `SELECT note_id, content FROM note_proposals WHERE state = 'failed';`.
 
+## (ix-b) Who may change an experiment design
+
+The protocol surface (`/protocols`) has its own authorization rule, and it is deliberately not the
+proposal queue's. A design is a chemist's own experiment rather than machine-written knowledge
+entering a shared graph, so the author is not excluded from deciding — they approve their own plate.
+
+- **Reads are open to any authenticated caller.** `GET /protocols`, `GET /protocols/{id}` and the
+  diff route take no ownership check at all. A design is a shared scientific artifact: the schema
+  keeps `opened_by` through offboarding and the listing serves the deployment's designs, so the
+  id's existence is not the secret.
+- **Writes need the owner *or* a reviewer.** `POST /protocols/{id}/revisions` and
+  `POST /protocols/{id}/status` both take `owner_permits(header.opened_by, actor)` **or** a role in
+  `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`. The same rule for both, on purpose: a reviewer who may sign
+  off on somebody's plate may also correct it, and every revision is append-only and carries its
+  own `author`, so a reviewer's edit is attributed rather than silent. Nothing here is a two-person
+  rule — if you want one, that is a decision to take in an ADR, not a setting.
+- **A refused write answers 403, not 404**, because reads are open and only the right to change is
+  withheld. It is recorded either way: `chemclaw_authz_refusals_total{resource="design"}` and a
+  WARNING carrying `resource`, `reason`, `actor`, the clipped `target` and the `status` the caller
+  was told. That series is what tells a scan of design ids from ordinary traffic.
+- **With `CHEMCLAW_ENTRA_REQUIRED=false` (dev) ownership degrades open**, exactly as every other
+  surface does — there is no real actor to own anything. Do not read a passing dev write as
+  evidence about the enforced posture; `tests/test_protocol_authorization.py` drives both.
+
+The agent-side half is the same rule in the same shape: `structure_experiment_request` and
+`draft_experiment_protocol` refuse a `design_id` belonging to another chemist through
+`owner_permits`, which is the one ownership predicate the session routes and the evidence tools
+also read.
+
 ## (x) Find out what a worker is doing (or why it stopped)
 
 Until D-2026-08-01-every-process-carries-its-own-witness the answer was "read the logs and guess".

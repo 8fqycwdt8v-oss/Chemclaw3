@@ -443,9 +443,21 @@ class ExperimentDesign(BaseModel):
     # `max_length=1536` is **exactly** the largest plate this system knows, not an order of
     # magnitude above it — an earlier version of this comment said the latter, which would have
     # made a 1536-well design sound like an absurdity rather than the case the number was chosen to
-    # admit. The largest design these ceilings permit serialises to 414 KB (a tenth of the body
-    # cap) and diffs in 0.060 s, which is the measurement that says the ceilings, not the cap, are
-    # what bound the cost.
+    # admit.
+    #
+    # **The cost at that ceiling is a diff time, not a byte count, and this comment used to quote a
+    # byte count as though the ceilings fixed it.** They do not: they bound *counts*, and the free
+    # text inside those counts is bounded only by the body cap. Measured at 1536 arms with every
+    # count at its own ceiling, varying only how full the notes and rationales are:
+    #
+    #     empty free text     482 KB   diff 0.329 s
+    #     short notes         572 KB   diff 0.278 s
+    #     long notes         1382 KB   diff 0.282 s
+    #
+    # So the diff time is flat in the bytes and set by the path count — which is the measurement
+    # that says these ceilings, and not the body cap, are what bound the cost. The single figure
+    # that stood here (414 KB, 0.060 s) was one sample of a two-variable space quoted as a
+    # constant, and it was low on both axes.
     #
     # **Every collection in this module is bounded, and the comment here used to say otherwise.**
     # It read "what is bounded is the lists a diff keys by an identifier, which are the six in
@@ -571,8 +583,26 @@ class ExperimentDesign(BaseModel):
         that declares factors is the first round of a screen, and it needs its control and its
         coverage statement exactly as a full plate does. `summarise` has always spelled this
         condition out; it now reads it from here.
+
+        **A replicate is the same experiment again, not a second one.** The count was over every
+        arm, so one experiment run in triplicate came out a screen: `controls_present` warned that
+        "a screen with nothing to compare against cannot tell a flat result from a failed run" over
+        three arms that are the same conditions by construction, and `layout_fits` asked a single
+        experiment for a plate. `arms_are_distinct` and `coverage_is_stated` already skip an arm
+        carrying `replicate_of` — this is that same reading, in the predicate the other two derive
+        from. `summarise` names the replicate count so the runs are not lost with the word.
         """
-        return len(self.arms) <= 1 and not self.factors
+        return len(self.distinct_arms) <= 1 and not self.factors
+
+    @property
+    def distinct_arms(self) -> list[ProtocolArm]:
+        """The arms that are their own conditions — every arm that is not a repeat of another.
+
+        The model validator already guarantees a replicate runs the same levels and the same
+        resolved setpoints as the arm it names, so this is the set of *conditions* the design tries
+        rather than the set of runs it schedules.
+        """
+        return [arm for arm in self.arms if not arm.replicate_of]
 
     @property
     def is_plate(self) -> bool:
@@ -615,15 +645,20 @@ class ExperimentDesign(BaseModel):
         return self.base.setpoints.model_copy(update=stated)
 
 
+#: What a stored revision *is*. `request` holds only a structured ask (the intake, before any
+#: protocol exists); `protocol` holds a whole design. Two kinds in one table because they are the
+#: same document growing, and a reader wants the history in one list. It is derived from the
+#: document by `store.revision_kind` rather than declared — see that function for what a caller
+#: declaring it separately cost.
+RevisionKind = Literal["request", "protocol"]
+
+
 class DesignRevision(BaseModel):
     """One immutable version of a design, and who wrote it."""
 
     design_id: str = Field(min_length=1)
     revision: int = Field(ge=1)
-    # `request` holds only a structured ask (the intake, before any protocol exists); `protocol`
-    # holds a whole design. Two kinds in one table because they are the same document growing, and
-    # a reader wants the history in one list.
-    kind: Literal["request", "protocol"]
+    kind: RevisionKind
     author_kind: AuthorKind
     author: str = ""
     # 0 on the first revision. Every later one names the revision it was derived from, which is

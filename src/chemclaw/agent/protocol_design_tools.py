@@ -67,6 +67,20 @@ def _store() -> DesignStore:
 _DIGITS = re.compile(r"\d+")
 
 
+#: Figures written as words, so a quote that states a number in prose is not read as stating no
+#: number at all. A chemist who wrote "five grams" stated the scale and the model normalised it;
+#: refusing that would push a real constraint into `inferred`, which is the mislabelling this whole
+#: check exists to prevent, running the other way.
+_NUMBER_WORDS = frozenset(
+    """zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen
+    fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty
+    ninety hundred thousand dozen half quarter single double triple""".split()
+)
+
+#: Alphanumeric runs, over text already lowercased — the tokens a value and a quote are compared as.
+_TOKEN = re.compile(r"[a-z0-9]+")
+
+
 def _quote_supports(value: str, quote: str) -> bool:
     """Whether these words plausibly state this value.
 
@@ -75,29 +89,45 @@ def _quote_supports(value: str, quote: str) -> bool:
     a chemist who wrote "We need to get the Suzuki on the deactivated chloride working. Try what you
     think.", a model stored `scale='5 g'` quoting `'working'`, `plate_format='96'` quoting `'the'`,
     `max_runs='96'` quoting `'Suzuki'` and `deadline='2026-09-01'` quoting `'.'` — four limits the
-    chemist never named, recorded as their own words. Moving the haystack out of the model's reach
-    fixed who supplies the text and left what `stated` means untouched.
+    chemist never named, recorded as their own words.
 
-    Two rules, and the second is skipped rather than guessed at:
+    **The first rule for that related the two only when the quote was one word**, and that is not a
+    property of a fabrication. `len(words) < 2` skipped the comparison entirely for anything longer,
+    so the same four limits went straight back in on two-word quotes out of the same message:
+    `scale='5 g'` quoting `'you think'`, `plate_format='96'` quoting `'deactivated chloride'`.
+    Measured, all four were accepted and stored as the chemist's own words. The quote's *length*
+    was never the thing that made those fabrications fabrications.
 
-    1. **The quote is a span, not a word.** Two words, or one word the value itself contains — which
-       is what separates `'250 mg'`, `'by Friday'` and `'96-well'` from `'working'` and `'.'`.
-    2. **When the quote states figures, they have to be the value's figures.** A quote reading "no
-       more than 48 runs" cannot be the evidence for `max_runs='96'`. A quote carrying no digits at
-       all is left to rule 1, because a chemist who wrote "five grams" or "by Friday" stated the
-       thing and the model normalised it — refusing that would push a real constraint into
-       `inferred`, which is the mislabelling this check exists to prevent, running the other way.
+    So the value and the quote are related for every quote, and the shape of the value decides how:
+
+    1. **A value carrying figures needs the quote's figures to be its own.** Compared as numbers
+       rather than as strings, so `'09'` in a date meets `'9'` in prose. A quote reading "no more
+       than 48 runs" cannot be the evidence for `max_runs='96'`.
+    2. **A quote that states its figure in words satisfies rule 1.** "five grams" is how a chemist
+       writes a scale, and the model normalising it to `'5 g'` is transcription rather than
+       inference.
+    3. **A value carrying no figures needs the quote to carry its words** — the same token, or one
+       containing the other where the token is long enough for that to mean something (`'toluene'`
+       against "in toluene", not `'g'` against "think").
+
+    **This is a heuristic and the docstring should not pretend otherwise.** It refuses a quote that
+    cannot state the value; it cannot tell whether the figure the quote does carry is *about* this
+    slot, so "24 wells" still supports `max_runs='24'` when the chemist said 24 wells about the
+    plate. `docs/planning/BACKLOG.md` carries what would close that and why it is not free.
     """
-    words = quote.split()
-    value_text = value.lower()
-    # Overlap in either direction: the value can contain the word (`'96 well'` for `'96'`) or the
-    # word can contain the value (`'96-well'`).
-    if len(words) < 2 and not any(
-        word.lower() in value_text or value_text in word.lower() for word in words if word
-    ):
-        return False
-    quote_digits = set(_DIGITS.findall(quote))
-    return not quote_digits or set(_DIGITS.findall(value)) <= quote_digits
+    value_numbers = {int(digits) for digits in _DIGITS.findall(value)}
+    quote_tokens = set(_TOKEN.findall(quote.lower()))
+    if value_numbers:
+        quote_numbers = {int(digits) for digits in _DIGITS.findall(quote)}
+        if quote_numbers:
+            return bool(value_numbers & quote_numbers)
+        return bool(quote_tokens & _NUMBER_WORDS)
+    return any(
+        value_token == quote_token
+        or (len(value_token) >= 4 and (value_token in quote_token or quote_token in value_token))
+        for value_token in _TOKEN.findall(value.lower())
+        for quote_token in quote_tokens
+    )
 
 
 def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str | None) -> None:
@@ -205,6 +235,28 @@ async def _require_writable(store: DesignStore, design_id: str) -> DesignSummary
     return header
 
 
+async def _stored_status(store: DesignStore, design_id: str) -> DesignStatus:
+    """The design's status as the store holds it — never a default this function invented.
+
+    Every caller reaches this *after* a revision exists, so a missing header row is a store that
+    lost one rather than a design that is merely `requested`. Four call sites each carried their own
+    `header.status if header else "requested"` / `else "draft"`, and both defaults are unreachable
+    and wrong: the receipt a chemist reads would name a status the design does not have, on the one
+    surface that reports what happened to their write. If the header is gone the honest answer is an
+    error naming the inconsistency.
+
+    Raises:
+        ChemclawError: the design has revisions and no header row.
+    """
+    header = await store.summary(design_id)
+    if header is None:
+        raise ChemclawError(
+            f"{design_id} has revisions but no header row, so its status cannot be read; "
+            "the store is inconsistent"
+        )
+    return header.status
+
+
 @tool
 async def structure_experiment_request(request: ExperimentRequest, salt: str = "") -> str:
     """Turn a chemist's free-text ask into the structured request a protocol is drafted from.
@@ -262,13 +314,12 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
     # plate, the ask was restated in a later session, and the header came back `draft` over a head
     # that compared equal to the approved one. Nothing changed, so nothing is stored.
     if head is not None and design == head.design:
-        header = await store.summary(design_id)
         return receipt(
             design,
             head.checks,
             design_id=design_id,
             revision=head.revision,
-            status=header.status if header else "requested",
+            status=await _stored_status(store, design_id),
         ).model_dump_json()
 
     checks = run_checks(design, stage="protocol" if design.has_protocol else "request")
@@ -276,7 +327,6 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
         design_id,
         design,
         checks,
-        kind="request",
         author_kind="agent",
         author=require_actor(),
         parent_revision=head.revision if head else 0,
@@ -285,13 +335,12 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
         correlation_id=get_current_correlation_id() or "",
         status="requested",
     )
-    header = await store.summary(design_id)
     return receipt(
         design,
         checks,
         design_id=design_id,
         revision=revision.revision,
-        status=header.status if header else "requested",
+        status=await _stored_status(store, design_id),
     ).model_dump_json()
 
 
@@ -411,7 +460,6 @@ async def draft_experiment_protocol(
             design_id,
             design,
             checks,
-            kind="protocol",
             author_kind="agent",
             author=require_actor(),
             parent_revision=parent_revision,
@@ -423,8 +471,7 @@ async def draft_experiment_protocol(
     except RevisionConflict as exc:
         raise ChemclawError(str(exc)) from exc
 
-    header = await store.summary(design_id)
-    status: DesignStatus = header.status if header else "draft"
+    status = await _stored_status(store, design_id)
     logger.info(
         "protocol.drafted design_id=%s revision=%s arms=%d evidence=%d",
         design_id,
@@ -485,14 +532,13 @@ async def read_experiment_protocol(design_id: str, revision: int = 0) -> str:
             + (f" at revision {revision}" if revision else "")
             + ". Use find_experiment_protocols to list what exists."
         )
-    header = await store.summary(design_id)
     body = ProtocolReadout(
         receipt=receipt(
             stored.design,
             stored.checks,
             design_id=design_id,
             revision=stored.revision,
-            status=header.status if header else "draft",
+            status=await _stored_status(store, design_id),
         ),
         design=stored.design,
         markdown=render_markdown(stored.design, stored.checks),
