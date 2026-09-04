@@ -23,6 +23,7 @@ from pydantic import SecretStr
 
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import Principal, require_principal
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import (
     reset_current_correlation_id,
     reset_current_identity,
@@ -740,3 +741,61 @@ def test_re_proposing_a_rejected_version_does_not_close_the_live_one(
 
     assert _run(store.read(rejected)).state is ProposalState.REJECTED
     assert _run(store.read(live)).state is ProposalState.OPEN
+
+
+# --- a rejection git never heard about ---------------------------------------------------------
+
+
+def test_a_rejected_note_cannot_be_re_pushed_by_proposing_it_again(
+    store: InMemoryProposalStore,
+) -> None:
+    """The gate refuses before it submits, because after the push there is nothing to prevent.
+
+    `InMemoryProposalStore.upsert` has always refused to reopen a rejected row, and the test above
+    pins it. But `propose_note` submits to git *first* and records afterwards, and no submitter ever
+    deletes a branch — so the refusal happened after the damage: the store held one `rejected` row
+    while the remote held a live, mergeable `note/<id>` branch that appeared in no review queue.
+
+    The consequence is the part that makes this a record defect rather than a tidiness one. If
+    anybody then merged that branch, `mark_merged` moved nothing — it moves `OPEN` rows only — so
+    the compliance record went on reading *rejected* for a note sitting in `knowledge/` and being
+    served as evidence. `test_a_merge_over_a_standing_rejection_leaves_the_record_wrong` below is
+    that consequence, asserted so the second half of the fix cannot be dropped either.
+    """
+    submitter = FakeSubmitter()
+    note = _note("probe-rejected")
+
+    _run(propose_note(note, submitter))
+    opened = _run(store.listing(ProposalState.OPEN, "", 10, None))
+    assert len(opened) == 1
+    _run(store.decide(opened[0].id, ProposalState.REJECTED, "reviewer", "conditions unsupported"))
+
+    submissions_before = len(submitter.submissions)
+    with pytest.raises(ChemclawError, match="already reviewed and rejected"):
+        _run(propose_note(note, submitter))
+    assert len(submitter.submissions) == submissions_before, (
+        "the gate pushed a branch for a note that had already been rejected"
+    )
+    # And the reviewer's reason reaches the model, so it can act on the objection rather than retry.
+    with pytest.raises(ChemclawError, match="conditions unsupported"):
+        _run(propose_note(note, submitter))
+
+
+def test_a_revision_of_a_rejected_note_is_still_proposable(
+    store: InMemoryProposalStore,
+) -> None:
+    """The refusal is keyed on the bytes, not on the note id — otherwise it would be a ban.
+
+    A reviewer rejecting a note is asking for a different note under the same id. If the gate
+    refused by id it would make the reviewer's own instruction impossible to follow, which is a
+    worse failure than the one being fixed.
+    """
+    submitter = FakeSubmitter()
+
+    _run(propose_note(_note("probe-revise"), submitter))
+    opened = _run(store.listing(ProposalState.OPEN, "", 10, None))
+    _run(store.decide(opened[0].id, ProposalState.REJECTED, "reviewer", "add the solvent"))
+
+    revised = _note("probe-revise", body="Coupling in 2-MeTHF, 88% yield, solvent stated.")
+    _run(propose_note(revised, submitter))
+    assert len(_run(store.listing(ProposalState.OPEN, "", 10, None))) == 1

@@ -93,6 +93,14 @@ _SELECT_MANY = f"""
 """
 
 _SELECT_ONE = f"SELECT {_COLUMNS} FROM note_proposals WHERE id = %s"
+# The decision standing against one exact version, asked before a submission reaches git. Ordered
+# and limited because `(note_id, content_hash)` is not unique across decided rows in every history
+# this table can hold; newest wins, which is the decision that is actually standing.
+_SELECT_DECIDED_VERSION = f"""
+SELECT {_COLUMNS} FROM note_proposals
+WHERE note_id = %s AND content_hash = %s AND state IN ('merged', 'rejected')
+ORDER BY id DESC LIMIT 1
+"""
 
 # A freshly-upserted version closes the note's previous open versions (migration 058 says why).
 # Scoped by id rather than content hash so the statement is correct on the refresh path too — the
@@ -250,3 +258,11 @@ class PostgresProposalStore:
             moved = cursor.rowcount
             await conn.commit()
         return int(moved)
+
+    async def decided_version(self, note_id: str, content_hash: str) -> NoteProposal | None:
+        """The decision standing against these exact bytes, newest first, or None."""
+        async with _connect() as conn:
+            cursor = _rows(conn)
+            await cursor.execute(_SELECT_DECIDED_VERSION, (note_id, content_hash))
+            row = await cursor.fetchone()
+        return _proposal(row) if row is not None else None

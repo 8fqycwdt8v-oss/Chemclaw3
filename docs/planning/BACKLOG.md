@@ -100,6 +100,61 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **`retrieval_top_k` cuts silently and the sweep reports `truncated_by=None`** — [M], measured
+      2026-09-04 and the half `D-2026-09-04-a-ranker-that-sorts-alphabetically-is-not-a-ranker`
+      deliberately left. `retrievers.py`'s `[: settings.retrieval_top_k]` discards everything past
+      8, and `research_tools.py`'s `total_before_cap` is computed **after** the merge, so on 5,000
+      matching notes `gather_evidence` reports `chunks=8, total_before_cap=8, truncated_by=None`
+      while 4,992 were dropped inside the leg. The two bounds wired to `truncated_by` cannot bite:
+      max distinct chunks is 8x3 plus the fingerprint leg's 10, against
+      `gather_evidence_max_chunks` 40. `EvidenceSweep` exists precisely so "a cut does not look
+      like a corpus" and this cut is invisible to it. **The fix is a contract change, which is why
+      it is a row rather than a patch**: `Retriever.retrieve` returns `list[EvidenceChunk]`, so the
+      found-count has nowhere to travel — the two shapes that need no protocol change are a mutable
+      attribute on the retriever (unsafe: one instance serves concurrent turns) and the count
+      repeated on every chunk, and both are worse than the gap. Do it as a small result object
+      across all four retrievers, `fanout.sweep_sources`, `harness.gather_section` and their tests.
+      `FingerprintSearch.hits_truncated` is the shape to copy.
+
+- [ ] **RRF at `k=60` over 8-item lists counts sources rather than ranks, and two of the three are
+      the same ranker** — [M], measured 2026-09-04. With `retrieval_fusion_k` 60 and
+      `retrieval_top_k` 8, rank 1 scores 0.016393 and rank 8 scores 0.014706 — a **1.11x** spread,
+      against **2.00x** for being found twice. A note in two sources at rank *r* beats a one-source
+      rank-1 note whenever `r < 62`, i.e. always, for every list this system produces. Worse than
+      ordinary RRF crowding, because `GraphRetriever` and `LexicalRetriever` apply the *same*
+      boolean rule over the *same* corpus (`vector_index.py` says so), so the agreement bonus
+      rewards redundancy and demotes the only leg with an orthogonal signal: measured, a note found
+      only by the dense leg fuses **last** of nine, and end to end the note answering the query
+      moves from position 2 in `graph` mode to position 9 in `hybrid`. Two candidate fixes and they
+      are not the same decision — set `k` to the scale of the lists (2-10), and/or weight
+      `graph`+`lexical` as one tier via the existing `retrieval_source_weights`. Ship the fused
+      score on the chunk either way; today the `score` the model reads back is the source's own and
+      does not explain the order.
+
+- [ ] **The retrieval gold corpus is smaller than `retrieval_top_k`, so the gate cannot see a
+      ranking defect** — [S], measured 2026-09-04. `data/evals/retrieval_corpus` holds **6** notes
+      against a k of 8, so the cut can never engage and 4 of 5 gold cases sit at recall 1.00.
+      Adding 30 ordinary notes whose ids sort earlier, **with no code change**, takes
+      `retrieval-coupling` from 1.00 to 0.25 and `retrieval-suzuki` from 1.00 to 0.50. The module's
+      own docstring says it exists so a change "could not quietly halve recall unnoticed"; it
+      cannot detect the only way recall actually halves. Grow it past `retrieval_top_k` (30-50,
+      most of them distractors matching the query terms) and add one case whose expected note sorts
+      last alphabetically. Related and larger: `data/evals/probes/knowledge.yaml` already names
+      **44** (query, note) pairs against the real corpus in its `direction:` prose, unreadable
+      because `Probe` is `extra="forbid"` — one field would turn a 10-pair fixture gold set into a
+      44-pair one over the product corpus, and `DEFERRED.md`'s claim that "the shipped graph has
+      none" is false.
+
+- [ ] **The PR-gate's submission is O(corpus) and serialises cluster-wide** — [M], measured
+      2026-09-04 against real bare remotes: 0.218 s per proposal at 100 notes, 0.574 s at 1,000,
+      **2.916 s at 10,000** — 87% of it `git worktree add -B`, a full checkout of the corpus, in
+      `git_submitter.py`. `_SUBMIT_LOCK` and `_cluster_lock` serialise submissions across the whole
+      cluster on one remote, so the ceiling is **~1,240 proposals/hour** and an 8-note fan-out
+      blocks its process for 21 s. **The obvious fix is not free**: `--no-checkout` removes the
+      materialized tree that `_contained_note_path`'s symlink defence reads, so it has to be
+      replaced by a lexical path check plus `git ls-tree <base>` for mode `120000` — a
+      security-relevant control, which is why this is a row and not a patch.
+
 - [ ] **The fingerprint index is keyed by source and the citation is not, so two sources collapse
       to one note id** — [M], and it is the half `D-2026-08-27-a-fingerprint-is-keyed-by-its-source`
       deliberately left. Migration 063 made the write side `(source, id)`, which is what stops one
@@ -135,18 +190,15 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **`core/fulltext.py`'s tokeniser can revert to the exact bug its own comment names, and 349
-      tests stay green** — [M], found 2026-09-04 by the review that asked whether this suite can
-      fail. Mutating `_WORD` to `[a-z0-9]+` makes `Suzuki` tokenise as `uzuki`, and the retrieval
-      suite — 349 tests across 22 files — passes. `reference_tokens`, `reference_terms` and
-      `core.fulltext` appear in **zero** test files; the module measures 100% line and branch
-      coverage while its mutant survives, which is the clearest statement available that a global
-      coverage floor is blind to this. Two more survived the same probe:
-      `templates/resolve._WHOLE` can lose its anchors with 77 template tests green (a step argument
-      would silently drop the text around its reference), and
+- [ ] **Two surviving mutants, and neither is in `[tool.mutmut] source_paths`** — [M], found
+      2026-09-04 by the review that asked whether this suite can fail. `templates/resolve._WHOLE`
+      can lose its anchors with 77 template tests green (a step argument would silently drop the
+      text around its reference), and
       `test_a_code_span_or_a_wikilink_in_an_answer_is_not_a_quantity_claim` passes with
       `_NOT_A_QUANTITY` deleted, because its fixture never reaches the mechanism the test is named
-      after. None of the three is in `[tool.mutmut] source_paths`.
+      after. The third — `core/fulltext.py`'s tokeniser, the largest of them — is closed by
+      `D-2026-09-04-a-ranker-that-sorts-alphabetically-is-not-a-ranker`: `tests/test_fulltext.py`
+      now kills it, and killed three more the review had not looked for.
 
 - [ ] **The two eval gates score literals written in their own case files** — [M], same review.
       11 of 13 baseline metrics are read from the case file rather than computed, so a metric that
