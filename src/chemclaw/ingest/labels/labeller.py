@@ -177,15 +177,23 @@ class RxnLabelServer:
             represent is simply absent, so the caller can record what it did get; the drain treats
             a missing entry as "not labelled this pass" rather than as an error.
 
-            **An answer whose species list is neither empty nor the length sent is dropped here**,
-            which is what makes "positional" a contract rather than a hope. `merge._species` reads
-            `answered[index]`, and its `index < len(answered)` guard only stops the read running off
-            the end: an answer for 3 of 4 species shifts every role past the gap onto a different
-            molecule — a reactant stored as the solvent, the solvent as the catalyst — and the row
-            is then stamped with the current `labeller_version`, so it leaves `stale()` and no later
-            pass revisits it. `LabelToolError`'s own docstring already calls a species list that
-            does not match the reaction bad data; nothing checked it, and the server is versioned
-            separately from this repository, which is precisely why it has to be checked here.
+            **An answer whose species list is neither empty nor the length sent keeps everything
+            except that list**, which is what makes "positional" a contract rather than a hope.
+            `merge._species` reads `answered[index]`, and its `index < len(answered)` guard only
+            stops the read running off the end: an answer for 3 of 4 species shifts every role past
+            the gap onto a different molecule — a reactant stored as the solvent, the solvent as the
+            catalyst. `LabelToolError`'s own docstring already calls a species list that does not
+            match the reaction bad data; nothing checked it, and the server is versioned separately
+            from this repository, which is precisely why it has to be checked here.
+
+            **Blanked rather than dropped, because the rest of the answer is not positional.** The
+            representation also carries `mapped_smiles`, and dropping the whole object threw that
+            away too — permanently, not for one pass: `enrich.label_stale` stamps every stale row
+            with the current `labeller_version` whether or not the server answered, so the reaction
+            leaves `stale()` and nothing revisits it until that version changes. An empty list is
+            the shape `merge._species` already documents a floor for ("a short or absent answer
+            falls back to `species_role_from`"), so the roles degrade to the source's coarse map
+            while the atom map survives.
         """
         sent = {rid: len(species) for rid, _smiles, species in reactions}
         payload = await self._call(
@@ -203,17 +211,20 @@ class RxnLabelServer:
             # An id this batch never sent is left to `enrich._placed`, which already drops it with
             # the warning that names it as unplaceable — two warnings for one answer would read as
             # two problems.
-            if expected is not None and item.species and len(item.species) != expected:
+            mismatched = (
+                expected is not None and bool(item.species) and len(item.species) != expected
+            )
+            if mismatched:
                 logger.warning(
                     "the labelling server answered for %d of the %d species sent for reaction %r; "
-                    "the roles are matched back by position, so the answer is unusable and this "
-                    "reaction is left unlabelled this pass",
+                    "the roles are matched back by position, so that half of the answer is "
+                    "discarded and the species roles fall back to what the source recorded. The "
+                    "atom map is not positional and is kept",
                     len(item.species),
                     expected,
                     item.id,
                 )
-                continue
-            answers[item.id] = item
+            answers[item.id] = item.model_copy(update={"species": []}) if mismatched else item
         return answers
 
     async def name(self, reactions: list[tuple[str, str]]) -> dict[str, ReactionNaming]:

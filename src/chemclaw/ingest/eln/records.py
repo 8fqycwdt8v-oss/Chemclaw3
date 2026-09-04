@@ -91,20 +91,33 @@ def _reject_unstorable(value: str, field: str) -> str:
 
 
 def _walk_storable(model: BaseModel, prefix: str) -> None:
-    """Reject any unstorable string on `model`, recursing into the models nested under it.
+    """Reject any unstorable string on `model`, recursing into the models and lists under it.
 
-    Field names are joined dotted (`conditions.major_impurity`) so the refusal reason — which is
-    what the ingest ledger stores and a chemist eventually reads — names the field a fix has to
-    touch rather than the record it sits in. `kg.note._walk_encodable` is the same shape over the
-    same problem for notes; it is not shared, because that one asks a different question of each
-    value and the two answers must be able to diverge (see `_reject_unstorable`).
+    Field names are joined dotted (`conditions.major_impurity`) and indexed (`tags[1]`) so the
+    refusal reason — which is what the ingest ledger stores and a chemist eventually reads — names
+    the field a fix has to touch rather than the record it sits in. `kg.note._walk_encodable` is
+    the same shape over the same problem for notes; it is not shared, because that one asks a
+    different question of each value and the two answers must be able to diverge (see
+    `_reject_unstorable`).
+
+    The `list` arm is the one that made both of those claims true. It was missing while the
+    docstring said "the same shape" and the validator above said the next field added to the
+    record cannot forget the check: no field of `ReactionRecord` is a list, so the omission was
+    invisible until the first one — and a `list[str]` of ELN tags is an ordinary thing to add.
     """
     for name in type(model).model_fields:
         value = getattr(model, name)
+        path = f"{prefix}{name}"
         if isinstance(value, str):
-            _reject_unstorable(value, f"{prefix}{name}")
+            _reject_unstorable(value, path)
         elif isinstance(value, BaseModel):
-            _walk_storable(value, f"{prefix}{name}.")
+            _walk_storable(value, f"{path}.")
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                if isinstance(item, str):
+                    _reject_unstorable(item, f"{path}[{index}]")
+                elif isinstance(item, BaseModel):
+                    _walk_storable(item, f"{path}[{index}].")
 
 
 def _one_of(reaction_id: str, found: Sequence[tuple[str, "ReactionRecord"]]) -> "ReactionRecord":
@@ -201,10 +214,10 @@ class ReactionRecord(BaseModel):
 
         Walked over the model rather than written at each field, the same argument
         `record._without_wikilinks` makes about applying its substitution once to the assembled
-        body: the next field added to this record cannot forget it. The walk covers strings and
-        nested models, which is every field this model has — `conditions` is the nested one, and it
-        matters, because it is a `jsonb` column of its own that an impurity name reaches without
-        passing through `body` at all.
+        body: the next field added to this record cannot forget it. The walk covers strings, nested
+        models and lists of either — `conditions` is the nested one today, and it matters, because
+        it is a `jsonb` column of its own that an impurity name reaches without passing through
+        `body` at all.
         """
         _walk_storable(self, "")
         return self

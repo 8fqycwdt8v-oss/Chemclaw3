@@ -889,6 +889,39 @@ def test_a_nul_in_a_condition_the_body_never_renders_is_refused_too() -> None:
     assert "conditions.major_impurity" in str(raised.value)
 
 
+def test_the_next_field_added_to_a_record_cannot_forget_the_storable_check() -> None:
+    """The walk's own claim, driven by actually adding a field to the record.
+
+    `_walk_storable` handled `str` and `BaseModel` only, while its docstring named
+    `kg.note._walk_encodable` as "the same shape over the same problem" — and that one walks lists
+    of both. No field of `ReactionRecord` is a list today, which is exactly why nothing caught it:
+    the first `list[str]` or `list[Model]` added here would walk straight past the guard into the
+    `psycopg.DataError` at the last of `ingest_reaction`'s writes that the guard exists to prevent.
+
+    A subclass rather than a synthetic model, because the claim is about *this* record gaining a
+    field, and the validator it has to reach is the record's own.
+    """
+
+    class _RecordWithLists(ReactionRecord):
+        tags: list[str] = []
+        extras: list[ProcessConditions] = []
+
+    with pytest.raises(ValidationError) as in_a_list:
+        _RecordWithLists(
+            reaction_id="EXP-6", body="fine", source="test-eln", tags=["clean", "des-bromo\x00"]
+        )
+    assert "tags[1]" in str(in_a_list.value)
+
+    with pytest.raises(ValidationError) as in_a_nested_model:
+        _RecordWithLists(
+            reaction_id="EXP-7",
+            body="fine",
+            source="test-eln",
+            extras=[ProcessConditions(major_impurity="des-bromo\x00 adduct")],
+        )
+    assert "extras[0].major_impurity" in str(in_a_nested_model.value)
+
+
 def test_future_dated_entry_is_rejected_and_does_not_poison_cursor() -> None:
     """A typo'd future year is a visible rejection and never becomes the high-water cursor.
 

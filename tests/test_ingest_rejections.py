@@ -428,6 +428,46 @@ def test_a_refusal_carrying_a_nul_byte_is_stored_rather_than_losing_the_batch() 
     asyncio.run(_run())
 
 
+def test_a_lone_surrogate_in_a_refusal_is_stored_as_a_visible_replacement() -> None:
+    r"""The other half of `_storable`, which nothing held: psycopg refuses before Postgres does.
+
+    A lone surrogate reaches a reason from a JSON export with a truncated `\u` escape —
+    `json.loads('"\ud800"')` returns one happily — and psycopg refuses it a step earlier than the
+    database, when it encodes the parameter. So the whole batch fails, the fallback re-offers each
+    row, and the surrogate row is lost; without the sanitiser this is the batch-losing failure the
+    NUL case documents, on the value nothing was driving.
+
+    Measured: removing the `encode(..., "replace")` arm left all seventeen tests in this file
+    green. `errors="replace"` rather than `"ignore"` is the assertion below — a reader sees a `?`
+    where something was, rather than a seamless gap that reads as the source's own words.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        source = "test-surrogate-source"
+        await _clear(source)
+
+        await record_refusals(
+            source,
+            {
+                "well-1": "yield_percent 119.43 exceeds 100",
+                "well-2": "input_value=quenched with brine\ud800 and dried",
+                "well\ud800-3": "no product recorded",
+            },
+        )
+
+        rows = await _rows(source)
+        assert [row[0] for row in rows] == ["well-1", "well-2", "well?-3"], (
+            "a lone surrogate must cost its own character, not the row and not the batch"
+        )
+        assert "quenched with brine? and dried" in rows[1][1], (
+            "the refusal's words survive with a visible mark where the surrogate was"
+        )
+        await _clear(source)
+
+    asyncio.run(_run())
+
+
 def test_one_row_the_database_will_not_take_costs_only_itself() -> None:
     """The belt-and-braces half: a row no sanitiser can repair must not take its neighbours.
 
@@ -471,13 +511,20 @@ def test_one_row_the_database_will_not_take_costs_only_itself() -> None:
 def test_a_nul_in_an_export_reaches_the_ledger_end_to_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The two halves of the NUL fix compose, which is the only place that can be shown.
+    r"""A NUL in an export costs one entry and reaches the ledger as a described refusal.
 
-    `ingest/eln/records.py` refuses the record, so the entry becomes an ordinary per-entry
-    rejection instead of a `psycopg.DataError` that escapes the sync loop — and the reason it
-    hands over is a `ValidationError` rendering `input_value=`, so the refusal's own words carry
-    the NUL forward into the ledger write, where `_storable` takes it out. Either half alone leaves
-    a record that was seen, refused and unrecorded.
+    `ingest/eln/records.py` refuses the record before `ingest_reaction`'s first write, so the entry
+    becomes an ordinary per-entry rejection instead of a `psycopg.DataError` at the last of five
+    writes that escapes the sync loop and fails identically on every retry.
+
+    **The ledger's own sanitiser is not what saves this path, and this docstring used to say it
+    was.** The reason handed over is a `ValidationError`, and pydantic renders `input_value=` as a
+    *repr* — measured, what arrives is the two-character escape `\x00` and no NUL byte at all, so
+    `_storable` is an identity here and can be removed with this test still green. The half that
+    genuinely reaches the write with a raw one is a refusal message built by hand, which
+    `test_a_refusal_carrying_a_nul_byte_is_stored_rather_than_losing_the_batch` and the surrogate
+    test beside it drive. The assertion below pins the escaping, so the corrected claim is checked
+    rather than believed.
     """
 
     async def _run() -> None:
@@ -500,6 +547,11 @@ def test_a_nul_in_an_export_reaches_the_ledger_end_to_end(
         rows = await _rows(source)
         assert [row[0] for row in rows] == ["poisoned-well"]
         assert "NUL" in rows[0][1] and "\x00" not in rows[0][1]
+        assert "\\x00" in rows[0][1], (
+            "what travels this path is pydantic's repr of the offending value, not the byte — the "
+            "ledger's sanitiser has nothing to do here, and a test that believes otherwise is "
+            "asserting a mechanism it never exercises"
+        )
         await _clear(source)
         await _forget_records(source)
 
@@ -783,3 +835,45 @@ class _Empty:
     async def retrieve(self, _query: str, _filters: dict[str, object]) -> list[EvidenceChunk]:
         """Answer, and find nothing."""
         return []
+
+
+def test_a_database_that_is_away_costs_one_connection_and_not_one_per_refusal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The fallback isolates a poison *row*; it must not re-attempt an absent *database* per row.
+
+    Both failures surface as one `Exception` from `_write`, and the fallback used to open its own
+    connection for each row — so a chunk whose database stopped answering paid a full
+    `pg_connect_timeout_seconds` per refusal. Measured at the shipped defaults with three refusals:
+    **40.2 s**, of which 30 s was the retry loop dialling a socket that had just refused. At
+    `eln_sync_batch_size = 100` that is ~1,010 s against an `eln_sync_timeout_seconds` of 300 —
+    the activity is killed, its chunk is lost, the cursor never advances, and a mechanism written
+    so that one bad row does not cost the batch costs the whole sync instead.
+
+    Counted rather than timed, because the count is the mechanism: one `db.failed` record is one
+    connection attempt, and a refused socket is instant on some hosts and a full timeout on others.
+    """
+
+    async def _run() -> None:
+        # A port nothing listens on: the case `record_refusals` swallows for the corpus's sake.
+        monkeypatch.setattr(
+            settings, "postgres_dsn", "postgresql://chemclaw:chemclaw@127.0.0.1:5999/chemclaw"
+        )
+        monkeypatch.setattr(settings, "pg_connect_timeout_seconds", 1)
+        refusals = {f"well-{index}": "yield_percent 119.43 exceeds 100" for index in range(5)}
+
+        with caplog.at_level("WARNING"):
+            await record_refusals("test-absent-database", refusals)
+
+        attempts = [r for r in caplog.records if getattr(r, "event", "") == "db.failed"]
+        assert len(attempts) == 1, (
+            f"an unreachable database was dialled {len(attempts)} times for 5 refusals; the "
+            "row-by-row fallback is for a row the database refuses, not for a database that is "
+            "not there"
+        )
+        ours = [r for r in caplog.records if r.name == rejections.__name__]
+        assert len(ours) == 1 and "unreachable" in ours[0].getMessage(), (
+            f"one warning naming the outage, not one per row: {[r.getMessage()[:60] for r in ours]}"
+        )
+
+    asyncio.run(_run())

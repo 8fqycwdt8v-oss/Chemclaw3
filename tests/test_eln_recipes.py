@@ -262,6 +262,50 @@ def test_the_headline_yield_is_the_products_the_source_marked_desired() -> None:
     single = _ord_multiproduct(_ord_product("CC(=O)OCC", yield_percent=85.0))
     assert single.yield_percent == 85.0
 
+    # Several marked desired: the source contradicts itself, so it has stated nothing this can
+    # read, and falling through to the measurement count would put the positional pick back. This
+    # branch was the one nothing held — mutating it to `return marked[0]` survived every test in
+    # the covering files, and it is the branch that keeps a wrong number out of a chemist's
+    # precedent, because a contradicted marking still *looks* like the source having chosen.
+    contradicted = _ord_multiproduct(
+        _ord_product("CC=O", yield_percent=12.0, desired=True),
+        _ord_product("CC(=O)OCC", yield_percent=85.0, desired=True),
+    )
+    assert contradicted.yield_percent is None, (
+        "two products marked desired is the source contradicting itself, not a vote the first wins"
+    )
+
+
+def test_a_multi_product_record_the_source_measured_once_keeps_that_measurement() -> None:
+    """The screen is *being measured*, not being measured by YIELD.
+
+    `_headline_product`'s own rule is "exactly one product stating a measurement — the others are
+    by-products the source did not measure, so there is still only one candidate". Screening on
+    YIELD alone made that argument false for the record that states only a PURITY: two products,
+    one of them carrying 99.2% and no yield anywhere, and the transcription stored nothing at all —
+    `conditions.purity_percent` NULL and the body's `- purity:` bullet gone, for a number a chemist
+    had recorded.
+
+    The pair still describes one compound, which is the property the rule exists for: with two
+    products each measured a different way, no single product is the candidate and both figures
+    stay `None` rather than being assembled from two compounds.
+    """
+    one_measured = _ord_multiproduct(
+        _ord_product("CC=O"),
+        _ord_product("CC(=O)OCC", purity_percent=99.2),
+    )
+    assert (one_measured.yield_percent, one_measured.purity_percent) == (None, 99.2), (
+        "the one product the source measured is the candidate, whichever measurement it states"
+    )
+
+    two_measured = _ord_multiproduct(
+        _ord_product("CC=O", yield_percent=40.0),
+        _ord_product("CC(=O)OCC", purity_percent=99.2),
+    )
+    assert (two_measured.yield_percent, two_measured.purity_percent) == (None, None), (
+        "a yield from one compound and a purity from another is a headline pair describing two"
+    )
+
 
 def test_ord_adapter_tolerates_camelcase_field_names() -> None:
     """protobuf-exported ORD JSON (camelCase) maps identically to snake_case."""
