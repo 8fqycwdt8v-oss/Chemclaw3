@@ -18,6 +18,7 @@ than like a note.
 """
 
 from datetime import datetime, timedelta
+from typing import cast
 
 from pydantic import BaseModel, Field
 from temporalio import activity, workflow
@@ -56,6 +57,43 @@ class CommitmentSyncResult(BaseModel):
 # reader and a writer of one commitment do, and neither of them deletes.
 _SWEEP = "DELETE FROM commitments WHERE source = %s AND observed_at < %s"
 
+# The mark half, and it is the *same* `now()` the upsert stamps `observed_at` with, on the same
+# server, because a comparison between two clocks is not a comparison. See `pass_mark`.
+_MARK = "SELECT now()"
+
+
+def _commitments_dsn() -> str:
+    """The database the mirror lives in — the **store's**, not core's.
+
+    `ingest/commitments/store.py` connects to `session_store_dsn or postgres_dsn`, so a deployment
+    that splits the two would have the mark read from one database and the rows stamped by another
+    — the sweep then silently succeeding against a table the mirror was never written to.
+    """
+    return settings.session_store_dsn or settings.postgres_dsn
+
+
+async def pass_mark() -> datetime:
+    """Stamp the start of one mirror pass, from the clock that will stamp the rows it compares to.
+
+    **The mark and the stamp have to come from one machine.** This used to be
+    `activity.info().started_time`, which the *Temporal server* stamps, while `observed_at` is
+    stamped by `now()` in Postgres — a worker pod, a temporal-history pod and a database in any
+    real deployment. The sweep then compared two clocks: measured against real Postgres, a broker
+    clock a quarter of a second ahead made the pass delete every row it had just mirrored
+    (`mirrored=3, withdrawn=3`, mirror empty), on every pass, permanently, while
+    `CommitmentSyncResult` reported a healthy sync. A tolerance would not have fixed it — it would
+    have kept the two clocks and guessed at the gap.
+
+    Read per attempt rather than carried, which is what the old `started_time` was chosen for: a
+    retry marks from its own start instead of inheriting the first attempt's.
+    """
+    async with connection(_commitments_dsn(), operation="commitments") as conn:
+        cursor = await conn.execute(_MARK)
+        marked = await cursor.fetchone()
+    if marked is None:  # pragma: no cover - `SELECT now()` always answers with a row
+        raise RuntimeError("the commitments database did not answer with its clock")
+    return cast(datetime, marked[0])
+
 
 async def sweep_withdrawn(source: str, marked_at: datetime) -> int:
     """Delete this source's rows that the pass beginning at `marked_at` did not restate.
@@ -64,16 +102,13 @@ async def sweep_withdrawn(source: str, marked_at: datetime) -> int:
     absent row *mean* withdrawn. For an incremental source an absent row means "unchanged", and
     this would empty the mirror on the first quiet pass.
 
+    `marked_at` must come from `pass_mark` — the database's own clock — or this deletes what the
+    pass just wrote.
+
     Returns:
         How many rows were removed.
     """
-    # The **store's** DSN, not core's. `ingest/commitments/store.py` connects to
-    # `session_store_dsn or postgres_dsn`, so a deployment that splits the two would have this
-    # sweep deleting from a database the mirror was never written to — silently succeeding, and
-    # converging nothing.
-    async with connection(
-        settings.session_store_dsn or settings.postgres_dsn, operation="commitments"
-    ) as conn:
+    async with connection(_commitments_dsn(), operation="commitments") as conn:
         cursor = await conn.execute(_SWEEP, (source, marked_at))
         return cursor.rowcount
 
@@ -92,8 +127,8 @@ async def mirror_commitments_activity(source: str) -> CommitmentSyncResult:
     "this is no longer committed" by omitting the row, and an upsert has no way to hear that: a
     withdrawn milestone kept a live state and stayed in `outstanding()` for the life of the
     deployment, inside a list stamped with the *refreshed* rows' freshness — so it read as current
-    work that nobody was doing. The mark is this activity's own start time and the sweep removes
-    what the pass did not restate, under the two conditions the call site states.
+    work that nobody was doing. The mark is the mirror database's own clock (`pass_mark`) and the
+    sweep removes what the pass did not restate, under the two conditions the call site states.
     """
     # **Namespaced, because `sync_cursors` is keyed on the source name alone and one source may
     # declare both halves.** Nothing in `DataSourceManifest` forbids an `ingest:` and a
@@ -107,11 +142,11 @@ async def mirror_commitments_activity(source: str) -> CommitmentSyncResult:
     adapter = make_data_source(source).commitments
     if adapter is None:  # pragma: no cover - guarded by `active_commitment_sources`
         return CommitmentSyncResult(source=source)
-    # **The mark, taken before the fetch.** Every row this pass restates is stamped `now()` by the
-    # upsert, so anything still older than this is something the source stopped saying. Read from
-    # the activity's own info rather than from the clock so a retry re-marks from its own start
-    # rather than inheriting the first attempt's.
-    marked_at = activity.info().started_time
+    # **The mark, taken before the fetch, from the database that stamps the rows.** Every row this
+    # pass restates is stamped `now()` by the upsert, so anything still older than this is
+    # something the source stopped saying — an inference that only holds while both stamps come
+    # from one clock, which is the whole of `pass_mark`'s docstring.
+    marked_at = await pass_mark()
     commitments = await adapter.fetch_commitments(since)
     written = await record_commitments(commitments)
     # **The sweep, and the two conditions on it.** `snapshot` is the adapter promising that a fetch

@@ -41,7 +41,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from chemclaw.core.ids import stable_hash
-from chemclaw.publish.properties import definition_for
 from chemclaw.publish.solvents import canonical_solvent
 
 # The contract version this writer builds records against. Stamped on every record so a consumer
@@ -285,6 +284,18 @@ class PropertyFact(BaseModel):
 
     `in_domain=None` means no applicability domain was declared, which is **not** the same as
     `False` and must never be read as "yes".
+
+    **This model is also the parse model for a document already in the outbox, so a validator here
+    is a filter on stored bytes.** The registry-scope check lived on this class for one release and
+    that is what it did: `durable/publish_results._drain_one` re-validates every queued
+    `result_publications.document`, so every already-enqueued species distribution — each carrying
+    `relative_energy`, a per-conformer quantity, as a calculation scalar, which is the very defect
+    the check was written for — became unparseable, spent an attempt per pass and dead-lettered,
+    with the backfill CLI unable to help because the stored bytes do not change. The check is now
+    `project._facts_belong_in_the_scalar_table`, on the write path, where its own argument — *a
+    registry mismatch is a projection bug and cannot be caused by data* — is true. A rule about
+    what this system may **produce** belongs where production happens; only a rule about what a
+    document must **be** to be read at all belongs here.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -328,31 +339,6 @@ class PropertyFact(BaseModel):
             raise ValueError(
                 f"property {self.property!r} must carry exactly one of value, value_bool or "
                 f"value_text (got {sum(filled)})"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _belongs_in_the_scalar_table(self) -> "PropertyFact":
-        """Reject a quantity the registry declares for one of the other tables.
-
-        This is the control `properties.ScopeKind` claims and did not have: nothing compared a
-        fact's property against `definition_for(name).scope_kind`, so a per-atom, per-point or
-        per-conformer quantity written as a scalar was stored rather than caught, and the
-        declaration that a site's `property_definition` table ships was a statement a consumer
-        could not trust. Measured, one shipped projection did exactly that — every species
-        distribution published `relative_energy`, a *per-conformer* quantity, as a calculation
-        scalar.
-
-        A registry mismatch is a projection bug and cannot be caused by data, so raising is right
-        here where `_identify` degrades instead: the projector names the property, and the
-        alternative to failing is a row nobody can find under a name that means something else.
-        """
-        declared = definition_for(self.property).scope_kind
-        if declared != "calculation":
-            raise ValueError(
-                f"property {self.property!r} is registered at {declared!r} scope, so its values "
-                f"belong in that table rather than in `property_value` — see "
-                "`publish.properties.ScopeKind`"
             )
         return self
 

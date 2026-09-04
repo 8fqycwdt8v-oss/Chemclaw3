@@ -128,6 +128,108 @@ def test_a_snapshot_source_converges_downward_when_a_commitment_is_withdrawn() -
     asyncio.run(_run())
 
 
+class _Export:
+    """A portfolio export that answers with whatever it is holding."""
+
+    def __init__(self, rows: list[Commitment], *, snapshot: bool) -> None:
+        self._rows = rows
+        self.snapshot = snapshot
+
+    async def fetch_commitments(self, since: datetime | None) -> list[Commitment]:
+        return list(self._rows)
+
+
+async def _mirror_pass(
+    export: _Export, *, broker_clock: datetime | None = None
+) -> commitment_sync.CommitmentSyncResult:
+    """Run one `mirror_commitments_activity` over `export`, with the broker's clock as given.
+
+    `broker_clock` is what the *Temporal server* would report as this attempt's `started_time`.
+    It is a parameter rather than a fixed value because the mark must not be read from it: two
+    machines' clocks are what a deployment has, and a test that hands the activity one clock for
+    both halves cannot see a mark and a stamp drifting apart.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    with (
+        mock.patch.object(
+            commitment_sync, "make_data_source", lambda _name: SimpleNamespace(commitments=export)
+        ),
+        mock.patch.object(commitment_sync, "load_cursor", _no_cursor),
+        mock.patch.object(commitment_sync, "store_cursor", _record_cursor),
+    ):
+        env = ActivityEnvironment()
+        if broker_clock is not None:
+            env.info = dataclasses.replace(env.info, started_time=broker_clock)
+        result = await env.run(commitment_sync.mirror_commitments_activity, SOURCE)
+    return result
+
+
+# What a worker pod's view of "now" may differ from the mirror database's by. Deliberately far
+# larger than one pass takes, because the failure is a *comparison* between two clocks and the
+# smallest skew that triggers it is the length of a fetch — measured, a quarter of a second was
+# already enough to empty the mirror.
+_BROKER_CLOCK_SKEW = timedelta(minutes=5)
+
+
+def test_the_pass_marks_from_the_database_that_stamps_the_rows_not_from_the_broker() -> None:
+    """One clock decides both halves of the mark-and-sweep, or the sweep decides nothing.
+
+    `observed_at` is stamped by Postgres (`now()` in the upsert). The mark used to be
+    `activity.info().started_time`, which the **Temporal server** stamps — a different machine from
+    the database in every real deployment, and from the worker in most. The sweep deletes this
+    source's rows `observed_at < marked_at`, so the moment the broker's clock leads Postgres' by
+    more than a fetch takes, the pass deletes every row it has just mirrored: measured against real
+    Postgres at a 0.25 s skew, `mirrored=3, withdrawn=3` and an empty mirror, every pass, while
+    `CommitmentSyncResult` reported a healthy sync. These rows exist nowhere else this system can
+    reach.
+
+    Both directions are asserted because both are the same defect. A broker clock that *lags*
+    marks before the rows the previous pass wrote, so nothing is ever swept and the mirror silently
+    stops converging downward — the failure mark-and-sweep was added to fix.
+
+    A tolerance would not be a fix: it keeps two clocks and guesses the gap. What is asserted here
+    is therefore that the broker's clock does not reach the outcome at all, which is why the skew
+    is handed in rather than the two being forced equal.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+
+        # A pass whose export restates everything: nothing may be swept, however far ahead the
+        # broker's clock runs.
+        await _clean()
+        await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
+        ahead = await _mirror_pass(
+            _Export([_commitment("MS-1"), _commitment("MS-2")], snapshot=True),
+            broker_clock=datetime.now(UTC) + _BROKER_CLOCK_SKEW,
+        )
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert ahead.withdrawn == 0, (
+            f"the pass swept {ahead.withdrawn} of the rows it had just written: the mark came from "
+            "a clock that leads the one stamping `observed_at`"
+        )
+        assert {row.external_id for row in rows} == {"MS-1", "MS-2"}, (
+            "a mirror the pass had just restated in full came back as "
+            f"{sorted(row.external_id for row in rows)} — the sweep deleted this pass's own work"
+        )
+
+        # And a pass whose export drops MS-2 must still remove it, however far *behind* the
+        # broker's clock runs.
+        behind = await _mirror_pass(
+            _Export([_commitment("MS-1")], snapshot=True),
+            broker_clock=datetime.now(UTC) - _BROKER_CLOCK_SKEW,
+        )
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert behind.withdrawn == 1, (
+            f"the pass swept {behind.withdrawn} rows: a mark from a lagging clock is older than "
+            "every row already in the mirror, so a withdrawn commitment is never removed"
+        )
+        assert {row.external_id for row in rows} == {"MS-1"}
+
+    asyncio.run(_run())
+
+
 def test_the_pass_sweeps_only_where_the_adapter_promises_a_whole_picture() -> None:
     """The sweep is wired to the claim, not to the shape of one answer.
 
@@ -138,20 +240,11 @@ def test_the_pass_sweeps_only_where_the_adapter_promises_a_whole_picture() -> No
     defect than the one being fixed, since these rows exist nowhere else this system can reach.
 
     Driven through the activity rather than through `sweep_withdrawn`, because the property is the
-    wiring: the mark comes from `activity.info().started_time`, and a sweep marked from anywhere
-    else would either delete what the pass just wrote or nothing at all.
+    wiring: a pass that never reached `sweep_withdrawn` and a pass that swept nothing look the same
+    from outside. The harness supplies no `started_time` here — the mark is the database's, and
+    `ActivityEnvironment`'s epoch default reaching the outcome is exactly what the test above
+    forbids.
     """
-    from temporalio.testing import ActivityEnvironment
-
-    class _Export:
-        """A portfolio export that answers with whatever it is holding."""
-
-        def __init__(self, rows: list[Commitment], *, snapshot: bool) -> None:
-            self._rows = rows
-            self.snapshot = snapshot
-
-        async def fetch_commitments(self, since: datetime | None) -> list[Commitment]:
-            return list(self._rows)
 
     async def _run() -> None:
         await migrated_db_or_skip()
@@ -160,19 +253,7 @@ def test_the_pass_sweeps_only_where_the_adapter_promises_a_whole_picture() -> No
             """One mirror pass over a source now exporting MS-1 alone."""
             await _clean()
             await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
-            export = _Export([_commitment("MS-1")], snapshot=snapshot)
-            monkeypatched = SimpleNamespace(commitments=export)
-            with (
-                mock.patch.object(commitment_sync, "make_data_source", lambda _name: monkeypatched),
-                mock.patch.object(commitment_sync, "load_cursor", _no_cursor),
-                mock.patch.object(commitment_sync, "store_cursor", _record_cursor),
-            ):
-                # `ActivityEnvironment` reports the epoch as `started_time`, which would make
-                # the mark older than every row and sweep nothing — the harness answering the
-                # question rather than the code. A real start is what the broker supplies.
-                env = ActivityEnvironment()
-                env.info = dataclasses.replace(env.info, started_time=datetime.now(UTC))
-                return await env.run(commitment_sync.mirror_commitments_activity, SOURCE)
+            return await _mirror_pass(_Export([_commitment("MS-1")], snapshot=snapshot))
 
         incremental = await _pass(snapshot=False)
         rows, _freshness = await outstanding(source=SOURCE)

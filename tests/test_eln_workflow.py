@@ -9,13 +9,14 @@ activity and the summary fold.
 """
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from temporalio import activity
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
@@ -41,7 +42,7 @@ from chemclaw.ingest.eln.sync import IngestSummary, RejectedEntry, sync_entries
 from chemclaw.ingest.sources.registry import active_ingest_source_names
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from chemclaw.science.labels.store import InMemoryLabelIndex
-from tests.temporal_env import pydantic_client, start_env_or_skip
+from tests.temporal_env import pydantic_client, start_env_or_skip, start_local_env_or_skip
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
 
@@ -400,6 +401,91 @@ def test_one_failing_source_does_not_take_the_rest_of_the_sync_down(
     )
     assert {record.reaction_id for record in asyncio.run(records.all_records())}, (
         "the healthy source ingested nothing"
+    )
+
+
+def test_cancelling_a_drain_stops_it_instead_of_skipping_the_source_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel must end the run, and the skip-one-source clause is exactly where that can be lost.
+
+    Temporal delivers a workflow cancellation to the awaiting `execute_activity` as an
+    `ActivityError` whose cause is `temporalio.exceptions.CancelledError` — the same type the
+    clause above catches to drop one unreachable source. Caught rather than re-raised, `cancel`
+    becomes "skip whichever source is in flight and carry on": the run finishes COMPLETED, the
+    remaining sources are synced, and the SDK's `uncancel` after the absorbed cancel means no
+    later activity is cancelled either. `cli.live_data.backfill` awaits `handle.result()`, so an
+    operator's cancel of a wrong-`since` backfill silently mutilated one source instead of
+    stopping the drain.
+
+    Driven on the **real-time** server for the reason `start_local_env_or_skip` records: this is a
+    test about a wall-clock event reaching a run that is still going, and time skipping would
+    fast-forward the in-flight activity instead of letting the cancel arrive during it.
+
+    Asserted on the run's *status* rather than on "it raised", because the failure being pinned is
+    a run that ends successfully, and on the second source's cursor, because the harm is the work
+    that happened after the cancel rather than the exception that did not.
+    """
+    _swap_stores(monkeypatch)
+    monkeypatch.setattr(settings, "data_sources", "eln-json,eln-ord")
+    cursors: dict[str, datetime] = {}
+
+    async def fake_load(source: str) -> datetime:
+        return cursors.get(source, _EPOCH)
+
+    async def fake_store(source: str, cursor: datetime) -> None:
+        cursors[source] = cursor
+
+    monkeypatch.setattr(eln_sync, "load_cursor", fake_load)
+    monkeypatch.setattr(eln_sync, "store_cursor", fake_store)
+    in_flight = asyncio.Event()
+
+    @activity.defn(name="sync_eln_entries")
+    async def hangs_on_the_first_source(
+        source: str, since: datetime, apply_overlap: bool = True
+    ) -> SyncChunk:
+        """First source heartbeats forever so the cancel reaches it; the second is the real one."""
+        if source == "eln-json":
+            in_flight.set()
+            while True:
+                activity.heartbeat()
+                await asyncio.sleep(0.05)
+        return await sync_eln_entries(source, since, apply_overlap)
+
+    async def _run() -> WorkflowExecutionStatus | None:
+        async with await start_local_env_or_skip() as env:
+            client: Client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue="test-eln-cancel",
+                workflows=[ElnSyncWorkflow],
+                activities=[
+                    plan_eln_sync,
+                    hangs_on_the_first_source,
+                    load_sync_cursor,
+                    store_sync_cursor,
+                ],
+            ):
+                handle = await client.start_workflow(
+                    ElnSyncWorkflow.run,
+                    id="eln-sync-cancelled",
+                    task_queue="test-eln-cancel",
+                )
+                await asyncio.wait_for(in_flight.wait(), timeout=60)
+                await handle.cancel()
+                with contextlib.suppress(WorkflowFailureError):
+                    await asyncio.wait_for(handle.result(), timeout=60)
+                return (await handle.describe()).status
+
+    status = asyncio.run(_run())
+
+    assert status == WorkflowExecutionStatus.CANCELED, (
+        f"the cancelled drain ended {status!r}; a cancel that is absorbed by the per-source skip "
+        "makes this run unstoppable — it drops the source in flight and syncs the rest"
+    )
+    assert "eln-ord" not in cursors, (
+        "the source after the cancelled one was synced anyway: the cancel skipped one source "
+        "instead of stopping the run"
     )
 
 
