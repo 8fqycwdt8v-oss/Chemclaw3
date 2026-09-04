@@ -471,6 +471,15 @@ live-data:  ## Check the seeded corpus against the published factor tables, valu
 # D-2026-08-15 deleted the team, the challenge panel and that measurement together. The target
 # outlived its suite and failed at argparse — `invalid choice: 'routing'` — so it is gone too.
 
+# The one measurement that asks whether the tools are worth what they cost, by asking the same
+# questions twice. The control arm is a *profile*, so it is the front door that needs
+# `data/evals/profiles` on its profile path, not this client — `infra/live/processes.sh` puts it
+# there, and the suite checks the front door accepted the profile before it spends anything,
+# because a run whose control arm quietly fell back to the default agent would produce a report
+# comparing one agent with itself.
+live-ab:  ## Ask the probe corpus with and without tools and compare (needs ANTHROPIC_API_KEY).
+	uv run python -m chemclaw.cli.live_probes --suite ab $(ARGS)
+
 live-plan-gate:  ## M12: plan -> approve -> execute -> re-gate, live (needs harness_autonomy=plan_only).
 	uv run python -m chemclaw.cli.live_probes --suite plan-gate $(ARGS)
 
