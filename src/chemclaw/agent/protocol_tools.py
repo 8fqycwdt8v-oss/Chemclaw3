@@ -30,7 +30,7 @@ from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.ingest.sources.registry import active_retrieve_sources
 from chemclaw.kg.graph import build_graph, note_in
-from chemclaw.kg.note import Note, resolves_outside_graph
+from chemclaw.kg.note import Note, external_record_id, resolves_outside_graph
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ async def _from_record(ref: str) -> Protocol | None:
     """
     if not resolves_outside_graph(ref):
         return None
-    record = await default_record_store().read(ref.removeprefix("reaction-"))
+    record = await default_record_store().read(external_record_id(ref))
     if record is None:
         return None
     return Protocol(
