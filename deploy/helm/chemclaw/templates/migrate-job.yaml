@@ -41,7 +41,11 @@ spec:
         app.kubernetes.io/component: migrate
         azure.workload.identity/use: "true"
     spec:
-      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- /* The hook-scoped identity and configuration, not the release's: Helm runs this Job
+             before any ordinary resource exists, so on a fresh install the ServiceAccount and
+             ConfigMap the pods use have not been created yet. `config.yaml` argues the pair in
+             full. */}}
+      serviceAccountName: {{ include "chemclaw.hookServiceAccountName" . }}
       {{- include "chemclaw.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- include "chemclaw.podSecurityContext" . | nindent 8 }}
@@ -74,7 +78,7 @@ spec:
             {{- include "chemclaw.env" . | nindent 12 }}
             {{- include "chemclaw.migrationEnv" . | nindent 12 }}
           envFrom:
-            {{- include "chemclaw.envFrom" . | nindent 12 }}
+            {{- include "chemclaw.hookEnvFrom" . | nindent 12 }}
           resources:
             {{- toYaml .Values.resources.connector | nindent 12 }}
 ---

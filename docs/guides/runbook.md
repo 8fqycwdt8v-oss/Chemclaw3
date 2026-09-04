@@ -1441,6 +1441,16 @@ kubectl logs job/chemclaw-migrate            # the hook is kept on failure, so t
 helm rollback chemclaw                       # or `helm upgrade --install` again once the cause is fixed
 ```
 
+**What `helm rollback` does and does not undo.** It restores the release manifest — every Deployment
+and Service, and `chemclaw-config`, the ConfigMap the pods read, which is an ordinary tracked
+resource for exactly this reason. (It was a Helm hook once, and hooks are not release state: a
+rollback reverted the pods and left the new release's configuration live, so a release rolled back
+from `connectors.bo.enabled=false` restored the `bo` pods while `CHEMCLAW_CONNECTORS_ENABLED` still
+omitted `bo` and the capability stayed dark.) It does **not** undo a data conversion:
+`chemclaw-convert` is a `post-upgrade` hook whose backfill rewrites `session_messages` rows, and
+neither rollback nor uninstall re-runs or reverses it — which is also why this chart must not be
+deployed with `helm upgrade --atomic` (`deploy/jenkins/targets/openshift.sh` does not).
+
 **The Job says a migration was edited after being applied.** `MigrationError`, and the fix is never
 to edit the file back: `schema_migrations` records a checksum precisely so an in-place change is
 loud. Add a new numbered file that makes the change forward.

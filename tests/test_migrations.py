@@ -16,6 +16,8 @@ and nobody said so". These run offline and touch no database, so they fail on th
 breaks the path rather than on the first job that needs the schema.
 """
 
+import asyncio
+import re
 from pathlib import Path
 
 import pytest
@@ -28,9 +30,52 @@ from chemclaw.core.migrate import (
     _legacy_checksum,
     _read_sql_files,
     _statements,
+    migrate,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+# The two prefixes that were already duplicated when this guard was written, and the reason it is a
+# ratchet rather than a flat rule. Both are applied everywhere this schema runs, and
+# `schema_migrations` keys on the **filename**: renaming one would re-apply it on every existing
+# database and fail on the objects it already created. So they are frozen here by name, and every
+# future prefix has to be unique.
+_APPLIED_DUPLICATE_PREFIXES = frozenset({"037", "043"})
+
+
+def test_no_two_migrations_share_a_number() -> None:
+    """A duplicate prefix means one file set applied in two different orders, both reported as fine.
+
+    `migrate()` sorts by the whole filename, so today's two pairs each have a deterministic order
+    and are independent of each other (columns on `bo_suggestions` against new document tables;
+    indexes against a new column) — the run is one transaction, so nothing can half-apply, and
+    measured on a fresh database all 79 files apply cleanly in that order. Harmless, and nothing
+    kept it so.
+
+    What it is latent *for* is the next file numbered into an already-used low prefix: on a fresh
+    install it sorts before everything from `038` on, and on an existing database it applies after
+    everything, because the ledger has already recorded the rest. Two installs of the same commit,
+    two orders, success reported both times — and a migration that depends on a later one is a
+    failure only the fresh install sees.
+    """
+    prefixes: dict[str, list[str]] = {}
+    for path in sorted((_REPO_ROOT / "infra" / "sql").glob("*.sql")):
+        prefixes.setdefault(path.name.split("_", 1)[0], []).append(path.name)
+
+    collisions = {
+        prefix: names
+        for prefix, names in prefixes.items()
+        if len(names) > 1 and prefix not in _APPLIED_DUPLICATE_PREFIXES
+    }
+    assert not collisions, (
+        f"two migrations share a number: {collisions}. Give the new one the next free prefix — "
+        "never renumber an applied file, whose name is its key in `schema_migrations`"
+    )
+    # The other direction, so the exemption cannot outlive its subject: a grandfathered prefix that
+    # is no longer duplicated is a line to delete, not a permanent licence.
+    stale = {prefix for prefix in _APPLIED_DUPLICATE_PREFIXES if len(prefixes.get(prefix, [])) < 2}
+    assert not stale, f"_APPLIED_DUPLICATE_PREFIXES exempts {stale}, which is no longer duplicated"
 
 
 def test_the_configured_directory_exists_and_holds_the_migrations() -> None:
@@ -64,6 +109,26 @@ def test_an_empty_directory_is_not_mistaken_for_no_work(tmp_path: Path) -> None:
         assert _read_sql_files() == {}
     finally:
         monkeypatch.undo()
+
+
+def test_a_directory_with_no_ledger_file_fails_by_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A mis-set `sql_migrations_dir` must name itself, the way the grant applier already does.
+
+    `migrate` bootstraps the ledger with `sources[_LEDGER_FILE]` and nothing guards the subscript,
+    so an empty or wrong directory failed a `pre-install` hook Job with a bare
+    `KeyError: '000_schema_migrations.sql'` — naming neither the directory that was searched nor
+    the setting that points at it, and leaving an operator nothing to act on. `apply_grants`
+    handles the identical misconfiguration explicitly ("An empty directory is an error, not a
+    successful no-op") and names the path; this is the same rule at the same layer.
+
+    Checked before the connect, so a mis-set path fails as the configuration error it is rather
+    than as a `KeyError` inside an open transaction — and so this test needs no server.
+    """
+    monkeypatch.setattr(settings, "sql_migrations_dir", str(tmp_path))
+    with pytest.raises(MigrationError, match=re.escape(str(tmp_path.resolve()))):
+        asyncio.run(migrate())
 
 
 def test_the_error_type_exists_for_a_drifted_migration() -> None:

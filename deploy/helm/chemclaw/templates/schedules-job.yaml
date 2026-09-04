@@ -21,7 +21,13 @@ metadata:
     "helm.sh/hook-weight": "5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
-  backoffLimit: 3
+  backoffLimit: {{ .Values.schedulesJob.backoffLimit }}
+  {{- /* Helm waits for this hook too, so the argument `migrate-job.yaml` makes at length applies
+         here unchanged: a Job with no deadline is a release that can hang forever. `backoffLimit`
+         above bounds *failures*, and the failure mode this Job actually has is a hang — temporalio
+         sets no default RPC timeout, so a frontend that completes the handshake and then stalls on
+         `list_schedules` never returns. See `values.yaml` for the number and why it is that. */}}
+  activeDeadlineSeconds: {{ .Values.schedulesJob.activeDeadlineSeconds }}
   template:
     metadata:
       labels:

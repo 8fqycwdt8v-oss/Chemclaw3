@@ -30,6 +30,20 @@ spec:
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
       {{- include "chemclaw.imagePullSecrets" . | nindent 6 }}
+      {{- /* The face had none, so it took Kubernetes' 30 s default while the front door has 615 and
+             a connector 3610 — a SIGKILL through whatever MCP tool call it was holding, plus no
+             room for the Endpoint to be withdrawn first (Kubernetes removes the Endpoint and sends
+             SIGTERM concurrently, which is the whole reason `service.drainSeconds` exists).
+
+             Derived from the front door's pair rather than the connector's, and neither number is
+             an accident: this process serves the same *in-process* read-only tools the front door
+             runs inside a turn — knowledge search, fingerprint search, precedent lookup — and holds
+             no call to the calc server, which is the only term the connector ceiling is made of.
+             `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` bounds a whole turn rather than one tool call,
+             so this is generous; it is also the only stated bound this chart has on in-process tool
+             work, and a generous ceiling costs nothing at steady state — the kubelet waits only as
+             long as the process actually takes. */}}
+      terminationGracePeriodSeconds: {{ add (int (required "config.CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS must be set: the mcp-face terminationGracePeriodSeconds is derived from it" .Values.config.CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS)) (int .Values.service.drainSeconds) }}
       securityContext:
         {{- include "chemclaw.podSecurityContext" . | nindent 8 }}
       containers:
@@ -51,18 +65,39 @@ spec:
           {{- /* `/healthz` and `/metrics` stay open here as on every connector: a kubelet probe
                and a Prometheus scrape carry no identity. Only `/mcp` requires the bearer, and it
                fails closed when the variable is unset. */}}
-          livenessProbe:
+          {{- /* `probes.connector`, because this is a connector server in every way that matters to
+                 a kubelet — and it is the *heaviest* of them: `chemclaw.api.mcp_face` seeds the
+                 whole tool registry through `agent.tool_modules` and imports strictly more than
+                 `connectors/calc/server/app.py` (measured 2800 ms against 1646 ms, unthrottled and
+                 warm). It had no startup probe at all and left `timeoutSeconds` and
+                 `failureThreshold` to Kubernetes' defaults (1 s, 3), so the first liveness kill
+                 landed about 100 s after start — inside its own cold-start time on a throttled
+                 node, and every restart paid the import again. That is precisely the crash loop
+                 `values.yaml`'s `probes:` block is written about, on the one component that had
+                 escaped it. Sharing the connector budget rather than a fourth block of its own:
+                 the process shape and the argument are the same, and a second set of numbers that
+                 only has to agree eventually does not. */}}
+          startupProbe:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 10
-            periodSeconds: 30
+            periodSeconds: {{ .Values.probes.connector.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.connector.startup.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.connector.startup.timeoutSeconds }}
           readinessProbe:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: {{ .Values.probes.connector.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.connector.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.connector.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: {{ .Values.probes.connector.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.connector.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.connector.liveness.failureThreshold }}
           resources:
             {{- toYaml .Values.resources.service | nindent 12 }}
           volumeMounts:
@@ -73,6 +108,13 @@ spec:
         {{- include "chemclaw.knowledgeInit" . | nindent 8 }}
       volumes:
         {{- include "chemclaw.volumes" . | nindent 8 }}
+        {{- /* `chemclaw.knowledgeMounts` above is `chemclaw.noteRepoMount` plus the checkout, and
+               only the checkout is in `chemclaw.volumes` — so this pairing is not optional, it is
+               the other half of that include. Without it three containers here (the face, the
+               knowledge-sync sidecar and its init) mounted `note-repo` against a pod that declared
+               no such volume, which `kubeconform` calls valid and the API server rejects at apply.
+               `deployment-service.yaml` and `deployment-workers.yaml` state the same pair. */}}
+        {{- include "chemclaw.noteRepoVolume" . | nindent 8 }}
 {{- end }}
 {{- if .Values.mcpFace.enabled }}
 ---

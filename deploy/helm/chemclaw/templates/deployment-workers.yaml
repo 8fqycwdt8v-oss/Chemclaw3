@@ -13,6 +13,24 @@ metadata:
     app.kubernetes.io/component: background-worker
 spec:
   replicas: {{ .Values.workers.background.replicas }}
+  {{- /* The other half of that `replicas: 1`, because one replica is one process only at steady
+         state. Kubernetes' default `RollingUpdate` is `maxSurge: 25%`/`maxUnavailable: 25%`, which
+         for a single replica rounds to `maxSurge: 1, maxUnavailable: 0` — the new pod is started
+         and becomes Ready *before* the old one is told to stop, and the old one then gets its whole
+         `terminationGracePeriodSeconds` (150) to finish. Two background workers poll
+         `background-jobs` for that window, which is precisely the race
+         `D-2026-08-27-what-a-second-background-worker-would-race-on` pins the count to prevent:
+         `NoteReindexWorkflow` retires `note_index` rows for notes missing from *this pod's*
+         knowledge checkout, the two pods hold two differently-aged clones of the corpus, and a
+         merge-webhook reindex landing on the older one deletes the freshly merged notes' rows while
+         logging that it retired notes that exist.
+
+         `Recreate` rather than `maxSurge: 0`: a singleton worker has no availability to protect —
+         Temporal redelivers an activity whose worker went away — so the honest statement is that
+         the old process is gone before the new one starts. The connector workers below keep the
+         default on purpose; nothing on their queues is host-local, so an overlap is only capacity. */}}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "chemclaw.selectorLabels" . | nindent 6 }}

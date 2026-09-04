@@ -193,6 +193,45 @@ def _chart_env_keys() -> set[str]:
     )
 
 
+def test_no_values_key_is_declared_twice() -> None:
+    """A duplicate key in a YAML mapping is not an error to any parser this repository uses.
+
+    Helm's takes the last one, `yaml.safe_load` takes the last one, and neither warns — so the whole
+    gate agrees on a value while the file shows two. `config.CHEMCLAW_CALC_SERVER_URL` was declared
+    twice, and the *first* occurrence is the one sitting under the comment block explaining why the
+    key is stated at all ("**Stated rather than left to the code default**, which is a loopback
+    address … every tool and all five durable jobs raised `CalcServerError` against nothing"). An
+    operator who reads that paragraph and edits the line beneath it gets a rendered ConfigMap that
+    still names the old address, and the failure they then hit is the one the paragraph describes.
+
+    `yaml.compose()` rather than `safe_load`, because the duplicate is exactly what `safe_load`
+    throws away: the node tree keeps every key, so the check is a walk over the mapping nodes.
+    Applied to the whole document rather than to `config:`: any block can grow the same defect.
+    """
+    duplicates: list[str] = []
+
+    def walk(node: yaml.Node, path: str) -> None:
+        if isinstance(node, yaml.MappingNode):
+            seen: dict[str, int] = {}
+            for key, value in node.value:
+                if key.value in seen:
+                    duplicates.append(
+                        f"{path}.{key.value} (lines {seen[key.value]} "
+                        f"and {key.start_mark.line + 1})"
+                    )
+                seen[key.value] = key.start_mark.line + 1
+                walk(value, f"{path}.{key.value}")
+        elif isinstance(node, yaml.SequenceNode):
+            for index, value in enumerate(node.value):
+                walk(value, f"{path}[{index}]")
+
+    walk(yaml.compose((_CHART / "values.yaml").read_text(encoding="utf-8")), "values")
+    assert not duplicates, (
+        "values.yaml declares a key twice; every parser silently keeps the last, so an edit to the "
+        f"other one is discarded with no error anywhere: {duplicates}"
+    )
+
+
 def test_chart_config_keys_have_a_consumer() -> None:
     """Every `CHEMCLAW_*` key the chart injects has a reader.
 

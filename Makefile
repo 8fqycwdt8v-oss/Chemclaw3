@@ -222,12 +222,27 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# happens to the durable tables' history (`templates/config.yaml`). A validation render has
 	@# neither destinations nor windows to enumerate, so it takes both escape hatches explicitly —
 	@# the same sentences an operator has to write, which is why the flags are visible here.
-	helm template chemclaw deploy/helm/chemclaw \
-	  --set networkPolicy.allowAnyDestination=true \
-	  --set retention.unboundedGrowthAccepted=true \
-	  | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
-	      -schema-location default -schema-location \
-	      'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+	@#
+	@# Twice, and the second render is the point: every switch this chart ships **off** was
+	@# validated by nobody. `mcpFace.enabled` rendered a Deployment mounting a volume the pod did
+	@# not declare and `monitoring.temporalSdkMetrics.enabled` rendered a container port name one
+	@# character over the Kubernetes limit — both behind flags no gate had ever set, so the first
+	@# thing that saw either was an operator's `helm upgrade`. The union render rather than one per
+	@# flag: the flags are independent, so turning them all on covers each of them and costs one
+	@# kubeconform invocation instead of three. (Neither of those two defects is one kubeconform can
+	@# *see* — both are cross-field invariants no OpenAPI schema expresses. They are caught by
+	@# `tests/test_deploy_chart.py`'s rendered-chart assertions, which walk the same variant set.
+	@# What this arm adds is that a template behind an off-by-default flag is at least rendered and
+	@# schema-checked at all.)
+	@set -e; \
+	  for flags in "" "--set mcpFace.enabled=true --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true"; do \
+	    helm template chemclaw deploy/helm/chemclaw \
+	      --set networkPolicy.allowAnyDestination=true \
+	      --set retention.unboundedGrowthAccepted=true $$flags \
+	    | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
+	        -schema-location default -schema-location \
+	        'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'; \
+	  done
 	@# The externally-hosted connector (D-2026-08-09-a-connector-we-do-not-run), rendered because
 	@# no shipped bundle sets `url` and so the default render above never takes that branch. Every
 	@# other check on it reads the template *text*, which cannot see a `{{- if }}` nesting mistake;
