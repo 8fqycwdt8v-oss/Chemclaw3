@@ -234,8 +234,15 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# `tests/test_deploy_chart.py`'s rendered-chart assertions, which walk the same variant set.
 	@# What this arm adds is that a template behind an off-by-default flag is at least rendered and
 	@# schema-checked at all.)
+	@#
+	@# **This list is a literal and the claim above it is not self-maintaining**, which is why
+	@# `tests/test_deploy_chart.py::test_the_union_render_covers_every_switch_this_chart_ships_off`
+	@# derives the real set from `values.yaml` and fails on this line the day a switch is added. It
+	@# shipped covering three of six; `secrets.create` and `mcpFace.route.enabled` were rendered by
+	@# nothing in `tests/`, this file or `.github/`. The two `--set`s after `alertmanager.enabled`
+	@# are its prerequisites, not extra coverage: that template refuses to render with no receivers.
 	@set -e; \
-	  for flags in "" "--set mcpFace.enabled=true --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true"; do \
+	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
 	      --set retention.unboundedGrowthAccepted=true $$flags \

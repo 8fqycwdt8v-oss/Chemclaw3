@@ -166,10 +166,24 @@ def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
     try:
         parts = conninfo.conninfo_to_dict(dsn)
     except ProgrammingError as exc:
+        # **The exception's message is deliberately not interpolated.** libpq quotes the offending
+        # token, and for two realistic single-character slips — a typo'd scheme, a stray leading
+        # space — that token is the whole DSN, userinfo included. This raise happens during
+        # `import chemclaw.core.config`, which is *before* `configure_logging()` installs
+        # `SecretRedactingFilter`, so a credential printed here reaches the container log with
+        # nothing able to scrub it. The docstring above already promised this ("naming the setting
+        # rather than the DSN — the value carries a password") and the first version of this code
+        # broke that promise in the same breath.
+        #
+        # The type is named because it is the one part of libpq's answer that carries no input, and
+        # it distinguishes "unparseable" from the other ways this can fail. `__cause__` keeps the
+        # original for a debugger; it is the traceback rather than the message, and a traceback is
+        # not what ships to a log aggregator from a startup refusal.
         raise ValueError(
-            f"{name} is not a connection string libpq can parse ({exc}), so nothing can say "
-            "whether it would connect with TLS. Refused under entra_required=true rather than "
-            "guessed at; the same DSN would fail at connect."
+            f"{name} is not a connection string libpq can parse "
+            f"({type(exc).__name__}), so nothing can say whether it would connect with TLS. "
+            "Refused under entra_required=true rather than guessed at; the same DSN would fail at "
+            "connect. The value is not repeated here because it carries a password."
         ) from exc
     return str(parts.get("hostaddr") or parts.get("host") or "").lower(), str(
         parts.get("sslmode") or "prefer"
@@ -682,10 +696,13 @@ class Settings(
     def _the_heartbeat_fits_inside_the_budget_it_reports_within(self) -> Self:
         """A heartbeat timeout outside the budget it sits under is a control that does nothing.
 
-        `background_activity_heartbeat_timeout_seconds` is the heartbeat timeout for core's three
-        long background activities — the note reindex, the retention sweep and the result-publish
-        drain — and its own comment asserts as fact that it sits "far below every start-to-close
-        budget it sits under". Nothing checked that, and both directions of getting it wrong are
+        `background_activity_heartbeat_timeout_seconds` is the heartbeat timeout for core's long
+        background activities — the note reindex, the retention sweep, the result-publish drain and
+        the artifact eviction sweep, which said "three" here until eviction became the fourth — and
+        its own comment asserts as fact that it sits "far below every start-to-close budget it sits
+        under". The `min()` below is over the budgets rather than over a count, so the guard stayed
+        correct while the sentence went stale; eviction is budgeted by `retention_timeout_seconds`,
+        which is already in it. Nothing checked that, and both directions of getting it wrong are
         silent:
 
         - **Above the budget it guards.** `CHEMCLAW_RESULT_PUBLISH_TIMEOUT_SECONDS=30` with one

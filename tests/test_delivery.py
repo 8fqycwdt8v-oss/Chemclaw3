@@ -11,6 +11,7 @@ one channel's failure is not everyone's, and nothing reads *from* a channel.
 """
 
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
@@ -718,3 +719,38 @@ def test_a_secret_in_the_recipient_is_scrubbed_like_one_in_the_body(
 
     assert secret not in scrubbed.recipient
     assert "***" in scrubbed.recipient
+
+
+def test_a_recipient_the_scrub_rewrote_is_reported_rather_than_silently_undeliverable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A rewritten address is an undelivered message, and nothing said so.
+
+    `redact_secrets` rewrites *structural* shapes as well as this deployment's own secret values,
+    and a routable address can be one: a Teams channel URN
+    (`urn:teams:channel:19:meeting_TOKEN=…@thread.v2`) loses its token to the `TOKEN=` pattern, a
+    webhook URL with userinfo loses its password, and a `xoxb-`-shaped address is replaced whole.
+    The scrub stays — `recipient` is free text that both shipped drivers put where the body goes,
+    and the seam's guarantee must not depend on who is calling it — but a substitution here does
+    not merely redact a message, it re-addresses one, and the driver that fails to deliver it can
+    only report the address it was given.
+
+    The original is deliberately absent from the log line: what tripped the pattern may be a real
+    credential, and this module is the half that leaves the cluster.
+    """
+    urn = "urn:teams:channel:19:meeting_TOKEN=abc12345678@thread.v2"
+    with caplog.at_level(logging.WARNING, logger="chemclaw.deliver.message"):
+        scrubbed = Message(recipient=urn, subject="s", body="b").redacted()
+
+    assert scrubbed.recipient != urn, "the scrub is the guarantee; it is not what is being relaxed"
+    assert len(caplog.records) == 1, f"a re-addressed message was silent: {caplog.text!r}"
+    assert scrubbed.recipient in caplog.text and urn not in caplog.text, (
+        "the line carries the address the driver will actually get, never the original"
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="chemclaw.deliver.message"):
+        intact = Message(recipient="chemist@example.com", subject="s", body="b").redacted()
+    assert intact.recipient == "chemist@example.com" and not caplog.records, (
+        "an ordinary address is untouched and unremarked"
+    )

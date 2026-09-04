@@ -982,8 +982,14 @@ def require_movable(current: DesignStatus, status: DesignStatus, head_kind: Revi
     protocol nobody had signed off, marked run. `_LEGAL_MOVES` above is the decided table, and
     each of its edges says there why it exists.
 
-    **Every self-transition is legal**, which the table does not spell out because it is one rule
-    about a repeat rather than five decisions about the lifecycle. `Chemclaw3_ui`'s sign-off panel
+    **Every self-transition is exempt from the *table***, which it does not spell out because it is
+    one rule about a repeat rather than five decisions about the lifecycle. It is not a blanket
+    permission, and this sentence used to say it was: the document rules below outrank the exemption
+    exactly as they outrank an edge, so three of the ten (status, head-kind) repeats are refused —
+    `requested -> requested` on a protocol head, and `approved`/`executed` on a request head. Those
+    states are unreachable in practice, because `advanced()` demotes the status on every revision
+    that changes the kind, which is why an absolute claim survived here. A sixth status would be
+    decided by that precedence and not by this paragraph. `Chemclaw3_ui`'s sign-off panel
     renders a *Mark X* button for all five statuses regardless of where the design is, so
     `approved → approved` is one click away by construction — and a move whose response is lost is
     reported to the chemist as "The status was not recorded" when it may well have been, so pressing

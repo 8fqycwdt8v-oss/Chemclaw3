@@ -260,6 +260,33 @@ a singleton (the PR-gate checkout lock is host-local, D-069), and over a singlet
 makes the pod un-evictable and blocks every drain in the cluster forever, while `maxUnavailable: 1`
 permits exactly what no PDB permits.
 
+## Upgrading a release installed before this chart
+
+`chemclaw-config` and the runtime ServiceAccount used to be `pre-install,pre-upgrade` **hooks**.
+Helm does not record hook resources in the release manifest, so `helm rollback` restored the pods
+and left the previous release's configuration live and `helm uninstall` left both behind. They are
+ordinary tracked resources now. That crossing costs two things, both one-time and both measured
+against a real API server (k3s v1.29.9):
+
+- **`helm upgrade` from the previous chart refuses**, because the live objects were created by a
+  hook and so carry no `meta.helm.sh/release-name`/`-namespace`: *"exists and cannot be imported
+  into the current release"*. It is a prepare-time refusal — nothing is half-applied, and
+  `--dry-run` refuses identically. `deploy/jenkins/targets/openshift.sh` adopts them itself
+  (reporting without acting under its default `DRY_RUN=true`); for a hand-run upgrade the two
+  commands are in `docs/guides/runbook.md` § (xi), keyed on `meta.helm.sh/release-name`.
+- **`helm rollback` to a pre-change revision would delete both**, while restoring Deployments that
+  name `chemclaw-config` in a non-optional `envFrom` and run as ServiceAccount `chemclaw` — and
+  Helm reports success. Both objects therefore carry `helm.sh/resource-policy: keep`, which Helm
+  reads off the live object at deletion time; with it, the same rollback leaves them standing. The
+  trade is stated where it is made (`templates/config.yaml`): **`helm uninstall` now leaves those
+  two objects behind**, which is what the old chart did. Everything else the move bought is intact
+  — `keep` skips deletion only, so a rollback inside this chart's lineage still restores the
+  previous revision's ConfigMap contents.
+
+Neither is permanent. When no release's retained history (`helm history`) still reaches a revision
+installed before this chart, the annotation is a line to delete and the adoption step has nothing
+left to adopt.
+
 ## Before a deploy that touches workflow code
 
 Temporal replays workflow **code** against recorded **history**, so a control-flow change deployed
@@ -414,6 +441,14 @@ a job whose whole body was an `echo`, and a stub is not a pipeline. Its trigger 
 its credentials — is recorded in `docs/planning/DEFERRED.md`. Migrations run as the pre-deploy Job
 (`templates/migrate-job.yaml`), never inside an app container.
 
-> **Verified offline:** pure-YAML parse + template brace-balance + `Settings` key mapping. `helm
-> template`/`kubeconform`/the image build run in CI (no helm/daemon in the dev sandbox) — this is
-> inherent to a deploy phase, not a gap in the manifests.
+> **Verified how, and where.** Pure-YAML parse, template brace-balance and `Settings` key mapping
+> run anywhere. `helm template` and `kubeconform` run wherever `helm` is on PATH — which includes
+> CI's `check` job, because the `ubuntu-latest` runner image ships Helm, so the
+> `shutil.which("helm")`-gated chart assertions have always run there even though `azure/setup-helm`
+> is pinned only in the `chart` job. **This note used to say helm runs "in CI (no helm/daemon in the
+> dev sandbox)" and read as though the sandbox was the gap.** It is not: the sandbox skips those
+> assertions silently, and installing helm there is one `curl`. What actually let five chart defects
+> through was narrower and worse — the tests rendered the *default* values and nothing else, so a
+> switch nobody flipped was a switch nobody checked. The render set is derived from `values.yaml`
+> now. A live cluster remains genuinely out of reach here, and `helm rollback` against a real API
+> server is the one thing a render cannot stand in for.

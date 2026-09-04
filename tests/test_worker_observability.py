@@ -20,10 +20,13 @@ module and these are one test file.
 import asyncio
 import time
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from mcp.server.fastmcp import FastMCP
 from starlette.testclient import TestClient
+from temporalio.worker import Worker
 
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.worker_http import _build_app, worker_http
@@ -231,22 +234,41 @@ def test_a_worker_whose_broker_has_gone_quiet_reports_not_ready() -> None:
     Service, a rollout in that window reported complete, and the PodDisruptionBudget counted it
     Available.
 
-    Drives the shipped predicate rather than a lambda of its own, so it fails if either half is
-    dropped.
+    **Driven through `worker_ready` and through the route, which this test used to only claim.**
+    It called `broker_seen_recently()` directly — the *ingredient*, never the predicate — while its
+    docstring said it would fail "if either half is dropped". Measured, it does not: with the
+    freshness half removed the whole worker suite stayed green (75 passed, unchanged) and a severed
+    worker answered `/readyz` 200 again, which is the regression the predicate exists to stop. So
+    the lifecycle flag is held True here while the broker goes quiet, and the assertion is the
+    status code a kubelet reads: a test that substitutes its own copy of the thing under test
+    proves nothing about the thing under test.
     """
     from chemclaw.core.config import settings
     from chemclaw.durable import job_metrics
+    from chemclaw.durable.serve import worker_ready
+
+    # Stands in for the `Worker` only in the attribute the predicate reads, pinned True throughout:
+    # what is under test is whether the *other* half can be reached at all.
+    running_worker = cast(Worker, SimpleNamespace(is_running=True))
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(settings, "jobs_in_flight_refresh_seconds", 10)
         patch.setattr(job_metrics, "_LAST_BROKER_OK", 0.0)
-        assert not job_metrics.broker_seen_recently(), (
-            "a worker that has never heard from the broker reports itself ready"
+        assert not worker_ready(running_worker), (
+            "a running worker that has never heard from the broker reports itself ready"
+        )
+        assert _client(lambda: worker_ready(running_worker)).get("/readyz").status_code == 503, (
+            "the route answered ready for a worker whose every poll is failing — the pod stays in "
+            "the Service and a rollout in that window reports complete"
         )
         patch.setattr(job_metrics, "_LAST_BROKER_OK", time.monotonic())
-        assert job_metrics.broker_seen_recently()
+        assert worker_ready(running_worker)
+        assert _client(lambda: worker_ready(running_worker)).get("/readyz").status_code == 200
         # Three missed refreshes at the configured interval.
         patch.setattr(job_metrics, "_LAST_BROKER_OK", time.monotonic() - 31)
-        assert not job_metrics.broker_seen_recently(), (
+        assert not worker_ready(running_worker), (
             "a worker whose last broker answer is three refresh intervals old still reports ready"
         )
+        # And the lifecycle half still decides on its own, so neither is redundant.
+        patch.setattr(job_metrics, "_LAST_BROKER_OK", time.monotonic())
+        assert not worker_ready(cast(Worker, SimpleNamespace(is_running=False)))

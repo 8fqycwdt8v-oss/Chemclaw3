@@ -197,7 +197,12 @@ def test_a_cut_is_never_silent_at_the_smallest_configurable_ceiling() -> None:
     bounded, removed = bounded_content("A" * 1_000, "read_document", 1)
 
     assert removed == 1_000, "every character of the result was dropped"
-    assert "written by the" in bounded and "read_document" in bounded
+    # The brief form, because the explanatory sentence is 312 characters and the limit is 1. It
+    # keeps the three facts the model cannot act correctly without — that something was removed,
+    # how much, and that the system removed it rather than the tool returning nothing — and drops
+    # the advice about narrowing the question, which is what there is no room for.
+    assert "read_document" in bounded and "by the system" in bounded
+    assert "1,000 chars cut" in bounded
 
 
 def test_a_result_smaller_than_the_notice_is_left_alone() -> None:
@@ -297,3 +302,48 @@ def test_one_assistant_message_cannot_fan_out_past_the_request_budget(width: int
         f"a {width}-wide fan-out sent {prefix + thread} estimated tokens against a budget of "
         f"{settings.agent_context_token_budget}"
     )
+
+
+@pytest.mark.parametrize("width", [190, 400, 1000])
+def test_the_batch_share_bounds_the_batch_at_every_width(width: int) -> None:
+    """The share has to bound the *batch*, and past a certain width it stopped doing so.
+
+    `bounded_content` refused to return less than the sentence explaining the cut, so once
+    `agent_max_tool_result_chars // width` fell below that sentence's ~312 characters every result
+    floored there and the batch total grew linearly with the width instead of being capped.
+    Measured before this: **124,800** characters at width 400 against a 60,000 ceiling, and
+    **312,000** at width 1000 — the defect the share was introduced to close, one order of
+    magnitude up.
+
+    Swept past the crossover deliberately. The first version of this test used widths 8 and 20,
+    both comfortably below it, which is why it passed against the floor.
+    """
+    ceiling = settings.agent_max_tool_result_chars
+    share = max(ceiling // width, 1)
+    out, _ = bounded_content("x" * 200_000, "sweep", share)
+    # Per result, the share or the brief notice, whichever is larger — the notice is never cut,
+    # because a bound paid for by saying nothing is not what this module is for.
+    assert len(out) <= max(share, 19), f"one result overran its share at width {width}"
+    assert len(out) * width <= ceiling, (
+        f"the batch totalled {len(out) * width:,} against a {ceiling:,} ceiling at width {width}"
+    )
+
+
+def test_a_cut_is_not_silent_when_the_first_block_carries_no_text() -> None:
+    """The notice has to land on a block that survives the rebuild.
+
+    `_kept` placed it at index 0 regardless, and `_rebuilt` drops the text computed for any block
+    that is neither a string nor a dict with a `text` key — so an image-first result lost the
+    notice entirely: the characters went, the truncation counter moved, and the model was handed
+    the image with nothing saying the rest had been removed. That is the silent cut this module
+    exists to prevent, one block along from where it was being prevented.
+    """
+    content = [{"type": "image", "source": {"data": "abc"}}, {"type": "text", "text": "y" * 9_000}]
+    out, removed = bounded_content(content, "sweep", 500)
+    assert removed > 0
+    text = "".join(b.get("text", "") for b in out if isinstance(b, dict))
+    assert "removed from the middle" in text or "chars cut" in text, (
+        "the result was shortened and nothing in it says so"
+    )
+    # The image is still there: this cap shortens text and carries everything else through.
+    assert any(isinstance(b, dict) and b.get("type") == "image" for b in out)
