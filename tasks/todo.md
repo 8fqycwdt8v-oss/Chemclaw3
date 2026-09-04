@@ -9,7 +9,7 @@ Owner decisions taken by the user this session are recorded per item.
 
 ## Queue
 
-- [ ] **A — [H] A helper's scratch file crosses to its caller unframed** (BACKLOG §4)
+- [x] **A — [H] A helper's scratch file crosses to its caller unframed** (BACKLOG §4)
       Owner decision: **keep the crossing, defang on read.**
       Measured: caller `read_file` returns 10,024 chars carrying a live `</retrieved-note-…>`;
       three further arms found (`grep --output_mode=content`, a crafted *path* echoed by
@@ -17,7 +17,7 @@ Owner decisions taken by the user this session are recorded per item.
       same `thread_id`). Third treatment in `frame_connector_results`, keyed on
       `scratchpad_tools()` so an upstream-added verb is covered. Needs an ADR.
 
-- [ ] **B — A schedule whose every run is killed reads as healthy** (BACKLOG §3)
+- [x] **B — A schedule whose every run is killed reads as healthy** (BACKLOG §3)
       Row's "needs a live broker" premise is **false**: driven end to end against
       `WorkflowEnvironment.start_local()` in this sandbox, two runs killed by their own
       execution timeout report byte-identically to healthy, and one extra `describe` per
@@ -29,13 +29,13 @@ Owner decisions taken by the user this session are recorded per item.
       unconditionally), and a hand-built `$defs` schema costs **+31 tokens net** across the
       ten. Deliverable is the corrected row plus asserting the drifted per-tool numbers.
 
-- [ ] **D — The module a chemist reads has no test file** (BACKLOG §5)
+- [x] **D — The module a chemist reads has no test file** (BACKLOG §5)
       Row's own closing condition is met: `render.py` coverage **76% → 94%**. Delete it.
 
 - [ ] **E — The corpus drain is the one ingest pass with no metric** (BACKLOG §4)
       Also closes the non-gated half of the stalled-feed row.
 
-- [ ] **F — Two readers bypass `external_record_id`** (prerequisite of BACKLOG §2's
+- [x] **F — Two readers bypass `external_record_id`** (prerequisite of BACKLOG §2's
       fingerprint-citation row)
 
 - [ ] **G — A truthful `stated` quote from an earlier turn cannot be represented** (BACKLOG §5)
@@ -65,3 +65,27 @@ each of these is hundreds to thousands of calls.
 
 Closed by decision already in the row: the two-row delete ordering ("keep both orders"), the
 second roster name ("leave it closed").
+
+
+## Review — batch 1 (merged as #304)
+
+`make lint type test` green at 6397 passed / 0 failed; CI green on all four checks.
+
+**What the reviews were worth.** The fresh-context review of A found six things, two of
+which no amount of care by the author would have caught: the ADR asserted two `BACKLOG.md`
+rows that did not exist (the exact silent omission its own sentences denied), and arm 1's
+headline measurement came from a fixture nothing drives. Both are the failure mode
+`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` exists to stop, reintroduced by
+the change that extends it.
+
+**Two rows were false about the tree**, which is why re-checking a row against `HEAD` before
+working it is the rule rather than a courtesy:
+- the schedule row's "recovering the status costs one describe … which is why it was not
+  taken here" reads as blocked on a live broker; `start_local()` runs offline here.
+- the `$defs` row's premise (measured separately: no switch, and `$defs` costs tokens rather
+  than saving them).
+
+**Twice the obvious implementation was wrong in the direction that hides the defect** —
+`first_execution_run_id` reports a killed `continue_as_new` drain as normal, and keying the
+defang on `read_file` closes one channel of five. Both were caught by driving the real shape
+(a three-hop chain; all six verbs) rather than the minimal one.
