@@ -18,6 +18,7 @@ module and these are one test file.
 """
 
 import asyncio
+import time
 from collections.abc import Callable, Iterator
 
 import pytest
@@ -219,3 +220,33 @@ def test_a_worker_may_not_admit_more_activities_than_its_pool_can_serve() -> Non
 # A second scan here could only be a weaker restatement of it (a substring sweep flags the word
 # "session" inside a HELP string), and a weaker duplicate of a security check is worse than none:
 # it is the copy people would trust.
+
+
+def test_a_worker_whose_broker_has_gone_quiet_reports_not_ready() -> None:
+    """`is_running` is a lifecycle flag, so readiness has to name the broker as well.
+
+    Measured before this existed: a worker on a severed connection answered `/readyz` 200
+    `{"status":"ready"}` for as long as it was left running, while the SDK core logged
+    `poll_workflow_task_queue retried 8 times ... ConnectionRefused` — the pod stayed in the
+    Service, a rollout in that window reported complete, and the PodDisruptionBudget counted it
+    Available.
+
+    Drives the shipped predicate rather than a lambda of its own, so it fails if either half is
+    dropped.
+    """
+    from chemclaw.core.config import settings
+    from chemclaw.durable import job_metrics
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(settings, "jobs_in_flight_refresh_seconds", 10)
+        patch.setattr(job_metrics, "_LAST_BROKER_OK", 0.0)
+        assert not job_metrics.broker_seen_recently(), (
+            "a worker that has never heard from the broker reports itself ready"
+        )
+        patch.setattr(job_metrics, "_LAST_BROKER_OK", time.monotonic())
+        assert job_metrics.broker_seen_recently()
+        # Three missed refreshes at the configured interval.
+        patch.setattr(job_metrics, "_LAST_BROKER_OK", time.monotonic() - 31)
+        assert not job_metrics.broker_seen_recently(), (
+            "a worker whose last broker answer is three refresh intervals old still reports ready"
+        )

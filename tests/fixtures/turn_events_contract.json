@@ -1,5 +1,6 @@
 {
   "error_codes": [
+    "at_capacity",
     "bad_tool_arguments",
     "budget_exhausted",
     "empty_answer",
@@ -28,7 +29,7 @@
       "connectors": "list[str]"
     },
     "error": {
-      "code": "Literal['internal', 'storage_unavailable', 'llm_timeout', 'turn_timeout', 'budget_exhausted', 'loop_cap_reached', 'spend_cap_reached', 'bad_tool_arguments', 'empty_answer']",
+      "code": "Literal['internal', 'storage_unavailable', 'llm_timeout', 'turn_timeout', 'budget_exhausted', 'at_capacity', 'loop_cap_reached', 'spend_cap_reached', 'bad_tool_arguments', 'empty_answer']",
       "correlation_id": "str",
       "message": "str",
       "retryable": "bool"

@@ -66,10 +66,32 @@ async def _connector_health(request: Request) -> list[ConnectorHealth]:
 
 
 async def _sweep_connectors(front: FrontDoorState) -> list[ConnectorHealth]:
-    """Probe every connector once and refresh the readiness snapshot with what came back."""
-    # Through the front-door module so the suite's patch seam (`chemclaw.api.app.
-    # probe_connectors`) keeps reaching the probe this route actually runs.
-    health = await front_door.probe_connectors()
+    """Probe every connector once and refresh the readiness snapshot with what came back.
+
+    **Never raises, the way `_probe_database` never raises**, and for a stronger reason than its
+    sibling has: connector health on this route is *reported, never gating* (see `readyz`), so a
+    sweep that propagated would turn a signal the route promises cannot fail the pod into the one
+    thing that fails it hardest — a 500 on the readiness probe, draining the pod, with
+    `{"detail": "The request could not be completed due to an internal error."}` as the operator's
+    whole diagnosis.
+
+    This used to lean entirely on `probe_connectors`'s own "never raises" docstring. That promise
+    covers the gathered probes; it does not cover the loop above them (`enabled()`, `health_url`,
+    `bundle_queue`) or a `_probe_queues` failure outside its own except clause. A promise made one
+    module away is not a bound.
+
+    The last snapshot stands rather than an empty list, matching what `refresh_open_jobs` does with
+    its gauge: a fleet nobody could measure this second is not a fleet that just went healthy, and
+    the snapshot is not refreshed either — so the next request past the window tries again instead
+    of caching the failure into a permanently stale reading.
+    """
+    try:
+        # Through the front-door module so the suite's patch seam (`chemclaw.api.app.
+        # probe_connectors`) keeps reaching the probe this route actually runs.
+        health = await front_door.probe_connectors()
+    except Exception:
+        log.warning("readiness: the connector sweep failed; reporting the last snapshot")
+        return front.connector_health
     front.connector_health = health
     front.connector_health_at = time.monotonic()
     return health

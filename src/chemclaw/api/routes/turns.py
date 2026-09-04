@@ -38,6 +38,7 @@ from chemclaw.api.state import (
     state,
 )
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,16 @@ async def post_message(
         METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "process"})
         raise HTTPException(status_code=409, detail="a turn is already running for this session")
 
+    # **The id the header, the audit trail and `turn_costs` are all keyed on.** Read once, here,
+    # rather than in the generator: the observability middleware minted it for this request and
+    # stamped it as an ambient, and the generator runs in this request's context, so both resolve
+    # to the same string — but reading it at the top is what makes that a fact of the code rather
+    # than of the runtime. Every `ErrorEvent` this module builds carries it, because
+    # `ErrorEvent.correlation_id` is the join key an operator is asked to quote and three of the
+    # four events built here used to default it to `""` while the answer sat on the response
+    # header. `run_turn`'s own events already carry the same id through `ledger.correlation_id`.
+    correlation_id = get_current_correlation_id() or ""
+
     async def _turn_events() -> AsyncIterator[dict[str, str]]:
         # Release the permit and the session's turn slot when the stream ends — normal
         # completion, error, timeout, or client disconnect (the generator is closed, running
@@ -178,7 +189,19 @@ async def post_message(
                     METRICS.increment("chemclaw_turns_shed_total")
                     # Retryable and honestly so: shedding says "not now", not "not ever",
                     # and it is the one failure where trying again shortly is exactly right.
-                    shed = ErrorEvent(message=_AT_CAPACITY, code="budget_exhausted", retryable=True)
+                    # **`at_capacity`, not `budget_exhausted`.** Both used to be the second,
+                    # with opposite `retryable` values — two populations with opposite remedies
+                    # under one code, on a taxonomy whose whole contract is that each member is a
+                    # different thing for the user to do. A surface switching on `code` could not
+                    # tell "we are busy, retry in a moment" from "your budget is gone, stop
+                    # retrying". `_AT_CAPACITY` was already the one literal for this condition;
+                    # now the code names the same thing the wording does.
+                    shed = ErrorEvent(
+                        message=_AT_CAPACITY,
+                        code="at_capacity",
+                        retryable=True,
+                        correlation_id=correlation_id,
+                    )
                     yield {"event": shed.type, "data": shed.model_dump_json()}
                     return
             else:
@@ -201,7 +224,12 @@ async def post_message(
                 front.budget.check(session_id, principal.oid)
             except BudgetExceeded as exc:
                 METRICS.increment("chemclaw_turns_refused_budget_total")
-                refused = ErrorEvent(message=str(exc), code="budget_exhausted", retryable=False)
+                refused = ErrorEvent(
+                    message=str(exc),
+                    code="budget_exhausted",
+                    retryable=False,
+                    correlation_id=correlation_id,
+                )
                 yield {"event": refused.type, "data": refused.model_dump_json()}
                 return
             METRICS.increment("chemclaw_turns_started_total")
@@ -265,6 +293,7 @@ async def post_message(
                     # Not retryable unchanged: the same question will take the same time. The
                     # useful next step is a narrower question, not another wait.
                     retryable=False,
+                    correlation_id=correlation_id,
                 )
                 yield {"event": timeout_event.type, "data": timeout_event.model_dump_json()}
         except Exception as exc:
@@ -285,7 +314,7 @@ async def post_message(
             # runner uses, so a client cannot get two different accounts of one kind of failure.
             turn_failed = True
             logger.exception("turn stream failed for session %s", session_id)
-            failed = failure_event(exc, session_id, uuid.uuid4().hex)
+            failed = failure_event(exc, session_id, correlation_id or uuid.uuid4().hex)
             yield {"event": failed.type, "data": failed.model_dump_json()}
         finally:
             if turn_failed:

@@ -480,3 +480,97 @@ def test_a_turn_torn_down_in_a_foreign_context_still_unstamps_every_ambient() ->
         await asyncio.create_task(stream.aclose())
 
     asyncio.run(_run())
+
+
+# --- F5: the route's own error events carry the same joins the runner's do ----------------------
+
+
+def test_the_routes_own_error_events_carry_the_correlation_id_the_header_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ErrorEvent.correlation_id` is the join key, and three of four events left it empty.
+
+    Every `ErrorEvent` built in `api/runner.py` passes `ledger.correlation_id`; the three built in
+    the route module passed none and defaulted to `""`. The id was never unavailable there — the
+    observability middleware minted it, stamped it as an ambient and put it on the response
+    header, and `run_turn` adopted the same id for the `turn_costs` row. So the field the contract
+    nominates as the thing to quote in a bug report was blank on exactly the failure a chemist
+    reports, while the row an operator needs sat under the id the header carried.
+
+    Asserted against the header rather than against "non-empty", because the whole value of the
+    field is that it is *the same* id.
+    """
+    monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.05)
+
+    stalling = create_app(
+        graph_factory=_StallingTurn().graph_factory, connector_factory=_no_connectors
+    )
+    with TestClient(stalling) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        with client.stream(
+            "POST", f"/sessions/{session_id}/messages", json={"message": "hi"}
+        ) as res:
+            assert res.status_code == 200
+            header = res.headers["X-Chemclaw-Correlation-Id"]
+            events = [
+                json.loads(line[len("data:") :].strip())
+                for line in res.iter_lines()
+                if line.startswith("data:")
+            ]
+
+    timeout = [event for event in events if event.get("code") == "turn_timeout"]
+    assert timeout, f"the turn did not time out: {events}"
+    assert timeout[0]["correlation_id"] == header, (
+        "the timeout event carries "
+        f"{timeout[0]['correlation_id']!r} while the header and `turn_costs` carry {header!r}"
+    )
+
+
+def test_a_shed_turn_and_a_spent_budget_do_not_share_one_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two populations with opposite remedies must not arrive under one `ErrorCode`.
+
+    `ErrorCode` is documented as closed and semantic — "each member is a *different thing for the
+    user to do*". The admission shed (*the process had no permit within
+    `service_turn_admission_timeout_seconds`*) emitted `budget_exhausted` with `retryable=True`,
+    and the spent budget emitted the same code with `retryable=False`. A surface switching on the
+    code — the documented way to choose the next step — could not tell "we are busy, retry in a
+    moment" from "your budget is gone, stop retrying", and a retry loop keyed on it either hammers
+    a saturated pod or gives up on a transient one.
+
+    `retryable` is unchanged on both, so a client keyed on that field alone sees exactly what it
+    saw before; what changes is that the code now names the same condition its own message does.
+    """
+    monkeypatch.setattr(settings, "service_max_concurrent_turns", 1)
+    monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.05)
+
+    async def _run() -> list[dict[str, Any]]:
+        app = create_app(
+            graph_factory=_StallingTurn().graph_factory, connector_factory=_no_connectors
+        )
+        async with asgi_client(app, timeout=10.0) as client:
+            first_id = (await client.post("/sessions")).json()["session_id"]
+            second_id = (await client.post("/sessions")).json()["session_id"]
+            holder = asyncio.create_task(
+                client.post(f"/sessions/{first_id}/messages", json={"message": "hold"})
+            )
+            await asyncio.sleep(0.2)  # the holder takes the one permit
+            shed = await client.post(f"/sessions/{second_id}/messages", json={"message": "shed"})
+            holder.cancel()
+            return [
+                json.loads(line[len("data:") :].strip())
+                for line in shed.text.splitlines()
+                if line.startswith("data:")
+            ]
+
+    monkeypatch.setattr(settings, "service_turn_timeout_seconds", 5.0)
+    events = asyncio.run(_run())
+
+    errors = [event for event in events if event.get("type") == "error"]
+    assert errors, f"the second turn was not shed: {events}"
+    assert errors[-1]["code"] == "at_capacity", (
+        f"an admission shed reached the client as {errors[-1]['code']!r}, the same code a spent "
+        "budget uses — with the opposite remedy"
+    )
+    assert errors[-1]["retryable"] is True

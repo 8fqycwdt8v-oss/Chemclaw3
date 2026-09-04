@@ -38,6 +38,7 @@ number the old set claimed to give never existed.
 
 import asyncio
 import logging
+import time
 
 from temporalio.client import Client
 
@@ -57,6 +58,21 @@ _OPEN_JOBS_QUERY = "WorkflowType = 'ConnectorJobWorkflow' AND ExecutionStatus = 
 # is a pod carrying nothing anybody has told it about, and the first refresh is one interval away.
 _OPEN_JOBS = 0.0
 
+# When the broker last answered this process. `time.monotonic()`, never a wall clock: a readiness
+# predicate that a clock step could flip is a probe that drains a pod because NTP moved.
+#
+# Zero means "never", which is the honest reading for a worker whose first refresh has not returned
+# — `serve_worker` opens the probe surface before it starts this loop, so there is a window of a
+# few milliseconds where the answer is not-ready, and that is the correct answer for it.
+_LAST_BROKER_OK = 0.0
+
+# How many missed refreshes make an outage rather than a blip. One failure is a retry the SDK is
+# already handling; three consecutive ones is a broker this worker has not reached for the better
+# part of a minute at the shipped interval. A derived tolerance rather than a setting of its own,
+# because the quantity a site actually tunes is `jobs_in_flight_refresh_seconds`, and a second knob
+# that must stay a multiple of the first is two ways to say one thing.
+_BROKER_STALE_INTERVALS = 3
+
 
 async def refresh_open_jobs(client: Client) -> None:
     """Re-read the broker's count of open connector jobs into the gauge's reading.
@@ -66,7 +82,7 @@ async def refresh_open_jobs(client: Client) -> None:
     so the failure is counted (`chemclaw_degraded_total`) and the previous reading stands, which is
     the same trade `notify_session_best_effort` and the outbox gauges make.
     """
-    global _OPEN_JOBS
+    global _OPEN_JOBS, _LAST_BROKER_OK
     try:
         count = await client.count_workflows(_OPEN_JOBS_QUERY)
     except Exception:
@@ -78,6 +94,20 @@ async def refresh_open_jobs(client: Client) -> None:
         )
         return
     _OPEN_JOBS = float(count.count)
+    _LAST_BROKER_OK = time.monotonic()
+
+
+def broker_seen_recently() -> bool:
+    """Whether this worker has had an answer from the broker inside the staleness window.
+
+    The readiness half of the refresh loop above. Synchronous and allocation-free because it runs on
+    the worker's own event loop for every kubelet probe — `core/worker_http.py` says a predicate
+    that does I/O would make the probe part of the problem it reports on.
+    """
+    if not _LAST_BROKER_OK:
+        return False
+    window = settings.jobs_in_flight_refresh_seconds * _BROKER_STALE_INTERVALS
+    return (time.monotonic() - _LAST_BROKER_OK) < window
 
 
 async def poll_open_jobs(client: Client, stop: asyncio.Event) -> None:

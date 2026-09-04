@@ -876,14 +876,23 @@ routes on `CHEMCLAW_WORKER_METRICS_PORT` (default 9000, the `metrics` container 
 
 ```
 kubectl port-forward deploy/chemclaw-background-worker 9000:9000
-curl -s localhost:9000/readyz    # 200 = polling, 503 = the worker is not running
+curl -s localhost:9000/readyz    # 200 = the worker object is running (see the caveat below)
 curl -s localhost:9000/metrics   # this pod's counters, gauges and histograms
 ```
 
-- **`/readyz` is 503 but the pod is up.** The Temporal worker is not polling — a lost broker
-  connection, or a shutdown that has begun. It is deliberately *not* a liveness signal: restarting
-  on it would turn an ordinary reconnect into a crash loop, so the pod stays and reports honestly.
-  Check the broker before the worker.
+- **`/readyz` 200 is not evidence that the broker is reachable, and this section used to say it
+  was.** The predicate is `worker.is_running` (`durable/serve.py`), which is a *lifecycle* flag:
+  true from the moment `worker.run()` is entered until shutdown, and the SDK's retry loop holds it
+  true straight through a total broker outage. Measured on 2026-09-04 against a severed connection:
+  every `poll_workflow_task_queue` failing with `ConnectionRefused` while `/readyz` answered
+  `200 {"status":"ready"}` for as long as the worker was left running. **So during a suspected
+  broker incident, probe the broker, never the worker's readiness** — and treat a rollout that
+  "completed" in that window as unproven. Cold start is not affected: a worker that cannot reach
+  the broker at startup exits 1 and crash-loops, which is correct.
+- **`/readyz` is 503 but the pod is up.** The worker object is not running — a shutdown that has
+  begun, or a failure before the poll loop started. It is deliberately *not* a liveness signal:
+  restarting on it would turn an ordinary reconnect into a crash loop, so the pod stays and reports
+  honestly. Check the broker before the worker.
 - **`/healthz` stops answering.** The event loop is wedged, almost always by a blocking call inside
   an activity, and the kubelet restarts the pod after `failureThreshold` (2 minutes by default —
   generous, because a false restart mid-job costs more than a slow true one). The metric to read
@@ -1232,9 +1241,13 @@ so. Start at §(x-b) step 1.
 #### ChemclawWorkerNotPolling
 `critical`, and rendered only when `monitoring.temporalSdkMetrics.enabled` is on. A worker is up and
 answering its probes while asking Temporal for no work, so jobs queue and nothing runs them. This is
-the gap the worker's probes leave *on purpose*: `/readyz` is deliberately not a liveness signal,
-because restarting on a lost broker connection would turn an ordinary reconnect into a crash loop.
-Check `/readyz` on the named pod (§(x)) and the broker before restarting anything.
+the gap the worker's probes leave: `/readyz` is deliberately not a liveness signal, because
+restarting on a lost broker connection would turn an ordinary reconnect into a crash loop — **and
+it does not currently report a lost broker connection at all**, since its predicate is the
+lifecycle flag `worker.is_running` (see §(x)). So `/readyz` on the named pod is not a second
+opinion here: check the **broker** before restarting anything, and read the pod's own
+`chemclaw_degraded_total{subsystem="jobs_in_flight"}`, which is the one worker-side series a broker
+outage does move.
 
 ### chemclaw.turns — the answer itself
 

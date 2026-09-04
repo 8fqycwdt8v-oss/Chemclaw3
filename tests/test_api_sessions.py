@@ -63,6 +63,29 @@ async def _conversation(session_id: str, owner: str | None, message: str = "a tu
     await PostgresHistoryProvider().save_messages(session_id, [HumanMessage(content=message)])
 
 
+async def _checkpoint_for(session_id: str) -> None:
+    """The graph state a fork branches from — the half `_conversation` does not write.
+
+    `_conversation` writes the transcript, which is what makes a session *listable*; a fork also
+    needs a checkpoint, which is what makes it a thread. Written straight into the checkpointer's
+    table rather than by running a graph, because nothing in this file runs a turn.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                # `ts` from `now()` rather than a literal date, for the reason
+                # `tests/test_session_fork.py::_seed` gives: a hardcoded timestamp is a slow fuse,
+                # because `durable/retention.py` sweeps the whole schema and would start expiring
+                # this fixture once real time caught up with it.
+                "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, checkpoint, "
+                "metadata) VALUES (%s, '', 'ckpt-1', "
+                "jsonb_build_object('v', 1, 'id', 'ckpt-1', 'ts', now()::text), '{}'::jsonb) "
+                "ON CONFLICT DO NOTHING",
+                (session_id,),
+            )
+        await conn.commit()
+
+
 async def _rows_for(session_id: str) -> int:
     """How many rows of the delete's own table set still name this session.
 
@@ -220,3 +243,46 @@ def test_a_session_with_a_turn_in_flight_refuses_the_delete() -> None:
     del app.state.active_turns[session_id]
     assert client.delete(f"/sessions/{session_id}").status_code == 204
     assert asyncio.run(_rows_for(session_id)) == 0
+
+
+def test_a_session_with_a_turn_in_flight_refuses_the_fork() -> None:
+    """409 while a turn is running — the same claim pair `DELETE` takes, for the same reason.
+
+    A fork reads five tables of the parent and writes them under a new id in one transaction. At
+    READ COMMITTED each statement takes its own snapshot, so a turn committing between two of them
+    puts a checkpoint in the child whose blob rows were copied before it existed — the "resumes
+    with holes" failure `agent/session_fork.py` opens by naming, arrived at through concurrency
+    rather than through copying the tip.
+
+    The forkability guard has the same exposure: the parent's transcript row can land between the
+    count and the copy, so a fork admitted mid-turn is a fork whose answer to "is this a session
+    yet" was true of neither the moment before nor the moment after.
+
+    Both leases, exactly as the delete test drives them: the durable claim is another *pod* running
+    the turn, the in-process lease is this one.
+    """
+    asyncio.run(migrated_db_or_skip())
+    asyncio.run(create_checkpoint_tables())
+    session_id = "sess-api-fork-busy"
+    asyncio.run(_conversation(session_id, _ALICE.oid))
+    asyncio.run(_checkpoint_for(session_id))
+    asyncio.run(SessionTurnClaims().claim(session_id, "another-worker", 60))
+
+    app = _durable_app()
+    client = _client(app)
+    assert client.post(f"/sessions/{session_id}/fork").status_code == 409, (
+        "a fork was admitted while another worker held the session's turn claim"
+    )
+
+    asyncio.run(SessionTurnClaims().release(session_id, "another-worker"))
+    app.state.active_turns[session_id] = TurnLease(token="live-turn", deadline=float("inf"))
+    assert client.post(f"/sessions/{session_id}/fork").status_code == 409, (
+        "a fork was admitted while this process was running a turn on the session"
+    )
+
+    del app.state.active_turns[session_id]
+    forked = client.post(f"/sessions/{session_id}/fork")
+    assert forked.status_code == 200, forked.text
+    # The claim is given back, not held: a fork that leaked the session's slot would lock the
+    # parent out of its own next turn for a whole lease.
+    assert client.post(f"/sessions/{session_id}/fork").status_code == 200

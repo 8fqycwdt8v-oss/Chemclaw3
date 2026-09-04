@@ -222,7 +222,20 @@ class WebhookDeliveryDriver:
         if token:
             headers["Authorization"] = f"Bearer {token}"
         payload = message.model_dump(include={"recipient", "subject", "body", "kind"})
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+        async with httpx.AsyncClient(
+            timeout=self.timeout_seconds,
+            # Never inherit an ambient proxy — the same flag, and the same reason, every other
+            # client in this tree that reaches a real dependency carries (`connectors/registry.py`,
+            # `core/mcp_session.py`, `core/embeddings.py`, `connectors/health.py`,
+            # `agent/llm_provider.py`, `publish/drivers/http.py`). This one was the exception and
+            # is the worst place for it: the payload is human-readable message content and the
+            # request carries `Authorization: Bearer`. Measured with a recording listener installed
+            # as `HTTP_PROXY`, the proxy received the whole POST — body and bearer — and the
+            # configured destination received nothing. The destination is stated in the manifest
+            # and reached through the chart's `networkPolicy.egressDestinations`; a pod-level
+            # `HTTPS_PROXY` is not a second opinion about where a digest goes.
+            trust_env=False,
+        ) as client:
             response = await client.post(self.url, content=json.dumps(payload), headers=headers)
             response.raise_for_status()
 

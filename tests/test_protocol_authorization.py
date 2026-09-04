@@ -208,7 +208,12 @@ def test_a_stranger_cannot_write_to_someone_elses_design(
 ) -> None:
     """No role at all, and not the owner: both writes are refused."""
     body: dict[str, Any] = (
-        {"status": "executed", "expected_revision": 1, "reason": "ran it"}
+        {
+            "status": "executed",
+            "expected_revision": 1,
+            "expected_status": "approved",
+            "reason": "ran it",
+        }
         if path == "status"
         else _revision_body(_design())
     )
@@ -230,7 +235,12 @@ def test_the_owner_signs_off_on_their_own_design(
     for client in _client(Principal(oid=ALICE)):
         response = client.post(
             f"/protocols/{DESIGN_ID}/status",
-            json={"status": "approved", "expected_revision": 1, "reason": "the precedent holds"},
+            json={
+                "status": "approved",
+                "expected_revision": 1,
+                "expected_status": "draft",
+                "reason": "the precedent holds",
+            },
         )
     assert response.status_code == 204
     events = asyncio.run(store.status_history(DESIGN_ID))
@@ -244,7 +254,12 @@ def test_a_reviewer_reaches_another_chemists_design(
     for client in _client(Principal(oid="carol-oid", roles=frozenset({"reviewer"}))):
         response = client.post(
             f"/protocols/{DESIGN_ID}/status",
-            json={"status": "abandoned", "expected_revision": 1, "reason": "SM decomposes"},
+            json={
+                "status": "abandoned",
+                "expected_revision": 1,
+                "expected_status": "draft",
+                "reason": "SM decomposes",
+            },
         )
     assert response.status_code == 204
 
@@ -285,7 +300,12 @@ def test_a_refused_design_write_is_recorded_on_the_server_side(
     between "no such design" and "not yours" survives at all.
     """
     body: dict[str, Any] = (
-        {"status": "executed", "expected_revision": 1, "reason": "ran it"}
+        {
+            "status": "executed",
+            "expected_revision": 1,
+            "expected_status": "approved",
+            "reason": "ran it",
+        }
         if path == "status"
         else _revision_body(_design())
     )
@@ -310,7 +330,12 @@ def test_a_write_to_an_unknown_design_is_recorded_as_well(
         for client in _client(Principal(oid="mallory-oid")):
             response = client.post(
                 "/protocols/design-nothing/status",
-                json={"status": "executed", "expected_revision": 1, "reason": "ran it"},
+                json={
+                    "status": "executed",
+                    "expected_revision": 1,
+                    "expected_status": "approved",
+                    "reason": "ran it",
+                },
             )
     assert response.status_code == 404
     assert METRICS.value("chemclaw_authz_refusals_total") == before + 1

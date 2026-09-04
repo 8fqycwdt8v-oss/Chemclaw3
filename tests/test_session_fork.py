@@ -19,14 +19,14 @@ from typing import Any, cast
 import psycopg
 import pytest
 from langchain_core.language_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from psycopg.types.json import Jsonb
 
 from chemclaw.agent import session_fork
 from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.session_fork import SessionForkError, fork_session
-from chemclaw.agent.session_store import SessionOwnerStore
+from chemclaw.agent.session_store import PostgresHistoryProvider, SessionOwnerStore
 from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -66,7 +66,9 @@ def _seeded_ts(index: int) -> str:
 _VERSIONS = ("1", "2")
 
 
-async def _seed(thread_id: str, *, versions: tuple[str, ...] = _VERSIONS) -> None:
+async def _seed(
+    thread_id: str, *, versions: tuple[str, ...] = _VERSIONS, transcript: bool = True
+) -> None:
     """A thread with two checkpoints and one blob per version — the shape a fork must preserve.
 
     **Two versions is the point, not padding.** `checkpoint_blobs` rows are shared across a
@@ -74,6 +76,11 @@ async def _seed(thread_id: str, *, versions: tuple[str, ...] = _VERSIONS) -> Non
     the newest checkpoint without belonging to it. A fork that copied "the tip" would take the
     version-2 row and leave version 1 behind, which no assertion about the newest checkpoint could
     detect.
+
+    `transcript=False` is the state a real session is in for the whole of its first turn: the
+    checkpointer writes from the first graph node, `runner._record_transcript` writes only once the
+    answer is assembled. Every other seed here is the *end* of a turn, so nothing reached the
+    middle of one.
     """
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
@@ -105,11 +112,12 @@ async def _seed(thread_id: str, *, versions: tuple[str, ...] = _VERSIONS) -> Non
                     "VALUES (%s, '', %s, 'task-1', 0, 'messages', 'msgpack', %s)",
                     (thread_id, f"ckpt-{index}", b"payload"),
                 )
-            await cur.execute(
-                "INSERT INTO session_messages (session_id, message, message_shape) "
-                "VALUES (%s, %s, 'langchain')",
-                (thread_id, Jsonb({"type": "human", "content": "the parent's question"})),
-            )
+            if transcript:
+                await cur.execute(
+                    "INSERT INTO session_messages (session_id, message, message_shape) "
+                    "VALUES (%s, %s, 'langchain')",
+                    (thread_id, Jsonb({"type": "human", "content": "the parent's question"})),
+                )
         await conn.commit()
 
 
@@ -211,6 +219,50 @@ def test_forking_a_session_that_has_taken_no_turn_is_refused() -> None:
         asyncio.run(_run())
 
 
+def test_forking_before_the_first_answer_is_refused_rather_than_minting_an_unlistable_session() -> (
+    None
+):
+    """A checkpoint is not enough to fork from; the owner listing needs a transcript row.
+
+    This is failure 2 of this module's own enumerated list ("A fork that copied only graph state
+    would be a session the chemist who asked for it could not find") reached from the other side:
+    the transcript copy exists and there is nothing for it to copy. `_COUNT_CHECKPOINTS` alone
+    admits exactly that state, because the two tables are written at very different moments — the
+    checkpointer from the first graph node, `runner._record_transcript` only once the answer is
+    assembled. Measured before the second guard existed: 1 checkpoint and 0 messages copied, a
+    `200` carrying the child's id, and `page_for_owner` never listing it.
+
+    A second, concurrency-free trigger reaches the same state: any session whose only turn produced
+    no prose (an empty answer, a stop, a timeout) has checkpoints and no messages forever.
+
+    The assertion is on the refusal *and* on nothing having been minted, because a guard that
+    raised after the copy would satisfy the first half and still leave the orphan behind.
+    """
+
+    async def _run() -> tuple[list[str], int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _seed("fork-mid-first-turn", transcript=False)
+        await SessionOwnerStore().record("fork-mid-first-turn", "owner-mid", None)
+        with pytest.raises(SessionForkError, match="not answered"):
+            await fork_session("fork-mid-first-turn", "owner-mid", None)
+        rows = await SessionOwnerStore().page_for_owner("owner-mid")
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM session_owners WHERE owner = %s", ("owner-mid",)
+            )
+            row = await cur.fetchone()
+        return [str(row_[0]) for row_ in rows], int(row[0]) if row else 0
+
+    listed, owned = asyncio.run(_run())
+
+    assert listed == [], f"a session the listing cannot show was minted anyway: {listed}"
+    assert owned == 1, (
+        f"the refused fork left {owned - 1} ownership row(s) behind — a session with rows in the "
+        "store and no way to reach it"
+    )
+
+
 def test_the_fork_resumes_with_the_parent_s_history_and_then_diverges() -> None:
     """The assertion no row count can make: the copy actually *works* as a thread.
 
@@ -246,6 +298,13 @@ def test_the_fork_resumes_with_the_parent_s_history_and_then_diverges() -> None:
 
             await graph("the parent's answer").ainvoke(
                 turn_input("first question"), config=turn_config(parent)
+            )
+            # A turn writes two records, and driving the graph directly writes only one. The
+            # transcript is `api/runner.py::_record_transcript`'s, which lives above the graph and
+            # is what makes a session listable at all — so a fixture that stops at the checkpoint
+            # is a session mid-first-turn, which `fork_session` now refuses by design.
+            await PostgresHistoryProvider().save_messages(
+                parent, [HumanMessage(content="first question")]
             )
             child = await fork_session(parent, "owner-1", None)
 

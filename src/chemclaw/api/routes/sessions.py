@@ -126,6 +126,17 @@ async def fork_session_route(
     Durable only. With no session store there is no thread to copy and no ownership row to write, so
     the honest answer is that the deployment does not have the feature rather than a new empty
     session that looks like a fork.
+
+    **A turn in flight refuses with 409, exactly as `delete_session` does and for the same reason.**
+    A fork *reads* five of the parent's tables and writes them under a new id; at READ COMMITTED
+    each statement in that transaction takes its own snapshot, so a turn committing partway through
+    lands a checkpoint in the child whose blob rows were copied before it existed — the "resumes
+    with holes" failure `agent/session_fork.py` opens by naming, reached through concurrency rather
+    than through copying the tip. The forkability guard is exposed the same way: the parent's first
+    transcript row can arrive between the count and the copy. So this route claims the session's
+    turn slot the way `POST /sessions/{id}/messages` claims it — the in-process lease first, then
+    the durable cross-process one — and gives both back in a `finally`, because a fork that held the
+    slot would lock the parent out of its own next turn for a whole lease.
     """
     front = state(request)
     if front.session_owners is None:
@@ -133,10 +144,38 @@ async def fork_session_route(
             status_code=501,
             detail="forking needs a durable session store; this deployment has none configured",
         )
+    # Nothing may sit between this claim and the `try` — the rule `delete_session` states: the
+    # reservation has no expiry until `_start_turn_lease` starts one, which nothing here ever does,
+    # so only that `finally` gives it back.
+    slot = _claim_turn_slot(front.active_turns, session_id)
+    if slot is None:
+        raise HTTPException(
+            status_code=409,
+            detail="a turn is running on this session; stop it before forking the session",
+        )
+    claims: SessionTurns | None = front.turn_claims
+    claimed = False
     try:
+        if claims is not None:
+            claimed = await claims.claim(
+                session_id, _WORKER_ID, settings.service_turn_claim_lease_seconds
+            )
+            if not claimed:
+                raise HTTPException(
+                    status_code=409,
+                    detail="a turn is running on this session; stop it before forking the session",
+                )
         child_id = await fork_session(session_id, principal.oid, live.profile)
     except SessionForkError as exc:  # a caller error: nothing to fork from yet
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        if claimed and claims is not None:
+            # Through the shielded release for the reason D-130 gives — this `finally` also runs
+            # when the caller is cancelled, and a bare `await` in a cancelled task raises at its
+            # first suspension point, so the release would start on every abandoned fork and finish
+            # on none.
+            await _release_turn_claim(claims, session_id)
+        _release_turn_slot(front.active_turns, session_id, slot)
     front.live_sessions.add(child_id, TurnSession(session_id=child_id), principal.oid, live.profile)
     log_event(
         logger,

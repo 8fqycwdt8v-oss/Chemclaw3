@@ -525,6 +525,57 @@ def test_git_command_timeout_kills_the_child_and_raises(
     assert killed["value"] is True
 
 
+def test_a_cancelled_git_read_kills_its_child_like_every_other_git_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancellation must not orphan a git process, whichever helper issued the command.
+
+    `_run`'s docstring says "**Every** git command goes through here ... the timeout and the
+    kill-on-cancel are properties of this function, and a command issued any other way would be
+    unbounded and invisible at once". `_read` issued its own `create_subprocess_exec` and is
+    called three times per submission from `_require_gate_authored_tip`. Half of that claim was
+    already false in the reassuring direction — `_read` did carry `git_command_timeout_seconds` —
+    but it had no `except asyncio.CancelledError` arm, so a submission cancelled mid-read (a
+    Temporal activity timeout is the live case) left the `git rev-parse`/`git log` child running.
+
+    Driven on `_read` directly rather than through `submit`, because the property is the helper's
+    and a submission would reach it only after a real checkout.
+    """
+    killed = {"value": False}
+
+    class _HangingProcess:
+        returncode = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.sleep(30)  # cancelled here, never returns
+            return b"", b""
+
+        def kill(self) -> None:
+            killed["value"] = True
+
+        async def wait(self) -> int:
+            return -9
+
+    async def _fake_exec(*_args: object, **_kwargs: object) -> _HangingProcess:
+        return _HangingProcess()
+
+    monkeypatch.setattr("chemclaw.kg.git_submitter.asyncio.create_subprocess_exec", _fake_exec)
+    submitter = GitNoteSubmitter(repo_dir=str(tmp_path), base_branch="main", remote="origin")
+
+    async def _run() -> None:
+        reading = asyncio.create_task(submitter._read("refs/remotes/origin/note/x"))
+        await asyncio.sleep(0.05)
+        reading.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reading
+
+    asyncio.run(_run())
+
+    assert killed["value"] is True, (
+        "a cancelled `_read` left its git child running — the orphan `_run` has an arm for"
+    )
+
+
 def test_no_connector_bundle_can_reach_the_pr_gate_itself() -> None:
     """The review asymmetry, structurally rather than by convention.
 
