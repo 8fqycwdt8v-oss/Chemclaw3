@@ -217,7 +217,8 @@ def _promotion_summary(observation: Observation) -> str:
 # a fire it skips costs a refresh of `last_seen` that the next fire redoes. Within that day a
 # fix redeploys and the parked run finishes; the retirement windows are weeks, so a day-late
 # pass is the same pass. Declaring here would trade nothing anyone can name for a failure state
-# no surface reports — `ScheduleHealth` carries no run outcome at all.
+# that no surface reported when this was decided — `ScheduleHealth` carries `last_outcome` now,
+# which reopens that trade rather than settling it.
 @workflow.defn
 class ObservationSynthesisWorkflow:
     """Mine, then retire — the observations tier's periodic half.

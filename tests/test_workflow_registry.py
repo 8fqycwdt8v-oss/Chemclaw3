@@ -269,9 +269,10 @@ _MUST_FAIL = frozenset(
 
 # Deliberate non-changes. Each is reached only from a Temporal Schedule, so the park is bounded by
 # `schedule_run_timeout_seconds`; nothing reads the run; and the work is idempotent or cursored, so
-# a skipped fire costs a delay. Declaring these would buy a failure state no surface reports —
-# `ScheduleHealth` carries no run outcome — and cost the run its chance to finish once a same-day
-# redeploy fixes the bug.
+# a skipped fire costs a delay. Declaring these would buy a failure state that no surface reported
+# when this was decided — `ScheduleHealth` carries `last_outcome` now, which reopens that trade
+# rather than settling it — and cost the run its chance to finish once a same-day redeploy fixes
+# the bug.
 _MAY_PARK = frozenset(
     {
         "ArtifactEvictionWorkflow",

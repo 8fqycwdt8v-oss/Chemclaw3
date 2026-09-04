@@ -225,9 +225,9 @@ async def prune_document_share(source: str, before: datetime, report: SyncReport
 # (`cli.live_data.backfill`); this one is reached only from the `document-sync` Schedule, whose
 # action carries `schedule_run_timeout_seconds`. So a parked run is bounded at a day, nothing
 # reads it, and the crawl keeps no cursor between runs by design — the next fire re-walks from
-# the top, which its own docstring prices at a `scandir`. Declaring would buy a failure state
-# no surface reports (`ScheduleHealth` has no run outcome) and cost the run its chance to
-# finish once a same-day redeploy fixes the bug.
+# the top, which its own docstring prices at a `scandir`. Declaring would buy a failure state no
+# surface reported when this was decided (`ScheduleHealth` carries `last_outcome` now, which
+# reopens that trade) and cost the run its chance to finish once a same-day redeploy fixes the bug.
 @workflow.defn
 class DocumentShareSyncWorkflow:
     """Crawl every mounted share into the document index, one bounded chunk at a time.

@@ -107,7 +107,10 @@ All three should be zero.
 curl -s $CHEMCLAW_URL/schedules | jq '.[] | select(.schedule_id | IN("reaction-corpus","reaction-labels"))'
 ```
 
-`ScheduleHealth` gives `last_run`, `runs_total`, `skipped_overlap`, `running_now` and `paused`.
+`ScheduleHealth` gives `last_run`, `last_outcome`, `runs_total`, `skipped_overlap`, `running_now`
+and `paused`. **`last_outcome` is the first thing to read**: it is Temporal's own status for the
+newest run that finished (`COMPLETED`, `FAILED`, `TIMED_OUT`, …), and without it a drain whose every
+run is killed by `schedule_run_timeout_seconds` reports exactly the numbers a healthy one does.
 **`skipped_overlap` is the number to watch**: it counts fires dropped because the previous run was
 still going, and a steadily climbing value is the early warning that the corpus has outgrown its
 cadence. That is the signal that says "narrow the window" before anyone notices missing precedents.

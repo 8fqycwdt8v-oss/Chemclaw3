@@ -157,8 +157,8 @@ async def evict_cold_artifacts() -> EvictionOutcome:
 # result; and one pass is an unconditional policy sweep, so a fire it skips costs a day of
 # blobs that the next pass reclaims with the rest. There is no party a parked run misleads —
 # the harm D-2026-08-16 measured was a chemist told `running`, and no chemist is here — and
-# both terminal states are equally unreported by `ScheduleHealth`. Changing it because the
-# neighbours changed is how a per-workflow decision turns into a sweep.
+# `ScheduleHealth.last_outcome` reports both terminal states alike, so it separates neither.
+# Changing it because the neighbours changed is how a per-workflow decision turns into a sweep.
 @workflow.defn
 class ArtifactEvictionWorkflow:
     """Keep the artifact store within its cost policy on a cadence (STO-6)."""
