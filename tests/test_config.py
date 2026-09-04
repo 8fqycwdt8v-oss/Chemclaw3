@@ -1122,6 +1122,42 @@ def test_the_tls_guard_reads_a_dsn_the_way_libpq_does(why: str, dsn: str) -> Non
         Settings(postgres_dsn=dsn, **base)
 
 
+def test_an_unparseable_dsn_is_refused_without_printing_its_password() -> None:
+    """The refusal that names the setting must not carry the value the setting holds.
+
+    `_pg_dial` interpolated psycopg's `ProgrammingError` into its own message, and libpq quotes the
+    offending token — which for a typo'd scheme or a stray leading space is the **whole DSN**,
+    userinfo included. This raise happens during `import chemclaw.core.config`, before
+    `configure_logging()` installs `SecretRedactingFilter`, so nothing downstream could scrub it: in
+    a pod the password went to the container log and to whatever ships it.
+
+    Both spellings are single-character slips in a `.env` or a ConfigMap, which is what makes this
+    reachable rather than theoretical. The guard's own docstring already promised the opposite —
+    "naming the setting rather than the DSN — the value carries a password" — so this asserts the
+    promise rather than the wording.
+    """
+    base: dict[str, Any] = {
+        "_env_file": None,
+        "entra_required": True,
+        "entra_audience": "api://x",
+        "entra_tenant_id": "t",
+        "llm_provider": "openai_compatible",
+        "llm_base_url": "http://llm:8000/v1",
+        "llm_model": "m",
+        "harness_enabled": True,
+        "temporal_tls_ca": "/ca.pem",
+    }
+    secret = "S3cr3t-Pa55w0rd"
+    for dsn in (
+        f"postgres//chemclaw:{secret}@db.internal/chemclaw",
+        f" postgresql://chemclaw:{secret}@db.internal/chemclaw",
+    ):
+        with pytest.raises(ValueError) as raised:
+            Settings(postgres_dsn=dsn, **base)
+        assert secret not in str(raised.value), f"the refusal printed the password for {dsn!r}"
+        assert "postgres_dsn" in str(raised.value), "the refusal does not name the setting to fix"
+
+
 def test_the_tls_guard_still_exempts_the_forms_that_carry_no_network() -> None:
     """A socket DSN and an IPv6 loopback URL are dev, not an unverified network connection.
 

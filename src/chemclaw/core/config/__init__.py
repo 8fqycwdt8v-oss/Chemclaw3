@@ -166,10 +166,24 @@ def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
     try:
         parts = conninfo.conninfo_to_dict(dsn)
     except ProgrammingError as exc:
+        # **The exception's message is deliberately not interpolated.** libpq quotes the offending
+        # token, and for two realistic single-character slips — a typo'd scheme, a stray leading
+        # space — that token is the whole DSN, userinfo included. This raise happens during
+        # `import chemclaw.core.config`, which is *before* `configure_logging()` installs
+        # `SecretRedactingFilter`, so a credential printed here reaches the container log with
+        # nothing able to scrub it. The docstring above already promised this ("naming the setting
+        # rather than the DSN — the value carries a password") and the first version of this code
+        # broke that promise in the same breath.
+        #
+        # The type is named because it is the one part of libpq's answer that carries no input, and
+        # it distinguishes "unparseable" from the other ways this can fail. `__cause__` keeps the
+        # original for a debugger; it is the traceback rather than the message, and a traceback is
+        # not what ships to a log aggregator from a startup refusal.
         raise ValueError(
-            f"{name} is not a connection string libpq can parse ({exc}), so nothing can say "
-            "whether it would connect with TLS. Refused under entra_required=true rather than "
-            "guessed at; the same DSN would fail at connect."
+            f"{name} is not a connection string libpq can parse "
+            f"({type(exc).__name__}), so nothing can say whether it would connect with TLS. "
+            "Refused under entra_required=true rather than guessed at; the same DSN would fail at "
+            "connect. The value is not repeated here because it carries a password."
         ) from exc
     return str(parts.get("hostaddr") or parts.get("host") or "").lower(), str(
         parts.get("sslmode") or "prefer"

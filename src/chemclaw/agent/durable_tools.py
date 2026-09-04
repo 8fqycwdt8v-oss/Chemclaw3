@@ -381,7 +381,24 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
             "completed" with an empty result would tell a chemist their calculation is done while
             silently withholding it.
     """
-    return await job_status(job_id, wait_seconds=settings.job_status_wait_seconds)
+    status = await job_status(job_id, wait_seconds=settings.job_status_wait_seconds)
+    # Framed **here**, in the `@tool`, and not in `job_status` below — which is the same mistake in
+    # the same shape as the one this fixes. `job_status` is also the whole body of the front door's
+    # `GET /jobs/{id}`, so framing inside it put envelope markup into an HTTP response that
+    # `GET /jobs` returns raw for the same row, breaking the property that module's docstring
+    # claims: a chemist polling in chat and one refreshing a page cannot disagree about a run. The
+    # envelope belongs to the model's context, so it belongs at the model's edge — which is exactly
+    # where `find_past_jobs` puts it, framing on top of a raw `search_job_records`.
+    #
+    # Both free-text fields, for `_framed_free_text`'s stated reason: they are the two columns of
+    # `job_records` a person (or their model) wrote, read back months later in somebody else's
+    # turn.
+    return status.model_copy(
+        update={
+            "summary": _framed_free_text(status.summary or "", job_id) or None,
+            "rationale": _framed_free_text(status.rationale, job_id),
+        }
+    )
 
 
 async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobStatus:
@@ -479,14 +496,14 @@ async def _recorded_status(job_id: str) -> DurableJobStatus | None:
     return DurableJobStatus(
         job_id=job_id,
         status=record.state,
-        summary=_framed_free_text(record.summary or record.failure_reason or "", job_id) or None,
+        summary=record.summary or (record.failure_reason or None),
         calc_refs=record.calc_refs,
         # Projected on the way out as well as on the way in, and the difference is *old rows*: a
         # record written before D-2026-08-21 holds the whole geometry, so a months-old conformer
         # search collected here would still spend a context window on coordinates. The projection
         # is idempotent, so applying it to a record already written without them costs a walk.
         result=without_geometry(record.result),
-        rationale=_framed_free_text(record.rationale, job_id),
+        rationale=record.rationale,
     )
 
 
