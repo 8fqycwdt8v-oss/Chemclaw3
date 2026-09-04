@@ -672,54 +672,6 @@ only holds defects can only ever restore the system to what it already intended 
       blocked: the saving is still partly in endpoint tools no offline floor can see, and it still
       needs the skill gate beside the allow-list.
 
-- [ ] **Ten `KNOWN_OVERSIZED` tools are one defect wearing ten names** — [M], and the honest
-      trigger is upstream rather than here. Each takes a **domain document** as its argument — a
-      BoFire campaign declaration, the note frontmatter contract, a structured ask, a laboratory
-      procedure, a job spec — and `convert_to_openai_tool` inlines every nested pydantic model in
-      full rather than emitting `$defs` and `$ref`. Measured 2026-08-28 while narrowing the protocol
-      pair from 6,231 tokens to 3,380: `SpeciesRole`'s class docstring shipped **three times** in one
-      schema and `RequestField`'s **four times**, purely because the same model appears at several
-      fields. A `$ref`-emitting conversion would cut every entry at once and touch no first-party
-      code.
-
-      **It said four until the basis was corrected, and the extra six are the same defect, not new
-      debt.** The 2026-08-29 re-baseline measured the tools the graph *binds* rather than the
-      callables the registry holds, and six that read as under `MAX_SINGLE_TOOL_TOKENS` were over it
-      all along — `rank_species` 885 as a callable, **1,094** as the object the model is sent, and
-      likewise `rank_species_across_solvents`, `compute_reaction_energy`, `survey_bond_strengths`,
-      `refine_ensemble` and `profile_rotation`. Nothing was added; the six were invisible for eleven
-      weeks to the test written to catch exactly them. It widens this row rather than changing it:
-      the entries are still nested-model inlining, and the job specs make the `$defs` question
-      *more* worth answering, not less.
-
-      **So the row is a measurement, not a rewrite.** What is owed first: does the installed
-      `langchain_core` have a switch for it, and do the providers this deployment targets accept a
-      `$defs`/`$ref` parameter schema? Both are one script. The alternative fix — taking the payload
-      as a JSON string or a scratchpad path — is **rejected on the record** in
-      `tests/test_context_floor.py`: it drops the schema to ~150 tokens and takes constrained
-      generation with it, on exactly the calls where a malformed argument is most expensive.
-      Anchors: `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
-      `science/bo/problem.py`.
-
-      **A big schema costs graph-build time as well as prompt tokens — and the larger half of that
-      was fixed on `main` while this row was being written** (2026-08-29). The four protocol tools
-      raised the per-turn compile by **30 ms (209 → 239, +14%) for four tools out of ~98**, isolated
-      by deleting the import that registers them, and profiling put **79% of the whole build** in
-      `langchain_core.tools.convert.tool` → `validate_arguments` → `create_model`: every build
-      re-derived a pydantic model from every tool's signature, so build time was proportional to
-      schema size exactly as prompt cost is.
-
-      **That is history rather than an open item.** `agent/tool_schema.py::as_structured_tool` now
-      converts each registered callable once per process, keyed on the function object, and the
-      merged tree measures **38.7 ms** with all four protocol tools present — so the build-time
-      half of this row is closed, and the bound in
-      `tests/test_langgraph_connectors.py::test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget`
-      came *down* to 250 rather than up. It is recorded here because the
-      finding still holds where the cache cannot reach: a tool's schema is still generated once,
-      and the *prompt* cost above is unchanged and paid every turn. Anchors:
-      `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
-      `science/bo/problem.py`.
-
 - [ ] **A truthful `stated` quote from an earlier turn cannot be represented** — [S], found
       2026-08-30 by the fresh-context review of the agent surface. `require_quotes_are_verbatim`
       checks the quote against `get_current_user_text()`, which is the message that started *this*

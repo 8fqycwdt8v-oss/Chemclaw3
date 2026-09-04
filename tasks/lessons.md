@@ -30,6 +30,16 @@ file grew. If a rule is being broken repeatedly, the fix is a *mechanism* (a scr
    the invariant, then re-run the full suite, because two of five "coverage gaps" were mis-targeted
    patches (one hit a docstring occurrence).
 
+   **And clear `__pycache__` inside the loop, or the loop lies to you in the alarming direction.**
+   A `.pyc` is validated on the source's mtime *in whole seconds* plus its size, so a
+   `cp`/edit/`mv` cycle that lands within one second and changes no byte count — swapping one digit
+   for another, which is exactly what a numeric mutation does — leaves the stale bytecode looking
+   current. Measured: a mutation loop reported a **failure on a restored, clean file**, because
+   pytest ran mutated bytecode against restored source. It fails loudly rather than silently, which
+   is the only reason it was caught; the same mechanism could as easily have run *clean* bytecode
+   against a mutated file and reported a test as biting when it does not. `rm -rf` the relevant
+   `__pycache__` (or `touch` the file) between the mutation and the run.
+
 2. **`Write` to a path that already exists destroys it.** Calling `Write` on `tests/test_graph.py`
    deleted 23 tests for the NetworkX indexer, and the suite still passed — nothing referenced them.
    Check for the file first. A green suite does not notice tests that no longer exist.
