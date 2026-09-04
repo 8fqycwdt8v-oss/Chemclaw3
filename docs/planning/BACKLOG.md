@@ -448,10 +448,7 @@ topic).
       and so both book `ingested=0, rejected=0`, identically. The discriminator has to be a
       staleness gauge over `corpus_cursors.updated_at` — age since the last *advance*, a real number
       even when the keyset position is opaque.
-      `CorpusSyncOutcome`'s docstring says "What one run did, per source" and is **false in three
-      ways** (verified): it holds one element, the counters accumulate across every source without
-      being reset when one finishes, and `CorpusReport` has no `source` field at all. Correcting
-      that sentence is owed regardless of this row. **The second is now buildable and was not when this row was
+      **The second is now buildable and was not when this row was
       written**: the cursor was stored on every page, so `updated_at` re-stamped on every fire and
       measured when the feed was last *looked at* rather than when it last moved.
       `D-2026-08-28-a-watermark-that-is-rewritten-has-no-age` gates that write on

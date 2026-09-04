@@ -146,8 +146,39 @@ async def drain_corpus(
     rule, and it is what makes a stopped drain resumable at any point with no bookkeeping.
 
     Every pass — including one that read nothing — books its rows on
-    `chemclaw_ingest_records_total{source,outcome}`; see `_count_pass` for the outcome vocabulary
+    `chemclaw_ingest_records_total{source,outcome}`; see `_drained` for the outcome vocabulary
     and why it is the same one the other three ingest passes use.
+    """
+    report = await _drain_page(
+        warehouse,
+        binding,
+        index,
+        source,
+        molecules=molecules,
+        reactions=reactions,
+        after=after,
+        limit=limit,
+    )
+    _drained(source, report)
+    return report
+
+
+async def _drain_page(
+    warehouse: Warehouse,
+    binding: CorpusBinding,
+    index: LabelIndex,
+    source: str,
+    *,
+    molecules: CorpusMolecules | None = None,
+    reactions: FingerprintStore | None = None,
+    after: str = "",
+    limit: int | None = None,
+) -> CorpusReport:
+    """Read one page and write it, and account for nothing.
+
+    Split out so that `drain_corpus` has exactly one return and the metric cannot be missed by a
+    path added later — the shape `ingest/documents/sync.py::sync_share` uses `_index_slice` for,
+    and which this file previously argued for in prose while keeping two explicit call sites.
     """
     page = limit if limit is not None else binding.fetch_limit
     statement, params = sql.corpus_statement(binding, warehouse.placeholder, after, page)
@@ -155,9 +186,7 @@ async def drain_corpus(
         await cursor.execute(statement, params)
         rows = await cursor.fetchall()
     if not rows:
-        empty = CorpusReport(cursor=after)
-        _count_pass(source, empty)
-        return empty
+        return CorpusReport(cursor=after)
 
     report = CorpusReport(read=len(rows), cursor=after, has_more=len(rows) == page)
     structures: set[str] = set()
@@ -212,11 +241,10 @@ async def drain_corpus(
             report.skipped,
             report.read,
         )
-    _count_pass(source, report)
     return report
 
 
-def _count_pass(source: str, report: CorpusReport) -> None:
+def _drained(source: str, report: CorpusReport) -> None:
     """Book what this pass did on `chemclaw_ingest_records_total`, whatever it did.
 
     **Two outcomes, not three, and they partition `read` exactly**: `_record`'s verdict is binary,
@@ -236,27 +264,37 @@ def _count_pass(source: str, report: CorpusReport) -> None:
 
     `unfingerprintable` is deliberately not an outcome: those rows *are* recorded and are already
     counted under `ingested`. It is a property of a row that landed, not a fate that competes with
-    landing, and adding it would break the partition above.
+    landing, and adding it would put one row in two series. `tests/test_reaction_corpus.py` asserts
+    the rendered label set is exactly these two rather than asserting the absence of one word, so
+    that mutation fails a test instead of merely contradicting this paragraph — it survived one
+    written the other way.
 
-    Called at both of `drain_corpus`'s returns, including the one that read nothing, so a source
-    with no new rows books a zero rather than nothing: the whole point of the counter is that a
-    silent series means the drain did not run, which it cannot mean if a healthy empty page is also
-    silent. The document sync makes the same argument for its own early returns.
-    """
-    for outcome, count in (("ingested", report.recorded), ("rejected", report.skipped)):
-        _count_records(source, outcome, count)
+    Every return of `drain_corpus` passes through `_drained`, including the one that read nothing,
+    so a source with no new rows books a zero rather than nothing: the whole point of the counter
+    is that a silent series means the drain did not run, which it cannot mean if a healthy empty
+    page is also silent. That is structural rather than remembered — `sync_share` extracts
+    `_index_slice` for the same reason, and this used to be two explicit call sites, where a third
+    return added later would have dropped the booking with nothing failing.
 
-
-def _count_records(source: str, outcome: str, count: int) -> None:
-    """Add `count` to this source's tally of one outcome.
-
-    A named function rather than a lambda in `_count_pass`'s loop, because a lambda closing over a
-    loop variable is bound late — the defect `ingest/documents/sync.py`'s copy of this names, where
-    every update lands on the last outcome.
+    Two `record_metric` calls rather than a loop over a helper. The loop needed one only to satisfy
+    ruff `B023`, and the helper it needed carried a docstring saying it existed because "a lambda
+    closing over a loop variable is bound late — where every update lands on the last outcome".
+    That is false here and was measured false: `record_metric` invokes the callable synchronously
+    inside the iteration, so the inline form books 7 and 3 correctly. Written out, there is no
+    loop, no `B023`, and no rationale to be wrong about.
     """
     record_metric(
         lambda m: m.increment(
-            "chemclaw_ingest_records_total", count, {"source": source, "outcome": outcome}
+            "chemclaw_ingest_records_total",
+            report.recorded,
+            {"source": source, "outcome": "ingested"},
+        )
+    )
+    record_metric(
+        lambda m: m.increment(
+            "chemclaw_ingest_records_total",
+            report.skipped,
+            {"source": source, "outcome": "rejected"},
         )
     )
 

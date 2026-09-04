@@ -10,6 +10,7 @@ here is the assertion that keeps them out of its way.
 """
 
 import asyncio
+import re
 from datetime import date
 
 import pytest
@@ -511,6 +512,23 @@ def test_an_unparseable_species_is_still_fingerprinted_which_is_why_only_one_err
 # --- the pass leaves a series behind ----------------------------------------------------------
 
 
+def _outcomes(source: str) -> set[str]:
+    """Every `outcome` this source rendered a series for.
+
+    The partition is a claim about the whole label set, so asserting it needs the set: a check that
+    one unwanted word is absent passes for every *other* unwanted word, which is how a third
+    outcome got past the first version of the test below.
+    """
+    found = set()
+    for line in METRICS.render().splitlines():
+        head, _, _reading = line.partition("} ")
+        if head.startswith("chemclaw_ingest_records_total{") and f'source="{source}"' in head:
+            match = re.search(r'outcome="([^"]+)"', head)
+            if match:
+                found.add(match.group(1))
+    return found
+
+
 def _series(name: str, **labels: str) -> float:
     """One labelled series' value, read out of the rendered exposition.
 
@@ -553,11 +571,11 @@ def test_the_drain_books_the_rows_it_read_and_the_two_series_partition_them() ->
         # Both pages, so the totals are the whole four-row release rather than the second page.
         assert (ingested, rejected) == (3.0, 1.0)
         assert ingested + rejected == float(first.read + page.read)
-        assert not [
-            line
-            for line in METRICS.render().splitlines()
-            if f'source="{source}"' in line and 'outcome="skipped"' in line
-        ]
+        # **The label set, not the absence of one word.** Written as `outcome="skipped"` not
+        # appearing, this survived the exact mutation `_drained`'s docstring argues against —
+        # adding `unfingerprintable` as a third outcome keeps `ingested + rejected == read` true
+        # and mints no `skipped`, so 18 tests passed while a recorded row sat in two series.
+        assert _outcomes(source) == {"ingested", "rejected"}
 
     asyncio.run(_run())
 

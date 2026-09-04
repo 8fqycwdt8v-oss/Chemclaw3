@@ -142,8 +142,10 @@ stage) and the corpus drain, which books against the **data source** it drained 
 the pass, so a deployment reading several corpora gets one series each.
 
 The drain books two outcomes, and the missing third is deliberate: `ingested` for a row that
-became a `corpus_reactions` row, `rejected` for one dropped for want of a usable SMILES or a
-citation. There is no `skipped` series, because in this system's ingest vocabulary `skipped` means
+became a `reaction_labels` row (with its `reaction_species`), `rejected` for one dropped for want
+of a usable reaction SMILES, key or citation. Note which table that is — `corpus_reactions` is the
+DRFP index, and a recorded row that yields no fingerprint is counted `ingested` and never reaches
+it, which is the whole of the `unfingerprintable` distinction the SQL block above measures. There is no `skipped` series, because in this system's ingest vocabulary `skipped` means
 *deliberately passed over* — unchanged, oversized, an unsupported extension — and the corpus drain
 has no such population. A permanently-zero series would assert one exists. So
 `ingested + rejected` is the whole of what the pass read, and `rejected` climbing is the number
