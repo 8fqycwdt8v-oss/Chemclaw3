@@ -63,8 +63,10 @@ class RetrievalSettings(BaseSettings):
     #
     # Both bounds apply, and the count is kept rather than replaced — it is ENV-visible and
     # deployments set it, which is `agent_keep_last_tool_groups`' argument for keeping a name whose
-    # meaning has been refined. ~60,000 characters is ~15k tokens against
-    # `agent_context_token_budget`'s 100,000.
+    # meaning has been refined. ~60,000 characters is ~15k tokens against the ~57,000 estimated
+    # tokens `agent_context_token_budget`'s 100,000 leaves a thread once this request's own prefix
+    # is charged against it (`agent/context_budget.py::effective_trigger`) — a quarter of it, not
+    # the seventh the raw 100,000 suggests.
     #
     # **Counted over the serialized chunk, not its `content`**, which is what makes that 15k figure
     # true. The first implementation charged `content` alone — measured, a 47% under-count on a

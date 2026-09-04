@@ -8,11 +8,16 @@ handed, which is where the defects were:
    ratio is measurable from the provider's own `input_tokens`, and `note_model_call` is where the
    two meet.
 2. **The ceiling.** Nothing knew the model's context window, so the budget was a constant that
-   happened to sit under most of them and the prefix — ~28,000 tokens on `default` — sat outside it.
-3. **The prefix.** A `ContextEdit` cannot see it; a middleware can; the contextvar is the seam.
+   happened to sit under most of them.
+3. **The prefix.** ~43,000 tokens on `default`, outside the budget entirely — and then outside it
+   in every *shipped* configuration, because the subtraction that fixed that was guarded by a
+   window setting nothing declares. It is charged unconditionally now, which makes
+   `agent_context_token_budget` a bound on the whole request. A `ContextEdit` cannot see the
+   prefix; a middleware can; the contextvar is the seam.
 """
 
 import asyncio
+import logging
 from typing import Any, cast
 
 import pytest
@@ -31,6 +36,7 @@ from chemclaw.agent.context_budget import (
     note_model_call,
     prefix_tokens,
     reset_calibration,
+    reset_floor_reports,
 )
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.core.config import settings
@@ -125,8 +131,10 @@ def test_calibration_can_be_switched_off(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_a_declared_window_bounds_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     """With a window declared the thread gets what the model has left, not what config hoped for.
 
-    Undeclared is the default and keeps today's behaviour — which is the honest state for an
-    endpoint whose window this repository cannot know.
+    Undeclared, the configured budget is the only bound — which is the honest state for an endpoint
+    whose window this repository cannot know. It is not, any more, "today's behaviour": the prefix
+    comes off in both arms (`test_the_prefix_reaches_the_edits_with_no_window_declared`), and this
+    test isolates the *window* arm by running off the request path, where the prefix is 0.
     """
     monkeypatch.setattr(settings, "llm_max_tokens", 4_096)
     monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
@@ -141,7 +149,7 @@ def test_a_declared_window_bounds_the_budget(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_a_declared_window_subtracts_the_measured_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The prefix is ~28,000 tokens on `default` and it is not in the thread — so it is subtracted.
+    """The prefix is ~43,000 tokens on `default` and it is not in the thread — so it is subtracted.
 
     Driven through the middleware rather than by setting the contextvar, because the claim is that
     a *request*'s prefix reaches the edits: the seam is the whole point and setting the variable by
@@ -163,6 +171,92 @@ def test_a_declared_window_subtracts_the_measured_prefix(monkeypatch: pytest.Mon
     assert prefix > 0, "the system message contributed nothing to the prefix"
     assert trigger == 50_000 - prefix - 1_000
     assert prefix_tokens() == 0, "the ambient outlived the call it describes"
+
+
+def test_the_prefix_reaches_the_edits_with_no_window_declared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same seam, in the arm that ships — and the one this repository had left open.
+
+    `llm_context_window_tokens` defaults to 0 and no value in `deploy/`, `infra/` or `.env.example`
+    states one, so the `if window:` that used to guard the subtraction meant the prefix was charged
+    against nothing in every real deployment: the system message, the skills listing and every bound
+    tool schema were outside the only budget there was. Measured end to end on 2026-09-04, a thread
+    the policy cut to its 90,030-token budget left as a 137,301-token request at a 128k model with
+    the overrun indicator flat.
+
+    So `agent_context_token_budget` is a bound on *request* spend now, and this is that sentence as
+    an assertion: with no window declared, the trigger the edits compare against is the configured
+    budget **minus** what this particular request already costs before a word of conversation.
+
+    Through the middleware, for `test_a_declared_window_subtracts_the_measured_prefix`'s reason: the
+    claim is about a request's prefix reaching the edits, and setting the contextvar by hand would
+    assert nothing about the seam that carries it.
+    """
+    monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
+    measured: list[int] = []
+
+    def handler(request: Any) -> str:
+        measured.append(prefix_tokens())
+        measured.append(effective_trigger(100_000))
+        return "done"
+
+    request = _request(system="you are a process chemist. " * 100)
+    MeasureRequestPrefix().wrap_model_call(request, handler)
+
+    prefix, trigger = measured
+    assert prefix > 0, "the system message contributed nothing to the prefix"
+    assert trigger == 100_000 - prefix, (
+        f"the trigger is {trigger} against a 100,000 budget and a {prefix}-token prefix: the "
+        "prefix was not charged, which is what an undeclared window used to mean"
+    )
+
+
+def test_a_budget_the_prefix_exhausts_floors_at_one_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The degenerate case, and the reason it is loud rather than silent.
+
+    A trigger of 1 is not a small budget, it is "reduce on every model call": every non-empty thread
+    is over it, so the lossless edit clears every reclaimable tool result and the window cuts back
+    to the newest group, on every call, forever. Raising instead is not the alternative — these run
+    inside a middleware and an exception there costs the turn — so the floor stands and the fact is
+    reported.
+
+    **It is reachable from a plain misconfiguration now, not only from the window corner.** Before
+    the prefix was charged unconditionally it took a declared window narrower than its own prefix;
+    it now takes any configured budget below the prefix, which is where the shipped
+    `agent_tool_result_clear_trigger` of 30,000 sits against ~43,000 tokens of instructions and tool
+    schemas (`tests/test_compaction.py` asserts that state end to end).
+
+    Once per distinct `(configured, prefix, window)`, because the condition is static: it is the
+    same on every model call of every turn, so a line per call would be noise in exactly the
+    situation an operator is trying to read.
+    """
+    monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
+    reset_floor_reports()
+    token = _prefix.set(50_000)
+    try:
+        with caplog.at_level(logging.WARNING, logger="chemclaw.agent.context_budget"):
+            assert effective_trigger(30_000) == 1
+            first = len(caplog.records)
+            assert effective_trigger(30_000) == 1
+            assert effective_trigger(50_000) == 1, "budget == prefix leaves nothing and must floor"
+        # A budget above the prefix is a budget, and must not be reported as a floor.
+        assert effective_trigger(60_000) == 10_000
+    finally:
+        _prefix.reset(token)
+
+    assert first == 1, f"the floor was reported {first} times for one model call"
+    assert len(caplog.records) == 2, (
+        "the same floor was reported twice, or a second distinct one was not reported at all: "
+        f"{[r.message for r in caplog.records]}"
+    )
+    said = caplog.records[0].message
+    assert "30000" in said and "50000" in said, (
+        f"the warning does not name the budget and the prefix an operator has to reconcile: {said}"
+    )
+    assert getattr(caplog.records[0], "event", None) == "context.trigger_floored"
 
 
 def _request(*, system: str) -> Any:
@@ -208,7 +302,7 @@ def test_the_ratio_is_learned_from_a_real_turn(monkeypatch: pytest.MonkeyPatch) 
     to prove the wiring, and the wiring is the part that was missing.
     """
     monkeypatch.setattr(settings, "agent_context_calibration_min_calls", 1)
-    # Comfortably above what one short turn estimates — the static prefix alone is ~28,000 tokens
+    # Comfortably above what one short turn estimates — the static prefix alone is ~43,000 tokens
     # — so a single observation moves the smoothed ratio past the 1.0 clamp and the wiring is
     # visible through the public surface rather than through the average's internals.
     billed = 200_000
@@ -262,37 +356,51 @@ def test_the_turn_record_says_whether_the_policy_acted() -> None:
     assert current_context() is None, "the record outlived the turn it describes"
 
 
-def test_a_clean_overrun_reading_means_the_request_fits_its_declared_window(
+def test_a_clean_overrun_reading_means_the_request_fits_its_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Where a window is declared, `_record_overrun`'s silence is sound — swept, not argued.
+    """`_record_overrun`'s silence is sound — swept, not argued, and now with no window needed.
 
-    `compaction._record_overrun` compares the thread against `effective_trigger(budget)`, and
-    `docs/planning/BACKLOG.md` reads that as a tautology: the window edit has just cut the thread to
-    that very number, so the indicator "reads clean by construction". The first half is right and
-    the conclusion drawn from it is not, and the difference decides whether a window-aware arm in
-    that function has anything to catch. This is the sweep that answers it.
+    `compaction._record_overrun` compares the thread being sent against
+    `effective_trigger(agent_context_token_budget)`. The question this sweep answers is what a
+    *clean* reading of that counter is evidence of.
 
-    The invariant: with `llm_context_window_tokens` declared, `sent <= effective_trigger(budget)`
-    implies `prefix + sent + llm_max_tokens <= window`. It holds because the trigger is *derived*
-    from `window - prefix - llm_max_tokens` and the ratio can only tighten it further — so a clean
-    reading is a request that fits the model, and the failure this counter exists to lead cannot
-    happen silently under a declared window.
+    **The predecessor of this test could only answer it under a declared window**, because that was
+    the only case in which `effective_trigger` charged the request's prefix — so undeclared, the
+    counter compared a thread against a number the prefix had never met, and a 137,301-token
+    request left at a 128k model with the counter flat. The prefix is charged unconditionally now,
+    so the invariant gets stronger rather than being relaxed:
 
-    **The one exception is stated rather than swept under.** When the prefix plus the output
-    reservation already exceeds the window there is no room for any thread at all, and the trigger
-    floors at 1 rather than going negative. A thread of 0 or 1 estimated tokens then reads clean on
-    a request that cannot fit — unreachable in practice, since `count_tokens_approximately` charges
-    every non-empty list several tokens, and any real thread ticks the counter.
+    - **Always**: `sent <= effective_trigger(budget)` implies `prefix + sent * ratio <= budget`.
+      That is the whole of what the setting now means — a bound on the *request*, not on the
+      thread — and it holds with no window declared, which is every shipped deployment.
+    - **And where a window is declared**, additionally `prefix + sent + llm_max_tokens <= window`,
+      which is D-2026-08-28's property, kept: the window arm still caps the budget at
+      `window - llm_max_tokens` before the prefix comes off.
+
+    Both follow from the trigger being *derived* from those quantities, and from the ratio being
+    clamped at 1.0 so it can only tighten. What a clean reading is therefore evidence *of* is now a
+    statement about the configured budget in every configuration, and about the provider's real
+    limit wherever a deployment states one.
+
+    **The one exception is stated rather than swept under, and it is no longer exotic.** When the
+    prefix alone exhausts the budget there is no room for any thread and the trigger floors at 1, so
+    a thread of 0 or 1 estimated tokens reads clean on a request that is already over. That corner
+    used to need a window narrower than its own prefix; it is now reachable from a plain
+    misconfiguration, and the shipped `agent_tool_result_clear_trigger` of 30,000 sits in it against
+    a 43,175-token prefix — which is why `effective_trigger` reports a floor instead of returning it
+    silently, and why `tests/test_compaction.py` pins that state end to end.
 
     The prefix is set on the contextvar directly here because the claim is about the arithmetic;
     that a *request*'s prefix reaches it is
-    `test_a_declared_window_subtracts_the_measured_prefix`'s claim, and is proven through the
+    `test_the_prefix_reaches_the_edits_with_no_window_declared`'s claim, and is proven through the
     middleware there.
     """
     unsound: list[tuple[int, int, int, int, float, int, int]] = []
     degenerate = 0
-    for window in (32_000, 64_000, 128_000, 200_000, 1_000_000):
+    degenerate_undeclared = 0
+    undeclared_points = 0
+    for window in (0, 32_000, 64_000, 128_000, 200_000, 1_000_000):
         for prefix in (0, 5_000, 20_000, 43_175, 120_000, 250_000):
             for reservation in (1_024, 4_096, 32_000):
                 for budget in (10_000, 30_000, 100_000, 400_000):
@@ -309,20 +417,34 @@ def test_a_clean_overrun_reading_means_the_request_fits_its_declared_window(
                         for sent in {0, 1, trigger // 2, trigger - 1, trigger}:
                             if sent < 0 or sent > trigger:
                                 continue
-                            if prefix + sent + reservation <= window:
+                            fits_budget = prefix + sent * estimator_ratio() <= budget
+                            fits_window = (not window) or (prefix + sent + reservation <= window)
+                            if not window:
+                                undeclared_points += 1
+                            if fits_budget and fits_window:
                                 continue
                             if trigger == 1:
                                 degenerate += 1
+                                degenerate_undeclared += 0 if window else 1
                                 continue
                             unsound.append(
                                 (window, prefix, reservation, budget, ratio, trigger, sent)
                             )
 
     assert not unsound, (
-        "a request the overrun indicator reads as clean does not fit its declared window: "
+        "a request the overrun indicator reads as clean does not fit the budget it was cut to: "
         f"{unsound[:5]}"
     )
     assert degenerate, (
-        "the sweep never reached the prefix-exceeds-window corner, so it is not evidence that the "
-        "corner is the only exception"
+        "the sweep never reached the prefix-exhausts-the-budget corner, so it is not evidence that "
+        "the corner is the only exception"
+    )
+    assert undeclared_points, (
+        "the sweep declared a window at every point, which is exactly the case this invariant was "
+        "extended to cover"
+    )
+    assert degenerate_undeclared, (
+        "the floor was only ever reached with a window declared, so this sweep is not evidence "
+        "about the corner the unconditional subtraction newly opens — a configured budget below "
+        "the prefix, which is the shipped agent_tool_result_clear_trigger's state"
     )

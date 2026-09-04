@@ -41,7 +41,13 @@ from chemclaw.agent.compaction import (
     context_compaction_middleware,
     newest_batch_size,
 )
-from chemclaw.agent.context_budget import MeasureRequestPrefix
+from chemclaw.agent.context_budget import (
+    MeasureRequestPrefix,
+    effective_trigger,
+    estimate_tool_schemas,
+    reset_calibration,
+)
+from chemclaw.agent.context_budget import _prefix as _prefix_var
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.message_pairing import calls_without_adjacent_results
 from chemclaw.core.config import settings
@@ -303,6 +309,67 @@ class _Recording(GenericFakeChatModel):
         return super()._generate(messages, *args, **kwargs)
 
 
+#: What the last `_CapturingModel` was sent and what was bound to it. Module level rather than
+#: instance state because a `BaseChatModel` is a pydantic model, so an annotated class attribute
+#: would become a *field* with a mutable default rather than a place to keep a measurement.
+_RECEIVED: list[Any] = []
+_BOUND: list[Any] = []
+
+
+class _CapturingModel(GenericFakeChatModel):
+    """A fake model that keeps what it was actually sent, so the numbers come off the wire.
+
+    `_record_overrun` compares a count it computes itself; a test that recomputed the same count
+    would be asserting the arithmetic rather than the request. Reading the system message out of
+    what the model received, and the tool schemas off what was bound to it, is the same pair
+    `context_budget.MeasureRequestPrefix` publishes — measured equal on 2026-09-04 — but obtained
+    from the far side of the call.
+    """
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        """Record the surface and stay unbound — the fake model has no tool-calling path."""
+        _BOUND[:] = list(tools)
+        return self
+
+    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any) -> Any:
+        """Record the request, then answer as the fake model would."""
+        _RECEIVED[:] = list(messages)
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kw)
+
+
+#: The compiled `default` graph's request prefix, measured once. Module level because it costs a
+#: graph build and a turn, and it is the same number for every test in this file.
+_PREFIX: list[int] = []
+
+
+def _graph_prefix() -> int:
+    """Estimated tokens of the prefix a compiled turn actually sends — system message + schemas.
+
+    **Every budget in this file is a *request* budget now**, and this is the part of a request no
+    fixture here contains. `context_budget.effective_trigger` subtracts the prefix from a configured
+    budget unconditionally, so a test that sets a budget of "what this thread costs" is really
+    asking the policy to leave the thread 43,000 tokens *less* than that and gets a trigger floored
+    at 1 — both edits maximally aggressive, which is not what any of these tests is about. Adding
+    the measured prefix is how a thread budget is written under the new arithmetic.
+
+    Measured rather than written down, because the prefix moves whenever a bound tool's schema
+    changes (`tests/test_context_floor.py` is the ratchet that bounds it), and a constant here would
+    make these tests fail on somebody else's tool-schema edit.
+    """
+    if not _PREFIX:
+        model = _CapturingModel(messages=iter([AIMessage(content="done")]))
+        graph = build_langgraph_agent(model=model)
+        asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="hello")]}))
+        system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
+        _PREFIX.append(_count(system) + estimate_tool_schemas(_BOUND))
+    return _PREFIX[0]
+
+
+def _request_budget(thread_tokens: int) -> int:
+    """A configured budget that leaves `thread_tokens` estimated tokens for the thread itself."""
+    return _graph_prefix() + thread_tokens
+
+
 def _turn_sending(thread: list[AnyMessage]) -> tuple[list[Any], dict[str, Any]]:
     """Run one turn over `thread` and return (what the model was sent, the final state).
 
@@ -346,8 +413,15 @@ def test_a_turn_clears_stale_tool_results_before_it_drops_conversation(
     two were split.** The tool-result edit stopped reading `agent_context_token_budget` and took
     `agent_tool_result_clear_trigger` instead; this test set only the budget, so the clear edit sat
     below its own (default 30k) trigger and cleared nothing while asserting nine. Setting the
-    trigger to 0 says what the test means — *this edit is armed* — instead of relying on one number
+    trigger to 1 says what the test means — *this edit is armed* — instead of relying on one number
     happening to arm both.
+
+    **And both go through `_request_budget`, because a budget is a request budget now.** The window
+    is isolated by being inert, and inert means "above what the request costs" — which includes the
+    ~43,000-token prefix the graph adds and this fixture does not contain. Setting the raw thread
+    cost instead leaves `effective_trigger` a negative budget, floors it at 1, and fires the window
+    over the very placeholders this test counts: measured, 0 cleared where 9 were asserted, because
+    the window had deleted them rather than because the clear edit had not run.
     """
     thread = _thread(10, with_tool_calls=True, filler="x" * 200)
     # The request the graph will build, and what it costs once the tool-result edit has run on it.
@@ -355,8 +429,10 @@ def test_a_turn_clears_stale_tool_results_before_it_drops_conversation(
     ClearToolUsesEdit(trigger=0, keep=1, placeholder=TOOL_RESULT_PLACEHOLDER).apply(
         after_clearing, count_tokens=_count
     )
-    monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", 0)
-    monkeypatch.setattr(settings, "agent_context_token_budget", _count(after_clearing))
+    monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", _request_budget(1))
+    monkeypatch.setattr(
+        settings, "agent_context_token_budget", _request_budget(_count(after_clearing))
+    )
     monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 1)
     monkeypatch.setattr(settings, "agent_keep_last_conversation_groups", 2)
 
@@ -386,15 +462,19 @@ def test_the_lossless_edit_fires_alone_between_its_trigger_and_the_budget(
     placeheld and **every conversation group intact**.
 
     The two numbers are measured off the thread rather than chosen, so the test cannot pass by a
-    coincidence of defaults.
+    coincidence of defaults — and both are expressed as *request* budgets, because that is what
+    `effective_trigger` now compares against: it charges this request's own prefix against a
+    configured budget whether or not a window is declared, so "one token above what the thread
+    costs" has to be written as "the prefix plus one token above what the thread costs" for the
+    window to be inert at all.
     """
     thread = _thread(10, with_tool_calls=True, filler="x" * 200)
     request: list[AnyMessage] = [*thread, HumanMessage(content="and now?")]
     cost = _count(request)
 
     # Armed: below what the thread costs. Inert: above it.
-    monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", cost - 1)
-    monkeypatch.setattr(settings, "agent_context_token_budget", cost + 1)
+    monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", _request_budget(cost - 1))
+    monkeypatch.setattr(settings, "agent_context_token_budget", _request_budget(cost + 1))
     monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 1)
     monkeypatch.setattr(settings, "agent_keep_last_conversation_groups", 2)
 
@@ -463,9 +543,18 @@ def test_the_counter_separates_not_needed_from_not_wired(monkeypatch: pytest.Mon
     Both directions, because a counter that ticks on every model call would answer neither of the
     operator's two questions — "is it running" and "is the budget anywhere near the traffic" — and
     a counter that never ticks is indistinguishable from the defect this replaced.
+
+    **The clear trigger is pinned here because it is a confound this test never controlled**, and
+    charging the prefix unconditionally is what turned it into one. Left at its shipped 30,000
+    against a ~43,000-token prefix, `effective_trigger` floors it at 1 and the lossless edit clears
+    on every call — so the under-budget arm ticked and the failure read as "compaction fired on a
+    thread inside its budget" when the subject under test, the budget, was behaving exactly as
+    asserted. `test_the_shipped_clear_trigger_is_below_the_prefix_it_is_now_charged` is where that
+    state is asserted on purpose.
     """
     monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 1)
     monkeypatch.setattr(settings, "agent_keep_last_conversation_groups", 2)
+    monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", _request_budget(1_000_000))
 
     def _run(budget: int) -> float:
         monkeypatch.setattr(settings, "agent_context_token_budget", budget)
@@ -482,7 +571,9 @@ def test_the_counter_separates_not_needed_from_not_wired(monkeypatch: pytest.Mon
         )
         return METRICS.value("chemclaw_context_compactions_total") - before
 
-    assert _run(1_000_000) == 0, "compaction fired on a thread that was inside its budget"
+    assert _run(_request_budget(1_000_000)) == 0, (
+        "compaction fired on a thread that was inside its budget"
+    )
     assert _run(1) > 0, "compaction did not fire on a thread over its budget"
 
 
@@ -668,12 +759,17 @@ def test_a_fan_out_never_loses_its_own_results(monkeypatch: pytest.MonkeyPatch) 
     """
     monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 2)
     messages = _fanned_out(steps=5, width=5, filler="x" * 20_000)
-    assert _count(messages) > settings.agent_tool_result_clear_trigger, (
-        "the thread is under the clearing trigger, so this test proves nothing"
-    )
+    # **The trigger is derived from this fixture, not read off the shipped setting.** The property
+    # under test is the edit's — the newest batch survives a clearing, however much wider than
+    # `keep` it is — and that must hold at every trigger. Read off the setting, this test stopped
+    # exercising a clearing at all the moment the clear trigger was re-expressed as a request
+    # budget: the fixture measured 50,329 against a raised 73,500, and only its own guard
+    # ("this test proves nothing") caught that it had gone vacuous rather than green.
+    trigger = _count(messages) // 2
+    assert trigger > 0, "the fixture is empty, so this test proves nothing"
 
     ClearOlderToolResultsEdit(
-        trigger=settings.agent_tool_result_clear_trigger,
+        trigger=trigger,
         keep=settings.agent_keep_last_tool_groups,
         placeholder=TOOL_RESULT_PLACEHOLDER,
     ).apply(messages, count_tokens=_count)
@@ -763,38 +859,8 @@ def test_an_unreducible_thread_is_counted(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
 
-#: What the last `_CapturingModel` was sent and what was bound to it. Module level rather than
-#: instance state because a `BaseChatModel` is a pydantic model, so an annotated class attribute
-#: would become a *field* with a mutable default rather than a place to keep a measurement.
-_RECEIVED: list[Any] = []
-_BOUND: list[Any] = []
-
-
-class _CapturingModel(GenericFakeChatModel):
-    """A fake model that keeps what it was actually sent, so the numbers come off the wire.
-
-    `_record_overrun` compares a count it computes itself; a test that recomputed the same count
-    would be asserting the arithmetic rather than the request. Reading the system message out of
-    what the model received, and the tool schemas off what was bound to it, is the same pair
-    `context_budget.MeasureRequestPrefix` publishes — measured equal on 2026-09-04 — but obtained
-    from the far side of the call.
-    """
-
-    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
-        """Record the surface and stay unbound — the fake model has no tool-calling path."""
-        _BOUND[:] = list(tools)
-        return self
-
-    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any) -> Any:
-        """Record the request, then answer as the fake model would."""
-        _RECEIVED[:] = list(messages)
-        return super()._generate(messages, stop=stop, run_manager=run_manager, **kw)
-
-
 def _drive(window: int, thread: list[AnyMessage]) -> tuple[int, int, float]:
     """Run one thread through a compiled graph at `window`; return prefix, thread, counter delta."""
-    from chemclaw.agent.context_budget import estimate_tool_schemas, reset_calibration
-
     reset_calibration()
     settings.llm_context_window_tokens = window
     model = _CapturingModel(messages=iter([AIMessage(content="done")]))
@@ -808,61 +874,182 @@ def _drive(window: int, thread: list[AnyMessage]) -> tuple[int, int, float]:
     return prefix, _count(rest), delta
 
 
-def test_declaring_the_window_is_what_charges_the_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One thread, driven twice, and the difference is the whole of `docs/planning/BACKLOG.md` §4.
+def test_the_prefix_is_charged_whether_or_not_a_window_is_declared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One thread, driven twice, and the two arms now agree — which is the whole change.
 
-    **Undeclared** — the shipped default, and no value in `deploy/`, `infra/` or `.env.example`
-    states one — the edits cut the thread to `agent_context_token_budget` and stop. The prefix
-    (~43,000 estimated tokens of instructions, skills listing and bound tool schemas) is charged
-    against nothing, so the request that leaves is the thread *plus* all of it, and
-    `chemclaw_context_unreducible_total` stays flat because it compares the thread against the
-    thread's budget. That is the defect the row reports, and the assertion below is what makes it
-    visible in the suite rather than only in a backlog row.
+    **What this replaces.** `test_declaring_the_window_is_what_charges_the_prefix` asserted the
+    opposite pair, and its own docstring said a reader who charged the prefix unconditionally would
+    see it fail on its first assertion. Measured on this fixture on 2026-09-04, before and after:
 
-    **Declared** — the same thread, the same prefix — `effective_trigger` derives the budget from
-    `window - prefix - llm_max_tokens`, the window edit cuts to *that*, and the whole request fits.
-    The counter stays flat because there is nothing to report.
+    ======================  ===========  ===========  ==============  =======
+    arm                     thread cut   request      fits a 128k?    counter
+    ======================  ===========  ===========  ==============  =======
+    before, no window          90,030      137,301    **no**            0
+    before, window=128,000     75,025      122,296    yes               0
+    after,  no window          45,015       92,286    yes               0
+    after,  window=128,000     45,015       92,286    yes               0
+    ======================  ===========  ===========  ==============  =======
 
-    **So a window-aware arm in `_record_overrun` would have nothing left to catch**, which is the
-    row's third candidate fix and the reason it is not taken: declaring the window does not merely
-    let the indicator fire, it removes the failure. Where the policy genuinely cannot reduce far
-    enough the existing comparison already ticks — `test_an_unreducible_thread_is_counted` — and
-    `tests/test_context_budget.py` sweeps the arithmetic that makes the clean reading sound. What is
-    left open is the undeclared case, and closing that means charging the prefix unconditionally,
-    which changes what `agent_context_token_budget` means.
+    The first row is the defect: a request that does not fit the model it is going to, with the
+    indicator flat, because `effective_trigger` charged the 43,175-token prefix against the budget
+    only under a declared window and no deployment declares one. The last two rows coincide because
+    `agent_context_token_budget` now binds in both arms — 100,000 minus the prefix is tighter than
+    what a 128k window leaves after the output reservation — so declaring the window stops being
+    the control and becomes a second, weaker bound.
 
-    A reader who lands that change will see this test fail on its first assertion. That is the
-    intent: the number below is a fact about the shipped configuration, not a property to preserve.
+    **The invariant asserted here is the new meaning of the setting**: what leaves is a *request*,
+    and `prefix + thread` is inside the configured budget. The old test could only assert that
+    under a declared window; this asserts it in the arm that ships.
+
+    The numbers are taken off the wire — the system message the model received, the schemas bound
+    to it — rather than recomputed, so the assertions survive a change to the prefix or to the
+    budget rather than needing to be re-transcribed.
     """
     monkeypatch.setattr(settings, "agent_context_token_budget", 100_000)
     monkeypatch.setattr(settings, "agent_keep_last_conversation_groups", 0)
+    monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", _request_budget(1_000_000))
     monkeypatch.setattr(settings, "llm_max_tokens", 4_096)
     monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
+    budget = settings.agent_context_token_budget
     thread: list[AnyMessage] = [HumanMessage(content="q" + "y" * 60_000) for _ in range(8)]
 
     open_prefix, open_sent, open_delta = _drive(0, thread)
 
-    assert open_sent > settings.agent_context_token_budget * 0.8, (
-        "the thread was never big enough to reach the budget, so this proves nothing"
+    assert _count(thread) > budget, "the fixture is inside the budget; it proves nothing"
+    assert open_prefix > 0.3 * budget, (
+        f"the prefix is {open_prefix} tokens against a {budget} budget — small enough that "
+        "charging it or not is not a difference this test can see"
     )
-    # The window this deployment is really running against — a 128k model, say. Derived from the
-    # request rather than written down, so the claim survives a change to the prefix or the budget.
-    window = open_prefix + open_sent
+    assert open_prefix + open_sent <= budget, (
+        f"a {open_prefix + open_sent}-token request left against a {budget}-token budget with no "
+        "window declared: the prefix was not charged, which is the whole of this change"
+    )
+    # And not vacuously: the thread got most of what the budget left it, so this is a *cut to the
+    # new line* rather than a thread that happened to be small.
+    assert open_sent > 0.5 * (budget - open_prefix), (
+        f"the thread was cut to {open_sent} where {budget - open_prefix} was available; the policy "
+        "reduced far past its budget and the assertion above proves nothing about the prefix"
+    )
     assert open_delta == 0, (
-        f"the indicator saw a {open_prefix + open_sent + 4_096}-token request against a "
-        f"{window}-token window and said nothing — which is the row, but it is supposed to be "
-        "silent here because the budget it compares against never met the prefix"
+        "the request fits the budget it was cut to, so the overrun indicator must stay flat — its "
+        "silence is sound here, which it was not before the prefix was charged"
     )
 
-    declared_prefix, declared_sent, declared_delta = _drive(window, thread)
+    # The window this deployment is really running against — `values.yaml` names `gpt-oss`, whose
+    # published window is 131,072 — and the second arm of the table above.
+    declared_prefix, declared_sent, declared_delta = _drive(128_000, thread)
 
     assert declared_prefix == open_prefix, "the two runs must differ only in the declared window"
-    assert declared_sent < open_sent, (
-        "declaring the window did not tighten the cut, so effective_trigger never charged the "
-        "prefix against it"
+    assert declared_sent == open_sent, (
+        f"declaring a window changed the cut ({open_sent} -> {declared_sent}); the configured "
+        "budget already charges the prefix, so a window this wide has nothing left to bind"
     )
-    assert declared_prefix + declared_sent + settings.llm_max_tokens <= window, (
-        "the request still does not fit the window it declared, which is the one thing a "
-        "window-aware arm in _record_overrun would have been for"
+    assert declared_delta == 0, "a request that fits both bounds must not be counted"
+
+    # And the window still bounds where it is the tighter of the two, which is the half
+    # D-2026-08-28 built and this change keeps rather than replaces.
+    tight = open_prefix + settings.llm_max_tokens + open_sent // 2
+    _, tight_sent, _ = _drive(tight, thread)
+
+    assert tight_sent < open_sent, (
+        f"a window of {tight} left the cut at {tight_sent}; the window arm stopped binding when it "
+        "is tighter than the configured budget, which is a control this change was not meant to "
+        "remove"
     )
-    assert declared_delta == 0, "a request that fits its declared window must not be counted"
+    assert open_prefix + tight_sent + settings.llm_max_tokens <= tight
+
+
+def test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counter becomes meaningful without a declared window, which it was not before.
+
+    `D-2026-08-28` left `chemclaw_context_unreducible_total` comparing a thread against a number
+    the request's prefix had never met, so in the shipped configuration — 100,000 budget, no window
+    — it could only fire on a thread that alone exceeded 100,000 estimated tokens. That is a very
+    large thread, and the case that actually reaches a provider's limit is smaller: a thread the
+    policy cannot cut *far enough*, sitting between the old trigger and the new one.
+
+    This is that case. The newest conversation group is what neither edit may cut past — the window
+    stops at `starts[-1]` and the tool-result edit keeps the newest batch — so a group of ~69,500
+    estimated tokens is unreducible, under the old trigger of 100,000 and over the new
+    100,000 - 43,175. Probed on both arithmetics before this test was written: **0** with the prefix
+    charged only under a declared window, **1** with it charged unconditionally.
+
+    The fixture stays under upstream's own eviction thresholds — 50,000 tokens for a most-recent
+    `HumanMessage`, 20,000 for a tool result — so what the model is sent is what is built here
+    rather than a `FilesystemMiddleware` pointer, which is the trap the first version of this probe
+    fell into: a single 280,000-character message reached the model as a file reference and the
+    counter stayed flat for a reason that had nothing to do with the budget.
+    """
+    monkeypatch.setattr(settings, "agent_context_token_budget", 100_000)
+    monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", 30_000)
+    monkeypatch.setattr(settings, "agent_keep_last_conversation_groups", 0)
+    monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 2)
+    monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
+    reset_calibration()
+    thread: list[AnyMessage] = [
+        HumanMessage(content="a small opening turn"),
+        HumanMessage(content="w" * 199_000),
+        AIMessage(content="", tool_calls=[{"name": "find_calculations", "args": {}, "id": "t1"}]),
+        ToolMessage(content="r" * 79_000, tool_call_id="t1", name="find_calculations"),
+    ]
+
+    _, sent, delta = _drive(0, thread)
+
+    assert sent < settings.agent_context_token_budget, (
+        f"the unreducible group is {sent} estimated tokens, which the *old* trigger of "
+        f"{settings.agent_context_token_budget} would also have caught — so this fixture does not "
+        "distinguish the two arithmetics and proves nothing about the change"
+    )
+    assert delta > 0, (
+        f"a {sent}-token thread the policy could not reduce went out against a budget of "
+        f"{settings.agent_context_token_budget} less a {_graph_prefix()}-token prefix and the "
+        "overrun indicator said nothing"
+    )
+
+
+def test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged() -> None:
+    """The lossless edit must have a budget left after the prefix, or it is not a budget.
+
+    This replaces a test that asserted the opposite. While `agent_tool_result_clear_trigger` meant
+    *thread* spend, 30,000 was an order of magnitude below the budget so that clearing ran early
+    and often. Charging the prefix made that same number mean "clear every reclaimable tool result
+    on every model call": the `default` prefix measures ~43,175, so `effective_trigger` floored it
+    at 1 and the model lost sight of evidence more than one step back. 73,500 is the old 30,000 of
+    thread re-expressed in the new unit.
+
+    **Asserted against the ratchet ceiling rather than against today's prefix**, which is the whole
+    reason this test is worth having. `tests/test_context_floor.py` bounds the bound tool surface
+    at `MAX_PROFILE_TOKENS`; a measurement moves whenever any tool schema changes, and a test
+    written against one would drift into passing for a reason nobody chose. Written against the
+    ceiling, the day the surface is allowed to grow past what this setting can absorb, this fails
+    and names the trade instead of the behaviour changing quietly.
+    """
+    from tests.test_context_floor import CEILINGS
+
+    ceiling = CEILINGS["__default__"]
+
+    prefix = _graph_prefix()
+    trigger = settings.agent_tool_result_clear_trigger
+
+    assert trigger > prefix, (
+        f"agent_tool_result_clear_trigger is {trigger} against a {prefix}-token prefix, so it "
+        "floors at 1 — the lossless edit would clear every reclaimable result on every model call"
+    )
+    assert trigger > ceiling, (
+        f"agent_tool_result_clear_trigger is {trigger} against a ratchet ceiling of "
+        f"{ceiling}: a surface grown to its permitted bound would floor this trigger, "
+        "so either the ceiling or this setting has to move, deliberately"
+    )
+    token = _prefix_var.set(prefix)
+    try:
+        # It still has to leave a usable band below the destructive edit, which is the split's
+        # whole point: clearing is free, the window is not.
+        assert (
+            1 < effective_trigger(trigger) < effective_trigger(settings.agent_context_token_budget)
+        )
+    finally:
+        _prefix_var.reset(token)

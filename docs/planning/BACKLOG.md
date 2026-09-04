@@ -292,53 +292,6 @@ topic).
       `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`, which deleted 1,442 lines of
       exactly this.
 
-- [ ] **No deployment declares a context window, and the overrun indicator cannot see the prefix**
-      — [M], found reviewing `D-2026-08-28-the-budget-is-the-control-not-the-trigger` after it
-      merged, and it is that change that made a latent gap live.
-      `context_budget.effective_trigger` subtracts the request's own prefix from the budget **only**
-      `if window:`; `llm_context_window_tokens` defaults to 0, `.env.example` ships 0, and
-      `grep -rn CONTEXT_WINDOW deploy/ infra/ docs/guides/runbook.md` returns nothing. So the ~30k
-      prefix — instructions, the skills listing, every tool schema — is never charged against
-      `agent_context_token_budget`.
-      While the group floor shipped at 12 an ordinary thread sat at ~4k and this could not bite.
-      With the floor off the window fills the budget by design, so a request measures **~135,700
-      estimated tokens** (99,924 thread + 35,773 prefix) against a configured 100,000 — over a
-      128k model window, and at this repository's own measured 2.2x ratio for structured chemistry
-      payloads, well over 200,000 billed.
-      **And the one thing that would say so reads clean.** `compaction._record_overrun` compares
-      the *thread* against the thread's budget, which the window edit has just cut to fit by
-      construction, so `chemclaw_context_unreducible_total` moved by **0** on exactly that request
-      — while its own docstring calls it "the only leading indicator this system has for a
-      context-length failure". `agent_context_calibration_min_calls = 20` also pins the ratio at
-      1.0 for the first twenty model calls of every process, i.e. every pod restart.
-      **The third candidate fix is closed, measured, and it was not a fix.** The row offered "add a
-      window-aware arm to `_record_overrun` so the indicator at least fires where a window is
-      declared". Driven end to end on a compiled graph over the real 61-tool surface, declaring the
-      window does not merely let the indicator fire — **it removes the failure**: undeclared, the
-      thread is cut to 90,030 and the request totals 137,301 against a 128k model with the counter
-      flat; at `llm_context_window_tokens=128000` the same thread is cut to 75,025 and the request
-      totals 122,296, which fits. `effective_trigger` already subtracts the measured prefix, the
-      window edit already cuts to *that*, and `_record_overrun` compares against the same number, so
-      a window-aware arm would be a control that cannot fire — the shape `lessons.md` #15 names, and
-      it would have shipped with a test that passes both ways.
-      That is not a coincidence of one fixture: a 1,440-combination sweep over
-      `(window, prefix, reservation, budget, ratio)` × 5 thread sizes finds
-      `sent <= effective_trigger(budget)` implies `prefix + sent + llm_max_tokens <= window`
-      everywhere except the degenerate corner where the prefix alone exceeds the window, and there
-      the trigger floors at 1 so any real thread ticks anyway. `tests/test_context_budget.py` now
-      pins that invariant, which is also what makes a clean reading under a declared window *sound*
-      rather than vacuous.
-      **So the row is a two-option decision with an owner, and the asymmetry is the finding:
-      declaring `llm_context_window_tokens` is the whole control, and the indicator is downstream of
-      it and cannot substitute for it.** Either declare the window in `deploy/` (cheapest, and it
-      needs a number a site owns — note `values.yaml` names `CHEMCLAW_LLM_MODEL: "gpt-oss"`, whose
-      published window is 131,072, so it is not quite "a number nobody here knows"), or subtract
-      `prefix_tokens()` unconditionally, which changes what `agent_context_token_budget` *means*
-      — thread spend becomes request spend — and is
-      `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget`'s decision to revisit.
-
-
-
 - [ ] **A third reducer sits above the compaction group and no prose mentions it** — [S], found
       2026-09-04 while measuring the context-window row. deepagents' `FilesystemMiddleware`
       silently offloads oversized *message content*: probed, a 500,001-character `HumanMessage`

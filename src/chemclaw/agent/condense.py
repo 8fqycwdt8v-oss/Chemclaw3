@@ -3,10 +3,11 @@
 Asking for similar reactions returns many protocols. A protocol is atomic — an SOP is one
 procedure and half of one is misleading rather than merely shorter — so the unit that has to fit a
 model call is one whole procedure, and N of them do not fit. Before this the only way to read them
-was `expand_note` once per protocol, uncapped, and once the thread crossed
-`agent_context_token_budget` the compaction policy reclaimed the earliest ones by replacing them
-with a flat placeholder, citation included. So a turn that pulled six protocols could not hold six
-protocols: it answered from the last two and its own recollection of the rest.
+was `expand_note` once per protocol, uncapped, and once the *request* crossed
+`agent_context_token_budget` — the thread plus this call's own prefix — the compaction policy
+reclaimed the earliest ones by replacing them with a flat placeholder, citation included. So a
+turn that pulled six protocols could not hold six protocols: it answered from the last two and its
+own recollection of the rest.
 
 **The reduce is deterministic and it already existed.** `memory.comparison` is the table
 `optimization_campaign_note` has always rendered — a row per run, the conditions and outcomes side
