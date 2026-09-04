@@ -210,11 +210,14 @@ def _build(raw: RawEntry) -> OrdReaction:
         temperature_c=temperature_c,
         yield_percent=yield_percent,
         purity_percent=purity_percent,
-        # The entry's timestamp is when the experiment was run (gap KNW-1). ORD models impurity
-        # profiles only indirectly (as further products or analyses), so `impurities` stays empty
-        # here rather than guessing which co-product was unwanted — a fabricated impurity profile
-        # would be worse than an absent one.
-        performed_at=raw.created_at.date(),
+        # **No `performed_at`, deliberately** — see `json_adapter._build` for the argument. An
+        # ORD record's only date is `provenance.record_created.time`, which is when the record was
+        # written; mapping it here filled the field while leaving `date_source` claiming the source
+        # had stated an experiment date. `adapter.DatedIngest` supplies both together.
+        #
+        # ORD models impurity profiles only indirectly (as further products or analyses), so
+        # `impurities` stays empty here rather than guessing which co-product was unwanted — a
+        # fabricated impurity profile would be worse than an absent one.
         provenance=_provenance(payload),
         steps=_steps(reaction_inputs, temperature_c, payload),
         procedure_text=_procedure_text(payload),

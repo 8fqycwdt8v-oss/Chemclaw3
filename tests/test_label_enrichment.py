@@ -24,6 +24,7 @@ from chemclaw.ingest.labels.labeller import (
     LabelToolError,
     ReactionNaming,
     ReactionRepresentation,
+    RxnLabelServer,
 )
 from chemclaw.ingest.labels.merge import merge
 from chemclaw.science.labels.policy import LabelPolicy
@@ -280,6 +281,60 @@ def test_an_outage_propagates_instead_of_becoming_200_doomed_single_calls() -> N
         # Nothing was stamped, so the next pass sees the same work.
         assert len(await index.stale(_VERSION, limit=10)) == 1
 
+    asyncio.run(_run())
+
+
+def test_a_short_species_list_is_dropped_rather_than_shifting_every_role(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A species list that does not match what was sent is bad data, and nothing used to say so.
+
+    `ReactionRepresentation.species` is documented as "one entry per species sent" and the roles
+    are matched back **positionally** — `merge._species` reads `answered[index]`. That guard only
+    stops the read running off the end; it cannot see that an answer for 3 of 4 species has shifted
+    every role by one, so a reactant is stored as the solvent and the solvent as the catalyst. The
+    server is versioned separately from this repository (`_role`'s leniency is written for exactly
+    that), and the row is then stamped with the current `labeller_version`, so it leaves `stale()`
+    and no later pass revisits it.
+
+    Dropping the whole answer puts it in the vocabulary the drain already has for an unusable one:
+    "not labelled this pass", which its `unlabelled` counter reports and its WARNING names.
+    """
+
+    async def _run() -> None:
+        server = RxnLabelServer()
+        short = {
+            "results": [
+                {
+                    "id": "r1",
+                    "mapped_smiles": "[Br:1][c:2]1ccccc1>>[c:2]1ccc(N)cc1",
+                    "species": [{"role": "solvent"}, {"role": "catalyst"}, {"role": "catalyst"}],
+                },
+                {"id": "r2", "species": [{"role": "starting-material"}]},
+                {"id": "r3", "species": []},
+            ]
+        }
+
+        async def _fake_call(tool: str, arguments: dict[str, object]) -> dict[str, object]:
+            return short
+
+        # The transport is the one thing this seam does not decide; the arity contract is.
+        monkeypatch.setattr(server, "_call", _fake_call)
+        answers = await server.represent(
+            [
+                ("r1", _RECORD, ["CCO", "O=C=O", "CCOCC", "[Pd]"]),
+                ("r2", _RECORD, ["CCO"]),
+                ("r3", _RECORD, ["CCO", "O=C=O"]),
+            ]
+        )
+
+        assert sorted(answers) == ["r2", "r3"], (
+            "an answer for 3 of the 4 species sent is unusable: every role after the gap belongs "
+            "to a different molecule"
+        )
+        assert "r1" in caplog.text and "3" in caplog.text and "4" in caplog.text
+
+    caplog.set_level("WARNING")
     asyncio.run(_run())
 
 

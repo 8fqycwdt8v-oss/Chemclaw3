@@ -185,9 +185,21 @@ def _read_and_parse(ref: FileRef, max_bytes: int) -> _Parsed:
             os.close(descriptor)
     parsed = parse_document(ref.path, raw)
     # The identity is the content, never the path — so four copies of one report collapse to one
-    # document and a rename is free. `backfill_corpus.note_for_document` makes the same call.
-    doc_id = f"doc-{stable_hash(parsed.text, chars=16)}"
-    return _Parsed(ref_path=ref.path, doc_id=doc_id, text=parsed.text)
+    # document and a rename is free.
+    #
+    # **Except when there is no content, where that rule stops being true of anything.** A document
+    # that extracts to nothing — an empty workbook, a placeholder `.txt`, a `.docx` with no
+    # paragraphs; `SyncReport.empty` counts them, so they are a real population on a departmental
+    # share — hashes to one value whatever it is, so every empty file on the share became one
+    # logical document: `known_documents` folded them together, `deduplicated` counted all but the
+    # first as copies, and `index.CITATION_SQL`'s `min(f.path)` would name one arbitrary path for
+    # all of them. Salting with the path makes an empty file its own document, which is what it is.
+    # Nothing is lost by declining to collapse them: such a document carries no chunks, so it can
+    # never be a retrieval hit and there is no embedding to share.
+    identity = parsed.text if parsed.text.strip() else f"{ref.path}\x1fempty"
+    return _Parsed(
+        ref_path=ref.path, doc_id=f"doc-{stable_hash(identity, chars=16)}", text=parsed.text
+    )
 
 
 def _file_record(source: str, ref: FileRef, doc_id: str, chunking_key: str) -> FileRecord:
