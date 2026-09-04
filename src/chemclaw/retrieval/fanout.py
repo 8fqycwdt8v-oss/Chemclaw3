@@ -41,7 +41,7 @@ import logging
 import operator
 import time
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any
 
 from langchain_core.runnables import RunnableConfig
@@ -174,19 +174,33 @@ def _record_seconds(name: str, seconds: float) -> None:
     )
 
 
-def record_kept_chunks(kept: Iterable[EvidenceChunk], asked: Iterable[str]) -> None:
-    """Count the chunks that **survived** the merge and both caps, per source.
+def record_kept_chunks(
+    kept: Iterable[EvidenceChunk], contributions: Mapping[str, Sequence[EvidenceChunk]]
+) -> None:
+    """Count the chunks that **survived** the merge and both caps, per source that surfaced them.
 
     `chemclaw_evidence_source_chunks_total` counts what a retriever *handed over* — `EvidenceSweep`
     says so in as many words ("Counts are pre-merge") — which is measured before RRF or the
     round-robin interleave and before the budget cap. So it does not cover the defect its own ADR
     names: `D-2026-08-01-a-cap-that-starves-a-source` measured *surviving* chunks (graph 38,
     lexical 0, vector 2), and under a pre-merge counter a leg that contributes thirty chunks and
-    survives none reads as perfectly healthy. Reintroduce `retrieval_source_weights` at the value
-    that ADR itself measured and not one series here moves.
+    survives none reads as perfectly healthy.
 
     The alert is the ratio `kept / chunks` going to zero for one source, which is that ADR's table
     expressed as a number a dashboard can hold.
+
+    **A note is counted against every source that surfaced it, not just the one that got there
+    first** — and getting that wrong pinned this series at zero for every leg but one. Both merge
+    paths keep the *first* occurrence of a note (`_interleave_dedup`'s `seen` set, and
+    `hybrid.representative.setdefault`), and `chunk.retriever` names only that first finder. So on a
+    healthy three-leg corpus where all three legs agree, this measured `graph 16, lexical 0,
+    vector 0` — the one metric built to detect a starved source reading exactly like a starved
+    source, permanently, in every hybrid deployment. An operator wiring the documented alert got a
+    standing false positive, and a real starvation was indistinguishable from the baseline.
+
+    Agreement between legs is the *healthy* case, so it must not read as starvation. What the ratio
+    now answers is "of what this leg found, how much reached the caller" — which is the question
+    the ADR asked.
 
     **Every asked source is seeded at zero**, and that is a deliberate exception to this registry's
     rule against invented zero series. It is not invented: a source that was asked and kept nothing
@@ -195,17 +209,22 @@ def record_kept_chunks(kept: Iterable[EvidenceChunk], asked: Iterable[str]) -> N
 
     Args:
         kept: The chunks that reached the caller, after merging and both budget caps.
-        asked: Every source name this sweep asked, so a starved one is present as a zero.
+        contributions: What each asked source handed over, by name. Its keys are the asked set, so
+            a source that returned nothing is still present as a zero.
     """
-    surviving: Counter[str] = Counter(chunk.retriever for chunk in kept)
-    named = set(asked)
-    for name in named:
-        _record_kept(name, surviving.get(name, 0))
+    survivors = {(chunk.source_note_id, chunk.content) for chunk in kept}
+    for name, offered in contributions.items():
+        _record_kept(
+            name,
+            sum(1 for chunk in offered if (chunk.source_note_id, chunk.content) in survivors),
+        )
     # A chunk whose `retriever` is not among the asked names would otherwise be dropped silently;
     # counting it keeps the two series comparable rather than quietly under-reporting the numerator.
-    for name in surviving:
-        if name not in named:
-            _record_kept(name, surviving[name])
+    unattributed: Counter[str] = Counter(
+        chunk.retriever for chunk in kept if chunk.retriever not in contributions
+    )
+    for name, count in unattributed.items():
+        _record_kept(name, count)
 
 
 def _record_kept(name: str, count: int) -> None:

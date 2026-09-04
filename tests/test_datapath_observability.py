@@ -375,9 +375,14 @@ class _Retriever:
         return list(self._chunks)
 
 
-def _chunk(source: str) -> EvidenceChunk:
-    """One chunk attributed to `source`, which is what the kept counter is labelled by."""
-    return EvidenceChunk(content="x", source_note_id="note-1", retriever=source)
+def _chunk(source: str, note_id: str = "note-1") -> EvidenceChunk:
+    """One chunk attributed to `source`, citing `note_id`.
+
+    The id is a parameter because the kept counter is keyed on `(source_note_id, content)` — the
+    same key both merge paths dedup on — so two chunks sharing an id are *one note two legs found*,
+    which is a different situation from two legs finding different notes.
+    """
+    return EvidenceChunk(content="x", source_note_id=note_id, retriever=source)
 
 
 def test_a_starved_source_reads_as_zero_rather_than_as_absent() -> None:
@@ -388,10 +393,28 @@ def test_a_starved_source_reads_as_zero_rather_than_as_absent() -> None:
     kept series at zero is what gives the ratio a denominator at the moment it matters; without it
     the starved source would simply be missing from the metric.
     """
-    record_kept_chunks([_chunk("graph")], asked=["graph", "lexical"])
+    offered = _chunk("graph")
+    record_kept_chunks([offered], {"graph": [offered], "lexical": [_chunk("lexical", "note-2")]})
 
     assert _series("chemclaw_evidence_source_kept_total", source="graph") >= 1.0
     assert _series("chemclaw_evidence_source_kept_total", source="lexical") == 0.0
+
+
+def test_a_note_two_legs_agreed_on_counts_for_both_of_them() -> None:
+    """Agreement is the healthy case and must not read as starvation.
+
+    Both merge paths keep the *first* occurrence of a note, so `chunk.retriever` names only the leg
+    that found it first. Attributing the kept count by that field credited every shared note to
+    whichever source `_sources()` happened to list first — measured on a healthy three-leg corpus,
+    `graph 16, lexical 0, vector 0`, which is exactly what a starved leg looks like. The one metric
+    built to detect `D-2026-08-01-a-cap-that-starves-a-source` was therefore pinned at zero for
+    every index-backed leg in every hybrid deployment.
+    """
+    shared = _chunk("graph")
+    before_lexical = _series("chemclaw_evidence_source_kept_total", source="lexical")
+    record_kept_chunks([shared], {"graph": [shared], "lexical": [shared]})
+
+    assert _series("chemclaw_evidence_source_kept_total", source="lexical") == before_lexical + 1.0
 
 
 @pytest.mark.anyio
