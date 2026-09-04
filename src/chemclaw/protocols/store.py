@@ -126,7 +126,9 @@ WHERE design_id = %(design_id)s
 """
 
 #: The head revision's own `kind`, read under the same row lock as the head itself — see
-#: `require_movable`.
+#: `require_movable`. The design's *current status* needs no second statement at all: `_SELECT_HEAD`
+#: already returns it, under the same `FOR UPDATE`, which is what makes the order rule read the
+#: status a concurrent `append` or `set_status` cannot have moved underneath it.
 _SELECT_HEAD_KIND = (
     "SELECT kind FROM experiment_protocol_revisions WHERE design_id = %s AND revision = %s"
 )
@@ -202,9 +204,10 @@ class UnstorableDocument(ChemclawError):
     somebody else's database and there is no author to refuse.
 
     **A status the design cannot support** — `require_movable`, which refuses `approved` or
-    `executed` on a design holding only the structured ask. Same exception because it is the same
-    answer to the caller: the request as sent cannot be stored, the reason is in the message, and
-    the fix is theirs. Both reach the routes as a 422.
+    `executed` on a design holding only the structured ask, `requested` on one holding a procedure,
+    and any move the lifecycle table does not permit from where the design currently is. Same
+    exception because it is the same answer to the caller: the request as sent cannot be stored, the
+    reason is in the message, and the fix is theirs. Both reach the routes as a 422.
     """
 
 
@@ -269,9 +272,14 @@ class DesignStore(Protocol):
         attributed to a document nobody read, and defaulting it to the head "for convenience" would
         remove the control rather than provide one.
 
+        The move itself is checked against where the design is — see `require_movable` for the
+        table and for why every `X -> X` is permitted.
+
         Raises:
             UnknownDesign: nothing in the store answers to `design_id`.
             RevisionConflict: a revision landed between the read and this move.
+            UnstorableDocument: the design cannot hold this status, or cannot reach it from the one
+                it has.
         """
         ...
 
@@ -450,7 +458,10 @@ class InMemoryDesignStore:
                 f"revision {expected_revision} is not the head ({head}); "
                 "re-read the design before signing off on it"
             )
-        require_movable(status, head_revision.kind)
+        # The design's current status, from the same dict the move is about to write — the
+        # in-memory counterpart of the header column Postgres reads under its row lock. Nothing
+        # yields between this read and the write, so there is no window to close here.
+        require_movable(self._meta[design_id]["status"], status, head_revision.kind)
         self._meta[design_id]["status"] = status
         self._meta[design_id]["updated_at"] = datetime.now(UTC)
         self._status_events.setdefault(design_id, []).append(
@@ -726,6 +737,7 @@ class PostgresDesignStore:
                 if head_row is None:
                     raise UnknownDesign(f"no design {design_id!r}")
                 head = int(head_row[0])
+                current: DesignStatus = head_row[1]
                 if expected_revision != head:
                     raise RevisionConflict(
                         f"revision {expected_revision} is not the head ({head}); "
@@ -741,7 +753,9 @@ class PostgresDesignStore:
                 # naming a head revision whose row this read does not find fails *closed* rather
                 # than waving an `executed` through on a document nobody can see.
                 require_movable(
-                    status, "protocol" if kind_row and kind_row[0] == "protocol" else "request"
+                    current,
+                    status,
+                    "protocol" if kind_row and kind_row[0] == "protocol" else "request",
                 )
                 await cur.execute(_SET_STATUS, {"status": status, "design_id": design_id})
                 await cur.execute(
@@ -887,8 +901,48 @@ def revision_kind(design: ExperimentDesign) -> RevisionKind:
 #: has no procedure, so neither word can be true of it.
 _NEEDS_A_PROTOCOL: frozenset[DesignStatus] = frozenset({"approved", "executed"})
 
+#: Where a design may go from where it is. Data rather than a chain of `if`s, because this is a
+#: product decision about a laboratory workflow and the next person to change it should be editing
+#: one row rather than reading a branch — and because a table can be driven as a matrix, which is
+#: how `tests/test_protocol_store.py` checks all twenty-five pairs on both backends.
+#:
+#: Every edge, and why it is here:
+#:
+#: * `requested -> draft` — the ask becomes a procedure. It is also the one promotion `advanced()`
+#:   makes on its own when a protocol revision lands, so refusing it here would let a write do what
+#:   a person may not.
+#: * `requested -> abandoned` — an ask nobody will act on. `abandoned` is kept precisely because a
+#:   design deliberately not run is evidence too.
+#: * `draft -> approved` — the sign-off, and the only door into `approved`.
+#: * `approved -> executed` — it was run. The only door into `executed`, which is the point of the
+#:   whole table: **`draft -> executed` is absent**, so a design cannot be recorded as run without a
+#:   human having said yes to it first. That is not a paperwork rule — `approved` is the moment a
+#:   person takes responsibility for conditions somebody is about to put on a bench.
+#: * `approved -> draft` — a sign-off withdrawn without editing the document. Without this edge the
+#:   only way to un-approve is to write a revision, which changes the protocol in order to change
+#:   the header, and `advanced()` already does that half automatically.
+#: * `executed -> abandoned` — the only move out of `executed`. A run happened; no later word
+#:   un-runs it, and `abandoned` here means "this line of work stops", not "it was never done".
+#: * `abandoned -> draft` — the one way back, and it must exist here because `advanced()` refuses to
+#:   do it on a write: "a design somebody decided not to run does not come back because an agent
+#:   wrote to it, and the way back is a person's `set_status`". This is that sentence's other half.
+#: * **`abandoned -> executed` is absent**, which is the move this table was written for: measured
+#:   on both backends, a retired design went straight to `executed`, asserting that an experiment
+#:   somebody had decided not to run had been run.
+#:
+#: Anything not listed is refused. `requested` is reachable from nothing but itself, because a
+#: design that has held a procedure cannot truthfully say it holds only an ask — `require_movable`
+#: refuses that on the document rather than on the order, one function below.
+_LEGAL_MOVES: dict[DesignStatus, frozenset[DesignStatus]] = {
+    "requested": frozenset({"draft", "abandoned"}),
+    "draft": frozenset({"approved", "abandoned"}),
+    "approved": frozenset({"executed", "draft", "abandoned"}),
+    "executed": frozenset({"abandoned"}),
+    "abandoned": frozenset({"draft"}),
+}
 
-def require_movable(status: DesignStatus, head_kind: RevisionKind) -> None:
+
+def require_movable(current: DesignStatus, status: DesignStatus, head_kind: RevisionKind) -> None:
     """Refuse a lifecycle move the design cannot support, naming why.
 
     Nothing tied a status to the document it is a statement about, so `set_status("executed")` on a
@@ -910,16 +964,42 @@ def require_movable(status: DesignStatus, head_kind: RevisionKind) -> None:
     other four statuses are claims about a document or about a decision, and only this one is a
     claim that no document exists yet.
 
-    **What is still not here is a transition *order*.** Nothing forbids `abandoned → executed`, and
-    that needs the design's *current* status, which this function is not given — a signature change
-    reaching both backends, and a table of legal moves that is a product decision rather than
-    something the surrounding code implies. `docs/planning/BACKLOG.md` carries it.
+    **The transition *order* is the third rule and it arrived last**, because it is the one that
+    cannot be derived from the document: it needs the design's *current* status, which this function
+    was not given. Nothing forbade `abandoned → executed` or `draft → executed`, measured accepted
+    on both backends — a design retired because the starting material decomposes, marked run; a
+    protocol nobody had signed off, marked run. `_LEGAL_MOVES` above is the decided table, and
+    each of its edges says there why it exists.
+
+    **Every self-transition is legal**, which the table does not spell out because it is one rule
+    about a repeat rather than five decisions about the lifecycle. `Chemclaw3_ui`'s sign-off panel
+    renders a *Mark X* button for all five statuses regardless of where the design is, so
+    `approved → approved` is one click away by construction — and a move whose response is lost is
+    reported to the chemist as "The status was not recorded" when it may well have been, so pressing
+    again is the ordinary recovery and it arrives here as `X → X`. Refusing it would turn a button
+    the client itself offers into a 422 on the one screen where the honest answer is "it already
+    worked". This tree relies on it too: the test that proves both SQL `CHECK (status IN (...))`
+    constraints accept every member of the Literal drives `draft → draft` and `requested →
+    requested` to do it. The move is not swallowed — the caller still gets its 204 and
+    `experiment_protocol_status_events` still gains a row, because a repeat is somebody acting a
+    second time and that table is the record of who moved a design and why.
+
+    **The document rules run first, deliberately.** Where both refuse — `requested` on a protocol
+    head, say — the more actionable message wins: "there is no procedure to approve" tells a chemist
+    what to do next, and "you cannot go from here to there" does not.
+
+    The table is indexed on `current` unconditionally, so a sixth `DesignStatus` added without a row
+    here fails on the first move rather than being silently movable anywhere.
 
     The complementary guard — refusing a sign-off that would silently overwrite a *different*
     person's sign-off at the same revision — is not here either, and `docs/planning/BACKLOG.md`
     records why: `expected_revision` is a compare-and-set on the document, so two people looking at
     revision 1 can approve and abandon it and both are told 204. Closing that needs the caller to
-    state the status it saw, which is a contract change across `Chemclaw3_ui` as well. The evidence
+    state the status it saw — an `expected_status`, which would also take a lost-response repeat
+    before it reached the table above. That row calls it "a contract change across `Chemclaw3_ui` as
+    well"; measured 2026-09-04 against the client's `main`, the panel **already sends
+    `expected_status`** and already handles a `status_conflict` 409, so the change left is this
+    side's alone. The evidence
     survives either way — `experiment_protocol_status_events` records both moves with their actors
     — but nobody is told at the time.
 
@@ -936,6 +1016,12 @@ def require_movable(status: DesignStatus, head_kind: RevisionKind) -> None:
             "this design holds a procedure, so it cannot go back to 'requested', which means it "
             "holds only the structured ask. Abandon it, or draft over it — a revision moves a "
             "design's status by itself."
+        )
+    legal = _LEGAL_MOVES[current]
+    if status != current and status not in legal:
+        raise UnstorableDocument(
+            f"a design that is {current!r} cannot be moved to {status!r}: from {current!r} the "
+            f"moves are {sorted(legal | {current})}."
         )
 
 
