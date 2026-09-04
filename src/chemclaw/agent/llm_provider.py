@@ -1,16 +1,23 @@
-"""The one place a chat-model class is imported — the LLM provider seam (plan Phase F0).
+"""The one place a chat-model class is imported — the LLM gateway seam (plan Phase F0).
 
-`build_chat_model` selects the model from config (`settings.llm_provider`), so pointing Chemclaw at
-the internal OpenAI-compatible ("OpenLLM-like") endpoint versus the Anthropic dev path is a single
-config change, never a code edit at a call site (KISS/DRY, mirroring the ELN adapter registry).
-Provider classes are imported **only here** — `agent/langgraph_agent.py` calls this factory and
-stays provider-agnostic. `prompt_caching_middleware` is here for the same reason and not because
-it is a model: a cache breakpoint is spelled `cache_control` on Anthropic and has no counterpart on
-the internal endpoint, so *which* middleware a deployment gets is a provider question, and this is
-where provider questions are answered.
+`build_chat_model` builds one client, `ChatOpenAI`, against the one OpenAI-compatible gateway
+`settings.llm_base_url` names. **There is no provider selection**
+(`D-2026-09-04-a-gateway-is-the-only-provider`): which vendor answers behind that address is the
+gateway's business, and a codebase that could not name a second vendor cannot send a prompt to one
+by accident. The seam F0 asked for survives intact — pointing Chemclaw at a different endpoint is a
+config change, never a code edit at a call site — it simply has one arm instead of two.
 
-The internal endpoint is reached with **one generic API credential** (`settings.llm_api_key`),
-deliberately not per-user Entra: the raw inference call is not a user-scoped resource access (see
+**What the second arm cost.** `_anthropic_model` passed no `base_url`, so a deployment that set
+`llm_base_url` to an internal gateway *and* left the provider at its shipped default built a client
+resolving to `api.anthropic.com`; `api/middleware._refuse_public_llm_exposure` returned early on
+that same truthy `llm_base_url` and its docstring said the combination was satisfied; and
+`core/netguard.derive_allowed` added the public host to the egress allowlist. Three controls, all
+reading the same field, all agreeing that a pod exfiltrating every prompt was correctly configured.
+Prompt caching went with it — `cache_control` breakpoints are Anthropic's spelling and there is no
+counterpart on the gateway — which is a real, accepted cost recorded in that ADR.
+
+The gateway is reached with **one generic API credential** (`settings.llm_api_key`), deliberately
+not per-user Entra: the raw inference call is not a user-scoped resource access (see
 `docs/archive/plans/foundation-plan.md` §0). Entra scoping applies to *who* is taking the turn and
 *which* authorized workflow runs (Phase F4), not to this credential. Transport concerns (private-CA
 TLS, timeout, retry budget) come from config so a firewalled internal endpoint works with no code
@@ -21,10 +28,10 @@ import logging
 from functools import cache
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware
 from langchain_core.callbacks import BaseCallbackHandler
 
 from chemclaw.core.config import settings
+from chemclaw.core.http import private_ca_transport
 from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
@@ -36,13 +43,13 @@ _KEYLESS_PLACEHOLDER = "not-required"
 
 
 def build_chat_model(task: str = "agent", *, effort: str | None = None) -> Any:
-    """Build the configured LangChain chat model — the whole of this seam.
+    """Build the gateway chat model — the whole of this seam.
 
-    Everything that is actually about *the provider* is decided here and only here: which endpoint,
+    Everything that is actually about *the endpoint* is decided here and only here: which address,
     which credential, the per-task model route, and the transport (private-CA TLS, timeout, retry
-    budget). That is the property F0 asked for — pointing Chemclaw at the internal endpoint is a
-    config change, not a code edit — and it is why the two provider branches below share this
-    entry point rather than being reached directly.
+    budget). That is the property F0 asked for — pointing Chemclaw at a different endpoint is a
+    config change, not a code edit — and it is why every caller comes through this entry point
+    rather than constructing a client.
 
     Returns `Any` rather than `BaseChatModel` so this module stays the only one naming a provider
     class: a return annotation would put `langchain_core` in every caller's import graph for a type
@@ -58,43 +65,15 @@ def build_chat_model(task: str = "agent", *, effort: str | None = None) -> Any:
     Returns:
         A LangChain `BaseChatModel` ready for `create_agent(model=...)`. Construction only, no
         network call.
-
-    Raises:
-        RuntimeError: When the selected provider's credential is absent, naming what to set.
     """
     model = settings.model_routes.get(task)
-    # Resolved here rather than inside `_generation_options`, so that both provider branches and
-    # the failover instance below are built from the same answer. A profile that narrows effort
-    # must narrow the fallback endpoint too, or a degraded turn would quietly think harder than
-    # the profile asked for.
+    # Resolved here rather than inside `_generation_options`, so that both the primary and the
+    # failover instance below are built from the same answer. A profile that narrows effort must
+    # narrow the fallback endpoint too, or a degraded turn would quietly think harder than the
+    # profile asked for.
     chosen = effort if effort is not None else settings.llm_effort
-    # **The gate is here, at the seam, and putting it only in config was not enough.**
-    # `LlmSettings._effort_is_provider_scoped` refuses `llm_effort` on the Anthropic path at
-    # startup, which covers the *deployment* knob and nothing else: `AgentProfile.effort` is a
-    # different input, reaching this function as the `effort` argument without passing through any
-    # settings validator. Measured on the shipped code default (`llm_provider="anthropic"`,
-    # `llm_effort=None`), a profile carrying `effort: high` produced exactly the payload the
-    # validator exists to prevent — `output_config={'effort': 'high'}` plus
-    # `thinking={'type': 'adaptive'}`.
-    #
-    # So the check belongs where every path converges rather than on one of them. This is the only
-    # place that resolves the two inputs into one answer, and every client below is built from it.
-    #
-    # Raised rather than dropped. Dropping would leave a profile that says `effort: high` quietly
-    # getting default effort — a control that reads as one and is not, which this repository has a
-    # standing rule against and `agent/spend_cap.py` has its own scar from.
-    if chosen is not None and settings.llm_provider == "anthropic":
-        raise RuntimeError(
-            f"agent effort {chosen!r} was requested on llm_provider='anthropic', where "
-            "reasoning_effort enables extended thinking rather than setting an effort level "
-            "(measured: it adds thinking={'type': 'adaptive'}, which conflicts with "
-            "llm_temperature and draws from llm_max_tokens). Remove `effort:` from the profile, "
-            "or run against llm_provider='openai_compatible'."
-        )
-    if settings.llm_provider == "openai_compatible":
-        primary = _openai_compatible_model(model, effort=chosen)
-        return _with_failover(primary, model, effort=chosen)
-    return _anthropic_model(model, effort=chosen)
+    primary = _openai_compatible_model(model, effort=chosen)
+    return _with_failover(primary, model, effort=chosen)
 
 
 def _with_failover(primary: Any, model: str | None, *, effort: str | None = None) -> Any:
@@ -153,16 +132,10 @@ class _FallbackObserved(BaseCallbackHandler):
 
     def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> None:
         """Count and log one failover; never touch the call itself."""
-        provider = settings.llm_provider
-        record_metric(
-            lambda metrics: metrics.increment(
-                "chemclaw_model_fallbacks_total", labels={"provider": provider}
-            )
-        )
+        record_metric(lambda metrics: metrics.increment("chemclaw_model_fallbacks_total"))
         logger.warning(
-            "model failover: the primary %s endpoint did not answer, so this call was served by "
-            "the configured fallback endpoint",
-            provider,
+            "model failover: the primary gateway did not answer, so this call was served by the "
+            "configured fallback endpoint"
         )
 
 
@@ -184,16 +157,23 @@ def _failover_exceptions() -> tuple[type[BaseException], ...]:
     return (APIConnectionError, InternalServerError)
 
 
-# What a provider says when the request was fine and the *thread* was too long, in the two SDKs
-# this seam speaks to. Matched on the message because neither exposes it as a distinct class: it
-# arrives as an ordinary `BadRequestError`, which is how it came to be classified `("internal",
-# False)` by `api/runner._classify` — "internal error, do not retry" told to a chemist about the one
-# failure mode `agent/compaction.py` exists to prevent, and the one that a shorter question fixes.
+# What an endpoint says when the request was fine and the *thread* was too long. Matched on the
+# message because no SDK exposes it as a distinct class: it arrives as an ordinary
+# `BadRequestError`, which is how it came to be classified `("internal", False)` by
+# `api/runner._classify` — "internal error, do not retry" told to a chemist about the one failure
+# mode `agent/compaction.py` exists to prevent, and the one that a shorter question fixes.
+#
+# **`prompt is too long` is Anthropic's wording and it stays, with the SDK gone.** A gateway is a
+# proxy: when the vendor behind it refuses a thread, the vendor's own sentence is what arrives in
+# the 400 body, so the spellings this must recognise are the *vendors'* rather than the client
+# library's. Dropping it because no `anthropic` package is installed would confuse whose string
+# this is — and would silently reclassify the one failure mode compaction exists to prevent, on
+# every deployment whose gateway fronts that vendor.
 #
 # Substrings rather than a setting, because these are somebody else's wording rather than a
-# threshold: a deployment cannot tune what its provider writes. An unrecognised phrasing falls
+# threshold: a deployment cannot tune what its gateway relays. An unrecognised phrasing falls
 # through to `error`, which is the honest degradation — it is not counted as something it might not
-# be. `tests/test_agent_observability_model.py` pins the two live spellings.
+# be. `tests/test_agent_observability_model.py` pins the live spellings.
 _CONTEXT_LENGTH_MARKERS: tuple[str, ...] = (
     "context_length_exceeded",
     "maximum context length",
@@ -203,28 +183,31 @@ _CONTEXT_LENGTH_MARKERS: tuple[str, ...] = (
 
 
 @cache
-def _sdk_exceptions(module_name: str, *names: str) -> tuple[type[BaseException], ...]:
-    """The named exception classes from a provider SDK, or nothing when it is not installed.
+def _openai_exceptions(*names: str) -> tuple[type[BaseException], ...]:
+    """The named exception classes from the OpenAI SDK, skipping any this version does not define.
 
     Tolerant where `_failover_exceptions` is strict, and the asymmetry is the point: that function
     configures a *control* (which failures fail over), so a missing name must break the build. This
     one feeds a *label*, and a classifier that raised would replace the failure it was called to
-    describe. Both SDKs are asked because a process may be configured for either and each is an
-    optional dependency of the other's deployment.
-    """
-    import importlib
+    describe with an `AttributeError` about its own lookup — at the moment a model call has already
+    failed. A renamed class degrades that call's outcome to `error`, which is what
+    `tests/test_agent_observability_model.py` drives.
 
-    try:
-        module = importlib.import_module(module_name)
-    except ImportError:  # pragma: no cover - both SDKs are installed in this workspace
-        return ()
-    found = (getattr(module, name, None) for name in names)
+    There is no `try: import` here, and there used to be: this took a module name and asked both
+    provider SDKs, because a process might be configured for either. One gateway means one client
+    library, and `openai` is a hard dependency of `langchain-openai` — so the import-guard branch
+    was unreachable, wore a `# pragma: no cover`, and would have become live code the moment the
+    second SDK was uninstalled. Removing the second caller is what removed the pragma.
+    """
+    import openai
+
+    found = (getattr(openai, name, None) for name in names)
     return tuple(k for k in found if isinstance(k, type) and issubclass(k, BaseException))
 
 
 @cache
 def _failure_families() -> tuple[tuple[str, tuple[type[BaseException], ...]], ...]:
-    """The provider SDKs' failure taxonomy, most specific first — one table, both providers.
+    """The gateway client's failure taxonomy, most specific first.
 
     **The taxonomy was already known and simply not recorded.** `_failover_exceptions` proved it:
     this seam has always distinguished "the endpoint is down" from "the request is wrong", because
@@ -240,23 +223,11 @@ def _failure_families() -> tuple[tuple[str, tuple[type[BaseException], ...]], ..
     from a failed model call.
     """
     return (
-        (
-            "timeout",
-            _sdk_exceptions("openai", "APITimeoutError")
-            + _sdk_exceptions("anthropic", "APITimeoutError"),
-        ),
-        (
-            "rate_limited",
-            _sdk_exceptions("openai", "RateLimitError")
-            + _sdk_exceptions("anthropic", "RateLimitError"),
-        ),
+        ("timeout", _openai_exceptions("APITimeoutError")),
+        ("rate_limited", _openai_exceptions("RateLimitError")),
         # The failover set *is* the transport family — the same sentence read for a different
-        # purpose — plus the Anthropic SDK's twins, which have no failover to configure.
-        (
-            "transport",
-            _failover_exceptions()
-            + _sdk_exceptions("anthropic", "APIConnectionError", "InternalServerError"),
-        ),
+        # purpose, which is why it is imported rather than restated.
+        ("transport", _failover_exceptions()),
     )
 
 
@@ -287,129 +258,13 @@ def _is_context_length(exc: BaseException) -> bool:
 
     A `BadRequestError` first, so a message that merely quotes a context-length phrase — a chemist
     asking about context windows, echoed back in some other error — cannot be classified by its
-    words alone. `code` is read where the SDK sets one (OpenAI's `context_length_exceeded`);
-    Anthropic sets none, so the message is all there is.
+    words alone. `code` is read where it is set (OpenAI's `context_length_exceeded`); a gateway
+    relaying a vendor that sets none leaves the message as all there is.
     """
-    if not isinstance(
-        exc,
-        _sdk_exceptions("openai", "BadRequestError")
-        + _sdk_exceptions("anthropic", "BadRequestError"),
-    ):
+    if not isinstance(exc, _openai_exceptions("BadRequestError")):
         return False
     text = f"{getattr(exc, 'code', '') or ''} {exc}".lower()
     return any(marker in text for marker in _CONTEXT_LENGTH_MARKERS)
-
-
-class _CachingDisabled(AgentMiddleware):
-    """A middleware that does nothing, under the name of the one it keeps out.
-
-    `AnthropicPromptCachingMiddleware` has no "off" constructor argument — `min_messages_to_cache`
-    gates only the message-tail breakpoint, and the ones that actually appeared in the payload were
-    on the system prompt and the tool definitions. So refusing it means occupying its slot rather
-    than configuring it, and a bare `AgentMiddleware` overrides no hook and registers no tool: it is
-    inert by construction rather than by a body that happens to be empty.
-
-    Named for what it displaces rather than for itself: `_apply_custom_middleware` matches on
-    `.name`, so a placeholder under its own class name would land *beside* upstream's and change
-    nothing. `tests/test_prompt_caching.py` asserts the payload, which is the only place the
-    difference is visible.
-    """
-
-    @property
-    def name(self) -> str:
-        """Upstream's name, so this replaces its middleware instead of joining it."""
-        return "AnthropicPromptCachingMiddleware"
-
-
-def prompt_caching_middleware() -> list[Any]:
-    """The provider's prompt-caching middleware, or nothing — the second thing this seam decides.
-
-    **It lives here rather than beside the middleware chain because caching is provider-specific,
-    which is the same reason the chat-model class lives here.** Anthropic marks a cacheable prefix
-    with `cache_control: {"type": "ephemeral"}` breakpoints; the internal OpenAI-compatible endpoint
-    has no such parameter and would be handed a kwarg it does not understand. `langgraph_agent`
-    splices whatever this returns and stays provider-agnostic, exactly as it does for the model.
-    Keeping the `langchain_anthropic` import inside this function is also what
-    `tests/test_third_party_layering.py` allows: `("chemclaw.agent", "llm")` is a *function-scope*
-    row, so a module-level import here would fail the layering gate.
-
-    **What gets marked, and why that is the whole win.** Upstream's middleware sets three
-    breakpoints: the last block of the system prompt, the last tool definition, and — via a
-    top-level `cache_control` on the request — the message tail. The Anthropic wire format renders
-    `tools` → `system` → `messages`, so a breakpoint on the system prompt caches the tool schemas
-    with it, and those two are the part that is byte-identical for the life of a profile. The
-    conversation tail is not static, but the incremental breakpoint on it means each call reads the
-    prefix the previous call wrote, which is what makes a long tool loop cheap rather than only the
-    first hop of it. Four breakpoints is the API's limit; three is what this uses.
-
-    **Below the minimum cacheable prefix it degrades silently, and two shipped profiles are below
-    it.** The sentence that stood here said the minimum was "roughly 1,024 tokens" and the ADR
-    beside it said every prefix was "far above every model's minimum". Both came from the spec;
-    neither had been run. Measured on 2026-08-12 by bisecting the prefix to ±1 token and reading
-    `cache_creation_input_tokens`:
-
-    - `claude-sonnet-5` — **1,024**. The spec number, for the model `agent_model` defaults to.
-    - `claude-haiku-4-5` — **4,096**. Four times that, for the model the live probe lane pins.
-
-    So the floor is per-model and **not ordered by model size** — the smaller, cheaper model has the
-    higher one, which is the shape "not monotonic" was gesturing at and the direction that makes it
-    a trap. Against those floors the shipped prefixes (tools + system, which is what the breakpoint
-    covers) are: `default` 21,321 · `computation` 8,708 · `reporting` 7,490 · `evidence` 5,803 ·
-    `design` 5,625 · `property-lookup` 3,092 · `safety` 2,933. The last two are below haiku's floor
-    and above sonnet's, so **whether a narrow profile caches is decided by `model_routes`, not by
-    the profile** — and on haiku those two pay full price on every call, confirmed by sending each
-    profile's real payload twice and getting `cache_read` and `cache_creation` of zero both times
-    while `computation` wrote 8,734 and read all 8,734 back.
-
-    Under the floor the breakpoint is accepted, no entry is created, both counters come back zero,
-    and the request is answered normally at full price. There is still no error to handle, and
-    still nothing here counts tokens to pre-empt one — that part of the original reasoning holds
-    and is why the numbers above live in a docstring and a test rather than in an `if`: a threshold
-    copied into the code would be a second, staler statement of a number only the provider knows,
-    and this one moved by 4× between two models of the same generation. What makes the difference
-    *visible* rather than assumed is the ledger — `api/runner_usage.graph_usage_tokens` reads
-    `cache_read`/`cache_creation` off every chunk and `turn_costs` stores both columns — and, per
-    profile, `chemclaw_cache_write_tokens_total{profile=...}`: a profile with input tokens and no
-    cache series is one below the floor, which is the reading an operator can act on.
-
-    **Two gates, because they answer different questions.** `settings.llm_provider` decides whether
-    the *deployment* is on Anthropic at all, so the production `openai_compatible` target gets an
-    empty list and never imports `langchain_anthropic` — the guarantee is structural rather than
-    resting on somebody else's isinstance check. `unsupported_model_behavior="ignore"` covers the
-    other case: an Anthropic-configured deployment handed an injected model (every test that passes
-    `build_langgraph_agent(model=fake)`), where upstream's default would emit a `UserWarning` per
-    model call for a situation that is entirely expected.
-
-    **Off has to be spelled, because `create_deep_agent` turns it on.** Upstream's
-    `append_prompt_caching_middleware` composes an `AnthropicPromptCachingMiddleware` whenever the
-    model is an Anthropic one, so returning `[]` no longer means "no caching" — it means "whatever
-    upstream decided". That was measured rather than reasoned about: with `llm_prompt_caching=False`
-    the request payload still carried `cache_control` breakpoints, and the test asserting their
-    absence is what caught it. So the disabled path now returns a *named placeholder* that occupies
-    upstream's slot and does nothing, on the same argument and by the same `.name` splice as
-    `compaction.disabled_summarizer`. This is the second default the harness supplies that this seam
-    must actively refuse; the rule is that a decision belonging to `settings` may not be made by an
-    upstream default, in either direction.
-
-    The empty list is still right when the provider is not Anthropic: upstream composes nothing
-    there either, so there is no slot to occupy and no `langchain_anthropic` import to make.
-
-    Returns:
-        A one-element list on the Anthropic path — the real middleware when caching is on, an inert
-        placeholder holding its name when it is off — and `[]` on every other provider. The list
-        shape is what `build_langgraph_agent` splices, matching its three other middleware groups.
-    """
-    if settings.llm_provider != "anthropic":
-        return []
-    if not settings.llm_prompt_caching:
-        return [_CachingDisabled()]
-    from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
-
-    # `ttl` is left at upstream's 5-minute default deliberately. The 1-hour cache doubles the write
-    # premium (2x rather than 1.25x) to buy survival across idle gaps, which is a trade a
-    # deployment with measured traffic can make and this seam cannot make for it — and a second
-    # setting with no reader is what `agent/compaction.py` records the cost of.
-    return [AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore")]
 
 
 def _openai_compatible_model(
@@ -475,51 +330,27 @@ def _openai_compatible_model(
     )
 
 
-def _anthropic_model(model: str | None = None, *, effort: str | None = None) -> Any:
-    """`ChatAnthropic` on the dev path, with the same eager credential preflight.
-
-    The preflight is kept for the reason `_anthropic_client` gives: a missing key should fail here,
-    naming what to set, rather than as an opaque 401 on the first model call — which under the
-    graph engine would surface mid-stream, after the turn has already emitted events.
-    """
-    _require_anthropic_key()
-    from langchain_anthropic import ChatAnthropic
-
-    return ChatAnthropic(
-        model_name=model or settings.agent_model,
-        timeout=settings.llm_timeout_seconds,
-        max_retries=settings.llm_max_retries,
-        stop=None,
-        **_generation_options(effort),
-    )
-
-
 def _generation_options(effort: str | None = None) -> dict[str, Any]:
     """The deployment's generation caps, as constructor kwargs both providers accept.
 
-    **Shared because a per-response cap that applies on one provider and not the other is not a
-    cap.** These were lost in the rebuild — the agent builder that used to thread them was deleted
-    and neither replacement passed them on — and the failure was silent in the expensive direction:
-    with `llm_max_tokens=4096` configured, the Anthropic model resolved to the library's own
-    default, measured at 128000. A deployment that had bounded its worst-case answer no longer had.
+    **Every model call gets them, and losing them once was silent in the expensive direction.**
+    They went missing in the LangGraph rebuild — the agent builder that used to thread them was
+    deleted and neither replacement passed them on — and with `llm_max_tokens=4096` configured the
+    client resolved to its library's own default, measured at 128000. A deployment that had bounded
+    its worst-case answer no longer had.
 
     `temperature` is omitted rather than sent as `None` when unset. That is the rule
     `core/config/llm.py` records having broken every turn once: some OpenAI-compatible endpoints
     reject an explicit null, so "unset" has to mean *absent from the request*, not present-and-null.
 
-    **`reasoning_effort` is here, and it is scoped to one provider by config rather than by a
-    branch in this function.** The first version of this said the two clients "both take it, so
-    there is no translation to write", on the strength of both *accepting* the kwarg. They accept
-    it and they do not mean the same thing by it — measured through `_get_request_payload` rather
-    than off the constructed object, which is the check that would have caught it:
-    `langchain-anthropic` folds it into `output_config.effort` and injects
-    `thinking={'type': 'adaptive'}`, i.e. extended thinking, with the `temperature` conflict and
-    the `max_tokens` draw that implies.
-
-    So `LlmSettings._effort_is_provider_scoped` refuses the setting on the Anthropic path and this
-    function stays a plain pass-through for the provider where the name means what it says. The
-    lesson is the general one: an attribute that round-trips on a client proves the constructor
-    accepted a kwarg, and nothing at all about what reaches the wire.
+    **`reasoning_effort` is a plain pass-through, and it took two guards to get here.** With two
+    clients it was scoped to one of them: `langchain-anthropic` folded the same kwarg into
+    `output_config.effort` and injected `thinking={'type': 'adaptive'}`, i.e. extended thinking,
+    with the `temperature` conflict and the `max_tokens` draw that implies — so a setting and a
+    profile field that read as one knob were two parameters wearing one name. Both guards went with
+    the second client. The lesson survives them and is the general one: an attribute that
+    round-trips on a client proves the constructor accepted a kwarg, and nothing at all about what
+    reaches the wire, which is why `tests/test_llm_effort.py` reads the request payload.
 
     The same absent-when-unset rule, and it binds harder here: a rejected parameter is a 400, and
     `_failover_exceptions` deliberately does not fail those over.
@@ -538,18 +369,6 @@ def _generation_options(effort: str | None = None) -> dict[str, Any]:
     if effort is not None:
         options["reasoning_effort"] = effort
     return options
-
-
-def _require_anthropic_key() -> None:
-    """Fail with the one message both Anthropic paths owe a misconfigured deployment."""
-    import os
-
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY is not set — the Anthropic chat-client path needs it. "
-            "Export it, set CHEMCLAW_LLM_PROVIDER=openai_compatible for the internal endpoint, "
-            "or pass an explicit model to build_langgraph_agent (as the tests do)."
-        )
 
 
 @cache
@@ -574,20 +393,12 @@ def _tls_http_client() -> Any | None:
 
     Process-scoped, so the pool binds to the first loop that uses it. Production runs one loop.
     """
-    if not settings.llm_tls_ca_bundle:
+    transport = private_ca_transport(settings.llm_tls_ca_bundle)
+    if transport is None:
         return None
-    import ssl
-
     import httpx
 
-    # An `SSLContext`, not `verify="<path>"`: httpx deprecated the string form ("`verify=<str>` is
-    # deprecated. Use `verify=ssl.create_default_context(cafile=...)`"), and building the context
-    # here is also the only form that says what the bundle *is* — a CA file to verify the peer
-    # against, rather than a path httpx has to guess the meaning of.
-    return httpx.AsyncClient(
-        verify=ssl.create_default_context(cafile=settings.llm_tls_ca_bundle),
-        # Never inherit an ambient proxy: HTTPS_PROXY/ALL_PROXY set on the pod would otherwise
-        # redirect every prompt, completion and the Authorization bearer to a host of the env
-        # setter's choosing, past the private-CA pinning above (the proxy re-terminates TLS).
-        trust_env=False,
-    )
+    # What pins the CA and refuses an ambient proxy is `core/http.private_ca_transport`, stated
+    # once for both LLM seams: the embedding client reaches the same gateway with the same bundle
+    # and had written the same two lines. Only the class differs, and only the caller knows it.
+    return httpx.AsyncClient(**transport)

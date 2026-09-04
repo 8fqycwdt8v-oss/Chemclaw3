@@ -153,14 +153,47 @@ def test_the_context_length_error_is_finally_its_own_outcome() -> None:
     assert classify_model_failure(anthropic_shape) == "context_length"
 
 
+def test_a_renamed_sdk_class_degrades_the_label_instead_of_raising() -> None:
+    """`_openai_exceptions` is deliberately tolerant, and nothing exercised that until now.
+
+    It is the asymmetry with `_failover_exceptions`, which imports its classes by name so a rename
+    upstream breaks the build: that function configures a *control*, this one feeds a *label*. A
+    classifier that raised would replace the failure it was called to describe with an
+    `AttributeError` about its own lookup, at the moment a model call has already failed — and a
+    turn would surface a name error instead of "the endpoint rate-limited you".
+
+    The tolerance used to be a `try: import` around a second, optional SDK, carrying a
+    `# pragma: no cover`. That branch went with the second provider
+    (`D-2026-09-04-a-gateway-is-the-only-provider`) — `openai` is a hard dependency, so it was
+    unreachable — and this is the half of it that is still real, driven rather than pragma'd.
+    """
+    from chemclaw.agent.llm_provider import _openai_exceptions
+
+    _openai_exceptions.cache_clear()
+    try:
+        assert _openai_exceptions("RateLimitError")
+        # The shape of an upstream rename: the name simply is not there any more.
+        assert _openai_exceptions("APIRateLimitedErrorRenamedUpstream") == ()
+        # And a name that resolves to something that is not an exception class is skipped too,
+        # rather than reaching an `isinstance` call that would raise on it.
+        assert _openai_exceptions("__name__") == ()
+    finally:
+        _openai_exceptions.cache_clear()
+
+
 def test_an_unrecognised_failure_is_error_rather_than_a_guess() -> None:
     """A 401 must not be laundered into an outage — the label space stays meaningful."""
     assert classify_model_failure(_openai_error("AuthenticationError", 401, "bad key")) == "error"
     assert classify_model_failure(ValueError("something else")) == "error"
 
 
-def test_a_model_call_is_counted_and_timed_by_provider() -> None:
-    """`chemclaw_model_calls_total{provider,outcome}` — the series that did not exist."""
+def test_a_model_call_is_counted_and_timed() -> None:
+    """`chemclaw_model_calls_total{outcome}` — the series that did not exist.
+
+    No `provider` label: the collapse to one gateway left it with one possible value
+    (`D-2026-09-04-a-gateway-is-the-only-provider`), and a label with one value is cardinality that
+    answers nothing.
+    """
     before = METRICS.observations("chemclaw_model_call_duration_seconds")[0]
 
     async def _handler(request: ModelRequest[Any]) -> Any:

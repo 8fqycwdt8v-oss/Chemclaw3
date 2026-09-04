@@ -63,6 +63,23 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **The LLM gateway inherits an ambient proxy unless a private CA bundle is configured** — [S],
+  found while collapsing the provider seam (`D-2026-09-04-a-gateway-is-the-only-provider`).
+  `agent/llm_provider._tls_http_client` returns `None` when `llm_tls_ca_bundle` is empty, which
+  leaves `ChatOpenAI` to build its own `httpx` client — and that client reads `HTTPS_PROXY` /
+  `ALL_PROXY` from the environment. So on a publicly-trusted gateway (no bundle), an env var set on
+  the pod redirects every prompt, completion and `Authorization` bearer to a host of the setter's
+  choosing. `core/http.private_ca_transport` states `trust_env=False` and both LLM seams take it,
+  but only on the bundle branch; `evals/live_judge.py` used to pass `trust_env=False`
+  unconditionally for its own client and lost that when it moved onto the seam, which is how this
+  surfaced. The fix is one line — hand a `trust_env=False` client in on the no-bundle branch too —
+  and it is **not** free: `trust_env=False` also stops httpx reading `SSL_CERT_FILE` /
+  `SSL_CERT_DIR`, so a deployment relying on an env-supplied trust store would break. That is a
+  behavioural change for every deployment behind a corporate proxy and wants its own ADR rather
+  than riding along with the collapse. `core/netguard` bounds the *destination host* and would not
+  see this: a proxy is dialled at its own address, which a deployment that configures one has
+  legitimately allowlisted.
+
 - [ ] **A standing plan approval authorizes any state-changing tool, not the plan's steps** — [L],
   from the 2026-08 security review (proven live). `plan_gate.enforce_plan_approval` refuses a
   state-changing call unless an approval exists for the current plan's identity — `plan_identity`,
@@ -739,10 +756,15 @@ only holds defects can only ever restore the system to what it already intended 
       day's verifier-margin run spent ~120 calls through it), so present-and-rejected is a *state*
       of this environment rather than a fact about it, and the worse case remains the stale one —
       it reads as a defect rather than as a missing credential.
-      `tests/test_prompt_caching.py` probes reachability and skips with a reason naming which case
-      it is, so the suite is honest about it. The *live* half of the eval plan (the bucket-C control
-      arm, any external benchmark, grading any probe on the model's judgement) needs the working
-      state and nothing else — probe first (`printenv 'API-KEY'`, one cheap call), then run the
+      **Nothing in the suite probes it any more**: `tests/test_prompt_caching.py` did, skipping with
+      a reason that named which case it was, and that file went with the prompt-caching mechanism
+      when the provider concept was removed (`D-2026-09-04-a-gateway-is-the-only-provider`). The
+      key is also no longer usable by `src/` directly — every model call goes to the gateway
+      `CHEMCLAW_LLM_BASE_URL` names, so this credential is only a credential *for* a gateway
+      (`infra/live/e2e-full-stack/up.sh` maps it onto `CHEMCLAW_LLM_API_KEY` when one is
+      configured). The *live* half of the eval plan (the bucket-C control arm, any external
+      benchmark, grading any probe on the model's judgement) needs the working state and nothing
+      else — probe first (`printenv 'API-KEY'`, one cheap call **through a gateway**), then run the
       measurement in the same session, because tomorrow's state is not evidence about today's.
 
 - [ ] **Memory records; it does not change what the next turn does** — [L], and it needs an ADR

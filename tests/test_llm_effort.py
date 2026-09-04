@@ -1,21 +1,27 @@
-"""The reasoning-effort knob reaches the constructed client, on both providers, and is absent unset.
+"""The reasoning-effort knob reaches the constructed client, and is absent from the request unset.
 
-**Asserted on the model object rather than on a captured kwargs dict**, which is the house pattern
-in `tests/test_llm_provider.py` and here it is load-bearing rather than stylistic: both
-`ChatOpenAI` and `ChatAnthropic` are `extra="ignore"`, so a kwarg they stopped accepting — a
-rename upstream, a client swap — would be **dropped in silence**. A test that asserted "we passed
-`reasoning_effort=`" would stay green through exactly that failure while every turn ran at the
-endpoint's default effort. Asking the constructed object what its effort *is* cannot.
+**Asserted on the request payload rather than on a captured kwargs dict**, which is the house
+pattern in `tests/test_llm_provider.py` and here it is load-bearing rather than stylistic:
+`ChatOpenAI` is `extra="ignore"`, so a kwarg it stopped accepting — a rename upstream, a client
+swap — would be **dropped in silence**, as would one a gateway does not understand. A test that
+asserted "we passed `reasoning_effort=`" would stay green through exactly that failure while every
+turn ran at the endpoint's default effort.
 
 The absence case is the other half and is not symmetric with it: "unset" has to mean the key is
 missing from the request rather than present and null, because some OpenAI-compatible endpoints
 reject an explicit null — the rule `core/config/llm.py` records having broken every turn once.
+
+**Half this file used to be about a refusal, and the refusal is gone.** Two guards — a settings
+validator and a check inside `build_chat_model` — existed because `langchain-anthropic` turned the
+same kwarg into extended thinking. With one gateway there is one meaning
+(`D-2026-09-04-a-gateway-is-the-only-provider`), so `effort` is unconditionally usable and the
+tests that drove the refusal are deleted rather than inverted. What survives from them is the
+*method*: read the payload, never the attribute.
 """
 
 from typing import Any
 
 import pytest
-from pydantic import SecretStr, ValidationError
 
 from chemclaw.agent.llm_provider import build_chat_model
 from chemclaw.agent.profiles import AgentProfile
@@ -24,28 +30,20 @@ from chemclaw.core.config.llm import LlmSettings
 
 
 def _openai(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point the seam at the shipped provider — an internal OpenAI-compatible endpoint."""
-    monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
+    """Point the seam at a gateway that is not the local mock."""
     monkeypatch.setattr(settings, "llm_base_url", "http://internal-llm.invalid/v1")
     monkeypatch.setattr(settings, "llm_model", "gpt-oss")
 
 
-def _anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point the seam at the dev provider, with the credential its preflight demands."""
-    monkeypatch.setattr(settings, "llm_provider", "anthropic")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-
-
-def test_the_configured_effort_reaches_the_wire_on_the_provider_that_supports_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_configured_effort_reaches_the_wire(monkeypatch: pytest.MonkeyPatch) -> None:
     """Asserted on the **request payload**, not on the constructed object.
 
     The first version of this file asserted `model.reasoning_effort == "high"` and called that
-    proof the feature worked. It is not: both clients are `extra="ignore"` pydantic models, so the
+    proof the feature worked. It is not: `ChatOpenAI` is an `extra="ignore"` pydantic model, so the
     attribute says the constructor accepted a kwarg and says nothing about what is sent. That gap
-    is exactly where the defect this test now guards lived — the same attribute assertion passed on
-    Anthropic while the wire carried `output_config` plus injected extended thinking.
+    is where a real defect lived — the same attribute assertion passed against the second client
+    this seam used to have, while the wire carried `output_config` plus injected extended thinking.
+    A gateway that silently ignores the parameter is the same gap, one hop further out.
 
     `_default_params` is what `ChatOpenAI` builds its request from, so this reads the payload the
     endpoint would receive.
@@ -73,64 +71,6 @@ def test_an_unset_effort_leaves_the_parameter_off_the_request(
     params = build_chat_model()._default_params
 
     assert params.get("reasoning_effort") is None
-
-
-def test_effort_is_refused_on_anthropic_where_it_means_extended_thinking() -> None:
-    """The config refuses the combination at startup rather than at the first turn.
-
-    **What the refusal is protecting against, measured rather than reasoned:** against
-    `langchain-anthropic`, `reasoning_effort="high"` renders as `output_config={'effort': 'high'}`
-    *and* `thinking={'type': 'adaptive', 'display': 'summarized'}`. That is extended thinking, not
-    an effort level — and it cannot be combined with a set `temperature` (a 400, which is not
-    failed over, so every turn fails) and draws its tokens from `llm_max_tokens`.
-
-    Constructed rather than monkeypatched, because a `@model_validator` runs at construction and
-    `setattr` on a live settings object never consults it — which is why the rest of this file
-    cannot cover this and a test that patched the singleton would prove nothing.
-    """
-    with pytest.raises(ValidationError, match="only supported on"):
-        LlmSettings(llm_provider="anthropic", llm_effort="high")
-
-
-def test_the_anthropic_payload_is_why_that_refusal_exists() -> None:
-    """Pins the upstream behaviour the refusal is written against, so a change is visible.
-
-    If `langchain-anthropic` stops injecting thinking for this model, this test goes red and the
-    refusal can be revisited — which is the point of asserting somebody else's behaviour rather
-    than only our reaction to it. The same shape `tests/test_upstream_surface.py` uses for every
-    other coupling to an upstream promise.
-
-    **The injection is model-gated, not universal**, which is why the model name here is pinned
-    rather than incidental: upstream conditions it on the model profile advertising an `xhigh`
-    reasoning level, so `claude-sonnet-4` and `claude-3-5-sonnet` get a bare `output_config` and no
-    thinking at all. That makes this assertion sensitive to a bundled model-table refresh as well
-    as to a code change — which is worth knowing when it goes red, and is why the failure message
-    says so.
-    """
-    from langchain_anthropic import ChatAnthropic
-
-    # `max_tokens` and `reasoning_effort` are pydantic field aliases upstream does not expose to a
-    # type checker, which is itself part of the point: the kwarg surface is not statically known,
-    # so what a client accepts has to be measured rather than trusted.
-    client = ChatAnthropic(  # type: ignore[call-arg]
-        model_name="claude-sonnet-5",
-        api_key=SecretStr("x"),
-        max_tokens=4096,
-        stop=None,
-        reasoning_effort="high",
-    )
-    payload = client._get_request_payload([("user", "hi")])
-
-    assert payload["output_config"] == {"effort": "high"}
-    # `.get` twice, because the interesting failure is `thinking` being **absent** — and
-    # `payload["thinking"]` would die on `KeyError` in exactly that case, so the message explaining
-    # what to do about it would never print. A test whose diagnostic is unreachable in the one
-    # scenario it was written for is a test that reports the wrong thing at the worst moment.
-    assert payload.get("thinking", {}).get("type") == "adaptive", (
-        "upstream no longer injects extended thinking for this model — the injection is gated on "
-        "the model profile's reasoning levels, so this can change from a model-table refresh as "
-        "well as from a behaviour change. `build_chat_model`'s refusal can be revisited."
-    )
 
 
 def test_a_profile_s_effort_beats_the_deployment_s(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,7 +142,7 @@ def test_the_profile_field_and_the_settings_field_accept_the_same_set() -> None:
 def test_a_misspelled_effort_value_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """A typo is a loud error, not a silently ignored knob.
 
-    Both clients are `extra="ignore"` and `ChatOpenAI` types the field `str | None`, so nothing
+    `ChatOpenAI` is `extra="ignore"` and types the field `str | None`, so nothing
     downstream would object to `"hihg"` — it would reach the endpoint and come back a 400 that is
     not failed over, on every turn. The `Literal` is what turns that into a refusal at load time.
     """
@@ -210,43 +150,27 @@ def test_a_misspelled_effort_value_is_refused(monkeypatch: pytest.MonkeyPatch) -
         AgentProfile(name="typo", effort="hihg")  # type: ignore[arg-type]
 
 
-def test_a_profile_cannot_smuggle_effort_onto_the_anthropic_path(
+def test_effort_is_no_longer_refused_anywhere_and_reaches_the_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The bypass the config validator alone left open.
+    """The widening this collapse bought, asserted on the wire rather than announced in a comment.
 
-    **A settings validator guards one of two inputs.** `LlmSettings._effort_is_provider_scoped`
-    refuses `CHEMCLAW_LLM_EFFORT` on the Anthropic path at construction — and `AgentProfile.effort`
-    never passes through it, because a profile is a YAML file resolved per agent rather than a
-    settings field. Measured against the shipped code default (`llm_provider="anthropic"`,
-    `llm_effort=None`, so the validator is satisfied), a profile carrying `effort: high` built a
-    `ChatAnthropic` whose payload was `output_config={'effort': 'high'}` plus
-    `thinking={'type': 'adaptive', 'display': 'summarized'}` — exactly what the validator exists to
-    prevent, reached by the other door.
+    Two guards used to refuse a non-`None` effort: `LlmSettings._effort_is_provider_scoped` for the
+    deployment setting, and a `RuntimeError` inside `build_chat_model` for `AgentProfile.effort`,
+    which never passes through a settings validator. Both existed because `langchain-anthropic`
+    folded the kwarg into `output_config` *and* injected `thinking={'type': 'adaptive'}` — a
+    different feature, with a `temperature` conflict and a claim on `llm_max_tokens`.
 
-    So the gate moved to `build_chat_model`, where the deployment setting and the profile override
-    are resolved into one answer and every client is built from it.
+    With one client there is one meaning, so a profile's effort now simply arrives. Asserted from
+    *both* inputs, because the two guards were separate and their removal has to be too — and on
+    `_default_params`, because a gateway that does not understand `reasoning_effort` drops it in
+    silence and the attribute would say nothing about that.
     """
-    monkeypatch.setattr(settings, "llm_provider", "anthropic")
+    _openai(monkeypatch)
     monkeypatch.setattr(settings, "llm_effort", None)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
-    with pytest.raises(RuntimeError, match="extended thinking"):
-        build_chat_model(effort="high")
+    # The profile input — the one the settings validator could never see.
+    assert build_chat_model(effort="high")._default_params["reasoning_effort"] == "high"
 
-
-def test_the_anthropic_path_is_untouched_when_no_effort_is_asked_for(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The guard bites only on the combination — the dev path is otherwise exactly as it was.
-
-    A refusal that also broke every ordinary Anthropic turn would be a worse defect than the one it
-    closes, and `pytest.raises` on the line above cannot show that it does not.
-    """
-    monkeypatch.setattr(settings, "llm_provider", "anthropic")
-    monkeypatch.setattr(settings, "llm_effort", None)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-
-    model = build_chat_model()
-
-    assert getattr(model, "reasoning_effort", None) is None
+    # And the deployment input, which the validator used to reject at construction.
+    assert LlmSettings(llm_effort="high").llm_effort == "high"

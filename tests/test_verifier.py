@@ -926,7 +926,6 @@ def _openai_compatible_client(monkeypatch: pytest.MonkeyPatch, base_url: str) ->
     """
     from chemclaw.agent.llm_provider import build_chat_model
 
-    monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
     monkeypatch.setattr(settings, "llm_base_url", base_url)
     monkeypatch.setattr(settings, "llm_model", "internal-test-model")
     monkeypatch.setattr(settings, "llm_api_key", SecretStr("test-key"))
@@ -1180,19 +1179,30 @@ def test_the_probe_is_a_no_op_while_verification_is_off(monkeypatch: pytest.Monk
     The injected client would fail on any use, which is what proves the probe never touched it.
     """
     monkeypatch.setattr(settings, "verifier_enabled", False)
-    monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
     asyncio.run(require_verifier_capability(client=object()))
 
 
-def test_the_probe_is_a_no_op_on_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Anthropic is unaffected: no `response_format` seam, so nothing to probe.
+def test_the_probe_now_runs_on_every_deployment_that_enables_the_judge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second half of the skip condition is gone, and that widens a control.
 
-    A startup must not buy a model call to establish a failure mode that does not exist on that
-    provider.
+    It read `settings.llm_provider != "openai_compatible"`, so an Anthropic-configured deployment
+    with the judge on never probed — correctly, because `ChatAnthropic` has no `response_format`
+    seam to misbehave. With one gateway there is no such deployment shape left
+    (`D-2026-09-04-a-gateway-is-the-only-provider`), so `verifier_enabled` is the whole condition.
+
+    Asserted by driving the probe with a client that *raises*: if the guard still skipped, this
+    would pass silently, which is exactly how a no-op control reads as a working one.
     """
+
+    class _Explodes:
+        def with_structured_output(self, *_: object, **__: object) -> object:
+            raise AssertionError("the probe must reach the client")
+
     monkeypatch.setattr(settings, "verifier_enabled", True)
-    monkeypatch.setattr(settings, "llm_provider", "anthropic")
-    asyncio.run(require_verifier_capability(client=object()))
+    with pytest.raises(RuntimeError):
+        asyncio.run(require_verifier_capability(client=_Explodes()))
 
 
 def test_the_probe_passes_a_server_that_honours_response_format(

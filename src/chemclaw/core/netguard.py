@@ -180,13 +180,13 @@ def derive_allowed(settings: Any) -> frozenset[str]:
         if host:
             hosts.add(host)
 
+    # The two model destinations, and there is no third: with the provider concept gone
+    # (`D-2026-09-04-a-gateway-is-the-only-provider`) no vendor host is ever added here. A branch
+    # used to put `api.anthropic.com` on the allowlist whenever `llm_provider == "anthropic"` —
+    # which was the shipped default — so the guard that exists to bound where prompts can go was
+    # opening the exact destination the exfiltration path used.
     add(settings.llm_base_url)
     add(settings.llm_fallback_base_url)
-    # The bare `anthropic` provider dials the public API; allow it only when that is the configured
-    # provider (the loopback/dev path — a network-exposed deployment on it is refused at
-    # boot by `_refuse_public_llm_exposure`). An `openai_compatible` deployment never reaches it.
-    if getattr(settings, "llm_provider", "") == "anthropic":
-        hosts.add("api.anthropic.com")
     add(settings.postgres_dsn, dsn=True)
     if getattr(settings, "postgres_migration_dsn", ""):
         add(settings.postgres_migration_dsn, dsn=True)

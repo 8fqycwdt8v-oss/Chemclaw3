@@ -81,45 +81,6 @@ class TurnUsage:
         self.unreadable += other.unreadable
 
 
-def _cache_creation(cache: Mapping[str, Any]) -> int:
-    """Tokens written to the prompt cache, under whichever of the two keys the provider used.
-
-    **`cache_creation` alone is wrong, and it was wrong on every real cached call.** LangChain's
-    Anthropic reader publishes cache writes twice over: once as the flat `cache_creation`, and once
-    broken out per TTL as `ephemeral_5m_input_tokens`/`ephemeral_1h_input_tokens` — and when the
-    per-TTL breakdown is present it **zeroes the flat key** to avoid double counting. Anthropic
-    returns that breakdown, so the flat key is zero exactly when a write happened.
-
-    Measured live on `claude-haiku-4-5`, first call over a 21,325-token cached prefix:
-    `{"cache_read": 0, "cache_creation": 0, "ephemeral_5m_input_tokens": 21325}`. Reading only the
-    flat key booked all 21,325 of them as full-price `input`, left `cache_write` at 0, and so wrote
-    a `turn_costs` row saying this deployment has never written a cache while it was writing one on
-    every cold prefix. A write is priced at 1.25x input, so the row understated the call and the
-    counter that exists to show caching working showed it never happening.
-
-    `specific or flat` rather than `specific + flat` mirrors upstream's own rule for the same
-    quantity — it is how `input_tokens` was computed, so this can never disagree with the total
-    `graph_usage_tokens` subtracts it from.
-
-    5-minute and 1-hour writes are summed into one number because `turn_costs` has one
-    `cache_write_tokens` column. They are priced differently (1.25x vs 2x), so a deployment that
-    ever runs both TTLs at once wants a column per TTL; nothing here sets a TTL other than the
-    5-minute default, so that split would be a migration for a distinction no caller can currently
-    make.
-
-    Args:
-        cache: One chunk's `input_token_details` mapping.
-
-    Returns:
-        Tokens written to cache this chunk, or 0.
-    """
-    per_ttl = sum(
-        int(cache.get(key) or 0)
-        for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
-    )
-    return per_ttl or int(cache.get("cache_creation") or 0)
-
-
 def graph_usage_tokens(chunk: Any) -> TurnUsage:
     """What one streamed message chunk reports about tokens, read off its `usage_metadata` (M8).
 
@@ -127,14 +88,25 @@ def graph_usage_tokens(chunk: Any) -> TurnUsage:
     in tests — simply meters 0; the turn caps still bind. `total` falls back to input+output when
     the provider omits it.
 
-    **Cache counts are subtracted from `input`.** LangChain reports `input_tokens` *including* the
-    cached tokens and then breaks them out again under `input_token_details`, so reading both
-    without adjusting would count every cached token twice — once cheap, once expensive — and
-    overstate the priced input of exactly the deployments that cache best. That is also why the
-    four dimensions are kept apart at all: a cache read is roughly an order of magnitude cheaper
-    than a fresh input token, so one undifferentiated total cannot answer what a deployment costs
-    (REV-10, D-144). Which key a *write* arrives under is `_cache_creation`'s problem, and it is
-    not the obvious one.
+    **Cache counts are subtracted from `input`, and that survived the collapse to one gateway
+    because it is the gateway client's arithmetic too.** `langchain_openai._create_usage_metadata`
+    sets `input_tokens = prompt_tokens` and then breaks the cached share out again under
+    `input_token_details.cache_read`, and OpenAI defines `prompt_tokens` as *including* cached
+    tokens — so reading both without adjusting would count every cached token twice, once cheap and
+    once expensive, and overstate the priced input of exactly the deployments that cache best. That
+    is also why the four dimensions are kept apart at all: a cache read is roughly an order of
+    magnitude cheaper than a fresh input token, so one undifferentiated total cannot answer what a
+    deployment costs (REV-10, D-144).
+
+    **A `_cache_creation` helper stood beside this and is gone with the second provider**
+    (`D-2026-09-04-a-gateway-is-the-only-provider`). It read `ephemeral_5m_input_tokens` /
+    `ephemeral_1h_input_tokens` before the flat `cache_creation`, because `langchain_anthropic`
+    publishes a cache write under both and **zeroes the flat key** when the per-TTL breakdown is
+    present — so the obvious read booked 21,325 written tokens as full-price input on every cold
+    prefix. That is a fact about a reader this repository no longer installs: `ChatOpenAI` publishes
+    the flat key only, which `tests/test_upstream_surface.py` pins. Expect the value to be 0 on most
+    gateways — an OpenAI-compatible endpoint caches implicitly and many report no write count at
+    all — and read `chemclaw_cache_read_tokens_total` for whether caching is happening.
 
     **`unreadable` is the difference between "nobody reported usage" and "usage was reported and we
     could not read it".** Duck-typing on a provider's key names is the right shape — a provider
@@ -155,7 +127,7 @@ def graph_usage_tokens(chunk: Any) -> TurnUsage:
     nested = details.get("input_token_details")
     cache = nested if isinstance(nested, Mapping) else {}
     cache_read = int(cache.get("cache_read") or 0)
-    cache_write = _cache_creation(cache)
+    cache_write = int(cache.get("cache_creation") or 0)
     reported_input = int(details.get("input_tokens") or 0)
     total = details.get("total_tokens")
     if total is None:

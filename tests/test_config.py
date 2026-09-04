@@ -63,14 +63,40 @@ def test_skills_dirs_splits_the_path_list() -> None:
     assert trailing.skills_dirs == ["skills"]
 
 
-def test_llm_provider_defaults_to_anthropic() -> None:
-    """The default provider is the dev path, so the config singleton is valid with no endpoint."""
+def test_the_default_gateway_is_the_mock_on_this_machine() -> None:
+    """A fresh checkout is valid with no endpoint and no credential — and cannot leave the host.
+
+    The previous default was `llm_provider="anthropic"` with an empty `llm_base_url`, which meant a
+    process that configured nothing sent every prompt to the public vendor API. This one dials
+    `cli/mock_llm`'s port on loopback, so the worst an unconfigured deployment can do is be refused
+    a connection — loudly, on the first turn, rather than quietly and outbound
+    (`D-2026-09-04-a-gateway-is-the-only-provider`). A non-loopback bind on this default is refused
+    at boot by `api/middleware._refuse_unconfigured_llm_gateway`.
+
+    There is no `llm_provider` field to assert; that is the point, and
+    `test_no_provider_field_survives` is what says so.
+    """
+    from chemclaw.cli.mock_llm import MOCK_PORT
+
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert settings.llm_provider == "anthropic"
-    # Unset, not 0.0: the default `agent_model` rejects an explicit temperature outright, so a
+    assert settings.llm_base_url == f"http://127.0.0.1:{MOCK_PORT}/v1"
+    assert settings.llm_model == "mock"
+    # Unset, not 0.0: current frontier models reject an explicit temperature outright, so a
     # default of 0.0 made the shipped config fail every live turn with a 400.
     assert settings.llm_temperature is None
     assert settings.llm_max_tokens == 4096
+
+
+def test_no_provider_field_survives() -> None:
+    """The concept is gone, not narrowed to one value — asserted, because that was the decision.
+
+    A one-value enum would have left every reader in place and the next vendor one commit away.
+    `agent_model` goes with it: a vendor model id in git whose only readers were the deleted
+    branch and an `or` tail behind `llm_model`.
+    """
+    assert "llm_provider" not in Settings.model_fields
+    assert "llm_prompt_caching" not in Settings.model_fields
+    assert "agent_model" not in Settings.model_fields
 
 
 def test_parity_defaults_are_backward_compatible() -> None:
@@ -110,21 +136,22 @@ def test_parity_json_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.tool_authz_default == "deny"
 
 
-def test_openai_compatible_requires_endpoint_and_model() -> None:
-    """Selecting the internal provider without a base_url/model fails at startup, clearly."""
+def test_a_blanked_gateway_address_is_refused() -> None:
+    """An empty base URL is not "no destination" — it is the SDK's own hardcoded public host.
+
+    This check was scoped to `llm_provider == "openai_compatible"`, which is exactly how the other
+    value came to ignore `llm_base_url` entirely. Unconditional now: both fields default to the
+    mock, so it fires only on a deployment that explicitly blanks one, which is the case worth
+    catching.
+    """
     with pytest.raises(ValueError, match="llm_base_url"):
-        Settings(_env_file=None, llm_provider="openai_compatible")  # type: ignore[call-arg]
+        Settings(_env_file=None, llm_base_url="")  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="llm_model"):
-        Settings(  # type: ignore[call-arg]
-            _env_file=None,
-            llm_provider="openai_compatible",
-            llm_base_url="https://llm.internal/v1",
-        )
+        Settings(_env_file=None, llm_model="")  # type: ignore[call-arg]
 
 
 def test_llm_base_url_overrides_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """The internal endpoint is a `CHEMCLAW_`-prefixed env var, like every other setting."""
-    monkeypatch.setenv("CHEMCLAW_LLM_PROVIDER", "openai_compatible")
     monkeypatch.setenv("CHEMCLAW_LLM_BASE_URL", "https://llm.internal/v1")
     monkeypatch.setenv("CHEMCLAW_LLM_MODEL", "internal-model")
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
@@ -251,13 +278,13 @@ def test_openai_compatible_embeddings_require_endpoint_and_model() -> None:
     with pytest.raises(ValueError, match="llm_base_url"):
         Settings(  # type: ignore[call-arg]
             _env_file=None,
+            llm_base_url="",
             embedding_provider="openai_compatible",
             embedding_model="internal-embed",
         )
     with pytest.raises(ValueError, match="embedding_model"):
         Settings(  # type: ignore[call-arg]
             _env_file=None,
-            llm_provider="openai_compatible",
             llm_base_url="https://llm.internal/v1",
             llm_model="internal-model",
             embedding_provider="openai_compatible",
@@ -946,7 +973,6 @@ def test_enforced_posture_refuses_a_plaintext_temporal_broker() -> None:
         "entra_required": True,
         "entra_audience": "api://x",
         "entra_tenant_id": "t",
-        "llm_provider": "openai_compatible",
         "llm_base_url": "http://llm:8000/v1",
         "llm_model": "m",
         "harness_enabled": True,
@@ -968,7 +994,6 @@ def test_enforced_posture_refuses_a_plaintext_postgres_dsn() -> None:
         "entra_required": True,
         "entra_audience": "api://x",
         "entra_tenant_id": "t",
-        "llm_provider": "openai_compatible",
         "llm_base_url": "http://llm:8000/v1",
         "llm_model": "m",
         "harness_enabled": True,

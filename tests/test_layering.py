@@ -351,6 +351,7 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.durable", "chemclaw.retrieval"),
     ("chemclaw.durable", "chemclaw.science"),
     ("chemclaw.durable", "chemclaw.templates"),
+    ("chemclaw.evals", "chemclaw.agent"),
     ("chemclaw.evals", "chemclaw.api"),
     ("chemclaw.evals", "chemclaw.core"),
     ("chemclaw.evals", "chemclaw.kg"),

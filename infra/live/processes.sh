@@ -160,12 +160,6 @@ start_worker() {
   CHEMCLAW_WORKER_METRICS_PORT="$port" start "$name" "$@"
 }
 
-# Whether a model can be reached at all. Asked once, in the same terms `agent/llm_provider.py`
-# branches on, so the two cannot disagree about what "configured" means.
-llm_configured() {
-  [ -n "${ANTHROPIC_API_KEY:-}" ] || [ "${CHEMCLAW_LLM_PROVIDER:-anthropic}" = "openai_compatible" ]
-}
-
 # Poll a URL until it answers 200, or fail naming the log to read. Never a bare sleep: a fixed
 # wait is either too short (a flaky lane) or too long (a slow one), and it reports nothing.
 #
@@ -447,32 +441,28 @@ up() {
     wait_for mock-llm "http://127.0.0.1:8820/__mock/stats"
   fi
 
-  # The front door builds the agent — and therefore a chat client — during startup, so with no
-  # model credential it does not fail at the first turn, it fails to boot at all
-  # (`agent/llm_provider.py::_anthropic_client` raises on a missing key). That is correct
-  # behaviour, and it is also why the durable half of the lane is deliberately independent of it:
-  # `make live-jobs` drives Temporal and Postgres with no model in the loop, so it runs here.
-  if llm_configured; then
-    start api "$python" -m uvicorn chemclaw.api.app:create_app --factory \
-      --host 127.0.0.1 --port "$API_PORT"
-  else
-    # Clear any pid file from an earlier run that *did* start it, so `status` reports the
-    # front door as absent rather than as a process that died.
-    rm -f "$RUN_DIR/api.pid"
-    log "no ANTHROPIC_API_KEY and no openai_compatible endpoint — skipping the front door."
-    log "  'make live-jobs' (Temporal + Postgres) runs without it; 'make live-probes' needs it."
-  fi
+  # **The front door always starts now, and the `llm_configured` gate that used to guard it is
+  # gone.** It asked whether `ANTHROPIC_API_KEY` was set, because building the agent built a chat
+  # client and that client's constructor raised on a missing key — so with no credential the front
+  # door failed to *boot* rather than at the first turn. There is one client now
+  # (`D-2026-09-04-a-gateway-is-the-only-provider`), it takes a placeholder bearer for the many
+  # internal gateways that ignore one, and `CHEMCLAW_LLM_BASE_URL` always names a destination:
+  # the mock above by default. So there is nothing left to be un-configured, and a gate that always
+  # passes is worse than none.
+  #
+  # A gateway that *does* want a credential and was not given one is a 401 on the first turn, which
+  # `make live-probes` reports and `make live-jobs` — Temporal and Postgres, no model in the loop —
+  # does not care about.
+  start api "$python" -m uvicorn chemclaw.api.app:create_app --factory \
+    --host 127.0.0.1 --port "$API_PORT"
 
   for worker in worker-background worker-calc worker-bo worker-results; do
     wait_for "$worker" "http://127.0.0.1:$(cat "$RUN_DIR/$worker.port")/readyz"
   done
-  if llm_configured; then
-    wait_for api "http://127.0.0.1:$API_PORT/readyz"
-    log "live stack up. front door: http://127.0.0.1:$API_PORT · logs: $LIVE_DIR"
-    log "  from another terminal, first: eval \"\$(bash infra/live/processes.sh env)\""
-  else
-    log "live stack up (durable half only) · logs: $LIVE_DIR"
-  fi
+  wait_for api "http://127.0.0.1:$API_PORT/readyz"
+  log "live stack up. front door: http://127.0.0.1:$API_PORT · logs: $LIVE_DIR"
+  log "  model gateway: ${CHEMCLAW_LLM_BASE_URL:-http://127.0.0.1:8820/v1}"
+  log "  from another terminal, first: eval \"\$(bash infra/live/processes.sh env)\""
 }
 
 down() {
@@ -499,12 +489,10 @@ down() {
 
 status() {
   [ -d "$RUN_DIR" ] || { log "nothing running"; return; }
-  # A process that was deliberately skipped leaves no pid file, so it would simply be absent from
-  # the listing below — and "absent" reads the same as "never existed". The front door is the one
-  # that gets skipped on purpose, so it says so rather than going quiet.
-  if [ ! -e "$RUN_DIR/api.pid" ] && ! llm_configured; then
-    printf '  %-20s not started (no model credential — see `make live-up` output)\n' "api"
-  fi
+  # This block used to name the front door as "deliberately skipped" when no model credential was
+  # set, because "absent" reads the same as "never existed". Nothing is skipped any more — the
+  # front door needs no credential to boot — so a missing `api.pid` now means it died, which the
+  # loop below reports as DOWN.
   for pidfile in "$RUN_DIR"/*.pid; do
     [ -e "$pidfile" ] || continue
     local name pid

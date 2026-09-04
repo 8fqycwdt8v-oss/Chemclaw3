@@ -626,3 +626,162 @@ def test_a_selection_that_matches_no_probe_is_an_error_not_a_clean_run(
         live_probes._parse_args(["--limit", "0"])
     with pytest.raises(SystemExit):
         live_probes._parse_args(["--limit", "-1"])
+
+
+# ---------------------------------------------------------------------------------------------
+# The judge, after it stopped importing a vendor SDK
+# (`D-2026-09-04-a-gateway-is-the-only-provider`).
+#
+# It was the last first-party importer of `anthropic`, and its one non-portable need was the
+# truncation signal: `stop_reason == "max_tokens"`, which separates `ungraded` — the *absence* of a
+# verdict — from a fabricated `unserved`. Conflating those mislabelled 65 of 190 probes in the first
+# run and inflated the headline unserved rate from at most 22 to 87, so it is the property this port
+# had to carry across rather than the one to lose quietly.
+# ---------------------------------------------------------------------------------------------
+
+
+def _graded_probe() -> tuple[Probe, ProbeOutcome]:
+    """One answered probe, the cheapest input `judge_outcome` will actually spend a call on."""
+    probe = Probe(
+        id="j-01",
+        section=1,
+        persona="lab_technician",
+        bucket="A",
+        question="what is the pKa of acetic acid?",
+        direction="a number with its method",
+    )
+    outcome = ProbeOutcome(
+        probe_id="j-01",
+        section=1,
+        persona="lab_technician",
+        bucket="A",
+        question=probe.question,
+        answer="4.76, computed with GFN2-xTB.",
+        answered=True,
+    )
+    return probe, outcome
+
+
+class _ScriptedJudge:
+    """A chat model that answers with one prepared message, recording what it was asked."""
+
+    def __init__(self, message: object) -> None:
+        self.message = message
+        self.prompts: list[object] = []
+
+    async def ainvoke(self, messages: object) -> object:
+        """Return the prepared reply, whatever was asked."""
+        self.prompts.append(messages)
+        return self.message
+
+
+@pytest.mark.parametrize("key", ["finish_reason", "stop_reason"])
+def test_a_truncated_judge_reply_is_ungraded_rather_than_a_verdict(
+    monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    """A reply cut off by its own token ceiling has no verdict, and must not be read as one.
+
+    **The payload here is deliberately parseable**, which is what makes this test worth having: a
+    truncated reply usually loses its closing brace and the JSON parse already yields `ungraded`, so
+    a test over a mangled payload would pass with the truncation check deleted. This one is a
+    complete, plausible `{"verdict": "unserved"}` — the shape that, read on its own, records a
+    grading crash as a system failure.
+
+    Both spellings, because LangChain does not normalise this: an OpenAI-compatible gateway reports
+    `finish_reason: "length"` and one relaying a vendor's own field can say `stop_reason:
+    "max_tokens"`. The vendor SDK this module used to import exposed only the second.
+    """
+    from langchain_core.messages import AIMessage
+
+    from chemclaw.evals import live_judge
+
+    value = "length" if key == "finish_reason" else "max_tokens"
+    reply = AIMessage(
+        content='{"verdict": "unserved", "reason": "no substance", "fabricated_claims": []}',
+        response_metadata={key: value},
+    )
+    monkeypatch.setattr(live_judge, "_judge_client", lambda: _ScriptedJudge(reply))
+
+    judgement = asyncio.run(live_judge.judge_outcome(*_graded_probe()))
+
+    assert judgement.verdict == "ungraded"
+    assert "token ceiling" in judgement.reason
+
+
+def test_a_complete_judge_reply_is_graded_on_its_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half: an ordinary reply is parsed, so the check above is not just refusing work.
+
+    The axis this holds constant against the test above is exactly the one that broke a reader
+    before — truncated vs complete — and without it the truncation check could be "return ungraded
+    always" and both tests would still be green.
+    """
+    from langchain_core.messages import AIMessage
+
+    from chemclaw.evals import live_judge
+
+    reply = AIMessage(
+        content='```json\n{"verdict": "served", "reason": "gives the number and the method", '
+        '"fabricated_claims": []}\n```',
+        response_metadata={"finish_reason": "stop"},
+    )
+    judge = _ScriptedJudge(reply)
+    monkeypatch.setattr(live_judge, "_judge_client", lambda: judge)
+
+    judgement = asyncio.run(live_judge.judge_outcome(*_graded_probe()))
+
+    assert judgement.verdict == "served"
+    assert judgement.reason == "gives the number and the method"
+    # The prompt is a system message plus the rendered answer — the shape the seam expects, rather
+    # than the vendor-specific `system=` + `messages=[]` pair this module used to post by hand.
+    prompt = list(judge.prompts[0])  # type: ignore[call-overload]
+    assert [m.type for m in prompt] == ["system", "human"]
+    assert "4.76" in prompt[1].content
+
+
+def test_an_unrouted_judge_says_it_is_grading_with_the_model_under_test(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The one property of this judge worth a log line, since it has no setting of its own now.
+
+    `live_probe_judge_model` was a vendor model id checked into this repository, which is what
+    `model_routes` exists so that nobody has to do. The cost of routing it instead is that an unset
+    route falls back to `llm_model` — the agent under test — and a judge sharing the agent's blind
+    spots ratifies them. That degradation is silent by construction, so it is announced.
+    """
+    import logging
+
+    from chemclaw.core.config import settings
+    from chemclaw.evals import live_judge
+
+    monkeypatch.setattr(settings, "model_routes", {})
+    live_judge._judge_client.cache_clear()
+    with caplog.at_level(logging.WARNING, logger="chemclaw.evals.live_judge"):
+        live_judge._judge_client()
+    assert any("live-probe-judge" in r.message for r in caplog.records)
+
+    caplog.clear()
+    monkeypatch.setattr(settings, "model_routes", {"live-probe-judge": "big"})
+    # Deliberately *not* the shipped 4096, which is also `llm_max_tokens`' default: at equal values
+    # this assertion would pass with the `.bind` deleted. The first version of this test did exactly
+    # that and its own guard caught it.
+    monkeypatch.setattr(settings, "live_probe_judge_max_tokens", 7331)
+    live_judge._judge_client.cache_clear()
+    try:
+        with caplog.at_level(logging.WARNING, logger="chemclaw.evals.live_judge"):
+            client = live_judge._judge_client()
+        assert not caplog.records
+        # The route reaches the model, and the judge's own ceiling reaches the *request* rather
+        # than only the constructed object — `llm_max_tokens` is the agent's answer allowance and
+        # is not what a judge reply needs. Read off the payload for the reason
+        # `tests/test_llm_effort.py` gives, and it is load-bearing here twice over: `ChatOpenAI`
+        # *renames* the kwarg to `max_completion_tokens` on the wire, so an assertion on the
+        # constructed object would neither have found the value nor noticed the rename.
+        assert client.bound.model_name == "big"
+        payload = client.bound._get_request_payload([("user", "x")], **client.kwargs)
+        assert payload["max_completion_tokens"] == settings.live_probe_judge_max_tokens
+        assert payload["max_completion_tokens"] != settings.llm_max_tokens, (
+            "pick a judge ceiling that differs from llm_max_tokens, or this proves nothing"
+        )
+    finally:
+        # Process-cached, so a later test must not inherit this route.
+        live_judge._judge_client.cache_clear()

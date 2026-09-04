@@ -156,8 +156,9 @@ class StoreSettings(BaseSettings):
     # table, the fingerprint diff, the mark-and-sweep and the citation stay in Postgres, because
     # they are relational work a vector store has no joins for and no clock to measure.
     #
-    # Adding a provider is an adapter module plus a name here — the shape `embedding_provider` and
-    # `llm_provider` already have.
+    # Adding a provider is an adapter module plus a name here — the shape `embedding_provider`
+    # already has. (`llm_provider` was named beside it and no longer exists: every model call goes
+    # to one gateway, `D-2026-09-04-a-gateway-is-the-only-provider`.)
     # **A shipped name, or `module:callable` naming any other adapter.** Attaching a vector
     # database this repository has never heard of — Milvus, Weaviate, LanceDB, pgvector on somebody
     # else's server — is one module implementing `retrieval.vectors.base.VectorStore` plus this

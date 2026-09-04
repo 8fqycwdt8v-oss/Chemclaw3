@@ -96,7 +96,7 @@ from chemclaw.agent.chemclaw_agent import (
     instructions_for,
 )
 from chemclaw.agent.compaction import context_compaction_middleware, disabled_summarizer
-from chemclaw.agent.llm_provider import build_chat_model, prompt_caching_middleware
+from chemclaw.agent.llm_provider import build_chat_model
 from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_arguments
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
@@ -155,7 +155,7 @@ def build_langgraph_agent(
     Args:
         model: The LangChain chat model to run on. Injectable for the same reason
             `build_langgraph_agent(chat_client=...)` is: the wiring must be assemblable and testable
-            without live credentials. `None` builds the config-selected provider
+            without live credentials. `None` builds the gateway client
             (`llm_provider.build_chat_model`).
         profile: The profile to narrow by (a name, an `AgentProfile`, or `None` for the default,
             which advertises the full in-process surface). Narrowing is attenuation only — the
@@ -325,14 +325,13 @@ def _resolve_chat_model(supplied: Any | None, profile: AgentProfile) -> Any:
       (`agent/subagents.py`), and a supplied model would silently defeat that.
     - When the key has *no* entry — the shipped default, where `model_routes` is empty — a caller's
       model is reused as it always was. `build_chat_model` would answer this case too, by falling
-      back to `llm_model`/`agent_model`; what it cannot do is know that an identical client already
-      exists. A turn compiles two graphs, so taking that fallback would build two clients per turn
-      to hold the same configuration, and would hand a test that passed a fake model a real one.
+      back to `llm_model`; what it cannot do is know that an identical client already exists. A
+      turn compiles two graphs, so taking that fallback would build two clients per turn to hold
+      the same configuration, and would hand a test that passed a fake model a real one.
     - With no model supplied and no route, this is the call every build has always made.
 
     The effort travels with whichever branch runs, because effort is a property of the agent rather
-    than of the endpoint — see `AgentProfile.effort`, and note that `build_chat_model` refuses a
-    non-`None` effort on the Anthropic path wherever it arrives from.
+    than of the endpoint — see `AgentProfile.effort`.
 
     Args:
         supplied: The model a caller handed to `build_langgraph_agent`, if any.
@@ -361,9 +360,14 @@ def _middleware(
     **`_apply_custom_middleware` splices this list by `.name`, and both halves of that are used.**
     An entry whose name matches one upstream already composed *replaces it in place*, keeping
     upstream's position; an entry whose name is new lands immediately after the last core member,
-    which is to say inside every middleware that registers a tool and outside the profile and
-    prompt-caching tail. So this list is not a stack in itself — it is two instructions, and reading
-    it as a sequence is the mistake `tests/test_middleware_order.py` exists to catch.
+    which is to say inside every middleware that registers a tool and outside the profile tail. So
+    this list is not a stack in itself — it is two instructions, and reading it as a sequence is the
+    mistake `tests/test_middleware_order.py` exists to catch.
+
+    A prompt-caching entry sat here until the collapse to one gateway
+    (`D-2026-09-04-a-gateway-is-the-only-provider`): `cache_control` breakpoints are one vendor's
+    spelling with no counterpart on an OpenAI-compatible endpoint, so with the vendor client gone
+    there is nothing to splice and nothing upstream composes to replace.
 
     Exactly one entry is a replacement, and it is the security-critical one.
     **`FilesystemMiddleware` is composed by upstream unconditionally**, over the same backend,
@@ -427,11 +431,6 @@ def _middleware(
         disabled_summarizer(model, backend),
         _skills_middleware(backend, labelled),
         *tool_call_middleware(audit, profile),
-        # Provider-specific, so which middleware this is — or that it is none — is decided in the F0
-        # seam rather than here. When the provider is Anthropic this replaces upstream's own by
-        # name; when it is not, upstream composed none and this contributes none, which is the same
-        # answer arrived at from both directions.
-        *prompt_caching_middleware(),
         # Unconditional, unlike the harness middleware above it: an unbounded thread is a property
         # of a session, not of the plan/execute mode, and the single-turn agent accumulates one just
         # as fast. Last, so the reduction sees everything the middleware above it added.

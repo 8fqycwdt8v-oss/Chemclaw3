@@ -74,7 +74,6 @@ def test_the_allowlist_is_derived_from_the_dialled_destinations() -> None:
     class _S:
         llm_base_url = "https://llm.internal.example:8000/v1"
         llm_fallback_base_url = ""
-        llm_provider = "openai_compatible"
         postgres_dsn = "postgresql://u:p@pg.internal:5432/db"
         postgres_migration_dsn = ""
         temporal_address = "temporal.internal:7233"
@@ -96,8 +95,23 @@ def test_the_allowlist_is_derived_from_the_dialled_destinations() -> None:
     assert "calc.internal" in hosts
     assert "calc-bundle.internal" in hosts
     assert "mirror.internal" in hosts
-    # openai_compatible never permits the public Anthropic API
+    # **No vendor host is ever on this list, and it used to be** — `derive_allowed` added
+    # `api.anthropic.com` whenever `llm_provider == "anthropic"`, which was the shipped default. So
+    # the guard whose job is to bound where a prompt can go was opening exactly the destination the
+    # exfiltration path used, on the configuration a fresh checkout gets
+    # (`D-2026-09-04-a-gateway-is-the-only-provider`). There is no branch left, and this fixture
+    # declares no `llm_provider` — which is itself the assertion: a re-added one would be a
+    # `getattr` default and this list would grow again.
     assert "api.anthropic.com" not in hosts
+    assert "api.openai.com" not in hosts
+    assert hosts == {
+        "llm.internal.example",
+        "pg.internal",
+        "temporal.internal",
+        "calc.internal",
+        "calc-bundle.internal",
+        "mirror.internal",
+    }
 
 
 def test_a_connect_to_a_resolved_ip_is_permitted() -> None:

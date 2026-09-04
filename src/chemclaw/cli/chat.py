@@ -97,9 +97,17 @@ def _build_cli_agent(
 
     `actor` is only the build-time audit fallback (used if a code path runs outside the ambient
     identity `_run` stamps for the session, e.g. a background task); the ambient identity is what
-    audit/authz/skill-scoping actually read at call time. The chat model reads its credential at
-    construction and fails with a clear message if it is missing (D-037), so a credential problem
-    surfaces here, before the prompt.
+    audit/authz/skill-scoping actually read at call time.
+
+    **There is no credential preflight here any more, and saying so is the point.** D-037's eager
+    check raised on a missing `ANTHROPIC_API_KEY` at construction; with one OpenAI-compatible
+    gateway (`D-2026-09-04-a-gateway-is-the-only-provider`) an empty `CHEMCLAW_LLM_API_KEY` is a
+    legitimate configuration — many internal gateways ignore the bearer, which is what
+    `_KEYLESS_PLACEHOLDER` exists for — so there is nothing to preflight and a claim that there is
+    would be a control that reads as one and is not. A gateway that *does* want a credential
+    answers 401 on the first turn, and `_repl` keeps the session alive across it. What still fails
+    at construction is a *misconfiguration*: a blanked `CHEMCLAW_LLM_BASE_URL` is refused by
+    `LlmSettings`, and `main` below turns that into one sentence and an exit code.
 
     **Takes the connectors, because a graph binds its tools at construction.** MAF appended them
     per `agent.run`, so the agent could be built before they were open; a compiled graph cannot.
@@ -355,18 +363,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint (`chemclaw` console script / `python -m chemclaw.cli.chat`).
 
     **Startup failures are a message and an exit code, which is what the rest of this package
-    already does.** `_build_cli_agent`'s docstring promises the chat model "fails with a clear
-    message if it is missing (D-037), so a credential problem surfaces here, before the prompt" —
-    and the message is good. It arrived under nine frames of asyncio and graph construction,
-    because this function caught nothing and returned `None`, so the console script exited on a
-    traceback rather than on a status. That is the single most likely first run of the only
-    interactive entrypoint this system has, and the trace leaks the internal call chain to an
-    operator who can act on exactly one sentence of it.
+    already does.** A configuration failure — a blanked `CHEMCLAW_LLM_BASE_URL`, an unreachable
+    checkpointer DSN — used to arrive under nine frames of asyncio and graph construction, because
+    this function caught nothing and returned `None`, so the console script exited on a traceback
+    rather than on a status. That is the single most likely first run of the only interactive
+    entrypoint this system has, and the trace leaks the internal call chain to an operator who can
+    act on exactly one sentence of it.
 
     The width is the three families a *startup* can fail with and nothing wider: a misconfiguration
-    (`ChemclawError`), a refused precondition like the missing credential (`RuntimeError`), and an
-    unreachable dependency such as the checkpointer DSN (`ConnectionError`). A bare `except` here
-    would swallow the programming errors this file wants to see raised. Failures *inside* a turn
+    (`ChemclawError`), a refused precondition (`RuntimeError`), and an unreachable dependency such
+    as the checkpointer DSN (`ConnectionError`). A bare `except` here would swallow the programming
+    errors this file wants to see raised. Failures *inside* a turn
     are already handled one level down, in `_repl`, which keeps the session alive across them.
     """
     configure_logging()

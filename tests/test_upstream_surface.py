@@ -768,6 +768,51 @@ def test_the_deepagents_symbols_this_repo_names_are_importable(
     assert hasattr(imported, name), f"{module} no longer exports {name}, which {reader} uses"
 
 
+def test_the_gateway_client_still_publishes_cache_tokens_under_the_two_flat_keys() -> None:
+    """`cache_read` and `cache_creation`, and no per-TTL breakdown — what `turn_usage` reads.
+
+    `agent/turn_usage.graph_usage_tokens` subtracts both from `input_tokens` to get the priced
+    residual, and books `cache_creation` as the write. Neither key name is published API: they are
+    built by `langchain_openai.chat_models.base._create_usage_metadata`, so a rename there books
+    every cached token as full-price input and leaves `turn_costs` claiming a deployment that
+    caches on every turn has never read a cache.
+
+    **The absent half is asserted too, and it is why a helper was deleted.**
+    `langchain_anthropic` publishes a write under `ephemeral_5m_input_tokens` /
+    `ephemeral_1h_input_tokens` *and zeroes the flat key* when it does, so `turn_usage` carried a
+    `_cache_creation` that read the per-TTL pair first. This client does not emit those keys at
+    all, and with the collapse to one gateway
+    (`D-2026-09-04-a-gateway-is-the-only-provider`) no installed reader does — so the helper was a
+    control with nothing to control. If a future `langchain_openai` starts publishing them, this
+    goes red and the helper comes back rather than the tokens quietly moving to `input`.
+    """
+    from langchain_openai.chat_models.base import _create_usage_metadata
+
+    usage = _create_usage_metadata(
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 200,
+            "total_tokens": 1200,
+            "prompt_tokens_details": {"cached_tokens": 700, "cache_write_tokens": 100},
+        }
+    )
+    details = usage["input_token_details"]
+    assert details.get("cache_read") == 700, (
+        "langchain_openai renamed the cache-read key — agent/turn_usage.graph_usage_tokens "
+        "subtracts it from input_tokens and would now double-count every cached token"
+    )
+    assert details.get("cache_creation") == 100, (
+        "langchain_openai renamed the cache-write key — agent/turn_usage.graph_usage_tokens "
+        "reads it, and turn_costs.cache_write_tokens is what it fills"
+    )
+    # `prompt_tokens` includes the cached share, which is the whole reason `input` is a residual.
+    assert usage["input_tokens"] == 1000
+    assert not [key for key in details if key.startswith("ephemeral_")], (
+        "langchain_openai now publishes a per-TTL cache-write breakdown; it zeroes the flat key "
+        "when it does, so agent/turn_usage needs the `_cache_creation` helper back"
+    )
+
+
 def test_the_pinned_versions_are_the_ones_these_assertions_were_measured_against() -> None:
     """A floor, not a ceiling — so a bump is loud once and then accepted deliberately.
 

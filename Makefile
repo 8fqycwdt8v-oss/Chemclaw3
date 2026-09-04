@@ -125,7 +125,7 @@ check: lint type test  ## The fast inner-loop gate: lint + type + test (no cover
 # in the diff under review.
 ci: lint type cov kg-validate eval-strict eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate template-validate prose-validate helm-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
 
-chat:  ## Chat with the agent from the terminal (admin/testing mode; needs ANTHROPIC_API_KEY).
+chat:  ## Chat with the agent from the terminal (admin/testing; needs CHEMCLAW_LLM_BASE_URL up).
 	uv run chemclaw --admin
 
 db-migrate:  ## Apply infra/sql migrations to the configured database.
@@ -415,7 +415,7 @@ live-e2e-full-stack-status:  ## Show which four-repo-pass processes are running.
 live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + Postgres; no LLM).
 	uv run python -m chemclaw.cli.live_jobs
 
-live-probes:  ## Ask the running front door the live probe set (needs ANTHROPIC_API_KEY).
+live-probes:  ## Ask the running front door the live probe set (needs a real model gateway).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)
 
 # The half of `template-validate` that needs a session. `make template-validate` reads a tool's

@@ -552,7 +552,11 @@ config:
   # raised `CalcServerError` against nothing, on a chart that named no host, no token and no egress
   # rule for the wire every one of those calls now crosses.
   CHEMCLAW_CALC_SERVER_URL: "http://chemclaw3-mcp-calc:8860/mcp"
-  CHEMCLAW_LLM_PROVIDER: "openai_compatible"
+  # The one model destination. **Stated rather than left to the code default**, for the reason
+  # `CHEMCLAW_CALC_SERVER_URL` above is: the default is the local dev mock on loopback, and a pod
+  # that inherited it would refuse to boot (`api/middleware._refuse_unconfigured_llm_gateway`).
+  # There is no `CHEMCLAW_LLM_PROVIDER` — this address is the whole knob
+  # (`D-2026-09-04-a-gateway-is-the-only-provider`).
   CHEMCLAW_LLM_BASE_URL: "http://internal-llm.llm.svc:8000/v1"
   CHEMCLAW_LLM_MODEL: "gpt-oss"
   CHEMCLAW_HARNESS_ENABLED: "true"

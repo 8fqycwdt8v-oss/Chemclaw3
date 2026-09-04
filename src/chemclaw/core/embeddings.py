@@ -29,6 +29,7 @@ from functools import lru_cache
 from typing import Any
 
 from chemclaw.core.config import settings
+from chemclaw.core.http import private_ca_transport
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
@@ -354,16 +355,14 @@ def _openai_client(
     from openai import OpenAI
 
     http_client: Any | None = None
-    if ca_bundle:
-        import ssl
-
+    transport = private_ca_transport(ca_bundle)
+    if transport is not None:
         import httpx
 
-        # An `SSLContext` rather than the path, for the reason `agent/llm_provider._tls_http_client`
-        # gives: httpx deprecated `verify=<str>`, and the context names what the bundle is.
-        http_client = httpx.Client(
-            verify=ssl.create_default_context(cafile=ca_bundle), trust_env=False
-        )
+        # The CA pinning and the ambient-proxy refusal are `core/http.private_ca_transport`'s, the
+        # same decision `agent/llm_provider._tls_http_client` takes for the chat client against the
+        # same gateway. Only the class differs — this seam is synchronous.
+        http_client = httpx.Client(**transport)
     return OpenAI(
         base_url=base_url,
         api_key=api_key or "not-required",
