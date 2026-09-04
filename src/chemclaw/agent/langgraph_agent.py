@@ -480,20 +480,34 @@ def _subagents(
     - **No checkpointer.** Upstream's contract is that a helper sees the prompt it was given and
       returns one report; a thread to resume would be a second conversation nobody addresses.
     - **No durable memory and no store.** `store=` is not forwarded, so the helper's backend has no
-      `/memories/` route: nothing a helper writes outlives the *turn*, and nothing reaches the
-      knowledge graph or the memory tiers.
+      `/memories/` route: nothing a helper writes reaches the knowledge graph or the memory tiers.
 
-      **It does not die with the helper, though, and this comment said it did.** Measured:
-      upstream's `_return_command_with_state_update` copies every helper state key except
-      `messages`, `todos` and `structured_response` into the caller's update, and `files` is not
-      among the three — so a helper's `/scratch/evidence.md` lands in the caller's `files` channel
-      (9,937 characters of it, on the isolation fixture). The reverse holds too: the helper is
-      handed the caller's state minus those same three keys. "Returns one report" is true of the
-      *message thread* and false as a statement about state, which is a distinction this comment
-      and `HELPER_BRIEF` both used to blur — see
-      `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`, and the BACKLOG row for the
-      laundering path it opens (a helper writes a live envelope delimiter into a file; the caller's
-      `read_file` is in-process, so `frame_connector_results` neither frames nor defangs it).
+      **It does not die with the helper, and it does not die with the turn either — this comment
+      claimed both in turn.** Measured: upstream's `_return_command_with_state_update` copies every
+      helper state key except `messages`, `todos` and `structured_response` into the caller's
+      update, and `files` is not among the three — so a helper's `/scratch/evidence.md` lands in the
+      caller's `files` channel (9,937 characters of it, on the isolation fixture). The reverse holds
+      too: the helper is handed the caller's state minus those same three keys. "Returns one report"
+      is true of the *message thread* and false as a statement about state, which is a distinction
+      this comment and `HELPER_BRIEF` both used to blur — see
+      `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`.
+
+      **And `files` is a checkpointed channel, so the reach is the caller's *session*, not its
+      turn** (`D-2026-09-04-a-helpers-file-crosses-back-and-stays`). It is written into the
+      checkpoint under the thread id, so a *later* turn on that thread — one with no helper in it at
+      all — can `ls /scratch` and read the file back. Driven over two turns on one thread with a
+      saver under them, which is the only arrangement that distinguishes "dies with the turn" from
+      "dies with the thread": turn two's `ls` lists `/scratch/evidence.md` and its `read_file`
+      returns what the helper wrote, both driven by the test rather than inferred from the channel,
+      over a caller arranged to spawn nothing at all (`helper_calls == 0`, asserted) so what it
+      reads back can only have come from the checkpoint. No byte count here, deliberately — the
+      defang below changes it, so a figure in this sentence would be a claim about a commit
+      (`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`);
+      `tests/test_subagents.py::test_a_helpers_file_outlives_the_turn_that_spawned_it` is what
+      holds the property. The crossing is
+      deliberate and kept; what closed is the reading of it — `agent/tool_framing.py` now defangs
+      every `scratchpad_tools()` verb, so a delimiter a helper copied into a file cannot go live in
+      a caller's thread on any turn.
     - **No helpers.** The guard is that `build_langgraph_agent(helper=True)` compiles on
       `create_agent`, so `SubAgentMiddleware` is absent rather than merely unpopulated — see the
       branch there for why returning an empty roster was not enough.

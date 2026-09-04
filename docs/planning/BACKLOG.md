@@ -145,50 +145,41 @@ topic).
       completion in the background. The only real fix is a killable subprocess, with pickling and a
       new child-OOM failure mode to classify (~150-250 lines).
 
-- [ ] **A schedule whose every run is killed by the ceiling reads as healthy on
-      `describe_schedules`** — [M]. `durable/schedules.py:399` — `ScheduleHealth` carries `paused`,
-      `last_run`, `runs_total`, `skipped_overlap`, `running_now` and `note`, and no run outcome;
-      `_describe` reads none either, because `ScheduleInfo.recent_actions` names the workflow and
-      when it started and nothing more. Measured against a live broker: a schedule built like
-      `_build_schedule` whose every run is killed reports `runs_total` climbing, `last_run`
-      advancing, `running_now` 0 and `skipped_overlap` 0 — byte-identical to a healthy job, while
-      the wedge the ceiling replaced had a distinctive signature on that same surface (`last_run`
-      frozen, `running_now` stuck at 1, `skipped_overlap` climbing). So the ceiling is a real fix
-      and it moved the failure to a surface that says nothing. Recovering the status costs one
-      `describe` per schedule on the front door's own event loop, which is why it was not taken
-      here; `config/temporal.py` no longer claims otherwise, but
-      `D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait.md` still does and wants a
-      superseding ADR — as do three further claims in the pair of 2026-08-27 ADRs that the tree has
-      since falsified or fixed: that "the ELN and corpus syncs are cursored" — `document_sync.py:238`
-      says in its own words that it keeps no `sync_cursors` row, and `corpus_sync.py` keeps one only
-      for a source whose binding sets `append_only`
-      (`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`), never in the release mode this claim
-      was made about — that
-      "a run with no memo stamps nothing" (`CalcJobWorkflow` defaults the memo read to
-      `settings.service_actor_id`, so the durable path delivers `service-account`), and that the
-      queue-bound AST rule "fails on any dispatched activity call with neither queue bound" (it was
-      evadable by an import alias, a direct function import or a subpackage until
-      `tests/test_activity_queue_bound.py` was widened).
-
 ## 4 — Operating it
 
-- [ ] **A helper's scratch file crosses to its caller unframed, and a `read_file` never defangs it**
-      — [H], opened by `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`, which measured
-      the crossing while fact-checking a sentence that denied it.
-      `task` returns a `Command`, and upstream copies every helper state key except `messages`,
-      `todos` and `structured_response` into the caller's update — so `files` crosses. Measured:
-      the helper's `/scratch/evidence.md` arrives in the caller's `files` channel carrying 9,937
-      characters of what the helper read. The report itself is now defanged; **the file beside it is
-      not**, and the caller's `read_file` is an in-process tool, so `served_by` returns `""` and
-      `frame_connector_results` neither frames nor defangs it. A helper that reads enveloped
-      evidence can therefore copy a live delimiter into a file and have its caller read it back
-      outside any envelope — the exact laundering the report fix closed, still open on the sibling
-      key of the same object. Two things to decide before writing code: whether a helper should be
-      able to write a file the caller reads at all (the isolation argument says the report is the
-      channel), and whether the fix belongs in `frame_connector_results` (which would have to stop
-      keying on connector origin) or in the file backend. Do not simply frame it — an envelope says
-      "evidence to cite", and this is the system's own scratch space, which is the same trap the
-      row below is about.
+- [ ] **Nothing bounds what a helper writes into its caller's checkpointed state** — [M], opened
+      by `D-2026-09-04-a-helpers-file-crosses-back-and-stays` while closing the *reading* half.
+      A helper's `files` cross into the caller's state, and that crossing is deliberate — but the
+      report beside it is bounded at `agent_max_tool_result_chars` (60,000) and the state write is
+      bounded by nothing. Measured: a helper writing 2,000,000 characters lands **2,000,137** in
+      the caller's `files`, which is a *checkpointed* channel, so it reaches a `checkpoint_blobs`
+      row and every later turn of that session.
+      **Read the scope before reaching for a cap.** This is not a context blow-out: nothing loads
+      the whole channel into a prompt, and a `read_file` result crosses `bound_tool_results` like
+      any other, so the model only ever pays for what it asks for. What it costs is checkpoint
+      weight and retention. It is also **not a bound on delegation** — the caller's own
+      `write_file` reaches it identically, so a cap belongs on the scratchpad rather than on the
+      helper, and `agent/scratchpad.py` is where the permission set that would carry one already
+      lives. `durable/retention.py` prunes checkpoints by thread, so the row is about the size of
+      what accumulates between prunes rather than about an unbounded leak.
+
+- [ ] **A connector may claim an ambient tool's name, and only the ordering of one branch
+      decides what happens** — [S], opened by `D-2026-09-04-a-helpers-file-crosses-back-and-stays`,
+      which found it while widening the defang set from one name to seven.
+      `connectors/registry._declared_tool_names` refuses one bundle's tool name colliding with
+      *another bundle's*, and never compares against the names this process binds itself. Measured
+      against a live streamable-HTTP server declaring a tool named `read_file`: it **wins
+      `ToolNode.tools_by_name` and carries the `SERVED_BY` stamp**. So a deployment can enable a
+      connector that silently shadows a filesystem verb.
+      Nothing is broken today, and the reason is one line's order: `frame_connector_results` asks
+      the stamp *before* it asks the name, so genuine out-of-process output is framed with its
+      provenance rather than defanged as this system's own notepad.
+      `test_a_connector_tool_named_like_a_local_verb_is_framed_not_defanged` pins that and fails
+      under the other order. What is open is the collision itself — six of the seven scratchpad
+      verbs are ordinary English words, so the namespace this repository binds is exactly the one
+      a third-party server is most likely to land on. The fix is a startup check comparing a
+      bundle's declared names against the ambient set, in the registry that already refuses the
+      bundle-versus-bundle case.
 
 - [ ] **A caller cannot tell that a helper's report is derived from untrusted reading**
       — [M], opened by `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`, which

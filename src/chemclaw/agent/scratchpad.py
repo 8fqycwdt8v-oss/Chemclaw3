@@ -68,6 +68,7 @@ nothing had been started. The fix is not a name added to that set: `write_file` 
 """
 
 import logging
+from functools import cache
 from typing import Any, cast
 
 from deepagents import FsToolName
@@ -257,6 +258,7 @@ def scratchpad_backend(skills: CompositeBackend, store: Any | None = None) -> Co
     return CompositeBackend(default=StateBackend(), routes=routes)
 
 
+@cache
 def scratchpad_tools() -> tuple[FsToolName, ...]:
     """The filesystem verbs this deployment lets a turn reach, in one place.
 
@@ -273,6 +275,13 @@ def scratchpad_tools() -> tuple[FsToolName, ...]:
     - **`delete`** is withheld on `D-2026-08-12`'s argument, which GxP's retirement does not touch:
       a turn that cannot rewrite a `SKILL.md` but can remove it still decides what judgment the next
       turn is able to load.
+
+    **Cached, because it answers a question about the installed package rather than about this
+    deployment**, and it answers it by *building* a `FilesystemMiddleware` — cheap once, wasteful on
+    a path that runs per tool call, which `agent/tool_framing.py` now is.
+    `chemclaw_agent.subagent_tool_names` is cached for the same reason and states it the same way;
+    like that one this depends on no discovery, so `tests/conftest.py` has nothing to clear, and
+    nothing in this repository monkeypatches it.
 
     Returns:
         The tool names to hand `FilesystemMiddleware`, sorted so the prompt order is stable.

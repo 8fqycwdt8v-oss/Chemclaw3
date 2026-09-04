@@ -111,6 +111,24 @@ def test_the_shell_and_the_delete_verb_are_withheld() -> None:
     assert set(scratchpad_tools()) == {"ls", "read_file", "write_file", "edit_file", "glob", "grep"}
 
 
+def test_the_verb_list_is_computed_once() -> None:
+    """`agent/tool_framing.py` asks this per tool call, so it may not build a middleware per call.
+
+    The value assertion above is what keeps the cache honest: a cache freezes whatever the first
+    call returned, so "computed once" and "computed correctly" have to be asserted together or the
+    pair proves only that a wrong answer is stable. Identity rather than equality, because two equal
+    tuples are exactly what a rebuild would produce.
+
+    `chemclaw_agent.subagent_tool_names` is cached on the same reasoning and for the same caller;
+    neither depends on connector discovery, so `tests/conftest.py` has nothing to clear between
+    tests.
+    """
+    assert scratchpad_tools() is scratchpad_tools(), (
+        "scratchpad_tools rebuilds a FilesystemMiddleware on every call, and "
+        "agent/tool_framing.frame_connector_results calls it once per tool call"
+    )
+
+
 def test_writes_are_denied_outside_the_two_roots_that_are_meant_to_be_written() -> None:
     """The deny rule closes the surface behind the allows, and must come last.
 
