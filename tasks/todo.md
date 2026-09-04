@@ -1,138 +1,84 @@
-# Backlog implementation pass — 2026-09-04
+# One gateway, no providers — 2026-09-04
 
-Working `docs/planning/BACKLOG.md` top-down, implementing the rows that are actually
-implementable offline. Every row was re-checked against `HEAD` before being queued
-(BACKLOG.md's own rule); two of them turned out to state something false about the tree,
-and correcting the row is the deliverable there rather than code.
+**The ask:** stop using the `anthropic` SDK directly; reach every model through one
+centrally-managed, OpenAI-compatible gateway, so any vendor behind it is the gateway's
+business rather than this codebase's.
 
-Owner decisions taken by the user this session are recorded per item.
+**Owner decisions taken:**
+1. Accept the loss of Anthropic prompt caching; record the cost in the ADR.
+2. **Remove the provider concept entirely** — no `llm_provider` field, not a one-value enum.
 
-## Queue
+## Why this is urgent independently of the redesign
 
-- [x] **A — [H] A helper's scratch file crosses to its caller unframed** (BACKLOG §4)
-      Owner decision: **keep the crossing, defang on read.**
-      Measured: caller `read_file` returns 10,024 chars carrying a live `</retrieved-note-…>`;
-      three further arms found (`grep --output_mode=content`, a crafted *path* echoed by
-      `write_file` with no helper at all, and the file surviving into a later turn on the
-      same `thread_id`). Third treatment in `frame_connector_results`, keyed on
-      `scratchpad_tools()` so an upstream-added verb is covered. Needs an ADR.
+`llm_base_url` is **silently ignored** on the anthropic path, and the guard meant to catch
+that believes the opposite. Measured:
 
-- [x] **B — A schedule whose every run is killed reads as healthy** (BACKLOG §3)
-      Row's "needs a live broker" premise is **false**: driven end to end against
-      `WorkflowEnvironment.start_local()` in this sandbox, two runs killed by their own
-      execution timeout report byte-identically to healthy, and one extra `describe` per
-      recent action recovers `status=TIMED_OUT`.
+    llm_provider="anthropic", llm_base_url="https://gateway.internal/v1"
+      -> build_chat_model("agent").anthropic_api_url = 'https://api.anthropic.com'
 
-- [x] **C — Ten `KNOWN_OVERSIZED` tools are one defect wearing ten names** (BACKLOG §5)
-      Row's premise is **false, measured**: installed `langchain_core` 1.6.0 has no
-      `$defs` switch (`_convert_pydantic_to_openai_function` dereferences and pops
-      unconditionally), and a hand-built `$defs` schema costs **+31 tokens net** across the
-      ten. Deliverable is the corrected row plus asserting the drifted per-tool numbers.
+`api/middleware.py::_refuse_public_llm_exposure` returns early whenever `llm_base_url` is
+truthy, and its docstring claims an `llm_base_url` "naming an anthropic-compatible gateway"
+satisfies it. It does not. So a network-exposed pod configured with an internal gateway URL
+boots clean, is allowed `api.anthropic.com` by `netguard.py:188`, and sends every prompt and
+completion to the public API. Nothing tests that combination.
 
-- [x] **D — The module a chemist reads has no test file** (BACKLOG §5)
-      Row's own closing condition is met: `render.py` coverage **76% → 94%**. Delete it.
+Removing the provider concept makes this **unrepresentable** rather than fixed, which is why
+the two are one change.
 
-- [x] **E — The corpus drain is the one ingest pass with no metric** (BACKLOG §4)
-      Also closes the non-gated half of the stalled-feed row.
+Two more silent gaps on the same path — which is the shipped *default*:
+- `llm_fallback_base_url` is never applied (`build_chat_model:97` skips `_with_failover`),
+  on the provider whose config comment calls failover "the one gap whose failure is total".
+- `evals/live_judge.py` posts the **Anthropic protocol** to a doubled `/v1/v1/messages` path
+  against a gateway, degrading every probe to `ungraded` rather than erroring.
 
-- [x] **F — Two readers bypass `external_record_id`** (prerequisite of BACKLOG §2's
-      fingerprint-citation row)
+## The work
 
-- [x] **G — A truthful `stated` quote from an earlier turn cannot be represented** (BACKLOG §5)
-      Must land *with* a bound on the history read, or it trades a correctness bug for an
-      unbounded per-turn scan the store's own docstring forbids.
+- [ ] **1. Delete the provider concept.** `llm_provider` gone from `core/config/llm.py` and
+      from all nine readers. With it: `_anthropic_model`, `_require_anthropic_key`,
+      `_CachingDisabled`, the Anthropic arm of `prompt_caching_middleware`,
+      `_effort_is_provider_scoped`, `build_chat_model`'s effort guard, `llm_prompt_caching`,
+      `_refuse_public_llm_exposure`, the `netguard` branch, and `agent_model` (vestigial —
+      its only readers are `_anthropic_model` and an `or` tail in `api/runner.py`).
 
-- [x] **I — No deployment declares a context window** (BACKLOG §4)
-      Owner decision: **window-aware arm on the indicator only**; leave what
-      `agent_context_token_budget` means alone.
+- [ ] **2. Keep a fresh checkout valid.** `_llm_provider_config` requires `llm_base_url` +
+      `llm_model`; unconditional, that fires on every `Settings()` in the suite. Default them
+      to the local mock (`http://127.0.0.1:8820/v1`) rather than dropping the validator — the
+      dev default becomes "the mock gateway on this machine" instead of "the public Anthropic
+      API", which is strictly safer than today and needs no credential.
 
-- [x] **H — A second sign-off at the same revision overwrites the first** (BACKLOG §5)
-      Needs the `Chemclaw3_ui` PR in the same change or it is a docstring-only control.
+- [ ] **3. Route the judge through the seam.** `evals/live_judge.py` is the *only* first-party
+      importer of `anthropic`. The one thing it needs that the seam lacks is a truncation
+      signal (`stop_reason == "max_tokens"`), which separates `ungraded` from a fabricated
+      `unserved` — the module's own header records that conflating them mislabelled 65 of 190
+      probes. Read `response_metadata` rather than the SDK, or fall back to the JSON-parse
+      failure it already treats as `ungraded`.
 
-- [x] **J — `predict_reaction_conditions` is unreachable from any deployment** (BACKLOG §5)
-      Owner decision: **wire it, on by default.** Needs an ADR for the enablement default.
+- [ ] **4. Drop `anthropic` and `langchain-anthropic` from `pyproject.toml`.** Verified
+      removable: `_sdk_exceptions` already returns `()` when the package is absent, measured,
+      and every consumer guards on that. `llm_provider.py:219`'s `# pragma: no cover` becomes
+      live code and wants a real test.
 
-## Not taken, and why
+- [ ] **5. Make the config's own claim true.** "No provider client class is imported outside
+      `agent/llm_provider.py`" is false today in three places and enforced by nothing — in
+      fact `tests/test_third_party_layering.py` *licenses* three of them. Either make the
+      sentence true and assert it, or rewrite it to what the tree actually guarantees.
+      `cli/mock_llm.py` is legitimate (it is the server side) and `core/embeddings.py` is a
+      parallel seam with no Anthropic arm at all; the rule has to name them or lose them.
 
-Deployment-blocked (no cluster / no results-store target / no warehouse): the chart-per-repo
-row, Postgres+Temporal ownership, the live results sink, corpus volume, the published-calc
-cross-reference, `read_corpus`'s full scan, the append-only staleness gauge (no shipped
-binding sets `append_only`).
+- [ ] **6. Docs and lanes.** `.env.example` (test-pinned both ways), `README`, the runbook's
+      caching prose, `infra/live/processes.sh`, `infra/live/e2e-full-stack/up.sh` (hard `die`
+      on a missing `ANTHROPIC_API_KEY`), and `make chat`.
 
-Budget-blocked: ChemRAG (1,932 pairs), the 288-probe A/B, the delegation corpus, the profile
-allow-list re-measure. The credential works this session (probed: 8 in / 1 out on haiku), but
-each of these is hundreds to thousands of calls.
+- [ ] **7. ADR**, recording: the exfiltration path this closes by construction; the caching
+      cost accepted; why the provider concept goes rather than shrinking to one value; and the
+      token-usage shapes that were Anthropic-specific (`turn_usage._cache_creation` reads
+      `ephemeral_*` keys because LangChain zeroes the flat one on a write; `input` is a
+      residual because the Anthropic adapter includes cached tokens where the API excludes
+      them). `context_budget`'s ratio is clamped so a gateway that reports differently can
+      only tighten the budget — expensive but safe.
 
-Closed by decision already in the row: the two-row delete ordering ("keep both orders"), the
-second roster name ("leave it closed").
+## Scale
 
-
-## Review — batch 1 (merged as #304)
-
-`make lint type test` green at 6397 passed / 0 failed; CI green on all four checks.
-
-**What the reviews were worth.** The fresh-context review of A found six things, two of
-which no amount of care by the author would have caught: the ADR asserted two `BACKLOG.md`
-rows that did not exist (the exact silent omission its own sentences denied), and arm 1's
-headline measurement came from a fixture nothing drives. Both are the failure mode
-`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` exists to stop, reintroduced by
-the change that extends it.
-
-**Two rows were false about the tree**, which is why re-checking a row against `HEAD` before
-working it is the rule rather than a courtesy:
-- the schedule row's "recovering the status costs one describe … which is why it was not
-  taken here" reads as blocked on a live broker; `start_local()` runs offline here.
-- the `$defs` row's premise (measured separately: no switch, and `$defs` costs tokens rather
-  than saving them).
-
-**Twice the obvious implementation was wrong in the direction that hides the defect** —
-`first_execution_run_id` reports a killed `continue_as_new` drain as normal, and keying the
-defang on `read_file` closes one channel of five. Both were caught by driving the real shape
-(a three-hop chain; all six verbs) rather than the minimal one.
-
-
-## Review — batches 2 and 3 (#305, #306, Chemclaw3_ui#62)
-
-All ten queued rows done. Backlog 44 -> 38 open rows: eight closed, two opened
-where an ADR had claimed rows that did not exist.
-
-**Six of the ten rows asserted something false about the tree**, which turned the
-preamble's instruction ("if it is wrong, the fix is to correct or delete the row, and
-that is as much a contribution as the code would have been") from an edge case into the
-majority case:
-
-- the schedule row said it needed a live broker; `start_local()` runs offline here
-- the corpus row asked for three outcomes over two populations
-- the `$defs` row's premise *and* its headline example were both false
-- the context-window row's third fix cannot fire, and my own briefing repeated it
-- the `rxnpredict` row said it raises the context floor; the delta is exactly zero
-- the sign-off row's anchor named the wrong file
-
-**Twice the obvious implementation was wrong in the direction that hides the defect.**
-`first_execution_run_id` reports a killed `continue_as_new` drain as normal; keying the
-defang on `read_file` closes one channel of five. Both were caught by driving the real
-shape — a three-hop chain, all six verbs — rather than the minimal one.
-
-**Three tests were prose rather than guards, and one went vacuous rather than red.**
-The corpus partition test argued in its docstring that a third outcome would break the
-partition, and that mutation passed 18 tests. Two guards enumerated a set the tree owns
-(`{chem, safety}`; the seven chart bundles) and reported a broken guard when an eighth
-arrived. `test_a_fan_out_never_loses_its_own_results` read its trigger off a shipped
-setting and stopped exercising a clearing when that setting rose — caught only by its
-own "this test proves nothing" guard.
-
-**What the reviews were for.** Not one review found broken code; every implementation
-passed its own gate. What they found was false sentences and tests that do not guard
-what they claim — an ADR citing backlog rows that did not exist, a measurement taken
-from a fixture nothing drives, a docstring justification that measures false, an
-operations guide naming the wrong table. That is the class nothing goes red for.
-
-## Left open deliberately
-
-`agent_tool_result_clear_trigger` is now 73,500 and asserted to clear the ratchet
-ceiling; if a tool surface is ever allowed past it, that test names the trade rather
-than the behaviour changing quietly. `helm` and `kubeconform` both install in this
-sandbox, so the 14 chart skips are a default rather than a limit — worth remembering
-before reporting a run as green. `infra/live/processes.sh` does not start `rxnpredict`,
-so `make live-up` would meet an unreachable connector on probes pr-01..pr-06; starting a
-torch-backed predictor there is a decision about checkpoints, not a wiring omission.
+~24 test functions + 3 module constants out of 6,454. `tests/test_prompt_caching.py` (12
+tests) is the only file whose whole subject disappears. The Helm chart already ships
+`openai_compatible`, so `deploy/` needs no change.
