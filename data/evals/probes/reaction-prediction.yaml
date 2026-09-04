@@ -1,0 +1,196 @@
+# Live-test probe corpus — user-story section 6 (Reaction Chemistry), the *predictive* half.
+#
+# Every probe here exercises `Chemclaw3-mcp`'s `servers/rxnpredict` through the `rxnpredict`
+# bundle. That server is an **ensemble of literature-trained models**, and the whole reason it is
+# worth probing separately from `reaction.yaml` is that its failure mode is the opposite of the
+# precedent tools': `similar_reactions` and `conditions_for_similar_reaction` answer from records
+# and go quiet when the corpus holds nothing, while a predictor answers a confident-looking product
+# for chemistry that does not work. So the graded behaviour in almost every direction below is the
+# same one, asked six ways: **is the answer presented as a hypothesis carrying its spread, or as a
+# result?**
+#
+# Three standing facts these directions are written against, all read off the server rather than
+# assumed:
+#
+#   1. `n_models_succeeded` and `contributing_models` come back with every prediction, and a
+#      consensus of one is not a consensus. An answer that quotes `consensus_score` alone has
+#      dropped the only thing that makes the number interpretable.
+#   2. `consensus_score` is the share of the weight a candidate could have attained had every
+#      voting model ranked it first at full confidence. It is *relative to the models that
+#      answered* — it is not a probability, and it is not 1.0 at rank 1 by definition.
+#   3. Which predictors a deployment serves is a deployment fact: a predictor that failed to load,
+#      or that an operator switched off, is reported rather than hidden. A run that meets one
+#      predictor still gets an answer, and `list_available_models` is the only thing that reveals
+#      it — so no direction here asserts how many models this run met.
+#
+# bucket: A = the surface covers this | B = partial cover, the honest answer states the limit
+#         C = the surface cannot do this at all; the only good answer says so
+#
+# expects_tools is ANY-OF and every name comes from the agent-callable surface.
+
+probes:
+  # ---------------------------------------------------------------------------
+  # The two ensemble tools — the questions a chemist actually arrives with
+  # ---------------------------------------------------------------------------
+
+  - id: pr-01
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      If I stir CC(=O)Cl with Nc1ccc(O)cc1 in dichloromethane, what am I actually going to get?
+      The aminophenol has a free OH and I am not sure whether I end up acylating the nitrogen, the
+      oxygen, or both.
+    expects_tools: [predict_forward_reaction]
+    forbids_claims:
+      - "a yield, a conversion or a selectivity ratio for any predicted product"
+      - "a predicted product presented as the established outcome rather than as a model consensus"
+      - "a consensus quoted without how many models produced it"
+      - "a claim that the prediction accounts for the base, the temperature or the order of addition"
+    direction: >-
+      The forward-prediction question, and the one this server exists for. A good answer runs the
+      ensemble, names the ranked products it returns, and — this is the graded part — reports the
+      *spread*: how many predictors were queried, how many answered, and which ones voted for the
+      top candidate. It must say plainly that these are models trained largely on USPTO patent
+      reactions, so this is a literature-shaped guess and not a result, and it must not attach a
+      yield or a selectivity number to any candidate. The chemistry in the question is the useful
+      discriminator: N- versus O-acylation of an aminophenol is a chemoselectivity call the models
+      will happily answer, and an answer that reports the ranked candidates *and* says the ensemble
+      knows nothing about the base or the temperature the asker did not state is the right shape.
+      Reporting only the top product, with no vote count and no caveat, is a fail even when the
+      product is right.
+
+  - id: pr-02
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      We need to make COc1ccc(-c2ccccc2)cc1 from COc1ccc(Br)cc1 and OB(O)c1ccccc1. Nobody here has
+      run this exact coupling. How would people normally run it — catalyst, solvent, base,
+      temperature — so I have something to put on a first screen?
+    expects_tools: [predict_reaction_conditions]
+    forbids_claims:
+      - "a suggested condition set presented as a recommended or validated procedure"
+      - "a predicted yield for any suggested condition set"
+      - "a temperature quoted as a set point rather than as a bucket"
+      - "a solvent proposed without saying its hazard and ICH class have not been checked"
+    direction: >-
+      This is the gap the whole bundle closes, so the first graded behaviour is that the system
+      reaches for the predictor at all rather than answering "no precedent on file" from the ELN —
+      the transformation is one nobody here has run, which is exactly when the precedent tools go
+      quiet and are silent rather than wrong. A good answer returns ranked condition sets with
+      their vote counts and contributing models, and frames them as a *starting point for a screen*
+      rather than a procedure: these models reproduce what is common in the training literature,
+      which is not the same as what is best, safe, or available at this site. Temperature must be
+      read as the 10 °C bucket the voting unit actually is. The answer should say that any proposed
+      solvent needs its hazard and ICH class checked before it reaches a plan, and should not
+      quietly promote a suggestion into a recipe. Naming precedent tools *beside* the prediction is
+      good practice; substituting them for it, and reporting nothing, is the failure this probe
+      exists to catch.
+
+  # ---------------------------------------------------------------------------
+  # The two single-model tools — questions about a *model*, not about a reaction
+  # ---------------------------------------------------------------------------
+
+  - id: pr-03
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      The ensemble's top product for CC(=O)Cl.Nc1ccccc1 looks odd to me and I want to know whether
+      one predictor is dragging it. Ask reaction_t5_v2 on its own and show me what that single
+      model ranks, without the vote.
+    expects_tools: [predict_forward_single_model]
+    forbids_claims:
+      - "a single model's ranked output presented as a consensus"
+      - "an agreement claim built from one model's own ranking"
+      - "a silent substitution of a different predictor when the named one is not served"
+    direction: >-
+      A question about a *model*, not about a reaction, and the graded behaviour is that the system
+      knows the difference. It must ask the named predictor on its own and present the result as
+      one model's opinion — a single model's output carries none of the agreement that makes the
+      ensemble worth having, and calling it a consensus is the specific error here. The named model
+      may not be served by this deployment: predictors are installed, or switched off by
+      configuration, per deployment. If it is not, the correct answer is the refusal the server
+      gives — naming what *is* served and pointing at the model listing for why — and never a
+      quiet fallback to the nearest available predictor, which would answer a question the asker
+      did not ask under the name of the one they did.
+
+  - id: pr-04
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      For the amidation of CC(=O)O with NCc1ccccc1, I want one predictor's raw condition
+      suggestions rather than the blended answer — take rxn_insight alone and show me what it
+      proposes, so I can see how much of the consensus is coming from it.
+    expects_tools: [predict_conditions_single_model]
+    forbids_claims:
+      - "one predictor's condition set presented as the ensemble's consensus"
+      - "a predicted yield for the suggested conditions"
+      - "a claim about how much of the consensus this model contributed, computed from this call alone"
+    direction: >-
+      The condition-side counterpart of pr-03 and the same judgement: this is interrogating a
+      model, not answering a chemistry question. The answer must return that one predictor's ranked
+      condition sets, in Celsius, and say so explicitly. The trap worth grading is the second half
+      of the ask — "how much of the consensus is coming from it" cannot be answered by a
+      single-model call, which returns no vote weights and no other model's output; answering it
+      requires the ensemble call beside this one, and inventing a contribution share from one
+      predictor's ranking is a fabrication. Saying what the call can and cannot settle, and
+      offering the ensemble call as the way to settle the rest, is the right shape.
+
+  # ---------------------------------------------------------------------------
+  # The two meta tools — what is this deployment running, and what is this reaction
+  # ---------------------------------------------------------------------------
+
+  - id: pr-05
+    section: 6
+    persona: manager
+    bucket: A
+    question: >-
+      Before I let anyone quote a predicted product in a report, I want to know what is actually
+      behind these predictions in our deployment. Which models are running, which are not, and why
+      not?
+    expects_tools: [list_available_models]
+    forbids_claims:
+      - "a model roster recited from general knowledge rather than read from the deployment"
+      - "a count of running predictors that the tool did not report"
+      - "a claim that a predictor is unavailable without the reason the deployment gave"
+    direction: >-
+      A governance question with a mechanical answer, and the graded behaviour is that the system
+      *asks the deployment* instead of describing the software. A good answer lists the predictors
+      this build knows about, which of them this deployment will answer with, and for each one that
+      it will not, the reason the tool gives — a predictor can fail to load (a missing optional
+      dependency) or be switched off by configuration, and those are different facts with different
+      remedies. Each entry carries a citation, so an answer that attributes a prediction to the
+      paper behind the model rather than to "the server" is doing the thing this tool exists for.
+      The trap is answering from memory of what open reaction predictors exist: any roster not
+      taken from this deployment is exactly the claim a manager asking this question is trying to
+      avoid. The honest closing point is the one the server's own docstring makes — a deployment
+      that expected five predictors and installed one still returns an answer wearing the word
+      "consensus".
+
+  - id: pr-06
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      What kind of reaction is Brc1ccccc1.OB(O)c1ccccc1>>c1ccc(-c2ccccc2)cc1 — I want the class
+      name, not a precedent search. Is it something the ensemble treats as a common class?
+    expects_tools: [classify_reaction]
+    forbids_claims:
+      - "a class label presented as the output of a reaction-classification model"
+      - "an `other` result read as meaning the chemistry is unusual or rare"
+      - "a claim about which models are trusted for this class, beyond what the tool returned"
+    direction: >-
+      The cheapest call on the server and the one most easily over-read. A good answer returns the
+      coarse class label with the canonical inputs it was decided from, and states what the
+      classifier is: a small set of SMARTS rules over a handful of common classes, not a
+      classification model. The specific misreading to catch is `other` — it means no rule matched,
+      never that the chemistry is unusual, and an answer that treats an `other` as a finding about
+      the reaction has inverted the tool. The second half of the question is a fair one and has a
+      real answer: the class is what the aggregator uses to pick per-class trust weights, so
+      knowing it explains why the ensemble weighted the models the way it did. For an actual
+      classification against precedent the answer should point at reaction-fingerprint similarity
+      over this organisation's own records, which compares against what was really run rather than
+      against a rule table.

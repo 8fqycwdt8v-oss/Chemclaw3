@@ -2745,9 +2745,14 @@ def test_a_derived_value_refuses_rather_than_rendering_a_plausible_wrong_one(
     [
         pytest.param(("--set", "connectors=null"), id="block-removed"),
         pytest.param(
+            # Derived from the values file rather than typed out. It *was* typed out, as the seven
+            # bundles that existed the day it was written, and the eighth (`rxnpredict`) turned
+            # "all disabled" into "all but one disabled" — so the release rendered, correctly, and
+            # this arm failed reporting a guard that had not broken. A list of the whole set is a
+            # thing only the whole set can supply.
             tuple(
                 arg
-                for name in ("molfp", "rxnfp", "safety", "chem", "calc", "bo", "results")
+                for name in sorted(_values()["connectors"])
                 for arg in ("--set", f"connectors.{name}.enabled=false")
             ),
             id="all-disabled",

@@ -135,14 +135,13 @@ class StatusIn(BaseModel):
     # not say what it approved is the one that gets attributed to a document nobody read. A
     # colleague saving while a chemist thinks is the ordinary case, not the exotic one.
     expected_revision: int = Field(ge=1)
-    # The status the person was looking at when they decided. Required for `expected_revision`'s
-    # reason one line up, and for one it does not cover: `expected_revision` is a compare-and-set on
-    # the *document*, so two people reading revision 1 could approve it and abandon it and both be
-    # told 204. Required rather than optional because this model is `extra="forbid"` and the shipped
-    # `Chemclaw3_ui` has always sent it — so until now every sign-off from the panel was a 422, and
-    # accepting it optionally would leave the concurrent-sign-off hole open for the one caller that
-    # already closes it.
-    expected_status: DesignStatus = Field()
+    # The status the person saw beside that revision. Required for the reason above one step
+    # further: `expected_revision` is a compare-and-set on the *document*, so it is silent about
+    # the decision — two people looking at revision 1 could approve and abandon it and both were
+    # told 204 (measured 100/100 over `asyncio.gather`; sequentially it needs no race at all). An
+    # *optional* field nobody sends would be a control that exists only in a docstring, so this is
+    # required and `Chemclaw3_ui` sends it.
+    expected_status: DesignStatus
     # **Recorded, which it was not.** `Chemclaw3_ui`'s status panel labels this "recorded with the
     # move", disables every button until it is filled in, and confirms "the move is recorded
     # against you with the reason you wrote" — and `set_status` took no `reason` at all, so the one
@@ -380,11 +379,11 @@ async def post_status(
             status_code=409, detail={"code": "revision_conflict", "message": str(exc)}
         ) from exc
     except StatusConflict as exc:
-        # A distinct code beside it rather than the same one, because the two are distinguishable to
-        # the person and lead somewhere different: a revision conflict means the document moved
-        # under you, a status conflict means somebody else already decided. `Chemclaw3_ui`'s
-        # `errorFromStatus` has always mapped `status_conflict` to its own kind, against a backend
-        # that has never emitted it.
+        # The same 409 and the same remedy, under its own `code`, because the caller needs to know
+        # *which* thing moved: `revision_conflict` means the document changed under them and the
+        # diff is worth reading, `status_conflict` means somebody else already decided and the
+        # question is whether to override them. One code for both would have made a browser say
+        # "the design was edited" about a colleague's sign-off.
         raise HTTPException(
             status_code=409, detail={"code": "status_conflict", "message": str(exc)}
         ) from exc

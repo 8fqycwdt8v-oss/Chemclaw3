@@ -1,0 +1,81 @@
+# Reaction prediction by ensemble: what will this give, and how would people run it.
+#
+# **This bundle is a declaration, not a server — we do not run it.** The capability lives in
+# `Chemclaw3-mcp` as `servers/rxnpredict/`, the third bundle of that shape after `chem` and
+# `safety` (`D-2026-08-09-a-connector-we-do-not-run`): setting `connectors.rxnpredict.url` in the
+# chart says the server is hosted outside this release, so no Deployment and no Service render and
+# the given address is dialled instead of a computed one.
+#
+# **What this closes is a capability that existed and was unreachable.** The server has been built
+# and serving these six tools for weeks; nothing in this repository named it, so
+# `skills/protocol-generation` answered "how would people run this?" entirely from precedent —
+# which answers from what *this* corpus holds and is silent on a transformation nobody here has
+# run. A capability nobody can address is indistinguishable from one that does not exist.
+#
+# **On by default, deliberately.** `registry.enabled()` is "discovery is enablement until you say
+# otherwise", so this file turns the six tools on in every fresh checkout, and that is the intended
+# outcome rather than an accident of the seam: all six are read-only predictors of their arguments
+# — no store, no durable state, no code execution — so the worst an unapproved plan can do with
+# them is read a guess. A deployment that does not host the server sets `CHEMCLAW_CONNECTORS_ENABLED`
+# without `rxnpredict`, or leaves `CHEMCLAW_RXNPREDICT_TOKEN` unset and every call is refused at
+# the server.
+#
+# **The tool list below now exists in two repositories** — here and in that server's own
+# `connector.yaml` — and nothing structurally forces them to agree. The server's copy is
+# authoritative, because it is what actually answers; this one is what this repository validates
+# against. **`make connector-validate` is not what catches a drift here** — it answers by
+# importing the bundle's own `server/` module in-process, and this bundle ships none, so it
+# reports these names as `unverified_tool_surfaces` and checks nothing. The two checks that do
+# reach the server are `make live-template-args` (every template step's *arguments* against the
+# running connector) and `Chemclaw3-mcp`'s own `assert_manifest_matches`.
+name: rxnpredict
+description: >-
+  Forward reaction prediction and reaction-condition prediction by ensemble: several open-source
+  models are run in parallel and their ranked outputs combined by Borda-weighted voting, gated on a
+  coarse SMARTS reaction class. Answers "what will this give?" and "how would people run this?",
+  always with the per-model spread beside the consensus. Predictions from literature-trained
+  models, not measurements — strong on common couplings, weak on stereochemistry and rare classes.
+
+endpoint:
+  transport: http
+  # `Chemclaw3-mcp`'s `servers/rxnpredict`, port 8857 (its `MODULES.md` is the port registry). A
+  # loopback dev default; a cluster address is set per deployment via CHEMCLAW_CONNECTOR_URLS, and
+  # `connectors.rxnpredict.url` in the chart.
+  url: http://127.0.0.1:8857/mcp
+  health_url: http://127.0.0.1:8857/healthz
+  # 120 s, matching the server's own manifest, and the reason is the first call rather than the
+  # steady state: a cold pod pays a T5 checkpoint off local disk into memory before it infers.
+  # This is the bound that stops a wedged predictor holding a turn, not a performance target.
+  request_timeout: 120
+  auth:
+    # **Bearer, because the server on the other side enforces one.** `Chemclaw3-mcp`'s
+    # `connector_app` checks the credential on `/mcp` itself, so `mode: none` here would not mean
+    # "no auth needed" — it would mean every call is refused. The variable is named rather than
+    # carried, read per request, and it is the same name the server reads.
+    mode: bearer
+    token_env: CHEMCLAW_RXNPREDICT_TOKEN
+  tools:
+    - predict_forward_reaction
+    - predict_reaction_conditions
+    - predict_forward_single_model
+    - predict_conditions_single_model
+    - list_available_models
+    - classify_reaction
+  # Every one of the six is a pure function of its arguments — model inference plus an in-process
+  # bounded LRU, no store, no durable state, nothing an unapproved plan could change. The server
+  # has **no** state-changing surface at all: upstream's `clear_prediction_cache` was the single
+  # exception and is deliberately not served (`Chemclaw3-mcp`'s `MODULES.md` records why), so this
+  # classification is the whole surface rather than the read half of it.
+  #
+  # The classification is what the plan gate reads, and getting it wrong by omission fails *open*
+  # (D-167). It is right to leave these open under an unapproved plan for the same reason the
+  # `safety` lookups are: "what does this transformation usually give, and how do people run it?"
+  # is exactly the question a chemist wants answered *before* deciding what work to approve. The
+  # spend that follows — a conformer search, a screen — is gated where it is incurred.
+  read_only:
+    - predict_forward_reaction
+    - predict_reaction_conditions
+    - predict_forward_single_model
+    - predict_conditions_single_model
+    - list_available_models
+    - classify_reaction

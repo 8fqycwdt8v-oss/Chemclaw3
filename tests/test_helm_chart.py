@@ -342,9 +342,11 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     included by every Deployment the chart renders, not just the pods that call these three
     bundles, so a required entry would take the front door and every worker into
     `CreateContainerConfigError` on `helm upgrade` for a Secret edit that has nothing to do with
-    them. `optionalKeys` is therefore doing two different jobs across its four members: for the
-    framing key, "optional" describes the capability; for these three, it describes only the
-    upgrade, and an operator still has to set all three before the bundle they gate works at all.
+    them. `optionalKeys` is therefore doing two different jobs across its members: for the
+    framing key, "optional" describes the capability; for a connector bearer, it describes only the
+    upgrade, and an operator still has to set it before the bundle it gates works at all. (That
+    sentence used to say "its four members" and count them; the map has grown twice since, so the
+    number is gone and the assertion below is the count.)
 
     The tenth through fourteenth are the ones that were **missing**, and each is an exposure
     *reduction* rather than a new secret at rest — which is why they belong here without an
@@ -374,6 +376,13 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     `config` renders into a ConfigMap the `view` role can read, and anyone who learns this value can
     read the whole corpus through that surface.
 
+    `rxnpredictToken` is the last, and it is not a new *kind* — it is a fourth of the seventh-
+    through-ninth kind, arriving with the `rxnpredict` bundle that made `Chemclaw3-mcp`'s
+    reaction/condition predictors addressable from this release at all. Its manifest names the
+    variable with `token_env`, `_EnvBearerAuth` reads it per request, and unset means every
+    prediction raises `MissingConnectorCredential` rather than degrading — the same fail-closed
+    direction, and the same operator obligation, as `chem` and `safety`.
+
     Both maps are asserted, because "which secrets does this chart name" is one question and
     splitting the answer across two values is exactly how a key comes to be in neither.
     """
@@ -392,6 +401,7 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_CHEM_TOKEN",
         "CHEMCLAW_SAFETY_TOKEN",
         "CHEMCLAW_CALC_TOKEN",
+        "CHEMCLAW_RXNPREDICT_TOKEN",
         "CHEMCLAW_RXNLABEL_TOKEN",
         "CHEMCLAW_LLM_FALLBACK_API_KEY",
         "CHEMCLAW_VECTOR_STORE_API_KEY",
@@ -903,4 +913,59 @@ def test_the_labelling_server_is_addressable_from_the_chart() -> None:
     assert "egressPorts.rxnlabel" in policy, (
         "the port is declared in values.yaml but never emitted in the egress rule, so it permits "
         "nothing"
+    )
+
+
+def test_every_externally_hosted_connector_can_actually_be_dialled() -> None:
+    """The test above, generalised off the bundle set instead of one hand-written server.
+
+    `connectors.<name>.url` says a sibling repository hosts this capability, and three separate
+    things have to line up before a packet reaches it: the address, a `networkPolicy.egressPorts`
+    entry carrying *that* port, and the template actually emitting the entry. Miss the second and
+    the connection is dropped even with the host in `egressDestinations`, because a NetworkPolicy
+    egress rule restricts by port independently of its `to:` peer list. Miss the third and the
+    values entry is a knob that renders nothing
+    (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`).
+
+    Derived from the values file rather than listed, so the *next* externally-hosted bundle is
+    covered on the day its `url:` is written. The hand-written version above stays because
+    `rxnlabel` is not a connector at all — its address is a `config` key, and no walk of the
+    `connectors` block can see it.
+    """
+    policy = (_CHART / "templates" / "networkpolicy.yaml").read_text(encoding="utf-8")
+    ports = _VALUES["networkPolicy"]["egressPorts"]
+    external = {name: cfg["url"] for name, cfg in _VALUES["connectors"].items() if cfg.get("url")}
+    assert external, "no externally-hosted connector found; this test would assert nothing"
+    for name, url in external.items():
+        dialled = re.search(r":(\d+)", url.split("//", 1)[-1])
+        assert dialled, f"{name}: url {url!r} names no port"
+        assert name in ports, (
+            f"{name} is dialled at {url} and networkPolicy.egressPorts has no `{name}` entry, so "
+            "every packet to it is dropped whatever egressDestinations says"
+        )
+        assert str(ports[name]) == dialled.group(1), (
+            f"{name}: egressPorts.{name} is {ports[name]} but the url dials {dialled.group(1)}"
+        )
+        assert f"egressPorts.{name}" in policy, (
+            f"egressPorts.{name} is declared in values.yaml and never emitted in the egress rule, "
+            "so it permits nothing"
+        )
+
+
+def test_no_egress_port_is_declared_without_being_emitted() -> None:
+    """The other direction, over the whole map: a port entry no rule names permits nothing.
+
+    The test above only reaches ports belonging to a connector `url:`. This one asks the question
+    of every key in `egressPorts`, which is where a value added for a client that is *not* a
+    connector — the labeller was one — would otherwise sit unreferenced and read, in review, as a
+    control that had been set up.
+    """
+    policy = (_CHART / "templates" / "networkpolicy.yaml").read_text(encoding="utf-8")
+    ports = _VALUES["networkPolicy"]["egressPorts"]
+    assert ports, "networkPolicy.egressPorts is empty; this test would assert nothing"
+    unemitted = sorted(key for key in ports if f"egressPorts.{key}" not in policy)
+    assert not unemitted, (
+        f"networkPolicy.egressPorts declares {unemitted}, which no egress rule emits. Either the "
+        "rule is missing — in which case the destination is unreachable — or the entry is dead "
+        "and should be deleted."
     )

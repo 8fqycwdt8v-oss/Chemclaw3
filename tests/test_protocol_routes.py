@@ -535,19 +535,61 @@ def test_a_sign_off_against_a_stale_revision_is_a_409(
     assert asyncio.run(store.status_history(_DESIGN_ID))[0].revision == 2
 
 
+def test_a_sign_off_against_a_status_somebody_else_moved_is_its_own_409(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """A colleague's decision refuses the sign-off, under a code that says *which* thing moved.
+
+    `expected_revision` is a compare-and-set on the document and says nothing about the decision,
+    so alice abandoning revision 1 and bob approving revision 1 both answered 204 and the header
+    read `approved`. The code is deliberately not `revision_conflict`: the document did not change,
+    so telling a browser it did would send the chemist to a diff that shows nothing.
+    """
+    _seed(store, _design(), status="draft")
+    abandoned = client.post(
+        f"/protocols/{_DESIGN_ID}/status",
+        json={
+            "status": "abandoned",
+            "expected_revision": 1,
+            "expected_status": "draft",
+            "reason": "the SM decomposes above 40 C",
+        },
+    )
+    assert abandoned.status_code == 204
+
+    response = client.post(
+        f"/protocols/{_DESIGN_ID}/status",
+        json={
+            "status": "approved",
+            "expected_revision": 1,
+            "expected_status": "draft",
+            "reason": "looks fine to me",
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "status_conflict"
+    # And the abandonment stands: nothing was recorded and nothing was moved.
+    summary = asyncio.run(store.summary(_DESIGN_ID))
+    assert summary is not None and summary.status == "abandoned"
+    assert [event.status for event in asyncio.run(store.status_history(_DESIGN_ID))] == [
+        "abandoned"
+    ]
+
+
 def test_the_body_the_shipped_ui_sends_is_accepted(
     client: TestClient, store: InMemoryDesignStore
 ) -> None:
     """The exact JSON `Chemclaw3_ui`'s sign-off panel sends, field for field.
 
-    `StatusIn` is `extra="forbid"` and the client has always sent `expected_status`, so **every
-    sign-off from the shipped panel was a 422** — measured 2026-09-04 against the client's `main`
-    (`src/api/client.ts::setProtocolStatus` posts `status`, `expected_revision`, `expected_status`
-    and `reason`). Nothing here failed, because every test in this file wrote the body the *server*
-    expected, which is the one shape a server-side test cannot check on its own.
+    `StatusIn` is `extra="forbid"` and the client has always sent `expected_status`, so before that
+    field existed here **every sign-off from the shipped panel was a 422** — measured 2026-09-04
+    against the client's `main`, where `src/api/client.ts::setProtocolStatus` posts `status`,
+    `expected_revision`, `expected_status` and `reason`. Nothing in this file failed, because every
+    test above writes the body the *server* expects, which is the one shape a server-side test
+    cannot check on its own.
 
-    Written as the client's literal body rather than as a parametrised case, so that a field the
-    panel adds later fails here rather than in somebody's browser.
+    Written as the client's literal body rather than as a parametrised case, so a field the panel
+    adds later fails here rather than in somebody's browser.
     """
     _seed(store, _design(), status="draft")
     response = client.post(
@@ -562,55 +604,18 @@ def test_the_body_the_shipped_ui_sends_is_accepted(
     assert response.status_code == 204
 
 
-def test_a_second_sign_off_against_the_status_the_first_one_left_is_a_conflict(
-    client: TestClient, store: InMemoryDesignStore
-) -> None:
-    """The hole `expected_revision` does not cover, and the 409 the UI already handles.
-
-    `expected_revision` is a compare-and-set on the *document*, so two people reading revision 1
-    could approve it and abandon it and both be told 204 — the evidence survives in
-    `experiment_protocol_status_events`, but nobody is told at the time, which is the point of a
-    sign-off. `errorFromStatus` in the client has always mapped `status_conflict` to its own kind,
-    against a backend that had never emitted it.
-    """
-    _seed(store, _design(), status="draft")
-    first = client.post(
-        f"/protocols/{_DESIGN_ID}/status",
-        json={
-            "status": "approved",
-            "expected_revision": 1,
-            "expected_status": "draft",
-            "reason": "approved by A",
-        },
-    )
-    assert first.status_code == 204
-
-    second = client.post(
-        f"/protocols/{_DESIGN_ID}/status",
-        json={
-            "status": "abandoned",
-            "expected_revision": 1,
-            "expected_status": "draft",
-            "reason": "abandoned by B, who was still looking at the draft",
-        },
-    )
-    assert second.status_code == 409
-    assert second.json()["detail"]["code"] == "status_conflict"
-    # Distinguishable from the sibling conflict, because the two lead somewhere different.
-    assert second.json()["detail"]["code"] != "revision_conflict"
-    # And B's move was not quietly recorded: one event, A's.
-    events = asyncio.run(store.status_history(_DESIGN_ID))
-    assert [e.status for e in events] == ["approved"]
-
-
 def test_a_sign_off_that_names_no_status_is_refused(
     client: TestClient, store: InMemoryDesignStore
 ) -> None:
-    """422, for `expected_revision`'s reason: a default would remove the control, not supply it."""
+    """Required, not optional — an optional field nobody sends is a control only a docstring has.
+
+    Which is why `Chemclaw3_ui` sends it: `setProtocolStatus` puts `expected_status` in the body
+    and `tests/protocolClient.test.ts` asserts the exact body it sends.
+    """
     _seed(store, _design(), status="draft")
     response = client.post(
         f"/protocols/{_DESIGN_ID}/status",
-        json={"status": "approved", "expected_revision": 1, "reason": "no status named"},
+        json={"status": "approved", "expected_revision": 1, "reason": "looks right"},
     )
     assert response.status_code == 422
 

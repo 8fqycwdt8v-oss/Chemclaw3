@@ -592,28 +592,6 @@ repository now has a **measured** better answer to a problem this repository sol
 not revisited. That is a different kind of debt and it needs its own section, because a queue that
 only holds defects can only ever restore the system to what it already intended to be.
 
-- [ ] **`predict_reaction_conditions` is built in the fleet and unreachable from any deployment
-      here** — [M], and it is now the biggest single gap in the protocol pipeline
-      (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`). `Chemclaw3-mcp`'s
-      `servers/rxnpredict` is **built** and serves six read-only tools — among them
-      `predict_reaction_conditions`, an ensemble of open predictors with the per-model spread
-      returned beside the consensus — and `grep -rn rxnpredict src/` in this tree finds one
-      docstring mention in `publish/record.py` and nothing else: no bundle under
-      `src/chemclaw/connectors/`, no `connectors:` entry in `deploy/helm/chemclaw/values.yaml`, no
-      token obligation. Re-verified 2026-08-29. So
-      `skills/protocol-generation` routes a chemist's "how would people run this" question entirely
-      through precedent (`conditions_for_similar_reaction`, `reagent_frequency`), which answers from
-      what *this* corpus holds and is silent on a transformation nobody here has run.
-
-      **It is a default-surface decision before it is a diff**, and the `pyexec` row below is the
-      worked precedent: `registry.enabled()` is "discovery is enablement until you say otherwise",
-      so a manifest stub turns six tools on in every fresh checkout, needs six probes
-      (`tests/test_probe_coverage.py`), and raises the context floor. Unlike `pyexec` the capability
-      is uncontroversial — six read-only predictors, no code execution — so the argument is about
-      the enablement default rather than about the tool. Whichever way it goes it also owes a
-      `values.yaml` entry, an `egressPorts` entry for 8857, and the `CHEMCLAW_RXNPREDICT_TOKEN`
-      obligation `chem` already models.
-
 - [ ] **`_quote_supports` cannot tell whether the figure a quote carries is about *this* slot** —
       [S], and it is the honest limit of a rule that is otherwise doing its job. A `stated` slot
       attests a value, and the check now relates value to quote for every quote: the value's figures
@@ -623,7 +601,12 @@ only holds defects can only ever restore the system to what it already intended 
 
       What it cannot do is *attribution*. A chemist who wrote "24 wells" has stated a figure, and
       nothing in the string says whether that 24 is the plate format, the run cap or a coincidence —
-      so `max_runs='24'` quoting "24 wells" passes, and it should not. Closing that needs the slot's
+      so `max_runs='24'` quoting "24 wells" passes, and it should not.
+      **The exposure grew on 2026-09-04** and the rule did not change:
+      `D-2026-09-04-a-quote-is-evidence-about-a-person-not-about-a-turn` widened the haystack from
+      this turn's message to the thread's user turns, so there is more of the chemist's own text for
+      a figure to coincidentally match. That strengthens the case for the count this row already
+      asks for rather than altering what it asks. Closing that needs the slot's
       identity to be part of the judgment, which means either a per-slot unit vocabulary (a *well*
       is not a *run*, an *hour* is not a *gram*) or asking the model to point at the span and
       checking the *span's* neighbourhood rather than its digits.
@@ -686,26 +669,6 @@ only holds defects can only ever restore the system to what it already intended 
       re-measured on the bound basis when the row is worked. What does not change is why it is
       blocked: the saving is still partly in endpoint tools no offline floor can see, and it still
       needs the skill gate beside the allow-list.
-
-- [ ] **A truthful `stated` quote from an earlier turn cannot be represented** — [S], found
-      2026-08-30 by the fresh-context review of the agent surface. `require_quotes_are_verbatim`
-      checks the quote against `get_current_user_text()`, which is the message that started *this*
-      turn, and `structure_experiment_request`'s own docstring says to call it "first … while
-      correcting it is still cheap" — i.e. iteratively, across turns. Measured: a chemist who wrote
-      "24 wells, no DMF, by Friday please." on turn 1 and "ok go ahead" on turn 3 gets the intake
-      refused, because `'24 wells'` is not in "ok go ahead".
-
-      So on the ordinary multi-turn path the honest `stated` is unrepresentable, and the remedy the
-      message prescribes records a real chemist constraint as a model inference — the mislabelling
-      the check exists to prevent, running the other way. The refusal message now says which message
-      is checkable rather than "the text you were given", which was itself untrue: it *was* given,
-      one turn earlier.
-
-      **Fixing it properly means widening the ambient to the thread's user turns**, which is a read
-      at the stamp site in `api/runner.py` (and `cli/chat.py`), on the hot path, per turn. Prior
-      turns are still the chemist's own words so the anti-spoofing argument is unaffected — the
-      question is only what that read costs and where it comes from. Anchors:
-      `core/turn_text.py`, `agent/protocol_design_tools.py::require_quotes_are_verbatim`.
 
 - [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
       what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models

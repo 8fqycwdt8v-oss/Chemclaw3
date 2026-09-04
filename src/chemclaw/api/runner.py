@@ -103,7 +103,7 @@ from chemclaw.core.session_context import (
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tracing import start_span
 from chemclaw.core.turn_signals import JobSignal
-from chemclaw.core.turn_text import reset_current_user_text, set_current_user_text
+from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_texts
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +249,12 @@ async def run_turn(
     # Bound before the try so the teardown clause below can read it whatever point the turn died
     # at — a cancellation during the connector open arrives before the real trace is built.
     tool_trace: ToolCallTrace | None = None
+    # **Read before the `with`, because `_turn_ambient` may not `await`.** That block reaches its
+    # resets by cancellation rather than by `aclose()` (D-130), so an `await` inside it re-raises
+    # the cancellation on the spot and leaks one turn's ambient identity into the next turn on this
+    # worker — the reason it is synchronous at all. The history read is therefore the caller's, and
+    # its result is passed in.
+    earlier_said = await _earlier_user_texts(history, session)
     with (
         _turn_ambient(
             session.session_id,
@@ -257,7 +263,7 @@ async def run_turn(
             dry_run,
             ledger.correlation_id,
             ledger.usage,
-            user_message,
+            [*earlier_said, user_message],
         ),
         start_span(
             "chemclaw.turn",
@@ -610,6 +616,67 @@ class _TurnLedger:
             self.started_jobs.append(signal.job_id)
 
 
+async def _earlier_user_texts(history: Any | None, session: TurnSession) -> list[str]:
+    """The chemist's own earlier messages in this thread, bounded, for the `stated` ambient.
+
+    The producer half of `core/turn_text`: `require_quotes_are_verbatim` grades a `basis="stated"`
+    slot against the chemist's own words, and until this existed it could only see the message that
+    started the turn in flight — so a constraint stated on turn 1 and acted on at turn 3 was
+    unrepresentable as `stated` at all.
+
+    **Bounded at the query**, by `agent_stated_quote_turns`, which is what makes it affordable to
+    run once per turn: the provider filters to the chemist's own rows in SQL and returns at most
+    that many, rather than reading a whole conversation and discarding the assistant half of it.
+    The character half of the bound is applied where the ambient is bound, because it is a property
+    of the ambient rather than of the read.
+
+    **Best-effort, and its failure mode is the strict one.** A transcript is a rendering and no
+    rendering is worth failing an answered turn over — the rule `api.tool_results` and
+    `_record_transcript` already state — so an unreachable store degrades to no earlier words,
+    which refuses a `stated` quote the turn could otherwise have accepted. That is the direction a
+    check may fail in; the other one accepts a fabrication.
+
+    **The catch stays narrow, and that is a choice about who is at fault.** Those two are what the
+    session store raises for an unreachable or refusing database. Anything else means a provider
+    whose `recent_user_texts` does not have this signature, which is a defect in this repository
+    rather than in a deployment's database — and this call sits *outside* `run_turn`'s own
+    `try`, so it would fail the request rather than degrade it. That is the right noise for a
+    two-provider seam, and the reason the duck-type test above is a `getattr` rather than a catch.
+
+    Args:
+        history: The session's history provider, or `None` off the durable path. A provider
+            without the method (a test double that only stores) contributes nothing, duck-typed
+            for the reason `_record_transcript` states.
+        session: The turn's session — its id addresses the durable rows and its `state` is where
+            the in-memory provider keeps its thread, so one call is correct under both.
+
+    Returns:
+        Their earlier messages, oldest first. Empty when there is no provider, no thread, or the
+        store could not be read.
+    """
+    reader = getattr(history, "recent_user_texts", None)
+    if reader is None or settings.agent_stated_quote_turns <= 0:
+        return []
+    try:
+        return list(
+            await reader(
+                session.session_id,
+                limit=settings.agent_stated_quote_turns,
+                state=session.state,
+            )
+        )
+    except (ConnectionError, psycopg.Error) as exc:
+        degraded(
+            logger,
+            "stated_quote_history",
+            "could not read the chemist's earlier messages for session %s (%s); a "
+            '`basis="stated"` quote from an earlier turn will be refused this turn',
+            session.session_id,
+            exc,
+        )
+        return []
+
+
 @contextmanager
 def _turn_ambient(
     session_id: str,
@@ -618,7 +685,7 @@ def _turn_ambient(
     dry_run: bool,
     correlation_id: str,
     usage: TurnUsage,
-    user_text: str,
+    user_texts: Sequence[str],
 ) -> Iterator[None]:
     """Stamp the six ambients a turn runs under, and unstamp every one on the way out.
 
@@ -652,16 +719,21 @@ def _turn_ambient(
       inside a provider's own chain (`chemclaw.agent.turn_usage.off_stream_metering`).
 
     `dry_run` rides here too for the reason it is ambient at all: the model can neither set it nor
-    clear it (IDEA-4). `user_text` — the chemist's message for this turn — rides here for exactly
-    that reason and no other: `protocols` checks a `basis="stated"` quote against it, and a haystack
-    the model supplies is a haystack the model can invent (`core.turn_text`).
+    clear it (IDEA-4). `user_texts` — the chemist's own words in this thread, this turn's message
+    last — rides here for exactly that reason and no other: `protocols` checks a `basis="stated"`
+    quote against them, and a haystack the model supplies is a haystack the model can invent
+    (`core.turn_text`). It is the *thread's* user turns rather than this turn's message because
+    `structure_experiment_request` is meant to be called iteratively, so a chemist's real
+    constraint is usually two turns behind the "ok go ahead" that triggers the intake; the bound on
+    how far back it reaches is `core.turn_text`'s, and the read that fills it is the caller's,
+    because nothing in this function may `await`.
 
     Reset order is the reverse-ish order the original spelled out and is preserved exactly: the two
     watches, the dry-run flag, then the three identity vars. `set_current_identity` is skipped
     entirely when there is no actor, so the unauthenticated path stamps nothing to reset.
     """
     session_token = set_current_session_id(session_id)
-    user_text_token = set_current_user_text(user_text)
+    user_texts_token = set_current_user_texts(user_texts)
     identity_token = set_current_identity(actor, roles) if actor is not None else None
     correlation_token = set_current_correlation_id(correlation_id)
     calls_token = begin_call_watch()
@@ -683,7 +755,7 @@ def _turn_ambient(
         _unstamp(session_id, end_spend_watch, spend_token)
         _unstamp(session_id, reset_turn_usage, usage_token)
         _unstamp(session_id, reset_dry_run, dry_run_token)
-        _unstamp(session_id, reset_current_user_text, user_text_token)
+        _unstamp(session_id, reset_current_user_texts, user_texts_token)
         _unstamp(session_id, reset_current_session_id, session_token)
         _unstamp(session_id, reset_current_correlation_id, correlation_token)
         if identity_token is not None:
