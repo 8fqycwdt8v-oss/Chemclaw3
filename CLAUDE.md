@@ -183,7 +183,10 @@ configured budgets are **billed**-token budgets, converted by a ratio `agent/con
 measures from the provider's own `input_tokens` and clamps so it can only tighten; the newest
 tool-call batch is never cleared and clearing stops at the trigger; `agent/tool_result_size.py`
 bounds one result head-and-tail with a notice that names itself as system text;
-`chemclaw_context_unreducible_total` is the leading indicator of a context-length failure;
+`chemclaw_context_unreducible_total` is the leading indicator of a context-length failure
+**wherever `llm_context_window_tokens` is declared, and no deployment declares one** — measured,
+an undeclared window bills a 137,301-token request at a 128k model with that counter flat, and
+declaring the window does not merely make the counter fire, it removes the failure;
 `llm_context_window_tokens` bounds the budget against this request's *measured* prefix; `turn_costs`
 records whether the policy acted; and `chemclaw_connector_tool_schema_tokens` measures the half of
 the prefix `tests/test_context_floor.py` cannot ratchet, because an endpoint tool's schema comes

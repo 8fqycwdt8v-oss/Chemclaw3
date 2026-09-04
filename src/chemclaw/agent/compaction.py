@@ -663,8 +663,29 @@ def _record_overrun(request: ModelRequest[Any], sent: int) -> None:
     The comparison is the window edit's own: the thread being sent, against the budget that edit
     was given. So this fires when the policy has finished and the request is still over — whether
     it reclaimed nothing at all or reclaimed plenty and could not reach the line. Both are the same
-    fact for an operator, and it is the only leading indicator this system has for a context-length
-    failure.
+    fact for an operator.
+
+    **What that fact is evidence *of* turns on `llm_context_window_tokens`, and the sentence that
+    used to close this paragraph — "the only leading indicator this system has for a context-length
+    failure" — stated the strong half of it unconditionally.** `effective_trigger` charges this
+    request's own prefix against the budget only `if window:`, so declaring one is what makes the
+    number below the room the *model* has left; a tick is then a request the policy could not bring
+    inside the window, and the sentence holds. Undeclared — the shipped default, and no value in
+    `deploy/`, `infra/` or `.env.example` states one — the budget is a spend preference that has
+    never met a provider's limit, and the ~43,000-token prefix is charged against nothing.
+
+    **Both directions were measured on 2026-09-04, driving one thread twice through a compiled
+    graph.** Undeclared: the edits left 90,030 estimated thread tokens beside a 43,175-token
+    prefix, so 137,301 went at a 128k model and this counter stayed flat — a false negative, and
+    the request `docs/planning/BACKLOG.md` reports. Declaring 128,000 cut the same thread to 75,025
+    and the request fit, which is the finding worth carrying: **a window-aware arm here would have
+    nothing left to catch**, because the budget this compares against is already derived from
+    `window - prefix - llm_max_tokens`. Swept over 1,440 (window, prefix, reservation, budget,
+    ratio) combinations, `sent <= budget` implies the request fits its declared window in every one
+    of them except the degenerate corner where the prefix alone exceeds the window — and there the
+    trigger floors at 1, so any real thread ticks. `tests/test_context_budget.py` holds that sweep.
+    The gap is the undeclared case, and closing it means charging the prefix unconditionally, which
+    changes what `agent_context_token_budget` *means*.
 
     Once per turn, for the same reason every other number here is high-water marked: the edits are
     non-destructive, so a standing overrun is re-derived on every model call of the turn.

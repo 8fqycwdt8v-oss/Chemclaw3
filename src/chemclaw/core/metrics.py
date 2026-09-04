@@ -443,11 +443,28 @@ _COUNTERS: dict[str, str] = {
     # indistinguishable from a quiet one.
     #
     # So a flat zero on the two counters above means "never *reduced*", and this is what separates
-    # the two readings of that. It is the leading indicator of a hard context-length failure, and
-    # the only one this system has.
+    # the two readings of that.
+    #
+    # **What it is a leading indicator *of* turns on one setting, and this line used to state the
+    # stronger half unconditionally.** The comparison is the thread against
+    # `agent_context_token_budget` as `context_budget.effective_trigger` converts it, and that
+    # conversion charges the request's own prefix — instructions, the skills listing, every bound
+    # tool schema, measured at 43,175 estimated tokens on `default` on 2026-09-04 — only when
+    # `llm_context_window_tokens` is declared. Declared, the trigger *is* what the model has left,
+    # so a tick is a request the policy could not bring inside the window: the leading indicator of
+    # a context-length failure, and the only one this system has. **Undeclared — the shipped
+    # default, and no value in `deploy/`, `infra/` or `.env.example` states a number — the trigger
+    # is a spend preference with no relation to any provider's limit.** Measured on 2026-09-04
+    # through a compiled graph, one thread driven twice: undeclared, the edits left 90,030 estimated
+    # thread tokens beside a 43,175-token prefix, so 137,301 went at a 128k model with this counter
+    # flat; declaring 128,000 trimmed the same thread to 75,025 and the request fit. So a flat zero
+    # is evidence about a context-length failure only where a window is declared, and
+    # `tests/test_context_budget.py` pins the half that is.
     "chemclaw_context_unreducible_total": (
-        "Model calls over a context trigger that the policy could not reduce — the leading "
-        "indicator of a context-length failure at the provider."
+        "Model calls over a context trigger that the policy could not reduce. Where "
+        "llm_context_window_tokens is declared that trigger is what the model has left after this "
+        "request's own prefix, so this is the leading indicator of a context-length failure at "
+        "the provider; undeclared, it is a spend budget and the prefix is not charged against it."
     ),
     # Counted rather than only logged because the *rate* is the signal: one truncated result is a
     # tool answering a broad question, and a tool that truncates on every call is one whose own

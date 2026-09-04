@@ -311,15 +311,50 @@ topic).
       — while its own docstring calls it "the only leading indicator this system has for a
       context-length failure". `agent_context_calibration_min_calls = 20` also pins the ratio at
       1.0 for the first twenty model calls of every process, i.e. every pod restart.
-      Three candidate fixes and they are not equivalent, which is why this is a row rather than a
-      patch: declare `llm_context_window_tokens` in `deploy/` (cheapest, and it needs a number
-      nobody here knows); subtract `prefix_tokens()` unconditionally (changes what
-      `agent_context_token_budget` *means* — thread spend becomes request spend — which is
-      `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget`'s decision to revisit, not a review
-      pass's); or add a window-aware arm to `_record_overrun` so the indicator at least fires where
-      a window is declared. **The first two are a decision with an owner.**
+      **The third candidate fix is closed, measured, and it was not a fix.** The row offered "add a
+      window-aware arm to `_record_overrun` so the indicator at least fires where a window is
+      declared". Driven end to end on a compiled graph over the real 61-tool surface, declaring the
+      window does not merely let the indicator fire — **it removes the failure**: undeclared, the
+      thread is cut to 90,030 and the request totals 137,301 against a 128k model with the counter
+      flat; at `llm_context_window_tokens=128000` the same thread is cut to 75,025 and the request
+      totals 122,296, which fits. `effective_trigger` already subtracts the measured prefix, the
+      window edit already cuts to *that*, and `_record_overrun` compares against the same number, so
+      a window-aware arm would be a control that cannot fire — the shape `lessons.md` #15 names, and
+      it would have shipped with a test that passes both ways.
+      That is not a coincidence of one fixture: a 1,440-combination sweep over
+      `(window, prefix, reservation, budget, ratio)` × 5 thread sizes finds
+      `sent <= effective_trigger(budget)` implies `prefix + sent + llm_max_tokens <= window`
+      everywhere except the degenerate corner where the prefix alone exceeds the window, and there
+      the trigger floors at 1 so any real thread ticks anyway. `tests/test_context_budget.py` now
+      pins that invariant, which is also what makes a clean reading under a declared window *sound*
+      rather than vacuous.
+      **So the row is a two-option decision with an owner, and the asymmetry is the finding:
+      declaring `llm_context_window_tokens` is the whole control, and the indicator is downstream of
+      it and cannot substitute for it.** Either declare the window in `deploy/` (cheapest, and it
+      needs a number a site owns — note `values.yaml` names `CHEMCLAW_LLM_MODEL: "gpt-oss"`, whose
+      published window is 131,072, so it is not quite "a number nobody here knows"), or subtract
+      `prefix_tokens()` unconditionally, which changes what `agent_context_token_budget` *means*
+      — thread spend becomes request spend — and is
+      `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget`'s decision to revisit.
 
 
+
+- [ ] **A third reducer sits above the compaction group and no prose mentions it** — [S], found
+      2026-09-04 while measuring the context-window row. deepagents' `FilesystemMiddleware`
+      silently offloads oversized *message content*: probed, a 500,001-character `HumanMessage`
+      reached the model as a 1,293-character pointer reading "Message content too large and was
+      saved to the filesystem at: /conversation_history/….md". `agent/compaction.py` describes two
+      reducers — upstream's `ClearToolUsesEdit` for tool results and this repository's conversation
+      window — and this is a third, above both, that none of its prose names.
+      Two consequences worth separating before anything is built. It means a single oversized
+      group can no longer be the unreducible shape, so `chemclaw_context_unreducible_total`'s
+      reading depends on a mechanism nobody here decided on. And an offloaded message becomes a
+      *file*, which is the surface
+      `D-2026-09-04-a-helpers-file-crosses-back-and-stays` just finished defanging on read — worth
+      checking whether the pointer's own path and the offloaded body round-trip through that
+      treatment, since the content is a chemist's message rather than a helper's notes.
+      One probe, not a measurement pass: what is owed first is the threshold, whether it is
+      configurable, and whether it fires on any real turn.
 
 - [ ] **`delete_session` and the owner prune take two rows in opposite orders** — [S], not
       reproduced. `_session_delete_statements` deletes `session_turns` then `session_owners`;

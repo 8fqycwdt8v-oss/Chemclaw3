@@ -761,3 +761,108 @@ def test_an_unreducible_thread_is_counted(monkeypatch: pytest.MonkeyPatch) -> No
         "nothing was reclaimed, so the compaction counter must not have moved — that conflation "
         "is the defect this series exists to separate"
     )
+
+
+#: What the last `_CapturingModel` was sent and what was bound to it. Module level rather than
+#: instance state because a `BaseChatModel` is a pydantic model, so an annotated class attribute
+#: would become a *field* with a mutable default rather than a place to keep a measurement.
+_RECEIVED: list[Any] = []
+_BOUND: list[Any] = []
+
+
+class _CapturingModel(GenericFakeChatModel):
+    """A fake model that keeps what it was actually sent, so the numbers come off the wire.
+
+    `_record_overrun` compares a count it computes itself; a test that recomputed the same count
+    would be asserting the arithmetic rather than the request. Reading the system message out of
+    what the model received, and the tool schemas off what was bound to it, is the same pair
+    `context_budget.MeasureRequestPrefix` publishes — measured equal on 2026-09-04 — but obtained
+    from the far side of the call.
+    """
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        """Record the surface and stay unbound — the fake model has no tool-calling path."""
+        _BOUND[:] = list(tools)
+        return self
+
+    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any) -> Any:
+        """Record the request, then answer as the fake model would."""
+        _RECEIVED[:] = list(messages)
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kw)
+
+
+def _drive(window: int, thread: list[AnyMessage]) -> tuple[int, int, float]:
+    """Run one thread through a compiled graph at `window`; return prefix, thread, counter delta."""
+    from chemclaw.agent.context_budget import estimate_tool_schemas, reset_calibration
+
+    reset_calibration()
+    settings.llm_context_window_tokens = window
+    model = _CapturingModel(messages=iter([AIMessage(content="done")]))
+    graph = build_langgraph_agent(model=model)
+    before = METRICS.value("chemclaw_context_unreducible_total")
+    asyncio.run(graph.ainvoke({"messages": list(thread)}))
+    system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
+    rest = [m for m in _RECEIVED if not isinstance(m, SystemMessage)]
+    prefix = _count(system) + estimate_tool_schemas(_BOUND)
+    delta = METRICS.value("chemclaw_context_unreducible_total") - before
+    return prefix, _count(rest), delta
+
+
+def test_declaring_the_window_is_what_charges_the_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One thread, driven twice, and the difference is the whole of `docs/planning/BACKLOG.md` §4.
+
+    **Undeclared** — the shipped default, and no value in `deploy/`, `infra/` or `.env.example`
+    states one — the edits cut the thread to `agent_context_token_budget` and stop. The prefix
+    (~43,000 estimated tokens of instructions, skills listing and bound tool schemas) is charged
+    against nothing, so the request that leaves is the thread *plus* all of it, and
+    `chemclaw_context_unreducible_total` stays flat because it compares the thread against the
+    thread's budget. That is the defect the row reports, and the assertion below is what makes it
+    visible in the suite rather than only in a backlog row.
+
+    **Declared** — the same thread, the same prefix — `effective_trigger` derives the budget from
+    `window - prefix - llm_max_tokens`, the window edit cuts to *that*, and the whole request fits.
+    The counter stays flat because there is nothing to report.
+
+    **So a window-aware arm in `_record_overrun` would have nothing left to catch**, which is the
+    row's third candidate fix and the reason it is not taken: declaring the window does not merely
+    let the indicator fire, it removes the failure. Where the policy genuinely cannot reduce far
+    enough the existing comparison already ticks — `test_an_unreducible_thread_is_counted` — and
+    `tests/test_context_budget.py` sweeps the arithmetic that makes the clean reading sound. What is
+    left open is the undeclared case, and closing that means charging the prefix unconditionally,
+    which changes what `agent_context_token_budget` means.
+
+    A reader who lands that change will see this test fail on its first assertion. That is the
+    intent: the number below is a fact about the shipped configuration, not a property to preserve.
+    """
+    monkeypatch.setattr(settings, "agent_context_token_budget", 100_000)
+    monkeypatch.setattr(settings, "agent_keep_last_conversation_groups", 0)
+    monkeypatch.setattr(settings, "llm_max_tokens", 4_096)
+    monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
+    thread: list[AnyMessage] = [HumanMessage(content="q" + "y" * 60_000) for _ in range(8)]
+
+    open_prefix, open_sent, open_delta = _drive(0, thread)
+
+    assert open_sent > settings.agent_context_token_budget * 0.8, (
+        "the thread was never big enough to reach the budget, so this proves nothing"
+    )
+    # The window this deployment is really running against — a 128k model, say. Derived from the
+    # request rather than written down, so the claim survives a change to the prefix or the budget.
+    window = open_prefix + open_sent
+    assert open_delta == 0, (
+        f"the indicator saw a {open_prefix + open_sent + 4_096}-token request against a "
+        f"{window}-token window and said nothing — which is the row, but it is supposed to be "
+        "silent here because the budget it compares against never met the prefix"
+    )
+
+    declared_prefix, declared_sent, declared_delta = _drive(window, thread)
+
+    assert declared_prefix == open_prefix, "the two runs must differ only in the declared window"
+    assert declared_sent < open_sent, (
+        "declaring the window did not tighten the cut, so effective_trigger never charged the "
+        "prefix against it"
+    )
+    assert declared_prefix + declared_sent + settings.llm_max_tokens <= window, (
+        "the request still does not fit the window it declared, which is the one thing a "
+        "window-aware arm in _record_overrun would have been for"
+    )
+    assert declared_delta == 0, "a request that fits its declared window must not be counted"

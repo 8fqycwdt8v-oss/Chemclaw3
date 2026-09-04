@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from chemclaw.agent.context_budget import (
     MeasureRequestPrefix,
+    _prefix,
     begin_context_watch,
     current_context,
     effective_trigger,
@@ -259,3 +260,69 @@ def test_the_turn_record_says_whether_the_policy_acted() -> None:
         end_context_watch(token)
 
     assert current_context() is None, "the record outlived the turn it describes"
+
+
+def test_a_clean_overrun_reading_means_the_request_fits_its_declared_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where a window is declared, `_record_overrun`'s silence is sound — swept, not argued.
+
+    `compaction._record_overrun` compares the thread against `effective_trigger(budget)`, and
+    `docs/planning/BACKLOG.md` reads that as a tautology: the window edit has just cut the thread to
+    that very number, so the indicator "reads clean by construction". The first half is right and
+    the conclusion drawn from it is not, and the difference decides whether a window-aware arm in
+    that function has anything to catch. This is the sweep that answers it.
+
+    The invariant: with `llm_context_window_tokens` declared, `sent <= effective_trigger(budget)`
+    implies `prefix + sent + llm_max_tokens <= window`. It holds because the trigger is *derived*
+    from `window - prefix - llm_max_tokens` and the ratio can only tighten it further — so a clean
+    reading is a request that fits the model, and the failure this counter exists to lead cannot
+    happen silently under a declared window.
+
+    **The one exception is stated rather than swept under.** When the prefix plus the output
+    reservation already exceeds the window there is no room for any thread at all, and the trigger
+    floors at 1 rather than going negative. A thread of 0 or 1 estimated tokens then reads clean on
+    a request that cannot fit — unreachable in practice, since `count_tokens_approximately` charges
+    every non-empty list several tokens, and any real thread ticks the counter.
+
+    The prefix is set on the contextvar directly here because the claim is about the arithmetic;
+    that a *request*'s prefix reaches it is
+    `test_a_declared_window_subtracts_the_measured_prefix`'s claim, and is proven through the
+    middleware there.
+    """
+    unsound: list[tuple[int, int, int, int, float, int, int]] = []
+    degenerate = 0
+    for window in (32_000, 64_000, 128_000, 200_000, 1_000_000):
+        for prefix in (0, 5_000, 20_000, 43_175, 120_000, 250_000):
+            for reservation in (1_024, 4_096, 32_000):
+                for budget in (10_000, 30_000, 100_000, 400_000):
+                    for ratio in (1.0, 1.5, 2.2, 4.0):
+                        monkeypatch.setattr(settings, "llm_context_window_tokens", window)
+                        monkeypatch.setattr(settings, "llm_max_tokens", reservation)
+                        reset_calibration()
+                        _observe(ratio)
+                        token = _prefix.set(prefix)
+                        try:
+                            trigger = effective_trigger(budget)
+                        finally:
+                            _prefix.reset(token)
+                        for sent in {0, 1, trigger // 2, trigger - 1, trigger}:
+                            if sent < 0 or sent > trigger:
+                                continue
+                            if prefix + sent + reservation <= window:
+                                continue
+                            if trigger == 1:
+                                degenerate += 1
+                                continue
+                            unsound.append(
+                                (window, prefix, reservation, budget, ratio, trigger, sent)
+                            )
+
+    assert not unsound, (
+        "a request the overrun indicator reads as clean does not fit its declared window: "
+        f"{unsound[:5]}"
+    )
+    assert degenerate, (
+        "the sweep never reached the prefix-exceeds-window corner, so it is not evidence that the "
+        "corner is the only exception"
+    )
