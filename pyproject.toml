@@ -323,8 +323,11 @@ filterwarnings = [
 # Per-test wall-clock cap. A stuck test once ran for the full 6h Actions job timeout with zero
 # diagnostic output — "cancelled", no test name, no traceback, a day's runner budget on one commit.
 # The job-level `timeout-minutes` in the root workflow is the outer backstop; this is the inner one
-# that names the offending test. 180s leaves real headroom: the slowest real test (a BO campaign in
-# test_reizman.py) takes ~37s, and the whole suite finishes in minutes.
+# that names the offending test. 180s covers every test that has no marker of its own. It does not
+# cover the slowest one: the BO campaign in test_reizman.py measured 279s, and this comment said
+# "~37s" — stale by 7.5x, and the cap it was justifying is what failed that test. It carries a
+# `@pytest.mark.timeout` of its own now, which is the mechanism for "slow, not hung"; a bare number
+# here would have to be raised to the slowest test in the tree and would stop naming hangs.
 #
 # The `signal` default (not `thread`) is deliberate: it fails the ONE hung test and lets the session
 # continue, rather than `os._exit()`-ing the whole process — which matters because collection order
