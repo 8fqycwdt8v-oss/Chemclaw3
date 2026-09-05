@@ -445,15 +445,24 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
     # name is — so an invented name of 90,000 characters minted a **90,054-character**
     # `chemclaw_tool_results_truncated_total{tool=…}` line on an unauthenticated `/metrics`, one
     # series per invented name. The same clamp `agent/audit.metric_tool_name` applies two
-    # middlewares away, reused rather than re-derived; the notice the model reads keeps the raw
-    # name, because a *returned* result must say which call it belongs to and the name it belongs
-    # to is bounded here by the result it rides on. `bound_refusal_text` cannot make that trade —
-    # see its docstring.
+    # middlewares away, reused rather than re-derived.
+    #
+    # **The notice the model reads uses the clamped name too, and the sentence that used to sit
+    # here said the opposite.** It argued that a returned result must name the call it belongs to
+    # and that the raw name "is bounded here by the result it rides on". It is not: the notice
+    # interpolates the name, so `widest` grows with it, `limit < widest` takes the brief branch,
+    # and the brief form is not cut. Measured on a compiled default graph at the shipped 60,000
+    # ceiling, an invented 70,000-character name put **70,050 characters** in front of the model
+    # with `removed=0` — no counter, no log — and eight distinct such names in one batch made a
+    # 464,083-token request, all of it in the batch neither context edit may reclaim. The name is
+    # model-authored, so it is exactly the input this module treats as attacker-influenced
+    # everywhere else. `bound_refusal_text` already passes the clamped label for this reason; the
+    # returned-result path now does the same, which is what makes the two consistent.
     label = metric_tool_name(request, tool)
     limit = result_char_limit(request)
 
     def _bounded(message: ToolMessage) -> ToolMessage:
-        content, removed = bounded_content(message.content, tool, limit)
+        content, removed = bounded_content(message.content, label, limit)
         if not removed:
             return message
         _record_cut(label, tool, removed, limit)

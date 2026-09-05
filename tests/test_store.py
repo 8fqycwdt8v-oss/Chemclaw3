@@ -535,3 +535,63 @@ def test_two_chemists_sharing_one_cached_result_both_reach_the_results_store(
         )
 
     asyncio.run(_run())
+
+
+def test_one_chemist_asking_repeatedly_does_not_grow_the_queued_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cache hit publishes, so the same chemist asking again must write nothing.
+
+    The hit path publishes on purpose — who asked is not a property of the calculation, and a hit is
+    the second chemist asking. That only stays cheap if a *repeat* by the same requester is
+    contained by the document already stored, and the first version of this hook broke exactly that:
+    it carried `correlation_id`, which `api/middleware` mints per HTTP request, so every turn
+    appended a publication the destination could not distinguish. Measured before the fix: 200 turns
+    by one actor in one session produced 200 publications in a 2,230-byte document that collapse to
+    **one** row at a sink keyed `(calc_ref, tenant_id, session_id, job_id)`, with delivery rising
+    from 56.7 ms to 669.7 ms — and because each merge bumps `revision` and resets the row to
+    `pending`, a hot key could stop settling at all.
+
+    So this drives the hot path the way the front door does — many turns, one actor, one session —
+    and asserts the document does not grow. The existing `test_re_enqueueing_the_same_publication`
+    replays one identical `Publication` object, which is the one shape a real front door never
+    produces twice; this is the shape it produces every turn.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        monkeypatch.setattr(settings, "result_sinks", "postgres")
+        store = PostgresStore()
+        key = CalculationKey(
+            calc_type="pka", calc_version="probe-repeat", input_hash="repeat-1", params_hash="p"
+        )
+
+        async def _compute() -> ResultPayload:
+            return {"smiles": "CCO", "pka": 4.76, "method": "gfn2"}
+
+        for _ in range(12):
+            identity = set_current_identity("alice", frozenset())
+            session_token = set_current_session_id("s-alice")
+            try:
+                await cached_compute(store, key, _compute)
+            finally:
+                reset_current_session_id(session_token)
+                reset_current_identity(identity)
+
+        async with db.connection(settings.postgres_dsn) as conn:
+            cursor = await conn.execute(
+                "SELECT jsonb_array_length(document->'publications'), revision "
+                "FROM result_publications WHERE sink = 'postgres' AND calc_ref = %s",
+                (key.as_str(),),
+            )
+            rows = await cursor.fetchall()
+
+        assert len(rows) == 1
+        publications, revision = rows[0]
+        assert publications == 1, (
+            f"twelve turns by one requester appended {publications} publications; the merge is "
+            "unbounded on a field the destination does not key on"
+        )
+        assert revision == 0, f"a no-op enqueue must not bump revision, got {revision}"
+
+    asyncio.run(_run())

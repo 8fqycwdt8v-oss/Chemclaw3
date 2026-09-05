@@ -92,11 +92,19 @@ class BearerAuth(BaseModel):
     *degrades*: its tools are absent for the turn, and until `describe_failure` unwrapped the
     `ExceptionGroup` the operator's only line named neither the exception nor the variable.
     Degrading is the right trade at the turn (`connectors.transport`'s own first paragraph), so
-    what changed is everything around it: the WARNING now names the cause,
-    `registry.unusable_reason` decides it from the environment before a socket is opened, and
-    `connectors.health` reports such a bundle `unusable` — which counts in
-    `chemclaw_connectors_unhealthy` and refuses startup under `connectors_required`. A deployment
-    that forgot the secret is told so at boot rather than by a chemist.
+    what changed is the diagnosis around it: the WARNING now names the cause, because
+    `transport.describe_failure` flattens the group instead of rendering `ExceptionGroup`.
+
+    **Boot does not catch this, and saying otherwise is the failure this paragraph nearly shipped.**
+    An earlier draft here claimed `registry.unusable_reason` decides a missing bearer from the
+    environment before a socket is opened and that `connectors.health` therefore refuses startup
+    under `connectors_required`. It does not: `unusable_reason` tests the *transport* only, and its
+    own docstring records that the bearer case was built, measured to make every shipped bundle
+    unusable at once in test, CLI and worker processes, and reverted. `connectors/health.py`'s
+    module docstring says the same in the other direction. So a deployment that forgot the secret
+    is still told by a chemist — the probe is unauthenticated by design, the server answers 200,
+    and only the tool call fails. That is a real gap, it is on record in `unusable_reason`, and it
+    is not closed here.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

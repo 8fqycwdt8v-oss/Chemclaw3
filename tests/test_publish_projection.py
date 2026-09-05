@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
 from chemclaw.publish import project as projection
 from chemclaw.publish.project import project
@@ -1217,39 +1216,38 @@ def test_a_single_species_distribution_publishes_no_gap() -> None:
     assert "species_gap" not in {f.property for f in record.properties}
 
 
-@pytest.mark.parametrize(
-    ("builder", "value"),
-    [("_text", "some-code"), ("_flag", True)],
-)
-def test_an_unregistered_property_fails_at_the_enqueue_whatever_its_value_kind(
+@pytest.mark.parametrize(("builder", "value"), [("_text", "some-code"), ("_flag", True)])
+def test_an_unregistered_property_fails_at_the_projection_whatever_its_value_kind(
     builder: str, value: object
 ) -> None:
-    """The enqueue is where an unprojectable shape has to fail, for every kind of fact.
+    """An unprojectable shape must fail beside the calculation, for every kind of fact.
 
     `outbox.py` promises it in its own opening paragraph — projection happens at enqueue "not at
     drain", because failing there means failing beside the calculation that produced it, "where the
-    context to diagnose it exists". `_fact` keeps that promise for numerics by routing through
-    `to_canonical` -> `definition_for`. `_text` and `_flag` did not touch the registry at all, so an
-    unregistered *coded* or *boolean* property's first contact with it was inside
-    `SqlResultSink.deliver` — at drain, hours later, in a background worker, which is precisely the
-    place that paragraph says it must not be.
+    context to diagnose it exists". The reviewed worry was that `_fact` routes numerics through
+    `to_canonical` -> `definition_for` while `_text` and `_flag` touch the registry nowhere, so an
+    unregistered *coded* or *boolean* property's first contact with it would be inside
+    `SqlResultSink.deliver` — at drain, hours later, in a background worker.
 
-    **Measured, and the reviewed defect did not reproduce.** `_text` and `_flag` never call
-    `to_canonical`, so they were read as reaching the registry for the first time inside
-    `SqlResultSink.deliver` — at drain, hours later, in a background worker. They do not:
-    `PropertyFact._belongs_in_the_scalar_table` calls `definition_for(self.property)` on every
-    fact whatever its value kind, so construction raises and `records_for` fails at the enqueue,
-    where `enqueue_payload` counts it on `chemclaw_result_projection_failures_total`.
+    **The worry does not hold, and the first version of this test asserted the wrong reason.** It
+    credited a `PropertyFact._belongs_in_the_scalar_table` that does not exist anywhere in `src/`,
+    and expected a `ValidationError` at *construction* that the builders do not raise — so it
+    failed, having measured a function nobody wrote. The guard that actually closes the hole is
+    `project._facts_belong_in_the_scalar_table`, called at the `project()` funnel every record goes
+    through, and it asks `definition_for` about **every** fact regardless of value kind.
 
-    Asserted here rather than left implicit, because the guard is a *side effect* of a validator
-    written for a different question (which table a quantity belongs in), and a future change that
-    narrows that validator to numerics would reopen the hole with no test failing. The HTTP sink
-    never calls `rows_for` at all, so this is the only thing standing between an unregistered
-    coded or boolean property and a destination that cannot check it.
+    So this drives the funnel rather than the builder, which is also the level the promise is about:
+    `records_for` is what `enqueue_payload` calls, and a raise here is what
+    `chemclaw_result_projection_failures_total` counts. Kept parametrised over both kinds because
+    the guard is a *side effect* of a validator written for a different question (which table a
+    quantity belongs in) — a change narrowing it to numerics reopens the hole silently, and the HTTP
+    sink never calls `rows_for` at all, so nothing downstream would catch it.
     """
     from chemclaw.publish import project
     from chemclaw.publish.properties import UnknownPropertyError
 
-    with pytest.raises(ValidationError) as raised:
-        getattr(project, builder)("no_such_property_at_all", value)
-    assert isinstance(raised.value.errors()[0]["ctx"]["error"], UnknownPropertyError)
+    fact = getattr(project, builder)("no_such_property_at_all", value)
+    assert fact is not None, "the builders do not validate; the funnel does"
+
+    with pytest.raises(UnknownPropertyError):
+        project._facts_belong_in_the_scalar_table([fact])

@@ -19,7 +19,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.tools import StructuredTool
 
-from chemclaw.agent.audit import NullAuditSink
+from chemclaw.agent.audit import NullAuditSink, metric_tool_name
 from chemclaw.agent.authz import AuthorizationError
 from chemclaw.agent.context_budget import estimate_tool_schemas
 from chemclaw.agent.framing import ENVELOPE_TAG
@@ -535,3 +535,43 @@ def test_a_cut_is_not_silent_when_the_first_block_carries_no_text() -> None:
     )
     # The image is still there: this cap shortens text and carries everything else through.
     assert any(isinstance(b, dict) and b.get("type") == "image" for b in out)
+
+
+def test_an_invented_tool_name_cannot_carry_a_result_past_the_ceiling() -> None:
+    """The ceiling has to hold against the *name*, which is model-authored like the payload.
+
+    `bounded_content` interpolates the tool name into both notices, so `widest` grows with the name.
+    Past `limit < widest` it takes the brief branch, and the brief form is deliberately never cut —
+    which means a long enough name walks the whole result through untouched, with `removed=0`, no
+    counter and no log. Measured before the fix, on a compiled `default` graph at the shipped
+    60,000-character ceiling: a 70,000-character invented name put **70,051** characters in front of
+    the model, and eight distinct such names in one batch made a 464,083-token request, all of it in
+    the newest batch neither context edit may reclaim.
+
+    The comment at the call site used to argue the opposite — that a returned result must name the
+    call it belongs to, and that the raw name "is bounded here by the result it rides on". It is
+    not, and `bound_refusal_text` had already reached the other conclusion for the same input, so
+    the two paths disagreed about whether a model-authored name may be trusted with a length.
+
+    Asserted through `bounded_content` directly rather than through the middleware, because the
+    defect is in the arithmetic and a middleware test would need a compiled graph to see one number.
+    The existing name-safety test uses a 200-character name, which is comfortably inside `widest`
+    and therefore cannot reach this branch at all.
+    """
+    ceiling = settings.agent_max_tool_result_chars
+    payload = "x" * (ceiling * 2)
+
+    # The escape has two shapes and the length is what they share: with a payload larger than the
+    # notice the whole result is cut and the *notice* is oversized (70,051 here); with a smaller one
+    # `total <= len(brief)` returns the content untouched at `removed=0`. Either way the model reads
+    # more than the ceiling, so the length is the assertion.
+    raw, _ = bounded_content(payload, "N" * 70_000, ceiling)
+    assert len(raw) > ceiling, "this is the escape: an unclamped name is interpolated uncut"
+    untouched, removed_none = bounded_content("x" * 100_000, "N" * 150_000, ceiling)
+    assert len(untouched) == 100_000 and removed_none == 0, (
+        "and past the notice's own width the payload is not cut at all, silently"
+    )
+
+    clamped, removed = bounded_content(payload, metric_tool_name(None, "N" * 70_000), ceiling)
+    assert len(clamped) <= ceiling, f"the clamped name must keep the cut: {len(clamped)}"
+    assert removed > 0, "and the cut must still be counted"

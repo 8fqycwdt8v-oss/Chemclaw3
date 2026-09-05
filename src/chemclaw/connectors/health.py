@@ -325,11 +325,14 @@ async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]
     unusable: list[ConnectorHealth] = []
     for manifest in enabled():
         # **Asked before the socket, because a bundle this deployment cannot open is not a bundle
-        # whose host has anything to say about it** (`registry.unusable_reason`). Both reasons that
-        # verdict covers — `transport: stdio` with the transport off, a declared bearer whose
-        # variable is unset — leave a perfectly healthy server answering `/healthz` 200 while every
-        # tool call fails, so probing first reported `healthy` for a capability that could not be
-        # used at all. It counts and gates exactly as `unreachable` does, which is what keeps
+        # whose host has anything to say about it** (`registry.unusable_reason`). The one reason
+        # that verdict covers today is `transport: stdio` with the transport off — which leaves a
+        # perfectly healthy server answering `/healthz` 200 while every tool call fails, so probing
+        # first reported `healthy` for a capability that could not be used at all. **A declared
+        # bearer whose variable is unset is the same class of fault and is deliberately NOT here**;
+        # this comment claimed it was, contradicting the module docstring forty lines up, which is
+        # the one a reader checks. `unusable_reason` records why it needs its own decision. It
+        # counts and gates exactly as `unreachable` does, which is what keeps
         # `mcp_connections`' decision to degrade past it from making it silent.
         refusal = unusable_reason(manifest.name, manifest.endpoint)
         if refusal is not None:

@@ -393,7 +393,21 @@ def max_request_timeout_seconds() -> float:
     already the interval this module keeps between its two nested bounds and for the identical
     reason (`connector_http_client`): the visible bound must trip before the invisible one. Laid
     end to end the chain is now `request_timeout` < httpx's read bound (`+ grace`) <= the turn
-    deadline, so the bound that *raises* is always the one that fires first.
+    deadline.
+
+    **What that buys is narrower than "the recoverable bound always wins", and the first draft of
+    this docstring claimed the wider thing.** `service_turn_timeout_seconds` is a *whole-turn*
+    `asyncio.timeout` (`api/routes/turns.py`), not a per-call one, so the two are only ordered for
+    a call that starts at the top of the turn. A turn that spends 20 s on two lookups and then
+    calls `calc` has the clamped 595 s bound firing at t=615 against a turn scope that fired at
+    t=600 — the chemist loses the turn, which is the outcome this exists to prevent. And even at
+    t=0 the margin is five seconds, which is not enough to re-invoke the model with the
+    `transport_error_result` and stream an answer.
+
+    So the honest claim is the one the tests assert: a manifest can no longer declare a bound
+    *above* the turn deadline, which removes the shipped race and bounds what a third-party bundle
+    can ask for. Making the recoverable error genuinely reachable needs a per-call deadline derived
+    from the turn's *remaining* budget, which is a different change and is not made here.
 
     Returns:
         The ceiling in seconds. Deployments whose turn deadline is not even one grace interval long

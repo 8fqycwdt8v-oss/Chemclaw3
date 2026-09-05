@@ -20,7 +20,7 @@ from typing import Any, Protocol, runtime_checkable
 from pydantic import BaseModel, Field, model_validator
 
 from chemclaw.core.chem import require_canonical_smiles
-from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
+from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.session_context import get_current_session_id
@@ -220,7 +220,7 @@ class StoredResult(BaseModel):
     # carry wrong linear-rotor S and G and an incomplete reactivity panel. A reader cannot act on a
     # difference it cannot see.
     #
-    # Empty means *not recorded* — every row written before migration 081 — and that is a third
+    # Empty means *not recorded* — every row written before migration 083 — and that is a third
     # state rather than a synonym for "old": a row written days before the column existed may well
     # be current, and claiming it is stale would be as wrong as the silence this replaces. Nothing
     # can recover it, so nothing pretends to.
@@ -707,11 +707,21 @@ async def publish_stored_result(
         params_hash=key.params_hash,
         structure_id=structure_id,
         compute_seconds=compute_seconds,
-        publication=Publication(
-            actor=actor,
-            session_id=get_current_session_id() or "",
-            correlation_id=get_current_correlation_id() or "",
-        )
+        # **No `correlation_id`, and leaving it in made this hook unbounded.** The outbox merges a
+        # publication the stored document does not already contain, and `api/middleware` mints a
+        # fresh correlation id per *HTTP request* — so one chemist asking about one cached number
+        # across N turns appended N publications that the destination collapses into one row, its
+        # key being `(calc_ref, tenant_id, session_id, job_id)` with correlation in neither the key
+        # nor the actor index. Measured: 200 turns, one actor, one session → 200 publications in a
+        # 2,230-byte document, one sink row, and a delivery cost rising 56.7 ms → 669.7 ms at 500.
+        # Worse, each merge bumps `revision` and resets the row to `pending`, so a hot key could
+        # stop settling entirely — measured, 20 deliveries of one row shipping 1,163 publication
+        # rows with `delivered=0`.
+        #
+        # Identity here is *who asked, in which session* — exactly what the destination keys on.
+        # The correlation id is the audit trail's join key and it is kept there
+        # (`audit_events.correlation_id`), which is the record that is actually per-request.
+        publication=Publication(actor=actor, session_id=get_current_session_id() or "")
         if actor
         else None,
     )

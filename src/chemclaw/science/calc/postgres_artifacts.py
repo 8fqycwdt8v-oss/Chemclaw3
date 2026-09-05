@@ -53,25 +53,6 @@ _UPSERT_LINK = """
         created_at = now()
 """
 
-# The hash this `(calc_key, name)` pointed at before the write, locked so a concurrent rewrite of
-# the same link cannot both read the same predecessor and both decide it is theirs to reclaim.
-_LOCK_LINK = """
-    SELECT content_hash FROM calculation_artifacts
-    WHERE calc_key = %s AND name = %s
-    FOR UPDATE
-"""
-
-# Reclaim a blob the rewrite above orphaned. `NOT EXISTS` is what makes content addressing safe to
-# delete under: the same bytes may be linked from any number of other calculations, and only the
-# last link leaving makes the blob unreachable.
-_DELETE_ORPHAN_BLOB = """
-    DELETE FROM artifact_blobs AS b
-     WHERE b.content_hash = %s
-       AND NOT EXISTS (
-           SELECT 1 FROM calculation_artifacts AS a WHERE a.content_hash = b.content_hash
-       )
-"""
-
 _SELECT_BLOB = "SELECT codec, data FROM artifact_blobs WHERE content_hash = %s"
 
 # Refresh the access stamp only when it is already stale, so a read on the reuse hot path is a
@@ -123,33 +104,33 @@ class PostgresArtifactStore:
         codec, payload = encode(data)
         async with db.connection(self._dsn) as conn:
             async with conn.cursor() as cur:
-                # What this link pointed at *before*, read under a row lock in the same
-                # transaction as the write that replaces it.
-                await cur.execute(_LOCK_LINK, (calc_key, name))
-                row = await cur.fetchone()
-                previous = row[0] if row is not None else None
                 await cur.execute(_INSERT_BLOB, (digest, codec, len(data), len(payload), payload))
                 await cur.execute(
                     _UPSERT_LINK, (calc_key, name, digest, media_type, compute_seconds)
                 )
-                # **A rewritten link used to strand its predecessor forever.** The upsert moves
-                # `(calc_key, name)` to the new address and nothing then referenced the old blob:
-                # measured, one rewrite left `blobs=2 links=1 unlinked_blobs=1`, and no code path
-                # deleted it. `durable/artifact_eviction.py` is not that path in any shipped
-                # configuration either — `artifact_store_max_bytes` and `artifact_evict_idle_days`
-                # both default to 0, so both of its triggers are off — which makes an orphan here
-                # permanent growth in the one place a deployment cannot see it. Deleted at the
-                # moment of the rewrite instead, where the fact that it has been orphaned is known
-                # for certain rather than inferred by a sweep.
-                if previous is not None and previous != digest:
-                    await cur.execute(_DELETE_ORPHAN_BLOB, (previous,))
-                    if cur.rowcount:
-                        logger.debug(
-                            "reclaimed the blob %s#%s no longer points at (%s)",
-                            calc_key,
-                            name,
-                            previous,
-                        )
+                # **A rewritten link strands its predecessor, and reclaiming it here was worse.**
+                # The upsert moves `(calc_key, name)` to the new address and nothing then references
+                # the old blob: measured, one rewrite leaves `blobs=2 links=1 unlinked_blobs=1`, and
+                # `durable/artifact_eviction.py` is not the path that collects it in any shipped
+                # configuration — `artifact_store_max_bytes` and `artifact_evict_idle_days` both
+                # default to 0, so both triggers are off. So this is real growth a deployment cannot
+                # see, and it is left in place deliberately.
+                #
+                # The delete that was here — `DELETE ... WHERE NOT EXISTS (a link to it)`, guarded
+                # by a `FOR UPDATE` on the link row — **destroyed another calculation's committed
+                # artifact**, and a review reproduced it against a live database. `NOT EXISTS` is
+                # evaluated on the deleting transaction's snapshot; the `DELETE` then blocks on the
+                # `KEY SHARE` lock a concurrent inserter holds on that blob, and when the lock
+                # releases PostgreSQL proceeds *without re-evaluating the subquery*. Content
+                # addressing makes the collision ordinary rather than exotic — 019 exists precisely
+                # so "two runs that produced an identical geometry store one copy" — so a rewrite of
+                # K1 racing a first write of K2 onto the same bytes deleted K2's link by cascade,
+                # after K2's transaction had committed and returned an `ArtifactRef`.
+                #
+                # Locking the *blob* row rather than the link would order it, at the cost of making
+                # the loser's insert fail a foreign key instead. That is a real design with a real
+                # trade and it is not made inside a review fix: a leaked blob is wasted bytes, and
+                # what was here deleted science. `docs/planning/BACKLOG.md` carries it.
             await conn.commit()
         return ArtifactRef(
             calc_key=calc_key,
