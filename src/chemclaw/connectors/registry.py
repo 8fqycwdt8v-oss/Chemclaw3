@@ -661,6 +661,7 @@ def _bound_by_this_process() -> dict[str, str]:
         if fn.__module__ != build_job_tool.__module__
     }
     bound.update(dict.fromkeys(chemclaw_agent.skill_tool_names(), "a scratchpad file verb"))
+    bound.update(dict.fromkeys(chemclaw_agent.harness_tool_names(), "a plan-harness tool"))
     bound.update(dict.fromkeys(chemclaw_agent.subagent_tool_names(), "the subagent spawner"))
     return bound
 
