@@ -23,10 +23,24 @@ The cost of that honesty is real and stated — a chemist who closes the tab pay
 turn — and it is bounded twice, by the loop cap (attached on every profile) and by
 `service_turn_timeout_seconds`, which keeps ticking inside the pump.
 
-**What the pump owns.** The turn generator's own `finally` releases the admission permit, the
-in-process lease and the durable claim; running the generator to completion in the pump is what
-keeps all three held while the model is genuinely still working — a session stays 409-locked for
-exactly as long as a turn is running, whether anyone is watching it or not.
+**What the pump owns, and the one thing it deliberately does not.** The turn generator's own
+`finally` releases the in-process lease and the durable claim; running the generator to completion
+in the pump is what keeps both held while the model is genuinely still working — a session stays
+409-locked for exactly as long as a turn is running, whether anyone is watching it or not.
+
+The **admission permit** is the exception, and it was not one until it was measured. That permit
+is not per session: it is the process's shared `service_max_concurrent_turns` semaphore, so
+holding it for a detached turn charges *everyone else on the replica* for work nobody is watching.
+Eight fresh sessions POSTed and hung up left 0 of the shipped 8 permits free and shed every other
+chemist's turn as `queued` then `error`, for up to `service_turn_timeout_seconds` — reachable by a
+flaky mobile network, a crashed tab, or a UI that retries on disconnect, where the retry *adds* a
+holder rather than replacing one. Before this module existed a disconnect returned the permit
+immediately, so the failure was self-limiting. So the permit is released at the detach, through
+`on_detach`: admission is fairness to a *waiting client*, and a detached turn has none. What still
+bounds the detached turn is what always did — the loop cap, `service_turn_timeout_seconds` ticking
+inside the pump, and the per-user token budget where one is configured — and it stays visible,
+because `chemclaw_turns_in_flight` counts leases rather than permits, so a replica running more
+turns than it admitted reads as exactly that.
 
 Backpressure survives the detour: while a reader is attached, the pump `put`s into a bounded
 queue, so a slow client still slows the turn exactly as the direct generator did. Once the reader
@@ -36,7 +50,7 @@ goes, the pump discards instead — an unread event buffered for nobody is memor
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from chemclaw.core.metrics import METRICS
@@ -66,6 +80,7 @@ class DetachableTurn:
         *,
         session_id: str,
         survive_disconnect: bool = True,
+        on_detach: Callable[[], None] | None = None,
     ) -> None:
         """Start pumping `source` immediately; the turn is running from this moment.
 
@@ -73,9 +88,16 @@ class DetachableTurn:
         over completion: a detach then stops the turn, exactly as closing the stream always did.
         The knob lives on the object rather than being read ambiently so a test can pin either
         posture without touching settings.
+
+        `on_detach` fires once, at the instant the reader is known to be gone and the turn is
+        known to be continuing — the one moment nothing else in the process can observe. Its
+        caller uses it to give back what was held *for the reader* rather than for the turn (see
+        `chemclaw.api.routes.turns`); it must not raise and must not block, because it runs inside
+        a reader teardown that is usually a cancellation.
         """
         self._session_id = session_id
         self._survive_disconnect = survive_disconnect
+        self._on_detach = on_detach
         self._queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_QUEUE_SIZE)
         self._attached = True
         self._stopper: asyncio.Task[None] | None = None
@@ -239,6 +261,8 @@ class DetachableTurn:
                         "detached and its answer will be in the transcript",
                         self._session_id,
                     )
+                    if self._on_detach is not None:
+                        self._on_detach()
                 else:
                     # The configured posture is the old one: a disconnect stops the turn. On a
                     # task because this finally runs inside the reader's own cancellation, where
@@ -311,3 +335,40 @@ class RunningTurns:
         """The session's running turn, or `None` when no turn is live."""
         turn = self._turns.get(session_id)
         return turn if turn is not None and turn.running else None
+
+    async def drain(self, timeout: float) -> int:
+        """Wait up to `timeout` for every live pump to finish; report how many did not.
+
+        **This is what makes a detached turn survive a rolling update rather than only a
+        disconnect.** A pump task is not an in-flight HTTP request, so uvicorn's own drain does not
+        know one exists; without this the front door's lifespan `finally` closed the memory store,
+        the checkpointer's pool and the shared store pool while turns were still running, and the
+        answer this module exists to deliver was lost from the transcript it promised to be in.
+        Measured before it existed: shutdown returned in 0.001 s and the running turn's next
+        checkpoint write raised `PoolClosed`.
+
+        The registry already holds every live turn and already prunes on completion, so this is a
+        snapshot plus one `asyncio.wait`. Snapshot, because `register`'s done callback deletes from
+        the same dict as each pump finishes.
+
+        Nothing is cancelled here. A turn is bounded by its own `service_turn_timeout_seconds`
+        deadline, measured from when *it* started, so a caller passing that same number can only
+        be reached by a turn whose deadline is already firing — and cutting a turn short to save a
+        second of a grace period the chart has already provisioned would trade the answer for
+        nothing. What is left running is *said*, because a pod that exits with work in flight is a
+        fact an operator has to be able to find.
+        """
+        pumps = [turn._task for turn in list(self._turns.values()) if not turn._task.done()]
+        if not pumps:
+            return 0
+        logger.info("draining %d running turn(s) before shutdown", len(pumps))
+        _finished, pending = await asyncio.wait(pumps, timeout=timeout)
+        if pending:
+            logger.warning(
+                "%d of %d running turn(s) did not finish within the %ss shutdown drain; their "
+                "answers will not reach the transcript",
+                len(pending),
+                len(pumps),
+                timeout,
+            )
+        return len(pending)

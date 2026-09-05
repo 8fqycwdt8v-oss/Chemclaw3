@@ -164,10 +164,20 @@ async def worker_http(*, component: str, ready: Callable[[], bool]) -> AsyncIter
         # there is a thing to wait for and the poll was only ever an approximation of it. `wait` on
         # both means a failed bind — where `bound` is never set — ends the wait through `serving`
         # instead of hanging.
-        await asyncio.wait(
-            [asyncio.ensure_future(server.bound.wait()), serving],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        #
+        # The loser of the race is held in a local and cancelled, rather than created inline and
+        # walked away from: on the branch this `wait` exists for — `serving` wins, so `bound` is
+        # never set — an inline future is left pending on an event nothing will ever set.
+        # `api/detach.py::_next_event` cancels its getter in a `finally` for the same reason.
+        # Nothing was measured leaking, and the reason is worth knowing rather than trusting:
+        # uvicorn answers a failed bind with `sys.exit(3)`, a `SystemExit` out of a task stops the
+        # loop, and `asyncio.run`'s teardown then cancels the orphan before anything can print it.
+        # That is upstream's choice of how to fail, not this function's correctness.
+        bound = asyncio.ensure_future(server.bound.wait())
+        try:
+            await asyncio.wait([bound, serving], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            bound.cancel()
         if serving.done():  # the bind failed - surface it rather than run unobservable
             await serving
         logger.info(

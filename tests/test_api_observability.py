@@ -488,6 +488,40 @@ def test_the_413_carries_the_browser_security_headers_like_every_other_response(
     )
 
 
+def test_a_cors_preflight_is_answered_above_every_middleware_that_stamps_a_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`CORSMiddleware` is outermost, so an `OPTIONS` reaches neither stamper — measured, not read.
+
+    `create_app`'s ordering comment claimed for a while that the preflight "now passes back through
+    the stamper on the way out", which is the opposite of what being outermost means: the preflight
+    is answered before anything below it runs. `_add_security_headers` states the true version and
+    argues it is harmless — nothing is rendered from a preflight — so what is pinned here is the
+    fact, in the one place a future reader can check it against a claim.
+    """
+    monkeypatch.setattr(settings, "service_cors_origins", "https://ui.example.com")
+    client = TestClient(_app(_FakeAgent()))
+
+    preflight = client.options(
+        "/sessions",
+        headers={
+            "Origin": "https://ui.example.com",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert preflight.headers.get("access-control-allow-origin") == "https://ui.example.com"
+    stamped = [
+        header
+        for header in ("Content-Security-Policy", "X-Content-Type-Options", _HEADER)
+        if header in preflight.headers
+    ]
+    assert not stamped, (
+        f"a preflight came back carrying {stamped}; CORS is no longer the outermost middleware, "
+        "which is what lets a 500 raised below it reach the browser at all"
+    )
+
+
 # --------------------------------------------------------------------------------------------
 # P8 — the stream gauges.
 # --------------------------------------------------------------------------------------------

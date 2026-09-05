@@ -8,6 +8,7 @@ routes — the stream that only detaches, and the explicit stop that actually ca
 
 import asyncio
 import contextlib
+import logging
 import threading
 import time
 from collections.abc import AsyncIterator
@@ -238,3 +239,169 @@ def test_the_stop_route_cancels_a_running_turn(monkeypatch: pytest.MonkeyPatch) 
             "the stream outlived the stop; the route cancelled nothing"
         )
         served.wait_for_slot_release(session_id)
+
+
+class _SlowerThanAdmission(ScriptedTurn):
+    """A turn that keeps streaming for longer than a queued turn is willing to wait.
+
+    The gap is what makes the defect observable: while a detached turn holds its admission permit,
+    an honest client's turn is shed rather than merely delayed, so the assertion is on an answer
+    rather than on a latency.
+    """
+
+    def __init__(self) -> None:
+        """Count how many turns actually reached the model."""
+        self.started = 0
+
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
+        self.started += 1
+        yield "thinking "
+        await asyncio.sleep(2.0)
+        yield "done"
+
+
+def _hang_up_mid_turn(client: httpx.Client, session_id: str) -> None:
+    """Open a turn, read one event, and drop the socket — the detach a flaky network produces."""
+    with client.stream(
+        "POST", f"/sessions/{session_id}/messages", json={"message": "long job"}
+    ) as response:
+        for line in response.iter_lines():
+            if line.startswith("data:"):
+                return
+
+
+def test_a_hung_up_client_stops_charging_admission_for_a_turn_nobody_is_watching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disconnect must not cost the replica a permit until the turn's 600-second deadline.
+
+    The permit is taken inside the turn generator and released in its `finally`, which since
+    `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` runs at the pump's *true* end rather than
+    when the client goes away. `detach.py` framed that per session — "a session stays 409-locked
+    for exactly as long as a turn is running" — but the permit is not per session: it is the
+    process's shared `service_max_concurrent_turns` semaphore. Measured on the real app with the
+    shipped cap of 8: eight fresh sessions POSTed and hung up left **0** permits free and every
+    other chemist's turn on that replica got `queued` then a shed `error`, for up to
+    `service_turn_timeout_seconds`. It needs no malice — a closed laptop, a Wi-Fi handoff or a UI
+    that retries on disconnect produces it, and the retry *adds* a holder rather than replacing
+    one. Before that ADR a disconnect returned the permit immediately, so the failure was
+    self-limiting.
+
+    Driven over a real socket for the reason `_Served` gives: neither `TestClient` nor httpx's ASGI
+    transport can express "the client dropped mid-stream".
+    """
+    monkeypatch.setattr(settings, "service_max_concurrent_turns", 2)
+    monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.5)
+    agent = _SlowerThanAdmission()
+
+    with _Served(_app(agent)) as served, httpx.Client(base_url=served.base, timeout=30) as client:
+        abandoned = [client.post("/sessions").json()["session_id"] for _ in range(2)]
+        for session_id in abandoned:
+            _hang_up_mid_turn(client, session_id)
+        honest = client.post("/sessions").json()["session_id"]
+        with client.stream(
+            "POST", f"/sessions/{honest}/messages", json={"message": "a real question"}
+        ) as response:
+            events = [line for line in response.iter_lines() if line.startswith("event:")]
+        for session_id in (*abandoned, honest):
+            served.wait_for_slot_release(session_id)
+
+    assert "event: error" not in events, (
+        f"an honest chemist was shed while {len(abandoned)} hung-up clients held every permit: "
+        f"{events}"
+    )
+    assert agent.started == 3, (
+        f"only {agent.started} of 3 turns reached the model; the shed one never ran"
+    )
+
+
+def test_shutdown_waits_for_the_turns_detaching_promised_to_finish() -> None:
+    """A rolling update must not destroy exactly the work detaching exists to preserve.
+
+    A pump task is not an in-flight HTTP request, so uvicorn's own drain cannot see one and
+    nothing in the process did either: on SIGTERM the lifespan `finally` ran immediately —
+    `close_memory_store()`, `close_checkpointer()`, then `db.pooling()` closing the store pool —
+    while detached turns were still mid-flight. Measured against the real `_lifespan` with a real
+    checkpointer: shutdown returned in **0.001 s** with the turn still running, and that turn's
+    next checkpoint write raised `PoolClosed` and booked itself `abandoned`. The client had been
+    told to recover its answer from `GET /sessions/{id}/messages`, and it was not there.
+
+    The chart makes it worse by believing it is handled: `terminationGracePeriodSeconds` is
+    derived as `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS + service.drainSeconds` specifically so "a
+    drain that outlasts it cannot cut one short" — grace the process did not use.
+    """
+
+    async def _run() -> tuple[list[int], bool]:
+        produced: list[int] = []
+        app = _app()
+        async with app.router.lifespan_context(app):
+            registry: RunningTurns = app.state.running_turns
+            # Registered and never read: the detached shape, which is the one nothing could see.
+            turn = DetachableTurn(_drip(produced, count=20), session_id="s-drain")
+            registry.register("s-drain", turn)
+        return list(produced), bool(app.state.running_turns.get("s-drain"))
+
+    produced, still_registered = asyncio.run(_run())
+
+    assert produced == list(range(20)), (
+        f"the lifespan returned with the detached turn {len(produced)}/20 events in; a rolling "
+        "update closes both Postgres pools underneath it"
+    )
+    assert not still_registered, (
+        "the turn was still running when the process finished shutting down"
+    )
+
+
+def test_shutdown_gives_up_on_a_turn_that_outlasts_the_grace_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The drain is bounded, and says what it left behind rather than hanging the pod.
+
+    The bound is `service_turn_timeout_seconds` because that is the number the chart's grace period
+    is already derived from — and because a turn's own deadline is measured from when it started,
+    so in a healthy configuration the turn's timeout always fires first and this bound is never the
+    binding one. It exists for the turn whose deadline is not enforceable (a teardown that itself
+    hangs), where the honest outcome is a warning and a shutdown, not a pod that never exits.
+    """
+    monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.2)
+
+    async def _forever() -> AsyncIterator[dict[str, str]]:
+        while True:
+            await asyncio.sleep(0.05)
+            yield {"event": "token", "data": "."}
+
+    async def _run() -> float:
+        app = _app()
+        turn = DetachableTurn(_forever(), session_id="s-stuck")
+        started = time.monotonic()
+        async with app.router.lifespan_context(app):
+            registry: RunningTurns = app.state.running_turns
+            registry.register("s-stuck", turn)
+        elapsed = time.monotonic() - started
+        await turn.stop()
+        return elapsed
+
+    # On the module's own logger rather than through `caplog`: `_lifespan` calls
+    # `configure_logging()`, whose `logging.basicConfig(force=True)` removes every root handler —
+    # pytest's capture handler included — so a root-attached capture sees nothing from inside a
+    # lifespan.
+    said: list[str] = []
+
+    class _Collect(logging.Handler):
+        """Keep every record this module emits, whatever the root handlers are doing."""
+
+        def emit(self, record: logging.LogRecord) -> None:
+            said.append(record.getMessage())
+
+    handler = _Collect(level=logging.WARNING)
+    detach_log = logging.getLogger("chemclaw.api.detach")
+    detach_log.addHandler(handler)
+    try:
+        elapsed = asyncio.run(_run())
+    finally:
+        detach_log.removeHandler(handler)
+
+    assert elapsed < 5, f"shutdown blocked {elapsed:.1f}s on a turn that never ends"
+    assert any("did not finish" in message for message in said), (
+        f"a turn abandoned at shutdown left no line an operator could find it by: {said}"
+    )

@@ -1122,6 +1122,97 @@ def test_the_tls_guard_reads_a_dsn_the_way_libpq_does(why: str, dsn: str) -> Non
         Settings(postgres_dsn=dsn, **base)
 
 
+_ENFORCED_POSTURE: dict[str, Any] = {
+    "_env_file": None,
+    "entra_required": True,
+    "entra_audience": "api://x",
+    "entra_tenant_id": "t",
+    "llm_provider": "openai_compatible",
+    "llm_base_url": "http://llm:8000/v1",
+    "llm_model": "m",
+    "harness_enabled": True,
+    "temporal_tls_ca": "/ca.pem",
+}
+
+
+@pytest.mark.parametrize(
+    ("why", "dsn"),
+    [
+        # The spelling that used to start and stopped: the hand-rolled parser could not see `host=`
+        # inside a URL query, so this took the loopback exemption by not being seen at all.
+        ("URL with host= in the query", "postgresql://u:p@/chemclaw?host=/var/run/postgresql"),
+        ("the keyword form of the same", "host=/var/run/postgresql dbname=chemclaw user=u"),
+        # Linux's abstract namespace, libpq's `@` spelling — the same transport, no filesystem path.
+        ("an abstract-namespace socket", "host=@/var/run/postgresql dbname=chemclaw user=u"),
+        # A directory list is still only sockets.
+        ("two socket directories", "host=/var/run/postgresql,/tmp dbname=chemclaw user=u"),
+    ],
+)
+def test_the_tls_guard_exempts_a_unix_socket_because_a_socket_is_not_a_network(
+    why: str, dsn: str
+) -> None:
+    """`sslmode` is ignored outright on a Unix-domain connection, so requiring it is theatre.
+
+    libpq reads a `host` beginning with `/` as a socket *directory* (and `@` as the abstract
+    namespace) and applies no TLS to either — there is no network to encrypt. The rewrite onto
+    libpq's own parser closed a real hole (`host=` inside a URL query was invisible to the
+    hand-rolled read) and closed this with it: the class became uniformly refused, with the only
+    passing spelling being `sslmode=require` on a transport that ignores it, i.e. a lie written into
+    the DSN to satisfy a guard. A `pgbouncer` sidecar or a local cluster over a mounted socket could
+    not start under the enforced posture at all.
+    """
+    Settings(postgres_dsn=dsn, **_ENFORCED_POSTURE)
+
+
+@pytest.mark.parametrize(
+    ("why", "dsn", "escape"),
+    [
+        # `PQconninfoParse` reads the string; it does not open the service file, so the host and
+        # the sslmode that file carries are both invisible here.
+        (
+            "a service file resolves the host",
+            "service=chemclaw",
+            "service=chemclaw sslmode=require",
+        ),
+        (
+            "the same as a URL",
+            "postgresql:///chemclaw?service=chemclaw",
+            "postgresql:///chemclaw?service=chemclaw&sslmode=require",
+        ),
+        # No host and no service: libpq falls back to `PGHOST`, which is an environment this parse
+        # never looks at either.
+        (
+            "PGHOST resolves the host",
+            "dbname=chemclaw user=u",
+            "dbname=chemclaw user=u sslmode=require",
+        ),
+    ],
+)
+def test_the_tls_guard_refuses_a_dsn_that_names_no_host_at_all(
+    why: str, dsn: str, escape: str
+) -> None:
+    """A "could not tell" answer must refuse, and three of them were being exempted.
+
+    `_pg_dial`'s docstring already makes this argument for the *unparseable* case — `""` is a member
+    of `PG_LOOPBACK_HOSTS`, so any could-not-tell answer would exempt the connection. But
+    `conninfo_to_dict` is `PQconninfoParse`, which parses the string and applies **neither** libpq's
+    environment defaults (`PGHOST`, `PGSSLMODE`) **nor** a `service=` file. All three below parse
+    cleanly, return no host, and were therefore exempted through that same `""` — the exact
+    fail-open the paragraph says it closes. `CHEMCLAW_POSTGRES_DSN=service=chemclaw` naming a remote
+    host with no sslmode in the service file connected at libpq's `prefer`: silent plaintext,
+    carrying the transcripts.
+
+    Refused rather than resolved, because resolving it means a second implementation of libpq's own
+    precedence rules — the "one parser, because a second spelling is a second answer" error this
+    guard was rewritten to stop making. Both escapes are one honest line of configuration: name the
+    host (a socket directory is exempt above), or state the sslmode in the DSN.
+    """
+    with pytest.raises(ValueError, match="no host"):
+        Settings(postgres_dsn=dsn, **_ENFORCED_POSTURE)
+    # Stating the transport's own answer is enough; nothing here demands the host be spelled out.
+    Settings(postgres_dsn=escape, **_ENFORCED_POSTURE)
+
+
 def test_an_unparseable_dsn_is_refused_without_printing_its_password() -> None:
     """The refusal that names the setting must not carry the value the setting holds.
 
@@ -1162,9 +1253,15 @@ def test_the_tls_guard_still_exempts_the_forms_that_carry_no_network() -> None:
     """A socket DSN and an IPv6 loopback URL are dev, not an unverified network connection.
 
     Asserted beside the refusals above because reading a DSN with libpq's parser changes what the
-    exemption sees as well as what the refusal does: `postgresql:///db` has no host at all and
-    `[::1]` arrives unbracketed, and both must stay exempt or local dev under `entra_required`
+    exemption sees as well as what the refusal does: `[::1]` arrives unbracketed and the socket
+    directory arrives as the host, and both must stay exempt or local dev under `entra_required`
     stops booting.
+
+    **The first case used to be `postgresql:///chemclaw` and is not any more.** That spelling names
+    no host, and "no host" is not "local": libpq goes on to read `PGHOST` or a `service=` file,
+    neither of which `PQconninfoParse` opens, so exempting it exempted a remote plaintext connection
+    on the strength of an answer nothing had. The dev convenience it was protecting survives one
+    character wider — naming the socket directory says the same thing and says it in the DSN.
     """
     base: dict[str, Any] = {
         "_env_file": None,
@@ -1177,7 +1274,7 @@ def test_the_tls_guard_still_exempts_the_forms_that_carry_no_network() -> None:
         "harness_enabled": True,
         "temporal_tls_ca": "/ca.pem",
     }
-    Settings(postgres_dsn="postgresql:///chemclaw", **base)
+    Settings(postgres_dsn="postgresql:///chemclaw?host=/var/run/postgresql", **base)
     Settings(postgres_dsn="postgresql://u:p@[::1]:5432/chemclaw", **base)
 
 
