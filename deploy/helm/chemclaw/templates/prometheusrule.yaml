@@ -453,10 +453,16 @@ spec:
                will serve, with every pod's own config still perfectly valid — the same blind spot
                `ChemclawFleetAboveItsTurnCeiling` covers for turns. Self-disabling: the ceiling
                gauge is 0 when undeclared. */}}
+        {{- /* Summed against BOTH declared ceilings, because `chemclaw_pg_pool_max_size` sums a
+               process's pools across every DSN it holds and carries no label to tell them apart.
+               With no split the second gauge is 0 and this is the original comparison; with one it
+               is the two servers' ceilings against the two servers' pools. A ceiling declared with
+               no split is refused at startup, so the two can never be added over one server. */}}
         - alert: ChemclawFleetAboveItsConnectionCeiling
           expr: >-
             max(chemclaw_pg_fleet_max_connections) > 0
-            and sum(chemclaw_pg_pool_max_size) > max(chemclaw_pg_fleet_max_connections)
+            and sum(chemclaw_pg_pool_max_size) >
+            max(chemclaw_pg_fleet_max_connections) + max(chemclaw_pg_session_fleet_max_connections)
           for: 10m
           labels:
             severity: warning

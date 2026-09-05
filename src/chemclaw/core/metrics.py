@@ -980,6 +980,13 @@ _GAUGES: dict[str, str] = {
     "chemclaw_pg_fleet_max_connections": (
         "Declared fleet-wide ceiling on Postgres connections (0 = none)."
     ),
+    # The second half of that pair, because one number describes one server: a deployment that
+    # points `session_store_dsn` at another server puts a front door's `/readyz` and checkpointer
+    # pools there, and `chemclaw_pg_pool_max_size` carries no DSN label to tell them apart. 0 when
+    # there is no split, which leaves the alert's comparison exactly what it was.
+    "chemclaw_pg_session_fleet_max_connections": (
+        "Declared ceiling on Postgres connections at a split session store (0 = none)."
+    ),
     # The calculation backend's admission budget (D-2026-08-27-a-per-worker-cap-is-not-a-backend-
     # ceiling), the third pair of this shape. Unlike the two above, the left-hand side is *live*
     # rather than configured, because the two kinds of process that dispatch there do not share a

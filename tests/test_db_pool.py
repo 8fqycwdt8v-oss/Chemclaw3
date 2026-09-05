@@ -418,3 +418,65 @@ def _gauge(rendered: str, name: str) -> float:
         if line.startswith(f"{name} "):
             return float(line.split(" ", 1)[1])
     raise AssertionError(f"{name} is not in the exposition")
+
+
+def test_a_sized_pool_is_not_the_pool_the_next_caller_borrows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The requested size is in the pool key, so one call site's ceiling is never another's.
+
+    Without this the *first* caller to reach a `(dsn, options)` key would decide how wide that pool
+    is for everyone who lands on it afterwards — and the discriminator is a timeout *value*, not a
+    call site. `/readyz` asks for two seconds and one connection; a future borrower asking for two
+    seconds and saying nothing about size would silently inherit that one connection and, measured
+    on the real app with the probe's connection held, answer 503 "database unreachable" in 2.004 s
+    against an idle database.
+
+    So the same DSN and the same statement timeout, asked for with and without a size, must be two
+    pools of two widths. That is one more pool in the worst case, which is the safe direction: the
+    fleet budget counts pools, and a starved call site counts nothing.
+    """
+    monkeypatch.setattr(settings, "pg_pool_max_size", 4)
+    monkeypatch.setattr(settings, "pg_pool_min_size", 2)
+
+    async def _run() -> list[tuple[int, int]]:
+        await migrated_db_or_skip()
+        async with db.pooling():
+            async with db.connection(settings.postgres_dsn, statement_timeout_seconds=2.0):
+                pass
+            async with db.connection(
+                settings.postgres_dsn, statement_timeout_seconds=2.0, pool_max_size=1
+            ):
+                pass
+            return sorted((int(pool.min_size), int(pool.max_size)) for pool in db._all_pools())
+
+    assert asyncio.run(_run()) == [(1, 1), (2, 4)], (
+        "asking for a narrow pool resized the pool an unsized caller borrows from, or shared one "
+        "with it. The size belongs in the pool key: db._POOLS"
+    )
+
+
+def test_a_narrow_pool_does_not_raise_on_the_request_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`min_size` is clamped under the requested size, and the alternative is a 500 on `/readyz`.
+
+    psycopg refuses `min_size > max_size` with a `ValueError`, and `pg_pool_min_size` defaults to
+    2. Raised inside `_pool_for` that lands on the request path, where it is not a `psycopg.Error`
+    — so `_failure_kind` returns `None`, nothing counts it and nothing names it — and
+    `_probe_database`'s own `except (psycopg.Error, ConnectionError, TimeoutError)` does not catch
+    it either. The readiness route would answer 500 with "The request could not be completed due
+    to an internal error" as the operator's whole diagnosis, on a pool it asked to be small.
+    """
+    monkeypatch.setattr(settings, "pg_pool_min_size", 8)
+    monkeypatch.setattr(settings, "pg_pool_max_size", 16)
+
+    async def _run() -> tuple[int, int]:
+        await migrated_db_or_skip()
+        async with db.pooling():
+            async with db.connection(settings.postgres_dsn, pool_max_size=1) as conn:
+                await conn.execute("SELECT 1")
+            pool = next(iter(db._all_pools()))
+            return int(pool.min_size), int(pool.max_size)
+
+    assert asyncio.run(_run()) == (1, 1)

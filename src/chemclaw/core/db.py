@@ -21,9 +21,11 @@ the churn did not merely cost latency, it disarmed a guard.
 `connection()` is the one call sites use. It borrows from a per-process pool when a process
 has opened one (`pooling()`, entered by the front door's lifespan and each worker's
 entrypoint) and otherwise falls back to a dedicated connect — so a script, a migration, or a
-test keeps today's behavior with no setup. Pools are keyed by `(dsn, libpq options)` because
-the statement timeout rides on the connection's `options`, so two call sites asking for
-different timeouts must not share connections.
+test keeps today's behavior with no setup. Pools are keyed by
+`(event loop, dsn, libpq options, requested max_size)`: the statement timeout rides on the
+connection's `options`, so two call sites asking for different timeouts must not share
+connections, and the requested size is in the key so that a call site sizing its own pool cannot
+decide the size of the pool a *later* call site borrows from by having arrived first.
 
 **A borrowed connection is bounded by default.** `connection()` applies
 `pg_statement_timeout_seconds` when the caller says nothing, and `connect()` — the dedicated,
@@ -61,10 +63,20 @@ logger = logging.getLogger(__name__)
 # an unaudited call site is — which is the one place a slow query is most likely to hide.
 _UNNAMED_OPERATION = "unspecified"
 
-# One pool per (event loop, dsn, merged libpq options). The options string carries the statement
-# timeout, so keying on it keeps the `/readyz` probe's 2s-bounded connection out of the stores'
-# 30s-bounded pool. (It once said "a migration's untimed connection", which was never a pooled
-# connection at all: `migrate` uses `connect`, not `connection`, and never enters `pooling()`.)
+# One pool per (event loop, dsn, merged libpq options, requested max_size). The options string
+# carries the statement timeout, so keying on it keeps the `/readyz` probe's 2s-bounded connection
+# out of the stores' 30s-bounded pool. (It once said "a migration's untimed connection", which was
+# never a pooled connection at all: `migrate` uses `connect`, not `connection`, and never enters
+# `pooling()`.)
+#
+# **The requested size is in the key, and that is what keeps a sizing decision local.** Without it
+# the *first* caller to reach a key would decide how wide that pool is for every caller landing on
+# it afterwards — and the discriminator is a timeout *value*, not a call site, so a future caller
+# asking for the readiness probe's two seconds and saying nothing about size would silently inherit
+# its one connection. Measured on the real app with a second borrower holding that key: `/readyz`
+# answered 503 "database unreachable" in 2.004 s against a healthy, idle database. With the size in
+# the key such a caller gets its own default-sized pool instead, which is one extra pool rather
+# than one silently starved call site.
 #
 # **The loop is part of the key, and that is not defensive.** `psycopg_pool` binds its waiter
 # futures and its background workers to the loop the pool was opened in, so a checkout issued from
@@ -82,7 +94,7 @@ _UNNAMED_OPERATION = "unspecified"
 # to the key to prevent — a live loop handed a pool built for a dead one — with no way to notice.
 # The object is its own identity, and `_forget_pools_of_ended_loops` is what keeps holding a
 # reference to it from being a leak of its own.
-_PoolKey = tuple[asyncio.AbstractEventLoop, str, str | None]
+_PoolKey = tuple[asyncio.AbstractEventLoop, str, str | None, int | None]
 _Pool = AsyncConnectionPool[psycopg.AsyncConnection[TupleRow]]
 _POOLS: dict[_PoolKey, _Pool] = {}
 # **Every read and every write of the two containers below is under this lock**, and it is a
@@ -262,8 +274,8 @@ def _forget_pools_of_ended_loops() -> None:
     evicted.clear()
 
 
-def _pool_for(dsn: str, options: str | None) -> _Pool:
-    """Return this process's pool for `(dsn, options)`, constructing it on first use.
+def _pool_for(dsn: str, options: str | None, max_size: int | None) -> _Pool:
+    """Return this process's pool for `(dsn, options, max_size)`, constructing it on first use.
 
     Constructed lazily rather than up front because a process does not know which DSNs it will
     touch until it touches them (the session store, the calculation store and the fingerprint
@@ -275,19 +287,30 @@ def _pool_for(dsn: str, options: str | None) -> _Pool:
     borrowing one whose waiters it cannot be woken by — see `_POOLS`. That second loop is usually a
     second *thread*, which is why the lookup and the insert are one critical section under
     `_POOL_REGISTRY_LOCK`: this is a request-path read of a dictionary another thread is writing.
+
+    `max_size` is this caller's own ceiling for its own pool, or `None` for `pg_pool_max_size`. It
+    is part of the key rather than applied to whichever pool already exists, so one call site's
+    ceiling is never silently another's — see `_POOLS`.
+
+    **`min_size` is clamped under it, and that is not tidiness.** `pg_pool_min_size` defaults to 2
+    and psycopg refuses `min_size > max_size` with a `ValueError`. Raised *here* that lands on the
+    request path, and it is not a `psycopg.Error`: `_failure_kind` returns `None` so nothing counts
+    or names it, and `/readyz`'s own `except (psycopg.Error, ConnectionError, TimeoutError)` does
+    not catch it either — the route 500s. A one-connection pool keeps exactly one connection warm.
     """
     _forget_pools_of_ended_loops()
-    key = (asyncio.get_running_loop(), dsn, options)
+    key = (asyncio.get_running_loop(), dsn, options, max_size)
     with _POOL_REGISTRY_LOCK:
         pool = _POOLS.get(key)
         if pool is not None:
             return pool
+        size = max_size or settings.pg_pool_max_size
         pool = AsyncConnectionPool(
             conninfo=dsn,
             connection_class=psycopg.AsyncConnection[TupleRow],
             kwargs={"connect_timeout": settings.pg_connect_timeout_seconds, "options": options},
-            min_size=settings.pg_pool_min_size,
-            max_size=settings.pg_pool_max_size,
+            min_size=min(settings.pg_pool_min_size, size),
+            max_size=size,
             max_idle=settings.pg_pool_max_idle_seconds,
             timeout=settings.pg_pool_timeout_seconds,
             # `max_idle` only governs when the pool itself decides a connection has sat unused long
@@ -423,7 +446,11 @@ def _record_duration(operation: str, seconds: float) -> None:
 
 @asynccontextmanager
 async def connection(
-    dsn: str, *, statement_timeout_seconds: float | None = None, operation: str = _UNNAMED_OPERATION
+    dsn: str,
+    *,
+    statement_timeout_seconds: float | None = None,
+    operation: str = _UNNAMED_OPERATION,
+    pool_max_size: int | None = None,
 ) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
     """Borrow a connection for the duration of the block — pooled when this process pools.
 
@@ -458,6 +485,15 @@ async def connection(
     that holds a connection across work of its own is measured doing exactly that, which is why a
     long-holding one owes the metric a name more than a short one does.
 
+    **`pool_max_size` is how a call site pays for what it uses.** Omit it and this borrows from the
+    pool `pg_pool_max_size` sizes, which is right for anything serving a request. Pass a number
+    when the call site's own concurrency is *known* and smaller: `/readyz` is single-flighted
+    (`ops._shared_probe`) and measured at exactly one simultaneous checkout across 1,000 concurrent
+    probes with the cache window off, so it asks for 1 rather than declaring `pg_pool_max_size`
+    connections of the fleet budget it can never use. The number joins the pool key — see `_POOLS`
+    — so it sizes this caller's pool and nobody else's. It does nothing in a process that never
+    entered `pooling()`: there is no pool, and `connect()` opens the one connection asked for.
+
     **Every borrowed connection is timed and every database failure it raises is classified here**,
     which is the only place that can see both. `chemclaw_db_unavailable_total` is incremented at
     two front-door sites, so a `ConnectionError` inside an ingest activity, the outbox drain or the
@@ -476,7 +512,7 @@ async def connection(
             async with conn:
                 yield conn
             return
-        pool = _pool_for(dsn, options)
+        pool = _pool_for(dsn, options, pool_max_size)
         await pool.open()  # idempotent; the first caller starts the pool's background workers
         try:
             async with pool.connection() as conn:
@@ -515,7 +551,8 @@ def bind_pool_metrics() -> None:
     hand, since `Settings` validates the shape the chart rendered and never re-runs
     (D-2026-08-05-the-connection-budget-is-a-fleet-number). It therefore reads the **sum over every
     pool this process holds**, not `settings.pg_pool_max_size`: a process routinely holds more than
-    one — this module keys on `(dsn, options)` precisely so `/readyz` and the stores do not share
+    one — this module keys on `(dsn, options, requested max_size)` precisely so `/readyz` and the
+    stores do not share
     connections, and the checkpointer registers a third — and measured against a live server that
     was three pools and 48 connections reported as 16. That under-count reached the fleet
     validator too, which multiplied *processes* rather than pools: the shipped chart's real floor
@@ -538,6 +575,10 @@ def bind_pool_metrics() -> None:
     METRICS.bind_gauge("chemclaw_pg_pool_max_size", lambda: float(_process_max_connections()))
     METRICS.bind_gauge(
         "chemclaw_pg_fleet_max_connections", lambda: float(settings.pg_fleet_max_connections)
+    )
+    METRICS.bind_gauge(
+        "chemclaw_pg_session_fleet_max_connections",
+        lambda: float(settings.pg_session_fleet_max_connections),
     )
 
 
