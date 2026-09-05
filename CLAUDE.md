@@ -207,11 +207,28 @@ deployment's thread allowance falls by the prefix, 43% of the shipped budget, an
 `agent_tool_result_clear_trigger` shipped at 30,000, *below* the prefix, which floors the trigger at
 1 — clear every reclaimable tool result on every model call. That floor is reported at WARNING
 rather than returned silently. **The same commit then took the decision this paragraph shipped
-calling open**: the default is 73,500, above the prefix, so the shipped configuration is not floored
-and `tests/test_compaction.py` asserts *that*. Three present-tense sentences — the two in
+calling open**: the default was set to 73,500, above the prefix, so the shipped configuration is not
+floored and `tests/test_compaction.py` asserts *that*. Three present-tense sentences — the two in
 `agent/context_budget.py` and this one — went on saying 30,000 and "an open decision", falsified by
 their own diff, which is `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening inside
 the commit that wrote it down.
+
+**Both of those numbers were charged against a ratchet that could not see a third of what it was
+bounding** (`D-2026-09-05-a-ratchet-that-re-derives-half-its-basis-bounds-half-a-request`). The
+budget paragraph above rests on `tests/test_context_floor.py`'s ceiling, and that file observes its
+tool half off the compiled graph's `ToolNode` while *re-deriving* its prose half as
+`instructions_for(profile)` plus `_skills_listing(...)` — which is not the system message the model
+is sent. So the ratchet measured 43,063 where the request carried 43,521, and the real prefix was
+**already 21 tokens over the 43,500 ceiling** with every assertion green. The whole gap is one thing
+the re-derivation cannot reach: the wrapper deepagents puts *around* the listing. `_observed_prefix`
+now invokes the graph against a capturing model and takes the `SystemMessage` off the wire, so the
+total is observed and the three prompt lines merely *split* it; lengthening upstream's own skills
+prompt moves the floor and can fail the ratchet, which it could not before. The ceiling is **44,500**
+and `agent_tool_result_clear_trigger` **74,500**, still ceiling-plus-30,000, and the raise is a real
+behavioural change: every deployment's lossless edit now fires 1,000 tokens later. That test's own
+docstring already said it — *"a basis that is re-derived rather than observed will agree with itself
+forever"* — and it was true of one half and the defect in the other, which is the same sentence
+being right about somebody else and blind about itself.
 
 **An audit against the Claude Agent SDK then added three guards and designed a fourth**
 (`D-2026-08-29-an-iteration-cap-is-not-a-cost-cap`). Most of that SDK's surface is already here and
@@ -252,7 +269,7 @@ later it was 42,549 — drifted by a merge that touched a tool-schema module, wi
 paragraph's subject rewritten. Twice now a session has re-transcribed these numbers to correct them
 and been stale again within a merge, which is the same argument this file already makes about
 counting `make` targets and skipped tests: **the live number is whatever `tests/test_context_floor.py`
-measures, and the ceiling it ratchets against is the only figure worth reading here — 43,500.**
+measures, and the ceiling it ratchets against is the only figure worth reading here — 44,500.**
 The deferral itself stands.
 
 M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is

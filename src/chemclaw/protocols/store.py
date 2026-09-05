@@ -1002,18 +1002,23 @@ def require_movable(current: DesignStatus, status: DesignStatus, head_kind: Revi
     decided by that precedence and not by this paragraph.
 
     **What the exemption buys is a repeat by somebody who has read the design as it now stands**,
-    and that is not what this paragraph used to say. `Chemclaw3_ui`'s sign-off panel renders a
-    *Mark X* button for all five statuses regardless of where the design is, so `approved →
-    approved` is one click away by construction: a second approver co-signing, or the same chemist
-    recording a second reason. The case named here instead was the lost response — a move reported
-    to the chemist as "The status was not recorded" when it may well have been, pressed again — and
+    and that is not what this paragraph used to say. The case is a second approver co-signing, or
+    the same chemist recording a second reason — an act, not an accident. **It is deliberately not
+    argued from what any client renders**, which is how this paragraph went wrong the first time:
+    it justified the exemption by `Chemclaw3_ui` offering a *Mark X* button for all five statuses,
+    and that repository's sign-off panel now drives its buttons from this very table, so the
+    argument would have expired on somebody else's merge. A rule this store enforces cannot rest on
+    a sentence about a caller this store cannot see.
+
+    The case named here instead was the lost response — a move reported to the chemist as "The
+    status was not recorded" when it may well have been, pressed again — and
     a retry only arrives here as `X → X` if the client re-read first. Measured on both backends, a
     panel that has not re-read still shows the *pre*-move status, so the retry names that as
     `expected_status` and `require_unmoved` refuses it as a `StatusConflict` before this function
     is reached at all (`test_a_retry_that_has_not_re_read_is_refused_before_the_repeat`). So the
     exemption covers the deliberate repeat and the retry that re-reads, where the honest answer is
     "it already worked"; nothing rescues the retry that does not, and refusing the repeat on top of
-    that would turn a button the client itself offers into a 422. This tree relies on the exemption
+    that would refuse an act the record exists to capture. This tree relies on the exemption
     too: the test that proves both SQL `CHECK (status IN (...))` constraints accept every member of
     the Literal drives `draft → draft` and `requested → requested` to do it. The move is not
     swallowed — the caller still gets its 204 and `experiment_protocol_status_events` still gains a
