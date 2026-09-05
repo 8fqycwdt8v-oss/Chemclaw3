@@ -95,28 +95,47 @@ def test_the_checkpointer_pool_is_not_given_the_plan_mode_and_the_reason_is_stru
 
     What actually makes it safe is *where* that OR sits — behind `thread_id = %s AND
     checkpoint_ns = %s`, so the generic plan puts both equalities in the `Index Cond` of an
-    `Index Only Scan Backward using checkpoints_pkey` and the OR filters one thread's checkpoints.
-    Measured at 200k rows over 2,000 threads: 0.35 ms under `auto` against 0.37 ms forced.
+    `Index Scan Backward using checkpoints_pkey` and the OR filters one thread's checkpoints.
+    Measured at 200k rows over 2,000 threads: ~0.4 ms either way.
 
-    So this asserts the *absence*, in both directions that matter. The pool takes no `options`
-    argument at all, which is what keeps `core.db`'s merge out of it; and a future statement there
-    whose risky clause is not behind that leading equality is a reason to revisit the exclusion,
-    which is the sentence `_FORCE_CUSTOM_PLAN` now carries instead of the false one.
+    **Parsed, not partitioned, because the first version of this test asserted nothing.** It read
+    `source.partition("AsyncConnectionPool(")` and then `.partition(")")`, which stops at the `)`
+    of `conninfo=_session_dsn()` — 39 characters of a 34,000-character file. Adding
+    `options=_FORCE_CUSTOM_PLAN` to the pool passed it; only the *second* assertion, a bare
+    substring scan for `plan_cache_mode`, caught the literal spelling the mutation check happened
+    to use. That scan is gone too: it made a comment naming the exclusion fail the test that exists
+    to explain the exclusion.
     """
     from chemclaw.agent import checkpointer
 
     source = Path(str(checkpointer.__file__)).read_text("utf-8")
-    _, _, construction = source.partition("AsyncConnectionPool(")
-    body, _, _ = construction.partition(")")
-    assert "options" not in body, (
-        "the checkpointer pool now passes `options`; `_FORCE_CUSTOM_PLAN` is excluded from it "
-        "because its risky clauses sit behind an equality on the primary key's leading columns, "
-        "and a pool that sets options at all is one whose exclusion needs re-deciding"
-    )
-    assert "plan_cache_mode" not in source, (
-        "the checkpointer sets a plan cache mode; that is a decision `core/db.py`'s "
-        "`_FORCE_CUSTOM_PLAN` comment argues against, so it needs an ADR rather than a diff"
-    )
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "AsyncConnectionPool"
+    ]
+    assert calls, "no AsyncConnectionPool(...) call found — the extraction is broken"
+    for call in calls:
+        passed = {keyword.arg for keyword in call.keywords}
+        assert "options" not in passed, (
+            f"the checkpointer pool now passes `options` (keywords: {sorted(k for k in passed)}); "
+            "`_FORCE_CUSTOM_PLAN` is excluded from it because its risky clauses sit behind an "
+            "equality on the primary key's leading columns, and a pool that sets options at all "
+            "is one whose exclusion needs re-deciding"
+        )
+        kwargs = [k for k in call.keywords if k.arg == "kwargs"]
+        for keyword in kwargs:
+            assert isinstance(keyword.value, ast.Dict), (
+                "the pool's `kwargs` is no longer a literal dict, so this test cannot see whether "
+                "libpq options reach it; read it another way rather than deleting the check"
+            )
+            keys = {k.value for k in keyword.value.keys if isinstance(k, ast.Constant)}
+            assert "options" not in keys, (
+                "the checkpointer pool passes libpq `options` through `kwargs=`, which reaches "
+                "the connection exactly as the positional keyword would"
+            )
 
 
 def test_statement_timeout_applies_when_the_dsn_has_no_options() -> None:

@@ -143,45 +143,47 @@ def _redact(dsn: str) -> str:
 
 
 # **Never let this pool serve a query from a generic plan.** psycopg auto-prepares a statement at
-# `prepare_threshold=5`, so the sixth execution is the first prepared one, and a pooled connection
-# reaches that in the first minute of traffic. Postgres may then serve it from a *generic* plan —
-# planned once with the parameters unknown — and keep that plan for the life of the connection.
+# `prepare_threshold=5`, so the sixth execution is the first *prepared* one — and Postgres's own
+# plancache then serves five custom plans before it will consider a generic one, so the first
+# generic execution is the **eleventh** overall. Measured both ways on one skewed table: with
+# auto-prepare, flat 38 ms through execution 10 and 83 ms from 11; with `prepare=True`, which
+# forces preparation from the first call, the same jump lands at 6. A probe that passes
+# `prepare=True` is measuring a client this code is not.
 #
-# **The statement this actually bites is the scoped lexical one, and the mechanism is a cost
-# estimate rather than an index that cannot be used.** `retrieval/vector_index.py::_lexical`
-# carries `(%(ids)s::text[] IS NULL OR note_id = ANY(%(ids)s::text[]))`, and one prepared statement
-# serves both parameterisations of it — which want *structurally different* plans. Measured at 100k
-# notes: with `ids` NULL the OR constant-folds away and the custom plan is a parallel seq scan plus
-# a top-N sort (cost 5,194); with 20 ids it is `Index Scan using note_index_pkey`,
-# `Index Cond: note_id = ANY(...)` (cost 118). The generic plan can be neither, so it is a bitmap
-# heap scan carrying the OR as a filter — and it estimates **rows=3** where the unscoped call
-# returns 100,000, which makes its cost estimate 1,190 against the correct plan's 5,194. `auto`
-# compares those estimates and keeps the wrong one: the unscoped query goes **36.8 ms → 66.7 ms at
-# execution 6 and stays there**, 1.81x, while `force_custom_plan` holds 37.0 ms flat.
+# **The statement at risk is the dense vector one, and the deciding variable is the embedding
+# width.** `retrieval/vector_index.py::_dense` renders `::vector(N)` from `settings.embedding_dim`,
+# which `core/config` *raises* unless it equals the `vector(1536)` column migration 012 declares.
+# At 1536, `EXPLAIN (GENERIC_PLAN)` on that exact shape is `Seq Scan on note_index` under a `Sort`,
+# and serving it costs **1,762 ms against 0.93 ms** — about 1,890x. At 384 the same statement plans
+# as an HNSW `Index Scan` and measures 0.64 ms either way, which is why a probe at that width finds
+# nothing and concludes the risk is imaginary. It is not imaginary; it is a width no deployment
+# here can have.
 #
-# **The dense vector query is not the one at risk, and the sentence here used to say it was.** That
-# claim — that `ORDER BY embedding <=> $1` cannot use an HNSW index with `$1` unknown, costing
-# 9 ms → 1,280 ms — does not reproduce and is not how pgvector behaves.
-# `EXPLAIN (GENERIC_PLAN)` on `_dense`'s own shape prints `Index Scan using
-# note_index_embedding_idx`, `Order By: (embedding <=> ($1)::vector(384))`, and the query measures
-# 1.10 ms → 0.69 ms across twenty executions under `auto`. The setting is right; the reason given
-# for it was a guess, and a guess in the present tense is what
-# `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` is about.
+# **What is true today is that `auto` does not take that plan, and that is a cost estimate rather
+# than a guarantee.** At 100k rows the generic plan *estimates* 5,915 against the custom plan's
+# 2,334, so `auto` keeps the custom one — while the plan it declined to use is three orders of
+# magnitude slower in reality. The safety margin is an estimate that is wrong in the fortunate
+# direction, and estimates move with statistics, row counts and a planner upgrade. This setting is
+# what makes the outcome not depend on that.
+#
+# `science/calc/postgres_store`, `ingest/documents/index.py`, `external_index.py` and
+# `science/labels/store.py` carry the same `IS NULL OR` shape; measured on the calc browse
+# statement, `force_generic_plan` is 59 ms against `force_custom_plan`'s 0.95 ms, and `auto`
+# likewise declines it. Same insurance, four more statements.
 #
 # The remedy is the server's own, and it is set here rather than per statement so that a query
 # added next year inherits it: `force_custom_plan` keeps the prepared statement — the parse is
 # still cached — and re-plans each execution with the parameters in hand. **Measured cost on the
-# queries that do not need it**: a point lookup goes 135.7 µs → 140.5 µs, about 10 µs.
+# queries that do not need it**: a point lookup goes 263 µs to 288 µs, about 25 µs.
 #
-# **The checkpointer pool (`agent/checkpointer.py`) is deliberately excluded, and not for the
-# reason this said either.** It claimed that pool's statements are primary-key lookups; LangGraph's
-# own SQL carries `(%s::text IS NULL OR checkpoint_id < %s)` and two `= ANY(%s)` clauses, which is
-# the same family measured above. What makes it safe is *where* the OR sits: behind
-# `thread_id = %s AND checkpoint_ns = %s`, so the generic plan is `Index Only Scan Backward using
-# checkpoints_pkey` with both equalities in the `Index Cond` and the OR filtering one thread's
-# checkpoints rather than a corpus. Measured at 200k rows across 2,000 threads, 0.35 ms under
-# `auto` against 0.37 ms forced — no difference to buy. The property to preserve when adding a
-# statement there is that one, not "it is a primary-key lookup".
+# **The checkpointer pool (`agent/checkpointer.py`) is deliberately excluded, and not because its
+# statements are primary-key lookups.** LangGraph's own SQL carries
+# `(%s::text IS NULL OR checkpoint_id < %s)` and two `= ANY(%s)` clauses. What makes it safe is
+# *where* the OR sits: behind `thread_id = %s AND checkpoint_ns = %s`, so the generic plan is an
+# `Index Scan Backward using checkpoints_pkey` with both equalities in the `Index Cond` and the OR
+# filtering one thread's checkpoints rather than a corpus. Measured at 200k rows across 2,000
+# threads, ~0.4 ms either way — nothing to buy. The property to preserve when adding a statement
+# there is that one, not "it is a primary-key lookup".
 _FORCE_CUSTOM_PLAN = "-c plan_cache_mode=force_custom_plan"
 
 

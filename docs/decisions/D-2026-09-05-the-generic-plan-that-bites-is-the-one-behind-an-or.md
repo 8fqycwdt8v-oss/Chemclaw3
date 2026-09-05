@@ -1,98 +1,114 @@
-# D-2026-09-05-the-generic-plan-that-bites-is-the-one-behind-an-or — the setting stays, all three of its reasons were wrong
+# D-2026-09-05-the-generic-plan-that-bites-is-the-one-behind-an-or — the setting stays; the first draft of this ADR measured three shapes the code does not run
 
 ## Status
 
-Accepted. No behaviour changes; the justification does.
+Accepted, after its own first draft was refuted by a fresh-context review. No behaviour changes;
+the justification does, twice.
+
+**The title is kept deliberately and is now wrong.** It names the conclusion of the draft this
+document replaces, and renaming it would hide that a merged-looking argument was reversed inside its
+own pull request. The statement that bites is the **dense vector** one.
 
 ## Context
 
 `core/db.py` adds `-c plan_cache_mode=force_custom_plan` to every connection this module's pools
-open. The comment that argues for it made three claims, in the present tense, and a review found the
-first did not reproduce. All three were measured against a live Postgres, at the shapes this system
-actually issues.
+open. The comment arguing for it made three claims. A review found the first did not reproduce, and
+the draft of this ADR concluded all three were false and supplied replacements. **A second review
+then refuted the replacements**, and it was right: every one of the draft's probes measured a shape
+this repository does not issue.
 
-**Claim 1 — the dense vector query is the one at risk.** As written: psycopg auto-prepares, Postgres
-switches to a generic plan, "and for the shape this system's retrieval is built on that plan is a
-sequential scan, because an `ORDER BY embedding <=> $1` cannot use an HNSW index when `$1` is not yet
-a value", measured at "9 ms → 1,280 ms on execution 11", with `EXPLAIN (GENERIC_PLAN)` naming
-`Seq Scan on note_index` under a `Sort`.
+### What the draft got wrong, and why each error was invisible
 
-**False, and not how pgvector behaves.** Driven at 100k rows on `_dense`'s own shape — three
-predicates and an `ORDER BY` on the same distance expression — `EXPLAIN (GENERIC_PLAN)` prints:
+**The embedding width.** The draft probed `_dense` at `vector(384)` and found the generic plan was
+an HNSW `Index Scan` with no cliff — concluding the original claim was "false, and not how pgvector
+behaves". But `infra/sql/012_note_index.sql` declares `vector(1536)` and `core/config` *raises*
+unless `embedding_dim` matches it, so 384 is a width no deployment can have. At 1536, on the same
+100k rows and the same statement:
 
 ```
-Index Scan using note_index_embedding_idx on note_index
-  Order By: (embedding <=> ($1)::vector(384))
-  Filter: ((embedding IS NOT NULL) AND (embedding_key = $2) AND ...)
+EXPLAIN (GENERIC_PLAN):  Seq Scan on note_index  ->  Sort
+  force_generic_plan   1,762 ms
+  force_custom_plan        0.93 ms
 ```
 
-An HNSW index orders on a parameterised operand perfectly well. Twenty executions under `auto`
-measure 1.10 ms (1–5) → 0.69 ms (11–20): no cliff, in the improving direction. The execution number
-was wrong too — psycopg's `prepare_threshold` is 5, so the sixth execution is the first prepared one,
-not the eleventh.
+~1,890x, and `Seq Scan ... Sort` is the literal plan shape the original comment named. **The
+sentence the draft deleted was correct.** Width is the deciding variable, and nothing in the draft's
+method could see it, because a probe writes its own schema.
 
-**Claim 2 — two other statements have the same shape.** One of them turns out to be the *only* one
-that has the problem at all, and its mechanism is a cost estimate rather than an unusable index.
+**The lexical statement.** The draft reported a 1.81x cliff on `_lexical`'s
+`(%(ids)s::text[] IS NULL OR note_id = ANY(...))`. The shipped `_lexical` splices
+`core.fulltext.TSQUERY_TERMS` — a `LATERAL` whose tsquery is built from `ARRAY(SELECT ...)`
+SubPlans, which can never constant-fold — so the custom and generic plans do not diverge the way the
+draft's simplified `websearch_to_tsquery` form does. The draft measured the statement `_lexical`
+used to be.
 
-`retrieval/vector_index.py::_lexical` carries `(%(ids)s::text[] IS NULL OR note_id = ANY(...))`, and
-one prepared statement serves both parameterisations of it — which want structurally different
-plans. Measured at 100k notes:
+**The execution number.** The draft said the flip happens at execution 6, "not the eleventh".
+Measured both ways on one skewed table:
 
-| parameters | custom plan | cost |
-| --- | --- | --- |
-| `ids` NULL | the OR constant-folds away; parallel seq scan + top-N heapsort | 5,194 |
-| 20 ids | `Index Scan using note_index_pkey`, `Index Cond: note_id = ANY(...)` | 118 |
-| generic | bitmap heap scan, OR as a `Filter`, **estimating rows=3** | 1,190 |
+```
+prepare=True (forced from execution 1):  38 ms x5, then 87 ms from execution 6
+auto-prepare, as the shipped code runs:  38 ms x10, then 83 ms from execution 11
+```
 
-The generic plan's estimate is wrong by four orders of magnitude, which makes it *look* cheaper than
-the correct plan. `auto` compares estimates, so it keeps it. The unscoped query goes **36.8 ms →
-66.7 ms at execution 6 and stays there for the life of the connection**; `force_custom_plan` holds
-37.0 ms flat. That is 1.81x — real, and a fifth of the 142x the comment claimed for a different
-statement.
+Server-side, a plain `PREPARE` serves five custom plans and switches on the prepared statement's
+sixth `EXECUTE` (cost 7,450 -> 273). psycopg's `prepare_threshold=5` makes the client's sixth call
+the prepared statement's first, so the two compose to **11**. The draft's probe passed
+`prepare=True`, which forces preparation from call one — an artefact of the measurement, not of the
+system. **The original comment's "execution 11" was correct.**
 
-**Claim 3 — the checkpointer is excluded because its statements are primary-key lookups.**
-LangGraph's own SQL carries `(%s::text IS NULL OR checkpoint_id < %s)` and two `= ANY(%s)` clauses:
-the same family. The exclusion is nevertheless correct, for a reason nobody had stated. That OR sits
-*behind* `thread_id = %s AND checkpoint_ns = %s`, so the generic plan is `Index Only Scan Backward
-using checkpoints_pkey` with both equalities in the `Index Cond` and the OR filtering one thread's
-checkpoints rather than a corpus. Measured at 200k rows over 2,000 threads: 0.35 ms under `auto`
-against 0.37 ms forced — nothing to buy.
+Three errors, one shape: each probe wrote its own version of the thing it was measuring.
 
 ## Decision
 
-**The setting stays and the comment is rewritten from the measurements.**
+**The setting stays, and the comment now carries the claims that survive measurement.**
 
-Keeping it is not inertia: the benefit is real, measured on a statement every scoped search issues,
-and the cost is the 10 µs a point lookup pays (135.7 → 140.5 µs). What changes is that the argument
-now names the statement that has the problem, the mechanism that causes it, and the execution at
-which it starts.
-
-The checkpointer exclusion also changes what it rests on: not "primary-key lookups", which is false,
-but "the risky clause sits behind an equality on the index's leading columns". That is the property
-to preserve when a statement is added there, and it is the one a reader can check.
+- The dense vector statement is the one at risk, and the **embedding width** is why — stated
+  explicitly, because that is the variable a future probe will otherwise get wrong again.
+- What is true *today* is that `auto` does not take the bad plan: at 100k rows the generic plan
+  estimates 5,915 against the custom plan's 2,334. That margin is **an estimate that is wrong in
+  the fortunate direction** — the plan it declines is three orders of magnitude slower in reality —
+  and estimates move with statistics, row counts and a planner upgrade. The setting is what stops
+  the outcome depending on that. It is insurance, not the repair of an observed cliff, and saying so
+  is the difference between this comment and the one it replaces.
+- Four more statements carry the same `IS NULL OR` shape (`science/calc/postgres_store`,
+  `ingest/documents/index.py`, `external_index.py`, `science/labels/store.py`). On the calc browse
+  statement, `force_generic_plan` measures 59 ms against `force_custom_plan`'s 0.95 ms, and `auto`
+  likewise declines it. Same insurance, four more places.
+- Cost on the statements that do not need it: a point lookup goes 263 µs to 288 µs (~25 µs on this
+  box; the draft recorded ~5 µs from a faster one — direction and magnitude-class hold, the absolute
+  does not travel).
+- The checkpointer exclusion stands, on the corrected reason: not "primary-key lookups" (false of
+  LangGraph's SQL) but that its `IS NULL OR` sits behind `thread_id = %s AND checkpoint_ns = %s`, so
+  the generic plan is an `Index Scan Backward using checkpoints_pkey` with both equalities in the
+  `Index Cond`. ~0.4 ms either way at 200k rows over 2,000 threads. (`Index Scan`, not `Index Only
+  Scan` — the draft's probe projected key columns only; LangGraph's `SELECT_SQL` does not.)
 
 ## Consequences
 
 - `tests/test_db.py::test_the_checkpointer_pool_is_not_given_the_plan_mode_and_the_reason_is_structural`
-  pins the exclusion as an *absence*: the pool passes no `options` and names no `plan_cache_mode`.
-  Mutation-verified by adding the option to `agent/checkpointer.py`. A pool that sets options at all
-  is one whose exclusion needs re-deciding, which is what the failure message says.
-- No test pins the 1.81x itself. It needs 100k rows and a live server to reproduce, which is a
-  benchmark rather than a unit test; what the suite holds is that the option is on every connection
-  this module opens, and the measurement is in the comment beside it with its date.
-- **The general lesson is about which claim was checkable and which was not.** "An HNSW index cannot
-  order on a parameter" is a statement about Postgres, one `EXPLAIN (GENERIC_PLAN)` away from being
-  checked, and it survived a review, a commit and a merge because it was *plausible* and the setting
-  it justified was harmless. The repository's own rule covers this exactly: prose is evidence about
-  what its author believed, never about what the code does — and that holds when the code is
-  somebody else's.
+  is rewritten to parse the `AsyncConnectionPool(...)` call with `ast` and check its keywords,
+  including a literal `kwargs=` dict. **The draft's version asserted nothing**: it partitioned on
+  `")"`, which stops at the `)` of `conninfo=_session_dsn()` — 39 characters of a 34,000-character
+  file — so `options=_FORCE_CUSTOM_PLAN` on the pool passed it. Only a bare substring scan for
+  `plan_cache_mode` caught the one spelling the mutation check happened to use, and that scan made a
+  *comment* naming the exclusion fail the test that exists to explain it. All three cases are now
+  mutation-verified: keyword fails, `kwargs=` entry fails, comment passes.
+- No test pins the 1,890x. It needs 100k rows at `vector(1536)` and a live server, which is a
+  benchmark rather than a unit test.
+- **The lesson is not "measure it" — the draft did measure, three times, carefully.** It is that a
+  probe you write yourself is a claim about the shape you gave it, and the shape is the part a
+  reviewer has to check. Every one of these three defects lives in the fixture, not the method:
+  a width from the probe's own `CREATE TABLE`, a query the probe retyped instead of importing, a
+  `prepare=True` the probe added for determinism. `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system`
+  is the same failure in a test fixture; this is it in a benchmark, and both were found only by
+  somebody who had not written the probe.
 
 ## Alternatives considered
 
-**Remove the setting.** Tempting the moment the first claim fell: a setting justified by a
-measurement that does not reproduce is the shape this repository deletes. Rejected because measuring
-the *second* claim found a real 1.81x regression — which is the whole argument for measuring before
-deleting rather than after.
+**Remove the setting.** Tempting when the first claim appeared to fall, and the draft's own closing
+line congratulated itself for resisting it. That reasoning was doubly wrong: claim 1 had not fallen
+(it is the surviving reason), and claim 2 — the one the draft kept the setting *for* — is the one
+that does not reproduce. Rejected on the measurement that actually holds: 1,890x on the dense
+statement at the shipped width.
 
-**Give the checkpointer the setting too, for symmetry.** Rejected on measurement: 0.35 ms against
-0.37 ms. Symmetry is not a reason to spend a re-plan on every turn's state read.
+**Give the checkpointer the setting too, for symmetry.** Rejected on measurement: ~0.4 ms either way.
