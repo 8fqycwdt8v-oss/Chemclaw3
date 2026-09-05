@@ -87,10 +87,11 @@ readers still serve.
 
 ### 4. Ceilings that do not know about each other
 
-`agent_max_parallel_tool_calls` (8) × `agent_max_tool_result_chars` (60,000) = **120,040 estimated
-tokens** in a batch compaction is *designed* never to clear, on top of a **42,730**-token prefix
-charged unconditionally, against a **100,000**-token budget. Nothing asserts the product.
-Separately, `calc`'s inline tools wait 3,600 s on a backend behind a 600 s agent bound.
+`calc`'s inline tools wait 3,600 s on a backend behind a 600 s agent bound, and the per-result and
+per-batch ceilings had no assertion tying them to the context budget at all — though the *product*
+this review first gave for that second one was wrong arithmetic (see the correction under H7): the
+ceiling is divided across a batch, not multiplied by it, and the real breach came from H8's
+expansion pass one layer further out.
 
 ### 5. A claim held only by a test
 
@@ -186,19 +187,33 @@ server's `inputSchema` verbatim; `assert_manifest_matches` checks names and clas
 Chemclaw3's in-tree bundles, and that claim is unchecked in both repositories.
 
 ### H7 — The unreducible floor exceeds the whole context budget
-Measured with the estimator the policy itself uses:
 
-```
-count_tokens_approximately(8 x 60,000-char ToolMessages) = 120,040 tokens
-static prefix (measured 2026-09-04, tests/test_context_floor.py)  =  42,730
-                                                          floor  = 162,770
-agent_context_token_budget                                        = 100,000
-```
+**CORRECTED 2026-09-05 — the conclusion held, the mechanism given here was wrong.** The
+arithmetic below multiplies where the code divides: `agent/tool_result_size.py:283` is
+`max(ceiling // batch_width(request), 1)`, so eight parallel calls get 7,500 characters *each*
+and the batch totals 60,000 chars — 15,040 estimated tokens, not 120,040. The floor at `HEAD` was
+`42,730 + 15,040 = 57,770` against a 100,000 budget, i.e. inside it. The reviewer's own report
+said "60,000 divided by `batch_width`" and the coordinator did not apply it to the product.
 
-Both halves are untouchable by design: `compaction.py:209` sets `keep=max(self.keep,
-newest_batch_size(messages))` so the newest batch survives structurally, and D-2026-09-04 made the
-prefix a charge rather than a subtraction. `llm_context_window_tokens` is still 0, so nothing else
-bounds it. Reviewer B's H8 compounds this by up to 3.98×.
+The floor **was** genuinely over budget at `HEAD` — by H8, one layer out. Measured on a compiled
+default graph at the shipped fan-out width: eight results each bounded to their 7,500-char share
+reached the model at **29,096** characters apiece, a **101,899-token request against the 100,000
+budget**, entirely inside the newest batch that neither context edit may reclaim. So H7 and H8
+were never two findings. They were one, and this entry named the wrong cause of it — which is
+precisely the failure `D-2026-08-01-a-cap-that-starves-a-source` records: when two explanations
+compete, the articulate one is uncorrelated with the true one, and only running it tells you which.
+
+What was genuinely missing and is now added:
+`tests/test_tool_result_size.py::test_the_unreducible_floor_fits_the_context_budget` computes the
+floor from the shipped settings plus the ratchet ceiling and fails when it exceeds
+`agent_context_token_budget`. It passes at `HEAD` (58,163 against 100,000) and is honest about that
+— it gates configuration coherence rather than becoming a second ratchet.
+
+The original text, kept because a corrected claim should show what it was:
+
+> `agent_max_parallel_tool_calls` (8) × `agent_max_tool_result_chars` (60,000) = 480,000 chars =
+> **120,040 estimated tokens** in a batch compaction is designed never to clear, on top of a
+> 42,730-token prefix, against a 100,000-token budget. Nothing asserts the product.
 
 ### H8 — `defang` runs after the size bound and can undo it
 `framing.py:118-121`'s second pass replaces **every** `<` with `&lt;` (1→4 chars) once an invisible
