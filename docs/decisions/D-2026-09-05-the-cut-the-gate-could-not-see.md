@@ -108,9 +108,14 @@ for a turn that was never graded.
 - `retrieval_recall` baseline 0.90 → 0.95 and `retrieval_precision` 1.00 → 0.476. The precision drop
   is not a regression: on a six-note corpus every hit was gold because the corpus *was* the gold set.
 - `EVAL_CASE_SET_VERSION` changes, which is the mismatch tripwire doing its job.
-- The context floor moves 43,316 → 43,333 — **+17 tokens for the whole change**, paid for by
+- The context floor moves **43,954 → 43,971 — +17 tokens for the whole change**, paid for by
   trimming developer rationale out of `gather_evidence`'s model-facing schema after the per-tool
   ceiling caught it at 1,059 against its 900 limit and said, in as many words, not to whitelist it.
+  Those absolutes read 43,316 → 43,333 when this was first written, on a basis
+  `D-2026-09-05-a-ratchet-that-re-derives-half-its-basis-bounds-half-a-request` then replaced —
+  re-measured against `origin/main` on the *observed* basis, the delta is the same 17 and the
+  ceiling is 44,500. Which is the argument that ADR makes: a figure is about a commit, and this
+  one had to be taken again rather than carried.
 
 ## A process failure worth recording
 
