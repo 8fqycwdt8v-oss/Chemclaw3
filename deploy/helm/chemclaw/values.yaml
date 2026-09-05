@@ -466,12 +466,21 @@ postgres:
   #
   # **A pod is not a pool, and this number was computed as though it were.** The helper counted
   # pods until 2026-09-05, while a front-door process holds the stores' pool, the `/readyz`
-  # probe's (a distinct `(dsn, options)` key, and that isolation is load-bearing) and the LangGraph
-  # checkpointer's — so the declared ceiling covered roughly two thirds of what the fleet opens.
-  # How many that is per front door is measured by `tests/test_fleet_pools.py` and multiplied by
-  # `chemclaw.fleetPools`, never written here. This value rose with the arithmetic, and the rise is
-  # the honest requirement becoming visible rather than a new one: the release always opened what
-  # it opens.
+  # probe's (a distinct `(dsn, options, requested max_size)` key, and that isolation is
+  # load-bearing) and the LangGraph checkpointer's — so the declared ceiling covered roughly two
+  # thirds of what the fleet opens. How many that is per front door is measured by
+  # `tests/test_fleet_pools.py` and carried by `chemclaw.fleetPools`, never written here. This
+  # value rose with the arithmetic, and the rise is the honest requirement becoming visible rather
+  # than a new one: the release always opened what it opens.
+  #
+  # **A pool is not `CHEMCLAW_PG_POOL_MAX_SIZE` either, and that half was corrected the same day.**
+  # The `/readyz` pool asks for a single connection, because the probe is single-flighted and was
+  # measured at a peak of one simultaneous checkout under 1,000 concurrent requests. Charging it
+  # the full width declared 208 for a fleet that opens 166 — and the difference was not headroom
+  # but a refusal: the front door is the role that scales, so `service.autoscaling.maxReplicas: 9`
+  # made `Settings` refuse 280 against this 256 and CrashLoop every pod against a database that
+  # could have served it. `Settings.fleet_connections_per_server` is the sum that replaced the
+  # product.
   #
   # **How many pools that is, is not written here.** The sentence that was said "17
   # pooled processes × the 8 below", which was 136 exactly — and by the time it was read the
@@ -501,6 +510,28 @@ postgres:
   #
   # Set to 0 to declare no ceiling, which makes both the startup check and the alert inert.
   maxConnections: 256
+  # The same declaration for a **split session store's** server, and it exists because one number
+  # describes one server. It is meaningful only when `secrets.optionalKeys.sessionStoreDsn`
+  # carries a DSN naming a different endpoint — which this chart cannot see, because that value
+  # lives in an operator-managed Secret and no template reads a Secret's contents. So the process
+  # decides: `Settings` places every pool on the server it will actually be opened against, and
+  # warns when this is 0 while the split is real.
+  #
+  # **What the split costs is measured rather than argued.** Pointing the session layer at a second
+  # database gives every pooled process one more `core/db` pool — a front door holds four where it
+  # held three, because its `/readyz` key and its checkpointer both resolve
+  # `session_store_dsn or postgres_dsn` and move there while the stores' session key is new. On the
+  # shipped topology that is 278 connections against the 256 above — a release breaching its own
+  # declared ceiling with the startup check passing, which is the `mcpFace` defect `_helpers.tpl`
+  # records, a second time. Split across the two servers it is 112 here and 166 there, so neither
+  # is over on its own and summing them into one ceiling would refuse a legal deployment. (320 and
+  # 208 were the uniform-width arithmetic the same commit replaced, which charged every readiness
+  # pool `CHEMCLAW_PG_POOL_MAX_SIZE` where each asks for one connection.)
+  #
+  # 0 = undeclared, matching `maxConnections`. A release with no split leaves it at 0 and nothing
+  # about it applies; setting it *without* a split is refused, because a ceiling for a server that
+  # does not exist is one the runtime alert would add to the real one.
+  sessionStoreMaxConnections: 0
 
 # The pre-install/pre-upgrade migration hook (D-034).
 migrateJob:

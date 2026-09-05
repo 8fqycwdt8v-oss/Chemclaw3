@@ -148,6 +148,16 @@ topic).
       for the audit trail, where that question can be answered. What stays open is unchanged: the
       string is still the caller's to choose.
 
+- [ ] **`build_langgraph_agent(connectors=...)` accepts a tool that shadows a first-party name** —
+      [S], the residual `D-2026-09-04-a-name-is-one-capability-across-every-namespace` names and
+      leaves open, and whose `BACKLOG.md` row was never written. `connectors/registry.py`'s
+      `_declared_tool_names` refuses a *manifest* claiming `propose_knowledge_note`, and that is
+      the path a deployment takes; the `connectors` keyword is the one that bypasses it, because
+      `agent/langgraph_agent.py`'s `bound = [*(as_structured_tool(fn) for fn in tools),
+      *(connectors or [])]` concatenates the two lists with no name check at all. Closed in
+      practice and open in the type: the check belongs beside that concatenation, over the names
+      the first list already declares.
+
 ## 2 — Answers that are wrong without saying so
 
 - [ ] **`retrieval_top_k` cuts silently and the sweep reports `truncated_by=None`** — [M], measured
@@ -273,6 +283,42 @@ topic).
       `parse_document` offers an interruption hook, so a hostile document still burns a worker to
       completion in the background. The only real fix is a killable subprocess, with pickling and a
       new child-OOM failure mode to classify (~150-250 lines).
+
+- [ ] **Nothing checks the client half of a wire contract, and it has drifted twice** — [L], the
+      row `D-2026-09-04-a-contract-has-two-halves-and-a-server-test-sees-one` says it is queuing
+      and which was never written. `tests/fixtures/turn_events_contract.json` pins what this
+      repository *sends*; nothing pins what a client accepts, so the `at_capacity` error code and
+      `PendingPlansResponse.truncated` both shipped here and reached `Chemclaw3_ui` as an
+      unhandled default — the second without anyone recording that it had not. The hand-written
+      case in `tests/test_protocol_routes.py` is the only cross-repo assertion in the tree, and
+      that ADR says plainly it does not scale to four repos. What it needs is one artefact both
+      sides read: a published fixture, a generated types package, or a job in `make ci` that
+      fetches the client's own declaration and diffs it against the fixture.
+
+- [ ] **A durable question waiting on a chemist is written to the push-back table and never
+      pushed** — [M], found 2026-09-05 while checking the client half of the wire contract.
+      `durable/awaiting.py` writes an `awaiting-answer` row into `session_events` when a wait opens
+      *and* when it expires, and `AWAITING_KIND` has exactly two references in the tree: that line
+      and its own definition. The front door's tailer (`api/routes/streams.py`) subscribes with
+      `kinds=("job_completed", "job_failed")`, so the row is never read by anything — a producer
+      with no consumer, which is the `map_to_hpc_identity` shape, except that here the consumer
+      exists in the *other* repository: `Chemclaw3_ui`'s `useJobStreams` has a full
+      `awaiting_answer` branch, `chatStore` keeps a slice for it, and its comment asserts this
+      stream is "scoped server-side to `job_completed`, `job_failed` and `awaiting-answer`", which
+      is false. Degraded rather than broken, because `GET /pending` still answers on a poll and the
+      review queue treats the service as the authority. Closing it is a new `Event` member plus the
+      kind in that tuple — and the wire name has to be decided, since the producer says
+      `awaiting-answer` and the client reads `awaiting_answer`. The UI's false comment is a
+      separate one-line fix in that repository.
+
+- [ ] **`JsonCommitmentExport` cannot run a destructive sweep, and the grant for one already
+      exists** — [S], the row `ingest/commitments/json_export.py`'s `snapshot` attribute says is
+      queued and which was never written. It is hard-coded `False`, so a commitment withdrawn at
+      the site is never withdrawn here; the `DELETE` privilege was granted ahead of it
+      deliberately, so the enabling half is the only part unbuilt. Not a flag flip: `snapshot`
+      licenses deleting every commitment a pass did not see, so it is the operator's assertion
+      that the export directory was complete — which makes it a `datasource.yaml` key defaulting
+      to false, not a class attribute.
 
 ## 4 — Operating it
 
@@ -663,6 +709,18 @@ topic).
       row. Raised by the 2026-08-27 deployment-monitoring review, which checked the PDB's argument
       and found it sound; the singleton underneath it is the defect.
 
+- [ ] **A background-worker rollout that never becomes Ready is invisible until someone looks** —
+      [S], the detection `8b23067` named as missing after measuring the review's proposed fix as
+      worse than the status quo, and which was never written down as a row. `deployment-workers.yaml`
+      ships `Recreate` because the singleton underneath it forbids two replicas, so the old process
+      is gone before the new one starts; a new pod that never becomes Ready therefore leaves the
+      `background-jobs` queue with no consumer while the release reports deployed. `--atomic` is
+      not the fix and is refused elsewhere for its own reason (`migrate-job.yaml`). What is missing
+      is an alert, expressible from what is already scraped —
+      `kube_deployment_status_replicas_unavailable` on that Deployment, or the staleness of the
+      worker's own `chemclaw_jobs_in_flight` — and it belongs beside `ChemclawWorkerNotPolling` in
+      `prometheusrule.yaml`.
+
 ---
 
 - [ ] **The `stated`-quote ambient reads the whole table's tail on every turn once a database has
@@ -929,6 +987,53 @@ only holds defects can only ever restore the system to what it already intended 
       greenlight numbers (≥5 recurring classes across ≥3 sessions, ≥1 would-have-helped multi-tool
       class); the command prints the verdict itself. Run 2026-08-27: 0 sessions, 0 turns, not
       greenlit. The day a deployment has sessions, this row is one command to check.
+
+      **That instrument was blind to half the signal, and now has two arms**
+      (`D-2026-09-05-a-census-that-counts-only-success-is-blind-to-half-the-signal`). Its definition
+      of recurrence is an identical tool-name *sequence*, which is the shape SkillRL and SkillForge
+      abstract; a recurring **failure** produces divergent sequences that end badly, so a corpus
+      dense in repeated mistakes reported zero. The second arm counts tools that errored across
+      sessions and the subset where an earlier session recovered before a later one failed again
+      (≥3 classes / ≥3 sessions / ≥1 repeat). `generator_greenlit` is unchanged; read
+      `any_greenlit`. Both still report zero on 0 sessions, so the block is unchanged.
+
+      **The tier question this row implied is settled and is no longer part of it**
+      (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): knowledge is global the moment it
+      is learned and ungated; a skill is **live for its own user before review** and reaches the
+      shared tree only after an **admin** merges it, so the end user never waits on a gate and no
+      unreviewed instruction reaches a second person. What is open here is now the generator alone —
+      plus the per-actor skills directory that tier needs, which is blocked on the same generator
+      (nothing writes one until a distiller exists) and whose invariants that ADR states — plus the follow-up that ADR names and does not claim shipped: the
+      direct write path that actually ungates agent-asserted notes, which owes D-161 migration
+      `025`'s self-confirmation guard.
+
+      **Review scaling and convergence, ideated 2026-09-05 and mostly not built.** The owner asked
+      how an admin avoids drowning in near-identical proposals, and how local and global skills stay
+      convergent. `D-2026-09-05-a-rejection-nobody-reads-is-a-decision-taken-twice` built the one
+      part that is real today — the reviewer now sees every earlier version of the note in front of
+      them, so a rejection is not re-derived or accidentally overturned. The rest waits on the
+      distiller and is recorded there rather than here in full: promotion thresholds on skills
+      (used N times **and** by ≥ 2 distinct chemists — D-161's two-threshold shape, and the single
+      most effective flood control available); duplicate suppression in the **generator** rather
+      than the queue (propose an edit to the nearest existing skill unless none is close — a
+      queue-side deduplicator is a bandage on a generator that should not have produced them);
+      cluster review over `cluster_by_similarity`; benefit-ranked triage over `evals/ab.py`, with
+      the machine ordering and the human still deciding, which is why it does not re-open
+      `D-2026-08-16`; and the convergence half — global-wins-on-conflict with the conflict
+      surfaced, promotion retiring the local variants that fed it via `memory/supersede.py`, expiry
+      on disuse read as a signal about the *distiller* rather than about review capacity, and
+      `skill-validate` run on local skills at write time so form converges even where content does
+      not. One constraint binds all of it: `D-2026-08-25` ends with **no Temporal Schedule opens a
+      pull request**, so a reconciliation job may cluster, measure and report, and a human opens the
+      proposal.
+
+      **Two findings from the reviewed framework (WikiSkill, arXiv 2608.27454) are recorded because
+      they contradict the obvious design and cost nothing to carry**: giving the *executing* agent
+      the accumulated experience measured **worse** than not (63.7% → 60.9%), while giving it to the
+      *proposer* was the largest ablation (+15.0pp) — so experience is compiled into skills, never
+      injected into the turn; and rejected proposals were load-bearing input, which this tree
+      already retains (`kg/proposal.py::rejected_version`, and `durable/retention.py` refuses to
+      prune `note_proposals`) and nothing reads back.
 
 ### The upstream-capability register — what our pinned dependencies now ship that we build ourselves
 

@@ -1,58 +1,69 @@
-# The capture half of the knowledge loop
+# Task — the reviewer sees what was already decided about this note
 
-Follow-on to `D-2026-09-04-a-ranker-that-sorts-alphabetically-is-not-a-ranker`, which closed the
-retrieval half and said plainly what it had not done: **data is captured automatically, conclusions
-are not.** All four review claims re-verified against `HEAD` before building — the tree had moved
-twice — and all four held.
+Follows the WikiSkill review (PR #323) and the owner's two questions: how does an admin avoid
+drowning in a flood of near-identical proposals, and how do local and global stay convergent.
 
-## Done
+## The honest scoping
 
-- [x] 1. **Nine `run_*` procedures wrote no durable record.** `record_job` had one caller in the
-      tree (`durable/connector_job.py`), so a template run left no `job_records` row: never
-      findable by `find_past_jobs`, and `get_durable_job_status` answered for its id only until
-      Temporal retained its history away. A *failing* run left nothing anywhere.
-      `TemplateWorkflow` now records on both paths. Proven on a real broker, not just by the
-      builders: removing the success-path call makes `tests/test_template_job_record.py` report
-      "got 1" instead of 2.
-- [x] 2. **Two docstrings asserted the opposite in the present tense** (`agent/durable_tools.py`) —
-      both true of connector jobs alone. Corrected, and `find_past_jobs` now documents the
-      `connector="template"` filter.
-- [x] 3. **A correction was recorded as a confirmation.** `memory/interaction.py` rendered
-      `A (confirmed):` unconditionally while three docstrings and the system prompt said
-      "confirmed **or corrected**". `corrected_from` carries what the system had said; empty means
-      confirmed.
-- [x] 4. **The recording rule had no trigger.** "A computed value that matters beyond the
-      conversation" named no moment; now a comparison whose margin *clears* the stated uncertainty
-      does, with the inside-the-error-bar case pointed at the ceiling section.
-- [x] 5. **Nothing graded the write-up after a calculation.** `propose_knowledge_note` is named by
-      fourteen probes across seven files and by none in `durable.yaml` or
-      `multistep-calculation.yaml`. Two new probes, `ms-18` and `ms-19`.
+Most of the ideated mechanisms — promotion thresholds on skills, cluster review, supersession of
+local variants, the divergence census — are downstream of a **distiller that does not exist** and
+is blocked on an empty corpus (`make trajectory-census`: 0 sessions, neither arm greenlit). Building
+them now is `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`, which this repository
+deleted 1,442 lines over. They stay recorded, not built.
 
-## Rejected, with the reasoning kept
+**One of them is real today**, because the review queue it concerns already exists and already
+carries proposals: `GET /proposals`, `GET /proposals/{id}`, `POST /proposals/{id}/decision`.
 
-- [x] 6. **An automatic `publish_to_graph` over calc's twelve durable jobs.** Designed, reviewed and
-      **not built** — two of its premises were false (`job-result` *is* minted, by
-      `propose_knowledge_note`; the record does *not* stop at the cache, `_publish_result` runs for
-      every job), `skills/computational-evidence` already forbids it in as many words, roughly half
-      the notes would have read "this calculation could not distinguish them" at GFN2-xTB's ±3
-      kcal/mol, and neither default is defensible. The ADR keeps the whole argument so it is not
-      re-proposed from scratch.
+**The gap.** A reviewer opening a proposal is shown the note's bytes and nothing about what has
+already been decided about that note. `rejected_version(note_id, content_hash)` refuses a re-proposal
+of *byte-identical* rejected content, so the exact-repeat case is closed — but a **changed**
+re-proposal of a note a colleague already rejected arrives with the prior rejection and its stated
+reason invisible. The reviewer re-derives the judgment, or merges what was already refused. That is
+the largest single ablation in the reviewed framework (+15.0pp for a proposer that sees rejection
+history), and this tree already *retains* the history — `note_proposals.reason`, and
+`durable/retention.py` refuses to prune the table — while nothing reads it back.
 
-## Two things measurement changed
+## Plan
 
-**The eval fix as proposed would have made the probes weaker.** The recommendation was to add
-`propose_knowledge_note` to `expects_tools` on `ms-07`/`ms-08`. `evals/live.py` scores that field
-with `any()`, so a second name makes a probe pass on *either* tool — `ms-07` would then have been
-satisfied by a turn that recorded a note and never ranked anything. Separate probes instead.
+- [x] 1. `ProposalStore.history(note_id, scope)` on the protocol and both backends, oldest-first.
+      Scope is the same actor rule the visibility gate uses, applied to *other people's* versions.
+- [x] 2. `ProposalHistoryEntry` schema — the decision, never the content. `ProposalDetail` gains it.
+- [x] 3. Wire it in `get_note_proposal` under the same reviewer/owner rule as visibility.
+- [x] 4. Tests: oldest-first, the viewed version excluded, a non-reviewer sees only their own prior
+      versions, empty on a first proposal, and that a *changed* re-proposal surfaces the rejection.
+- [x] 5. ADR + ledger + BACKLOG; record the deferred mechanisms with their trigger.
+- [x] 6. `make lint type test` green, Postgres up so the DB-backed tests actually run.
 
-**`turn_costs` already is the per-turn outcome row**, so the "no end-of-turn record" finding was
-half wrong: `tool_calls`, `tool_failures`, `jobs_started` and `outcome` are written every turn.
-What is missing is the knowledge dimensions (did this turn retrieve, cite, capture) — a much
-cheaper change than the new table that was proposed, and queued rather than rushed at the end of
-this one.
+## No migration
 
-## Cost, stated
+`note_proposals_note_idx ON note_proposals (note_id, submitted_at DESC)` (migration 027) is already
+exactly the index this query sorts by — checked rather than assumed
+(`D-2026-08-27-an-index-must-match-the-sort-it-serves`).
 
-The context floor moves 43,063 -> 43,316 against the unraised 43,500 ceiling: **184 tokens of
-headroom**, from one optional argument on `record_confirmed_answer`. That is tight enough to be the
-next person's problem, and the reclaim is already a `BACKLOG.md` row.
+## Review
+
+**What shipped.** `ProposalStore.history(note_id, actor)` on the protocol and both backends, returned
+by `GET /proposals/{id}` as `history`. 6 new tests in `test_note_proposals.py` and 1 in
+`test_note_proposals_postgres.py` — the second because the ordering across separate transactions and
+the actor predicate are things only the database decides, and that predicate fails *open*.
+
+**Two things were reused rather than invented**, both after checking:
+`ProposalSummary` already carries exactly what a history entry is and carries no body, so a
+`ProposalHistoryEntry` would have been the same fields under a second name; and migration 027 already
+indexes `(note_id, submitted_at DESC)`, so there is no migration.
+
+**One surprise worth keeping.** The first draft of the HTTP test sent
+`{"state": "rejected", ...}` to the decision route, which takes `{"approved": false, ...}` — the
+route returned 422, the rejection never happened, and the assertion then failed against a
+`superseded` row instead. That is the test catching a wrong assumption about a shape rather than a
+bug, which is the right way round, but it is a reminder that a route's payload is worth reading
+rather than guessing.
+
+**The scoping decision is the one to re-check if this is ever extended.** History follows
+`_is_reviewer`, exactly as the listing does. A future "show me every note like this one" would cross
+that boundary by construction and needs the rule restated, not inherited.
+
+**Verification.** `make lint`, `make type` green. `test_note_proposals` 42 passed,
+`test_note_proposals_postgres` 8 passed (ran rather than skipped — Docker up, Postgres migrated),
+`test_decision_log` / `test_repo_map` / `test_deferred_register` green. Full `make test` reported in
+the commit.

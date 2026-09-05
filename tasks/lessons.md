@@ -1941,3 +1941,38 @@ way; the warnings belonged to a third file. **Rule: before attributing a metric'
 change, run the metric twice without the change. A number that moves on its own is not evidence,
 and a suite-wide aggregate of a GC-timing-dependent warning is exactly that kind of number.**
 The correction goes in the live prose, because `git log` keeps the wrong sentence either way.
+
+**A test can be red only under `make cov`, and lesson 38's rule sends you the wrong way.**
+`test_concurrent_batches_do_not_race_on_the_cache` failed the full gate and passed every time I ran
+it alone — which reads exactly like the contended-load case above, and is not it. Coverage tracing
+multiplies a tight 4,800-iteration threaded loop by ~30 (4.8 s bare, 132-216 s traced) and the
+global cap is 180 s, so the run's outcome is decided by which side of that line the machine lands
+on. Five isolated runs under `--cov`: 132 s, 152 s pass; 200 s, 213 s, 216 s fail. Perfect
+correlation with the cap, none with the race the test is named for.
+
+Two things I nearly got wrong. I reached for "order dependence" first, because that is what the last
+two suite-only failures were, and it cost a detour. And the failure *presents* as the concurrency
+bug under test, so "flaky race test" is the reading that offers itself — on a test whose own
+docstring says a race test cannot promise to fail every run.
+
+**Rule: reproduce a suite-only failure under the gate's own flags before theorising.** `pytest <file>`
+is not `make cov`. And when a slow test sits under a shared cap, the number to check is its
+*traced* runtime, not its bare one — this is the third test in this repository whose cap was sized
+against a measurement nobody took under coverage.
+
+**An absolute-sounding qualifier in a one-line design instruction is a question, not a spec.** The
+owner wrote "things that change agent behaviour like skills only after human review". I read "only"
+as covering every turn, wrote a whole ADR section rejecting the local-skills tier on that reading,
+and was wrong: the review applies to the *shared* tree, and the local tier was the point of the
+design. Both readings are grammatical and they differ in exactly one property — whether an
+unreviewed skill may touch its own author's turns. **Rule: when a short instruction turns on a
+quantifier (only, always, never, all) and two readings would produce materially different code, put
+the two readings to the owner before writing either one up. The tell is that I can state the
+distinguishing property in a single sentence — if I can, I can ask.**
+
+**A rejected alternative's argument survives the rejection being overturned.** When the tier came
+back, the objection I had raised against it (per-user skills fragment answers across chemists with
+nothing recording why) was still true. Deleting it with the rejection would have lost the reason
+the design needs an inspectability invariant. **Rule: when a decision reverses, re-file the losing
+argument as a stated cost or as a requirement it generates — never delete it as though it had been
+wrong.**

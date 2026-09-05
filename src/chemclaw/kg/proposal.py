@@ -156,6 +156,15 @@ class ProposalStore(Protocol):
         """Close every open proposal for the named notes as merged; return how many moved."""
         ...
 
+    async def history(self, note_id: str, actor: str) -> list[NoteProposal]:
+        """Every recorded version of one note, oldest first, optionally scoped to one proposer.
+
+        What a reviewer needs and could not get: this note has been here before, and somebody
+        already decided something about it. `decided_version` answers the *exact bytes* question
+        and is asked by the gate; this answers the reviewer's question, which is about the note.
+        """
+        ...
+
     async def decided_version(self, note_id: str, content_hash: str) -> NoteProposal | None:
         """The *decided* row for exactly these bytes, or None when this version is undecided.
 
@@ -319,6 +328,16 @@ class InMemoryProposalStore:
             moved += 1
         return moved
 
+    async def history(self, note_id: str, actor: str) -> list[NoteProposal]:
+        """Every version of one note, oldest first — id order, which is submission order here."""
+        versions = [
+            proposal
+            for proposal in self._by_id.values()
+            if proposal.note_id == note_id and (not actor or proposal.actor == actor)
+        ]
+        versions.sort(key=lambda proposal: proposal.id)
+        return versions
+
     async def decided_version(self, note_id: str, content_hash: str) -> NoteProposal | None:
         """The decided row for these exact bytes, keyed the same way `upsert` keys them."""
         proposal_id = self._by_version.get((note_id, content_hash))
@@ -423,6 +442,24 @@ async def list_proposals(
 async def read_proposal(proposal_id: int) -> NoteProposal | None:
     """One proposal in full, or None when there is no such row."""
     return await proposal_store().read(proposal_id)
+
+
+async def proposal_history(note_id: str, actor: str) -> list[NoteProposal]:
+    """Every recorded version of one note, oldest first, optionally scoped to one proposer.
+
+    **What the gate already prevented, and what it did not.** `rejected_version` refuses a
+    re-proposal of byte-identical rejected content before it reaches git, so the exact repeat is
+    closed. A *changed* re-proposal of a note somebody already rejected is a different version, so
+    it arrives in the queue legitimately — and it arrived with the earlier rejection and its stated
+    reason nowhere in sight, leaving the next reviewer to re-derive the judgement or to merge what
+    a colleague had refused. The record was always there (`reason` is written on every decision, and
+    `durable/retention.py` refuses to prune this table); nothing read it back.
+
+    `actor` is the visibility rule, not a filter for convenience: a non-reviewer may see their own
+    submissions, so a history assembled for them must not disclose that somebody else proposed the
+    same note. Empty means "every proposer", which is the reviewer's view.
+    """
+    return await proposal_store().history(note_id, actor)
 
 
 async def decide_proposal(
