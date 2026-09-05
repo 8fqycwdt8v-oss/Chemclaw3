@@ -11,9 +11,9 @@ scoped to `DIGEST_KIND` so the claim cannot destroy another consumer's rows, and
 *authenticated* caller's `oid` rather than by anything in the request. That route is what makes the
 acknowledgement below true, and it did not exist for the whole first life of this job: the only
 consumer in the tree was `GET /sessions/{id}/events`, which 404s a synthetic id no `session_owners`
-row backs and claims only the two job-outcome kinds anyway. Measured against a real row: the claim
-returned `[]` and left it `consumed_at IS NULL`, which `durable/retention.py` then declines to prune
-forever — while the watermark below advanced past it
+row backs and claims a named set of kinds that has never included this one. Measured against a
+real row: the claim returned `[]` and left it `consumed_at IS NULL`, which
+`durable/retention.py` then declines to prune forever — while the watermark below advanced past it
 (`D-2026-08-27-a-digest-nobody-can-read-is-not-delivered`).
 
 **Why the watermark advances on the mailbox write, not on the chemist reading it.** A crash between

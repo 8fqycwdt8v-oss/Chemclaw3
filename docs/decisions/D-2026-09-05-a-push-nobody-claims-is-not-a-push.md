@@ -22,10 +22,10 @@ Nothing has ever read those rows.
 $ grep -rn "notify_session_best_effort(" src/ --include='*.py' | grep -v "def \|import"
 src/chemclaw/durable/awaiting.py:398        AWAITING_KIND
 src/chemclaw/durable/digest.py:272          digest kind
-src/chemclaw/durable/connector_job.py:893   "job_failed"
-src/chemclaw/durable/connector_job.py:957   "job_completed"
-src/chemclaw/durable/template_job.py:156    "job_completed"
-src/chemclaw/durable/template_job.py:182    "job_failed"
+src/chemclaw/durable/connector_job.py:903   "job_failed"
+src/chemclaw/durable/connector_job.py:967   "job_completed"
+src/chemclaw/durable/template_job.py:254    "job_completed"
+src/chemclaw/durable/template_job.py:322    "job_failed"
 ```
 
 Five kinds are produced. `GET /sessions/{id}/events` claimed exactly two of them:
@@ -36,10 +36,18 @@ async for pushed in front_door.stream_new_events(
 ):
 ```
 
-`DIGEST_KIND` has its own claim on its own channel (`streams.py:343`). `AWAITING_KIND` had **no
-claim anywhere**. So every notification this workflow has ever written was written, never
-delivered, and aged out under retention — and the claim is destructive and at-most-once (COR-4), so
-there was never a second chance at it either.
+`DIGEST_KIND` has its own claim on its own channel (`streams.py`, the `/digests` route).
+`AWAITING_KIND` had **no claim anywhere**. So every notification this workflow has ever written was
+written and never delivered, and the claim is destructive and at-most-once (COR-4), so there was
+never a second chance at it either.
+
+**And they are all still there.** An unclaimed row is immortal twice over: `durable/retention.py`
+prunes `session_events` only `WHERE consumed_at IS NOT NULL`, and `retention_session_events_days`
+defaults to `0` (disabled) with no value in `.env.example` or `deploy/`. `durable/digest.py` already
+says so in the present tense about its own kind — *"which `durable/retention.py` then declines to
+prune forever"*. So widening the claim does not deliver *the* notification; it delivers the entire
+history on the first connect. Measured on one BO campaign opened, chased daily and expired a month
+ago: **16 frames on a single poll**, fifteen of them `waiting` for a question that is closed.
 
 **What a chemist saw instead was worse than nothing.** `agent/pending_tools.py:106` records
 `record_job_started(handle.id, "awaiting")` beside the wait, which arrives on the turn stream as a
@@ -59,10 +67,11 @@ asked a question and it expired unanswered" — is the one reading the stream co
 
 Four things about the shape, each of which could have gone the other way:
 
-**One event, not two, with `state` telling them apart.** The two pushes carry different fields —
-the open and every reminder send `kind`, `asked_of` and `due_at`; the expiry sends `subject`,
-`state` and `reminders`. Two event types would put the choice of which to parse on every consumer.
-One type with `state` puts it on one `if`, and `state` is a field the payload already carries.
+**One event, not two, with `state` telling them apart.** The two pushes differ in three fields:
+the open and every reminder add `kind`, `asked_of` and `due_at`, which the expiry omits. Everything
+else — `request_id`, `subject`, `state`, `reminders` — is on both. Two event types would put the
+choice of which to parse on every consumer; one type with `state` puts it on one `if`, and `state`
+is a field the payload already carries.
 
 **Every field but `request_id` is defaulted, and the read is `.get`, not `[]`.** The row is
 *already claimed* by the time `_awaiting_event` runs — the claim is the destructive act, so there is
@@ -70,8 +79,13 @@ no re-delivery and a `ValidationError` here does not retry the notification, it 
 request itself is still open, still in `GET /pending`, still on its deadline; losing the notice of
 it is the whole harm this ADR exists to end, and it would be perverse to reintroduce it as a
 validation failure. `_digest` is lenient for the same reason and this is the stronger case.
-`reminders` goes through `int(... or 0)` rather than a cast for the same argument: a string there
-is a row from a build that is not this one, which is not a reason to lose the notification.
+`reminders` is taken only when it is already an `int`, and defaulted otherwise. Not `int(...)`,
+which is what the first draft of this used and is not lenient at all: `int("many")` raises, and a
+raise inside the mapper is strictly worse than the `ValidationError` it replaces — the generator
+dies, every event queued behind the bad row dies with it, the handler books it on
+`chemclaw_db_unavailable_total` (the counter that tells an operator a Postgres outage from anything
+else), and `restore_unconsumed` returns the poisoned row so the client retries into the same crash
+for ever while its batch-mates are already consumed and gone.
 
 **`AWAITING_KIND` is imported from `durable.awaiting`, not re-spelled.** A wire constant with two
 spellings is drift a route cannot notice — this fleet's own
@@ -82,6 +96,12 @@ wrong.
 selective consumer leaves other kinds for theirs, and this kind had no consumer to take it from.
 `tests/test_service.py::test_pushback_streams_a_question_waiting_on_a_person` asserts both halves —
 that `AWAITING_KIND` is in the claimed tuple *and* that the two original kinds are still there.
+
+**The stream reports each request's state, not its log.** Given the backlog above, that is what
+makes the widening safe to turn on: a reminder carries no fact its open did not — this request is
+open — so a repeat of a state already sent on this connection is suppressed, and the transition that
+matters (`waiting` → `expired`) is always delivered. Per connection rather than per row, because a
+reconnect is a fresh surface that needs the current state again. Sixteen frames become two.
 
 ## Consequences
 
@@ -98,9 +118,17 @@ the event and discards it, which is the same outcome as before by a different me
 lands in the same change, in that repository, as its own pull request — a companion-repo change is
 never proxied through this one.
 
-**A deployment that has been running waits has lost every notification already written.** They are
-not recoverable; the rows are gone under retention or will be. What is recoverable is the state:
-`GET /pending` reads the projection, not the mailbox, and has always been correct.
+**A deployment that has been running waits replays its backlog on the first connect after this
+ships**, collapsed to one notice per request per state by the rule above. Nothing was lost — the
+rows were never pruned — so this is a behavioural change to argue for rather than a recovery: the
+first chemist to open a session with old waits sees the open questions it still has, and one expiry
+line per question that has since closed. `GET /pending` remains the authority on what is actually
+answerable; this stream is a notification.
+
+**`request_id` is the `job_started` id**, because `record_job_started(handle.id, …)` and
+`handle.id == request_id_for(request)`. A surface can therefore settle the standing "job started"
+row against this event's expiry rather than leaving it running for ever, which is the defect the
+paragraph above describes and nothing else in the tree says is closeable.
 
 **`record_job_started(handle.id, "awaiting")` is left alone.** It is not wrong — a wait *is* a
 durable job and the id is how it is answered — and now that the stream carries the wait's own

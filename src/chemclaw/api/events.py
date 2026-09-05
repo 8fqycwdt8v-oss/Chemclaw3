@@ -213,10 +213,13 @@ class AwaitingAnswerEvent(BaseModel):
 
     **Both pushes come through here, and `state` tells them apart.** The workflow notifies on
     open and on every reminder with `state="waiting"`, and once more with `state="expired"` when the
-    deadline passes unanswered — "told, not silently abandoned", as that call site puts it. An
+    deadline passes unanswered — "told, not silently abandoned", as that call site puts it. The two
+    differ in exactly three fields — the open adds `kind`, `asked_of` and `due_at` — and share the
+    rest, `subject` included. An
     expiry carries fewer fields than an open (no `kind`, no `asked_of`, no `due_at`), which is why
-    every field but `request_id` and `state` has a default: a model that required them would fail
-    validation on exactly the outcome nobody is watching for.
+    every field but `request_id` has a default — `state`'s default is `waiting`, the value the open
+    push carries: a model that required them would fail validation on exactly the outcome nobody is
+    watching for.
 
     **It is a notification, not the record.** `GET /pending` is authoritative — it filters to what
     the caller may actually answer, and this stream is scoped to one session — so a client should
@@ -227,9 +230,12 @@ class AwaitingAnswerEvent(BaseModel):
     type: Literal["awaiting_answer"] = "awaiting_answer"
     request_id: str
     #: `waiting` on the open and on every reminder; `expired` when the deadline passed unanswered.
+    #: The stream collapses a repeat of a state already sent on one connection, so a month of daily
+    #: reminders arrives as one `waiting` and, once it lapses, one `expired`.
     state: str = "waiting"
     subject: str = ""
-    #: The service's own vocabulary for what kind of answer is wanted (`measurement`, …).
+    #: The service's own vocabulary for what kind of answer is wanted (`measurement`, …). One of
+    #: the three fields only the open push carries.
     kind: str = ""
     #: An object id, a UPN, or an entitlement. Advisory routing, never a control — `GET /pending`
     #: is what decides who may answer. Empty means "anyone entitled to".

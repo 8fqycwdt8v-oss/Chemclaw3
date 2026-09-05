@@ -176,11 +176,13 @@ async def session_events(
     users on this process (`service_max_event_streams_total`) because 50 chemists each within
     their per-user cap is still 250 forever-polling tasks on one event loop. Each stream
     polls the database for its whole lifetime, so unbounded streams are a load vector (429
-    past either cap). The claim is scoped to the two job-outcome kinds in the SQL itself — the
+    past either cap). The claim is scoped to a named set of kinds in the SQL itself — the
     claim is destructive (at-most-once), so filtering after it would silently destroy events of any
-    other kind meant for another consumer. Both outcomes are claimed here, because a job that
-    failed after its turn ended has exactly the same claim on the asker's attention as one that
-    succeeded, and only one of the two used to have a way to reach them.
+    other kind meant for another consumer. Three kinds are claimed here: both job outcomes, because
+    a job that failed after its turn ended has exactly the same claim on the asker's attention as
+    one that succeeded and only one of the two used to have a way to reach them; and
+    `awaiting-answer`, because a workflow that has stopped to ask a person is news on the same
+    channel (`D-2026-09-05-a-push-nobody-claims-is-not-a-push`).
     """
     # **Read here, not where the error is built** — the rule `post_message` states and this route
     # was not swept with: `ErrorEvent.correlation_id` is the join key an operator asks a chemist to
@@ -207,6 +209,10 @@ async def session_events(
             streams[principal.oid] = remaining
 
     async def _events() -> AsyncIterator[dict[str, str]]:
+        # The newest `awaiting_answer` state already sent to this client, per request. See the
+        # collapse below; scoped to the connection because that is the span over which a repeat is
+        # genuinely redundant — a reconnect re-reports, which is what a fresh surface needs.
+        awaiting_reported: dict[str, str] = {}
         # No `finally` returning the slot here: the response owns that now
         # (`_SlotBoundEventStream`), whose scope strictly contains this generator's. Keeping
         # both would decrement twice for one stream — and the site kept would be the one that
@@ -228,16 +234,40 @@ async def session_events(
                 # **A question the agent is waiting on is news on this channel too.**
                 # `AwaitAnswerWorkflow._push` has always written this row; nothing ever claimed it,
                 # because the tuple above named two kinds and this is a third. So the notification
-                # was written, never delivered, and aged out under retention — and the only thing a
-                # chemist saw was the `job_started` recorded beside it, of a kind no surface knows,
+                # was written and never delivered — and the only thing a chemist saw was the
+                # `job_started` recorded beside it, of a kind no surface has any handling for,
                 # which reads as a durable job that runs for seven days and then expires.
                 #
                 # Widening the claim steals from nobody: `AWAITING_KIND` had **no consumer at all**,
                 # and the claim is kind-scoped precisely so a selective consumer leaves other kinds
                 # for theirs. Named from `durable.awaiting` rather than written out again here — a
                 # second spelling of a wire constant is the drift this route would not notice.
+                #
+                # **Those undelivered rows are all still on disk, and the first connect claims the
+                # lot.** They were written unconsumed, `durable/retention.py` prunes
+                # `session_events` only `WHERE consumed_at IS NOT NULL`, and
+                # `retention_session_events_days` defaults to 0 — so nothing has ever aged out, and
+                # `digest.py` already says as much in the present tense ("which
+                # `durable/retention.py` then declines to prune forever"). Measured on one BO
+                # campaign opened, chased daily and expired a month ago: **16 frames on a single
+                # poll**, fifteen of them `waiting` for a question that is closed.
+                #
+                # So the state per request is collapsed to its newest frame. A `waiting` push and
+                # its fourteen reminders carry the same fact — this request is open — and the
+                # client's own contract is idempotent on `request_id`; what a surface needs is the
+                # *current* state, not the log. A state that actually changes (`waiting` →
+                # `expired`) is always sent, because that is the transition the whole feature is
+                # for. Per connection rather than per batch: the rows arrive oldest-first, so
+                # suppressing a repeat of the state already reported leaves exactly the newest.
                 if pushed.kind == AWAITING_KIND:
-                    yield _awaiting_event(pushed.payload)
+                    frame = _awaiting_event(pushed.payload)
+                    request_id = str(pushed.payload.get("request_id", ""))
+                    state_now = str(pushed.payload.get("state", "waiting"))
+                    if request_id and awaiting_reported.get(request_id) == state_now:
+                        continue
+                    if request_id:
+                        awaiting_reported[request_id] = state_now
+                    yield frame
                     continue
                 job_id = str(pushed.payload.get("job_id", ""))
                 failed = pushed.kind == "job_failed"
@@ -320,10 +350,25 @@ def _awaiting_event(payload: dict[str, Any]) -> dict[str, str]:
     validation would take the notification with it, and the notification is the whole point — the
     request itself is still open, still in `GET /pending`, and still on its deadline.
 
-    The two pushes carry different fields. The open (and every reminder) sends `kind`, `asked_of`
-    and `due_at`; the expiry sends `subject`, `state` and `reminders` and nothing else. `.get` with
-    the model's own defaults is what lets one reader take both without asking which it is.
+    **This function claimed that leniency before it had it.** The first version read the reminder
+    count as `int(payload.get("reminders", 0) or 0)`, and `int()` raises on any string that is not
+    an integer literal — so `"many"`, `"2.0"`, a list or a dict each raised out of the mapper. That
+    is worse than the `ValidationError` the leniency exists to avoid, in three measured ways: the
+    generator dies and every event queued behind the bad row dies with it; the `except` one level
+    up books it on `chemclaw_db_unavailable_total`, which is the counter operators read to tell a
+    Postgres outage from anything else; and `restore_unconsumed` puts the poisoned row back, so the
+    client is told `retryable: true`, reconnects, and dies again for ever — while the rows claimed
+    in the *same batch* are already marked consumed and are gone. Not reachable from this build's
+    producer (`_reminders` is an `int` on both `_push` paths), which is exactly why the docstring
+    could claim a property the code did not have.
+
+    Only the fields the two pushes actually differ on are read defensively for shape. Both pushes
+    carry `request_id`, `subject`, `state` and `reminders`; only the open adds `kind`, `asked_of`
+    and `due_at`. (The earlier version of this docstring said the expiry sent `subject`/`state`/
+    `reminders` "and nothing else" and that the open did not send `subject` — both halves wrong,
+    read off the two `_push` call sites in `durable/awaiting.py`.)
     """
+    raw_reminders = payload.get("reminders", 0)
     event = AwaitingAnswerEvent(
         request_id=str(payload.get("request_id", "")),
         state=str(payload.get("state", "waiting")),
@@ -331,10 +376,13 @@ def _awaiting_event(payload: dict[str, Any]) -> dict[str, str]:
         kind=str(payload.get("kind", "")),
         asked_of=str(payload.get("asked_of", "")),
         due_at=str(payload.get("due_at", "")),
-        # `int()` on whatever arrived rather than a cast: a reminder count is a number in every
-        # payload this workflow writes, and a string there is a row from a build that is not this
-        # one — which is not a reason to lose the notification.
-        reminders=int(payload.get("reminders", 0) or 0),
+        # An `isinstance` test rather than a conversion, so there is no input this can raise on.
+        # `bool` is excluded because it is an `int` in Python and `True` reminders is not a count.
+        reminders=(
+            raw_reminders
+            if isinstance(raw_reminders, int) and not isinstance(raw_reminders, bool)
+            else 0
+        ),
     )
     return {"event": event.type, "data": event.model_dump_json()}
 

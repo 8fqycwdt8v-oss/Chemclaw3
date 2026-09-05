@@ -842,6 +842,15 @@ def test_pushback_survives_an_awaiting_payload_from_another_build(monkeypatch) -
     Same rule `_digest` states for the same reason, one channel over: the row is claimed before this
     code sees it, so a `ValidationError` here destroys a notification rather than deferring it — and
     the request it names is still open, still on its deadline and still in `GET /pending`.
+
+    **`reminders="many"`, because the first version of this test proved nothing.** It passed
+    `"2"`, and pydantic v2's lax mode already coerces that to `2` — so the mapper's own guard could
+    be deleted and all three awaiting tests stayed green. `"many"` is the input that separates
+    them: `int("many")` raises, and a raise here does not merely drop one field. It kills the
+    generator, so every event queued behind this row dies; the handler books it on
+    `chemclaw_db_unavailable_total`, which is how an operator tells a Postgres outage from anything
+    else; and `restore_unconsumed` puts the row back, so the client retries into the same crash for
+    ever while the rows claimed in the same batch are already consumed and gone.
     """
     import chemclaw.api.app as app_module
     from chemclaw.agent.session_events import SessionEvent
@@ -851,8 +860,8 @@ def test_pushback_survives_an_awaiting_payload_from_another_build(monkeypatch) -
         yield SessionEvent(
             session_id=session_id,
             kind=AWAITING_KIND,
-            # `reminders` as a string, and no `state` at all.
-            payload={"request_id": "await-9f2c", "reminders": "2"},
+            # `reminders` as a value no `int()` accepts, and no `state` at all.
+            payload={"request_id": "await-9f2c", "reminders": "many"},
         )
 
     monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
@@ -867,8 +876,95 @@ def test_pushback_survives_an_awaiting_payload_from_another_build(monkeypatch) -
 
     assert len(events) == 1
     assert events[0]["request_id"] == "await-9f2c"
-    assert events[0]["reminders"] == 2
+    assert events[0]["reminders"] == 0
     assert events[0]["state"] == "waiting"
+
+
+def test_pushback_collapses_a_replayed_backlog_of_reminders(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A month of daily reminders reaches the browser as one open notice and one expiry.
+
+    **The rows were never pruned, so the first connect claims all of them.** Retention removes
+    `session_events` only `WHERE consumed_at IS NOT NULL` and `retention_session_events_days`
+    defaults to 0, so every `awaiting-answer` row written since the workflow was built is still on
+    disk unconsumed — `durable/digest.py` says exactly this in the present tense about its own
+    kind. Widening the claim therefore does not deliver *the* notification, it delivers the whole
+    history: measured on one BO campaign opened, chased daily and expired a month ago, sixteen
+    frames on a single poll, fifteen of them `waiting` for a question that is closed.
+
+    A reminder carries no fact the open did not — the request is open — so the stream reports each
+    request's *state* rather than its log. The transition that matters is always sent, which is why
+    the expiry survives the collapse and is the last thing the client sees.
+    """
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.session_events import SessionEvent
+    from chemclaw.durable.awaiting import AWAITING_KIND
+
+    async def _fake_stream(session_id: str, **_: object) -> object:
+        for reminder in range(15):
+            yield SessionEvent(
+                session_id=session_id,
+                kind=AWAITING_KIND,
+                payload={
+                    "request_id": "await-9f2c",
+                    "kind": "measurement",
+                    "subject": "Isolated yield for arm B3",
+                    "asked_of": "process-chemist",
+                    "due_at": "2026-09-06T00:00:00Z",
+                    "reminders": reminder,
+                    "state": "waiting",
+                },
+            )
+        yield SessionEvent(
+            session_id=session_id,
+            kind=AWAITING_KIND,
+            payload={
+                "request_id": "await-9f2c",
+                "subject": "Isolated yield for arm B3",
+                "state": "expired",
+                "reminders": 15,
+            },
+        )
+
+    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
+
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        events = []
+        with client.stream("GET", f"/sessions/{session_id}/events") as res:
+            for line in res.iter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[len("data:") :].strip()))
+
+    assert [e["state"] for e in events] == ["waiting", "expired"]
+    # A different request is a different subject and is never collapsed into another's.
+    assert {e["request_id"] for e in events} == {"await-9f2c"}
+
+
+def test_pushback_does_not_collapse_two_different_requests(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The collapse is per request, so two open questions are two notices."""
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.session_events import SessionEvent
+    from chemclaw.durable.awaiting import AWAITING_KIND
+
+    async def _fake_stream(session_id: str, **_: object) -> object:
+        for request_id in ("await-aaaa", "await-bbbb", "await-aaaa"):
+            yield SessionEvent(
+                session_id=session_id,
+                kind=AWAITING_KIND,
+                payload={"request_id": request_id, "state": "waiting"},
+            )
+
+    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
+
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        events = []
+        with client.stream("GET", f"/sessions/{session_id}/events") as res:
+            for line in res.iter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[len("data:") :].strip()))
+
+    assert [e["request_id"] for e in events] == ["await-aaaa", "await-bbbb"]
 
 
 def test_pushback_for_unknown_session_is_404() -> None:
