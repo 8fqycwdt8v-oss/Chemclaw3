@@ -475,3 +475,38 @@ def test_no_shipped_document_names_a_connector_bundle_that_is_gone() -> None:
         }
     )
     assert not stale, f"documents naming a connector bundle that does not exist: {stale}"
+
+
+def _makefile_targets_and_phony() -> tuple[list[str], set[str]]:
+    """Every target the Makefile declares, and every name its `.PHONY` lines list."""
+    makefile = (_ROOT / "Makefile").read_text(encoding="utf-8")
+    phony: set[str] = set()
+    for match in re.finditer(r"^\.PHONY:((?:.*\\\n)*.*)$", makefile, re.MULTILINE):
+        phony.update(match.group(1).replace("\\", " ").split())
+    targets = [
+        match.group(1)
+        for match in re.finditer(r"^([a-zA-Z0-9_.-]+):(?![=])", makefile, re.MULTILINE)
+        if match.group(1) != ".PHONY"
+    ]
+    return list(dict.fromkeys(targets)), phony
+
+
+def test_every_makefile_target_that_names_no_file_is_declared_phony() -> None:
+    """A `.PHONY` list maintained by hand is a second declaration of the target list.
+
+    That is the same shape as every other drift this file checks, and it had drifted: seven of the
+    Makefile's targets were missing from it — `live-ab`, the three `live-e2e-full-stack*` targets,
+    `upstream-check`, `share-estimate` and `share-sync`, all of them added after the line was last
+    touched. Nothing here is subtle about why it matters: `make` treats a non-phony target as a
+    recipe for a *file*, so the day anything creates a path named `live-ab` in the repository root,
+    `make live-ab` reports "up to date" and runs nothing. A target that silently does nothing is
+    worse than a missing one, because the operator gets a zero exit code.
+
+    The check is derived rather than transcribed — no list of the seven names lives here — so a
+    target added next year is covered on the day it is written rather than on the day someone
+    notices. The exemption is real-file targets, which is why this test asks whether the name exists
+    on disk instead of asserting the two sets are equal outright; today none of them do.
+    """
+    targets, phony = _makefile_targets_and_phony()
+    undeclared = [name for name in targets if name not in phony and not (_ROOT / name).exists()]
+    assert undeclared == [], f"Makefile targets missing from .PHONY: {undeclared}"
