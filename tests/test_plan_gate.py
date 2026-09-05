@@ -233,8 +233,51 @@ def test_no_session_means_no_gate(approvals: InMemoryPlanApprovalStore) -> None:
 
     A template activity's tool step and a one-shot CLI call land here. They are not ungoverned:
     `enforce_tool_authz` and `authorize_trigger` still decide, which is what governs them.
+
+    **This is the gate's one fail-open branch and it is deliberate.** Every other way out of
+    `enforce_plan_approval` fails *closed* — `_UNANSWERABLE`, an empty plan whose
+    `plan_identity([])` is `None`, an unreadable checkpoint whose `session_todos` is `None`. The
+    asymmetry is not an oversight: an approval is a durable row keyed by session, so a session-less
+    caller cannot obtain one, and failing closed would refuse every state-changing tool on the CLI
+    and in every template step of a `harness_enabled` deployment with no route to ever allow one.
+    That is not a stricter posture; it is a dead path.
+
+    The claim above is what makes it acceptable, and until now it was only prose. The test below
+    checks it.
     """
     assert asyncio.run(_call("propose_knowledge_note", None))
+
+
+def test_the_gate_the_session_less_caller_falls_through_to_is_actually_attached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fail-open above rests on another gate, so that gate's presence has to be a checked fact.
+
+    `enforce_plan_approval` is conditional — `harness_enabled` is `False` by code default and the
+    shipped Helm chart sets it `true` with `plan_only`, so the branch above is reachable in the
+    *deployed* configuration and not in a local one. `enforce_tool_authz` is not conditional on
+    anything: it is in `tool_governance_middleware` for every build. Asserting both together is
+    what turns "not a hole" from a sentence into something a reviewer can run.
+
+    Both directions matter. If the authorization gate ever became conditional, the session-less
+    branch would become a genuine hole and this goes red naming it — which is the whole reason the
+    assertion is here rather than in the middleware-order file, where it would read as ordering.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
+    gated = _middleware_names()
+    monkeypatch.setattr(settings, "harness_enabled", False)
+    ungated = _middleware_names()
+
+    assert "enforce_plan_approval" in gated and "enforce_plan_approval" not in ungated, (
+        "the plan gate is supposed to be the conditional one"
+    )
+    assert "enforce_tool_authz" in gated and "enforce_tool_authz" in ungated, (
+        "a session-less caller falls through the plan gate on the reasoning that "
+        "enforce_tool_authz "
+        "still decides — and that gate is no longer attached unconditionally, so the branch in "
+        "enforce_plan_approval is now a fail-open with nothing under it"
+    )
 
 
 def _proceed(result: Any) -> bool:

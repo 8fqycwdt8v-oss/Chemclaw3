@@ -226,6 +226,38 @@ def test_a_polled_queue_clears_the_same_gate(
     assert _states(asyncio.run(check_connectors_at_startup())) == {"durable": "healthy"}
 
 
+def test_a_bundle_this_deployment_cannot_open_is_unusable_not_unprobed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half that keeps `mcp_connections`' decision to degrade from being a decision to hide.
+
+    A `transport: stdio` bundle with the transport turned off is not a network fact and is not
+    decided over a socket: it has no `health_url` and no jobs, so this sweep called it `unprobed` —
+    explicitly not counted and not gating — while `registry.mcp_connections` raised on it and took
+    every turn with it. Now the turn degrades past it, which is only honest if the deployment is
+    told, so the verdict counts and gates exactly as `unreachable` does. `connectors_required` is
+    what makes that assertion mean something.
+    """
+    stdio = (
+        "name: local\n"
+        "description: a local capability\n"
+        "endpoint:\n"
+        "  transport: stdio\n"
+        "  command: /bin/sh\n"
+        "  args: ['-c', 'true']\n"
+        "  tools:\n    - compute\n  read_only:\n    - compute\n"
+    )
+    _bundles(tmp_path, monkeypatch, local=stdio)
+    monkeypatch.setattr(settings, "connectors_required", True)
+
+    with pytest.raises(ConnectorsUnavailable, match="unusable"):
+        asyncio.run(check_connectors_at_startup())
+
+    (item,) = asyncio.run(probe_connectors())
+    assert item.state == "unusable" and item.unhealthy
+    assert "CHEMCLAW_CONNECTOR_STDIO_ENABLED" in item.detail, "the detail names the knob to turn"
+
+
 def test_a_bundle_with_no_durable_work_and_no_health_route_stays_unprobed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

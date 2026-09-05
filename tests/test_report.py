@@ -10,7 +10,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore, ReactionRecord
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 from chemclaw.retrieval.harness import (
     Claim,
@@ -338,12 +338,22 @@ def test_graph_retriever_excerpt_strips_wikilinks(tmp_path: Path) -> None:
 
 
 def test_fingerprint_retriever_cites_reaction_records() -> None:
-    """The fingerprint retriever cites reaction records for structurally similar reactions."""
+    """The fingerprint retriever cites reaction records for structurally similar reactions.
+
+    The record store holds the run this fixture indexes, which the test's own name always claimed
+    and its fixture did not: the retriever now serves only hits it can resolve, so an empty record
+    store here would be asserting the orphan case (`tests/test_filtered_similarity.py`) rather than
+    the citation shape.
+    """
 
     async def _run() -> None:
         store = InMemoryFingerprintStore()
         await store.add(record_for_reaction("eln-1", _ESTER))
-        retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
+        records = InMemoryReactionRecordStore()
+        await records.record(
+            [ReactionRecord(reaction_id="eln-1", body="Ester run.", source="eln:test")], "eln-json"
+        )
+        retriever = FingerprintReactionRetriever(store, records)
 
         hits = await retriever.retrieve(_ESTER, {})
         assert hits[0].source_note_id == "reaction-eln-1"  # cites the reaction record
@@ -592,3 +602,174 @@ def test_a_partially_failed_section_renders_the_evidence_it_kept() -> None:
     assert "incomplete" in text, "the reviewer must still see the gap"
     assert "Ethyl acetate, 85%" in text, "the surviving sources' evidence must render"
     assert "No supporting data found" not in text
+
+
+# --- the merge and the budgets the report path did not have --------------------------------------
+
+
+def _chunk(
+    note_id: str, retriever: str, content: str = "Pd(OAc)2 gave 78% yield."
+) -> EvidenceChunk:
+    """One evidence chunk, as a retriever hands it over."""
+    return EvidenceChunk(source_note_id=note_id, content=content, retriever=retriever, score=0.5)
+
+
+def test_a_section_does_not_report_one_note_three_times_because_three_legs_found_it() -> None:
+    """The flat concatenation this path used to be, and what it did to a PR-gated draft.
+
+    Measured on the committed 38-note corpus with `graph,vector,lexical` and the query "palladium
+    catalyst yield": 24 chunks over **12** distinct notes, 7 of them repeated and three of them
+    three times with byte-identical content — rendered as 24 bullets carrying 24 citations. Three
+    identical bullets are exactly what `report_note`'s own docstring warns a reader will take for
+    three independent confirmations, in the artifact a chemist signs.
+
+    Asserted on the *rendered note* and not only on the chunk list, because the bullet is what the
+    reviewer reads and the renderer is where the harm lands.
+    """
+    lists = [
+        _FakeRetriever("pd", [_chunk("compound-pd-oac2", name)]) for name in ("graph", "vector")
+    ]
+    lists.append(_FakeRetriever("pd", [_chunk("compound-pd-oac2", "lexical")]))
+
+    section = asyncio.run(
+        gather_section(
+            ReportSection(heading="Precedent", query="pd yield", memory_layer="evidence"),
+            list(lists),
+        )
+    )
+
+    assert [chunk.source_note_id for chunk in section.evidence] == ["compound-pd-oac2"], (
+        "three legs found one note with identical content; that is one piece of evidence"
+    )
+    body = report_note(Report(title="t", sections=[section])).body
+    assert body.count("- Pd(OAc)2 gave 78% yield.") == 1
+
+
+def test_two_different_excerpts_of_one_note_both_survive() -> None:
+    """Dedup is on `(note, content)`, not on the note — the same contract the sweep has.
+
+    The mirror of the test above, and the reason this is a merge rather than a `set` of note ids:
+    two different excerpts of one note are two pieces of evidence, and collapsing them would lose
+    the second half of what the corpus said.
+    """
+    section = asyncio.run(
+        gather_section(
+            ReportSection(heading="Precedent", query="pd yield", memory_layer="evidence"),
+            [
+                _FakeRetriever("pd", [_chunk("compound-pd-oac2", "graph", "78% in toluene.")]),
+                _FakeRetriever("pd", [_chunk("compound-pd-oac2", "vector", "62% in THF.")]),
+            ],
+        )
+    )
+
+    assert len(section.evidence) == 2
+    assert {chunk.content for chunk in section.evidence} == {"78% in toluene.", "62% in THF."}
+
+
+def test_a_section_is_bounded_and_says_so_when_it_is_cut(monkeypatch: Any) -> None:
+    """Neither budget reached this path, so a section carried whatever the legs returned.
+
+    The count cap is asserted here because it is the one a fixture can drive without inventing a
+    chunk size; both are `within_budget`'s, and the marker is what keeps a cut section from reading
+    as the whole of what the corpus holds — the same distinction `retrieval_failed` preserves for
+    the other cause.
+    """
+    from chemclaw.core.config import settings
+
+    monkeypatch.setattr(settings, "gather_evidence_max_chunks", 3)
+    retriever = _FakeRetriever(
+        "pd", [_chunk(f"reaction-{i}", "graph", f"run {i}") for i in range(10)]
+    )
+
+    section = asyncio.run(
+        gather_section(
+            ReportSection(heading="Precedent", query="pd yield", memory_layer="evidence"),
+            [retriever],
+        )
+    )
+
+    assert len(section.evidence) == 3
+    assert section.truncated_by == "count"
+    assert (
+        "More evidence was retrieved than this section can hold"
+        in report_note(Report(title="t", sections=[section])).body
+    )
+
+
+class _DecliningRetriever:
+    """A source that declines the question it was asked, and says why."""
+
+    name = "sharedrive"
+
+    async def retrieve(self, _query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
+        from chemclaw.retrieval.evidence import RetrieverSkip
+
+        if filters.get("type"):
+            raise RetrieverSkip(f"the {self.name} share cannot serve a note-type filter")
+        return []
+
+
+def test_a_declined_source_is_not_reported_as_a_failed_one() -> None:
+    """A decline and an outage are two facts with two different fixes, and one used to hide.
+
+    This repository models failure, skip and empty as three distinct facts end to end —
+    `fanout.FanState` carries three channels for exactly that reason, and `_sweep`'s docstring
+    argues it. `gather_section` collapsed two of them into `retrieval_failed`, which renders as
+    "_Some retrieval sources failed… re-run required_".
+
+    `ShareDocumentRetriever` declines whenever a `type` filter is set, because a file on a share has
+    no knowledge-graph note type and answering anyway would be ignoring the filter. So **every
+    filtered section of every report on a share-enabled deployment** told its reviewer that
+    retrieval had failed and to re-run — and a re-run would decline again, identically, forever.
+    An alert that fires on the normal state is one nobody reads.
+
+    The gap still has to be visible: a section swept without the share leg is a section about less
+    than the whole corpus. It is visible as what it is — the source's own words — rather than as an
+    outage.
+    """
+    section = ReportSection(
+        heading="Esterification",
+        query="ester",
+        memory_layer="evidence",
+        filters={"type": "reaction"},
+    )
+    healthy = _FakeRetriever(
+        "ester",
+        [
+            EvidenceChunk(
+                content="Ethyl acetate, 85%", source_note_id="reaction-a", retriever="fake"
+            )
+        ],
+    )
+
+    gathered = asyncio.run(gather_section(section, [healthy, _DecliningRetriever()]))
+
+    assert gathered.retrieval_failed is False, "a decline is not an outage and does not re-run away"
+    assert gathered.sources_skipped == {
+        "sharedrive": "the sharedrive share cannot serve a note-type filter"
+    }
+    assert gathered.supported is True, "the evidence the other sources found still supports it"
+
+    body = report_note(Report(title="R", sections=[gathered])).body
+    assert "re-run required" not in body
+    assert "cannot serve a note-type filter" in body, (
+        "the reviewer must still see that a source did not contribute, and why"
+    )
+    assert "- Ethyl acetate, 85%" in body
+
+
+def test_a_section_that_was_both_declined_and_failed_says_both() -> None:
+    """The two facts do not displace each other; a section can carry one, the other, or both."""
+    section = ReportSection(
+        heading="Esterification",
+        query="ester",
+        memory_layer="evidence",
+        filters={"type": "reaction"},
+    )
+
+    gathered = asyncio.run(gather_section(section, [_DeadRetriever(), _DecliningRetriever()]))
+
+    assert gathered.retrieval_failed is True
+    assert set(gathered.sources_skipped) == {"sharedrive"}
+    body = report_note(Report(title="R", sections=[gathered])).body
+    assert "re-run required" in body and "cannot serve a note-type filter" in body

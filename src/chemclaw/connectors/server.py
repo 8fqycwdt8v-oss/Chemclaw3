@@ -70,13 +70,21 @@ def _declared_bearer_env(name: str) -> str | None:
     middleware, whole `/mcp` surface anonymous — and justified it with "`connector-validate` checks
     the declaration separately". That justification was false: the validator has no auth check of
     any kind, and it validates the *repository's* manifest directory, not the one mounted in the
-    pod. `discovered()` parses every bundle in `connectors_dirs` and raises `ConnectorError` on one
-    bad YAML, so a single typo in an operator's prepended directory — the documented PATH-like
-    override — would have taken every bearer-mode connector in the process unauthenticated, logging
-    only that it "could not read manifests to resolve its auth mode".
+    pod. `discovered()` used to parse every bundle in `connectors_dirs` and raise `ConnectorError`
+    on one bad YAML, so a single typo in an operator's prepended directory — the documented
+    PATH-like override — would have taken every bearer-mode connector in the process
+    unauthenticated, logging only that it "could not read manifests to resolve its auth mode".
 
     A control whose absence is decided by a file being unreadable is not a control. Failing closed
     makes the same event loud: the connector answers 401 until an operator fixes the manifest.
+
+    **That scenario is narrower now and the guard is not.** `discovered()` no longer fails whole
+    because one *other* bundle is malformed — it skips that bundle and records why — so a typo next
+    door leaves this pod resolving its own manifest correctly instead of refusing every request.
+    What still raises is a failure of discovery itself (an unreadable directory), and what still
+    reaches the paragraph below is this bundle's own manifest being the unloadable one: absent from
+    `found`, present beside this module, therefore `_UNRESOLVED_AUTH`. Both halves fail closed; the
+    blast radius of somebody else's typo is what shrank.
 
     **A manifest that ships and is not discovered fails closed too, and that half was missing.**
     Only `discovered()` *raising* failed closed. `discovered()` succeeding without this bundle in

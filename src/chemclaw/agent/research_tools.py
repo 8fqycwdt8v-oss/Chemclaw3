@@ -17,21 +17,20 @@ evidenced fact from transferred analogy, and drafting new protocols — lives in
 
 import logging
 from datetime import date
-from itertools import zip_longest
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import Field
 
 from chemclaw.agent.framing import defang, frame_untrusted
-from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.eln.records import default_record_store
 from chemclaw.ingest.rejections import IngestRejection, refusals_matching
 from chemclaw.ingest.sources.registry import active_retrieve_sources
+from chemclaw.kg.note import strip_links
 from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep, SourceRetriever
 from chemclaw.retrieval.fanout import record_kept_chunks, sweep_sources
-from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
+from chemclaw.retrieval.merge import merge_ranked_lists, within_budget
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.store import default_reaction_store
 
@@ -39,9 +38,11 @@ logger = logging.getLogger(__name__)
 
 # Test seam: swap the production reaction store for an in-memory one without a database.
 _reaction_store = default_reaction_store
-
-# Which bound cut the sweep, or `None` when nothing did.
-_Truncation = Literal["count", "chars"] | None
+# The other half of the same seam, and it became one when `FingerprintReactionRetriever` started
+# resolving every structural hit against the record store rather than only the filtered ones: the
+# anchor path now reads two stores, so a test that injects one and not the other is a test running
+# half against a database it did not set up.
+_record_store = default_record_store
 
 
 class EvidenceSweepWithRefusals(EvidenceSweep):
@@ -122,7 +123,7 @@ class _AnchoredRetriever:
 
     def __init__(self, store: Any, reaction_smiles: str) -> None:
         """Bind the store and the anchor this retriever will answer with."""
-        self._inner = FingerprintReactionRetriever(store, default_record_store())
+        self._inner = FingerprintReactionRetriever(store, _record_store())
         self._anchor = reaction_smiles
 
     async def retrieve(self, _query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
@@ -137,52 +138,6 @@ class _AnchoredRetriever:
         saying so.
         """
         return await self._inner.retrieve(self._anchor, filters)
-
-
-def _interleave_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceChunk]:
-    """Round-robin the per-source hit-lists into one, dropping exact (note, content) repeats.
-
-    The `graph` retrieval mode's cross-source merge, and the thing that makes the cap at the end of
-    `gather_evidence` fair. **A source's rank position is comparable across sources; its score is
-    not** — `EvidenceChunk.score` is a note's `confidence` from the graph, a `ts_rank` from
-    Postgres FTS, a cosine from the dense index and a Tanimoto from the fingerprint store, and the
-    chunk's own docstring says so. Concatenating the lists and then sorting the union by that
-    number let one source's scale decide the whole sweep, and the cap then kept a prefix of
-    whichever scale ran highest.
-
-    Measured on a mixed sweep — 45 graph hits at the notes' 0.8 confidence, 8 lexical hits at
-    ts_rank 0.02–0.09 and 7 dense hits at cosine 0.60–0.85, against the 40-chunk cap — the flat
-    union returned 38 graph / 0 lexical / 2 vector, and with the sort taken out it returned
-    40 / 0 / 0: the concatenation order alone starves the later sources, and the score sort was
-    mitigating that rather than causing it. Either way the lexical leg contributed nothing an agent
-    could read, which is the whole reason a deployment enables it.
-
-    Round-robin fixes the cap instead of re-tuning the ranking. Each source's own order is
-    preserved (every retriever already returns best-first), each contributes its best hit before
-    any source contributes its second, and a source that runs out simply stops taking a slot — so
-    the budget flows to whoever still has hits rather than being carved into fixed quotas. With a
-    single source it is that source's list unchanged, which is the default deployment.
-
-    **The two merge modes dedup at different granularities, and that is a contract, not an
-    accident.** This mode keys on `(note, content)` — two different excerpts of one note are two
-    pieces of evidence and both may spend a slot — while `hybrid`'s RRF keys on the note id and
-    keeps one representative chunk, because rank fusion is a statement about *notes* across
-    ranked lists and a per-excerpt fusion would double-count whichever note fragments most.
-    Switching `retrieval_mode` therefore changes chunk counts as well as order; a reader
-    comparing sweeps across modes is comparing different units, and the report layer's warning
-    about "two agreeing-looking bullets" applies within one note's excerpts here.
-    """
-    seen: set[tuple[str, str]] = set()
-    merged: list[EvidenceChunk] = []
-    for position in zip_longest(*ranked_lists):
-        for chunk in position:
-            if chunk is None:  # this source has no hit at this depth
-                continue
-            key = (chunk.source_note_id, chunk.content)
-            if key not in seen:
-                seen.add(key)
-                merged.append(chunk)
-    return merged
 
 
 async def _refused_on_ingest(query: str) -> tuple[list[IngestRejection], str]:
@@ -357,27 +312,26 @@ async def gather_evidence(
             f"queried, so this is not an answer about what the knowledge base contains."
         )
 
-    # `hybrid` fuses the per-source rankings (a note any source ranks highly rises); `graph` (the
-    # default) round-robins them. Both are cross-source-fair under the cap below, differing in
-    # whether a note found twice is *rewarded* for it. Either way graph expansion stays the
-    # reasoning path.
-    if settings.retrieval_mode == "hybrid":
-        # RRF already produces the cross-source ranking (best first), so it *is* the order the cap
-        # keeps — re-sorting by a single source's raw score would discard the fusion.
-        ranked = reciprocal_rank_fusion(
-            ranked_lists,
-            k=settings.retrieval_fusion_k,
-            weights=settings.retrieval_source_weights_map,
-        )
-    else:
-        # Round-robin, not a flat union re-sorted by score: the cap below has to be survivable by
-        # every source, and each retriever has already ranked its own hits by the only signal that
-        # is meaningful within it (KM-5). Sorting the union by `score` compared a note's confidence
-        # against a `ts_rank` against a cosine, which is the comparison `EvidenceChunk.score`
-        # documents as invalid — see `_interleave_dedup` for what it measured.
-        ranked = _interleave_dedup(ranked_lists)
+    # One merge for both sweep paths (`retrieval.merge`), because there is one question here and
+    # `harness.gather_section` used to answer it with a flat concatenation — the argument for the
+    # mode dispatch, the round-robin and what a score sort costs is all recorded there.
+    ranked = merge_ranked_lists(ranked_lists)
     # Frame each chunk's content as retrieved data before it enters the model context, so a
     # note body carrying adversarial text is read as evidence to cite, not an instruction.
+    #
+    # **`strip_links` first, because framing is about the envelope and a `[[link]]` is about the
+    # graph.** Delimiter forgery is closed (probed with a live tag, a foreign nonce and a
+    # zero-width-obfuscated tag; all three arrive escaped), and none of that says anything about
+    # what a wikilink *means*. `[[…]]` is this repository's citation syntax, so a share document
+    # or a warehouse row — text written by whoever wrote it — could name a knowledge note that
+    # does not exist, or a different one that does, and the model reads it as this system's own
+    # reference. `harness._as_evidence` has stripped these on the report path since it was
+    # written, on exactly that argument; the note-backed retrievers strip in `retrievers._excerpt`,
+    # whose docstring already records that this was never the whole guarantee because the share and
+    # warehouse retrievers never reach it. One stripper (`kg.note.strip_links`), applied to every
+    # chunk rather than to the two that need it: it is idempotent on already-stripped note text, so
+    # a uniform pass cannot drift from the per-retriever one the way a second list of exceptions
+    # would.
     #
     # `source` is neutralized on the same pass and for the same reason, having been missed on the
     # first: it is a *second* retrieved-text channel on the very same object. The warehouse
@@ -388,7 +342,9 @@ async def gather_evidence(
     framed = [
         chunk.model_copy(
             update={
-                "content": frame_untrusted(chunk.content, note_id=chunk.source_note_id),
+                "content": frame_untrusted(
+                    strip_links(chunk.content), note_id=chunk.source_note_id
+                ),
                 "source": defang(chunk.source),
                 # `source_note_id` for the same reason and from the same producer: the warehouse
                 # retriever builds both from one row key, one statement apart. `safe_id` sanitizes
@@ -400,7 +356,7 @@ async def gather_evidence(
         )
         for chunk in ranked
     ]
-    kept, truncated_by = _within_budget(framed)
+    kept, truncated_by = within_budget(framed)
     # Back to the *unframed* chunks for attribution below. `framed` is a 1:1 `model_copy` of
     # `ranked`, and framing rewrites both halves of the dedup key — `content` gains the envelope and
     # `source_note_id` is defanged — so matching a kept chunk against what a leg offered has to
@@ -437,51 +393,3 @@ async def gather_evidence(
         sources={name: len(hits) for (name, _), hits in zip(sources, ranked_lists, strict=True)},
         sources_skipped=skipped,
     )
-
-
-def _within_budget(chunks: list[EvidenceChunk]) -> tuple[list[EvidenceChunk], _Truncation]:
-    """Spend both budgets down the merged ranking, and say which one ran out.
-
-    **Both, because either alone is unbounded in the other.** `gather_evidence_max_chunks` counts
-    chunks whose sizes differ ~7.5x across sources — a note excerpt is `note_excerpt_chars` (240)
-    and a share chunk is up to its binding's `chunk_chars` (1,800) — so 40 chunks is ~9.6 kB from
-    the graph and ~72 kB from a share, and nothing normalised them. A count of things cannot bound
-    anything, because what a thing costs is whatever is in it: exactly the finding
-    `agent_keep_last_conversation_groups` records, where counting groups left a 300k-token thread
-    at 180k against a 100k budget.
-
-    **Spent by walking the merged ranking, which is what keeps it fair.**
-    `D-2026-08-01-a-cap-that-starves-a-source` is about the *shape* of a cut rather than its size:
-    `ranked` is already round-robin across sources (or RRF-fused), so consuming it in order spends
-    the character budget cross-source-fairly for the same reason the count is. A second cap applied
-    the old way — per source, or over a re-sorted union — would reintroduce the starvation that
-    ADR measured to zero surviving chunks on a whole leg.
-
-    **At least one chunk always survives.** An over-budget first chunk would otherwise return an
-    empty list, which this tool's contract says means "nothing on file" — the same clamp
-    `KeepLastConversationGroupsEdit` makes for the same reason, since an empty result that reads as
-    an honest absence is worse than an oversized one.
-
-    **What is charged is the serialized chunk, not its content**, and the first version of this
-    function got that wrong in the same way the count cap it replaces was wrong. `content` is only
-    part of what reaches the model: `source_note_id`, `retriever`, `score`, `conflicts_with`,
-    `conflicts_total`, `created_by`, `source` and `confidence` all ride beside it, inside JSON
-    scaffolding. Measured on one realistic chunk carrying conflicts and provenance — **300
-    characters of content against 569 serialized, a 47% under-count**, so a 60,000-character budget
-    was really spending about 114,000. Fixing a cap's currency and then measuring the wrong quantity
-    is the same error one level down.
-    """
-    budget = settings.gather_evidence_max_chars
-    kept: list[EvidenceChunk] = []
-    spent = 0
-    for chunk in chunks[: settings.gather_evidence_max_chunks]:
-        # One extra serialization for at most `gather_evidence_max_chunks` chunks, which buys the
-        # only number that means anything here: what this chunk actually costs the context window.
-        cost = len(chunk.model_dump_json())
-        if kept and spent + cost > budget:
-            return kept, "chars"
-        kept.append(chunk)
-        spent += cost
-    if len(chunks) > len(kept):
-        return kept, "count"
-    return kept, None

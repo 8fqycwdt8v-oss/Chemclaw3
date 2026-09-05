@@ -24,6 +24,7 @@ from chemclaw.science.calc.artifacts import (
 )
 from chemclaw.science.calc.store import (
     CalculationKey,
+    CalculationQuery,
     InMemoryStore,
     StoredResult,
     cached_compute,
@@ -308,5 +309,58 @@ def test_a_payload_carrying_no_arrays_is_stored_unchanged() -> None:
         assert row is not None and row.result == plain
         hit = await store.get(_KEY)
         assert hit is not None and hit.result == plain
+
+    asyncio.run(_run())
+
+
+def test_a_listing_names_an_artifact_by_the_reference_the_tools_take_not_by_its_digest() -> None:
+    """`find` is where an offloaded row is described, and it described it in an unusable form.
+
+    The row carries a bare content hash, and no tool takes one: `fetch_artifact` and a note's
+    `artifact_refs` are both `<calculation key>#<name>`. So a listing handed the model 64 hex
+    characters that addressed nothing before eviction and nothing after it, with no way to tell
+    the two cases apart.
+
+    Rehydration stays refused — that is what keeps a listing cheap — so what changes is only what
+    the row *says* about the arrays it is not carrying.
+    """
+
+    async def _run() -> None:
+        store, _, _ = _offloading()
+        await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
+
+        [row] = await store.find(CalculationQuery(calc_type="xtb.hess"))
+        assert row.result["hessian_artifact"] == f"{_KEY.as_str()}#hessian.npy"
+        assert row.result["dipole_derivatives_artifact"] == (
+            f"{_KEY.as_str()}#dipole_derivatives.npy"
+        )
+        # Still not rehydrated: the arrays are addressed, never carried.
+        assert "hessian_npy" not in row.result
+
+    asyncio.run(_run())
+
+
+def test_rewriting_an_artifact_reclaims_the_blob_it_orphaned() -> None:
+    """The in-memory backend leaks exactly as the Postgres one did, and must not.
+
+    Kept in parity deliberately: the in-memory store is what most of this suite exercises, so a
+    leak the two backends do not share is a leak no test can see. A blob still linked from another
+    calculation is left alone — content addressing means one blob may serve many links.
+    """
+
+    async def _run() -> None:
+        store = InMemoryArtifactStore()
+        first = await store.put("k:1", "hessian", b"stale" * 10)
+        second = await store.put("k:1", "hessian", b"fresh" * 10)
+        assert first is not None and second is not None
+        assert await store.open(first.content_hash) is None, "an orphaned blob was left behind"
+        assert await store.open(second.content_hash) == b"fresh" * 10
+
+        shared = b"shared bytes" * 10
+        a = await store.put("k:2", "hessian", shared)
+        await store.put("k:3", "hessian", shared)
+        assert a is not None
+        await store.put("k:2", "hessian", b"something else" * 10)
+        assert await store.open(a.content_hash) == shared, "a blob another link names was deleted"
 
     asyncio.run(_run())

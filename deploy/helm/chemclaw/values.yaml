@@ -283,8 +283,14 @@ connectors:
     # that field addresses a bundle's own MCP endpoint, which this bundle does serve. The address
     # of the calculation server is `CHEMCLAW_CALC_SERVER_URL` in `config` below, and the two
     # operator obligations are the same as those bundles': add its host to
-    # `networkPolicy.egressDestinations`, and provide `CHEMCLAW_CALC_TOKEN` if that server enforces
-    # a bearer.
+    # `networkPolicy.egressDestinations`, and provide `CHEMCLAW_CALC_TOKEN` — **required, not
+    # conditional**. This said "if that server enforces a bearer", which stopped being true when
+    # `core/mcp_session.bearer_from_env` began refusing rather than returning `None` and calling
+    # anonymously: the client now declines to make the call whatever the server would have
+    # accepted. Unset, every `cached_compute` miss raises `McpCredentialRefused` naming this
+    # variable, and because that maps to a `ChemclawError` it is non-retryable, so a durable calc
+    # job fails on its first attempt rather than spinning. Fail-closed and diagnosable, but a
+    # release running against a non-enforcing backend must set it before upgrading.
     worker: true
   bo:
     enabled: true

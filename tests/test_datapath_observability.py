@@ -376,6 +376,7 @@ class _Retriever:
 
 
 def _chunk(source: str, note_id: str = "note-1") -> EvidenceChunk:
+    """One chunk attributed to `source`, citing `note_id` — the unit the kept counter matches on."""
     """One chunk attributed to `source`, citing `note_id`.
 
     The id is a parameter because the kept counter is keyed on `(source_note_id, content)` — the
@@ -392,6 +393,9 @@ def test_a_starved_source_reads_as_zero_rather_than_as_absent() -> None:
     leg that contributes and survives nothing is indistinguishable from a healthy one. Seeding the
     kept series at zero is what gives the ratio a denominator at the moment it matters; without it
     the starved source would simply be missing from the metric.
+
+    `lexical` here is genuinely starved: it found a note the merged result does not contain. That
+    is the state the alert exists for, and the test below is its counterpart.
     """
     offered = _chunk("graph")
     record_kept_chunks([offered], {"graph": [offered], "lexical": [_chunk("lexical", "note-2")]})
@@ -409,6 +413,12 @@ def test_a_note_two_legs_agreed_on_counts_for_both_of_them() -> None:
     `graph 16, lexical 0, vector 0`, which is exactly what a starved leg looks like. The one metric
     built to detect `D-2026-08-01-a-cap-that-starves-a-source` was therefore pinned at zero for
     every index-backed leg in every hybrid deployment.
+
+    Measured a second way on the committed 38-note corpus over 20 queries, which is the reading an
+    operator would have alerted on: **0.18** kept/found for a healthy lexical leg in hybrid mode,
+    and a flat zero on **6 of the 15 queries it answered at all** — indistinguishable from the
+    genuinely starved leg two tests above, which is why the alert would have been switched off long
+    before the defect it exists for recurred.
     """
     shared = _chunk("graph")
     before_lexical = _series("chemclaw_evidence_source_kept_total", source="lexical")

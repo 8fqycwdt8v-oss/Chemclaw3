@@ -20,6 +20,7 @@ import pytest
 from chemclaw.connectors.calc.server import tools
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.config import settings
+from chemclaw.science.calc.artifacts import InMemoryArtifactStore
 from chemclaw.science.calc.store import (
     CalculationKey,
     CalculationQuery,
@@ -235,5 +236,113 @@ def test_the_tool_refuses_a_date_it_cannot_parse(monkeypatch: pytest.MonkeyPatch
         monkeypatch.setattr(tools, "default_store", InMemoryStore)
         with pytest.raises(ValueError):
             await tools.find_calculations(since="last Tuesday")
+
+    asyncio.run(_run())
+
+
+def test_an_unknown_calc_type_is_refused_naming_what_the_store_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The most expensive wrong answer this tool can give is a confident empty list.
+
+    Matching is exact equality, the real types are `xtb.sp`, `xtb.hess`, … , and this tool's own
+    docstring used to offer `"xtb"` as a worked example — measured: `calc_type='xtb.sp'` found 1
+    row, `calc_type='xtb'` found 0, and the docstring instructs the model to report 0 as "the store
+    has nothing". A misspelt filter and an empty store were indistinguishable.
+    """
+
+    async def _run() -> None:
+        store = await _populated()
+        monkeypatch.setattr(tools, "default_store", lambda: store)
+        with pytest.raises(ValueError, match="has ever been stored") as refused:
+            await tools.find_calculations(calc_type="xtb")
+        assert "dft" in str(refused.value) and "pka" in str(refused.value)
+
+        # A type that exists but matches nothing under the other filters is still an empty answer.
+        assert (
+            await tools.find_calculations(calc_type="pka", since="2099-01-01T00:00:00+00:00") == []
+        )
+
+    asyncio.run(_run())
+
+
+def test_an_empty_store_answers_with_an_empty_list_rather_than_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty store's empty list is exactly true, and must not become a refusal."""
+
+    async def _run() -> None:
+        monkeypatch.setattr(tools, "default_store", InMemoryStore)
+        assert await tools.find_calculations(calc_type="pka") == []
+
+    asyncio.run(_run())
+
+
+def test_a_record_says_which_epoch_definition_its_row_was_computed_under(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three states, because a pre-column row's epoch is unrecoverable rather than old.
+
+    The cache was never at risk — the epoch is folded into the key — but this listing served rows
+    from two epochs for one subject with only `computed_at` to tell them apart, while the epoch log
+    says the earlier ones carry a wrong linear-rotor entropy and an incomplete reactivity panel.
+    """
+
+    async def _run() -> None:
+        store = InMemoryStore()
+        current = _stored("CCO", calc_type="pka", calc_version="v3", at=_NOW)
+        await store.put(current)
+        await store.put(
+            _stored("CCN", calc_type="pka", calc_version="v3", at=_NOW).model_copy(
+                update={"epoch": "1"}
+            )
+        )
+        await store.put(
+            _stored("CCC", calc_type="pka", calc_version="v3", at=_NOW).model_copy(
+                update={"epoch": ""}
+            )
+        )
+        monkeypatch.setattr(tools, "default_store", lambda: store)
+        statuses = {
+            record.calc_ref: record.epoch_status
+            for record in await tools.find_calculations(calc_type="pka")
+        }
+        assert statuses[current.key.as_str()] == "current"
+        assert sorted(statuses.values()) == ["current", "superseded", "unrecorded"]
+
+    asyncio.run(_run())
+
+
+def test_a_listing_resolves_an_offloaded_array_and_drops_one_that_has_been_reclaimed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`find_calculations` rendered a content hash `fetch_artifact` will not resolve.
+
+    `fetch_artifact` takes `<calculation key>#<name>`; the row holds a bare digest, which no tool
+    takes. And after `durable/artifact_eviction.py` reclaims the blob, `calculation_artifacts`
+    cascades away while `calculation_results` keeps its row — measured, the offloading store's
+    `get` correctly reported a miss and recomputed while the listing went on showing the digest as
+    if it were an answer.
+    """
+
+    async def _run() -> None:
+        results, blobs = InMemoryStore(), InMemoryArtifactStore()
+        key = CalculationKey.build("xtb.hess", "v1", {"structure": "st_1"})
+        ref = await blobs.put(key.as_str(), "hessian.npy", b"packed array")
+        assert ref is not None
+        await results.put(
+            StoredResult(key=key, result={"hessian_artifact": ref.content_hash}, created_at=_NOW)
+        )
+        monkeypatch.setattr(tools, "default_store", lambda: results)
+        monkeypatch.setattr(tools, "default_artifact_store", lambda: blobs)
+
+        [record] = await tools.find_calculations(calc_type="xtb.hess")
+        assert record.result["hessian_artifact"] == f"{key.as_str()}#hessian.npy"
+
+        # Now the eviction sweep reclaims the blob and its link, leaving the result row behind.
+        evicted = InMemoryArtifactStore()
+        monkeypatch.setattr(tools, "default_artifact_store", lambda: evicted)
+        [after] = await tools.find_calculations(calc_type="xtb.hess")
+        assert "hessian_artifact" not in after.result
 
     asyncio.run(_run())

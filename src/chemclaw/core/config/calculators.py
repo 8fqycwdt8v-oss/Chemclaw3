@@ -339,6 +339,30 @@ class CalculatorSettings(BaseSettings):
     # own budget. Matched to the server's own ceiling for the same reason
     # `calc_sampling_timeout_seconds` is: the server is what should bound the wait, not a client
     # guess shorter than it.
+    #
+    # **That argument is about an *activity*, and both of those tools are inline, so the number is
+    # unreachable where it is actually used.** The two tools are `tools:` entries in
+    # `connectors/calc/connector.yaml`, and the agent reaches them through that manifest's
+    # `request_timeout: 600` — deliberately the turn's own ceiling. A client bound of 3600 s past a
+    # 600 s hop is not a longer wait, it is a *belief* in one: the hop cancels first, and the
+    # sentence above about Temporal retrying does not apply, because an inline tool call is not an
+    # activity and nothing retries it.
+    #
+    # The consequence is specific to these two and worth naming, because it does not follow for the
+    # bundle's other inline tools. A composite like `compute_thermochemistry` makes progress under
+    # cancellation — each primitive it composes is cached as it lands, so the next call resumes —
+    # while these two *are* one primitive, so a run between 600 s and 3600 s is cancelled with
+    # nothing stored and the identical retry starts from zero, forever, while a `servers/calc`
+    # admission slot is held to its own ceiling by the abandoned run.
+    #
+    # So the value is clamped at the call site to what the agent hop can actually wait for
+    # (`connectors/calc/server/tools.py::_inline_bound`, using the same
+    # `registry.max_request_timeout_seconds()` the hop derives its own bound from), and this number
+    # is what a *durable* path would be allowed if one of these ever grew one. The default is left
+    # where it is rather than lowered: lowering it is a `.env.example` change in the same commit
+    # (`tests/test_config.py::test_env_example_ships_the_code_defaults`), and the clamp is what
+    # makes the invariant hold either way. `tests/test_calc_tools.py` asserts it at the agent hop,
+    # which is the hop nothing asserted — the process hop and the pod hop each had a test.
     calc_atomic_timeout_seconds: float = Field(default=3600.0, gt=0)
     # The molecule `connectors/calc/remote.py::remote_version` derives a key *for* when it asks the
     # server what version a calculator is on. `calculation_key` answers an identity, and an identity

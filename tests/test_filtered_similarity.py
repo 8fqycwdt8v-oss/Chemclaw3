@@ -9,6 +9,14 @@ label and knows nothing about notes, so the filter can only run after the neighb
 and running it on the returned page would mean one unwanted neighbour costs a wanted one. It has
 to search deeper first. That property is invisible in a small fixture unless a test builds a
 corpus where the wanted hits sit below the page boundary, which is what this one does.
+
+**What the unfiltered path does with an unresolvable hit is the other subject here, and it
+changed.** This file used to pin "no filter means no drop", citing D-018's pending-note citation as
+deliberate. `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` retracted that premise — the
+record is a row `ingest_reaction` writes itself, not a note somebody merges — so a fingerprint with
+no record is a half-landed write rather than a note in review, and serving it hands the model a
+Tanimoto 1.00 precedent nothing can open. The two tests at the bottom of this file are that
+correction and the control that keeps it from becoming a narrowing.
 """
 
 import asyncio
@@ -51,23 +59,6 @@ async def _indexed(reactions: dict[str, str]) -> InMemoryFingerprintStore:
     for record_id, smiles in reactions.items():
         await store.add(record_for_reaction(record_id, smiles))
     return store
-
-
-def test_an_unfiltered_search_is_unchanged_including_the_unstored_record() -> None:
-    """No filter means no corpus read and no drop — the D-018 pending-note citation survives.
-
-    That citation is deliberate: the fingerprint index is written at ingestion while the note is
-    merged separately, so a hit whose note is still in review yields a reference `kg-validate`
-    flags on the report PR. Narrowing must not quietly delete a behaviour nobody asked to change.
-    """
-
-    async def _run() -> None:
-        store = await _indexed({"r1": _QUERY})
-        retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
-        chunks = await retriever.retrieve(_QUERY, {})
-        assert [c.source_note_id for c in chunks] == ["reaction-r1"]  # no record stored
-
-    asyncio.run(_run())
 
 
 def test_a_tag_filter_narrows_to_the_records_that_carry_it() -> None:
@@ -168,5 +159,57 @@ def test_a_page_is_never_exceeded_by_the_deeper_search(
             store, await _records(**dict.fromkeys(reactions, "wanted"))
         )
         assert len(await retriever.retrieve(_QUERY, {"tag": "wanted"})) == 3
+
+    asyncio.run(_run())
+
+
+def test_a_hit_whose_record_never_landed_is_not_served_as_evidence() -> None:
+    """A perfect-similarity precedent the chemist cannot open is worse than no precedent.
+
+    `ingest_reaction` writes across four stores in four transactions with the record **last** — a
+    deliberate ordering the replay-skip invariant depends on (writing the record first was measured
+    to break it), so a crash between the first write and the last leaves a fingerprint row with no
+    `reaction_records` row behind it. Measured in that state: the unfiltered sweep returned
+    `[('reaction-ORPHAN-1', 1.0)]` — an exact structural match, the strongest possible hit — while
+    `records.known(['ORPHAN-1'])` was empty and the filtered sweep correctly returned nothing. So
+    `gather_evidence(..., reaction_smiles=…)` handed the model a Tanimoto 1.00 precedent that
+    `expand_note` cannot open, and the model cites what it is given.
+
+    **This replaces `test_an_unfiltered_search_is_unchanged_including_the_unstored_record`, whose
+    premise was retracted.** That test pinned the unstored record as *deliberate*, citing D-018: the
+    fingerprint is written at ingestion while the note is merged separately, so a pending note
+    yields a dangling citation `kg-validate` surfaces on the report PR. There is no such note any
+    more. `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` removed the gate: the record is a
+    row written by `ingest_reaction` itself, unconditionally, in the same call as the fingerprint.
+    A fingerprint with no record is therefore not "in review" — it is a write that did not land, and
+    there is no pull request anywhere for a reviewer to see it on.
+    """
+
+    async def _run() -> None:
+        store = await _indexed({"r1": _QUERY})
+        retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
+
+        assert await retriever.retrieve(_QUERY, {}) == []
+
+    asyncio.run(_run())
+
+
+def test_an_unfiltered_search_still_serves_every_hit_it_can_resolve() -> None:
+    """The guard above drops only what cannot be opened; it is not a narrowing.
+
+    The pair matters: an existence check that also applied the filter gate would silently turn every
+    unfiltered structural sweep into a filtered one, which is the D-170 behaviour this file's first
+    test exists to protect. `known` is existence regardless of currency or filter — the same
+    question `kg.validate` asks of a citation — so a record that would fail a `type`/`tag`/window
+    filter is still served when no filter was asked for.
+    """
+
+    async def _run() -> None:
+        store = await _indexed({"r1": _QUERY})
+        # `project=None`: this record fails the `type: reaction`/tag gate but exists.
+        retriever = FingerprintReactionRetriever(store, await _records(r1=None))
+
+        chunks = await retriever.retrieve(_QUERY, {})
+        assert [c.source_note_id for c in chunks] == ["reaction-r1"]
 
     asyncio.run(_run())

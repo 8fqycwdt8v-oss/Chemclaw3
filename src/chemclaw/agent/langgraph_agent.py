@@ -127,7 +127,7 @@ from chemclaw.agent.tool_authz import (
     surface_authorization_denials,
     surface_domain_errors,
 )
-from chemclaw.agent.tool_framing import frame_connector_results
+from chemclaw.agent.tool_framing import defang_tool_results, frame_connector_results
 from chemclaw.agent.tool_result_size import bound_tool_results
 from chemclaw.agent.tool_schema import as_structured_tool
 from chemclaw.connectors.registry import skills_dirs
@@ -920,5 +920,15 @@ def tool_call_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
         # (`read_document`, `find_calculations`) are in-process, so a cap keyed on the `SERVED_BY`
         # stamp would have missed exactly the case it exists for (`agent/tool_result_size.py`).
         bound_tool_results,
+        # Innermost of the three presentation middlewares, and *inside* the cut above rather than
+        # outside it, which is the whole reason it is not part of `frame_connector_results`.
+        # `framing._defang` escapes every `<` in a payload whose delimiter is disguised — one
+        # character for four — so neutralising above the cut put characters back after the size
+        # control had run. Measured on the compiled graph at the shipped fan-out width, eight calls
+        # bounded to 7,500 characters each reached the model at 29,096, for a 101,899-token request
+        # against a 100,000 budget, all of it in the newest batch that neither context edit may
+        # reclaim (`agent/tool_framing.py`). The envelope stays outermost for its own reason — a cut
+        # taken outside it severs the closing delimiter — so the three nest rather than swap.
+        defang_tool_results,
         *tool_governance_middleware(audit, profile),
     ]

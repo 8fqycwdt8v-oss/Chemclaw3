@@ -108,6 +108,29 @@ class PostgresArtifactStore:
                 await cur.execute(
                     _UPSERT_LINK, (calc_key, name, digest, media_type, compute_seconds)
                 )
+                # **A rewritten link strands its predecessor, and reclaiming it here was worse.**
+                # The upsert moves `(calc_key, name)` to the new address and nothing then references
+                # the old blob: measured, one rewrite leaves `blobs=2 links=1 unlinked_blobs=1`, and
+                # `durable/artifact_eviction.py` is not the path that collects it in any shipped
+                # configuration — `artifact_store_max_bytes` and `artifact_evict_idle_days` both
+                # default to 0, so both triggers are off. So this is real growth a deployment cannot
+                # see, and it is left in place deliberately.
+                #
+                # The delete that was here — `DELETE ... WHERE NOT EXISTS (a link to it)`, guarded
+                # by a `FOR UPDATE` on the link row — **destroyed another calculation's committed
+                # artifact**, and a review reproduced it against a live database. `NOT EXISTS` is
+                # evaluated on the deleting transaction's snapshot; the `DELETE` then blocks on the
+                # `KEY SHARE` lock a concurrent inserter holds on that blob, and when the lock
+                # releases PostgreSQL proceeds *without re-evaluating the subquery*. Content
+                # addressing makes the collision ordinary rather than exotic — 019 exists precisely
+                # so "two runs that produced an identical geometry store one copy" — so a rewrite of
+                # K1 racing a first write of K2 onto the same bytes deleted K2's link by cascade,
+                # after K2's transaction had committed and returned an `ArtifactRef`.
+                #
+                # Locking the *blob* row rather than the link would order it, at the cost of making
+                # the loser's insert fail a foreign key instead. That is a real design with a real
+                # trade and it is not made inside a review fix: a leaked blob is wasted bytes, and
+                # what was here deleted science. `docs/planning/BACKLOG.md` carries it.
             await conn.commit()
         return ArtifactRef(
             calc_key=calc_key,

@@ -82,8 +82,29 @@ class BearerAuth(BaseModel):
 
     `token_env` names the variable rather than carrying the token, so no credential is ever
     written to a manifest in the repo. It is read per request, not at import, so a rotated
-    secret is picked up without a restart — and a missing variable fails the call with a clear
-    error instead of silently sending an empty `Authorization` header.
+    secret is picked up without a restart — and a missing variable refuses to send an
+    `Authorization` header at all rather than sending an empty one.
+
+    **What a missing variable actually does, because this paragraph used to promise the wrong
+    thing.** It said the call fails "with a clear error", and `identity._EnvBearerAuth` does raise
+    `MissingConnectorCredential` — inside `session.initialize()`, inside the MCP client's task
+    group, where `connectors.transport` absorbs it as an unreachable connector. So the bundle
+    *degrades*: its tools are absent for the turn, and until `describe_failure` unwrapped the
+    `ExceptionGroup` the operator's only line named neither the exception nor the variable.
+    Degrading is the right trade at the turn (`connectors.transport`'s own first paragraph), so
+    what changed is the diagnosis around it: the WARNING now names the cause, because
+    `transport.describe_failure` flattens the group instead of rendering `ExceptionGroup`.
+
+    **Boot does not catch this, and saying otherwise is the failure this paragraph nearly shipped.**
+    An earlier draft here claimed `registry.unusable_reason` decides a missing bearer from the
+    environment before a socket is opened and that `connectors.health` therefore refuses startup
+    under `connectors_required`. It does not: `unusable_reason` tests the *transport* only, and its
+    own docstring records that the bearer case was built, measured to make every shipped bundle
+    unusable at once in test, CLI and worker processes, and reverted. `connectors/health.py`'s
+    module docstring says the same in the other direction. So a deployment that forgot the secret
+    is still told by a chemist — the probe is unauthenticated by design, the server answers 200,
+    and only the tool call fails. That is a real gap, it is on record in `unusable_reason`, and it
+    is not closed here.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -112,6 +133,15 @@ class HttpEndpoint(BaseModel):
     the MCP client, which has no default of its own: it reaches `anyio.fail_after(None)` and waits
     forever, so `None` means "take the registry's `_DEFAULT_REQUEST_TIMEOUT_SECONDS`" rather than
     "unbounded". `chemclaw.connectors.registry.request_timeout_seconds` is where that is decided.
+
+    **And it is bounded above by the deployment, not only below by this schema.** `gt=0` was the
+    whole constraint, so a bundle could declare `100000` and be obeyed — at which point the front
+    door's `service_turn_timeout_seconds` fires first and the chemist loses the *turn* instead of
+    receiving the recoverable `transport_error_result` this bound exists to produce.
+    `registry.request_timeout_seconds` clamps to `registry.max_request_timeout_seconds()` and says
+    so once per process, the same `min(what the bundle asks, what the deployment funds)` shape
+    `JobSpec.timeout_seconds` already has. Clamping rather than refusing, because this number is
+    read on the turn path and a refusal there is the failure `registry.mcp_connections` documents.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

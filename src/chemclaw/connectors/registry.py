@@ -143,16 +143,68 @@ def _load_manifest(bundle: Path) -> ConnectorManifest:
     return manifest
 
 
+#: Why each bundle on disk could not be loaded, by directory name, for the discovery generation
+#: `discovered()` last computed. A module-level dict rather than a second cached function because
+#: `discovered.cache_clear()` is the seam every test uses and there must be exactly one cache to
+#: clear: this is refilled inside `discovered()`'s uncached body, so it always describes the same
+#: generation as the mapping that function returns. Read it through `discovery_problems()`.
+_DISCOVERY_PROBLEMS: dict[str, str] = {}
+
+
 @cache
 def discovered() -> dict[str, tuple[Path, ConnectorManifest]]:
-    """Every discovered bundle by name, with its directory — validated, regardless of enablement.
+    """Every bundle that *loaded*, by name, with its directory — regardless of enablement.
 
     Cached because discovery reads and parses every manifest on disk, while the result is fixed
     for the process's lifetime (config is read once at import, and bundles do not appear at run
     time). `discovered.cache_clear()` is the seam a test uses after pointing `connectors_dir`
     elsewhere.
+
+    **A bundle that does not load costs itself and nothing else.** This used to build the mapping
+    in one comprehension, so a single unparseable `connector.yaml` anywhere on `connectors_dirs`
+    raised out of *every* caller of `enabled()` — the agent build, `bearer_token_env_names()`
+    (which is the log and webhook redaction set, so the failure silently widened what could be
+    logged), `kg.note.known_note_types`, the health sweep — in a deployment that had never enabled
+    that bundle. That directly contradicts this module's own first paragraph: discovery is not
+    enablement. The failure is not swallowed, it is *deferred to the party that can act on it*: it
+    is logged here at WARNING once per discovery, `enabled()` raises when the deployment actually
+    turns that bundle on, and `discovery_problems()` is how a validator reports every one of them.
     """
-    return {bundle.name: (bundle, _load_manifest(bundle)) for bundle in _bundle_dirs()}
+    loaded: dict[str, tuple[Path, ConnectorManifest]] = {}
+    problems: dict[str, str] = {}
+    for bundle in _bundle_dirs():
+        try:
+            loaded[bundle.name] = (bundle, _load_manifest(bundle))
+        except ConnectorError as exc:
+            problems[bundle.name] = str(exc)
+    _DISCOVERY_PROBLEMS.clear()
+    _DISCOVERY_PROBLEMS.update(problems)
+    if problems:
+        # WARNING rather than ERROR: nothing is broken yet for a deployment that does not enable
+        # these, and `enabled()` is where it becomes an error for one that does. Loud enough that
+        # "the connector I dropped in is not there" is answerable from the log.
+        logger.warning(
+            "%d connector bundle(s) on disk could not be loaded and are not available to be "
+            "enabled: %s",
+            len(problems),
+            "; ".join(f"{name}: {problem}" for name, problem in sorted(problems.items())),
+        )
+    return loaded
+
+
+def discovery_problems() -> dict[str, str]:
+    """Why each bundle on disk failed to load, by directory name — empty when every one did.
+
+    The half `discovered()` cannot return, exposed because a bundle that is broken while disabled
+    is a bundle nobody can ever enable, and CI is where that should surface rather than the day an
+    operator turns it on. `chemclaw.cli.validate_connectors` is the caller that reports every entry.
+
+    Calls `discovered()` first so the answer describes the current cache generation rather than
+    whatever the last uncached run left behind — the two are one fact and must not be readable
+    apart.
+    """
+    discovered()
+    return dict(_DISCOVERY_PROBLEMS)
 
 
 def bearer_token_env_names() -> tuple[str, ...]:
@@ -192,11 +244,37 @@ def enabled() -> list[ConnectorManifest]:
     enablement until you say otherwise" default `skills_enabled` uses, so a fresh checkout runs
     the full shipped surface. A name in the list that no bundle provides is a loud error: it
     would otherwise advertise nothing and look like a capability that simply stopped working.
+
+    **A bundle that failed to load is loud exactly where it is enabled, and nowhere else**
+    (`discovered`). Two cases, and the asymmetry is the whole point of the seam:
+
+    * The enable-list *names* it. That is the "a name in the list that no bundle provides" rule
+      with more force, not less — the bundle is present and invalid, so the deployment asked for a
+      capability that cannot be built. Refusing names the file to fix.
+    * The enable-list is empty, so discovery *is* enablement. Every bundle on disk is enabled by
+      that default, which makes a broken one an enabled broken one; refusing is the same rule.
+
+    What is left is the case this function used to fail on and no longer does: a bundle nobody
+    enabled. It costs its own capability, is logged once at discovery, and is reported in full by
+    `make connector-validate` through `discovery_problems()`.
     """
     found = discovered()
+    problems = discovery_problems()
     names = settings.connectors_enabled_list
     if not names:
+        if problems:
+            raise ConnectorError(
+                "every discovered connector is enabled (connectors_enabled is empty) and "
+                f"{len(problems)} bundle(s) could not be loaded: "
+                + "; ".join(f"{name}: {problem}" for name, problem in sorted(problems.items()))
+            )
         return [manifest for _, manifest in found.values()]
+    broken = sorted(set(names) & problems.keys())
+    if broken:
+        raise ConnectorError(
+            f"connectors_enabled names connector(s) {broken} whose manifest could not be loaded: "
+            + "; ".join(f"{name}: {problems[name]}" for name in broken)
+        )
     unknown = sorted(set(names) - found.keys())
     if unknown:
         raise ConnectorError(
@@ -301,7 +379,51 @@ def _endpoint_url(connector: str, endpoint: HttpEndpoint) -> str:
     return settings.connector_urls.get(connector, endpoint.url)
 
 
-def request_timeout_seconds(endpoint: Endpoint) -> float:
+def max_request_timeout_seconds() -> float:
+    """The largest per-call bound that can still fire *inside* a turn, derived not chosen.
+
+    A manifest's `request_timeout` is the bound whose expiry the model can recover from: the MCP
+    session raises, `agent.tool_authz` hands back a `transport_error_result`, and the chemist gets
+    an answer that says a tool was unavailable. The front door's `service_turn_timeout_seconds`
+    bound is the one nobody recovers from — it takes the whole turn. So the first must be strictly
+    smaller than the second, and the shipped tree did not have that property: `calc` declares
+    `request_timeout: 600` against a 600 s turn deadline, which makes *which one fires* a race.
+
+    The margin is `READ_TIMEOUT_GRACE_SECONDS` rather than a number invented here, because that is
+    already the interval this module keeps between its two nested bounds and for the identical
+    reason (`connector_http_client`): the visible bound must trip before the invisible one. Laid
+    end to end the chain is now `request_timeout` < httpx's read bound (`+ grace`) <= the turn
+    deadline.
+
+    **What that buys is narrower than "the recoverable bound always wins", and the first draft of
+    this docstring claimed the wider thing.** `service_turn_timeout_seconds` is a *whole-turn*
+    `asyncio.timeout` (`api/routes/turns.py`), not a per-call one, so the two are only ordered for
+    a call that starts at the top of the turn. A turn that spends 20 s on two lookups and then
+    calls `calc` has the clamped 595 s bound firing at t=615 against a turn scope that fired at
+    t=600 — the chemist loses the turn, which is the outcome this exists to prevent. And even at
+    t=0 the margin is five seconds, which is not enough to re-invoke the model with the
+    `transport_error_result` and stream an answer.
+
+    So the honest claim is the one the tests assert: a manifest can no longer declare a bound
+    *above* the turn deadline, which removes the shipped race and bounds what a third-party bundle
+    can ask for. Making the recoverable error genuinely reachable needs a per-call deadline derived
+    from the turn's *remaining* budget, which is a different change and is not made here.
+
+    Returns:
+        The ceiling in seconds. Deployments whose turn deadline is not even one grace interval long
+        get `0.0`, which `request_timeout_seconds` reads as "there is no room to clamp into" and
+        leaves declarations alone rather than manufacturing a zero-second timeout.
+    """
+    return max(settings.service_turn_timeout_seconds - _READ_TIMEOUT_GRACE_SECONDS, 0.0)
+
+
+#: Connectors already warned about a clamped `request_timeout`, so the line is written once per
+#: process rather than twice per turn per connector. Keyed by the declared number as well as the
+#: name so a deployment that fixes a manifest and reloads is told again if it is still too large.
+_CLAMPED_TIMEOUTS: set[tuple[str, int]] = set()
+
+
+def request_timeout_seconds(endpoint: Endpoint, connector: str = "") -> float:
     """How long one call to this endpoint may take — the single derivation of that number.
 
     Two independent bounds are built from it (the MCP session's `read_timeout_seconds` and the
@@ -312,13 +434,45 @@ def request_timeout_seconds(endpoint: Endpoint) -> float:
     `StdioEndpoint` declares no timeout at all — a subprocess of our own process is not a network
     dependency — but an unresponsive subprocess hangs a turn exactly as a mute HTTP host does, so
     it gets the same default rather than an exemption.
+
+    **A declaration above the deployment's ceiling is lowered, not obeyed and not refused**
+    (`max_request_timeout_seconds`). `HttpEndpoint.request_timeout` is `gt=0` and nothing else, so a
+    third-party bundle could declare `100000` and get it: the turn deadline would fire first, the
+    model would never receive the recoverable transport error, and the chemist would lose the whole
+    turn instead of one tool call. Clamping is the same shape `JobSpec.timeout_seconds` already
+    has — `min(what the bundle asks, what the deployment funds)`, a lowering of the deployment's
+    ceiling and never a raise — and it is preferred to refusing the manifest for the reason
+    `mcp_connections` gives about raising on the turn path at all. The clamp is announced once per
+    process with both numbers and the setting that produced the ceiling.
+
+    Args:
+        endpoint: The endpoint whose declaration to read.
+        connector: The bundle's name, for the WARNING when its declaration is clamped. Defaulted
+            because the two bound-builders below have the endpoint and not the name, and a missing
+            name costs the log line a word rather than costing the clamp.
     """
     if isinstance(endpoint, HttpEndpoint) and endpoint.request_timeout is not None:
-        return float(endpoint.request_timeout)
+        declared = float(endpoint.request_timeout)
+        ceiling = max_request_timeout_seconds()
+        if 0.0 < ceiling < declared:
+            key = (connector, endpoint.request_timeout)
+            if key not in _CLAMPED_TIMEOUTS:
+                _CLAMPED_TIMEOUTS.add(key)
+                logger.warning(
+                    "connector %s declares request_timeout: %s, which is not below the %ss turn "
+                    "deadline (service_turn_timeout_seconds); a call that ran that long would be "
+                    "killed with the turn instead of returning a recoverable error. Using %ss.",
+                    connector or "(unnamed)",
+                    endpoint.request_timeout,
+                    settings.service_turn_timeout_seconds,
+                    ceiling,
+                )
+            return ceiling
+        return declared
     return _DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
-def _session_kwargs(endpoint: Endpoint) -> dict[str, Any]:
+def _session_kwargs(endpoint: Endpoint, connector: str) -> dict[str, Any]:
     """The `ClientSession` arguments that give a tool call a deadline at all.
 
     This is the bound that actually fires: `mcp.shared.session.send_request` waits inside
@@ -327,7 +481,7 @@ def _session_kwargs(endpoint: Endpoint) -> dict[str, Any]:
     `langchain-mcp-adapters` forwards `session_kwargs` verbatim into `ClientSession`, and both
     transports' connection mappings accept it, so one function serves both branches.
     """
-    return {"read_timeout_seconds": timedelta(seconds=request_timeout_seconds(endpoint))}
+    return {"read_timeout_seconds": timedelta(seconds=request_timeout_seconds(endpoint, connector))}
 
 
 def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.AsyncClient:
@@ -346,9 +500,16 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
     **Redirects are not followed, and that is a security property rather than a tuning choice.**
     An httpx request hook runs on every hop and httpx carries the previous request's headers into
     the redirected one, stripping `Authorization` alone — so a connector (or anything that can bind
-    its Service port; all shipped manifests declare `auth: mode: none`) could answer the MCP POST
-    with a `302` toward an origin it controls and collect the caller's Entra object id and full role
-    set once per turn. MCP streamable-HTTP needs no redirect for any real flow:
+    its Service port) could answer the MCP POST with a `302` toward an origin it controls and
+    collect the caller's Entra object id, session and correlation id once per turn. (This sentence
+    used to add "all shipped manifests declare `auth: mode: none`" as the reason anything on the
+    port qualifies. Every endpoint-bearing manifest in this tree declares
+    `mode: bearer`
+    (D-2026-08-20), and has since before this paragraph was last edited — the guard is right and
+    the stated stakes were a snapshot of a fleet that no longer exists. It never carried the
+    caller's *role set*: `X-Chemclaw-Roles` was deleted by
+    `D-2026-08-26-an-entitlement-set-is-not-provenance`.) MCP streamable-HTTP needs no redirect
+    for any real flow:
     `FastMCP.streamable_http_app` serves the endpoint as an exact Starlette `Route`, so neither the
     per-bundle Service address nor the dev composite's `/<name>/mcp` mount ever answers 3xx — proven
     by the transport tests, which complete the handshake and a tool call over this client.
@@ -384,7 +545,7 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
         # with no error to show for it. The session bound is the one that must win, because it is
         # the one that raises. See `_READ_TIMEOUT_GRACE_SECONDS`.
         timeout=httpx.Timeout(
-            request_timeout_seconds(endpoint) + _READ_TIMEOUT_GRACE_SECONDS,
+            request_timeout_seconds(endpoint, connector) + _READ_TIMEOUT_GRACE_SECONDS,
             connect=_CONNECT_TIMEOUT_SECONDS,
         ),
     )
@@ -431,6 +592,61 @@ def health_url(manifest: ConnectorManifest) -> str | None:
     return effective.removesuffix(endpoint_tail) + health_tail
 
 
+def unusable_reason(connector: str, endpoint: Endpoint | None) -> str | None:
+    """Why *this deployment* cannot open this bundle's endpoint at all, or `None` when it can.
+
+    A **configuration** verdict, not a network one, and the distinction is what makes it worth
+    having in one place: every reason here is decidable offline, is the same on every turn, and is
+    an operator's to fix. A dark host is `connectors.health`'s question and is asked over a socket;
+    this one is asked of a manifest and an environment.
+
+    Two callers, which is why it exists rather than living inside the one function that used to
+    raise it. `mcp_connections` skips such a bundle so it costs its own tools instead of the turn,
+    and `connectors.health.probe_connectors` reports it `unusable` so `/readyz`, the unhealthy
+    gauge and `connectors_required` can all see the thing that `mcp_connections` degraded past —
+    the half without which "degraded" quietly becomes "silent".
+
+    One reason today, measured: **`transport: stdio` while `connector_stdio_enabled` is false.**
+    Refusing is right — `command` is executed in the chat process — and *raising* was not:
+    `mcp_connections` built every spec in one comprehension, `connector_specs()` is called inline
+    by `api/runner.py` with no handler anywhere in `api/` or `agent/`, so one such manifest landing
+    on `connectors_dir` (the documented PATH-style operator override) killed **every turn** before
+    any tool bound, while the startup sweep reported that bundle `unprobed` and
+    `connectors_required` never saw it. That inverts `connectors.transport`'s own trade, one module
+    away: losing a capability is a much smaller failure than losing the turn.
+
+    **A declared bearer whose variable is unset is deliberately *not* one of these**, and the
+    reason is a measurement rather than a principle. It is the same class of fault — decidable
+    offline, permanent, an operator's to fix — and it is the one this sweep is worst at seeing,
+    because the probe hits the unauthenticated `/healthz` and reports the bundle healthy while
+    every tool call is refused. Adding it here was tried and reverted: no token is mounted in an
+    ordinary test, CLI or worker process, so every shipped bearer bundle became unusable at once
+    and `connector_specs()` returned `[]` — five test files outside this seam changed meaning,
+    which is a change to what a tokenless process *is*, not a bug fix. It needs its own decision.
+    What is fixed instead is the diagnosis: `transport.describe_failure` unwraps the task group so
+    the `MissingConnectorCredential` and the variable's name reach the log, and
+    `core.mcp_session.bearer_from_env` refuses the other hop rather than calling it anonymously.
+
+    Takes the endpoint rather than the manifest, because that is what it reads and because both
+    callers already hold the two separately — `_mcp_connection` is handed them apart, and a
+    jobs-only bundle has `None` here and nothing to judge.
+
+    Args:
+        connector: The bundle's name, for the sentence an operator reads.
+        endpoint: Its declared endpoint, or `None` for a bundle whose capability is durable work.
+
+    Returns:
+        A sentence naming the bundle, the fault and the knob that fixes it, or `None`.
+    """
+    if isinstance(endpoint, StdioEndpoint) and not settings.connector_stdio_enabled:
+        return (
+            f"connector {connector!r} declares `transport: stdio`, which launches "
+            f"{endpoint.command!r} in this process; it is disabled by default because a manifest "
+            "is data. Set CHEMCLAW_CONNECTOR_STDIO_ENABLED=true to allow it."
+        )
+    return None
+
+
 def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorSpec:
     """Describe one connector endpoint for the LangGraph engine (M7).
 
@@ -444,7 +660,9 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
     **The HTTP client is still ours, and that is what keeps four security properties alive.**
     `httpx_client_factory` is the seam `langchain-mcp-adapters` exposes, so `connector_http_client`
     crosses unchanged and with it the refusal to follow redirects (a connector answering `302`
-    would otherwise harvest the caller's Entra oid and role set), `turn_identity_hook`, `auth_for`,
+    would otherwise harvest the caller's Entra oid, session and correlation id — not its role
+    set, which `D-2026-08-26-an-entitlement-set-is-not-provenance` stopped sending),
+    `turn_identity_hook`, `auth_for`,
     and the split connect/read timeout. The library's own `timeout`/`auth`/`headers` arguments are
     deliberately *not* passed on the connection: the factory ignores what it is handed, and the
     honest way to ignore an argument is to never let a caller supply one. The adapter closes the
@@ -462,7 +680,7 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
                 transport="streamable_http",
                 url=_endpoint_url(manifest.name, endpoint),
                 httpx_client_factory=_connector_client_factory(manifest.name, endpoint),
-                session_kwargs=_session_kwargs(endpoint),
+                session_kwargs=_session_kwargs(endpoint, manifest.name),
             ),
             allowed_tools=tuple(endpoint.tools),
         )
@@ -474,12 +692,15 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
         # every connector token. Refusing here rather than at parse time keeps `StdioEndpoint`
         # constructible — the transport's own tests build one directly — while making a *file* an
         # inert declaration until an operator turns the transport on.
-        if not settings.connector_stdio_enabled:
-            raise ConnectorError(
-                f"connector {manifest.name!r} declares `transport: stdio`, which launches "
-                f"{endpoint.command!r} in this process; it is disabled by default because a "
-                "manifest is data. Set CHEMCLAW_CONNECTOR_STDIO_ENABLED=true to allow it."
-            )
+        #
+        # `mcp_connections` filters on the same predicate before it ever gets here, so on the turn
+        # path this is unreachable and a `transport: stdio` bundle costs its own tools rather than
+        # the turn. It stays because the refusal is a *security* control and this is the function
+        # that would otherwise launch the subprocess: a second caller reaching for a spec must not
+        # be able to get one by not knowing to ask `unusable_reason` first.
+        refusal = unusable_reason(manifest.name, endpoint)
+        if refusal is not None:
+            raise ConnectorError(refusal)
         # No identity headers, for the same reason the HTTP branch above attaches them: a subprocess
         # of our own process runs under our own identity, with no outbound request to attach them to
         # (`connectors.identity`).
@@ -489,7 +710,7 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
                 transport="stdio",
                 command=endpoint.command,
                 args=list(endpoint.args),
-                session_kwargs=_session_kwargs(endpoint),
+                session_kwargs=_session_kwargs(endpoint, manifest.name),
             ),
             allowed_tools=tuple(endpoint.tools),
         )
@@ -513,17 +734,45 @@ def _connector_client_factory(connector: str, endpoint: HttpEndpoint) -> Any:
 
 
 def mcp_connections() -> list[ConnectorSpec]:
-    """One connection spec per enabled connector that declares an endpoint (unopened).
+    """One connection spec per enabled connector this deployment can actually open (unopened).
 
     The deployment's whole surface; `chemclaw.agent.chemclaw_agent.connector_specs` is the
     profile-narrowed half. Split that way because enablement is a deployment decision and narrowing
     is a per-turn one, and a profile must never be able to widen what the deployment enabled.
+
+    **A bundle this deployment cannot open costs its own tools, never the turn**
+    (`unusable_reason`).
+    This is on the pre-first-token path of every turn through `api/runner.py`, which has no handler
+    for a `ConnectorError` — nor does anything else in `api/` or `agent/` — so raising from here
+    ended the conversation over one manifest. It is announced instead, in the vocabulary the
+    package already uses for a connector that contributes nothing: a WARNING naming each one, and
+    `chemclaw_connectors_unreachable_total`. `connectors.health` is where the same verdict reaches
+    `/readyz` and `connectors_required`, so degrading here does not make it silent.
     """
-    return [
-        _mcp_connection(manifest, manifest.endpoint)
-        for manifest in enabled()
-        if manifest.endpoint is not None
-    ]
+    specs: list[ConnectorSpec] = []
+    unusable: list[str] = []
+    for manifest in enabled():
+        if manifest.endpoint is None:
+            continue
+        refusal = unusable_reason(manifest.name, manifest.endpoint)
+        if refusal is not None:
+            unusable.append(refusal)
+            continue
+        specs.append(_mcp_connection(manifest, manifest.endpoint))
+    if unusable:
+        # The same WARNING-and-count vocabulary `open_connector_specs` uses for a connector that
+        # did not come up, and deliberately the *same counter*: from the turn's point of view the
+        # outcome is identical — those tools are absent — and a second series would split one
+        # "capability is missing" alert in two. It differs from an outage in that it will not clear
+        # on its own, which is what makes the health sweep's `unusable` verdict the other half.
+        logger.warning(
+            "%d enabled connector(s) cannot be opened by this deployment and contribute no tools: "
+            "%s",
+            len(unusable),
+            "; ".join(unusable),
+        )
+        record_metric(lambda m: m.increment("chemclaw_connectors_unreachable_total", len(unusable)))
+    return specs
 
 
 async def open_connector_specs(
@@ -650,16 +899,29 @@ def _bound_by_this_process() -> dict[str, str]:
     into the very registry read here — so reading them back would make every deployment with jobs
     fail on its second build, on a name it declared itself. The launchers are recognised by the
     module that generated them rather than by a marker, so there is nothing to remember to set.
-    Template launchers are deliberately *not* excluded: `run_<name>` is a different name space that
-    a bundle has no business claiming either.
+
+    **Template launchers are asked for by name rather than read out of the registry, and that is
+    the fix for a guard that depended on import order.** They are registered by the same function
+    that registers the job launchers — `_register_generated_tools` evaluates
+    `[*job_tools(), *template_tools()]`, and `job_tools()` is what runs this check — so on the
+    *first* build of a process no `run_<name>` was in the registry yet. Measured with a bundle
+    declaring an endpoint tool `run_tautomer_resolution`: build #1 passed and the connector tool
+    *shadowed* the template launcher (`ToolNode` keys by name and connector tools are appended
+    last), while build #2 onward raised `ConnectorError` and killed the turn — the same
+    configuration reading as two different faults depending on how many agents a process had built.
+    `make connector-validate` exited 0, because a validator registers no template launchers at all.
+    Asking `chemclaw.templates.registry` what it will generate makes the answer the same on every
+    build and in every process, which is what a collision guard has to be.
     """
     from chemclaw.agent import chemclaw_agent
+    from chemclaw.templates.registry import template_tool_names
 
     bound = {
         fn.__name__: "an in-process tool"
         for fn in registered_tools()
         if fn.__module__ != build_job_tool.__module__
     }
+    bound.update(dict.fromkeys(template_tool_names(), "a template launcher"))
     bound.update(dict.fromkeys(chemclaw_agent.skill_tool_names(), "a scratchpad file verb"))
     bound.update(dict.fromkeys(chemclaw_agent.harness_tool_names(), "a plan-harness tool"))
     bound.update(dict.fromkeys(chemclaw_agent.subagent_tool_names(), "the subagent spawner"))

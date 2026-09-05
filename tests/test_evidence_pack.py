@@ -183,3 +183,102 @@ def test_the_pack_carries_the_three_things_a_reader_must_not_supply_themselves()
 
     asyncio.run(_run())
     asyncio.run(_clear())
+
+
+def test_the_effects_a_truncated_pack_shows_are_the_recent_ones() -> None:
+    """A capped section must keep the rows an incident is about, which are the newest.
+
+    The pack's own `truncated` field was added because "every read is `ORDER BY <ts> LIMIT 200` and
+    nothing said so", and it names effects specifically: "because effects are ordered oldest-first
+    the rows dropped were the most recent — the ones an incident is actually about". The field
+    disclosed the truncation and left the ordering that makes it wrong.
+
+    Two definitions of that read existed at the same time.
+    `durable/effect_ledger.effects_for_session` was documented as "the evidence pack's read",
+    ordered `attempted_at DESC`, and had **no caller anywhere in `src/`**; the pack carried an
+    inline copy with the opposite ordering, which is the one that ran. The dead one is deleted
+    rather than adopted — `operations` may not import `durable` — so the pack's own read is the
+    single definition, and it is the ordering that survives.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear()
+        async with await connect(settings.postgres_dsn) as conn:
+            for index, stamp in enumerate(("2026-01-01", "2026-06-01", "2026-09-01")):
+                await conn.execute(
+                    "INSERT INTO effects (effect_id, connector, job, system, reversal,"
+                    " session_id, state, attempted_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        f"pack-eff-{index}",
+                        "lims",
+                        "file_deviation",
+                        "LIMS",
+                        "irreversible",
+                        SESSION,
+                        "attempting",
+                        f"{stamp}T00:00:00+00:00",
+                    ),
+                )
+            await conn.commit()
+        try:
+            pack = await assemble(SESSION, limit=2)
+            assert [effect.effect_id for effect in pack.effects] == [
+                "pack-eff-2",
+                "pack-eff-1",
+            ], "a capped effects section keeps the newest, not the oldest"
+            assert "effects" in pack.truncated
+        finally:
+            await _clear()
+
+    asyncio.run(_run())
+
+
+def test_the_effect_ledgers_read_path_has_a_caller() -> None:
+    """The absence test this repository uses when a claim has no producer.
+
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` is the pattern: three
+    docstrings said in the present tense that the audit trail names the agent, and the writer had
+    no caller. `durable/effect_ledger` was in that shape from the other side — `unsettled()`,
+    `effects_for_session()` and `class Unsettled` had zero references in `src/`, the CLI, the API,
+    `deploy/` or `infra/`, while the module docstring said "`unsettled` is the query an incident
+    starts from" and `Unsettled.meaning` called itself "the sentence an operator needs beside it".
+
+    So: every public read this module still declares is one somebody calls. All three are gone
+    rather than given a caller. `unsettled` and `Unsettled` because a reader nothing reads is the
+    `map_to_hpc_identity` shape, and the incident query survives as
+    `infra/sql/075_effects.sql`'s `effects_unsettled_idx`, which is what an operator actually runs.
+    `effects_for_session` because the pack **may not call it**: `tests/test_layering.py` makes
+    `operations` a leaf on the kernel so that a reading of the record cannot reach the capability
+    that wrote it, and this module is what writes `effects`. Two definitions of one query where
+    the layering permits exactly one is how the live reader came to be the wrongly-ordered one, and
+    the surviving definition is the pack's own, now ordered newest-first.
+    """
+    import re
+    from pathlib import Path
+
+    from chemclaw.durable import effect_ledger
+
+    source = Path(effect_ledger.__file__).resolve()
+    package = source.parents[1]
+    #: The one reviewed exemption. `get_effect` is a plain accessor by primary key that claims
+    #: nothing in its docstring — it exists so the write-path tests can read back what
+    #: `begin_effect`/`settle_effect` wrote without a second copy of `_row`. It is named here so
+    #: that adding a *second* such function is a decision somebody takes rather than a silence.
+    test_only = {"get_effect"}
+    declared = {
+        name
+        for name in vars(effect_ledger)
+        if not name.startswith("_")
+        and getattr(getattr(effect_ledger, name), "__module__", "") == effect_ledger.__name__
+    }
+    word = re.compile(r"\b({})\b".format("|".join(sorted(declared))))
+    referenced: set[str] = set()
+    for path in package.rglob("*.py"):
+        if path != source:
+            referenced.update(word.findall(path.read_text(encoding="utf-8")))
+    unreferenced = sorted(declared - referenced - test_only)
+    assert unreferenced == [], (
+        f"{unreferenced} is declared here and called nowhere in src/. A read path with no caller "
+        "is a claim that a control exists; give it one or delete it."
+    )

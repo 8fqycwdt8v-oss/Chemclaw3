@@ -12,6 +12,7 @@ from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.migrate import migrate
 from chemclaw.science.calc.postgres_store import PostgresStore, default_store
 from chemclaw.science.calc.store import (
+    CALCULATION_EPOCH,
     CalculationKey,
     CalculationQuery,
     InMemoryStore,
@@ -212,3 +213,90 @@ def test_known_answers_existence_in_bulk_and_both_backends_agree() -> None:
         assert await store.known([]) == set()
 
     asyncio.run(_run())
+
+
+def test_a_rewrite_that_changes_the_payload_does_not_keep_the_old_cost() -> None:
+    """A cost measured for one answer must not be reported as the cost of a different one.
+
+    The `COALESCE` above is right for a re-`put` of the *same* payload and wrong for a rewrite:
+    two writers racing on one key produced a row carrying B's result and A's `compute_seconds`
+    — measured, payload `{"who": "B"}` with `100.0` s from A. `durable/artifact_eviction.py` ranks
+    what to reclaim by that number, so a mixed row misprices an eviction decision with a cost
+    nothing on the row ever paid. NULL is the honest answer for an answer nobody timed.
+    """
+
+    async def _run() -> tuple[dict[str, object], float | None]:
+        store = await _store_or_skip()
+        key = CalculationKey.build("pgrace", "v1", inputs={"smiles": "pg-race-CCO"})
+        await store.put(StoredResult(key=key, result={"who": "A"}, compute_seconds=100.0))
+        await store.put(StoredResult(key=key, result={"who": "B"}))
+        got = await store.get(key)
+        assert got is not None
+        return got.result, got.compute_seconds
+
+    payload, cost = asyncio.run(_run())
+    assert payload == {"who": "B"}
+    assert cost is None, "a new payload inherited the previous answer's measured cost"
+
+
+def test_a_row_carries_the_epoch_it_was_written_under_and_find_returns_it() -> None:
+    """Migration 083: the epoch is a column, so a browse can tell two epochs apart.
+
+    The cache never needed it — the epoch is folded into `params_hash`, so `get` is exact and
+    cannot cross epochs — but `find` browses, and it served epoch-1 rows beside epoch-2 rows for
+    one subject with only `created_at` to separate them. A row written before the column existed
+    keeps the empty string, which is "not recorded" and deliberately not "old".
+    """
+
+    async def _run() -> tuple[str, str, str]:
+        store = await _store_or_skip()
+        current = CalculationKey.build("pgepoch", "v1", inputs={"smiles": "pg-epoch-CCO"})
+        await store.put(StoredResult(key=current, result={"energy": -1.0}))
+        earlier = CalculationKey(
+            calc_type="pgepoch", calc_version="v1", input_hash="pgepoch-old", params_hash="p"
+        )
+        await store.put(StoredResult(key=earlier, result={"energy": -0.5}, epoch="1"))
+        unrecorded = CalculationKey(
+            calc_type="pgepoch", calc_version="v1", input_hash="pgepoch-pre", params_hash="p"
+        )
+        await store.put(StoredResult(key=unrecorded, result={"energy": -0.1}, epoch=""))
+
+        got = await store.get(current)
+        old = await store.get(earlier)
+        pre = await store.get(unrecorded)
+        assert got is not None and old is not None and pre is not None
+        rows = {
+            row.key.as_str(): row.epoch
+            for row in await store.find(CalculationQuery(calc_type="pgepoch", limit=10))
+        }
+        assert rows[current.as_str()] == got.epoch
+        assert rows[earlier.as_str()] == "1"
+        return got.epoch, old.epoch, pre.epoch
+
+    current_epoch, old_epoch, pre_epoch = asyncio.run(_run())
+    assert current_epoch == CALCULATION_EPOCH
+    assert old_epoch == "1"
+    assert pre_epoch == "", "a row written with no epoch must not be given one"
+
+
+def test_calc_types_reports_what_the_store_actually_holds() -> None:
+    """The vocabulary a `calc_type` filter is judged against, read off the rows.
+
+    `find_calculations` refuses a type this store has never held rather than answering `[]`, and
+    the list it names has to come from the data — the types are minted by the calculation server,
+    so anything written down here would be stale the day it adds a primitive.
+    """
+
+    async def _run() -> set[str]:
+        store = await _store_or_skip()
+        await store.put(
+            StoredResult(
+                key=CalculationKey.build("pgtypes.one", "v1", inputs={"smiles": "pg-types-CCO"}),
+                result={"energy": -1.0},
+            )
+        )
+        return await store.calc_types()
+
+    types = asyncio.run(_run())
+    assert "pgtypes.one" in types
+    assert "pgtypes" not in types, "a family prefix is not a type"

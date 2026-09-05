@@ -14,13 +14,19 @@ store.
 **Rows this release has no projector for are skipped, not failed.** `calculation_results` is never
 pruned, so a deployment legitimately holds results from calculators that no longer ship, and a walk
 that aborted on the first one would never reach the rest.
+
+**Three walks, because there are three durable records and every published shape is in one of
+them.** A primitive is a `calculation_results` row, a job composite is a `job_records` row, and a
+*tool* composite is a `result_composites` row — the last of those exists because it is the one
+shape written to neither of the first two (`publish/composites.py`), so until it did, a tool
+composite that failed its enqueue was gone.
 """
 
 import logging
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
-from chemclaw.publish import outbox
+from chemclaw.publish import composites, outbox
 from chemclaw.publish.project import projector_for
 from chemclaw.publish.record import Publication
 
@@ -145,6 +151,49 @@ async def backfill_jobs(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
                     job_id=job_id,
                     rationale=rationale,
                 ),
+            )
+        offset += batch
+
+
+async def backfill_composites(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
+    """Walk the tool composites. Returns `(seen, queued, skipped)`.
+
+    The third walk, and the reason it exists is that the first two cannot reach this shape.
+    `backfill_cached` recovers `calculation_results` and `backfill_jobs` recovers `job_records`; a
+    tool composite is written to neither, because its key would name its own output. Before
+    `result_composites` (`publish/composites.py`) that made a tool composite whose enqueue failed —
+    or one computed before a sink was attached — permanently unrecoverable, while the two shapes
+    beside it were both replayable.
+
+    Same shape as its two siblings deliberately, down to the `projector_for` pre-filter that keeps
+    an unprojectable row a `skipped` count rather than an abort. `payload_kind` is what routes a
+    composite: no projector prefix matches a `<connector>.<tool>` route.
+    """
+    seen = queued = skipped = 0
+    offset = 0
+    while True:
+        async with db.connection(settings.postgres_dsn) as conn:
+            cursor = await conn.execute(composites.WALK, (batch, offset))
+            rows = list(await cursor.fetchall())
+        if not rows:
+            return seen, queued, skipped
+        for row in rows:
+            seen += 1
+            calc_ref, calc_type, payload_kind, input_hash = row[0], row[1], row[2], row[3]
+            payload, created_at = row[4], row[5]
+            if projector_for(calc_type, payload_kind) is None:
+                skipped += 1
+                continue
+            if dry_run:
+                queued += 1
+                continue
+            queued += await outbox.enqueue_payload(
+                calc_ref=calc_ref,
+                calc_type=calc_type,
+                payload_kind=payload_kind,
+                payload=payload,
+                input_hash=input_hash,
+                computed_at=created_at,
             )
         offset += batch
 

@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from chemclaw.core.config import PG_LOOPBACK_HOSTS, settings
+from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event, register_secret_env
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.publish.driver import SinkRejectedError, SinkUnavailableError
@@ -35,17 +36,26 @@ logger = logging.getLogger(__name__)
 
 
 def _refuse_plaintext_sink(name: str, url: str, token_env: str) -> None:
-    """Refuse a non-loopback `http://` sink under the enforced posture.
+    """Refuse a non-loopback `http://` sink. Loopback is exempt; the posture is not consulted.
 
     The published records are confidential chemistry and — when `token_env` is set — every POST
     carries a bearer credential in its `Authorization` header. Over `http://` both cross the wire in
-    cleartext, so a sink that is not `https://` and not loopback is the same plaintext-transport
-    exposure `require_pg_tls`/the Temporal-mTLS guard refuse for the database and the broker, and it
-    is refused on the same terms: only under `entra_required` (the deployment that believes it is in
-    the enforced posture), with loopback dev exempt.
+    cleartext.
+
+    **This used to open with `if not settings.entra_required: return`, and that was the wrong
+    reading of the rule it was copying.** `require_pg_tls` and the Temporal-mTLS guard gate on the
+    posture because they govern *this deployment's own* database and broker, which live inside the
+    cluster the posture describes. A result sink is by definition somebody else's store: it is the
+    one place computed chemistry and a bearer token leave this deployment, and whether they leave
+    in cleartext cannot depend on a switch that is **off by default** and that no shipped
+    configuration turns on. So the refusal is unconditional and the exemption is the honest one —
+    loopback, which never reaches a wire.
+
+    What it costs is stated because it is a real behavioural change: a deployment publishing to a
+    non-loopback `http://` endpoint today stops constructing its sink, with the fix named in the
+    message (an `https://` url, or a loopback bind for dev). That is one manifest line, and the
+    alternative is a credential in cleartext in every deployment that has not opted in.
     """
-    if not settings.entra_required:
-        return
     parts = urlsplit(url)
     if parts.scheme == "https" or (parts.hostname or "").lower() in PG_LOOPBACK_HOSTS:
         return
@@ -55,9 +65,9 @@ def _refuse_plaintext_sink(name: str, url: str, token_env: str) -> None:
         else "the published records"
     )
     raise ValueError(
-        f"entra_required=true with a non-loopback http sink {name!r} at {url!r}: {carried} "
-        "(confidential chemistry) would cross the wire in cleartext. Use an https:// url, or "
-        "bind a loopback address for local dev."
+        f"non-loopback http sink {name!r} at {url!r}: {carried} (confidential chemistry) would "
+        "cross the wire in cleartext. Use an https:// url, or bind a loopback address for local "
+        "dev."
     )
 
 
@@ -78,7 +88,7 @@ class HttpResultSink:
         token_env: str = "",
         timeout_seconds: float = 30.0,
         writer_version: str = "",
-        verify_tls: bool = True,
+        verify_tls: bool | str = True,
     ) -> None:
         """Hold the endpoint and the *name* of the variable its credential lives in.
 
@@ -92,15 +102,30 @@ class HttpResultSink:
             timeout_seconds: Per-request ceiling.
             writer_version: The ChemClaw release stamped on each published record. Defaults to
                 this deployment's own revision; a manifest sets it only to override that.
-            verify_tls: Left settable only so a site with an internal CA can point at its own
-                bundle by other means; **never set this false** — an unverified TLS connection to a
-                results store is an unauthenticated one.
+            verify_tls: True, or the path to a CA bundle for a site whose results store presents
+                an internal certificate. **`False` is refused**, not merely discouraged: it was a
+                plain constructor keyword reachable from `config:` in a manifest, its docstring
+                said "never set this false", and nothing checked — `sink-validate` binds the
+                driver's *signature*, not its values, so `verify_tls: false` in a `sink.yaml`
+                constructed and delivered without a word. An unverified TLS connection to a
+                results store is an unauthenticated one, which makes the bearer token beside it
+                pointless. Accepting a **path** here is what makes the internal-CA case the
+                docstring already claimed to serve actually reachable, since that is what it was
+                being set false to work around.
         """
         if not url:
             raise ValueError(
                 f"result sink {name!r} declares no url; an HTTP sink must name where it publishes"
             )
         _refuse_plaintext_sink(name, url, token_env)
+        if verify_tls is False:
+            raise ValueError(
+                f"result sink {name!r} sets verify_tls: false. An unverified TLS connection to a "
+                "results store is an unauthenticated one, and the bearer token it carries protects "
+                "nothing against whoever answered. Give the path to your CA bundle instead "
+                "(verify_tls: /etc/pki/internal-ca.pem), or use a certificate the pod already "
+                "trusts."
+            )
         self._name = name
         self._tenant_id = tenant_id
         self._url = url
@@ -116,9 +141,15 @@ class HttpResultSink:
             # put the token into a log line.
             register_secret_env(token_env)
 
-    def _headers(self) -> dict[str, str]:
-        """The request headers, with the credential read now rather than at construction."""
-        headers = {"content-type": "application/json"}
+    def _headers(self, batch_id: str) -> dict[str, str]:
+        """The request headers, with the credential read now rather than at construction.
+
+        `Idempotency-Key` carries the batch's content hash as well as the body doing so, because a
+        receiver that fronts a queue or a gateway routes on headers and never unpacks the document.
+        The spelling is the one Stripe established and everything since has copied, so a receiver
+        needs no documentation from this side to honour it.
+        """
+        headers = {"content-type": "application/json", "idempotency-key": batch_id}
         if self._token_env:
             token = os.environ.get(self._token_env)
             if not token:
@@ -130,17 +161,35 @@ class HttpResultSink:
         return headers
 
     def _document(self, records: Sequence[ResultRecord]) -> dict[str, Any]:
-        """The batch as one versioned document.
+        """The batch as one versioned document, with an idempotency key over its content.
 
         `contract_version` rides on the envelope as well as on each record, so a receiver can route
         on it without unpacking — the same reason the SQL driver stamps it on every row.
+
+        **`batch_id` is what makes the receiver's job possible.** The outbox is at-least-once by
+        design — `claim` commits before delivery, so a worker that dies mid-POST leaves its rows
+        claimable — and `driver.py` requires `deliver` to be idempotent. The SQL driver keeps that
+        promise itself, because every primary key in the shipped schema is a content hash. This one
+        could not: the envelope carried no key at all, so `deliver`'s docstring conceded that a
+        receiver appending rather than upserting "will accumulate duplicates on any transient
+        failure" and that this driver "cannot enforce" otherwise — a promise made in the Protocol
+        and delegated away in the one implementation that needed it.
+
+        A content hash over the batch, so it is the same string on every redelivery of the same
+        rows and a different one for a different batch. That is the header an idempotent receiver
+        already knows how to key on, and it costs one hash per POST. It does **not** make a
+        receiver idempotent; it makes being idempotent possible, which is the most a sender can do.
+        `calc_ref` alone cannot serve: one calculation is legitimately delivered again when a
+        second chemist's publication is merged into its row (`publish/outbox._ENQUEUE`), and a
+        receiver deduplicating on `calc_ref` would drop exactly that.
         """
-        return {
+        payload = {
             "tenant_id": self._tenant_id,
             "writer_version": self._writer_version,
             "contract_version": records[0].contract_version,
             "records": [record.model_dump(mode="json") for record in records],
         }
+        return {"batch_id": f"batch_{stable_hash(payload)}", **payload}
 
     async def aclose(self) -> None:
         """Nothing to release: the client is scoped to a single delivery.
@@ -199,10 +248,13 @@ class HttpResultSink:
     async def deliver(self, records: Sequence[ResultRecord]) -> None:
         """POST the batch, classifying the response into retryable and not.
 
-        The receiver is expected to be idempotent on `calc_ref` — the same promise the SQL driver
-        keeps with content-addressed upserts. The outbox retries, so a receiver that appends
-        instead of upserting will accumulate duplicates on any transient failure; that is stated
-        here because it is the one thing this driver cannot enforce from its side.
+        The batch carries a `batch_id` — a content hash — in the document and as an
+        `Idempotency-Key` header, so a receiver has something to deduplicate a redelivery on. The
+        outbox is at-least-once by construction (`claim` commits before the POST), so a receiver
+        that neither upserts nor honours that key will accumulate duplicates on any transient
+        failure; that is stated here because it is the one thing this driver cannot enforce from
+        its side — but it is now something the receiver *can* enforce, which it could not be
+        before, because nothing in the request identified the batch.
         """
         if not records:
             return
@@ -211,8 +263,9 @@ class HttpResultSink:
             async with httpx.AsyncClient(
                 timeout=self._timeout, verify=self._verify, trust_env=False
             ) as client:
+                document = self._document(records)
                 response = await client.post(
-                    self._url, json=self._document(records), headers=self._headers()
+                    self._url, json=document, headers=self._headers(str(document["batch_id"]))
                 )
         except httpx.TimeoutException as exc:
             self._record("timeout", len(records), time.perf_counter() - started, detail=str(exc))

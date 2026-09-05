@@ -107,12 +107,30 @@ def test_identical_bytes_dedupe_to_one_blob_but_keep_both_links() -> None:
     asyncio.run(_run())
 
 
-def test_overwriting_a_name_repoints_the_link_without_losing_the_old_blob() -> None:
-    """A second `put` under the same `(calc_key, name)` updates the link (D-124's upsert).
+def test_overwriting_a_name_repoints_the_link_and_deliberately_leaks_its_predecessor() -> None:
+    """A second `put` under the same `(calc_key, name)` updates the link and **keeps** the old blob.
 
     `_UPSERT_LINK` is `ON CONFLICT (calc_key, name) DO UPDATE`, never a second row — so the link
-    must resolve to the *new* content afterwards, while the old blob (addressed by its own hash)
-    stays retrievable on its own hash, since eviction — not an overwrite — is what reclaims it.
+    must resolve to the *new* content afterwards. Nothing then references the old blob: it keeps no
+    link, no `calculation_results` payload names it (the row is rewritten by the same `put`), no
+    note can cite it (`artifact_refs` are `<calc_key>#<name>`, resolved through the link table), and
+    `durable/artifact_eviction.py` does not collect it in any shipped configuration, because
+    `artifact_store_max_bytes` and `artifact_evict_idle_days` are both 0. Measured, one rewrite
+    leaves `blobs=2 links=1 unlinked_blobs=1`, and that is real growth a deployment cannot see.
+
+    **It is asserted as intended anyway, because the obvious fix destroyed data.** A reclaiming
+    `DELETE ... WHERE NOT EXISTS (a link)` was written here, guarded by a `FOR UPDATE` on the link
+    row, and a review reproduced it deleting *another calculation's committed artifact* against a
+    live database: `NOT EXISTS` is evaluated on the deleting transaction's snapshot, the `DELETE`
+    blocks on the `KEY SHARE` lock a concurrent inserter holds on that blob, and PostgreSQL then
+    proceeds without re-evaluating the subquery. Content addressing makes that collision ordinary
+    rather than exotic — migration 019 exists so two runs producing an identical geometry store one
+    copy — so a rewrite of one key racing a first write of another onto the same bytes cascaded the
+    second key's link away after its transaction had committed.
+
+    So this asserts the leak on purpose: a leaked blob is wasted bytes, and the reclaim deleted
+    science. Whoever re-adds one must order it against a concurrent *link insert*, not against a
+    concurrent rewrite of the same link, and must decide what the losing writer sees.
     """
 
     async def _run() -> None:
@@ -127,8 +145,36 @@ def test_overwriting_a_name_repoints_the_link_without_losing_the_old_blob() -> N
         [ref] = await store.list_for(calc_key)
         assert ref.content_hash == second.content_hash
 
-        assert await store.open(first.content_hash) == b"stale hessian" * 5
+        assert await store.open(first.content_hash) == b"stale hessian" * 5, (
+            "the predecessor is leaked deliberately; see this test's docstring before reclaiming it"
+        )
         assert await store.open(second.content_hash) == b"refreshed hessian" * 5
+
+    asyncio.run(_run())
+
+
+def test_a_rewrite_keeps_a_blob_another_calculation_still_links() -> None:
+    """The invariant any future reclaim must not break, kept as a standing guard.
+
+    Identical bytes are one blob shared by every calculation that produced them, so a rewrite may
+    only ever delete what *no* link still names. This is the **serial** case and it passes with no
+    reclaim at all, which is precisely why it is not evidence that a reclaim would be safe — the
+    failure a reclaim produces is a race, and a review had to drive the interleaving against a live
+    database to see it. Left here as the floor a reimplementation has to clear before it starts
+    thinking about concurrency.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        shared = b"a shared hessian" * 5
+        first = await store.put("pgart-shared-a:1", "hessian", shared)
+        second = await store.put("pgart-shared-b:1", "hessian", shared)
+        assert first is not None and second is not None
+        assert first.content_hash == second.content_hash
+
+        # Rewrite one of the two links; the other still names the blob.
+        await store.put("pgart-shared-a:1", "hessian", b"a different hessian" * 5)
+        assert await store.open(first.content_hash) == shared
 
     asyncio.run(_run())
 

@@ -16,14 +16,20 @@ exists on top of pydantic's own validation:
   dev-loopback default which is unreachable in a cluster.
 """
 
+from pathlib import Path
 from unittest import mock
 
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from chemclaw.cli.validate_connectors import _connector_urls_problems, _job_problems
+from chemclaw.cli.validate_connectors import (
+    _connector_urls_problems,
+    _job_problems,
+    validate_connectors,
+)
 from chemclaw.connectors.manifest import ConnectorManifest
 from chemclaw.core.config import settings
+from tests.test_connector_registry import _bundle, _http_manifest, _use
 
 _MANIFEST = {
     "name": "probe",
@@ -341,3 +347,34 @@ def test_a_declared_but_unserved_tool_is_unverifiable_for_a_bundle_we_do_not_run
     assert set(unverified) == expected, unverified
     # One concrete tool, so the mapping is not merely present but populated.
     assert "screen_hazards" in unverified["safety"]
+
+
+def test_a_broken_bundle_a_deployment_never_enables_is_still_a_validation_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one line that replaced a raise, and nothing pinned it.
+
+    `discovered()` used to load every bundle in one comprehension, so a single malformed
+    `connector.yaml` anywhere on `connectors_dir` raised for every caller of `enabled()` — the
+    agent build, the log-redaction filter, the health sweep — in deployments that never enabled it.
+    Loading each bundle independently fixed that and moved the failure into `discovery_problems()`,
+    which would have made *this validator* silent about exactly the bundles it exists to catch: a
+    broken one is now simply absent from `discovered()` rather than fatal.
+
+    `validate_connectors()` therefore asks for them explicitly, and that call is the whole of the
+    replacement. Deleting it leaves a broken-but-disabled bundle invisible to CI with every suite
+    green — which is why this asserts on the CLI's own answer rather than on `discovery_problems()`
+    directly. The enable-list deliberately names only the *good* bundle: with an empty list
+    discovery is enablement and `enabled()` still raises, so that arm would pass either way and
+    prove nothing about the line under test.
+    """
+    _bundle(tmp_path, "beta", _http_manifest("beta"))
+    _bundle(tmp_path, "alpha", "name: alpha\nendpoint:\n  transport: http\n  nope: 1\n")
+    _use(monkeypatch, tmp_path, enabled_list="beta")
+
+    problems = validate_connectors()
+
+    assert any("alpha" in problem for problem in problems), (
+        "a bundle that failed to load is absent from discovered() and must still be reported; "
+        f"got {problems}"
+    )

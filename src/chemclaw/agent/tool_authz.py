@@ -28,6 +28,7 @@ from chemclaw.agent.authz import (
     side_effecting_call,
     side_effecting_tools,
 )
+from chemclaw.agent.tool_result_size import bound_refusal_text
 from chemclaw.agent.turn_flags import is_dry_run
 from chemclaw.connectors.transport import transport_failure
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
@@ -247,8 +248,21 @@ def _refusal_message(request: Any, text: str) -> ToolMessage:
     rather than as a transient failure worth retrying. `status="error"` reaches Anthropic as
     `is_error` on the tool_result block, which is the opposite signal: it invites exactly the retry
     a deliberately-worded refusal is trying to prevent.
+
+    **"Verbatim" stops at the size ceiling, and this is the one place it can.** The two converters
+    that call this sit *outside* `bound_tool_results` in `tool_call_middleware`, so a refusal they
+    manufacture never passes the cut every returned result does — while both of them interpolate
+    **model-authored** text: `agent/model_calls.refuse_unparsed_arguments` embeds the document that
+    would not parse, and `denial_result`/`domain_error_result` embed a tool name the model invented.
+    Measured on the real chain against a 60,000-character ceiling, a 200,000-character malformed
+    document produced a 200,254-character result and a 150,000-character invented name a
+    150,141-character refusal. `bound_refusal_text` is the same arithmetic and the same notice as
+    the middleware's, applied at the one function both converters compose through
+    (`agent/tool_result_size.py`).
     """
-    return ToolMessage(content=text, tool_call_id=request.tool_call["id"])
+    return ToolMessage(
+        content=bound_refusal_text(request, text), tool_call_id=request.tool_call["id"]
+    )
 
 
 @wrap_tool_call

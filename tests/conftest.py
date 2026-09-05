@@ -33,6 +33,7 @@ from chemclaw.agent.authz import side_effecting_tools as _side_effecting_tools
 from chemclaw.connectors.reachability import forget_reachability as _forget_reachability
 from chemclaw.connectors.registry import discovered as _connectors_discovered
 from chemclaw.core.config import settings
+from chemclaw.core.tool_registry import _REGISTRY as _TOOL_REGISTRY
 from chemclaw.ingest.eln.warehouse.connect import forget_open_warehouses as _forget_warehouses
 from chemclaw.ingest.sources.registry import discovered as _sources_discovered
 from chemclaw.kg.submission import NoteSubmission, SubmissionOutcome
@@ -135,6 +136,34 @@ def _fresh_discovery_caches() -> Iterator[None]:
     _templates_discovered.cache_clear()
     _sources_discovered.cache_clear()
     _side_effecting_tools.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_generated_tools() -> Iterator[None]:
+    """Restore `core.tool_registry` to its import-time contents after every test.
+
+    **A fourth process-global of exactly the kind the fixture above argues about, and it was not
+    covered.** `_REGISTRY` is populated two ways: by `@tool` at import of `agent/tool_modules.py`,
+    which is fixed for the process's life and must stay; and by `_register_generated_tools`, which
+    adds one launcher per enabled durable job and per enabled step template *at call time*, because
+    which of those are enabled is a deployment's choice. The second kind is the leak — a test that
+    calls `_capability_tools()` or `template_tools()` leaves 23 launchers behind for the rest of
+    the session, and the next test asking "is this name taken?" gets a different answer than it
+    would alone.
+
+    That is not hypothetical: `test_a_connector_cannot_claim_a_template_launcher_name_on_the_first
+    _build` exists to prove the collision guard works on a process's *first* agent build, which is
+    the state where no launcher is registered. It passed run alone and failed in the full suite,
+    on its own precondition assertion — the test correctly refusing to be evidence about ordering
+    while something upstream had already done the registering.
+
+    Snapshot-and-restore rather than `clear()`, because the import-time half is what the whole of
+    `agent/tool_modules.py` exists to guarantee and dropping it would serve zero tools.
+    """
+    before = dict(_TOOL_REGISTRY)
+    yield
+    _TOOL_REGISTRY.clear()
+    _TOOL_REGISTRY.update(before)
 
 
 @pytest.fixture(autouse=True)

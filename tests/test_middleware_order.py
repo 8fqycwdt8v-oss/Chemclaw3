@@ -97,6 +97,11 @@ _EXPECTED_ORDER = (
     # and `audit_events.detail` must keep recording what the tool returned rather than what the
     # model was shown (`agent/tool_result_size.py`).
     "bound_tool_results",
+    # Inside the cut, and that nesting is the whole reason it is a middleware of its own rather
+    # than the first half of `frame_connector_results`. `framing._defang` escapes every `<` in a
+    # payload whose delimiter is disguised — one character for four — so neutralising above the cut
+    # put characters back after the size control had already run (`agent/tool_framing.py`).
+    "defang_tool_results",
     "announce_tool_failures",
     "audit_tool_calls",
     "enforce_tool_authz",

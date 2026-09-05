@@ -153,6 +153,16 @@ _EXPECTED_SUBSYSTEMS = {
     # is told to mark a real chemist constraint `inferred`, which is the mislabelling that check
     # exists to prevent.
     "stated_quote_history",
+    # `connectors/transport._allowed`, on the one path in the process that can see a manifest's
+    # declared tool surface and the server's advertised one at the same moment. A declared tool the
+    # server no longer serves is dropped by the intersection, while `advertised_tool_names()`, the
+    # plan gate's classification, the skills backend and `skill-validate` all go on counting it —
+    # so a skill is offered for a tool the model can never call. The only `degraded()` site here
+    # that is not inside an `except` (hence `exc_info=False`): nothing raised, which is exactly the
+    # problem. It counts rather than merely logs because a fleet drifting away from its manifests
+    # is a rate, and `make connector-validate` cannot see it at all for a bundle whose server lives
+    # in `Chemclaw3-mcp`.
+    "connector_tool_drift",
     "tool_result_store",
     "transcript_projection",
 }

@@ -23,7 +23,12 @@ import asyncio
 import logging
 
 from chemclaw.core.logging import configure_logging
-from chemclaw.publish.backfill import backfill_cached, backfill_jobs, requeue_failed
+from chemclaw.publish.backfill import (
+    backfill_cached,
+    backfill_composites,
+    backfill_jobs,
+    requeue_failed,
+)
 from chemclaw.publish.registry import publishing_enabled
 
 logger = logging.getLogger(__name__)
@@ -43,7 +48,13 @@ async def _run(args: argparse.Namespace) -> int:
         logger.info("returned %d retired publication(s) to the queue", reset)
 
     total_queued = 0
-    for label, walk in (("calculation cache", backfill_cached), ("job records", backfill_jobs)):
+    # Three walks, one per shape that can hold a publishable result. The third was added with
+    # `result_composites`: a tool composite is in neither of the other two tables by construction.
+    for label, walk in (
+        ("calculation cache", backfill_cached),
+        ("job records", backfill_jobs),
+        ("tool composites", backfill_composites),
+    ):
         seen, queued, skipped = await walk(dry_run=args.dry_run, batch=args.batch)
         total_queued += queued
         logger.info(

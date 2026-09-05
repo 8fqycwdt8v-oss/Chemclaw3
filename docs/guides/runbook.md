@@ -463,13 +463,23 @@ override a shipped one), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS
 (`endpoint.request_timeout`, `endpoint.auth`); the `bearer` mode names an env var, so no credential is
 ever written into a bundle.
 
-**Troubleshooting.** Each enabled connector is probed as one of five states: `healthy`,
-`unreachable` (the health route did not answer), `unpolled` (Temporal answered and nothing polls the
-bundle's `connector-<name>` queue — a jobs-only bundle whose worker fleet is at zero), `unknown` (the
-queue could not be asked at all, so reachability was not determined; this neither counts nor gates,
+**Troubleshooting.** Each enabled connector is probed as one of six states: `healthy`,
+`unreachable` (the health route did not answer), `unusable` (this deployment cannot open the bundle
+*at all* — today that means `transport: stdio` while `connector_stdio_enabled` is false — decided
+from configuration **before** any socket, because a host that answers has nothing to say about a
+bundle nothing can dial), `unpolled` (Temporal answered and nothing polls the bundle's
+`connector-<name>` queue — a jobs-only bundle whose worker fleet is at zero), `unknown` (the queue
+could not be asked at all, so reachability was not determined; this neither counts nor gates,
 because a broker outage is one fault shared by every durable bundle) or `unprobed` (nothing to ask —
-no `health_url` declared and no durable work, honest for a third-party server). `unreachable` and
-`unpolled` are the two that count as unhealthy and trip `connectors_required`.
+no `health_url` declared and no durable work, honest for a third-party server). `unreachable`,
+`unusable` and `unpolled` are the three that count as unhealthy and trip `connectors_required`.
+
+**A bundle whose bearer variable is unset reads `healthy` and is not one of these.** The probe is
+unauthenticated by design, so such a server answers 200 while every tool call is refused. It is the
+same class of fault as `unusable` and is deliberately outside that verdict — `registry.unusable_reason`
+records why closing it needs its own decision. If a connector is `healthy` and every call still
+fails, check its `token_env` before anything else; the WARNING the failed call logs now names the
+variable.
 `GET /readyz` reports the *count* of unhealthy ones and never their names — it is unauthenticated by necessity, so its body is a public
 document and a roster of the internal capability surface does not belong in one. The names are on
 `/metrics` (`chemclaw_connectors_unhealthy`) and in the WARNING each failed probe logs, which also

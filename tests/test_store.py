@@ -7,17 +7,27 @@ and recomputes.
 
 import asyncio
 import logging
+from unittest import mock
 
 import pytest
 
+from chemclaw.core import db
+from chemclaw.core.config import settings
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.metrics import Metrics
+from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.science.calc import store as store_module
 from chemclaw.science.calc.models import Structure
+from chemclaw.science.calc.postgres_store import PostgresStore
 from chemclaw.science.calc.store import (
     CalculationKey,
+    CalculationQuery,
     InMemoryStore,
+    ResultPayload,
     StoredResult,
     cached_compute,
 )
+from tests.pg import migrated_db_or_skip
 
 
 def test_identical_calculation_computed_once() -> None:
@@ -315,3 +325,273 @@ def test_an_empty_key_is_not_a_key() -> None:
 
     with pytest.raises(ValidationError):
         CalculationKey(calc_type="", calc_version="", input_hash="", params_hash="")
+
+
+def test_a_store_that_cannot_write_does_not_destroy_the_computation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed `put` costs a future cache hit, never the calculation in hand.
+
+    The write used to be unguarded, so a Postgres restart mid-`put` propagated out of
+    `cached_compute` and failed the leader *and* every waiter it had collected — measured, one
+    leader plus one waiter both got `RuntimeError - postgres is down`, one computation ran, and its
+    payload reached nobody. For a CREST search that is nineteen minutes of CPU discarded because a
+    cache row could not be written, which is the opposite of what a cache is for.
+
+    Both halves are asserted, because the waiter is the half that is easy to leave broken: it never
+    touches the store itself and only ever sees what the leader's future carries.
+    """
+    metrics = Metrics()
+
+    async def _run() -> tuple[tuple[ResultPayload, bool], tuple[ResultPayload, bool]]:
+        store = _BrokenWrites()
+        key = CalculationKey.build("xtb.sp", "gfn2", inputs={"smiles": "CCO"})
+        started = asyncio.Event()
+
+        async def compute() -> dict[str, float]:
+            started.set()
+            await asyncio.sleep(0.05)
+            return {"energy": -1.5}
+
+        async def waiter() -> tuple[ResultPayload, bool]:
+            await started.wait()
+            await asyncio.sleep(0.01)
+            return await cached_compute(store, key, compute)
+
+        leader = asyncio.create_task(cached_compute(store, key, compute))
+        joined = asyncio.create_task(waiter())
+        first, second = await asyncio.gather(leader, joined)
+        assert store.computes == 1
+        return first, second
+
+    with (
+        caplog.at_level(logging.WARNING),
+        mock.patch("chemclaw.core.metrics_bridge.METRICS", metrics),
+    ):
+        (payload, was_cached), (shared_payload, shared_cached) = asyncio.run(_run())
+
+    assert payload == shared_payload == {"energy": -1.5}
+    assert was_cached is False  # this caller computed it
+    assert shared_cached is True  # this one joined an in-flight computation
+    assert 'chemclaw_calc_cache_total{outcome="unstored"} 1' in metrics.render()
+    assert "could not be stored" in caplog.text
+
+
+class _BrokenWrites(InMemoryStore):
+    """A store whose `put` always fails, as a database being restarted does."""
+
+    def __init__(self) -> None:
+        """Count the computations that reached it, so a shared miss is distinguishable."""
+        super().__init__()
+        self.computes = 0
+
+    async def put(self, stored: StoredResult) -> None:
+        """Refuse every write."""
+        self.computes += 1
+        raise RuntimeError("postgres is down")
+
+
+def test_a_waiter_on_a_different_store_is_never_told_the_row_is_cached() -> None:
+    """The single-flight ledger is keyed by store as well as key, because a key is not a row.
+
+    Keyed by the flat key alone, a caller of store B joined a computation running against store A,
+    was told `was_cached=True`, and left B without the row — measured, `A: ({'e': 1}, False)`,
+    `B: ({'e': 1}, True)`, and B held nothing. Every later call on B was a miss again, so the join
+    saved no computation and bought a false statement about caching.
+    """
+
+    async def _run() -> None:
+        first, second = InMemoryStore(), InMemoryStore()
+        key = CalculationKey.build("xtb.sp", "gfn2", inputs={"smiles": "CCO"})
+        started = asyncio.Event()
+        computes = 0
+
+        async def compute() -> dict[str, int]:
+            nonlocal computes
+            computes += 1
+            started.set()
+            await asyncio.sleep(0.05)
+            return {"energy": 1}
+
+        async def other() -> tuple[ResultPayload, bool]:
+            await started.wait()
+            await asyncio.sleep(0.01)
+            return await cached_compute(second, key, compute)
+
+        (_, leader_cached), (_, other_cached) = await asyncio.gather(
+            cached_compute(first, key, compute), other()
+        )
+        assert leader_cached is False
+        assert other_cached is False, "a different store's miss is its own miss"
+        assert computes == 2
+        assert await second.get(key) is not None, "the second store must end up holding the row"
+
+    asyncio.run(_run())
+
+
+def test_a_stored_row_records_the_epoch_it_was_written_under() -> None:
+    """The epoch is on the row, not only inside the opaque `params_hash`.
+
+    Exact-key `get` was always protected by the fold into the key; the *record* was not, so a
+    browse surface served rows from two epochs side by side with nothing to tell them apart.
+    """
+
+    async def _run() -> None:
+        store = InMemoryStore()
+        key = CalculationKey.build("pka", "v3", inputs={"smiles": "CCO"})
+        await cached_compute(store, key, _one)
+        stored = await store.get(key)
+        assert stored is not None
+        assert stored.epoch == store_module.CALCULATION_EPOCH
+
+    asyncio.run(_run())
+
+
+async def _one() -> dict[str, int]:
+    """One trivial payload, for tests that care about the envelope rather than the science."""
+    return {"n": 1}
+
+
+def test_a_family_prefix_without_its_dot_is_refused_like_the_family() -> None:
+    """`"xtb"` is not a `calc_type`, and it must not slip past the molecule-filter guard.
+
+    Matching is exact equality and the real types are `xtb.sp`, `xtb.hess`, … — so `"xtb"` found
+    nothing *and* passed a `startswith(("xtb.", ...))` refusal, which made the exact combination
+    the validator exists to refuse the one combination it accepted. Measured before the fix:
+    `calc_type='xtb.sp' -> 1`, `calc_type='xtb' -> 0`, and `'xtb'` with a molecule accepted.
+    """
+    for family in ("xtb", "geometry"):
+        with pytest.raises(ValueError, match="keyed by 3-D structure"):
+            CalculationQuery(smiles="CCO", calc_type=family)
+    # And the dotted members it was always meant to catch still are.
+    with pytest.raises(ValueError, match="keyed by 3-D structure"):
+        CalculationQuery(smiles="CCO", calc_type="xtb.hess")
+    # A molecule-keyed type is unaffected.
+    assert CalculationQuery(smiles="CCO", calc_type="pka").calc_type == "pka"
+
+
+def test_two_chemists_sharing_one_cached_result_both_reach_the_results_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cache hit is the *second* chemist asking, and the store must learn both names.
+
+    Driven end to end because the defect had two independent causes, and fixing either alone
+    measures as success while the other stays open:
+
+    * `cached_compute` returned on a hit *before* `publish_stored_result`, so the second chemist
+      never enqueued at all;
+    * the outbox's `ON CONFLICT (sink, calc_ref, schema_version) DO NOTHING` dropped the second
+      row *including its `publications`*, so even an enqueue that did happen was discarded.
+
+    And underneath both, the hook named nobody — it passed no `Publication` at all, so the actor
+    index on `calculation_publication` held no row for any primitive this system had ever computed.
+    That is why this asserts on the *set of actors* rather than on a row count: a count of 1 was the
+    old bug, and a count of 2 carrying one name would be the same bug wearing a different number.
+
+    `settings.result_sinks` is the knob rather than `publishing_enabled`, for the reason
+    `tests/test_publish_reaches_the_hooks.py::_publishing` gives — two modules read that function,
+    and patching one is how a hook comes to look wired without being. It names the shipped
+    `postgres` sink because `enabled()` refuses a name no manifest declares; nothing is delivered
+    here, only queued, which is where the publication lives.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        monkeypatch.setattr(settings, "result_sinks", "postgres")
+        store = PostgresStore()
+        key = CalculationKey(
+            calc_type="pka", calc_version="probe-prov", input_hash="prov-1", params_hash="p"
+        )
+
+        async def _compute() -> ResultPayload:
+            # A real projectable payload: `_pka` builds a `Subject` from `smiles`, and a member
+            # that names no compound is refused. The point of this test is the publication, so the
+            # chemistry has to be valid enough to reach one.
+            return {"smiles": "CCO", "pka": 4.76, "method": "gfn2"}
+
+        for actor, session in (("alice", "s-alice"), ("bob", "s-bob")):
+            identity = set_current_identity(actor, frozenset())
+            session_token = set_current_session_id(session)
+            try:
+                _, was_cached = await cached_compute(store, key, _compute)
+            finally:
+                reset_current_session_id(session_token)
+                reset_current_identity(identity)
+            # bob's call is the cache hit — the branch that used to publish nothing at all.
+            assert was_cached is (actor == "bob")
+
+        async with db.connection(settings.postgres_dsn) as conn:
+            cursor = await conn.execute(
+                "SELECT document->'publications' FROM result_publications "
+                "WHERE sink = 'postgres' AND calc_ref = %s",
+                (key.as_str(),),
+            )
+            rows = await cursor.fetchall()
+        assert len(rows) == 1, "one calculation is one record, however many people asked for it"
+        actors = {entry["actor"] for entry in rows[0][0]}
+        assert actors == {"alice", "bob"}, (
+            "both requesters must survive: the sink keys publications on "
+            "(calc_ref, tenant_id, session_id, job_id) precisely to hold several"
+        )
+
+    asyncio.run(_run())
+
+
+def test_one_chemist_asking_repeatedly_does_not_grow_the_queued_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cache hit publishes, so the same chemist asking again must write nothing.
+
+    The hit path publishes on purpose — who asked is not a property of the calculation, and a hit is
+    the second chemist asking. That only stays cheap if a *repeat* by the same requester is
+    contained by the document already stored, and the first version of this hook broke exactly that:
+    it carried `correlation_id`, which `api/middleware` mints per HTTP request, so every turn
+    appended a publication the destination could not distinguish. Measured before the fix: 200 turns
+    by one actor in one session produced 200 publications in a 2,230-byte document that collapse to
+    **one** row at a sink keyed `(calc_ref, tenant_id, session_id, job_id)`, with delivery rising
+    from 56.7 ms to 669.7 ms — and because each merge bumps `revision` and resets the row to
+    `pending`, a hot key could stop settling at all.
+
+    So this drives the hot path the way the front door does — many turns, one actor, one session —
+    and asserts the document does not grow. The existing `test_re_enqueueing_the_same_publication`
+    replays one identical `Publication` object, which is the one shape a real front door never
+    produces twice; this is the shape it produces every turn.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        monkeypatch.setattr(settings, "result_sinks", "postgres")
+        store = PostgresStore()
+        key = CalculationKey(
+            calc_type="pka", calc_version="probe-repeat", input_hash="repeat-1", params_hash="p"
+        )
+
+        async def _compute() -> ResultPayload:
+            return {"smiles": "CCO", "pka": 4.76, "method": "gfn2"}
+
+        for _ in range(12):
+            identity = set_current_identity("alice", frozenset())
+            session_token = set_current_session_id("s-alice")
+            try:
+                await cached_compute(store, key, _compute)
+            finally:
+                reset_current_session_id(session_token)
+                reset_current_identity(identity)
+
+        async with db.connection(settings.postgres_dsn) as conn:
+            cursor = await conn.execute(
+                "SELECT jsonb_array_length(document->'publications'), revision "
+                "FROM result_publications WHERE sink = 'postgres' AND calc_ref = %s",
+                (key.as_str(),),
+            )
+            rows = await cursor.fetchall()
+
+        assert len(rows) == 1
+        publications, revision = rows[0]
+        assert publications == 1, (
+            f"twelve turns by one requester appended {publications} publications; the merge is "
+            "unbounded on a field the destination does not key on"
+        )
+        assert revision == 0, f"a no-op enqueue must not bump revision, got {revision}"
+
+    asyncio.run(_run())

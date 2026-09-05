@@ -157,6 +157,22 @@ class StoreSettings(BaseSettings):
     # Eviction budget in stored bytes, and the idle window a blob must exceed to be a candidate.
     # Both 0 = off, so the sweep is inert until an operator opts in — matching `retention_*_days`.
     # Eviction targets blobs only; `calculation_results` is never evicted (D-011).
+    #
+    # **Both triggers off is the shipped configuration, which means the shipped configuration has
+    # no total bound on this store at all** — `artifact_max_bytes` bounds one artifact, nothing
+    # bounds their sum, and `durable/retention.py` records the bound as a fact ("`artifact_blobs`:
+    # durable/artifact_eviction.py, by idle window and size budget") which is true of the sweep and
+    # not of any deployment. Said plainly here rather than left to be inferred from two zeros.
+    #
+    # They stay off, deliberately. Turning either on by default would make an *upgrade* delete a
+    # chemist's Hessians — a data-destroying default that arrives without anybody asking for it,
+    # against an unbounded-growth cost that is real but slow and visible in ordinary disk
+    # monitoring. The number an operator would have to invent is also not derivable here: a budget
+    # in bytes depends on the volume this deployment has, which no default can know. What *was* a
+    # defect rather than a policy is the blob a rewrite orphaned, which no sweep could reclaim
+    # because it was unreachable and which nothing else would ever have deleted;
+    # `science/calc/postgres_artifacts.py` now reclaims it at the moment of the rewrite, so the
+    # growth left here is growth somebody chose.
     artifact_store_max_bytes: int = Field(default=0, ge=0)
     artifact_evict_idle_days: int = Field(default=0, ge=0)
     # How often the eviction sweep runs, once either bound above turns it on. A day: eviction is a

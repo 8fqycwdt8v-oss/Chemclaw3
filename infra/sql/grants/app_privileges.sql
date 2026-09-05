@@ -96,9 +96,17 @@ BEGIN
     -- draft: a credential that could UPDATE an approval row could rewrite who approved what, and
     -- one that could DELETE it could make an approval that happened disappear. The header's
     -- `status` is the mutable projection; these rows are the record it is projected from.
+    --
+    -- `result_composites` joins them, and INSERT alone is the whole of what it needs: the row is
+    -- written once by `publish/composites.record_composite` under `ON CONFLICT (calc_ref) DO
+    -- NOTHING`, never updated, and `durable/retention.py` refuses to prune it for the reason
+    -- `calculation_results` and `job_records` are refused — it is the only local copy of a tool
+    -- composite, which is written to neither of those because its key names its own output. So it
+    -- is the no-DELETE argument and the write-once argument at the same time, and UPDATE would be
+    -- a privilege nobody uses.
     EXECUTE format(
         'GRANT INSERT ON bo_suggestions, structures, experiment_protocol_revisions, '
-        'experiment_protocol_status_events TO %I',
+        'experiment_protocol_status_events, result_composites TO %I',
         app_role
     );
 

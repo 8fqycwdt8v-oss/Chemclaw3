@@ -300,3 +300,148 @@ def test_a_schema_cannot_smuggle_a_second_libpq_option_past_the_timeout_bound() 
             await benign.aclose()
 
     asyncio.run(_run())
+
+
+def test_a_missing_table_is_probed_once_per_pass_not_once_per_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A site that has not run the DDL must cost one probe, not one per record per attempt.
+
+    `_known_columns` caches its answer on `self._columns` **only on success**, and a target missing
+    a table raises before that assignment. The drain then replays the batch record by record — the
+    right behaviour for a refusal about *one* record, and this refusal is about all of them — so
+    every record re-probed `information_schema`. Measured against a target with no tables:
+    **48 round trips for 5 rows**, and that was one attempt of the eight the row used to get.
+
+    Both halves are fixed here. The refusal is remembered for the sink's lifetime, which is one
+    drain pass (the drain builds a sink per run so a DBA who applies the DDL is picked up on the
+    next pass, not the next restart); and a `SinkRejectedError` no longer spends the retry budget
+    at all, so what used to be 8 attempts x 48 probes is one probe.
+    """
+    from chemclaw.durable import publish_results
+    from chemclaw.publish.drivers.postgres import PostgresWarehouse
+    from chemclaw.publish.drivers.sql import SqlResultSink
+
+    probes: list[str] = []
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        dsn = settings.postgres_dsn
+        monkeypatch.setattr(outbox, "publishing_enabled", lambda: True)
+        monkeypatch.setattr(outbox, "enabled_names", lambda: ["nostore"])
+        async with outbox._connect("test_fixture") as conn:
+            await conn.execute("DELETE FROM result_publications")
+            await conn.commit()
+        for index in range(5):
+            await outbox.enqueue_payload(
+                calc_ref=f"job-missing-{index}",
+                calc_type="calc.compare_solvents",
+                payload_kind="SolventComparisonResult",
+                payload=_screen().model_dump(mode="json"),
+            )
+
+        sink = SqlResultSink(
+            name="nostore",
+            tenant_id="site-a",
+            connection={
+                "driver": "chemclaw.publish.drivers.postgres:PostgresWarehouse",
+                "dsn": dsn,
+                # An empty schema the DDL was never applied to: every table is missing.
+                "schema": "chemclaw_no_result_store",
+            },
+        )
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            await conn.execute("CREATE SCHEMA IF NOT EXISTS chemclaw_no_result_store")
+
+        # Counted at the driver, so what is measured is *round trips to the database* rather than
+        # calls to a method that may answer from its own memory.
+        cursor_factory = PostgresWarehouse.cursor
+
+        def _counting(self: Any) -> Any:
+            probes.append("cursor")
+            return cursor_factory(self)
+
+        monkeypatch.setattr(PostgresWarehouse, "cursor", _counting)
+        outcome = await publish_results._drain_one("nostore", sink, 50)
+        await sink.aclose()
+
+        # Five queued screens decompose into three records each — the aggregate and its two parts.
+        assert outcome.failed == 15 and outcome.delivered == 0
+        assert len(probes) == 1, (
+            "one probe for the pass: the refusal must be remembered rather than re-asked of the "
+            f"database once per replayed record, got {len(probes)}"
+        )
+        async with outbox._connect("test_fixture") as conn:
+            cursor = await conn.execute(
+                "SELECT DISTINCT state, attempts FROM result_publications WHERE sink = 'nostore'"
+            )
+            assert await cursor.fetchall() == [("failed", 1)], (
+                "a sink that has answered about this content answers identically forever"
+            )
+
+    asyncio.run(_run())
+
+
+def test_the_connected_preflight_finds_registry_drift_the_manifest_check_cannot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A property this release publishes that the site's registry does not hold.
+
+    The one class of drift with no detector anywhere. `property_value.property` REFERENCES
+    `property_definition`, and those rows come from a **separate manual command**
+    (`cli/sink_schema.py --seed`) that a DBA runs by hand — while `publish/dialect.definition_for`
+    checks only the *local* registry. So a release that adds a property publishes rows the site's
+    foreign key rejects, and nothing notices until the drain dead-letters them: `sink-validate`
+    deliberately does not connect, and the sink's own probe reads `information_schema.columns`,
+    which says nothing about the rows in a table.
+
+    `--preflight` is a separate, opt-in command precisely because `sink-validate` refusing to
+    connect is a deliberate decision, not an oversight.
+    """
+    from chemclaw.cli.validate_sinks import _preflight_problems
+    from chemclaw.publish.drivers.sql import SqlResultSink
+    from chemclaw.publish.manifest import ResultSinkManifest
+
+    manifest = ResultSinkManifest(
+        name="drifted",
+        description="a site one release behind",
+        driver="chemclaw.publish.drivers.sql:SqlResultSink",
+    )
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        dsn = settings.postgres_dsn
+        await _create_store(dsn)
+        # The site is one release behind: a property this writer can publish is not seeded.
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            await conn.execute(f"SET search_path={_STORE}")
+            await conn.execute(
+                "DELETE FROM property_definition WHERE property = 'gibbs_free_energy'"
+            )
+
+        monkeypatch.setattr(
+            "chemclaw.publish.registry.build",
+            lambda _manifest: SqlResultSink(
+                name="drifted",
+                tenant_id="site-a",
+                connection={
+                    "driver": "chemclaw.publish.drivers.postgres:PostgresWarehouse",
+                    "dsn": dsn,
+                    "schema": _STORE,
+                },
+            ),
+        )
+        found = await _preflight_problems(manifest)
+        assert len(found) == 1, found
+        assert "gibbs_free_energy" in found[0]
+        assert "sink_schema --seed" in found[0], "the report has to name the command that fixes it"
+
+        # And with the seed applied it is clean, so the check is not simply always loud.
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            from chemclaw.cli.sink_schema import seed
+
+            await conn.execute(f"SET search_path={_STORE}")
+            await conn.execute(seed())
+        assert await _preflight_problems(manifest) == []
+
+    asyncio.run(_run())

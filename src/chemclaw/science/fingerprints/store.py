@@ -485,14 +485,33 @@ class PostgresFingerprintStore:
         # COLLATE "C" (byte order), because the database's default text collation (e.g.
         # en_US.UTF-8/ICU) orders mixed-case ids differently from Python's code-point sort
         # and would silently break the documented cross-backend ordering parity.
+        #
+        # **The tie-break sorts the k rows, not the table.** Written into the *inner* `ORDER BY`
+        # it made the ordering underivable from `<table>_jaccard_idx` and the planner abandoned
+        # the index for a `Seq Scan + Sort` — the identical defect `retrieval/vector_index.py` and
+        # `ingest/documents/index.py` each carry a note about, missed here. Measured on this
+        # schema with `ANALYZE` run, `bit(2048)` at ~60 bits set, k=11, median of 5:
+        # 20,000 rows, inner tie-break -> `Seq Scan` over all 20,000, **10.91 ms**; as an outer
+        # sort over the k rows the subquery already returned -> `Index Scan using
+        # molecule_fingerprints_jaccard_idx`, **1.24 ms**, and 1.40 ms with no tie-break at all.
+        # The cost is O(N) and the same statement serves `corpus_reactions`, the table sized for
+        # a ~10^7-row patent corpus, once per conversational tool call.
+        # `tests/test_fingerprint_plan.py` asserts the plan, because the rows come back correct
+        # under both plans and no unit test on a four-row table can tell them apart.
+        #
+        # The subquery projects `source` under an alias so the outer sort can name it whichever
+        # shape this store has: the unsourced form projects the constant `''` and orders by `id`
+        # alone, so an outer `ORDER BY` naming `source` would not resolve without it.
         self._similar = (
-            f"SELECT {self._source_read}, id, label, "
+            "SELECT source, id, label, similarity FROM ("
+            f"SELECT {self._source_read} AS source, id, label, "
             f"1 - (bits <%%> %(q)s::bit({width})) AS similarity "
             f"FROM {table} "
             f"WHERE definition = %(definition)s "
             f"AND 1 - (bits <%%> %(q)s::bit({width})) >= %(threshold)s "
-            f"ORDER BY bits <%%> %(q)s::bit({width}), {self._order} "
+            f"ORDER BY bits <%%> %(q)s::bit({width}) "
             f"LIMIT %(k)s"
+            f") AS hits ORDER BY similarity DESC, {self._order}"
         )
 
     @asynccontextmanager
@@ -600,9 +619,18 @@ class PostgresFingerprintStore:
         return int(row[0]) if row else 0
 
     async def find_similar(self, query_bits: str, top_k: int, threshold: float) -> list[Match]:
-        """Return up to `top_k` records with Tanimoto >= `threshold`, most similar first."""
+        """Return up to `top_k` records with Tanimoto >= `threshold`, most similar first.
+
+        The pgvector recall knobs are applied in the search's own transaction, as they are on the
+        note and document indexes. They govern how many candidates an HNSW scan hands to the
+        filters above it, which is the shape this statement has only since the tie-break moved out
+        of its inner `ORDER BY` — while the planner was answering with an exact `Seq Scan` there
+        was no candidate list for them to widen. Both default to leaving the server alone, so this
+        costs a search nothing until an operator sets one.
+        """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
+                await db.apply_vector_recall_settings(cur)
                 params = {
                     "q": query_bits,
                     "threshold": threshold,
@@ -631,6 +659,16 @@ async def find_matches(
     Honest limit on the durable backend: the threshold filter applies *after* pgvector's ordered
     HNSW scan, so a selective threshold can return fewer rows than qualify in the table and the
     flag then under-reports. It errs toward `False` — it never calls a complete page partial.
+
+    **That sentence became true when the plan was fixed, and was false while it was written.**
+    Until the tie-break moved out of `_similar`'s inner `ORDER BY`, the planner abandoned the
+    Jaccard index and answered with a `Seq Scan` — an exact scan of the whole table, under which
+    the threshold cannot hide a qualifying row and the flag cannot under-report. `EXPLAIN
+    (ANALYZE)` on the shipped statement now shows the threshold as a `Filter` on an `Index Scan
+    using <table>_jaccard_idx`, inside the `LIMIT`: bounded by `hnsw.ef_search` candidates, so a
+    row that qualifies but is not in that pool is never seen. The caveat is the price of the fix,
+    not a defect of it — `settings.hnsw_ef_search` and `settings.hnsw_iterative_scan` buy that
+    recall back, and `find_similar` now applies them the way the note and document indexes do.
 
     The one place the generic search knobs fall back to config, so the molecule
     and reaction entry points cannot drift in how they default (DRY). `top_k` may arrive

@@ -6,8 +6,23 @@ deployment does **not** own — and, crucially, says it *before* the change is a
 **A row in `attempting` after a crash is the honest state**, not a bug in the ledger. This system
 may have filed the deviation and lost the acknowledgement; a ledger that recorded only successes
 would answer "nothing happened" for exactly the case an operator most needs to investigate. So
-`begin_effect` writes first and `settle_effect` updates, and `unsettled` is the query an incident
-starts from.
+`begin_effect` writes first and `settle_effect` updates.
+
+**This module writes; it does not read for anybody.** It used to declare three read paths —
+`unsettled()`, `effects_for_session()` and an `Unsettled` model whose `meaning` field called itself
+"the sentence an operator needs beside it" — with zero references in `src/`, the CLI, the API,
+`deploy/` or `infra/`, while the docstring above said in the present tense that `unsettled` is
+where an incident starts. That is the `map_to_hpc_identity` shape this tree deletes on sight: a
+claim that a control exists.
+
+The claims were not lost with them, which is the test of whether deleting was right. The incident
+query is `state = 'attempting'`, and `infra/sql/075_effects.sql`'s `effects_unsettled_idx` is that
+predicate, indexed, for the operator who runs it. The per-session read is
+`operations/evidence_pack.assemble`, which had its own copy of `effects_for_session` all along —
+and had to, because `tests/test_layering.py` makes `operations` a leaf on the kernel precisely so
+that a reading of the record cannot reach the capability that wrote it. Two definitions of one
+query where the layering permits only one is how the live reader came to be the wrongly-ordered
+one. `tests/test_evidence_pack.py` fails whoever adds a reader here with no caller.
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -16,7 +31,7 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import TupleRow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -159,43 +174,3 @@ async def get_effect(effect_id: str) -> EffectRecord | None:
             await cur.execute(f"SELECT {_COLUMNS} FROM effects WHERE effect_id = %s", (effect_id,))
             row = await cur.fetchone()
     return _row(tuple(row)) if row else None
-
-
-async def unsettled(limit: int = 50) -> list[EffectRecord]:
-    """Effects that were begun and never settled — where an incident investigation starts.
-
-    Each row means: this system may have changed something outside itself and cannot prove either
-    way. That is a small set in a healthy deployment and the first thing to read in an unhealthy
-    one, which is why it has an index of its own.
-    """
-    async with _connect() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                f"SELECT {_COLUMNS} FROM effects WHERE state = 'attempting' "
-                "ORDER BY attempted_at LIMIT %s",
-                (max(1, min(limit, 200)),),
-            )
-            return [_row(tuple(row)) for row in await cur.fetchall()]
-
-
-async def effects_for_session(session_id: str, limit: int = 50) -> list[EffectRecord]:
-    """Every effect one conversation caused, newest first — the evidence pack's read."""
-    async with _connect() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                f"SELECT {_COLUMNS} FROM effects WHERE session_id = %s "
-                "ORDER BY attempted_at DESC LIMIT %s",
-                (session_id, max(1, min(limit, 200))),
-            )
-            return [_row(tuple(row)) for row in await cur.fetchall()]
-
-
-class Unsettled(BaseModel):
-    """The unsettled set, with the sentence an operator needs beside it."""
-
-    effects: list[EffectRecord] = Field(default_factory=list)
-    meaning: str = (
-        "Each of these was begun and never settled: this system may have changed something in "
-        "the named system and cannot prove either way. Check the far side by `external_ref` "
-        "where one was recorded, and by the job's arguments where none was."
-    )

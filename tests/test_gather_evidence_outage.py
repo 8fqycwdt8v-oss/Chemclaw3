@@ -54,6 +54,16 @@ class _NoMetadata:
         """Every id passes; no filter is ever given here."""
         return set(reaction_ids)
 
+    async def known(self, reaction_ids: Sequence[str]) -> set[str]:
+        """Every id resolves. This fake stands for a corpus with no half-landed ingests in it.
+
+        Separate from `eligible` for the reason the protocol gives: this one answers "can the
+        citation be resolved at all", which the unfiltered sweep now asks so that a fingerprint
+        row whose record write did not land cannot be served at Tanimoto 1.00 and then refuse to
+        open. Answering it `set(reaction_ids)` keeps *this* test about the outage it is named for.
+        """
+        return set(reaction_ids)
+
 
 class _Live:
     """A source that answers — with `count` hits, possibly none."""

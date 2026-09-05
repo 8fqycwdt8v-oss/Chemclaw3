@@ -45,7 +45,12 @@ from chemclaw.connectors.identity import (
     HEADER_SESSION,
     turn_identity_hook,
 )
-from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint, StdioEndpoint
+from chemclaw.connectors.manifest import (
+    BearerAuth,
+    ConnectorManifest,
+    HttpEndpoint,
+    StdioEndpoint,
+)
 from chemclaw.connectors.registry import (
     _mcp_connection,
     connector_http_client,
@@ -65,6 +70,7 @@ from chemclaw.core.identity_context import (
     set_current_identity,
 )
 from chemclaw.core.mcp_session import cancel_on_timeout, invoke
+from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.conftest import _free_port
 
@@ -298,6 +304,12 @@ def test_the_turn_identity_reaches_the_calculation_backend(
 
     port = _free_port()
     monkeypatch.setattr(settings, "calc_server_url", f"http://127.0.0.1:{port}/mcp")
+    # The credential this hop declares, present — which is what a deployment always has and what
+    # this test always assumed. `open_session` used to send no `Authorization` header at all when
+    # the variable was unset and let the far side decide; it now refuses here, so a probe that
+    # leaves it unset is asserting about an anonymous call no deployment makes. The served app is
+    # synthetic and gates nothing, so any value reaches the tool.
+    monkeypatch.setenv(settings.calc_server_token_env, "a-real-looking-token")
 
     async def _call() -> None:
         async with calc_session() as session:
@@ -1052,3 +1064,131 @@ def _probe_tool() -> BaseTool:
         return "ok"
 
     return probe
+
+
+def test_a_declared_tool_the_server_does_not_serve_is_reported_not_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The drift `_allowed` used to absorb in silence, and the reason silence was the defect.
+
+    A manifest declares the surface core advertises; the handshake says what the server actually
+    has. `_allowed` intersects the two, so a name in the first and not the second produces no tool
+    and produced no word — while `advertised_tool_names()`, `state_changing_tool_names()`, the plan
+    gate, the skills backend and `skill-validate` all go on counting it. The chemist meets that as
+    a skill offered for a tool the model can never call, and `make connector-validate` cannot see
+    it for the bundles most likely to drift: it asks the bundle's own `server/` module, and a
+    bundle we do not run ships none.
+
+    Both halves are asserted. The connector stays *usable* — its served tool is bound and it is not
+    reported unreachable — because failing the whole connector over one renamed tool would cost
+    every tool it still serves, in every turn, which inverts this module's own trade. And the drift
+    leaves a number: `chemclaw_degraded_total{subsystem="connector_tool_drift"}`, so a fleet
+    drifting away from its manifests is visible without grepping logs.
+    """
+    server = FastMCP("drift-probe")
+
+    @server.tool()
+    async def echo() -> str:
+        """The only tool this server has, while its manifest claims two."""
+        return "ok"
+
+    app = connector_app(server, name="drift-probe")
+    port = _free_port()
+
+    async def _open() -> tuple[list[str], list[str]]:
+        endpoint = _endpoint(f"http://127.0.0.1:{port}/mcp", "echo", "does_not_exist")
+        spec = _mcp_connection(
+            cast(ConnectorManifest, SimpleNamespace(name="drift-probe")), endpoint
+        )
+        async with AsyncExitStack() as stack:
+            tools, unreachable = await open_connector_specs(stack, [spec])
+            return [tool.name for tool in tools], unreachable
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    before = METRICS.value("chemclaw_degraded_total")
+    with caplog.at_level(logging.ERROR, logger="chemclaw.connectors.transport"):
+        with _Server(app, port):
+            bound, unreachable = asyncio.run(_open())
+
+    assert bound == ["echo"], "the tools the server does serve are still bound"
+    assert not unreachable, "one missing tool must not take the whole connector out of the turn"
+    assert "does_not_exist" in caplog.text and "drift-probe" in caplog.text
+    assert METRICS.value("chemclaw_degraded_total") == before + 1
+    assert 'chemclaw_degraded_total{subsystem="connector_tool_drift"}' in METRICS.render()
+
+
+def test_a_failure_inside_the_task_group_is_reported_as_its_cause(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An `ExceptionGroup`'s name is not a diagnosis, and rendering it as one hid the credential.
+
+    `create_session` opens the MCP client inside an `anyio` task group, so a
+    `MissingConnectorCredential` raised by `identity._EnvBearerAuth` during `session.initialize()`
+    reaches `absorb_connect_failure` wrapped. What an operator saw was the whole of
+
+        connector alpha is unreachable (ExceptionGroup: unhandled errors in a TaskGroup
+        (1 sub-exception))
+
+    with the variable's name — the one actionable thing in the tree — nowhere. Driven end to end
+    against a real endpoint rather than over a constructed group, because the wrapping is upstream's
+    and a hand-built `ExceptionGroup` would only prove the renderer agrees with itself.
+    """
+    endpoint = HttpEndpoint(
+        url=f"http://127.0.0.1:{_free_port()}/mcp",
+        tools=["unreached"],
+        read_only=["unreached"],
+        auth=BearerAuth(token_env="CHEMCLAW_UNSET_PROBE_TOKEN"),
+    )
+    spec = _mcp_connection(cast(ConnectorManifest, SimpleNamespace(name="alpha")), endpoint)
+
+    async def _open() -> list[str]:
+        async with AsyncExitStack() as stack:
+            _tools, unreachable = await open_connector_specs(stack, [spec])
+            return unreachable
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    with caplog.at_level(logging.WARNING, logger="chemclaw.connectors.transport"):
+        assert asyncio.run(_open()) == ["alpha"]
+    assert "MissingConnectorCredential" in caplog.text
+    assert "CHEMCLAW_UNSET_PROBE_TOKEN" in caplog.text
+    assert "TaskGroup" not in caplog.text, "the wrapper must not be what the operator is shown"
+
+
+def test_the_calc_backend_hop_refuses_rather_than_calling_anonymously(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`open_session` declares a `token_env`; unset, it used to send no `Authorization` at all.
+
+    The asymmetry that made this worth changing: a *connector's* hop fails closed on exactly this
+    condition (`identity._EnvBearerAuth`), and the chart's own `calcToken` comment says unset means
+    "`MissingConnectorCredential` on the very first call ... rather than a degraded one" — which
+    was true of every bundle reading it through that class and never of this path. The observable
+    cost was a misdescription: `D-2026-08-28-the-durable-half-has-a-backend-too` records the error
+    an operator actually got, "it does not accept the bearer taken from CHEMCLAW_CALC_TOKEN", at a
+    moment when no bearer had been taken or sent. Only this side can tell "no token" from "wrong
+    token".
+
+    The refusal is `McpCredentialRefused` rather than a new class, because the classification is
+    the one that matters to a durable job — non-retryable, the identical call will be refused
+    identically — and `connectors/calc/remote.py` and `ingest/labels/labeller.py` already map it
+    that way. `sent` is what distinguishes the two shapes for a caller that wants to word them
+    apart. Asserted against a port nothing listens on: if a socket were opened this would be
+    `McpConnectFailed` instead.
+    """
+    monkeypatch.delenv("CHEMCLAW_UNSET_PROBE_TOKEN", raising=False)
+
+    async def _open() -> None:
+        async with mcp_session.open_session(
+            f"http://127.0.0.1:{_free_port()}/mcp",
+            token_env="CHEMCLAW_UNSET_PROBE_TOKEN",
+            timeout_seconds=1.0,
+        ):
+            pass  # pragma: no cover - the open must not get this far
+
+    with pytest.raises(mcp_session.McpCredentialRefused) as raised:
+        asyncio.run(_open())
+    assert raised.value.sent is False, "no credential was sent, so this is not the server refusing"
+    assert "CHEMCLAW_UNSET_PROBE_TOKEN" in str(raised.value)
+
+    monkeypatch.setenv("CHEMCLAW_UNSET_PROBE_TOKEN", "a-real-looking-token")
+    assert mcp_session.bearer_from_env("CHEMCLAW_UNSET_PROBE_TOKEN") == "a-real-looking-token"

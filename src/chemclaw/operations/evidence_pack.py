@@ -54,7 +54,9 @@ LIMITS: tuple[str, ...] = (
     "An empty section means this system recorded nothing for it, which is not the same as nothing "
     "having happened — a window outside retention reads identically.",
     "A section named in `truncated` is a prefix, not the whole of it: this pack reads a bounded "
-    "number of rows per store, oldest first. Read the counts as lower bounds there.",
+    "number of rows per store — oldest first, except `effects`, which is newest first because a "
+    "capped list of what this system changed outside itself has to keep the recent end. Read the "
+    "counts as lower bounds there.",
 )
 
 
@@ -146,9 +148,10 @@ class EvidencePack(BaseModel):
     #: Sections that hit the per-store row cap, so what is shown is a prefix rather than the whole
     #: record. **Silence here was the defect**: every read is `ORDER BY <ts> LIMIT 200` and nothing
     #: said so, while `limits` trains a reader to treat a *non-empty* section as complete. A session
-    #: with 260 calls whose refusals all came after #200 reported zero refusals to an auditor, and
-    #: because effects are ordered oldest-first the rows dropped were the most recent — the ones an
-    #: incident is actually about.
+    #: with 260 calls whose refusals all came after #200 reported zero refusals to an auditor.
+    #: Disclosing the truncation was half the fix and the other half took a year: effects were read
+    #: oldest-first, so the rows a cap dropped were the most recent — the ones an incident is
+    #: actually about. `effects` is now read newest first.
     truncated: tuple[str, ...] = ()
 
     @property
@@ -266,6 +269,18 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
             (session_id, limit),
         )
     ]
+    # **Newest first, and it is the only read here that is.** The note on `truncated` below already
+    # said what oldest-first costs: a capped section drops the most recent effects, "the ones an
+    # incident is actually about". It disclosed the truncation and kept the ordering that makes it
+    # wrong.
+    #
+    # **The right-ordered query existed one module over and nothing called it.**
+    # `durable/effect_ledger.effects_for_session` was documented as "the evidence pack's read",
+    # ordered `attempted_at DESC`, and had zero references in `src/` — so there were two
+    # definitions of this read, and the one that ran was the wrong one. Resolved by deleting the
+    # unused one rather than by calling it, because `tests/test_layering.py` forbids exactly that
+    # import: `operations` is a leaf on the kernel so that a reading of the record cannot reach the
+    # capability that wrote it, and `effect_ledger` is what *writes* `effects`.
     effects = [
         PackEffect(
             effect_id=str(effect_id),
@@ -280,7 +295,8 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
         for effect_id, system, job, reversal, state, approved_by, external_ref, attempted_at in (
             await _rows(
                 "SELECT effect_id, system, job, reversal, state, approved_by, external_ref, "
-                "attempted_at FROM effects WHERE session_id = %s ORDER BY attempted_at LIMIT %s",
+                "attempted_at FROM effects WHERE session_id = %s "
+                "ORDER BY attempted_at DESC LIMIT %s",
                 (session_id, limit),
             )
         )

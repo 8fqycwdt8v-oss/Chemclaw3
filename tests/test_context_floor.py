@@ -541,3 +541,39 @@ def test_a_narrowing_profile_is_actually_cheaper_than_the_default() -> None:
         f"the default profile's prefix is {default_total} tokens and these are not below it: "
         f"{not_narrowing}. A profile that advertises fewer tools should cost fewer tokens."
     )
+
+
+#: Tools whose whole purpose is "look before you spend", and which the always-loaded instructions
+#: must therefore name. Each is a *read* that exists to be made before an expensive write or job,
+#: which is the one class of affordance a skill loaded on demand cannot deliver: by the time the
+#: model knows it should have checked, it has already committed the compute.
+#:
+#: `find_past_jobs` covers the question at the *job* level — what has this system already run — and
+#: `find_calculations` the same question at the *molecule* level. The prompt named the first and not
+#: the second for as long as the second existed, so the affordance a chemist actually reaches for
+#: ("what do we already know about this molecule?") was reachable only through the on-demand
+#: `skills/computational-evidence` skill, while the store behind it is never pruned and therefore
+#: always has an answer.
+_CHECK_BEFORE_SPENDING = ("find_past_jobs", "find_calculations")
+
+
+def test_the_always_loaded_prompt_names_the_look_before_you_spend_tools() -> None:
+    """A tool paid for on every turn that the prompt never names may never be reached at all.
+
+    The other side of this file's own economics. Every bound tool costs prefix tokens forever
+    (that is the ratchet above); a tool the always-loaded instructions do not name is one the model
+    has a schema for and no stated reason to prefer, which is the same waste seen from the other
+    end. It matters for exactly one class — the cheap read that must happen *before* an expensive
+    commitment — because a skill loaded on demand cannot deliver that ordering.
+
+    Measured over `_INSTRUCTIONS` when this was written: `find_past_jobs` 3 mentions,
+    `find_calculations` **0**, with the prompt explicitly telling the model to check the first
+    "before starting an expensive job" and saying nothing about the molecule-level equivalent.
+    """
+    instructions = instructions_for(get_profile("default"))
+    missing = [name for name in _CHECK_BEFORE_SPENDING if name not in instructions]
+    assert not missing, (
+        f"the always-loaded instructions never name {missing}. Each of these exists to be called "
+        "before an expensive job or write, and an affordance the model is only told about in a "
+        "skill it has to load first is one it reaches after the decision, not before it."
+    )

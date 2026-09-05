@@ -33,6 +33,14 @@ endpoint:
   # on every real substrate — the work was killed before `cached_compute` could store it, so the
   # identical retry recomputed from zero. Each completed primitive is cached as it lands, so a
   # long wait here is productive; anything past the turn deadline is cancelled by the turn anyway.
+  #
+  # **"Productive" is a property of a composite, not of every tool below.** A tool that *is* one
+  # primitive stores nothing when this bound cancels it, so a client bound above this number lets
+  # it be retried forever without ever completing — which is what `compute_atomic_descriptors` and
+  # `compute_surface_potential` were doing with a 3600 s one. They are clamped to this hop at the
+  # call site (`server/tools.py::_inline_bound`, derived from the same
+  # `registry.max_request_timeout_seconds()` this number is measured against), and
+  # `tests/test_calc_tools.py` asserts it here — the agent hop, which is the one nothing checked.
   request_timeout: 600
   auth:
     # **Bearer, and the token is this bundle's own `/mcp` credential — not the one core presents to

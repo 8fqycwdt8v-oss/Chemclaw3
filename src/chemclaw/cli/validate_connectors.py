@@ -62,6 +62,7 @@ from chemclaw.connectors.queues import bundle_queue
 from chemclaw.connectors.registry import (
     ConnectorError,
     discovered,
+    discovery_problems,
     enabled,
     job_tools,
     server_tools_module,
@@ -368,7 +369,14 @@ def validate_connectors() -> list[str]:
         found = discovered()
     except ConnectorError as exc:
         return [str(exc)]
-    problems: list[str] = []
+    # **A bundle that failed to load is a problem even though `discovered()` no longer raises.**
+    # It used to: one malformed manifest anywhere on `connectors_dir` broke every caller of
+    # `enabled()`, including deployments that never enabled it. Loading each bundle independently
+    # fixed that and moved the failure into `discovery_problems()` — which would have made this
+    # validator silent about exactly the bundles it exists to catch, since a broken one is now
+    # absent from `found` rather than fatal. The docstring's promise (discovery, not the enabled
+    # set) is kept by asking for them explicitly.
+    problems: list[str] = [f"{name}: {why}" for name, why in sorted(discovery_problems().items())]
     discovered_names = {manifest.name for bundle, manifest in found.values()}
     for bundle, manifest in found.values():
         problems.extend(_bundle_content_problems(bundle, manifest))

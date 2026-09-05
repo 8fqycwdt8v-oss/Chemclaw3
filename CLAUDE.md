@@ -144,6 +144,22 @@ delimiter anyway. Only swapped-order-plus-head-only fails. Reading "it passes wi
 swapped" as "the order is not the reason" is the inference two sufficient causes defeat, and it
 shipped here before a reviewer ran the fourth arm.
 
+**Well-formed, yes; bounded, no — and this paragraph asserted the wrong property for a month.**
+Framing did two things, and only the *envelope* has to sit outside the cut. `framing._defang`'s
+second pass replaces every `<` with `&lt;` once an invisible character reveals a disguised
+delimiter, and it ran in the outer middleware, i.e. **after** the ceiling had already been applied:
+measured on a compiled default graph at the shipped fan-out width, eight results each cut to their
+7,500-character share reached the model at **29,096** characters apiece — a 101,899-token request
+against the 100,000 budget, all of it in the newest batch neither context edit may reclaim. So the
+chain is now three layers, envelope → cut → defang: `defang_tool_results` is its own
+`wrap_tool_call` *inside* `bound_tool_results`, and `frame_connector_results` only wraps. The same
+commit made the ceiling reach the two refusals this system composes itself —
+`surface_authorization_denials` and `surface_domain_errors` manufacture a `ToolMessage` *above* the
+cut and both interpolate model-authored text, measured at 200,254 and 150,141 characters — through
+one `bound_refusal_text` at the function both compose through. A rewrite that can grow a result
+belongs inside the cut, and a ceiling is a claim about what the model reads rather than about what
+a tool returned.
+
 **That sweep missed one, and 2026-08-26 finished it**
 (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`): `audit_events.agent` was
 empty on **every row that trail has ever written**, because `set_current_specialist` had no caller

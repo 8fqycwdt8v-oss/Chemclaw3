@@ -197,11 +197,17 @@ async def test_the_vectors_leave_and_the_catalogue_stays(tmp_path: Path) -> None
 
 @_sync
 async def test_dense_search_ranks_in_the_store_and_returns_note_ids(tmp_path: Path) -> None:
-    """A note is embedded whole, so the point id *is* the note id — no encoding, no resolve step."""
+    """A note is embedded whole, so the point id *is* the note id — no encoding, no resolve step.
+
+    Written under the *live* embedding key, not a fixture string: the dense read filters on it, so a
+    row stamped `key-1` is a row from a superseded configuration and correctly ranks nothing. On the
+    pgvector backend it never ranked anything either — this fixture only passed while the subclass
+    ignored the predicate.
+    """
     store = InMemoryVectorStore()
     index = await _fresh_index(store)
     await index.upsert(
-        [_record("reaction-a", [1.0, 0.0]), _record("reaction-b", [0.0, 1.0])], "key-1"
+        [_record("reaction-a", [1.0, 0.0]), _record("reaction-b", [0.0, 1.0])], await _key()
     )
 
     hits = await index.search_dense([1.0, 0.0], 5)
@@ -210,11 +216,14 @@ async def test_dense_search_ranks_in_the_store_and_returns_note_ids(tmp_path: Pa
 
 @_sync
 async def test_a_scope_narrows_before_the_cut_rather_than_after_it(tmp_path: Path) -> None:
-    """Filtering after the top-k is how a narrow scope over a wide corpus returns nothing at all."""
+    """Filtering after the top-k is how a narrow scope over a wide corpus returns nothing at all.
+
+    Under the live embedding key for the reason the test above states.
+    """
     store = InMemoryVectorStore()
     index = await _fresh_index(store)
     await index.upsert(
-        [_record(f"reaction-{n}", [1.0 - n / 100, n / 100]) for n in range(20)], "key-1"
+        [_record(f"reaction-{n}", [1.0 - n / 100, n / 100]) for n in range(20)], await _key()
     )
 
     hits = await index.search_dense([0.0, 1.0], 1, within={"reaction-1"})
@@ -283,3 +292,96 @@ async def _embed(text: str) -> list[float]:
     from chemclaw.core.embeddings import embed_texts
 
     return embed_texts([text])[0]
+
+
+@_sync
+async def test_the_dense_read_drops_vectors_from_a_superseded_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model swap must empty this index's dense leg, not fill it with cross-space garbage.
+
+    `PostgresNoteIndex._dense` binds `embedding_key = %(key)s` for a measured reason its own comment
+    states: repointing `embedding_model` at another model of the same width raises nothing at
+    insert, and every stored vector then scores against the *new* model's query — "cross-space
+    garbage cited as evidence", with the citations resolving because the note ids are real.
+
+    This subclass namespaced the key it *stores* and the key the *rebuild* diffs on, and left the
+    read unfiltered. Measured before the fix: a vector upserted under model A and searched after a
+    switch to model B came back at 0.9939 from the external store while the pgvector index returned
+    nothing and `fingerprints()` correctly reported the row as needing a re-embed — the three
+    answers disagreed about the same row.
+
+    The fix filters the store's matches against the catalogue, which is why this can be asserted
+    with a fake store: the predicate is enforced against a real `note_index` table, so an adapter
+    that quietly ignored a filter argument could not make this pass.
+    """
+    store = InMemoryVectorStore()
+    index = await _fresh_index(store)
+    monkeypatch.setattr(settings, "embedding_model", "model-a")
+    await index.upsert([_record("reaction-a", [1.0, 0.0])], await _key())
+
+    assert [hit.note_id for hit in await index.search_dense([1.0, 0.0], 5)] == ["reaction-a"], (
+        "the positive control: under the configuration that wrote it, the vector is a hit"
+    )
+
+    monkeypatch.setattr(settings, "embedding_model", "model-b")
+    assert await index.fingerprints(await _key()) == {}, (
+        "the rebuild already reads this row as stale — that half was never broken"
+    )
+    assert [match.id for match in await store.search(COLLECTION, [1.0, 0.0], 5)] == [
+        "reaction-a"
+    ], "the store still holds the old vector; nothing has re-embedded yet"
+    assert await index.search_dense([1.0, 0.0], 5) == [], (
+        "a vector from a superseded embedding configuration is not evidence"
+    )
+
+
+@_sync
+async def test_an_empty_keep_set_retires_nothing_from_the_durable_index() -> None:
+    """The same guard as `test_an_empty_keep_set_retires_nothing`, on the backend that matters.
+
+    That test pins `InMemoryNoteIndex`, under a docstring saying two cheap noes are worth more than
+    one because the failure is silent and expensive. The durable half was unpinned: measured,
+    deleting `if not keep: return []` from `PostgresNoteIndex._retire_absent_ids` left the whole
+    suite green, because `DELETE … WHERE NOT (note_id = ANY('{}'))` is true of every row and
+    nothing asserted the empty case against a real table.
+
+    Expensive is not a figure of speech here. `reindex_notes` has its own early return, so reaching
+    this with an empty set means the corpus loader returned nothing — a mis-pointed
+    `knowledge_dir`, a bad mount — and the cost of being wrong is one embedding call per note to
+    rebuild.
+    """
+    await _fresh_index(InMemoryVectorStore())  # empties note_index; the store is unused here
+    index = PostgresNoteIndex()
+    text = "Ester A notes."
+    await index.upsert(
+        [
+            NoteRecord(
+                note_id="reaction-a",
+                text=text,
+                embedding=await _embed(text),
+                fingerprint="fp-reaction-a",
+            )
+        ],
+        await _key(),
+    )
+
+    assert await index.retire_absent(set()) == 0
+    assert set(await index.fingerprints(await _key())) == {"reaction-a"}
+
+
+@_sync
+async def test_an_empty_keep_set_leaves_the_external_store_s_points_alone() -> None:
+    """And on this subclass the same missing guard is a full corpus re-embed *plus* a store wipe.
+
+    `retire_absent` here deletes the catalogue rows and then the points they addressed, so an
+    unguarded empty `keep` takes out both halves — and the vector store is the half no other sweep
+    rebuilds. Asserted on the store, not only on the catalogue, because that is the expensive side.
+    """
+    store = InMemoryVectorStore()
+    index = await _fresh_index(store)
+    await index.upsert([_record("reaction-a", [1.0, 0.0])], await _key())
+
+    assert await index.retire_absent(set()) == 0
+    assert [match.id for match in await store.search(COLLECTION, [1.0, 0.0], 5)] == ["reaction-a"]
+    assert set(await index.fingerprints(await _key())) == {"reaction-a"}
