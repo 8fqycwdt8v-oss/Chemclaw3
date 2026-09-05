@@ -43,6 +43,15 @@ measured: the assignment form dies, the loop form reached the end and exited 0. 
 is refused too — `fleet_checkout_python` already catches a missing checkout, and this catches a
 present one that publishes no manifest this repository declares an endpoint for.
 
+**A test on `main` was pinning the broken form as the fix.** #313's
+`test_the_live_lane_derives_its_bundle_list_rather_than_naming_one` asserted the literal
+`for name in $(fleet_bundle_names "$python"); do`, which is exactly the substitution whose failure
+bash discards — so a test named for a property was pinning a line, and the line it pinned was the
+unguarded one. It now asserts the property from both directions, including that the direct
+substitution is *absent*. That is the second half of the same lesson the mutants taught in #308:
+**a test that names an implementation instead of a behaviour will hold the implementation still
+while the behaviour rots.**
+
 **Handing the judge the agent's cached client armed a footgun rather than defusing one — and the
 fix for it is not in this commit, because `main` had already made the whole thing moot.**
 `_tls_http_client` is a process-wide singleton the agent holds for its whole life, and

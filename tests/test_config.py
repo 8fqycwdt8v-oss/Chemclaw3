@@ -101,14 +101,31 @@ def test_the_live_lane_derives_its_bundle_list_rather_than_naming_one() -> None:
     `CHEMCLAW_CONNECTORS_ENABLED` to the fleet's bundles would have taken the core-served ones
     (`bo`, `calc`, `molfp`, `rxnfp`, `results`) off the lane with it, which is why this asserts the
     derivation exists and *not* that the lane pins its enabled set.
+
+    **The shape it pins moved once, and the reason is the point.** This first asserted the literal
+    `for name in $(fleet_bundle_names "$python"); do` — which is the form that *swallows* a failure
+    in the thing it derives: bash does not propagate a command substitution's exit status under
+    `set -e` when it only feeds a `for` list, though it does for an assignment. So the test named a
+    line rather than the property in its own title, and the line it named was the unguarded one.
+    It now pins the property from both directions, which is what makes a green run here evidence
+    that the lane fails loudly rather than starting half a fleet.
     """
     script = (
         Path(__file__).resolve().parent.parent / "infra" / "live" / "processes.sh"
     ).read_text()
 
     assert "fleet_bundle_names()" in script, "the lane must derive its fleet bundles"
-    assert 'for name in $(fleet_bundle_names "$python"); do' in script, (
-        "start_fleet_bundles must iterate the derived names rather than a list written here"
+    assert 'names="$(fleet_bundle_names "$python")" || die' in script, (
+        "start_fleet_bundles must iterate the derived names rather than a list written here — "
+        "and must check the derivation, which only an assignment can do"
+    )
+    assert "for name in $names; do" in script, (
+        "the loop must run over the checked names, not re-derive them"
+    )
+    assert 'for name in $(fleet_bundle_names "$python"); do' not in script, (
+        "the substitution must not be iterated directly: `for x in $(cmd)` does not propagate a "
+        "non-zero exit under `set -e`, so a crash inside the derivation leaves the loop running "
+        "over partial output — the same silent partial list the derivation replaced"
     )
     assert "export CHEMCLAW_CONNECTORS_ENABLED" not in script, (
         "the lane must not pin its enabled set: narrowing it drops the core-served bundles the "
