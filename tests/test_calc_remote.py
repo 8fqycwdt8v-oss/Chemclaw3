@@ -74,13 +74,21 @@ class _FakeSession:
 
 
 class _Result:
-    """The `CallToolResult` shape the client reads: `isError` plus text content."""
+    """The `CallToolResult` shape the client reads: `isError` plus text content.
 
-    def __init__(self, payload: dict[str, Any], is_error: bool = False) -> None:
+    A *failed* call carries plain text rather than JSON, which is what the wire actually looks
+    like: `Tool.run` raises `ToolError(f"Error executing tool {name}: {e}")` and
+    `_make_error_result` puts `str(e)` in one text block untouched. The fake used to JSON-wrap
+    every answer, error included — harmless while the client matched its markers anywhere in the
+    text, and load-bearing now that it matches them at the head, since a wrapped marker is exactly
+    the *echoed* shape `server_marked` exists to reject.
+    """
+
+    def __init__(self, payload: dict[str, Any] | str, is_error: bool = False) -> None:
         import json
 
         self.isError = is_error
-        self.content = [_Text(json.dumps(payload))]
+        self.content = [_Text(payload if isinstance(payload, str) else json.dumps(payload))]
 
 
 class _Text:
@@ -233,7 +241,9 @@ def test_a_refused_call_and_an_unreachable_server_are_different_failures(
 
     class _Failing(_FakeSession):
         async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-            return _Result({"detail": "unparameterised solvent"}, is_error=True)
+            return _Result(
+                "Error executing tool predict_pka: unparameterised solvent", is_error=True
+            )
 
     _session(monkeypatch, _Failing(_KEY, {}))
 
@@ -271,7 +281,10 @@ def test_the_servers_internal_error_is_an_outage_not_bad_data(
 
     class _Broken(_FakeSession):
         async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-            return _Result({"detail": "an internal error occurred"}, is_error=True)
+            return _Result(
+                "Error executing tool predict_pka: an internal error occurred (error id 4a7f21c9)",
+                is_error=True,
+            )
 
     _session(monkeypatch, _Broken(_KEY, {}))
 
@@ -306,13 +319,9 @@ def test_a_full_pod_is_backpressure_not_bad_data(monkeypatch: pytest.MonkeyPatch
             if name == "calculation_key":
                 return _Result({"key": _KEY})
             return _Result(
-                {
-                    "detail": (
-                        "Error executing tool predict_pka: [calc-at-capacity] this server has 0 "
-                        "of its 4 calculation slots free and predict_pka needs 1, so it was "
-                        "refused rather than queued. Retry once one finishes"
-                    )
-                },
+                "Error executing tool predict_pka: [calc-at-capacity] this server has 0 "
+                "of its 4 calculation slots free and predict_pka needs 1, so it was "
+                "refused rather than queued. Retry once one finishes",
                 is_error=True,
             )
 
@@ -349,6 +358,9 @@ def test_a_domain_refusal_is_still_bad_data_when_the_marker_is_absent(
     bad molecule is bad on every attempt. The token is bracketed precisely so no sentence anybody
     writes contains it by accident; this drives a refusal that talks about capacity in English and
     asserts it is *still* classified as bad data.
+
+    **The absent case is the easy half and it was the only half tested.** A caller cannot write the
+    token by accident; it can write it *on purpose*, which is what the sibling test below drives.
     """
 
     class _Wordy(_FakeSession):
@@ -356,7 +368,8 @@ def test_a_domain_refusal_is_still_bad_data_when_the_marker_is_absent(
             if name == "calculation_key":
                 return _Result({"key": _KEY})
             return _Result(
-                {"detail": "this molecule has more capacity for hydrogen bonding than the model"},
+                "Error executing tool predict_pka: this molecule has more capacity for hydrogen "
+                "bonding than the model",
                 is_error=True,
             )
 
@@ -368,6 +381,80 @@ def test_a_domain_refusal_is_still_bad_data_when_the_marker_is_absent(
         assert not isinstance(refused.value, CalcBusyError)
 
     asyncio.run(_run())
+
+
+def test_the_marker_cannot_be_forged_from_a_tool_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reachable half of the case above: a refusal that quotes the token back at us.
+
+    `servers/calc` interpolates the caller's own strings into its domain refusals — the solvent
+    check raises "…has no parameters for {name!r}…", the xTB wrapper does the same with
+    {method!r} — and `solvent` is a free-form argument on that tool surface. So while the client
+    matched `SERVER_AT_CAPACITY` anywhere in the message, `solvent="[calc-at-capacity]"` was a
+    permanently bad input classified as backpressure: reproduced end to end, it raised
+    `CalcBusyError`, bought ~28 minutes of `calculation_retry` backoff on an input no retry can
+    fix, **and** incremented `chemclaw_calc_backend_at_capacity_total`, which the shipped alert
+    rule pages "scale the calculation tier" on. A caller could manufacture that page from a tool
+    argument.
+
+    The refusal text is the one `servers/calc/engine/solvents.py` actually produces for an
+    unsupported solvent name, transcribed rather than built from this repository's constant, for
+    the reason the test above gives: the two repositories share no package, so a literal is the
+    whole contract.
+
+    The counter is asserted as well as the class, because the alert is the half that reaches a
+    person at 3 a.m. and it moves on the *classification*, not on the exception the chemist sees.
+    """
+
+    class _Echo(_FakeSession):
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            if name == "calculation_key":
+                return _Result({"key": _KEY})
+            return _Result(
+                "Error executing tool predict_pka: GFN2-xTB's ALPB solvation model has no "
+                "parameters for '[calc-at-capacity]'. It is an implicit model with a fixed set "
+                "of parameterized solvents, so an unlisted one cannot be approximated.",
+                is_error=True,
+            )
+
+    _session(monkeypatch, _Echo(_KEY, {}))
+    before = METRICS.value("chemclaw_calc_backend_at_capacity_total")
+
+    async def _run() -> None:
+        with pytest.raises(CalcToolError) as refused:
+            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        assert not isinstance(refused.value, CalcBusyError), (
+            "a marker echoed back inside a domain refusal is not the server saying it is full"
+        )
+
+    asyncio.run(_run())
+
+    assert METRICS.value("chemclaw_calc_backend_at_capacity_total") == before, (
+        "a tool argument moved the saturation series the capacity alert pages on"
+    )
+
+
+def test_the_marker_is_read_at_the_head_where_the_server_writes_it() -> None:
+    """The unit under the two tests above: what `server_marked` accepts and what it refuses.
+
+    Driven directly because the classification tests can only show the two ends. The transport's
+    own prefix must pass (`Tool.run` raises `ToolError(f"Error executing tool {name}: {e}")`,
+    which `_make_error_result` sends verbatim), a bare marker must pass — the server writes it at
+    the head and `mcp_server_kit` may re-wrap after redaction — and a marker anywhere else must
+    not, because everywhere else is where a quoted argument lands.
+    """
+    marker = mcp_session.SERVER_AT_CAPACITY
+
+    assert mcp_session.server_marked(f"{marker} 0 of 4 slots free", marker)
+    assert mcp_session.server_marked(
+        f"Error executing tool relax_structure: {marker} 0 free", marker
+    )
+    assert not mcp_session.server_marked(f"no parameters for {marker!r}", marker)
+    assert not mcp_session.server_marked(
+        f"Error executing tool relax_structure: no parameters for {marker!r}", marker
+    )
+    assert not mcp_session.server_marked("Unknown tool: " + marker, marker)
 
 
 def test_a_black_holed_server_fails_to_connect_in_seconds_not_quarter_hours() -> None:

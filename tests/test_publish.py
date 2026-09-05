@@ -257,12 +257,23 @@ def test_the_calculation_retry_waits_out_a_full_backend_without_spinning_at_it()
         waits.append(min(interval, cap))
         interval *= policy.backoff_coefficient
     assert waits[-1] == cap, "the last retry must wait a whole calculation, not a fraction of one"
-    # Nineteen minutes is the measured CREST search this has to outlast, and the total must still
-    # fit in the parent job's slack over one full attempt — the ceiling `Settings` already checks.
+    # Nineteen minutes is the measured CREST search this has to outlast.
     total = sum(waits, timedelta())
     assert total > timedelta(minutes=19)
-    slack = settings.connector_job_timeout_seconds - settings.xtb_job_timeout_seconds
-    assert total < timedelta(seconds=slack)
+    # **And the slack it has to fit in is the composite, not the ceiling minus the work.** This
+    # read `connector_job_timeout_seconds - xtb_job_timeout_seconds` and so measured the room left
+    # over one *attempt*, ignoring the queue wait that precedes it — which is the same
+    # bound-versus-composite error `connector_queue_wait_timeout` was rederived to end
+    # (`D-2026-09-05-a-refusal-for-capacity-is-not-a-refusal-of-the-question` §3). What the parent
+    # ceiling must actually contain on the path these retries exist for is a job that waits for a
+    # slot, is refused at capacity, backs off, and then runs: p95 backpressure on `connector-calc`
+    # is ~1.98 h measured, and one full attempt is `xtb_job_timeout_seconds`.
+    longest, _ = settings.longest_bundle_activity
+    composite = timedelta(hours=1.98) + total + timedelta(seconds=longest)
+    assert composite < timedelta(seconds=settings.connector_job_timeout_seconds), (
+        "a job that queues, is refused for capacity, backs off and then runs must still finish "
+        "inside the ceiling its parent gives it"
+    )
 
 
 @workflow.defn
@@ -329,11 +340,21 @@ def test_a_bundle_queue_wait_is_bounded_generously_rather_than_by_cores_hour() -
     """
     bundle = connector_queue_wait_timeout()
     core = queue_wait_timeout()
+    longest, _ = settings.longest_bundle_activity
+    ceiling = timedelta(seconds=settings.connector_job_timeout_seconds)
 
     assert bundle > timedelta(hours=1.98), "measured p95 backpressure would fail this bound"
-    assert bundle < timedelta(seconds=settings.connector_job_timeout_seconds), (
-        "a queue bound at or above the job's own execution ceiling can never fire first, which is "
-        "the state it exists to make loud"
+    # **The composite, because the wait precedes the work and the ceiling has to hold both.**
+    # `bundle < ceiling` is true of the bound alone and was false of the pair it is spent with:
+    # at the fraction this replaced, 9,000 s of wait plus a 15,000 s CREST search was 24,000
+    # against an 18,000 s ceiling, so a job inside both of its own bounds died as a bare
+    # `WorkflowExecutionTimedOut` — the failure the bound was added to remove. Asserted against
+    # `longest_bundle_activity` rather than against `xtb_job_timeout_seconds` so a bundle whose
+    # longest activity overtakes the CREST search is covered by the same line.
+    assert bundle + timedelta(seconds=longest) < ceiling, (
+        "the queue wait plus the longest activity it precedes must fit inside the child's own "
+        "execution ceiling, or a job that waits and then runs dies as a workflow execution "
+        "timeout delivered to no workflow code"
     )
     assert bundle > core, "core's hour is the bound this one exists not to be"
 

@@ -168,3 +168,26 @@ Corrections are in the review document, in place, each with the measurement that
 - `CHEMCLAW_FRAMING_ENVELOPE_SECRET` must be set for server-side prefix caching to hit across pods.
 - `_DELETE_BATCH_ROWS` is a module constant; promote to config if the batch size should be tunable.
 - A `serverConfig.test.ts` flake in the UI, pre-existing, ordering-dependent.
+
+## 2026-09-05 — five defects an adversarial review found in the context-floor work
+
+Scoped to `tests/test_bo_tools.py`, `tests/test_context_floor.py`, `tests/test_compaction.py`,
+`tests/test_context_budget.py`, `core/config/agent.py`, `agent/context_budget.py`, `.env.example`,
+`deploy/helm/chemclaw/values.yaml`.
+
+- [x] **1 (blocking).** Restore the three `bo` schema tests `7576713` deleted while keeping the
+      narrowing `70912a0` landed. All three re-run against HEAD; one needed adapting (the sentence
+      it asserts wraps across a source line, so the served prose is whitespace-normalised before
+      the `in` check — the property is that the sentence travels, not where it wraps). Each proved
+      able to fail by a mutation of `science/bo/problem.py` in a restored-afterwards copy.
+- [x] **2 (major).** `agent_context_token_budget = 133,000` permits a request no 128k model
+      accepts. Capped to 120,000, derived against the smallest window this stack targets, and the
+      chart now states `CHEMCLAW_LLM_CONTEXT_WINDOW_TOKENS` so the second bound is real.
+      Both halves asserted in `tests/test_compaction.py`.
+- [x] **3 (major).** `SERVED_ELSEWHERE`'s 9,538 was stale on the day it was written; re-measured
+      **9,864**. Figures corrected, and the allowance is now guarded by a test that measures the
+      sibling checkout for real and skips *loudly* when it is not there.
+- [x] **4 (minor).** The budget's half of the derivation is asserted, so collapsing the split
+      fails a test instead of passing 150 of them.
+- [x] **5 (minor).** The stale numbers inside `agent/context_budget.py` are gone or point at what
+      measures them.

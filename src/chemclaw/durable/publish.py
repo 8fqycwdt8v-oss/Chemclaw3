@@ -15,7 +15,7 @@ exact class name, so the concrete names are listed too). The queue bounds are th
 other shared discipline here: one place that says how long an activity may wait for a worker to pick
 it up, in three sizes because a wait means three different things. `queue_wait_timeout` is core's
 hour; `connector_queue_wait_timeout` is a bundle's, where a long wait is ordinary backpressure; and
-`light_write_queue_wait_timeout` is the tighter one the two end-of-job writes take, because patience
+`light_write_queue_wait_timeout` is the tighter one the end-of-job writes take, because patience
 there is time a finished job has told nobody about. `calculation_retry` is the last piece —
 `BAD_DATA_RETRY` with a backoff sized to the thing that is now retryable, a shared calculation
 backend that is full.
@@ -327,11 +327,20 @@ def queue_wait_timeout() -> timedelta:
 def light_write_queue_wait_timeout() -> timedelta:
     """How long a *small* write may wait on the shared background queue, before it is a fault.
 
-    Two calls want this rather than the hour above, and both sit at the end of a job: the session
-    push-back (`durable/notify.py`) and the durable job record (`durable/connector_job.py`). Both
-    are swallowed by their caller, and the job record additionally sits *in front of* the message
-    telling a chemist their job died — so an hour of patience there is an hour in which a failed
-    job is not reported (`tests/test_durable_observability.py` holds exactly that).
+    Three calls want this rather than the hour above, and all three sit at the end of a job: the
+    session push-back (`durable/notify.py`) and the durable job record, written once by
+    `durable/connector_job.py` and once by `durable/template_job.py`. All are swallowed by their
+    caller, and the connector wrapper's record additionally sits *in front of* the message telling
+    a chemist their job died — so an hour of patience there is an hour in which a failed job is not
+    reported (`tests/test_durable_observability.py` holds exactly that).
+
+    **The third was found by a reviewer rather than by this sentence, which is why the count is
+    here at all.** `template_job.py`'s record is the identical activity on the identical queue with
+    the identical numbers, and it kept the `schedule_to_close_timeout` the other two were moved off
+    — under a comment claiming it matched the connector wrapper "exactly and for its reason", true
+    when it was written and false the moment that pair was fixed. Two call sites named in prose is
+    a claim a third has to falsify by hand; the sentence above now says three, and what actually
+    holds the rule is `tests/test_activity_queue_bound.py`'s walk over every dispatch site.
 
     **They were bounded by `schedule_to_close_timeout` at twice their own work budget — 60 s — and
     that is a total rather than a wait, so it was spent almost entirely on a queue neither call
@@ -444,10 +453,13 @@ def calculation_retry() -> RetryPolicy:
 
     **It fits inside the parent ceiling, and that is checked arithmetic rather than a hope.** A
     saturation refusal costs milliseconds, so the retries add ~1,688 s to a job whose parent
-    execution budget (`connector_job_timeout_seconds`, 18,000 s) already carries 3,000 s of slack
-    over one full attempt (`xtb_job_timeout_seconds`, 15,000 s). If a deployment narrows that slack
-    the parent ceiling is still the backstop, and `Settings` already refuses a ceiling that does not
-    cover one attempt.
+    execution budget (`connector_job_timeout_seconds`) carries 10,200 s over one full attempt
+    (`xtb_job_timeout_seconds`, 15,000 s) at the shipped defaults. That slack is not free space,
+    though — it is the same headroom `connector_queue_wait_timeout` spends on the wait — so the
+    composite a job can actually run up is *wait plus backoff plus attempt*, and it is that sum
+    `tests/test_publish.py` asserts against the ceiling at the measured p95 backpressure. If a
+    deployment narrows the slack the parent ceiling is still the backstop, and `Settings` already
+    refuses a ceiling that does not cover one attempt.
 
     **The jitter is this function's, because Temporal has none — measured rather than assumed.**
     `RetryPolicy` carries no jitter field, and driven against the real broker on 2026-09-05 an

@@ -54,7 +54,11 @@ from chemclaw.connectors.queues import bundle_queue
 # ceiling fired — a failure that names neither the queue nor the reason and reaches no
 # workflow code. The bound is stated once, there, because a wait means something different on
 # a bundle queue than on core's.
-from chemclaw.durable.publish import BAD_DATA_RETRY, connector_queue_wait_timeout
+from chemclaw.durable.publish import (
+    BAD_DATA_RETRY,
+    calculation_retry,
+    connector_queue_wait_timeout,
+)
 from chemclaw.durable.registry import durable_workflow
 
 
@@ -225,7 +229,17 @@ class BoCampaignWorkflow:
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
                 schedule_to_start_timeout=connector_queue_wait_timeout(),
-                retry_policy=BAD_DATA_RETRY,
+                # **`calculation_retry` and not `BAD_DATA_RETRY`, because this activity reaches the
+                # shared calculation backend.** A *computed* objective is
+                # `science.bo.objectives.solubility_objective`, which calls `cached_remote` on a
+                # cache miss, so `CalcBusyError` — the admission gate refusing a full pod — is one
+                # of the failures this dispatch can see. Temporal's default 1/2/4/8 s against a
+                # hold that is a whole calculation long is exactly what `calculation_retry`'s own
+                # docstring calls "a small storm that then fails anyway": five attempts inside
+                # fifteen seconds, and the round fails carrying the serving side's advice to retry.
+                # The type list is identical, so a bad candidate still fails fast; only the spacing
+                # differs, which is the property the calc bundle's own dispatch already has.
+                retry_policy=calculation_retry(),
             )
         )
 

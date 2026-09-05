@@ -1145,13 +1145,17 @@ def test_a_transport_fault_is_not_a_job_s_failure_reason() -> None:
 
 
 def test_the_job_duration_histogram_brackets_the_job_ceiling() -> None:
-    """A p95 that saturates at 900 s cannot describe a job budgeted at 18,000.
+    """A p95 that saturates at 900 s cannot describe a job budgeted in hours.
 
     `chemclaw_job_duration_seconds` was bound to `_TOOL_BUCKETS`, whose top finite boundary is 900,
-    while `connector_job_timeout_seconds` defaults to 18,000 and `xtb_job_timeout_seconds` to
-    15,000. `histogram_quantile` returns the highest finite boundary rather than interpolating into
-    `+Inf`, so the quantile pinned at exactly 900 s as jobs got expensive — verbatim the defect
+    while `connector_job_timeout_seconds` is hours and `xtb_job_timeout_seconds` is 15,000.
+    `histogram_quantile` returns the highest finite boundary rather than interpolating into `+Inf`,
+    so the quantile pinned at exactly 900 s as jobs got expensive — verbatim the defect
     `_TURN_BUCKETS` was split off to fix one tier up.
+
+    Asserted against the setting rather than against the boundaries, which is what caught the
+    ceiling's move to 25,200 s: the old top boundary was 21,600, so the histogram would have
+    saturated below the budget it exists to describe.
     """
     buckets = _HISTOGRAM_BUCKETS["chemclaw_job_duration_seconds"]
     ceiling = settings.connector_job_timeout_seconds
@@ -1164,4 +1168,4 @@ def test_the_job_duration_histogram_brackets_the_job_ceiling() -> None:
     metrics = Metrics()
     metrics.observe("chemclaw_job_duration_seconds", 15000.0, {"connector": "calc"})
     rendered = metrics.render()
-    assert 'chemclaw_job_duration_seconds_bucket{connector="calc",le="18000"} 1' in rendered
+    assert 'chemclaw_job_duration_seconds_bucket{connector="calc",le="21600"} 1' in rendered

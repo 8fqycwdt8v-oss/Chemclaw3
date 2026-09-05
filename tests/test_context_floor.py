@@ -324,12 +324,19 @@ load_profiles()
 #:
 #: **What this still does not cover is named rather than implied.** `SERVED_ELSEWHERE`'s three
 #: bundles are `Chemclaw3-mcp`'s servers, so their schemas arrive at handshake from a process this
-#: repository does not build: 9,538 tokens over 21 tools measured against the sibling checkout on
-#: 2026-09-05, which puts the shipped `default` prefix at ~73,600 over 113 tools and makes this
-#: ceiling a gate on ~87% of it. `SERVED_ELSEWHERE_ALLOWANCE` is the bound for the rest and
+#: repository does not build: **9,864 tokens over 21 tools**, measured against the sibling checkout
+#: on 2026-09-05, which puts the shipped `default` prefix at **73,963** over 113 tools and makes
+#: this ceiling a gate on 87% of it. `SERVED_ELSEWHERE_ALLOWANCE` is the bound for the rest and
 #: `PREFIX_BOUND` is the two added. That remainder is a measurement
 #: (`chemclaw_connector_tool_schema_tokens`), not a gap in the ratchet, and it cannot become one
 #: without this repository building somebody else's server.
+#:
+#: **The figure this paragraph shipped with was 9,538, and it was stale on the day it was
+#: written** — the sibling repository's own merge landed a `Raises:` paragraph and eleven lines
+#: into `chem` the same afternoon. That is not a transcription error, it is the property of a
+#: number about a repository this one does not build, and it is the reason
+#: `test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_bound` below now
+#: measures the sibling rather than quoting it.
 #:
 #: The headroom is **901** tokens against 64,099 — under what one `propose_knowledge_note` costs
 #: (1,126), which is the property every entry above was chosen for, and it is stated here knowing
@@ -515,17 +522,27 @@ SERVED_ELSEWHERE = frozenset({"chem", "rxnpredict", "safety"})
 #: added wherever a caller needs the figure a deployment actually pays: `PREFIX_BOUND` below.
 #:
 #: Measured 2026-09-05 against the `Chemclaw3-mcp` checkout beside this one — every declared tool,
-#: through this repository's own `convert_to_openai_tool` path — the three bundles cost **9,538
-#: tokens over 21 tools** (`chem` 5,380 / 12, `rxnpredict` 2,526 / 6, `safety` 1,632 / 3). 11,000
-#: carries ~15% over that, which is the headroom a surface this file cannot ratchet needs: nothing
-#: here fails when one of those servers adds a tool, so the allowance has to absorb one.
+#: through this repository's own `convert_to_openai_tool` path — the three bundles cost **9,864
+#: tokens over 21 tools** (`chem` 5,577 / 12, `rxnpredict` 2,655 / 6, `safety` 1,632 / 3). 11,000
+#: carries **11.5%** over that, which is the headroom a surface this file cannot ratchet needs:
+#: nothing here fails when one of those servers adds a tool, so the allowance has to absorb one.
 #:
-#: **It is not asserted, and cannot be.** A test reading a sibling checkout would pass or fail on
-#: whether somebody happens to have cloned it, which is the failure mode
-#: `cli/validate_connectors.py::unverified_tool_surfaces` refuses for the same surface. What makes
-#: the figure re-derivable instead of a claim is that the method is written down: dump
-#: `tools/list` from each `chemclaw_mcp_<name>` server and convert it exactly as `_served_tools`
-#: converts a local one.
+#: **That was 9,538 and "~15%" when it was written, and it was already wrong the same day.** The
+#: sibling repository merged a `Raises:` paragraph and eleven lines into `chem` between the
+#: measurement and the commit that recorded it — 326 tokens, a third of the headroom, moved by a
+#: repository this one does not build and cannot watch. A figure like that does not go stale
+#: eventually; it goes stale on somebody else's merge schedule, which is why the paragraph below
+#: no longer says the allowance cannot be asserted.
+#:
+#: **It is asserted, and the honest form of the assertion is one that can skip.**
+#: `test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_bound` runs the
+#: sibling's own servers in the sibling's own interpreter, converts their `tools/list` exactly as
+#: `_served_tools` converts a local one, and fails when the total passes this allowance. Where
+#: there is no sibling checkout it **skips with the reason in the message**, because a check that
+#: quietly shrinks is worse than one that says what it did not look at — the argument
+#: `cli/validate_connectors.py::unverified_tool_surfaces` makes about the identical blind spot one
+#: layer over. A skip is not a pass: CI without the sibling learns nothing here, and
+#: `tests/conftest.py`'s epilogue is what makes that visible.
 SERVED_ELSEWHERE_ALLOWANCE = 11_000
 
 #: The whole static prefix a shipped `default` turn may cost, as a bound: this file's ceiling plus
@@ -978,6 +995,157 @@ def test_the_bundles_this_floor_cannot_measure_are_exactly_the_ones_it_names() -
         f"this file can measure the tool schemas of {sorted(endpoint_bundles - unmeasurable)} and "
         f"not of {sorted(unmeasurable)}, but SERVED_ELSEWHERE names {sorted(SERVED_ELSEWHERE)}. "
         "Update it and the ceiling comment's share-of-the-prefix figure in the same commit."
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# The half this ratchet cannot serve, measured rather than quoted.
+#
+# `SERVED_ELSEWHERE_ALLOWANCE` bounds three servers built in `Chemclaw3-mcp`, and `PREFIX_BOUND`
+# — which both compaction defaults are derived from — is that allowance plus this file's ceiling.
+# So a bound nobody checks is not a bound on the prefix, it is a bound on the part of the prefix
+# this repository happens to author, and the other part moves on somebody else's merge schedule:
+# the recorded 9,538 was 9,864 by the end of the day it was measured.
+#
+# The measurement runs the sibling's servers in the *sibling's* interpreter, because
+# `chemclaw_mcp_chem` is not importable from this workspace at any price — the whole point of
+# `D-2026-08-09-a-connector-we-do-not-run` is that this repository does not carry their closure.
+# What crosses the process boundary is `tools/list` as JSON, which is exactly what a handshake
+# delivers; the conversion and the counting happen here, through the same two functions every
+# other figure in this file goes through.
+# --------------------------------------------------------------------------------------------
+
+#: The program run inside the sibling checkout's interpreter. Written here rather than committed
+#: there because it is *this* file's measurement: the sibling owes the fleet a `tools/list`, not a
+#: token count in this repository's estimator.
+_SIBLING_DUMP = """
+import asyncio, importlib, json, sys
+from mcp.shared.memory import create_connected_server_and_client_session
+
+
+async def dump(name):
+    server = importlib.import_module("chemclaw_mcp_%s.tools" % name).server
+    async with create_connected_server_and_client_session(server) as session:
+        listed = await session.list_tools()
+        return [t.model_dump(mode="json", exclude_none=True) for t in listed.tools]
+
+
+print(json.dumps({name: asyncio.run(dump(name)) for name in sys.argv[1:]}))
+"""
+
+
+def _sibling_python() -> tuple[Path | None, str]:
+    """The sibling checkout's own interpreter, or `None` and the reason there is not one.
+
+    `CHEMCLAW_MCP_CHECKOUT` overrides the search so a CI job that clones the sibling somewhere
+    else can still measure; the default is the directory beside this repository, which is where
+    `infra/live/e2e-full-stack/up.sh` expects the family to sit.
+    """
+    import os
+
+    root = Path(os.environ.get("CHEMCLAW_MCP_CHECKOUT", "")) or Path(__file__).parents[2] / (
+        "Chemclaw3-mcp"
+    )
+    if not root.is_dir():
+        return None, f"no Chemclaw3-mcp checkout at {root} (set CHEMCLAW_MCP_CHECKOUT)"
+    interpreter = root / ".venv" / "bin" / "python"
+    if not interpreter.exists():
+        return None, f"{root} has no .venv — run `make install` there to measure its schemas"
+    return interpreter, ""
+
+
+def _served_elsewhere_tokens() -> tuple[dict[str, tuple[int, int]], str]:
+    """Per-bundle `(tools, tokens)` for `SERVED_ELSEWHERE`, or an empty mapping and the reason.
+
+    Never raises for a missing or broken sibling: this file's job is to bound *this* repository's
+    prefix, and a checkout somebody has not built is a fact about their laptop rather than a
+    regression. It raises for nothing at all — a failure to run the dump is returned as the reason
+    string, so the caller decides between skipping and failing.
+    """
+    import subprocess
+
+    interpreter, reason = _sibling_python()
+    if interpreter is None:
+        return {}, reason
+    names = sorted(SERVED_ELSEWHERE)
+    try:
+        completed = subprocess.run(
+            [str(interpreter), "-c", _SIBLING_DUMP, *names],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            cwd=str(interpreter.parents[1]),
+        )
+    except (OSError, subprocess.SubprocessError) as error:  # pragma: no cover - environment
+        return {}, f"could not run the sibling's interpreter: {error}"
+    if completed.returncode != 0:
+        return {}, f"the sibling's tools/list dump failed: {completed.stderr.strip()[-400:]}"
+    try:
+        listed = json.loads(completed.stdout)
+    except ValueError as error:  # pragma: no cover - environment
+        return {}, f"the sibling's dump was not JSON: {error}"
+
+    from langchain_core.tools import StructuredTool
+
+    def _unused(**kwargs: Any) -> None:
+        """A body these tools never get: only their published schema is measured."""
+
+    measured: dict[str, tuple[int, int]] = {}
+    for name, tools in listed.items():
+        total = 0
+        for tool in tools:
+            built = StructuredTool(
+                name=str(tool["name"]),
+                description=str(tool.get("description") or ""),
+                args_schema=tool["inputSchema"],
+                func=_unused,
+            )
+            total += _count(_tool_schema(built))
+        measured[str(name)] = (len(tools), total)
+    return measured, ""
+
+
+def test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_bound() -> None:
+    """`SERVED_ELSEWHERE_ALLOWANCE` has to be checked against the servers it stands in for.
+
+    **Why this is not the same test as the ceiling above.** The ceiling bounds what this repository
+    builds and a pull request here is what moves it. This allowance bounds three servers built in
+    another repository, so nothing in *this* one's history moves it — and `PREFIX_BOUND`, which
+    `core/config/agent.py` derives both compaction defaults from, is the two added. Left as a
+    recorded figure it was wrong within hours of being recorded: 9,538 became 9,864 on the sibling's
+    own merge, a third of the headroom, with every test here green. Roughly a thousand more tokens
+    over there — two `chem` tools — would put the real prefix over the bound both defaults rest on,
+    and this repository would have had no way to notice.
+
+    **A skip, loudly, rather than a green line.** A test that needs somebody else's checkout cannot
+    be a hard requirement of this suite; the failure mode `cli/validate_connectors.py::
+    unverified_tool_surfaces` names is a check that quietly narrows to what it can reach. So the
+    skip message says which bundles went unmeasured and why, and `tests/conftest.py`'s epilogue
+    counts it — the run then states what it is not evidence about instead of implying it checked.
+    """
+    measured, reason = _served_elsewhere_tokens()
+    if not measured:
+        pytest.skip(
+            f"the {len(SERVED_ELSEWHERE)} bundles served from Chemclaw3-mcp "
+            f"({', '.join(sorted(SERVED_ELSEWHERE))}) were NOT measured: {reason}. "
+            f"SERVED_ELSEWHERE_ALLOWANCE ({SERVED_ELSEWHERE_ALLOWANCE}) and therefore PREFIX_BOUND "
+            f"({PREFIX_BOUND}) are unchecked in this run, and both compaction defaults are derived "
+            "from them."
+        )
+    assert set(measured) == set(SERVED_ELSEWHERE), (
+        f"measured {sorted(measured)} where SERVED_ELSEWHERE names {sorted(SERVED_ELSEWHERE)}"
+    )
+    total = sum(tokens for _tools, tokens in measured.values())
+    breakdown = ", ".join(
+        f"{name} {tokens} / {tools}" for name, (tools, tokens) in sorted(measured.items())
+    )
+    assert total <= SERVED_ELSEWHERE_ALLOWANCE, (
+        f"the bundles this ratchet cannot serve now cost {total} tokens ({breakdown}) against an "
+        f"allowance of {SERVED_ELSEWHERE_ALLOWANCE}. That allowance is half of PREFIX_BOUND "
+        f"({PREFIX_BOUND}), which `core/config/agent.py` derives `agent_tool_result_clear_trigger` "
+        "and `agent_context_token_budget` from — so raising it is a change to both defaults and to "
+        "what every request may cost, not a bump. Raise all three together, or narrow a schema in "
+        "Chemclaw3-mcp."
     )
 
 

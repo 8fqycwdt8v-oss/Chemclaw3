@@ -320,8 +320,8 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
         # Temporal type name, resolved at dispatch against whatever the bundle's worker registered —
         # so `mypy` cannot see it, no test covered it, and a typo passed lint, type, pytest and
         # every other rule in this file. What it costs at runtime: the child starts on a queue whose
-        # worker serves no such type, the parent waits `connector_job_timeout_seconds` (5 h at the
-        # shipped default), and the chemist is told "running" for a day. That is the failure
+        # worker serves no such type, the parent waits the whole `connector_job_timeout_seconds`,
+        # and the chemist is told "running" for a day. That is the failure
         # `durable/registry.py` exists to prevent, one level above where it can see.
         if served is not None and job.workflow not in served:
             queue = bundle_queue(manifest.name)

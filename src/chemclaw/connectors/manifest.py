@@ -478,13 +478,14 @@ class JobSpec(BaseModel):
     # A job that opens a durable wait (`durable/awaiting.py`) spends wall clock doing nothing, and a
     # workflow execution timeout cannot tell that apart from a wedged run — so
     # `child_execution_timeout` hands such a job no ceiling at all, and every job that leaves this
-    # `false` keeps the deployment's five-hour one exactly as before.
+    # `false` keeps the deployment's own one exactly as before.
     #
     # It exists because the ceiling and the wait were 67x apart and no manifest could close the gap:
     # `BoCampaignWorkflow._measure` waits `bo_measurement_deadline_days` (a fortnight, the plate
-    # turnaround a screening campaign is *for*) under `connector_job_timeout_seconds` (five hours,
-    # sized off a CREST search), and `timeout_seconds` above may only lower. Raising the fleet-wide
-    # number instead would have given every xTB and CREST job a fortnight to be wedged in.
+    # turnaround a screening campaign is *for*) under `connector_job_timeout_seconds` (hours, sized
+    # off a CREST search and the queue wait it funds), and `timeout_seconds` above may only lower.
+    # Raising the fleet-wide number instead would have given every xTB and CREST job a fortnight to
+    # be wedged in.
     #
     # This is a claim about the job's *shape*, not a number it may inflate, which is why it is safe
     # to let a manifest declare it: the bundle knows whether its workflow suspends and core cannot

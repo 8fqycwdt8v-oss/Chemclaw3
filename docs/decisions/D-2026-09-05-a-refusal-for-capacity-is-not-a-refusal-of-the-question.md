@@ -38,18 +38,41 @@ side's own advice to retry.
    1.016 / 2.013 / 4.015 / 8.021 s against nominal 1/2/4/8. Without jitter every job a full pod
    refused together would return together. Spread downward only, per-run and replay-deterministic.
 
-3. *A bundle queue's wait is bounded, at its own scale.* `D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait`
-   scoped its rule to `durable/` and argued the exclusion — on a bundle queue a wait genuinely *is*
-   backpressure. That argument is still right and is not an argument for no bound: measured at 200
-   users the only ceiling was the child's five hours, so a job that never got a slot told the
-   chemist "running" and then failed as a workflow-execution timeout, which is delivered to nobody
-   and names neither the queue nor the reason. The bound is half the job's own budget — above the
-   measured p95 backpressure of ~1.98 h, below the parent ceiling. Eight call sites, and the AST
-   scan now covers `connectors/` so a future bundle cannot omit it.
+3. *A bundle queue's wait is bounded, at its own scale, and it is the ceiling's **headroom**.*
+   `D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait` scoped its rule to `durable/`
+   and argued the exclusion — on a bundle queue a wait genuinely *is* backpressure. That argument
+   is still right and is not an argument for no bound: measured at 200 users the only ceiling was
+   the child's own execution timeout, so a job that never got a slot told the chemist "running"
+   and then failed as a workflow-execution timeout, which is delivered to nobody and names neither
+   the queue nor the reason. Seven call sites, and the AST scan now covers `connectors/` so a
+   future bundle cannot omit it.
+
+   **The first form of this bound was a fraction of the ceiling, and an adversarial review of this
+   ADR's own work reproduced the defect that leaves.** The wait *precedes* the work, so what the
+   child's execution budget has to contain is `q + w`: at half of 18,000 s, 9,000 + 15,000 =
+   24,000 against an 18,000 s ceiling, and a job that waited inside its wait bound and then ran
+   inside its work bound died at the ceiling as a bare `WorkflowExecutionTimedOut` — precisely the
+   failure this section exists to remove (reproduced on the real broker scaled 1000:1; three
+   guards missed it, two of them by asserting the bound alone where the composite was the claim).
+   A smaller fraction is no fix, because `q = fC` makes the wait grow with the very ceiling it has
+   to fit inside. So the wait is now `connector_job_timeout_seconds` minus
+   `Settings.longest_bundle_activity` minus `activity_timeout_seconds` — the same max the
+   ceiling's own validator checks against, read rather than restated — which makes the composite
+   fit by construction, with no cross-check to forget.
+
+   **That costs funded runtime, and the ceiling rises to pay for it.** The headroom at 18,000 s
+   would have been 2,970 s, *below* the measured p50 backpressure (~3,744 s), so a healthy queued
+   job would have been failed. `connector_job_timeout_seconds` therefore goes 18,000 -> 25,200 s
+   (15,000 + 30 + 10,170: one CREST search, the child's overhead, and a wait bound ~1.4x the
+   measured p95 of ~7,128 s), and `template_run_timeout_seconds` 25,320 -> 32,520 s, because a
+   `job` step's bound moved with it and `_the_template_run_ceiling_covers_one_step` treats
+   equality as the defect. `chemclaw_job_duration_seconds`' top buckets move with the ceiling too,
+   or the p95 saturates below the budget it exists to describe.
 
 4. *The 60-second drops are bounded separately from the work they cannot control.* Push-back and the
-   job record both carried `schedule_to_close_timeout = 60 s` on the queue that also runs 900 s
-   template steps; measured, eight slots held by long activities made a 50 ms activity wait 41.6 s
+   job record — the connector wrapper's *and* the template runner's, which is three call sites and
+   shipped here as two — all carried `schedule_to_close_timeout = 60 s` on the queue that also runs
+   900 s template steps; measured, eight slots held by long activities made a 50 ms activity wait 41.6 s
    and return `Activity task timed out` at 60.1 s. Both failures were swallowed best-effort, so the
    session showed "running" for ever and `job_records` — the only copy outliving Temporal history —
    was lost. Now a `schedule_to_start` bound, with the work bound unchanged and the retry budget
@@ -62,7 +85,10 @@ side's own advice to retry.
 
 **What it costs, stated because it is a real behavioural change.** A durable calc job against a
 saturated backend now spends up to ~28 minutes in backoff before failing, where it used to fail
-instantly. That is the fix rather than a side effect — the instant failure was wrong — but it does
+instantly — on the BO path too, whose evaluation activity reaches the same backend through
+`solubility_objective` and was left on Temporal's 1/2/4/8 s default, which is the storm this
+schedule exists not to be. A deployment also funds two hours more runtime per connector job (§3),
+which is what buys the queue bound its headroom. That is the fix rather than a side effect — the instant failure was wrong — but it does
 mean a genuinely dark backend surfaces more slowly. `chemclaw_calc_backend_at_capacity_total{tool}`
 is what separates *busy* from *dark*, and it is deliberately **not** on `chemclaw_degraded_total`,
 which would fire the outage alert on ordinary busy-ness and make the one series an operator trusts
@@ -74,8 +100,9 @@ workflow-id reuse already collapses the dominant case, and the obvious remedy is
 with the pool and the activity ceiling both at 8, holding eight advisory locks starved an ordinary
 query to `PoolTimeout` after 5.00 s against live Postgres. The row stands with its trigger.
 
-**Two queue bounds are derived, not settings.** They are fractions of `connector_job_timeout_seconds`
-and `template_step_timeout_seconds` with the derivation written down. Promoting them to
+**Two queue bounds are derived, not settings.** One is `connector_job_timeout_seconds`' headroom
+over the longest activity it bounds and one is `template_step_timeout_seconds`, each with the
+derivation written down. Promoting them to
 ENV-overridable settings was proposed and declined: it would let an operator set a queue bound
 *above* the job budget it must stay below, which the derived form cannot express, and which is
 exactly the class of contradiction the fleet cross-checks in `core/config` exist to catch after the

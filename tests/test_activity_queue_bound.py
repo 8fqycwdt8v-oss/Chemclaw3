@@ -58,15 +58,30 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 _WORKFLOW_TREES = {"durable": 30, "connectors": 7}
 
 # The two ways a call can bound its queue wait. `schedule_to_start_timeout` is the general one
-# (`durable/publish.py::queue_wait_timeout`); `schedule_to_close_timeout` is stricter — it caps
-# every attempt together — and `durable/notify.py` passes it deliberately for its best-effort
-# push-back. Either satisfies the invariant this file exists for, which is that the wait is bounded
-# at all.
+# (`durable/publish.py::queue_wait_timeout`, and `light_write_queue_wait_timeout` for the
+# end-of-job writes); `schedule_to_close_timeout` is stricter — it caps every attempt together.
+# **No call site passes the second one today.** The two small writes that did were moved off it,
+# measured: it is a *total*, so on a queue they do not control it was spent on the wait and it
+# capped all five attempts together. It stays accepted here because it does bound the wait, which
+# is the invariant this file exists for; it is not the bound to reach for.
 _QUEUE_BOUNDS = {"schedule_to_start_timeout", "schedule_to_close_timeout"}
 
-# The two SDK calls that put an activity task on a queue. `execute_local_activity` is deliberately
+# Every SDK call that puts an activity task on a queue. `execute_local_activity` is deliberately
 # absent (see `_dispatch_calls`).
-_DISPATCH_NAMES = {"execute_activity", "start_activity"}
+#
+# **The `_method`/`_class` forms are the ordinary spelling for a class-bound activity, and this set
+# held only the two bare ones** — so `workflow.execute_activity_method(Cls.act, …)` with nothing
+# but a start-to-close budget walked straight past the scan, which is the same evasion the
+# receiver check was widened to close (`_dispatch_calls` records that measurement).
+# `test_the_scan_sees_a_class_bound_dispatch` drives one rather than trusting this list.
+_DISPATCH_NAMES = {
+    "execute_activity",
+    "execute_activity_method",
+    "execute_activity_class",
+    "start_activity",
+    "start_activity_method",
+    "start_activity_class",
+}
 
 
 def _dispatch_calls(tree: str) -> list[tuple[str, set[str]]]:
@@ -97,31 +112,49 @@ def _dispatch_calls(tree: str) -> list[tuple[str, set[str]]]:
     """
     calls: list[tuple[str, set[str]]] = []
     for path in sorted((_SRC / tree).rglob("*.py")):
-        module = ast.parse(path.read_text())
-        for node in ast.walk(module):
-            if not isinstance(node, ast.Call):
+        calls.extend(_dispatch_calls_in(path.read_text(), path.relative_to(_SRC).as_posix()))
+    return calls
+
+
+def _dispatch_calls_in(source: str, where: str) -> list[tuple[str, set[str]]]:
+    """The walk itself, over one module's text — so a test can drive it on a spelling nobody wrote.
+
+    Split out from the tree walk for one reason: the failure this file guards is a *new* call site
+    written without a bound, and the only honest way to show the matcher sees a spelling is to hand
+    it that spelling. Asserting the names against `dir(temporalio.workflow)` instead would say the
+    names exist, not that this walk matches them.
+
+    Args:
+        source: One module's text.
+        where: How a match in it should be named in the failure message.
+
+    Returns:
+        One `(where:line, keyword names)` pair per dispatched activity call.
+    """
+    calls: list[tuple[str, set[str]]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            if func.attr not in _DISPATCH_NAMES:
                 continue
-            func = node.func
-            if isinstance(func, ast.Attribute):
-                if func.attr not in _DISPATCH_NAMES:
-                    continue
-                # `self.next.execute_activity(...)`: the interceptor chain, not a dispatch.
-                receiver = func.value
-                if (
-                    isinstance(receiver, ast.Attribute)
-                    and receiver.attr == "next"
-                    and isinstance(receiver.value, ast.Name)
-                    and receiver.value.id == "self"
-                ):
-                    continue
-            elif isinstance(func, ast.Name):
-                # `from temporalio.workflow import execute_activity` — a bare call.
-                if func.id not in _DISPATCH_NAMES:
-                    continue
-            else:
+            # `self.next.execute_activity(...)`: the interceptor chain, not a dispatch.
+            receiver = func.value
+            if (
+                isinstance(receiver, ast.Attribute)
+                and receiver.attr == "next"
+                and isinstance(receiver.value, ast.Name)
+                and receiver.value.id == "self"
+            ):
                 continue
-            where = path.relative_to(_SRC).as_posix()
-            calls.append((f"{where}:{node.lineno}", {kw.arg for kw in node.keywords if kw.arg}))
+        elif isinstance(func, ast.Name):
+            # `from temporalio.workflow import execute_activity` — a bare call.
+            if func.id not in _DISPATCH_NAMES:
+                continue
+        else:
+            continue
+        calls.append((f"{where}:{node.lineno}", {kw.arg for kw in node.keywords if kw.arg}))
     return calls
 
 
@@ -144,6 +177,46 @@ def test_every_dispatched_activity_call_bounds_the_queue_wait(tree: str, floor: 
     )
     unbounded = [where for where, passed in calls if not passed & _QUEUE_BOUNDS]
     assert unbounded == []
+
+
+def test_the_scan_sees_a_class_bound_dispatch() -> None:
+    """The `_method`/`_class` spellings, driven rather than listed.
+
+    `_DISPATCH_NAMES` held `execute_activity` and `start_activity` only, while
+    `temporalio.workflow` also exports `execute_activity_method`, `execute_activity_class`,
+    `start_activity_method` and `start_activity_class` — and the `_method` form is the *ordinary*
+    way to dispatch a class-bound activity rather than an exotic one. So the walk above could be
+    passed by writing the next durable job in the shape the SDK's own documentation shows, which
+    makes the rule advisory exactly where it is meant to be structural.
+
+    Driven on source text rather than asserted against `dir(temporalio.workflow)`: the question is
+    whether *this walk* matches the spelling, and a name list that agrees with itself is what the
+    receiver check already learned not to trust. The bounded twin is checked in the same breath, so
+    a matcher that flagged everything would not pass this either.
+    """
+    unbounded = """
+class Job:
+    async def run(self) -> None:
+        await workflow.execute_activity_method(
+            Worker.record, start_to_close_timeout=timedelta(seconds=30)
+        )
+"""
+    bounded = """
+class Job:
+    async def run(self) -> None:
+        await workflow.start_activity_class(
+            Worker,
+            start_to_close_timeout=timedelta(seconds=30),
+            schedule_to_start_timeout=timedelta(seconds=60),
+        )
+"""
+    seen = _dispatch_calls_in(unbounded, "synthetic.py")
+    assert len(seen) == 1, "a class-bound dispatch is invisible to the walk"
+    assert not seen[0][1] & _QUEUE_BOUNDS, "and this one is the unbounded shape the rule refuses"
+
+    ok = _dispatch_calls_in(bounded, "synthetic.py")
+    assert len(ok) == 1
+    assert ok[0][1] & _QUEUE_BOUNDS
 
 
 def test_an_activity_nobody_polls_fails_instead_of_waiting_forever(

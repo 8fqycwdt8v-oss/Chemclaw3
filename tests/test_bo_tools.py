@@ -655,7 +655,12 @@ def test_the_decision_space_still_explains_itself_where_the_model_reads_it() -> 
     Asserted over the served `inputSchema` rather than over the Python docstrings, for the reason
     `test_the_tool_the_model_sees_states_what_is_and_is_not_supported` gives: that is what travels.
     """
-    prose = " ".join(_described(_served_input_schema("suggest_next_experiment")))
+    # Whitespace-normalised, because a docstring's *line wrapping* is not part of what travels: the
+    # sentence this asserts sits across a line break in `LinearConstraint`, so a literal `in` over
+    # the raw text fails on where the source happens to wrap and passes again on a reflow nobody
+    # meant as a change. The property is that the sentence is in the schema, not that it is on one
+    # line — and this is exactly the arm that was red when the tests were first written.
+    prose = " ".join(" ".join(_described(_served_input_schema("suggest_next_experiment"))).split())
     # A categorical whose options are molecules is worth featurizing, and `descriptors` is not the
     # model's to fill.
     assert "structures" in prose and "SMILES" in prose

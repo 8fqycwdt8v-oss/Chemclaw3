@@ -136,8 +136,10 @@ class CalcBusyError(SubsystemUnavailableError):
     (`durable/publish.py::calculation_retry`), because that is the layer that can wait minutes
     without holding a worker slot.
 
-    The message is written for the chemist, who is told the system will wait and ask again — not
-    that their molecule was wrong.
+    The message is written for the chemist, who is told their molecule is fine and what actually
+    happens next — and it names both paths, because this class is raised on the durable one, where
+    the retry is automatic, and on the in-process tool surface, where it is not
+    (`agent/tool_authz.py` returns it to the model as an ordinary domain error).
     """
 
 
@@ -278,10 +280,18 @@ async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) ->
         logger.warning(
             "the calculation server refused %s because it is full; the job will be retried", tool
         )
+        # **Worded so it is true on both paths, which is what it was not.** It promised "the
+        # system will wait and ask again" — true of a durable job, whose `calculation_retry`
+        # backoff does exactly that, and false of the in-process tool surface, where
+        # `agent/tool_authz.py`'s domain-error converter hands this sentence to the model as an
+        # ordinary refusal and nothing retries anything. The model then had a promise instead of
+        # the actionable advice the server's own refusal used to carry ("Retry once one
+        # finishes"). One sentence naming both paths costs nothing and cannot be false on either.
         raise CalcBusyError(
             f"the calculation service is busy: every calculation slot was taken when {tool} was "
             "asked for, so it was turned away before any work started. Nothing is wrong with what "
-            "was asked — the system will wait and ask again."
+            "was asked, and the same request succeeds once a calculation finishes: a durable job "
+            "waits and asks again on its own, and a direct call has to be made again."
         ) from exc
     except McpRequestRefused as exc:
         raise CalcToolError(str(exc)) from exc

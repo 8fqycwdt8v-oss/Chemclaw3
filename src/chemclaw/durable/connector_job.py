@@ -464,7 +464,7 @@ def wrapper_execution_timeout() -> timedelta:
     (`Settings._the_template_run_ceiling_covers_one_step`).
 
     What is left is genuinely this function's subject and is deliberately not changed: a campaign
-    started as a template `job` step is still reaped here at roughly five hours, because a template
+    started as a template `job` step is still reaped here at the fleet ceiling, because a template
     step is bounded and a wait for a plate is a fortnight. Raising it means raising
     `connector_job_timeout_seconds` for the whole fleet and `template_run_timeout_seconds` above
     that, which is an operator's decision about funded runtime rather than a manifest's — the
@@ -520,7 +520,7 @@ def child_execution_timeout(
 
     **What is given up, stated rather than implied.** For this one job the wall-clock reaper is
     gone, so a bundle worker that never comes back leaves the campaign `running` instead of failing
-    it in five hours. What still bounds it: every wait is clamped at `awaiting_max_days` by
+    it at the fleet ceiling. What still bounds it: every wait is clamped at `awaiting_max_days` by
     `open_pending_request_activity`, an unanswered wait *ends* the campaign rather than continuing
     on a batch nobody ran, every activity carries its own start-to-close and heartbeat, and the
     round count is refused above `bo_max_rounds` at launch. Every other job keeps the ceiling, so

@@ -709,10 +709,13 @@ _TOOL_BUCKETS: tuple[float, ...] = (
 # p95 pinned at exactly 900 s precisely as jobs got expensive — on the series whose own HELP text
 # says it exists "so a p95 exists for the most expensive work in the system".
 #
-# Bracketed on both sides of the ceiling (14400 below, 21600 above) so a deployment saturating its
-# own job timeout is visible as mass moving into the 18000 bucket rather than as a quantile that
+# Bracketed on both sides of the ceiling (21600 below, 28800 above) so a deployment saturating its
+# own job timeout is visible as mass moving into the 25200 bucket rather than as a quantile that
 # stops moving. The low end stays fine-grained because a re-run that hits the D-011 cache returns
-# in seconds and belongs in a bucket of its own rather than pooled with a CREST search.
+# in seconds and belongs in a bucket of its own rather than pooled with a CREST search. The top
+# three boundaries moved with the ceiling when it went to 25,200 s to fund a bundle's queue wait
+# out of its own headroom; `tests/test_durable_observability.py` asserts the bracket against the
+# setting rather than against these literals, which is what made that a caught knock-on.
 _JOB_BUCKETS: tuple[float, ...] = (
     1.0,
     5.0,
@@ -727,8 +730,9 @@ _JOB_BUCKETS: tuple[float, ...] = (
     3600.0,
     7200.0,
     14400.0,
-    18000.0,
     21600.0,
+    25200.0,
+    28800.0,
 )
 # A generic set for the histograms added since, whose range is "a network call": an embedding
 # batch, a database statement, one delivery to a result sink, one model call.
