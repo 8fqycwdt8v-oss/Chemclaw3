@@ -391,24 +391,49 @@ configuration stays valid. Each alert therefore compares a *live* left-hand side
 declared ceiling and is self-disabling when none is declared:
 `ChemclawFleetAboveItsTurnCeiling` (`sum(chemclaw_turn_capacity)` against
 `chemclaw_fleet_turn_ceiling`), `ChemclawFleetAboveItsConnectionCeiling`
-(`sum(chemclaw_pg_pool_max_size)` against `chemclaw_pg_fleet_max_connections`), and
+(`sum(chemclaw_pg_pool_max_size)` against `chemclaw_pg_fleet_max_connections`, **each server
+separately** — see below), and
 `ChemclawCalcBackendOverCommitted` (`sum(chemclaw_calc_requests_in_flight)` against
 `chemclaw_calc_backend_max_concurrent_requests`).
 
-**The connection one is charged in pools, and it used to be charged in pods.** `postgres.maxConnections`
-is compared against `chemclaw.fleetPools × CHEMCLAW_PG_POOL_MAX_SIZE`, and `pg_pool_max_size` bounds
-one *pool*: `core/db` keys a pool on `(dsn, libpq options)`, so a process holds one per distinct
-pair plus any foreign pool it registers. Measured by driving each role's composition root, a
-front-door process holds the stores' pool, the `/readyz` probe's (its own statement timeout is a
-distinct key — deliberately, since sharing the stores' pool makes readiness answer 503 while the
-pool is merely busy) and the LangGraph checkpointer's autocommit pool; every worker, connector
-server and the mcp-face holds one. Counting pods declared a ceiling covering about two thirds of
-what the shipped fleet opens, which is why `postgres.maxConnections` rose in the same commit that
-corrected the arithmetic — **a release provisioning to the old number has to raise its Postgres
-`max_connections` to the new one, or lower `CHEMCLAW_PG_POOL_MAX_SIZE` until the product fits.**
-The startup check names both sides in every pod; `sum(chemclaw_pg_pool_max_size)` has been the
-honest live reading throughout, which is why the alert could fire on a fleet whose per-pod
+**The connection one is charged in pools, and it used to be charged in pods.** `pg_pool_max_size`
+bounds one *pool*: `core/db` keys a pool on `(dsn, libpq options, requested max_size)`, so a process
+holds one per distinct key plus any foreign pool it registers. Measured by driving each role's
+composition root, a front-door process holds the stores' pool, the `/readyz` probe's (its own
+statement timeout is a distinct key — deliberately, since sharing the stores' pool makes readiness
+answer 503 while the pool is merely busy) and the LangGraph checkpointer's autocommit pool; every
+worker, connector server and the mcp-face holds one. Counting pods declared a ceiling covering
+about two thirds of what the shipped fleet opens, which is why `postgres.maxConnections` rose in
+the same commit that corrected the arithmetic — **a release provisioning to the old number has to
+raise its Postgres `max_connections` to the new one, or lower `CHEMCLAW_PG_POOL_MAX_SIZE` until the
+fleet fits.** The startup check names both sides in every pod; `sum(chemclaw_pg_pool_max_size)` has
+been the honest live reading throughout, which is why the alert could fire on a fleet whose per-pod
 validation passed.
+
+**It is a sum and not a product, for two reasons that arrived together.** Pools are not all the same
+width — the `/readyz` one asks for a single connection, because the probe is single-flighted — so
+charging every pool `pg_pool_max_size` over-declared the shipped fleet by a fifth and refused a
+legal `service.autoscaling.maxReplicas: 9` outright, CrashLooping every pod against a database that
+could serve it. And they are not all on the same *server*: `CHEMCLAW_SESSION_STORE_DSN` moves the
+front door's `/readyz` and checkpointer pools to a second database and adds one pool to every pooled
+process, which the chart cannot see because that DSN lives in an operator-managed Secret no template
+reads. `Settings.fleet_connections_per_server` places each pool on the server it will be opened
+against; `postgres.maxConnections` bounds `postgres_dsn`'s and `postgres.sessionStoreMaxConnections`
+bounds the split store's. Undeclared while the split is real warns at startup and names the
+connections nobody is checking; declared with no split is refused, because a ceiling for a server
+that does not exist is one the alert would add to the real one.
+
+**The alert checks each server, and it is two comparisons rather than one sum for a reason worth
+knowing.** `sum(pools) > primaryCeiling + sessionCeiling` looks conservative and is the opposite:
+if each server is inside its own ceiling the sum cannot exceed the sum, so it never false-positives
+— and `p₁ > A` with `p₁ + p₂ ≤ A + B` is satisfiable, so it goes silent while one server is over.
+Enumerated over 200,000 random draws: 0 false positives, 25% misses. On this chart's topology with
+the session server declared at 180 it is over from seven front-door replicas and the sum waits
+until thirteen. The same expression also paged a *healthy* split whose second ceiling was
+undeclared — the whole fleet's 278 against `256 + 0` — while the primary sat at 44%.
+`chemclaw_pg_session_pool_max_size` is the part of the live left-hand side that lands on the split
+store, so the primary's side is the difference; with no split it is 0 in every pod and both
+branches are the original comparison.
 
 The last of those reads *held sessions* rather than a configured capacity, and the difference is
 forced rather than stylistic: two kinds of process dispatch to the calculation backend and they do

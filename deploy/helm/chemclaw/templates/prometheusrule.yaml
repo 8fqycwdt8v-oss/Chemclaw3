@@ -453,10 +453,29 @@ spec:
                will serve, with every pod's own config still perfectly valid — the same blind spot
                `ChemclawFleetAboveItsTurnCeiling` covers for turns. Self-disabling: the ceiling
                gauge is 0 when undeclared. */}}
+        {{- /* Each server against its own ceiling, because a sum against a sum is one check and
+               not two. `sum(pools) > primaryCeiling + sessionCeiling` can only *miss*: over
+               200,000 random draws it never fired with both servers inside their ceilings and
+               stayed silent in 49,993 where one was over. On this chart's topology with the
+               session server declared at 180 it is over from seven front-door replicas and the
+               summed form waited until thirteen, by which point it was at 1.58x. It also paged a
+               *healthy* split whose second ceiling was undeclared — 278 against 256 while the
+               primary sat at 112 — with remediation advice pointing at the wrong server.
+               `chemclaw_pg_session_pool_max_size` is the part of the left-hand side that lands on
+               the split store, so subtracting it leaves the primary's. With no split it is 0 in
+               every pod and both branches are exactly the original comparison. */}}
         - alert: ChemclawFleetAboveItsConnectionCeiling
           expr: >-
             max(chemclaw_pg_fleet_max_connections) > 0
-            and sum(chemclaw_pg_pool_max_size) > max(chemclaw_pg_fleet_max_connections)
+            and (
+            sum(chemclaw_pg_pool_max_size) - sum(chemclaw_pg_session_pool_max_size)
+            > max(chemclaw_pg_fleet_max_connections)
+            or (
+            max(chemclaw_pg_session_fleet_max_connections) > 0
+            and sum(chemclaw_pg_session_pool_max_size)
+            > max(chemclaw_pg_session_fleet_max_connections)
+            )
+            )
           for: 10m
           labels:
             severity: warning

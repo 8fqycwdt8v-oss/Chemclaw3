@@ -1131,9 +1131,13 @@ POOLS_PER_FRONT_DOOR = 3
 """How many Postgres pools one front-door process holds.
 
 The stores' pool, the `/readyz` probe's (`api/routes/ops.py` borrows with its own statement
-timeout, and `core/db` keys a pool on `(dsn, libpq options)`) and the LangGraph checkpointer's
-registered autocommit pool. Every other role holds one. Measured rather than assumed:
-`tests/test_fleet_pools.py` drives each role's real composition root and counts.
+timeout, and `core/db` keys a pool on `(dsn, libpq options, requested max_size)`) and the LangGraph
+checkpointer's registered autocommit pool. Every other role holds one. Measured rather than
+assumed: `tests/test_fleet_pools.py` drives each role's real composition root and counts.
+
+They are not the same *width*: the `/readyz` one asks for a single connection, so a count of pools
+is not a count of connections and `Settings.fleet_connections_per_server` is what converts one to
+the other. This constant stays a pool count because that is what `chemclaw.fleetPools` renders.
 """
 
 
@@ -1195,20 +1199,33 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
     pools = _fleet_pools(values)
     per_pool = int(values["config"]["CHEMCLAW_PG_POOL_MAX_SIZE"])
     declared = int(values["postgres"]["maxConnections"])
+    # The front-door replica ceiling is a *second* input to this budget, not only to the turn one:
+    # one pool per front door is the `/readyz` probe's and one connection wide. Omitting it here
+    # would leave the test constructing a `Settings` at the code default of one replica — passing
+    # on arithmetic no rendered pod runs.
+    autoscaling = values["service"]["autoscaling"]
+    replicas = (
+        autoscaling["maxReplicas"] if autoscaling["enabled"] else values["service"]["replicas"]
+    )
 
     try:
-        Settings(  # type: ignore[call-arg]
+        settings = Settings(  # type: ignore[call-arg]
             _env_file=None,
             pg_fleet_pools=pools,
             pg_pool_max_size=per_pool,
             pg_fleet_max_connections=declared,
+            service_fleet_replicas=replicas,
         )
     except ValueError as exc:  # pragma: no cover - the failure this test exists to report
         pytest.fail(
-            f"the shipped chart renders {pools} pools × {per_pool} connections = "
-            f"{pools * per_pool} against a declared ceiling of {declared}; every pod would refuse "
-            f"to start with: {exc}"
+            f"the shipped chart renders {pools} pools at {per_pool} connections each (bar "
+            f"{replicas} readiness pools of one) against a declared ceiling of {declared}; every "
+            f"pod would refuse to start with: {exc}"
         )
+    # No split in the shipped chart: `sessionStoreDsn` is a Secret key nothing populates, so every
+    # pool lands on one server and the second figure must be zero. A release that started
+    # declaring a split here without declaring its ceiling would warn on every pod's startup.
+    assert settings.fleet_connections_per_server()[1] == 0
 
     # Derived from the topology, never hand-written beside it — a second copy of the replica counts
     # goes stale the first time a connector is enabled, which is exactly the silent multiplication
@@ -1274,7 +1291,26 @@ def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do(
     """
     rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
     assert "ChemclawFleetAboveItsConnectionCeiling" in rules
-    assert "sum(chemclaw_pg_pool_max_size) > max(chemclaw_pg_fleet_max_connections)" in rules
+    # Each server against its own ceiling, and *not* a sum against a sum: enumerated over 200,000
+    # random draws, `sum(pools) > primary + session` never fired with both servers inside their
+    # ceilings and stayed silent in 49,993 where one was over — it can only miss. It also paged a
+    # healthy split whose second ceiling was undeclared, pointing remediation at the wrong server.
+    # The primary's side is the total minus the split store's; with no split the subtrahend is 0 in
+    # every pod and both branches are exactly the comparison this shipped with.
+    assert (
+        "sum(chemclaw_pg_pool_max_size) - sum(chemclaw_pg_session_pool_max_size)" in rules
+        and "> max(chemclaw_pg_fleet_max_connections)" in rules
+    )
+    assert (
+        "sum(chemclaw_pg_session_pool_max_size)" in rules
+        and "> max(chemclaw_pg_session_fleet_max_connections)" in rules
+    )
+    # Self-disabling on the second ceiling too, or a split with none declared alerts forever.
+    assert "max(chemclaw_pg_session_fleet_max_connections) > 0" in rules
+    assert (
+        "max(chemclaw_pg_fleet_max_connections) + max(chemclaw_pg_session_fleet_max_connections)"
+        not in rules
+    ), "the summed comparison is back; it can only miss (see this test's docstring)"
     # Self-disabling, or every deployment that declares no ceiling alerts forever.
     assert "max(chemclaw_pg_fleet_max_connections) > 0" in rules
     assert "ChemclawPgPoolSaturated" in rules
@@ -1287,7 +1323,12 @@ def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do(
     # registry without this would depend on whether some earlier test opened a pool.
     bind_pool_metrics()
     rendered = METRICS.render()
-    for gauge in ("chemclaw_pg_pool_max_size", "chemclaw_pg_fleet_max_connections"):
+    for gauge in (
+        "chemclaw_pg_pool_max_size",
+        "chemclaw_pg_session_pool_max_size",
+        "chemclaw_pg_fleet_max_connections",
+        "chemclaw_pg_session_fleet_max_connections",
+    ):
         assert gauge in rendered, f"the alert compares against {gauge}, which the app never exposes"
 
 

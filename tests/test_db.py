@@ -303,7 +303,7 @@ def test_reading_this_process_pools_while_another_thread_builds_them_does_not_ra
         """`evals/retrieval._run_sync`'s shape: a loop per call that builds a pool and ends."""
 
         async def _touch() -> None:
-            db._pool_for(dsn, None)
+            db._pool_for(dsn, None, None)
 
         while not stop.is_set():
             try:
@@ -321,7 +321,7 @@ def test_reading_this_process_pools_while_another_thread_builds_them_does_not_ra
 
     try:
         for index in range(_RACE_SEEDED_POOLS):
-            db._POOLS[(seed_loop, f"{dsn}?n={index}", None)] = AsyncConnectionPool(
+            db._POOLS[(seed_loop, f"{dsn}?n={index}", None, None)] = AsyncConnectionPool(
                 conninfo=dsn, min_size=0, max_size=1, open=False
             )
         sys.setswitchinterval(1e-6)

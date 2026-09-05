@@ -189,6 +189,16 @@ topic).
       registry's own refusal test. Anchors: `connectors/registry.py::_bound_by_this_process`,
       `tests/test_connector_registry.py`, `agent/plan_gate.py`.
 
+- [ ] **`build_langgraph_agent(connectors=...)` accepts a tool that shadows a first-party name** —
+      [S], the residual `D-2026-09-04-a-name-is-one-capability-across-every-namespace` names and
+      leaves open, and whose `BACKLOG.md` row was never written. `connectors/registry.py`'s
+      `_declared_tool_names` refuses a *manifest* claiming `propose_knowledge_note`, and that is
+      the path a deployment takes; the `connectors` keyword is the one that bypasses it, because
+      `agent/langgraph_agent.py`'s `bound = [*(as_structured_tool(fn) for fn in tools),
+      *(connectors or [])]` concatenates the two lists with no name check at all. Closed in
+      practice and open in the type: the check belongs beside that concatenation, over the names
+      the first list already declares.
+
 ## 2 — Answers that are wrong without saying so
 
 - [ ] **`retrieval_top_k` cuts silently and the sweep reports `truncated_by=None`** — [M], measured
@@ -314,6 +324,42 @@ topic).
       `parse_document` offers an interruption hook, so a hostile document still burns a worker to
       completion in the background. The only real fix is a killable subprocess, with pickling and a
       new child-OOM failure mode to classify (~150-250 lines).
+
+- [ ] **Nothing checks the client half of a wire contract, and it has drifted twice** — [L], the
+      row `D-2026-09-04-a-contract-has-two-halves-and-a-server-test-sees-one` says it is queuing
+      and which was never written. `tests/fixtures/turn_events_contract.json` pins what this
+      repository *sends*; nothing pins what a client accepts, so the `at_capacity` error code and
+      `PendingPlansResponse.truncated` both shipped here and reached `Chemclaw3_ui` as an
+      unhandled default — the second without anyone recording that it had not. The hand-written
+      case in `tests/test_protocol_routes.py` is the only cross-repo assertion in the tree, and
+      that ADR says plainly it does not scale to four repos. What it needs is one artefact both
+      sides read: a published fixture, a generated types package, or a job in `make ci` that
+      fetches the client's own declaration and diffs it against the fixture.
+
+- [ ] **A durable question waiting on a chemist is written to the push-back table and never
+      pushed** — [M], found 2026-09-05 while checking the client half of the wire contract.
+      `durable/awaiting.py` writes an `awaiting-answer` row into `session_events` when a wait opens
+      *and* when it expires, and `AWAITING_KIND` has exactly two references in the tree: that line
+      and its own definition. The front door's tailer (`api/routes/streams.py`) subscribes with
+      `kinds=("job_completed", "job_failed")`, so the row is never read by anything — a producer
+      with no consumer, which is the `map_to_hpc_identity` shape, except that here the consumer
+      exists in the *other* repository: `Chemclaw3_ui`'s `useJobStreams` has a full
+      `awaiting_answer` branch, `chatStore` keeps a slice for it, and its comment asserts this
+      stream is "scoped server-side to `job_completed`, `job_failed` and `awaiting-answer`", which
+      is false. Degraded rather than broken, because `GET /pending` still answers on a poll and the
+      review queue treats the service as the authority. Closing it is a new `Event` member plus the
+      kind in that tuple — and the wire name has to be decided, since the producer says
+      `awaiting-answer` and the client reads `awaiting_answer`. The UI's false comment is a
+      separate one-line fix in that repository.
+
+- [ ] **`JsonCommitmentExport` cannot run a destructive sweep, and the grant for one already
+      exists** — [S], the row `ingest/commitments/json_export.py`'s `snapshot` attribute says is
+      queued and which was never written. It is hard-coded `False`, so a commitment withdrawn at
+      the site is never withdrawn here; the `DELETE` privilege was granted ahead of it
+      deliberately, so the enabling half is the only part unbuilt. Not a flag flip: `snapshot`
+      licenses deleting every commitment a pass did not see, so it is the operator's assertion
+      that the export directory was complete — which makes it a `datasource.yaml` key defaulting
+      to false, not a class attribute.
 
 ## 4 — Operating it
 
@@ -703,6 +749,18 @@ topic).
       derived grace period long enough to drain (`chemclaw.workerGracePeriod`, shipped), and this
       row. Raised by the 2026-08-27 deployment-monitoring review, which checked the PDB's argument
       and found it sound; the singleton underneath it is the defect.
+
+- [ ] **A background-worker rollout that never becomes Ready is invisible until someone looks** —
+      [S], the detection `8b23067` named as missing after measuring the review's proposed fix as
+      worse than the status quo, and which was never written down as a row. `deployment-workers.yaml`
+      ships `Recreate` because the singleton underneath it forbids two replicas, so the old process
+      is gone before the new one starts; a new pod that never becomes Ready therefore leaves the
+      `background-jobs` queue with no consumer while the release reports deployed. `--atomic` is
+      not the fix and is refused elsewhere for its own reason (`migrate-job.yaml`). What is missing
+      is an alert, expressible from what is already scraped —
+      `kube_deployment_status_replicas_unavailable` on that Deployment, or the staleness of the
+      worker's own `chemclaw_jobs_in_flight` — and it belongs beside `ChemclawWorkerNotPolling` in
+      `prometheusrule.yaml`.
 
 ---
 
