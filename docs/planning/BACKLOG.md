@@ -63,6 +63,27 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **The JWKS fetch follows an ambient proxy and has no seam to stop it** — [M], opened
+  2026-09-05 by the review of `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
+  `api/auth.py:85` builds a `PyJWKClient`, whose `fetch_data` calls `urllib.request.urlopen` —
+  which resolves proxies from the process-global default opener and has no `trust_env`. Measured
+  with a recorder standing in as the proxy: it received
+  `GET http://login.microsoftonline.com/tenant/discovery/v2.0/keys`. **This is the anchor every
+  bearer token is validated against**, so a proxy that could answer it could serve a key set of its
+  own choosing. Two things bound the severity and neither closes it: a real tenant endpoint is
+  `https`, where a proxy sees a CONNECT tunnel it can only open with a CA the pod already trusts
+  (which is exactly what a TLS-terminating corporate proxy arranges); and the boot refusal added by
+  that ADR stops any deployment that has *not* declared a proxy, which is every shipped one. The
+  residual is a site that has declared one — there the LLM seam refuses it and this one does not,
+  which is an asymmetry that reads as a control and is not.
+  **Not a one-liner, which is why it is a row.** `PyJWKClient` takes `ssl_context` and no opener,
+  so the only in-process fix is
+  `urllib.request.install_opener(build_opener(ProxyHandler({})))` at import — a process-wide side
+  effect on every library that reaches for `urlopen`, which wants its own decision rather than
+  riding along. The alternative is vendoring `fetch_data`, which couples this module to a surface
+  it does not otherwise use (`_match_kid` is already written the long way for that reason).
+  Anchors: `api/auth.py::_client_for`, `core/netguard.py::refuse_proxied_egress`.
+
 - [ ] **An external vector store's client builds its own httpx and is outside the proxy fix** —
   [S], opened 2026-09-05 by `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
   `retrieval/vectors/qdrant.py:118` constructs `AsyncQdrantClient`, which builds its own httpx

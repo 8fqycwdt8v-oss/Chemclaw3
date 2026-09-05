@@ -26,9 +26,15 @@ guard catches the large class a static import scan cannot: a dependency reaching
 **One shape has no such backstop, and it is why `refuse_proxied_egress` exists.** A proxy moves the
 destination out of the address, so the allowlist cannot see it; and where the proxy is a sidecar on
 loopback — the shipped OpenShift shape — it shares the pod's network namespace, so the NetworkPolicy
-cannot see it either. That case is refused at boot rather than at dial, which is also what makes it
-reach the child process the paragraph above concedes: `git` inherits the environment, and a
-configured proxy is now a thing this process refuses to start beside.
+cannot see it either. That case is refused at boot rather than at dial, which is also what lets it
+reach the child process the paragraph above concedes: `git` inherits the environment.
+
+**What that refusal is and is not, stated narrowly because the first telling was not.** It fires
+when a proxy variable is set *and* would carry at least one of this process's own `http(s)`
+destinations past `NO_PROXY` *and* the proxy's host is not named in `egress_allow`. It is not "a
+configured proxy refuses the process": a proxy for a scheme nothing here dials, or one every
+destination bypasses, is accepted — deliberately, because a refusal for a reason that is not true
+is a pod that will not start.
 
 Armed once, at `chemclaw.core.config` import, beside `pin_langsmith_egress`, because that module is
 the one import every entrypoint makes (the front door, the CLI, the connector server, the durable
@@ -40,7 +46,6 @@ LLM provider).
 from __future__ import annotations
 
 import logging
-import os
 import socket
 from collections.abc import Iterable
 from typing import Any
@@ -170,8 +175,11 @@ def derive_allowed(settings: Any) -> frozenset[str]:
     Every entry is a host this process has a configured, legitimate reason to reach. Reading them
     off the settings object rather than a static list is what keeps the allowlist in step with the
     dial: a moved LLM endpoint or a new connector updates both at once. Loopback needs no entry
-    (`core.http.is_loopback_host` covers it), so the dev defaults (Postgres/Temporal/calc on
-    localhost) add nothing here.
+    *for the guard* (`core.http.is_loopback_host` covers it), so the dev defaults add nothing the
+    allowlist check consults — but they are in the returned set all the same: measured on bare
+    `Settings()`, this returns `{'127.0.0.1', 'localhost'}`. That distinction went from harmless to
+    load-bearing when `refuse_proxied_egress` arrived, since a reader who took "add nothing here"
+    literally would expect an empty set to reason from.
 
     **The walk below is hand-written and the coverage is not.** "It cannot drift" was a claim about
     this list, and two settings had already drifted out of it; `tests/test_netguard.py` now gives
@@ -320,7 +328,70 @@ def allowed_hosts() -> frozenset[str]:
     return _allowed
 
 
-_PROXY_ENV_VARS = ("all_proxy", "http_proxy", "https_proxy")
+def _http_destinations(settings: Any) -> list[str]:
+    """Every `http(s)` URL this process dials, as URLs rather than as bare hosts.
+
+    **Deliberately not `derive_allowed`, and the difference is what stops false refusals.** That
+    set is every host this process may dial *by any protocol*, and a proxy variable carries none of
+    the non-HTTP ones: measured against live Postgres with all three variables pointed at a dead
+    port, psycopg connects and returns a row — libpq does not read them. Charging the database and
+    the Temporal frontend to a proxy would refuse a deployment whose `NO_PROXY` correctly covers
+    every HTTP destination and simply does not name its DSN host, which is a pod that will not
+    start for a reason that is not true.
+
+    URLs rather than hosts because the *scheme* decides which variable applies: with `HTTP_PROXY`
+    set alone and every destination on `https`, httpx builds a plain connection pool and nothing is
+    proxied at all. A check that asked only "is any proxy variable set" reported that configuration
+    as carried.
+
+    `egress_allow` entries are not included: they are bare hosts with no scheme, so there is nothing
+    to decide which variable would carry them. That is a gap in the conservative direction — a
+    declared extra destination reached over HTTP is not counted — and it is the price of not
+    inventing a scheme for a string the operator wrote as a host.
+    """
+    candidates = [
+        settings.llm_base_url,
+        settings.llm_fallback_base_url,
+        settings.calc_server_url,
+        settings.rxnlabel_server_url,
+    ]
+    candidates.extend(getattr(settings, "connector_urls", {}).values())
+    if getattr(settings, "entra_required", False):
+        candidates.append(getattr(settings, "entra_jwks_endpoint", "") or settings.entra_jwks_url)
+    if getattr(settings, "otel_enabled", False):
+        candidates.append(settings.otel_endpoint)
+    if getattr(settings, "vector_store_provider", "pgvector") != "pgvector":
+        candidates.append(settings.vector_store_url)
+    return [url for url in candidates if url and urlsplit(url).scheme in ("http", "https")]
+
+
+def proxied_destinations(settings: Any) -> dict[str, str]:
+    """Which of this process's HTTP destinations a configured proxy would carry, and by which host.
+
+    Read through `urllib.request.getproxies_environment` and `proxy_bypass` rather than off
+    `os.environ` directly, and that is the whole correctness argument. A hand-rolled read of
+    `http_proxy` plus `HTTP_PROXY` misses every mixed-case spelling — `Https_Proxy`, `HTTPS_proxy`,
+    `https_PROXY` — and measured, httpx honours all of them: one proxy mount each, while the
+    hand-rolled check saw nothing and the process booted silently. `getproxies_environment`
+    lowercases every name, which is also what httpx, requests and `proxy_bypass` itself do, so the
+    two halves of this function agree about what a proxy variable is. The ADR's own rule against
+    writing a second reading of `no_proxy` applies to the proxy variables in exactly the same way,
+    and the first version of this file broke it.
+    """
+    from urllib.request import getproxies_environment, proxy_bypass
+
+    proxies = getproxies_environment()
+    carried: dict[str, str] = {}
+    for url in _http_destinations(settings):
+        parts = urlsplit(url)
+        proxy = proxies.get(parts.scheme) or proxies.get("all")
+        host = (parts.hostname or "").lower()
+        if not proxy or not host or proxy_bypass(host):
+            continue
+        proxy_host = _host_from_url(proxy)
+        if proxy_host:
+            carried[host] = proxy_host
+    return carried
 
 
 def refuse_proxied_egress(settings: Any) -> None:
@@ -337,25 +408,20 @@ def refuse_proxied_egress(settings: Any) -> None:
     dials Postgres, Temporal and the calc backend there.
 
     That is not an attacker-only shape. An OpenShift service mesh or egress sidecar *is* a loopback
-    proxy by design, and it is the layer that would otherwise be the backstop: a sidecar shares the
-    pod's network namespace, so traffic to it never crosses a NetworkPolicy enforcement point. For
-    this one shape the module docstring's "that is the NetworkPolicy's job" does not hold, and
-    nothing below the guard catches it.
+    proxy by design, and it is also the reason the module docstring's usual fallback does not apply
+    — a sidecar shares the pod's network namespace, so its traffic never crosses a NetworkPolicy
+    enforcement point. There is no layer below this one for this shape.
 
-    So a proxy is treated as a **destination**: if one is configured and its host is not named in
-    `CHEMCLAW_EGRESS_ALLOW`, this process does not start. Named explicitly rather than accepted for
-    being loopback, because loopback is exactly the case that needs the operator's signature.
+    So a proxy is treated as a **destination**: if one would carry anything this process dials over
+    HTTP and its host is not named in `CHEMCLAW_EGRESS_ALLOW`, this process does not start. Named
+    explicitly rather than accepted for being loopback, because loopback is exactly the case that
+    needs the operator's signature.
 
-    **`NO_PROXY` is honoured, and that is what keeps this from being a nuisance.** The question is
-    not "is a proxy set" but "would a proxy carry traffic to somewhere this deployment actually
-    dials", so the destinations are `derive_allowed(settings)` and the bypass test is the stdlib's
-    own (`urllib.request.proxy_bypass`) rather than a second reading of `no_proxy`
-    written here. A sandbox whose `no_proxy` covers the loopback addresses the dev defaults use —
-    this repository's CI containers, among others — configures a proxy and is not refused, because
-    no call this process makes would go through it.
-
-    Silent when the guard is disabled, because `arm_from_settings` returns before reaching this: a
-    deployment that has opted out of the guard has opted out of this too, and says so at WARNING.
+    **`NO_PROXY` is honoured, and the destination set is narrowed to what a proxy can actually
+    carry** — see `proxied_destinations` and `_http_destinations` for why each of those is what
+    keeps a legitimate deployment starting. Silent when the guard is disabled, because
+    `arm_from_settings` returns before reaching this: a deployment that has opted out of the guard
+    has opted out of this too, and says so at WARNING.
 
     Raises:
         RuntimeError: naming the proxy, the destinations it would carry, and the one way to
@@ -363,33 +429,26 @@ def refuse_proxied_egress(settings: Any) -> None:
             `api/middleware._refuse_unconfigured_llm_gateway` it reaches the durable worker too,
             because it hangs off the `chemclaw.core.config` import every entrypoint makes.
     """
-    from urllib.request import proxy_bypass
-
-    configured = {
-        value.strip()
-        for name in _PROXY_ENV_VARS
-        for value in (os.environ.get(name, ""), os.environ.get(name.upper(), ""))
-        if value.strip()
-    }
-    if not configured:
+    carried = proxied_destinations(settings)
+    if not carried:
         return
-    proxy_hosts = {host for host in (_host_from_url(url) for url in configured) if host}
     declared = {
         entry.strip().lower() for entry in (settings.egress_allow or "").split(",") if entry.strip()
     }
-    undeclared = sorted(proxy_hosts - declared)
+    undeclared = {
+        destination: proxy for destination, proxy in carried.items() if proxy not in declared
+    }
     if not undeclared:
         return
-    carried = sorted(host for host in derive_allowed(settings) if not proxy_bypass(host))
-    if not carried:
-        return
+    proxies = ", ".join(sorted(set(undeclared.values())))
+    destinations = ", ".join(sorted(undeclared))
     raise RuntimeError(
-        "SECURITY: a proxy is configured in this process's environment "
-        f"({', '.join(undeclared)}) and would carry traffic to {', '.join(carried)} — every "
-        "prompt, completion and Authorization bearer would be re-terminated at a host this "
-        "deployment has not declared, past the CA pinning and invisibly to the egress guard, "
-        "which sees only the dial to the proxy. Name the proxy in CHEMCLAW_EGRESS_ALLOW to say "
-        "this is intended, add these destinations to NO_PROXY, or unset the proxy variable."
+        f"SECURITY: a proxy is configured in this process's environment ({proxies}) and would "
+        f"carry traffic to {destinations} — every prompt, completion and Authorization bearer "
+        "would be re-terminated at a host this deployment has not declared, past the CA pinning "
+        "and invisibly to the egress guard, which sees only the dial to the proxy. To proceed, "
+        "add the proxy to CHEMCLAW_EGRESS_ALLOW as a bare host (no scheme, no port) to say this "
+        "is intended, add these destinations to NO_PROXY, or unset the proxy variable."
     )
 
 

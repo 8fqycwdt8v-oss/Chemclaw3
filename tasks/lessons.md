@@ -1901,3 +1901,34 @@ choice here looked like "guard-side or client-side"; measuring first showed the 
 as originally scoped was theatre, because the LLM call goes out on a client `langchain-openai`
 builds with `trust_env=True` and centralising *first-party* construction never reaches it. A
 question asked before that measurement would have offered an option that does nothing.
+
+**I wrote a control and then hand-rolled the environment convention it depends on.** The ADR argued,
+correctly, that reading `no_proxy` a second time would be writing a second answer to it — and used
+`urllib.request.proxy_bypass` for that half while reading the proxy variables myself, as
+`name` and `name.upper()` over three names. Every client library lowercases instead, so
+`Https_Proxy` gave httpx a live proxy mount while my check saw nothing and the process booted
+clean. The test's own docstring made the argument that defeats it ("a control an operator disables
+by typing the variable in lower case") and stopped one step short. **Rule: when a rule cites an
+environment convention, get every part of that convention from one stdlib call — and when a
+docstring argues why case matters, enumerate the cases rather than two of them.**
+
+**A guard derived from the widest available set refuses things that set cannot describe.** I ran
+`derive_allowed` — every host by any protocol — through a proxy check. Measured, psycopg connects
+with all three proxy variables pointed at a dead port, so the Postgres host was never proxiable;
+a site whose `NO_PROXY` covered every HTTP destination and not its database would have been refused
+at boot by a message that was false. **Rule: a new check gets its own derivation of exactly what it
+can decide about, even when a wider set is sitting there already typed.**
+
+**Preserving one half of a conflated flag can break the other half in *either* direction.** First
+attempt at keeping `SSL_CERT_FILE` alive under `trust_env=False` used
+`create_default_context(cafile=None)` — which honours it, and on the shipped configuration silently
+swapped certifi's 118 roots for the OS store's 152, dropping 13. The correct fix reproduces the
+library's own precedence explicitly and is verified against it in all four combinations. **Rule:
+when replacing a library's default, measure your replacement against that default in every input
+combination, not just the one that motivated the change.**
+
+**My own fixture hid a finding.** The scheme-mismatch test failed for a reason unrelated to
+schemes: `calc_server_url` ships as loopback `http://`, so `HTTP_PROXY` really did carry it, and
+the fixture was measuring the shipped defaults rather than the property. **Rule: a fixture for a
+property test sets every input the property ranges over — a default left in place is an unstated
+arm.**

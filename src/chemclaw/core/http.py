@@ -139,12 +139,11 @@ def gateway_client_kwargs(ca_bundle: str = "") -> dict[str, Any]:
       string form ("`verify=<str>` is deprecated. Use `verify=ssl.create_default_context(...)`"),
       and building the context is also the only form that says what the bundle *is* — a CA file to
       verify the peer against, rather than a path httpx has to guess the meaning of. It is built on
-      the no-bundle branch too, because `trust_env=False` *also* stops httpx reading
-      `SSL_CERT_FILE`/`SSL_CERT_DIR`: refusing the proxy would otherwise silently swap a
-      deployment's env-supplied trust store for `certifi`, which is a second behavioural change
-      nobody asked for. `create_default_context(cafile=None)` falls through to OpenSSL's own
-      default paths, which honour those two variables — so the trust store is taken back explicitly
-      rather than surrendered along with the proxy. The comment below has the measurement.
+      the no-bundle branch too, and it reproduces httpx's own `trust_env=True` precedence —
+      configured bundle, else `SSL_CERT_FILE`/`SSL_CERT_DIR`, else certifi — because `trust_env`
+      conflates proxy discovery with the trust store and only the first is objected to here.
+      Getting that precedence *wrong in either direction* silently changes which certificates every
+      deployment trusts; the comment below has both measurements.
 
     **This returned `None` for the whole no-bundle branch until 2026-09-05, and that made the first
     decision unreachable in every shipped configuration.** `llm_tls_ca_bundle` defaults to `""` and
@@ -164,19 +163,34 @@ def gateway_client_kwargs(ca_bundle: str = "") -> dict[str, Any]:
     Returns:
         Kwargs for `httpx.Client(**kwargs)` / `httpx.AsyncClient(**kwargs)`. Never None.
     """
+    import os
     import ssl
 
-    # `cafile=None` is not "no verification" — `create_default_context` falls through to OpenSSL's
-    # own default paths, which honour `SSL_CERT_FILE`/`SSL_CERT_DIR`. That fall-through is the
-    # whole reason this passes `verify` on *both* branches: `trust_env=False` also stops httpx
-    # reading those two variables, so a client that merely dropped `trust_env` would silently
-    # replace a deployment's env-supplied trust store with `certifi`. Measured — one probe bundle
-    # holding a single certificate, against `certifi`'s 118:
+    import certifi
+
+    # **This reproduces what httpx does with `trust_env=True`, minus the proxy.** `trust_env`
+    # conflates proxy discovery with the trust store, only the first is objected to here, and
+    # surrendering the second with it is a behavioural change nobody asked for — in *both*
+    # directions, which is the part a first version of this got wrong:
     #
-    #     trust_env=True,  SSL_CERT_FILE set                    ->    1 CA cert
-    #     trust_env=False, SSL_CERT_FILE set, no explicit verify->  118 CA certs   <- the trap
-    #     trust_env=False, SSL_CERT_FILE set, verify=this ctx   ->    1 CA cert
+    #   - Dropping `trust_env` without an explicit `verify` loses `SSL_CERT_FILE`/`SSL_CERT_DIR`.
+    #     Measured against a probe bundle holding one certificate: 118 (certifi) where the
+    #     deployment had asked for 1.
+    #   - Passing `create_default_context(cafile=None)` instead loses *certifi*, falling through to
+    #     OpenSSL's default paths. Measured on the shipped configuration (no bundle, no
+    #     `SSL_CERT_*`): 152 certificates from the OS store against the SDK's previous 118, with
+    #     **13 roots in certifi and not in the OS store**. That is a narrowing on every deployment,
+    #     and it would have shipped as a TLS failure against whichever gateway one of those 13
+    #     signed.
     #
-    # `trust_env` conflates proxy discovery with the trust store and only the first is objected to
-    # here, so the trust store is taken back explicitly rather than surrendered with it.
-    return {"trust_env": False, "verify": ssl.create_default_context(cafile=ca_bundle or None)}
+    # So the precedence is stated rather than inherited: an explicitly configured bundle, else the
+    # environment's store, else certifi — which is httpx's own order, and leaves the trust store
+    # exactly as it was before this function started building the client.
+    cafile = ca_bundle or os.environ.get("SSL_CERT_FILE") or None
+    capath = os.environ.get("SSL_CERT_DIR") or None
+    if cafile is None and capath is None:
+        cafile = certifi.where()
+    return {
+        "trust_env": False,
+        "verify": ssl.create_default_context(cafile=cafile, capath=capath),
+    }

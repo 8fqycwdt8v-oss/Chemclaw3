@@ -85,16 +85,25 @@ env-supplied trust store for `certifi` — a second behavioural change nobody as
 as a TLS failure against the site's own gateway. Measured with a probe bundle holding one
 certificate against `certifi`'s 118:
 
-| | CA certs seen |
-| --- | --- |
-| `trust_env=True`, `SSL_CERT_FILE` set | 1 |
-| `trust_env=False`, `SSL_CERT_FILE` set, no explicit `verify` | **118** — the trap |
-| `trust_env=False`, `SSL_CERT_FILE` set, `verify=create_default_context(cafile=None)` | 1 |
+**And getting that back wrong in the other direction is just as silent, which the first attempt
+did.** Passing `create_default_context(cafile=None)` picks up `SSL_CERT_FILE`, but on the shipped
+configuration — no bundle, no `SSL_CERT_*` — it falls through to OpenSSL's default paths and drops
+certifi: measured, **152 certificates from the OS store against the SDK's previous 118, with 13
+roots in certifi and not in the OS store**. That is a narrowing on every deployment, and it would
+have shipped as a TLS failure against whichever gateway one of those 13 signed. So the precedence
+is stated rather than inherited — configured bundle, else the environment's store, else certifi,
+which is httpx's own order. Measured against the client the SDK used to build, in all four
+combinations:
 
-So the context is built on *both* branches. `create_default_context(cafile=None)` falls through to
-OpenSSL's own default paths, which honour both variables — the trust store is taken back explicitly
-rather than surrendered along with the proxy, and it costs one line rather than a second setting.
-That is what lets this ADR close the row above it as well as its own.
+| environment | SDK (`trust_env=True`) | this function |
+| --- | --- | --- |
+| neither set (the shipped case) | 118 | **118** |
+| `SSL_CERT_FILE` set (probe bundle of one) | 1 | **1** |
+| `SSL_CERT_DIR` set | 0 | **0** |
+| both set | 1 | **1** |
+
+The trust store is therefore unchanged in every case and only the proxy is refused, which is what
+lets this ADR close the row above it as well as its own.
 
 **The guard half.** `netguard.refuse_proxied_egress` treats a proxy as a destination: if one is
 configured and its host is not named in `CHEMCLAW_EGRESS_ALLOW`, the process does not start. Named
@@ -132,13 +141,44 @@ Measured after the change:
 start.** That is a real behavioural change and it is the point: the operator's intent is the only
 thing that distinguishes a legitimate sidecar from an env var somebody else set, and an env var
 cannot carry intent. The blast radius is a site's own configuration — no shipped configuration sets
-any proxy variable, verified across `deploy/`, `infra/` and `.env.example`, and the only in-repo
-mentions are comments explaining `trust_env=False` and one test that installs `HTTP_PROXY` to prove
-the delivery driver ignores it.
+any proxy variable, verified across `deploy/`, `infra/` and `.env.example`. Outside those three
+directories the mentions are comments explaining `trust_env=False` and tests that set a proxy in
+order to assert something about it — including the ones this commit adds, which is worth saying
+because the first draft of this sentence counted the tree *before* its own diff and claimed
+there was one.
 
 Where a proxy *is* declared, the client half is what still holds: the LLM and embedding clients
 refuse the environment regardless, so declaring a sidecar for the traffic that needs it does not
 hand it the prompts.
+
+## What a fresh-context review then found in it
+
+The commit above passed its own gate and a reviewer who did not write it found five defects in it,
+three of them in the new control:
+
+- **The boot refusal read `name` and `name.upper()` for three variables**, and every client library
+  lowercases instead — so `Https_Proxy`, `HTTPS_proxy`, `https_PROXY` and `All_Proxy` each gave an
+  httpx client a live proxy mount while the check saw nothing and the process booted silently. It
+  now goes through `urllib.request.getproxies_environment`, which is the same source
+  `proxy_bypass` reads. The rule this ADR already stated about `no_proxy` — a second reading is a
+  second answer — applied verbatim to the proxy variables and had not been applied to them.
+- **It charged every host in `derive_allowed` to the proxy**, including the Postgres DSN and the
+  Temporal frontend. Measured: psycopg connects with all three proxy variables pointed at a dead
+  port, because libpq does not read them. A site whose `NO_PROXY` covered every HTTP destination
+  but not its database host would have been refused at boot by a message that was not true.
+- **It ignored the scheme.** `HTTP_PROXY` alone against `https` destinations proxies nothing —
+  httpx builds a plain connection pool — and the check refused anyway. The destination set is now
+  `http(s)` URLs rather than bare hosts, and the proxy lookup is per-scheme.
+- The trust-store narrowing above, and the JWKS client below.
+
+The suite found one of these independently: two `tests/test_logging.py` subprocess arms, which
+inherit the sandbox's own proxy variables, refused to start on an OTel endpoint. The per-scheme
+narrowing fixes them for the right reason rather than by exempting the test.
+
+Four of the new tests also passed against a gutted `refuse_proxied_egress` — they asserted "no
+exception", which a deleted body satisfies. Each negative arm now carries a positive control that
+re-runs the same settings with the bypass removed and asserts the refusal does fire. Against the
+gutted body the file goes from 8 failures to 19.
 
 ## What is still open
 
@@ -146,6 +186,23 @@ hand it the prompts.
   and takes only `verify`. It is an opt-in non-default provider (`pgvector` ships) and
   `qdrant_client` is not installed in this closure, so it is recorded rather than blind-patched.
   The boot refusal covers it in any deployment that has not declared a proxy.
+- **`api/auth.py`'s JWKS client**, and it is the one worth reading twice. `PyJWKClient` fetches the
+  tenant key set through `urllib.request.urlopen`, which has no `trust_env` and follows `HTTP_PROXY`
+  — measured, a recorder standing in as the proxy received
+  `GET http://login.microsoftonline.com/…/keys`. That is the anchor every bearer token is validated
+  against. It is *not* fixed here because there is no per-client seam: `urlopen` resolves proxies
+  from the process-global default opener, so closing it means `install_opener(build_opener(
+  ProxyHandler({})))` at import — a process-wide side effect on every library that uses `urlopen`,
+  which is a decision of its own rather than a detail of this one. The boot refusal stands in front
+  of it for every deployment that has not declared a proxy, which is every shipped one; the residual
+  is a site that *has* declared one, where the LLM seam refuses the proxy and this one does not.
+  Filed with the measurement.
+
+- **The dev/eval HTTP clients** (`evals/live.py`, `cli/live_probes.py`, `cli/live_storm.py`) build
+  httpx clients without `trust_env=False`. They dial this system's own front door on loopback from
+  a developer's machine, so they are out of the estate this ADR is about — named here so the next
+  reader does not have to re-derive that.
+
 - **A proxy set *after* arm time**, by mutating `os.environ` post-import. The check is at boot by
   design; a per-dial re-read would put an environment read on the hot path.
 - **The explicit `proxy=` kwarg**, which reads no environment variable at all. No first-party client

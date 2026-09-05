@@ -258,6 +258,13 @@ def test_the_gateway_clients_are_built_once_per_process(monkeypatch: pytest.Monk
     try:
         first = _tls_http_clients()
         assert _tls_http_clients() is first, "a second turn must reuse the process's clients"
+        # The bundle is still reaching the context, asserted here because this file is the only
+        # place that says so: an earlier version checked `is not None` against a factory that
+        # returned `None` without one, and dropping that left the *configured* bundle pinned
+        # nowhere but `tests/test_protocol_condense.py`'s unrelated `FileNotFoundError` path.
+        for client in first:
+            context = client._transport._pool._ssl_context
+            assert context.get_ca_certs(), "the configured bundle produced an empty trust store"
     finally:
         _tls_http_clients.cache_clear()
 
