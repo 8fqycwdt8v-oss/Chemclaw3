@@ -495,9 +495,9 @@ probes:
       - "silently duplicating an existing note without checking"
     direction: >-
       Checks for an existing note first, then proposes one whose content is exactly what the
-      chemist stated plus retrieved links, and is explicit that the proposal goes through the
-      PR-gate — a human validates and merges it, so nothing is in the graph yet. Names where
-      the proposal went and what happens next.
+      chemist stated plus retrieved links, and is explicit about what the note now is: recorded
+      and readable by everyone, authored as `agent`, and correctable rather than checked. Names
+      where it landed.
 
   - id: an-20
     section: 8

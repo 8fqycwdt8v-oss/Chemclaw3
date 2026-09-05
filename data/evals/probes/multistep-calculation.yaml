@@ -497,9 +497,9 @@ probes:
       stated as already done — so re-running it is a miss, and the graded behaviour is that a note
       is drafted. What the note must carry is the method, the medium, the gap **and the method's
       uncertainty beside it**, because a gap quoted without its error bar is exactly what makes a
-      stored number unreadable a year later. The PR-gate is the other graded half: the answer must
-      say a human has to merge it before it is knowledge, and must not describe the note as
-      already part of the record. Citing the calculation by its `calc_refs` rather than retyping
+      stored number unreadable a year later. Provenance is the other graded half: the note is
+      recorded and readable at once, so the answer must say it is machine-written (`created_by`
+      `agent`) rather than present it as an established result somebody has checked. Citing the calculation by its `calc_refs` rather than retyping
       the numbers is the better answer, since that is the join back to what was actually computed.
 
   - id: ms-19

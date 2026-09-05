@@ -1,3 +1,18 @@
+-- RETIRED. The PR-gate's record of every agent-authored note ever proposed and what a human
+-- decided about it.
+--
+-- `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` ended the gate: knowledge is written
+-- straight into the graph and corrected rather than pre-approved, so nothing proposes a note and
+-- nothing decides one. No row is written here any more.
+--
+-- **The table stays and is not dropped**, for two reasons rather than one. The schema is
+-- forward-only — a migration may not drop a table or a column
+-- (`tests/test_migrations_are_additive.py`) — and a deployment that ran the gate holds real
+-- sign-offs by real people, which `agent/leaver.py::_RETAINED` still has to find on an erasure
+-- request. `durable/retention.py` no longer refuses it: there is no live record to protect.
+--
+-- The statements below are unchanged; re-running this file on an existing database is a no-op.
+
 -- Every agent-authored note ever submitted to the PR-gate, and what a human decided about it.
 --
 -- The PR-gate is named in `CLAUDE.md`, `ARCHITECTURE.md`, `SECURITY.md` and D-005 as the line the

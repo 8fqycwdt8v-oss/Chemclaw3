@@ -170,7 +170,7 @@ probes:
       (water content, base, temperature, order of addition, boronic acid held without catalyst),
       with the expected observation if the hypothesis holds and if it does not. Does not adopt the
       chemist's diagnosis as established. Any calculated input (a pKa, say) is labelled predicted.
-      Offering the plan through the PR-gate as a proposal is right; asserting the cause is not.
+      Recording the plan as a machine-written note is right; asserting the cause is not.
 
   - id: op-08
     section: 2
@@ -552,8 +552,8 @@ probes:
       calculation references that came back with the suggestion so a stale descriptor can later be
       traced to the experiments it shaped, and stating the rationale in the chemist's terms — the
       question this batch answers — rather than restating the parameter ranges. The status must be
-      unambiguous: this is agent-authored and enters through the human review gate, so it is a
-      proposal awaiting sign-off, not yet plan-of-record and not yet in the graph. It should not
+      unambiguous: this is agent-authored, so it is readable at once and is not plan-of-record —
+      being in the graph and being agreed are different things. It should not
       reach for the campaign's own note type, which belongs to a durable campaign rather than to an
       inline suggestion.
 
