@@ -95,6 +95,23 @@ def test_telemetry_off_installs_a_noop_meter_provider_rather_than_leaving_none()
     )
 
 
+def _without_proxy_variables() -> dict[str, str]:
+    """This process's environment minus every proxy variable, for a subprocess arm.
+
+    The subject here is whether the OTel SDK is installed and starts under the value the chart
+    ships, and the chart ships no proxy. Inheriting one makes the arm assert something else:
+    `core/netguard.refuse_proxied_egress` charges the OTLP endpoint, because the gRPC exporter
+    resolves a proxy without consulting the target's scheme, so a subprocess that inherits this
+    sandbox's own corporate proxy is *correctly* refused and the arm fails for a true reason that
+    is not its own. Stripped rather than allowlisted, so the arm says what it is about.
+    """
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if not name.lower().endswith("_proxy") and name.lower() != "no_proxy"
+    }
+
+
 def test_configure_telemetry_works_with_the_shipped_helm_value() -> None:
     """OTel must actually start under the value the chart ships, not merely validate.
 
@@ -122,7 +139,7 @@ def test_configure_telemetry_works_with_the_shipped_helm_value() -> None:
             "from chemclaw.core.logging import configure_telemetry; configure_telemetry()",
         ],
         env={
-            **os.environ,
+            **_without_proxy_variables(),
             "CHEMCLAW_OTEL_ENABLED": "true",
             "CHEMCLAW_OTEL_ENDPOINT": "http://otel-collector.observability.svc:4317",
         },
@@ -208,7 +225,7 @@ def test_a_second_configure_telemetry_does_not_install_a_second_pipeline() -> No
     result = subprocess.run(
         [sys.executable, "-c", probe],
         env={
-            **os.environ,
+            **_without_proxy_variables(),
             "CHEMCLAW_OTEL_ENABLED": "true",
             "CHEMCLAW_OTEL_ENDPOINT": "http://otel-collector.observability.svc:4317",
         },

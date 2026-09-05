@@ -29,12 +29,15 @@ loopback — the shipped OpenShift shape — it shares the pod's network namespa
 cannot see it either. That case is refused at boot rather than at dial, which is also what lets it
 reach the child process the paragraph above concedes: `git` inherits the environment.
 
-**What that refusal is and is not, stated narrowly because the first telling was not.** It fires
-when a proxy variable is set *and* would carry at least one of this process's own `http(s)`
-destinations past `NO_PROXY` *and* the proxy's host is not named in `egress_allow`. It is not "a
-configured proxy refuses the process": a proxy for a scheme nothing here dials, or one every
-destination bypasses, is accepted — deliberately, because a refusal for a reason that is not true
-is a pod that will not start.
+**What that refusal is and is not, stated narrowly because two tellings of it were not.** It fires
+when a proxy variable is set *and* would carry a destination this process reaches through something
+that **reads the environment** *and* that destination is not bypassed by `NO_PROXY` *and* the
+proxy's host is not named in `egress_allow`. It is not "a configured proxy refuses the process".
+The narrowing to env-reading clients is the whole correctness argument and lives on
+`_env_reading_destinations`: charging every destination instead refused pods over hosts a proxy
+could not carry — every first-party HTTP client here passes `trust_env=False` — while the two that
+genuinely are proxied went uncharged, and on the shipped loopback defaults it stopped a developer
+behind a corporate proxy from importing this module at all.
 
 Armed once, at `chemclaw.core.config` import, beside `pin_langsmith_egress`, because that module is
 the one import every entrypoint makes (the front door, the CLI, the connector server, the durable
@@ -377,9 +380,11 @@ def _env_reading_destinations(settings: Any) -> list[tuple[str, str, tuple[str, 
     true is a pod that will not start" — with a false negative behind it.
 
     It also broke a developer's checkout outright: the shipped destinations are loopback, so on a
-    stock tree `HTTP_PROXY=http://proxy.corp:3128 python -c "import chemclaw.core.config"` refused
-    to start and `pytest` collection died. Anyone behind a corporate proxy could not run this
-    repository.
+    stock tree, importing `chemclaw.core.config` with any corporate `HTTP_PROXY` exported raised,
+    and `pytest` collection died with it. Anyone behind such a proxy could not run this repository.
+    (The proxy address is described rather than quoted, because `tests/test_no_egress.py` scans
+    this file's *text* for `http(s)://` host literals and cannot tell a measurement in a docstring
+    from a default in code — which is that guard working, and it caught this line.)
 
     So the question is not "which hosts does this process dial" but **"which of them are dialled by
     something that reads the environment"**, and today that is two:
