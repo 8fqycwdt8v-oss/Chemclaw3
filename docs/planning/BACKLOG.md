@@ -329,21 +329,18 @@ topic).
       sides read: a published fixture, a generated types package, or a job in `make ci` that
       fetches the client's own declaration and diffs it against the fixture.
 
-- [ ] **A durable question waiting on a chemist is written to the push-back table and never
-      pushed** — [M], found 2026-09-05 while checking the client half of the wire contract.
-      `durable/awaiting.py` writes an `awaiting-answer` row into `session_events` when a wait opens
-      *and* when it expires, and `AWAITING_KIND` has exactly two references in the tree: that line
-      and its own definition. The front door's tailer (`api/routes/streams.py`) subscribes with
-      `kinds=("job_completed", "job_failed")`, so the row is never read by anything — a producer
-      with no consumer, which is the `map_to_hpc_identity` shape, except that here the consumer
-      exists in the *other* repository: `Chemclaw3_ui`'s `useJobStreams` has a full
-      `awaiting_answer` branch, `chatStore` keeps a slice for it, and its comment asserts this
-      stream is "scoped server-side to `job_completed`, `job_failed` and `awaiting-answer`", which
-      is false. Degraded rather than broken, because `GET /pending` still answers on a poll and the
-      review queue treats the service as the authority. Closing it is a new `Event` member plus the
-      kind in that tuple — and the wire name has to be decided, since the producer says
-      `awaiting-answer` and the client reads `awaiting_answer`. The UI's false comment is a
-      separate one-line fix in that repository.
+- [ ] **The awaiting collapse keeps the oldest frame of each state, not the newest** — [S], found
+      2026-09-05 measuring `D-2026-09-05-a-push-nobody-claims-is-not-a-push`'s own collapse. That
+      change is right — fifteen `waiting` frames for a closed question is the defect it was written
+      for — but `awaiting_reported` suppresses a repeat of a state *already reported*, and the rows
+      arrive oldest-first, so the frame that survives is the first of each run. Replayed against
+      the backlog its ADR measured (one open, fourteen chases, an expiry) it emits
+      `waiting reminders=0` then `expired`, never the `reminders=14` that was true at connect; the
+      rows are consumed on that first claim, so the count never corrects on this channel.
+      `GET /pending` still answers it. Emitting the newest needs a batch boundary
+      `agent/session_events.stream_new_events` does not expose — it yields row by row — so the fix
+      is either a batched yield or a one-frame hold flushed per poll, and neither belongs in a
+      passing edit. Anchors: `api/routes/streams.py`, `agent/session_events.py`.
 
 - [ ] **`JsonCommitmentExport` cannot run a destructive sweep, and the grant for one already
       exists** — [S], the row `ingest/commitments/json_export.py`'s `snapshot` attribute says is
