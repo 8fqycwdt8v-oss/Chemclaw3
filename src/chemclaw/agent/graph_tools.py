@@ -21,7 +21,7 @@ from chemclaw.agent.framing import frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
-from chemclaw.core.turn_signals import record_proposal
+from chemclaw.core.turn_signals import record_note_written
 from chemclaw.ingest.eln.compound import compound_dependencies
 from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.kg.analytics import GraphGaps, analyze
@@ -394,7 +394,7 @@ async def record_knowledge_note(
             not expire on its own, it is superseded.
 
     Returns:
-        The submitted PR reference.
+        A reference to what landed — the commit the note was recorded in.
     """
     note = Note(
         id=id,
@@ -416,7 +416,7 @@ async def record_knowledge_note(
     # cite the molecule it is writing about without first checking whether that note exists.
     reference = await record_note(note, default_writer(), dependencies=compound_dependencies(note))
     # Surface what landed on the turn's stream (gap RCH-4) — see `core.turn_signals`.
-    record_proposal(note.id, reference)
+    record_note_written(note.id, reference)
     return reference
 
 
@@ -428,7 +428,7 @@ async def record_failure(
     confidence: float | None = None,
     held_until: date | None = None,
 ) -> str:
-    """Record that something the knowledge graph says did **not** hold in practice (PR-gated).
+    """Record that something the knowledge graph says did **not** hold in practice.
 
     Call this when a chemist reports that a note is wrong, misfired, or no longer matches the
     lab — the counterpart to `record_confirmed_answer`, which can only capture an answer that was
@@ -456,7 +456,8 @@ async def record_failure(
             keeps the disputed note visible and marked.
 
     Returns:
-        The submitted PR reference. Nothing changes in the graph until a human merges it.
+        A reference to what landed. **The refutation is live immediately** — it is readable by
+        everyone as soon as this returns, so write only what the evidence carries.
 
     Raises:
         ChemclawError: When `refutes` names no note, when `held_until` predates that note's own
@@ -496,5 +497,5 @@ async def record_failure(
         [close_refuted_note(refuted, note.id, held_until)] if held_until is not None else []
     )
     reference = await record_note(note, default_writer(), superseded=retirement)
-    record_proposal(note.id, reference)
+    record_note_written(note.id, reference)
     return reference

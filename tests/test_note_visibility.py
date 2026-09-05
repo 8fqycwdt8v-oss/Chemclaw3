@@ -118,13 +118,18 @@ def test_a_reader_sees_the_note_as_soon_as_it_is_written(knowledge_clone: Path) 
 def test_the_note_records_who_authored_it(knowledge_clone: Path) -> None:
     """The control the deletion rests on, promoted from a secondary mitigation to the whole of it.
 
-    An agent-authored note carries `created_by: agent` through the loader, so a reader can tell
-    machine-written content from curated content. Under the gate this sat behind a human review
-    step; there is no review step now, so this field and the citations beside it are what a chemist
-    has. A change to it is a change to the control.
+    An agent-authored note carries `created_by: agent` **through the writer and out of the
+    loader**, so a reader can tell machine-written content from curated content. Under the gate
+    this sat behind a human review step; there is no review step now, so this field and the
+    citations beside it are what a chemist has. A change to it is a change to the control.
+
+    Driven through `GitNoteWriter` rather than `write_text`, which is what this test used to do —
+    that version exercised `load_notes` and `parse_note` and nothing the deletion changed, so it
+    was evidence about the loader while billed as evidence about the control.
     """
     notes_dir = knowledge_clone / "knowledge"
-    (notes_dir / "reaction" / "agent-proposal.md").write_text(_UNREVIEWED, encoding="utf-8")
+    writer = GitNoteWriter(repo_dir=str(knowledge_clone), base_branch="main", remote="origin")
+    asyncio.run(writer.write(_submission()))
     invalidate_cache(notes_dir)
     by_id = {note.id: note for note in load_notes(notes_dir)}
     assert by_id["agent-proposal"].created_by == "agent"

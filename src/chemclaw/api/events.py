@@ -164,12 +164,19 @@ class QuestionEvent(BaseModel):
 
 
 class NoteProposedEvent(BaseModel):
-    """A note was opened on a branch for human review through the PR-gate (gap RCH-4).
+    """A note was written into the knowledge graph (gap RCH-4).
 
-    The "agent proposes, human decides" line is the architecture's spine, but it lived only in
-    a git host's UI: `propose_note` returned its reference into the model's context and the chemist
-    never learned their contribution landed. This carries the branch reference back to the surface
-    that produced it.
+    A note write returns its reference into the *model's* context, so without this the chemist
+    never learns their contribution landed. This carries the reference back to the surface that
+    produced it.
+
+    **The wire name is `note_proposed` and the event is not a proposal.** Nothing reviews a note
+    any more (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so the accurate name is
+    `note_recorded` — but the literal is an SSE contract that `Chemclaw3_ui` and `evals/live.py`
+    both switch on, and renaming it is a coordinated two-repo deploy with a skew window in which
+    one side silently drops the event. Kept as-is deliberately, with the rename tracked in
+    `docs/planning/BACKLOG.md`; what a chemist actually *reads* says "recorded", which is the half
+    that was making a false claim to a person.
     """
 
     type: Literal["note_proposed"] = "note_proposed"

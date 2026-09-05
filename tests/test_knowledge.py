@@ -1,7 +1,7 @@
-"""Tests for the git submitter behind the PR-gate (plan step 2.8), and the boundary it enforces.
+"""Tests for `GitNoteWriter` — the one path a note takes from this system into the graph.
 
-A bundle *builds* a note and cannot *publish* one: core publishes whatever note the job envelope
-carries (D-118), which is why nothing here submits a note on a connector's behalf —
+A bundle *builds* a note and cannot *write* one: core writes whatever note the job envelope
+carries (D-118), which is why nothing here writes a note on a connector's behalf —
 `tests/test_connector_job_workflow.py` owns that half, and the last test in this file asserts that
 no bundle has a second way in.
 """
@@ -15,7 +15,12 @@ from pathlib import Path
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.kg.git_writer import GitNoteWriter, GitWriteError
+from chemclaw.kg.git_writer import (
+    GitNoteWriter,
+    GitRemoteError,
+    GitWriteError,
+    _replace_atomically,
+)
 from chemclaw.kg.note import Note
 from chemclaw.kg.record import NoteFile, NoteWrite
 
@@ -119,15 +124,17 @@ def test_a_write_stays_on_base_and_the_note_is_readable_there(tmp_path: Path) ->
 
 
 def test_a_rejected_push_still_leaves_the_checkout_on_base(tmp_path: Path) -> None:
-    """A submission that fails after the branch is created leaves nothing behind.
+    """A push that fails leaves the checkout on its base branch, with the note committed locally.
 
     Historically this was the PR-gate bypass a `try/finally` closed: a rejected push (a dead
     remote, a protected ref, a hook) left `note_repo_dir` on `note/<id>` with the unreviewed note
     in the working tree, served as merged knowledge by every reader and counted as merged by the
-    ELN sync's corpus scan (since deleted with the ELN half of the gate, D-2026-08-25). The tree is
-    no longer switched at all, so the failure
-    path's obligation is a different one — dispose of the worktree — and that is asserted here
-    too, because a `finally` that stops running is exactly how the original defect happened.
+    ELN sync's corpus scan (since deleted with the ELN half of the gate, D-2026-08-25).
+
+    The tree is no longer switched at all, so what is left to assert is what the failure *does*
+    leave: the base branch, and a local commit the next successful write carries. Nothing here
+    claims a worktree is disposed of — there is no worktree — and an earlier version of this
+    docstring said so while the body asserted nothing of the kind.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     hook = remote / "hooks" / "pre-receive"
@@ -147,16 +154,17 @@ def test_a_rejected_push_still_leaves_the_checkout_on_base(tmp_path: Path) -> No
 
 
 def test_a_failure_before_the_commit_leaves_no_note_in_the_tree(tmp_path: Path) -> None:
-    """A write that dies between two files leaves the first one on disk, and that is now visible.
+    """A write that dies on any file leaves none of them in the tree readers scan.
 
-    A write carries a note *and its dependencies*, so it can die between two `write_text` calls —
-    here on the containment check of the second. Under the PR-gate the half-written pair lived in a
-    worktree no reader scanned; it now lives in the tree they do scan.
+    A write carries a note *and its dependencies*, so it can die part-way — here on the containment
+    check of the second file. Under the PR-gate the half-written pair lived in a worktree no reader
+    scanned, so this cost nothing; writing into the tree readers *do* scan, a surviving first file
+    is a published half-unit.
 
-    **This is the cost of the write order, and it is bounded by that order rather than removed.**
-    `record._build_write` puts dependencies first, so the file that survives a mid-write failure is
-    one the subject note would have cited — never a subject citing something absent. Nothing is
-    committed, so the next successful write of the same note supersedes it.
+    **This test's name asserted that and its body asserted the opposite**, because the first version
+    of the direct writer validated each path as it wrote. Paths are now resolved and checked in a
+    pass of their own before any byte lands, and anything already written is restored if a later
+    step raises — so the name is true again.
     """
     _, work = _make_remote_and_clone(tmp_path)
     writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -172,15 +180,15 @@ def test_a_failure_before_the_commit_leaves_no_note_in_the_tree(tmp_path: Path) 
         asyncio.run(writer.write(pair))
 
     assert _current_branch(work) == "main"
-    assert (work / "knowledge" / "job-result" / "job-pair.md").exists()
-    # Nothing was committed: the failure is before `git add`, so the tree is dirty, not recorded.
+    assert not (work / "knowledge" / "job-result" / "job-pair.md").exists()
+    # And the tree is clean, not merely uncommitted: a restored write leaves no untracked residue.
     status = subprocess.run(
         ["git", "-C", str(work), "status", "--porcelain", "--untracked-files=all"],
         capture_output=True,
         text=True,
         check=True,
     ).stdout
-    assert "?? knowledge/job-result/job-pair.md" in status
+    assert status.strip() == ""
 
 
 def test_a_write_busts_a_readers_cache_because_it_does_touch_their_tree(
@@ -326,9 +334,14 @@ def test_rewriting_a_note_from_a_second_clone_lands_on_the_shared_base(tmp_path:
     remote, work_a = _make_remote_and_clone(tmp_path)
     v1 = _note_write("job-x", content="v1\n")
     submitter_a = GitNoteWriter(repo_dir=str(work_a), base_branch="main", remote="origin")
+
+    # **Cloned before the first write, so it is genuinely behind.** Cloning it afterwards is what
+    # this test used to do, and it made the fast-forward inert: the second clone already held
+    # everything the first had pushed, so removing `--ff-only` from the writer left this test
+    # green. Stale, the same removal fails the push as a non-fast-forward.
+    work_b = _clone(remote, tmp_path / "fresh")
     asyncio.run(submitter_a.write(v1))
 
-    work_b = _clone(remote, tmp_path / "fresh")  # a second clone of the same notes repo
     v2 = v1.model_copy(update={"files": [NoteFile(path=v1.files[0].path, content="v2\n")]})
     submitter_b = GitNoteWriter(repo_dir=str(work_b), base_branch="main", remote="origin")
     assert asyncio.run(submitter_b.write(v2)).written is True
@@ -363,10 +376,9 @@ def test_leading_dash_note_path_reaches_git_add_as_a_pathspec_not_an_option(
     `_contained_note_path` only checks containment: `repo_root / "-u"` resolves *inside*
     `repo_root`, so this path passes it and reaches `git add` as a bare positional argument.
     Without `--` ending option parsing first, git reads `-u` as `--update` (stage only
-    already-tracked changes, no pathspec) instead of the file it names — nothing new gets
-    staged, `_write_and_push`'s "nothing to commit" idempotence check trips, and `submit`
-    returns a branch name as if it had succeeded while the written note is never committed or
-    pushed, then discarded unseen with the submission's worktree.
+    already-tracked changes, no pathspec) instead of the file it names — nothing new gets staged,
+    `_write_and_commit`'s idempotence check trips, and the write reports the unchanged tree as if
+    it had succeeded while the note is never committed or pushed.
     """
     _, work = _make_remote_and_clone(tmp_path)
     writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -394,20 +406,24 @@ def test_leading_dash_note_path_reaches_git_add_as_a_pathspec_not_an_option(
     assert shown == "body\n"  # committed as a real file named "-u", not consumed as an option
 
 
-def test_submit_refuses_the_checkout_the_process_runs_from(
+def test_a_write_refuses_the_checkout_the_process_runs_from(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A submitter pointed at the process's own checkout is refused before any git op.
 
-    The reason changed and the guard did not. It used to protect uncommitted work from the
-    `reset --hard` + `clean -fd` every submission ran; the submission no longer touches the shared
-    tree, so that danger is gone. What remains is worse and still live: a submission creates
-    `note/<id>` here and **force-pushes it to this repository's origin**, so pointed at the
-    ChemClaw source checkout — which the `note_repo_dir="."` default resolves to — the gate would
-    publish an agent-authored knowledge note into the code repository.
+    The reason has changed twice and the guard has not. It used to protect uncommitted work from
+    the `reset --hard` + `clean -fd` every submission ran, then the force-push of a `note/<id>`
+    branch. Neither happens now, and what remains is the plainest form of it: a write commits into
+    the tree it is handed and pushes that tree's origin, so pointed at the ChemClaw source checkout
+    — which the `note_repo_dir="."` default resolves to — it would commit into the running
+    application's own source tree and publish the note into the code repository.
 
-    Asserted as the absence of the mutation rather than as an exception alone: no note branch and
-    no worktree may exist afterwards, which is what "refused before any git op" actually claims.
+    Asserted as the absence of the mutation rather than as an exception alone: the refusal must
+    come *before* anything is written, so the checkout holds no new file and no new commit.
+
+    Two assertions used to stand here instead — no `note/*` branch, no `.git/chemclaw-worktrees`
+    — and both were unconditionally true, because nothing in this code creates either any more. An
+    assertion that cannot fail is a claim that a control exists.
     """
     _, work = _make_remote_and_clone(tmp_path)
     uncommitted = work / "work-in-progress.txt"
@@ -427,17 +443,19 @@ def test_submit_refuses_the_checkout_the_process_runs_from(
     with pytest.raises(GitWriteError, match="CHEMCLAW_NOTE_REPO_DIR"):
         asyncio.run(writer.write(_note_write("job-own")))
 
-    # Nothing ran: no branch was created here, and no worktree. (The untracked file surviving is
-    # no longer evidence of anything — the submitter could not destroy it even without the guard.)
+    # Nothing ran. (The untracked file surviving is no longer evidence of anything — the writer
+    # could not destroy it even without the guard.) What *would* have happened without the guard is
+    # a file on disk and a commit on HEAD, so both are asserted: this is the tree the note would
+    # have landed in.
     assert uncommitted.read_text(encoding="utf-8") == "do not destroy\n"
-    branches = subprocess.run(
-        ["git", "-C", str(work), "branch", "--list", "note/*"],
+    assert not (work / "knowledge" / "job-result" / "job-own.md").exists()
+    log = subprocess.run(
+        ["git", "-C", str(work), "log", "--oneline", "--grep", "job-own"],
         capture_output=True,
         text=True,
         check=True,
     ).stdout
-    assert branches.strip() == ""
-    assert not (work / ".git" / "chemclaw-worktrees").exists()
+    assert log.strip() == ""
 
 
 def test_poisoned_index_does_not_leak_into_the_next_write(tmp_path: Path) -> None:
@@ -602,41 +620,52 @@ def test_a_cancelled_git_read_kills_its_child_like_every_other_git_command(
     )
 
 
-def test_no_connector_bundle_can_reach_the_pr_gate_itself() -> None:
-    """The review asymmetry, structurally rather than by convention.
+def test_no_connector_bundle_can_reach_the_note_write_path() -> None:
+    """A bundle *builds* a note; core writes it. Structurally, rather than by convention.
 
     A bundle used to own a `write_knowledge_node` activity calling `record_note` directly, which
-    made "the agent proposes, a human decides" something the bundle chose to honour rather than a
-    boundary it could not cross. Core publishes the envelope's note now, so a connector reaching
-    the graph would first have to import the PR-gate.
+    made "core owns the write path" something the bundle chose to honour rather than a boundary it
+    could not cross. Core writes the envelope's note now, so this is what keeps it that way.
+    `chemclaw.connectors -> chemclaw.kg` is an allowed edge in `tests/test_layering.py` — bundles
+    legitimately build `Note` objects — so this is the rule that narrows that edge to *building*.
 
-    Asserted over **every** bundle rather than against one module's attribute, which is what it
-    used to be: that spelling named the `qm` bundle, so it went dark the day that bundle was
-    removed (`D-2026-08-26-semiempirical-is-the-whole-tier`) and would have protected nothing
-    while still reading as a control. `chemclaw.connectors -> chemclaw.kg` is an allowed edge in
-    `tests/test_layering.py` — bundles legitimately build `Note` objects — so this is the rule that
-    narrows it to *building*.
+    **Two spellings of the same reach used to walk past it.** The scan matched a bare
+    `ast.Name` and an import of `kg.pr_gate` — a module that no longer exists, so half of it could
+    never fire again — which left `import chemclaw.kg.record as r; r.record_note(...)` and
+    `from chemclaw.kg.record import record_note` both green. It now asserts over the *write
+    surface* by name rather than over one call spelling: any import that binds a writing name, and
+    any attribute access ending in one.
     """
+    #: The names that reach the graph. `default_writer` is here beside `record_note` because
+    #: constructing the writer is the other half of the same reach — a bundle holding one can
+    #: call `write` on it without `record_note` ever appearing.
+    forbidden = {"record_note", "default_writer", "GitNoteWriter"}
     bundles = Path("src/chemclaw/connectors")
     offenders = []
     for path in sorted(bundles.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        # Imports and calls only — a *docstring* naming the gate is the point being made, not a
-        # violation of it, and `connectors/manifest.py` makes exactly that point.
+        # Imports, names and attributes — a *docstring* naming the write path is the point being
+        # made, not a violation of it, and `connectors/manifest.py` makes exactly that point.
         for node in ast.walk(tree):
             reached = (
-                isinstance(node, ast.ImportFrom) and (node.module or "").endswith("kg.pr_gate")
+                isinstance(node, ast.ImportFrom)
+                and (node.module or "").startswith("chemclaw.kg")
+                and any(alias.name in forbidden for alias in node.names)
             ) or (
                 isinstance(node, ast.Import)
-                and any(alias.name.endswith("kg.pr_gate") for alias in node.names)
+                and any(
+                    alias.name in {"chemclaw.kg.record", "chemclaw.kg.git_writer"}
+                    for alias in node.names
+                )
             )
-            named = isinstance(node, ast.Name) and node.id == "record_note"
-            if reached or named:
+            named = isinstance(node, ast.Name) and node.id in forbidden
+            attributed = isinstance(node, ast.Attribute) and node.attr in forbidden
+            if reached or named or attributed:
                 offenders.append(str(path.relative_to("src")))
                 break
     assert offenders == [], (
-        f"{offenders} reach the PR-gate from inside a connector: a bundle returns its note in the "
-        "job envelope and core decides whether it is proposed"
+        f"{offenders} reach the note write path from inside a connector: a bundle returns its "
+        "note in the job envelope and core writes it"
     )
 
 
@@ -738,3 +767,224 @@ def test_git_subprocess_receives_the_scrubbed_env(
     env = captured["env"]
     assert isinstance(env, dict)
     assert "CHEMCLAW_LLM_API_KEY" not in env
+
+
+# --- what the deep review of D-2026-09-05-the-gate-is-deleted-not-dormant found ----------------
+
+
+def test_a_push_that_failed_is_pushed_by_the_next_attempt_of_the_same_note(tmp_path: Path) -> None:
+    """A stranded commit must not be swallowed by the idempotence that makes a re-record cheap.
+
+    Measured on the first version of this writer: a transient push rejection left the commit on the
+    local base branch; the retry rewrote byte-identical content, staged nothing, and returned
+    `written=False` **without pushing** — so the note was on one pod's disk, reported to the chemist
+    as recorded, and on no remote. `_push` therefore decides by whether the local base is ahead of
+    its remote-tracking ref, not by whether this call staged anything.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+
+    with pytest.raises(GitWriteError, match="push"):
+        asyncio.run(writer.write(_note_write("job-stranded")))
+    hook.unlink()
+
+    outcome = asyncio.run(writer.write(_note_write("job-stranded")))
+    assert outcome.written is True, "the retry must push the commit the failed attempt left behind"
+    on_remote = subprocess.run(
+        ["git", "-C", str(remote), "ls-tree", "-r", "--name-only", "main"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "knowledge/job-result/job-stranded.md" in on_remote
+
+
+def test_an_agent_write_may_not_overwrite_a_note_a_human_authored(tmp_path: Path) -> None:
+    """The control the PR-gate used to be, and the one the deletion ADR did not account for.
+
+    `record_note` checks `created_by` on the note it is handed, which says nothing about what is
+    already at that path. Under the gate a reviewer saw "this modifies a human-authored file" in the
+    diff; nothing sees it now, so the writer refuses. The ADR's replacement control is a note that
+    *contradicts* curated knowledge — which only works while the thing to contradict still exists.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    curated = work / "knowledge" / "playbook" / "playbook-suzuki.md"
+    curated.parent.mkdir(parents=True)
+    curated.write_text(
+        "---\nid: playbook-suzuki\ntype: playbook\ncreated_by: human\n---\nPd(dppf)Cl2, 2-MeTHF.\n",
+        encoding="utf-8",
+    )
+    for command in (["add", "-A"], ["commit", "-qm", "curated"], ["push", "-q", "origin", "main"]):
+        subprocess.run(["git", "-C", str(work), *command], check=True)
+
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitWriteError, match="authored by a human"):
+        asyncio.run(
+            writer.write(
+                NoteWrite(
+                    files=[
+                        NoteFile(
+                            path="knowledge/playbook/playbook-suzuki.md",
+                            content="---\nid: playbook-suzuki\ntype: playbook\n"
+                            "created_by: agent\n---\nPdCl2, DMF.\n",
+                        )
+                    ],
+                    message="Add playbook note: playbook-suzuki",
+                )
+            )
+        )
+    assert "2-MeTHF" in curated.read_text(encoding="utf-8"), "the chemist's note is untouched"
+
+
+def test_a_note_is_replaced_in_one_step_so_a_reader_never_sees_half_of_it(tmp_path: Path) -> None:
+    """`write_text` truncates then writes; readers of this tree hold no lock.
+
+    Measured on the first version: ~80% of reads overlapping a rewrite saw a partial file, and a
+    note whose frontmatter survived the cut *parses cleanly* with half its body — so its wikilinks
+    go missing from the graph rather than the file being skipped. Asserted here at the mechanism
+    rather than by racing threads, because a race that passes once proves nothing.
+    """
+    target = tmp_path / "note.md"
+    target.write_text("---\nid: n\ntype: reaction\ncreated_by: agent\n---\nold\n", encoding="utf-8")
+    inode_before = target.stat().st_ino
+
+    _replace_atomically(target, "---\nid: n\ntype: reaction\ncreated_by: agent\n---\nnew\n")
+
+    assert "new" in target.read_text(encoding="utf-8")
+    assert target.stat().st_ino != inode_before, "the file was replaced, not truncated in place"
+    assert not list(tmp_path.glob(".note.md.*")), "no temporary file is left behind"
+
+
+def test_a_no_op_rewrite_beside_a_stray_stage_is_a_no_op_and_not_an_error(tmp_path: Path) -> None:
+    """The idempotence check is scoped to *our* paths, and unscoped it fails loudly.
+
+    `test_poisoned_index_does_not_leak_into_the_next_write` covers the commit limiter; this covers
+    the `diff --cached` above it, which nothing reached. The combination that separates them is a
+    **byte-identical re-write** with something else already staged: scoped, git stages nothing and
+    the write returns `written=False`. Unscoped, the stray makes `diff --cached` report a change,
+    the path-limited `git commit` then finds nothing to commit on those paths and exits non-zero,
+    and the caller gets a non-retryable `GitWriteError` — `durable/publish.py` drops the note.
+
+    (The comment in `git_writer` used to predict the other failure — "would turn a no-op into a
+    commit". It cannot: the commit is path-limited too. Measured, and the comment now says so.)
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    note = _note_write("job-idem", content="stable\n")
+    assert asyncio.run(writer.write(note)).written is True
+
+    stray = work / "unrelated.txt"
+    stray.write_text("somebody else's staged work\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", str(stray)], check=True)
+
+    outcome = asyncio.run(writer.write(note))
+    assert outcome.written is False, "a byte-identical re-write is a no-op, not a commit"
+    staged = subprocess.run(
+        ["git", "-C", str(work), "diff", "--cached", "--name-only"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert staged.strip() == "unrelated.txt", "the stray is neither committed nor discarded"
+
+
+def _diverge(remote: Path, tmp_path: Path, name: str) -> None:
+    """Push a note to `remote` from a third clone, so the pod's own clone is now behind."""
+    other = _clone(remote, tmp_path / f"other-{name}")
+    note = other / "knowledge" / "job-result" / f"{name}.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(f"from elsewhere: {name}\n", encoding="utf-8")
+    for command in (["add", "-A"], ["commit", "-qm", f"elsewhere {name}"], ["push", "-q"]):
+        subprocess.run(["git", "-C", str(other), *command], check=True)
+
+
+def test_a_failed_push_does_not_wedge_every_later_write_on_this_pod(tmp_path: Path) -> None:
+    """A stranded commit plus a moved remote must resolve, not fail forever.
+
+    **The two halves of this module contradicted each other and the suite held both.** A push that
+    fails deliberately leaves the note committed locally (asserted above). `_push`'s docstring then
+    says the next attempt "fetches, fast-forwards past whatever landed, and pushes this commit
+    along with its own" — which `--ff-only` cannot do once the remote has moved, because the clone
+    has diverged. So the *first* failed push wedged the pod: every later write raised
+    `GitRemoteError` on the fast-forward, forever, and no amount of retrying reached the push.
+
+    Driven the way it happens: a push fails, somebody else pushes, and the next write must land
+    both notes on the remote.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitWriteError, match="push"):
+        asyncio.run(writer.write(_note_write("job-stranded", content="stranded\n")))
+
+    hook.unlink()
+    _diverge(remote, tmp_path, "job-elsewhere")
+
+    assert asyncio.run(writer.write(_note_write("job-next", content="next\n"))).written is True
+    on_remote = subprocess.run(
+        ["git", "-C", str(remote), "ls-tree", "-r", "--name-only", "main"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    for note in ("job-stranded", "job-elsewhere", "job-next"):
+        assert f"knowledge/job-result/{note}.md" in on_remote, f"{note} never reached the remote"
+
+
+def test_a_persons_local_commit_is_never_replayed(tmp_path: Path) -> None:
+    """The refusal the fast-forward was really protecting, kept and made precise.
+
+    Rebasing is safe only while every replayed commit is this writer's own — unpushed and carrying
+    `_RECORD_TRAILER`. A commit somebody made by hand in the notes clone is not, and moving it is
+    not a decision this writer takes on its own. The old `--ff-only`-and-raise refused this case
+    correctly and refused the recoverable one above identically, which is why it read as safe.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    by_hand = work / "knowledge" / "job-result" / "job-by-hand.md"
+    by_hand.parent.mkdir(parents=True, exist_ok=True)
+    by_hand.write_text("a person wrote this here\n", encoding="utf-8")
+    for command in (["add", "-A"], ["commit", "-qm", "a person's commit"]):
+        subprocess.run(["git", "-C", str(work), *command], check=True)
+    _diverge(remote, tmp_path, "job-elsewhere")
+
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitRemoteError, match="this system did not write"):
+        asyncio.run(writer.write(_note_write("job-next")))
+    assert by_hand.read_text(encoding="utf-8") == "a person wrote this here\n"
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [".git/config", ".git/hooks/pre-commit", "knowledge/../.git/config"],
+)
+def test_a_note_path_may_not_reach_into_the_git_directory(tmp_path: Path, relative: str) -> None:
+    """`.git/` is inside the checkout, so containment alone lets a note write repository metadata.
+
+    `_contained_note_path` refuses what escapes `root`; every path here resolves *within* it.
+    `.git/config` decides where this checkout pushes, `.git/hooks/pre-commit` runs on the next
+    commit, and `.git/chemclaw-submit.lock` is the lock guarding the very write doing it.
+
+    Nothing reaches that function with such a path today — `record._note_file` builds every one
+    through `note_relative_path`, whose segments are slug-validated — which is the argument that
+    made containment "defense in depth" in the first place. Depth that stops one directory short of
+    the interesting one is not depth, so the third case is here too: the traversal is *resolved*,
+    so a path that climbs out of the knowledge tree and back into `.git` is the same path.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitWriteError, match="git directory"):
+        asyncio.run(
+            writer.write(
+                NoteWrite(
+                    files=[NoteFile(path=relative, content="url = git@evil.example:x/y.git\n")],
+                    message="Add job-result note: job-x",
+                )
+            )
+        )
+    assert "evil.example" not in (work / ".git" / "config").read_text(encoding="utf-8")

@@ -2,14 +2,14 @@
 # Keep a pod-local checkout of the knowledge repo in step with its base branch (gap DEP-1).
 #
 # Why this exists: every reader resolves the knowledge graph as a plain local directory
-# (`kg/graph.py`, `report/retrievers.py`, `agents/verifier.py`), so a note merged through the
-# PR-gate only becomes visible to a running pod once something writes it to that pod's filesystem.
+# (`kg/graph.py`, `report/retrievers.py`, `agents/verifier.py`), so a note another pod or a person
+# pushed only becomes visible to a running pod once something writes it to that pod's filesystem.
 # Nothing did. This script is that something.
 #
 # Three modes, sharing one clone-or-refresh core so the init container and the refresh sidecar
 # cannot drift:
-#   checkout  — provision the full writable clone the PR-gate submitter branches from, on every pod
-#               that can propose a note. Runs *first*, because the publish target is inside it.
+#   checkout  — provision the full writable clone `kg/git_writer.py` commits into, on every pod
+#               that can record a note. Runs *first*, because the publish target is inside it.
 #   once      — refresh the read replica and publish it, then exit. Used as an init container so a
 #               pod never serves traffic against an empty graph.
 #   loop      — `once`, then refresh every CHEMCLAW_KNOWLEDGE_SYNC_INTERVAL_SECONDS. Used as a
@@ -21,22 +21,32 @@
 # The refresh is `fetch` + `reset --hard`, never `pull`: the checkout is a read-only *replica* of the
 # base branch, so a fast-forward failure must not be able to leave it on a merge conflict.
 #
-# **Where the publish lands, and why it is inside the submitter's clone.** Every reader resolves
+# **Where the refresh lands, and why it is inside the writer's clone.** Every reader resolves
 # `settings.knowledge_path`, which is `note_repo_dir / knowledge_dir` and nothing else — one
 # property, deliberately, so "where notes are written" and "where notes are read" cannot be two
-# answers (`core/config/`; and `kg/git_submitter.py` submits into a private worktree under `.git/`
-# precisely *because* readers share this tree). Publishing anywhere else does not fail;
-# it silently answers with no evidence, because a missing note is not an error. So the publish
-# target is `${CHEMCLAW_NOTE_REPO_DIR}/${CHEMCLAW_KNOWLEDGE_DIR}` — the directory the application
-# reads — and the chart derives it from those same two settings rather than naming a second path.
+# answers (`core/config/`). Refreshing anywhere else does not fail; it silently answers with no
+# evidence, because a missing note is not an error. So the target is
+# `${CHEMCLAW_NOTE_REPO_DIR}/${CHEMCLAW_KNOWLEDGE_DIR}` — the directory the application reads — and
+# the chart derives it from those same two settings rather than naming a second path.
 #
-# That makes this script the only writer of that tree — the submitter used to be the other one, and
-# since it moved its writes into a private worktree it no longer touches this directory at all. It
-# still takes the submitter's cross-process lock (`.git/chemclaw-submit.lock`, an advisory `flock` —
-# see `kg/git_submitter.py`) for the duration of the publish: the two now serialize against each
-# other's *git* operations in one clone rather than against each other's file writes, which is a
-# weaker need but not no need. A held lock means a submission is in flight: skip this tick and
-# publish on the next one.
+# **That tree has two writers now, and `rsync --delete` was the wrong instrument for it.** Until
+# `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` the note writer committed inside a private
+# worktree and never touched this directory, so publishing a read replica over it with `--delete`
+# could only remove notes that had genuinely left the base branch. The writer commits *here* now.
+# A note whose push failed is committed locally and is not on the remote — the intended behaviour,
+# asserted by `tests/test_knowledge.py` — so the next tick's `--delete` deleted it from the tree
+# every reader scans, permanently and silently: it stays in the local `HEAD`, so no later
+# path-limited `git add` ever restores it.
+#
+# So where there is a writer's clone, the refresh **is** that clone's own fast-forward
+# (`refresh_note_repo`): `git fetch` + `merge --ff-only`, exactly what `kg/git_writer.py` does
+# before each write. Remote notes arrive, local commits survive, and nothing deletes a file. The
+# shallow replica and its `rsync` remain for the case they were always right for — a pod that
+# records nothing and therefore has no clone to fast-forward.
+#
+# Both forms take the writer's cross-process lock (`.git/chemclaw-submit.lock`, an advisory
+# `flock` — see `kg/git_writer.py`), because both run git in a checkout the writer also runs git
+# in. A held lock means a write is in flight: skip this tick and refresh on the next one.
 #
 # The token is delivered through a credential helper rather than baked into the remote URL, so it
 # never lands in `.git/config`, in `git remote -v`, or in any log line this script emits.
@@ -55,8 +65,8 @@ interval="${CHEMCLAW_KNOWLEDGE_SYNC_INTERVAL_SECONDS:-300}"
 # The corpus baked into the image (`Containerfile`: WORKDIR /app, `COPY knowledge ./knowledge`).
 # Only ever *copied from*, never written to.
 seed_dir="/app/${notes_subdir}"
-# The submitter's advisory lock file, relative to its checkout. Must match
-# `kg/git_submitter.py::_LOCK_FILE_NAME` — the two are the same lock or they are no lock at all.
+# The note writer's advisory lock file, relative to its checkout. Must match
+# `kg/git_writer.py::_LOCK_FILE_NAME` — the two are the same lock or they are no lock at all.
 submit_lock=".git/chemclaw-submit.lock"
 # The last time a refresh actually completed, as a file whose mtime is the answer.
 #
@@ -147,7 +157,7 @@ if [[ -z "${repo_url}" ]]; then
   # deliberately runs without a knowledge remote (dev, or a seeded read-only corpus) must not
   # crash-loop its pods over an unset optional value.
   if [[ "${mode}" == "checkout" ]]; then
-    log "CHEMCLAW_KNOWLEDGE_REPO_URL unset — no submitter clone, so no note can be proposed"
+    log "CHEMCLAW_KNOWLEDGE_REPO_URL unset — no writer clone, so no note can be recorded"
   else
     log "CHEMCLAW_KNOWLEDGE_REPO_URL unset — publishing the image corpus into ${publish_dir}"
     seed_from_image
@@ -187,45 +197,76 @@ refresh() {
     git -C "${target}" reset --hard "origin/${branch}"
     git -C "${target}" clean -fd
   fi
-  publish_under_submit_lock
-  # After the publish, not before it: what this timestamp claims is that the tree readers resolve
-  # was rebuilt, and a fetch whose publish then failed rebuilt nothing.
+  refresh_under_write_lock
+  # After the refresh, not before it: what this timestamp claims is that the tree readers resolve
+  # was brought up to date, and a fetch whose refresh then failed brought nothing up to date.
   : > "${heartbeat}"
 }
 
-# Run `publish` holding the PR-gate submitter's checkout lock, when there is a checkout to lock.
+# Bring the tree readers scan up to date, holding the note writer's checkout lock.
 #
-# The publish target lives inside `CHEMCLAW_NOTE_REPO_DIR` (see the header), so this script and
-# `kg/git_submitter.py` write one tree from two processes. The submitter already enforces
+# The target lives inside `CHEMCLAW_NOTE_REPO_DIR` (see the header), so this script and
+# `kg/git_writer.py` operate on one tree from two processes. The writer already enforces
 # cross-process ownership with an advisory `flock` under `.git/`; taking the same lock is what makes
 # this script a well-behaved second holder rather than a race. Non-blocking on purpose: a held lock
-# means a submission is running, and waiting behind a `git push` inside a 300 s tick buys nothing
-# that the next tick does not.
+# means a write is running, and waiting behind a `git push` inside a 300 s tick buys nothing that
+# the next tick does not.
 #
-# With no checkout (no remote, or a pod that submits nothing) there is no lock file and no second
-# writer, so the publish runs unguarded — the same reasoning `git_submitter` uses for a dev tree.
-publish_under_submit_lock() {
+# With no checkout (no remote, or a pod that records nothing) there is no lock file and no second
+# writer, so the replica publish runs unguarded — the same reasoning `git_writer` uses for a dev
+# tree.
+refresh_under_write_lock() {
   local lock="${note_repo}/${submit_lock}"
   if [[ -z "${note_repo}" ]] || [[ ! -d "${note_repo}/.git" ]]; then
     publish
     return
   fi
   if ! command -v flock >/dev/null; then
-    log "ERROR flock is not installed — refusing to publish into a live checkout (see deploy/Containerfile)"
+    log "ERROR flock is not installed — refusing to touch a live checkout (see deploy/Containerfile)"
     return 1
   fi
   (
     if ! flock -n 9; then
-      log "WARNING a note submission holds ${lock} — publishing on the next tick"
+      log "WARNING a note write holds ${lock} — refreshing on the next tick"
       exit 0
     fi
-    publish
+    refresh_note_repo
   ) 9>>"${lock}"
 }
 
+
+# Fast-forward the writer's own checkout onto the base branch — the refresh where one exists.
+#
+# `--ff-only`, never a merge, a rebase or a `reset --hard`. A divergence here means this pod holds
+# a commit the remote does not, which is a note whose push failed: a merge would invent a commit
+# nobody wrote, a rebase would move a commit this script did not author, and a hard reset would
+# delete the note outright — the very failure this function replaced.
+#
+# **A divergence is a warning, not an error, and that distinction is load-bearing.** Returning
+# non-zero here fails `once`, which is an init container: the pod would crash-loop on a stranded
+# note rather than serve it. Resolving the divergence belongs to `kg/git_writer.py`, which replays
+# its own unpushed commits on the next write; this script keeps serving what the pod holds until
+# then.
+refresh_note_repo() {
+  if ! git -C "${note_repo}" fetch origin "${branch}"; then
+    log "WARNING could not fetch ${branch} into ${note_repo} — serving the previous snapshot"
+    return 1
+  fi
+  if ! git -C "${note_repo}" merge --ff-only "origin/${branch}"; then
+    log "WARNING ${note_repo} holds a commit origin/${branch} does not — a note whose push failed. Serving what it holds; the next successful note write replays it and remote notes resume."
+    return 0
+  fi
+  log "refreshed ${note_repo} to $(git -C "${note_repo}" rev-parse --short HEAD) ($(find "${note_repo}/${notes_subdir}" -name '*.md' 2>/dev/null | wc -l) notes)"
+}
+
+# Publish the shallow read replica into the directory the app reads.
+#
+# **Only where there is no writer's clone.** With one, `refresh_note_repo` above does the job
+# without deleting anything; `--delete` here would remove a locally-committed note that has not
+# reached the remote. Reached only through `refresh_under_write_lock`, which makes that choice.
 publish() {
-  # Publish into the directory the app reads. A plain copy (not a symlink) keeps the app's
-  # stat-fingerprint cache (`kg/graph.py`) honest and keeps the read path a real directory.
+  # A plain copy (not a symlink) keeps the app's stat-fingerprint cache (`kg/graph.py`) honest and
+  # keeps the read path a real directory.
   #
   # `rsync -a --delete` is the only acceptable mechanism here, and the reason is the failure this
   # replaced. The previous form swallowed rsync's stderr and fell back to
@@ -255,25 +296,24 @@ publish() {
   fi
 }
 
-# A full, writable clone for the PR-gate submitter (gap DEP-2) — a *different* directory from the
-# shallow read replica above, because the submitter creates branches and force-pushes them, which
-# a hard-reset replica does not survive. Not shallow: `--force-with-lease` needs real history to
-# reason about, and `git worktree add` needs the base commit the submission branches from.
+# A full, writable clone for the note writer (gap DEP-2) — a *different* directory from the shallow
+# read replica above, because the writer commits and pushes, which a hard-reset replica does not
+# survive. Not shallow: a fast-forward needs real history to reason about.
 # Idempotent, so a restarted pod reuses the existing clone instead of re-cloning.
 #
-# This runs as the *first* init container, before the publish: `git clone` refuses a non-empty
-# destination, and the publish directory lives inside this one.
+# This runs as the *first* init container, before the refresh: `git clone` refuses a non-empty
+# destination, and the directory readers scan lives inside this one.
 provision_note_repo() {
   if [[ -z "${note_repo}" ]]; then
-    log "CHEMCLAW_NOTE_REPO_DIR unset — no submitter clone provisioned"
+    log "CHEMCLAW_NOTE_REPO_DIR unset — no writer clone provisioned"
     return 0
   fi
   if [[ -d "${note_repo}/.git" ]]; then
-    log "submitter clone already present at ${note_repo}"
+    log "writer clone already present at ${note_repo}"
     git -C "${note_repo}" fetch origin "${branch}"
     return 0
   fi
-  log "cloning ${branch} into submitter checkout ${note_repo}"
+  log "cloning ${branch} into writer checkout ${note_repo}"
   mkdir -p "$(dirname "${note_repo}")"
   git clone --branch "${branch}" "${repo_url}" "${note_repo}"
 }

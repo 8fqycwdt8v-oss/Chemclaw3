@@ -191,7 +191,7 @@ KNOWLEDGE_READ_TOOLS: frozenset[str] = frozenset(
 #
 # The generality that was traded away is smaller than it looks: a connector bundle cannot write to
 # the knowledge graph or the memory tiers at all. Every path into them is one of these six, because
-# the PR-gate is in-process and the memory stores are this repository's own.
+# the write path is in-process and the memory stores are this repository's own.
 #
 # `synthesize_memory` is here although it *launches* rather than writes: the job it starts opens
 # pull requests against the knowledge repository, so a turn that called it is a turn that put

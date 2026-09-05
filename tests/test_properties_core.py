@@ -330,35 +330,73 @@ def test_an_already_validated_field_is_refused_before_our_validator(
 @given(
     note=_notes(),
     dependencies=st.lists(_notes(), max_size=5),
+    superseded=st.lists(_notes(), max_size=3),
     directory=st.sampled_from(["knowledge", "kg/notes"]),
 )
 @settings(max_examples=100)
-def test_a_write_writes_each_note_once_with_its_subject_last(
-    note: Note, dependencies: list[Note], directory: str
+def test_a_write_writes_each_note_once_in_dependency_subject_retirement_order(
+    note: Note, dependencies: list[Note], superseded: list[Note], directory: str
 ) -> None:
-    """One path per note, subject **last** — the invariant `_build_write`'s docstring claims.
+    """One path per note, in the order `_build_write`'s docstring claims and a reader depends on.
 
-    It argues that a caller "may legitimately list the same dependency twice" and that writing one
-    path twice in a commit is "at best noise and at worst two different renderings racing". Both
-    halves are quantified here, because the generator produces exactly the collisions a fixed
-    example cannot enumerate: a dependency repeated, a dependency that *is* the subject, and two
-    distinct notes that share an id and differ in body — the racing-renderings case, where the
-    first occurrence must win rather than the last.
+    **dependencies, then the subject, then the retirements** — each cites the one before it, so a
+    reader walking the tree mid-write never sees a note before what it cites. The docstring argues
+    both ends: a subject written first would cite a note that is not there, and a retirement
+    written first would point `superseded-by` at a successor that does not exist yet, which is the
+    dangling wikilink `kg-validate` exists to prevent.
 
-    The position assertion is inverted from what this property held under the PR-gate, where
-    `NoteProposal.content` read `files[0]`. Dependencies are written first now, so the subject
-    never reaches the graph before what it cites
-    (`D-2026-09-05-the-gate-is-deleted-not-dormant`) — and the property is worth generating over
-    precisely because a dedup that drops the *subject* instead of a duplicate would still satisfy a
-    length check.
+    **The retirement half was asserted by nothing.** Hoisting the `superseded` loop above the
+    subject left the whole suite green — 148 tests — because the two order tests that existed both
+    passed `dependencies` only, and the one retirement test read the files into a dict keyed by id,
+    which discards order by construction. Generating over all three legs at once is what closes
+    that, and it also pins the dedup across legs: a note may appear as a dependency *and* as a
+    retirement, and the first occurrence must win.
+
+    The dedup half is worth generating over rather than exemplifying, because the collisions a
+    fixed example cannot enumerate are exactly the interesting ones: a dependency repeated, a
+    dependency that *is* the subject, and two distinct notes sharing an id and differing in body —
+    the racing-renderings case.
+
+    The count in the commit message is pinned here too. `test_pr_gate.py` held it and was deleted
+    with the gate; measured, `len(files) - 1` -> `+ 1` and the threshold `> 1` -> `>= 1` both
+    survived the whole suite afterwards.
     """
-    write = _build_write(note, directory, dependencies)
+    write = _build_write(note, directory, dependencies, superseded)
     paths = [file.path for file in write.files]
+    ids = [_id_of(path, directory) for path in paths]
     assert len(paths) == len(set(paths)), "a commit that writes one path twice"
-    assert write.files[-1].path.startswith(f"{directory}/{note.type}/{note.id}")
 
-    expected_ids = list(dict.fromkeys([*(dep.id for dep in dependencies), note.id]))
-    assert len(paths) == len(expected_ids)
+    # Asserted as the invariant rather than as a re-derived sequence: a model that repeats
+    # `_build_write`'s own dedup would agree with it however either was mutated.
+    assert ids.count(note.id) == 1, "the subject is written exactly once"
+    subject = ids.index(note.id)
+    assert paths[subject].startswith(f"{directory}/{note.type}/{note.id}")
+    for dependency in dependencies:
+        if dependency.id != note.id:
+            assert ids.index(dependency.id) < subject, "a dependency lands after its subject"
+    for retired in superseded:
+        if retired.id != note.id and retired.id not in {d.id for d in dependencies}:
+            assert ids.index(retired.id) > subject, "a retirement lands before its successor"
+
+    # **Which leg a file is in decides whether it may overwrite**, and that is set here rather
+    # than in the writer — which honours the flag and was the only half anything tested. A
+    # dependency is machine-rendered and re-rides on every write that cites it, so overwriting it
+    # would silently revert a chemist's edit; a retirement *is* that copy with `valid_to` closed,
+    # so rewriting it is the whole point.
+    for file in write.files[:subject]:
+        assert file.overwrite is False, "a dependency may overwrite a human's edit"
+    for file in write.files[subject:]:
+        assert file.overwrite is True, "the subject or a retirement refuses to land"
+
+    extra = len(paths) - 1
+    assert write.message.endswith(
+        f"{note.id} with {extra} supporting note(s)" if extra else note.id
+    )
+
+
+def _id_of(path: str, directory: str) -> str:
+    """The note id a rendered path ends in — `<directory>/<type>/<id>.md`."""
+    return path.removeprefix(f"{directory}/").split("/", 1)[1].removesuffix(".md")
 
 
 # --- budget monotonicity: a booked turn is never unbooked ---------------------------------------

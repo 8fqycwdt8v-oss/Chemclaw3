@@ -66,7 +66,7 @@
   {{- end }}
   {{- end }}
   {{- /* Derived from the knowledge volume layout rather than hand-written in `config`, so the
-         path the PR-gate submitter writes to can never drift from the volume it is mounted on
+         path the note writer writes to can never drift from the volume it is mounted on
          (gap DEP-2). Together with `CHEMCLAW_KNOWLEDGE_DIR` above it is also what every *reader*
          resolves — `Settings.knowledge_path` is the two joined — which is why the knowledge-sync
          containers take their publish target from the same pair (`chemclaw.knowledgePublishPath`)

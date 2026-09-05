@@ -158,7 +158,7 @@ def _report_id(request: ReportRequest) -> str:
     What that costs is real and small: two requests differing only in casing or section order share
     one run, so the *first* requester's casing and ordering are what the draft renders. The second
     is not misled — `get_durable_job_status` reports the run's own summary, which names the title
-    actually drafted — and a PR-gated draft is edited by a human before it becomes knowledge.
+    actually drafted — and a recorded draft is edited by a chemist after the fact, not before.
 
     `requested_by`, `requested_roles` and `memory_layer` are deliberately left byte-exact, and that
     is the same argument as the paragraph above rather than a separate one: they are not free text
@@ -182,7 +182,7 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
     """Start a durable development report and return its job id immediately.
 
     Drafts a multi-section report by retrieving evidence per section across every internal
-    source, then opens the assembled draft as a PR-gated `report` note for human review.
+    source, then records the assembled draft as a `report` note, readable at once.
     Long-running and resumable — it survives restarts — so this returns a job id rather than the
     report; poll it with `get_durable_job_status`. Re-requesting the same title and sections
     returns the existing job — matched on meaning, not on bytes, so re-ordered sections and
@@ -208,7 +208,7 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
         requested_by=require_actor(),
         requested_roles=sorted(get_current_roles()),
         # This tool only ever runs inside a turn, where the front door has bound the id — so the
-        # run's own log lines and its PR-gated draft join back to the conversation that asked.
+        # run's own log lines and its recorded draft join back to the conversation that asked.
         # `or ""` rather than a minted id: a launch outside a turn is unjoined, and saying so is
         # the point (`D-2026-08-27-a-step-runs-under-the-correlation-id-it-was-launched-with`).
         correlation_id=get_current_correlation_id() or "",
@@ -237,7 +237,7 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
 # The four corpus-scanning jobs this tool can start, by the word a chemist would use.
 #
 # **They exist here because D-2026-08-25 took their Schedules away and left nothing behind.** That
-# decision was right — each of these opens pull requests, and knowledge arriving on a timer is
+# decision was right — each of these writes knowledge, and knowledge arriving on a timer is
 # knowledge nobody asked for — but the change removed the trigger without adding one, so all four
 # became unreachable code whose docstrings claimed they were "started on demand". That is the
 # defect this module's own header was written about: a durable workflow registered on the worker
@@ -262,7 +262,7 @@ async def synthesize_memory(kind: MemoryJobKind, fresh: bool = False) -> str:
     Use this when someone asks what the corpus now supports — "have we accumulated enough on this
     route to write it up", "what campaigns are in the record", "is anything worth distilling" —
     or after a large ELN ingest. Each kind re-reads **every** reaction from the configured ingest
-    sources and proposes notes through the PR-gate, so a human still decides what becomes
+    sources and records notes directly, so nothing decides what becomes
     knowledge; this only decides *when to look*.
 
     Nothing runs these on a timer (D-2026-08-25). A pull request nobody asked for is knowledge

@@ -4,7 +4,7 @@
 # Chemclaw3_mock (the eln-json/eln-ord data sources, the mock-vendor MCP tool), and Chemclaw3_ui.
 #
 # Deliberately does not reimplement readiness polling for pieces that already have it:
-# `infra/live/bootstrap.sh` brings up Postgres/Temporal and the PR-gate's note repo, and
+# `infra/live/bootstrap.sh` brings up Postgres/Temporal and the note writer's repo, and
 # `infra/live/processes.sh` brings up this repo's own connectors, four Temporal workers and front
 # door. Both are called as subprocesses. This script owns only what those two do not know about —
 # the four external processes from the other three repos, the env that wires everything together,
@@ -363,8 +363,8 @@ up() {
 # over an ingest, and the lane's own checks are where a bad corpus is supposed to go red.
 backfill_corpus() {
   log "backfilling the seeded ELN/ORD corpus from the epoch (see cli/live_data)"
-  # A short wait on purpose: this only has to *start* the drain. Every proposal costs a PR-gate
-  # git branch and commit (~1.8 s/record measured), so the full corpus takes hours and a bring-up
+  # A short wait on purpose: this only has to *start* the drain. Every note costs a git commit
+  # and a push (~1.8 s/record measured), so the full corpus takes hours and a bring-up
   # must not block on it. The workflow keeps running on the broker; `make live-data` reads how far
   # it got and is the place a shortfall is supposed to show up.
   if (cd "$REPO_ROOT" && uv run python -m chemclaw.cli.live_data --backfill-only \

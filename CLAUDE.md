@@ -475,8 +475,12 @@ does*: knowledge does not, so it lands in `knowledge/` the moment it is learned,
 are what make that safe, and they are the control now: provenance on every retrieved chunk, the
 citations a chemist checks at the point of use, and contradiction — `memory/failure.py`'s
 `contradicts` edge, `kg/conflicts.py`, `memory/supersede.py` and bi-temporal `valid_to`. **A skill
-is the opposite case and stays gated**, with an admin as its reviewer, because it is injected into
-the prompt and reshapes every later answer with no citation trail. See
+is the opposite case**, because it is injected into the prompt and reshapes every later answer with
+no citation trail — and what the code does about that is refuse outright: no agent path writes a
+`SKILL.md` (`agent/skill_backend.SkillsReadOnlyRefusal`), so a skill changes only through a
+reviewed commit to `skills/`. Said that way deliberately: "an admin reviews it" describes the
+repository's workflow, not a control this system implements, and the two are easy to confuse in
+exactly the direction that overstates what is enforced. See
 `docs/reference/architektur.md` §4, §9, §12 for the layers, and that ADR for what replaced the gate.
 
 `kg/record.py` is the one write path, and the order it writes in is load-bearing now that a reader

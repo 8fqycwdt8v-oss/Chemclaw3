@@ -153,7 +153,8 @@ function applyEvent(evt, answerEl) {
       add("trace", `❓ ${evt.question}` + ((evt.options || []).length ? `\n   options: ${evt.options.join(" | ")}` : ""));
       return answerEl;
     case "note_proposed":
-      add("trace", `📝 proposed ${evt.note_id} for review — ${evt.reference}`);
+      // "recorded", not "proposed for review": nobody reviews it, and it is readable now.
+      add("trace", `📝 recorded ${evt.note_id} — ${evt.reference}`);
       return answerEl;
     case "approval_request":
       // A trace line and nothing else. This carried Yes/No buttons that POSTed to

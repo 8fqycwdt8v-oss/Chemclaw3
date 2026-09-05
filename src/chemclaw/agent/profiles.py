@@ -17,8 +17,8 @@ Design (see `docs/archive/audit/10-config-extensibility.md` §6):
 - **A profile *attenuates*, it never *authorizes*.** The tool/MCP subsets can only *narrow* the
   advertised surface. The audit + per-tool authz middleware and the skill role-gates run in
   `build_langgraph_agent` *after* this narrowing, so a profile that names a tool the caller may not
-  use is still denied at call time, and a profile that omits the PR-gate tools merely removes
-  capability. A profile is a narrowing seam layered *under* RBAC, never a bypass.
+  use is still denied at call time, and a profile that omits the knowledge-writing tools merely
+  removes capability. A profile is a narrowing seam layered *under* RBAC, never a bypass.
 - **Files, not code.** A profile is a YAML file discovered from `data/profiles/` or from a connector
   bundle (`chemclaw.agent.profile_discovery`, D-112), selected per session by name. This module
   holds the

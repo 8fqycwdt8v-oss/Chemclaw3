@@ -294,6 +294,15 @@ topic).
       review. 0 reaction citations and 0 `calc_refs` in the committed knowledge corpus, so the half
       of the validator its own docstring says CI runs is dead on every CI run.
 
+- [ ] **The `note_proposed` SSE event is not a proposal, and the name is a two-repo contract** —
+      [S], found 2026-09-05 in the gate-deletion review. Nothing reviews a note, so the accurate
+      name is `note_recorded`; the literal is switched on by `Chemclaw3_ui`
+      (`state/types.ts`, `chatStore.ts`, `TracePanel.tsx`, `chem/entities.ts`, `turnActivity.ts`)
+      and by `evals/live.py`, so renaming it is a coordinated deploy with a skew window in which
+      one side drops the event silently. The internal names and the text a chemist reads are
+      already fixed; only the wire literal is left. Needs a rollout order (accept both, then emit
+      the new one, then drop the old), which is why it is a row rather than part of that fix.
+
 - [ ] **The detached settle of a cancelled `AwaitAnswerWorkflow` is racy** — [M], found 2026-09-04
       while fixing the stranded-row HIGH. `ParentClosePolicy.REQUEST_CANCEL` is strictly better than
       the alternatives (all three measured against a live broker), but the settle is scheduled from
@@ -1202,15 +1211,19 @@ Both change what a `Component` is, so this wants its own ADR and its own measure
 partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
 by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
 
-## The PR-gate costs 1.81 s per proposed note, and a backfill is one note per record
+## A note write costs ~1.8 s, and a backfill is one write per record
 
-Measured over the ORD backfill: 103 records per 3.1 minutes, steady, with the cost in the PR-gate's
-git branch-and-commit cycle rather than in mapping (the whole 10,011-record corpus maps in 0.3 s).
-That is a little over two hours for the mock's 4,251 ingestible records and 4,251 branches in the
-note repository. A real deployment's first sync is a decade of records, where this is days and a
-repository nobody can list. Nothing is broken — every proposal genuinely is a reviewable unit — but
-a backfill and an incremental sync arguably want different submission shapes (one branch per batch,
-or a bulk proposal a reviewer expands). Found by the 2026-08-18 corpus-fidelity pass.
+Measured over the ORD backfill: 103 records per 3.1 minutes, steady, with the cost in the
+commit-and-push cycle rather than in mapping (the whole 10,011-record corpus maps in 0.3 s). That is
+a little over two hours for the mock's 4,251 ingestible records. A real deployment's first sync is a
+decade of records, where this is days.
+
+**Half of this closed itself and half did not.**
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the branch per note, so the
+"4,251 branches in a repository nobody can list" half is gone. What remains is the serialized
+commit-and-push, which is the same 1.8 s: a backfill and an incremental sync still want different
+write shapes (one commit per batch for the first, one per note for the second). Found by the
+2026-08-18 corpus-fidelity pass, re-scoped 2026-09-05.
 
 ## The labelling client is the one MCP leg with no identity or trace on the wire
 

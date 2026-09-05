@@ -28,12 +28,12 @@ async def review_activity(
     tool_name: str = "",
     compare_with_previous: bool = False,
 ) -> dict[str, object]:
-    """Read what this system itself has done — tool use, durable jobs, proposals, or effort.
+    """Read what this system itself has done — tool use, durable jobs, knowledge writes, or effort.
 
     The record of the *work*, not of the chemistry: who used which capability, which jobs ran, what
-    this system proposed for the knowledge graph and what people decided, and how many turns and
-    tokens each actor spent. For "is anyone actually using this", "how did our hazard screening
-    trend against last quarter", or "how much of what is in the graph did this system propose".
+    this system wrote into the knowledge graph, and how many turns and tokens each actor spent. For
+    "is anyone actually using this", "how did our hazard screening trend against last quarter", or
+    "how much of what is in the graph did this system write".
 
     Three limits to carry into any answer built on it:
 
@@ -49,9 +49,9 @@ async def review_activity(
 
     Args:
         aspect: `tools` — calls per tool split by outcome (ok, refused, error, cancelled). `jobs` —
-            durable runs per connector job, and how many proposed a note. `authorship` — what this
-            system proposed for the graph, by note type, and how humans decided. `spend` — turns,
-            tokens and wall clock per actor.
+            durable runs per connector job, and how many recorded a note. `authorship` — the notes
+            this system wrote into the graph, by the tool that wrote them, and how those calls
+            ended. `spend` — turns, tokens and wall clock per actor.
         days: How far back to look, ending now. Clamped to 1..730; quote `coverage`, not this.
         tool_name: With `aspect="tools"`, narrow to one tool name. Ignored by the other aspects.
         compare_with_previous: Also return the same reading over the preceding window of equal

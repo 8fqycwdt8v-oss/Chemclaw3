@@ -13,7 +13,7 @@ lines unreachable (`D-2026-08-15-a-capability-that-ships-off-is-not-a-capability
 
 ## The write path
 
-`settings.notes_path` is `note_repo_dir / knowledge_dir` — one location for read and write, so a
+`settings.knowledge_path` is `note_repo_dir / knowledge_dir` — one location for read and write, so a
 file written there is readable by `load_notes` *immediately*. That is what makes "global the moment
 it is learned" true without a new store.
 
@@ -93,10 +93,82 @@ references including one in a *merged* ADR, which must never be edited — the s
 caught 22 files with dangling module pointers. Neither would have been visible by reading.
 
 **Cost accepted and written down rather than smoothed over**: a wrong machine-written claim is now
-served until contradicted, and a write that dies between two files leaves the first on disk in the
-tree readers scan (bounded by the write order — the survivor is always a dependency).
+served until contradicted. (The second cost stated here — "a write that dies between two files
+leaves the first on disk" — was closed in the fix-forward below rather than accepted: every path is
+validated before any byte lands, each file is replaced atomically, and a failure restores what was
+there.)
 
 **Verification.** `make lint`, `make type` (448 files), `make prose-validate`, `make skill-validate`
 green. Full `make test` reported in the commit, with Docker and Postgres up so the DB-backed tests
 run rather than skip — the first run of this change reported 475 skips against a normal 63, which
 was Postgres being down and is exactly the trap `CLAUDE.md` warns about.
+
+
+---
+
+# Fix-forward — five fresh-context reviews of the merge above
+
+Five subagents over `7654cfb`, each given the diff and one dimension, none given the account of why
+it was written. ADR: `D-2026-09-05-a-reader-outlives-its-writer-more-quietly-than-a-writer`.
+
+**The shape four of the nine findings share**, and the reason a deletion is riskier than a build: a
+component whose *producer* was removed keeps its readers, and a reader with no writer passes every
+test it has. Grep finds the writers; the readers name a table or a concept and survive the grep.
+
+## Stranded readers
+
+- [x] `operations.authorship` answered "how much of this was AI-written" out of `note_proposals` —
+      a table nothing writes. On any deployment installed since it would report `proposed=0`: not an
+      error, a truthful-looking zero about the thing that was asked. Rebased onto `audit_events`.
+- [x] The evidence pack's `proposals` section, same table. Worse setting: the pack's own `limits`
+      train a reader to read an empty section as "this system recorded nothing". Deleted; the one
+      thing genuinely lost is named in `LIMITS`.
+- [x] `kg-validate`'s docstring claimed it gates the PR that adds notes. It never runs between a
+      write and its readability now. Restated as what it catches.
+- [x] `backfill_corpus`'s stated safety was "nothing lands in the graph unreviewed". Re-grounded on
+      the reason that is actually true — a deterministic transcription infers nothing.
+
+## Two defects the deletion created in the write path, both measured
+
+- [x] **A failed push wedged every later write on that pod, forever.** The writer deliberately
+      leaves a note committed locally when a push fails; once the remote moves, `merge --ff-only`
+      refuses and every subsequent write raises — while `_push`'s docstring said the next attempt
+      "fetches, fast-forwards past whatever landed, and pushes this commit along with its own".
+      `_replay_our_unpushed_commits` rebases *our* commits and refuses anything without the trailer,
+      which is the case the old refusal was really for and could not distinguish.
+- [x] **The knowledge-sync sidecar deleted notes the pod had just recorded.** `rsync -a --delete`
+      from a replica into the tree the writer now commits to removed a note whose push had failed —
+      permanently, since it stays in the local `HEAD` and no path-limited `git add` restores it.
+      Where there is a writer's clone the refresh is that clone's own fast-forward; the replica
+      stays for a pod that records nothing. A divergence warns rather than failing, because `once`
+      is an init container and a non-zero exit would crash-loop the pod on a stranded note.
+
+## Test quality
+
+- [x] Five mutations the suite did not kill, each re-planted to verify the fix: the retirements half
+      of the write order (148 tests green with the loop hoisted), the supporting-note count
+      (`test_pr_gate.py` was deleted and had been pinning it), `record.py`'s `overwrite=False` on
+      dependencies, the `if outcome.written:` metric guard, and the `diff --cached` scoping.
+- [x] Three inert assertions: the connector-bundle guard scanned for a module *this commit deleted*
+      and otherwise matched one call spelling (two bypasses planted and now caught); the
+      fast-forward test built its second clone after the first push, so it was never stale; and two
+      assertions billed as "the absence of the mutation" checked for artefacts nothing creates.
+
+## Prose, verified at the emitted artifact
+
+Nine model-facing passages still promised a reviewer — six skills, the `reporting` profile's live
+prompt, eight eval probes whose `forbids_claims` contradicted their own `direction`. Checked by
+rendering every registered profile's `SystemMessage` and every bound tool's `.description`, not by
+grep, because grep is what let them ship.
+
+## Companion repo
+
+`Chemclaw3_ui` #68: the review queue's proposals section called the deleted `/proposals` routes, and
+`orEmpty` folds a 404 into `[]` — so a chemist saw "everything has been decided" for a decision that
+cannot occur. Second time that policy has bitten that page. `/review` itself stays: its plans and
+questions sections are live.
+
+## Verification
+
+`ruff`, `mypy --strict` (799 files) and every validator green; full `pytest` with Docker and
+Postgres up, so the DB-backed tests run rather than skip.

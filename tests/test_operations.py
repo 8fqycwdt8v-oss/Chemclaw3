@@ -7,8 +7,8 @@ claims the prose made about earlier code and nothing checked:
   so a query that silently matched nothing fails here instead of returning a plausible zero.
 - **An empty answer says over what span it is empty.** `Coverage` travels with every reading; a
   window that excludes the rows must report the window, not merely the absence.
-- **No caller free text escapes.** `audit_events.arguments`, `job_records.rationale` and
-  `note_proposals.content` all hold text a caller supplied, and there is one shared corpus with no
+- **No caller free text escapes.** `audit_events.arguments`, `audit_events.detail` and
+  `job_records.rationale` all hold text a caller supplied, and there is one shared corpus with no
   record-level scoping. This test writes a distinctive marker into each of those columns and scans
   the serialized readings for it — the direction that matters, because a field added later would
   leak silently.
@@ -18,6 +18,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
+from chemclaw.agent import authz
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.operations import (
@@ -28,6 +29,7 @@ from chemclaw.operations import (
     spend,
     tool_usage,
 )
+from chemclaw.operations.activity import KNOWLEDGE_WRITE_TOOLS
 from tests.pg import migrated_db_or_skip
 
 #: A string no bounded vocabulary could contain, written into every free-text column below.
@@ -37,11 +39,15 @@ SECRET = "zzz-caller-supplied-secret-zzz"
 #: aggregate over everyone's fixtures — asserting on the *whole* list once measured
 #: `('bo', 'start_optimization_campaign', 3, 3)` from three unrelated files. Unique keys make the
 #: assertions exact without pretending this test owns the tables; `authorship` has no such key
-#: available (`note_type` is a closed vocabulary), so it is asserted as a delta instead.
+#: available (it is keyed by tool name, a closed vocabulary), so it is asserted as a delta instead.
 PROBE_TOOL = "ops_probe_tool"
 PROBE_CONNECTOR = "ops-test-connector"
 PROBE_JOB = "ops-test-job"
 PROBE_ACTOR = "ops-test-actor"
+
+#: The knowledge-writing tool this test drives through the trail. Any member of
+#: `KNOWLEDGE_WRITE_TOOLS` would do; this one is the tool the whole seam is named for.
+PROBE_WRITE_TOOL = "record_knowledge_note"
 
 
 async def _seed() -> None:
@@ -49,9 +55,16 @@ async def _seed() -> None:
     async with await connect(settings.postgres_dsn) as conn:
         await conn.execute("DELETE FROM audit_events WHERE actor = %s", (PROBE_ACTOR,))
         await conn.execute("DELETE FROM job_records WHERE requested_by = %s", (PROBE_ACTOR,))
-        await conn.execute("DELETE FROM note_proposals WHERE actor = %s", (PROBE_ACTOR,))
         await conn.execute("DELETE FROM turn_costs WHERE actor = %s", (PROBE_ACTOR,))
-        calls = (("ok", PROBE_TOOL), ("refused", PROBE_TOOL), ("ok", "find_notes"))
+        calls = (
+            ("ok", PROBE_TOOL),
+            ("refused", PROBE_TOOL),
+            ("ok", "find_notes"),
+            # The `authorship` reading's own row: a knowledge write, in the trail, where its live
+            # producer puts it. Seeded here rather than into a table of its own, which is the
+            # whole point of the 2026-09-05 rebase.
+            ("ok", PROBE_WRITE_TOOL),
+        )
         for outcome, tool in calls:
             await conn.execute(
                 "INSERT INTO audit_events (correlation_id, actor, tool, arguments, outcome,"
@@ -70,11 +83,6 @@ async def _seed() -> None:
                 "done",
                 "note-1",
             ),
-        )
-        await conn.execute(
-            "INSERT INTO note_proposals (note_id, note_type, content_hash, content, branch, actor,"
-            " state, decided_at) VALUES (%s, %s, %s, %s, %s, %s, %s, now())",
-            ("note-ops-1", "playbook", "h1", SECRET, "b1", PROBE_ACTOR, "merged"),
         )
         await conn.execute(
             "INSERT INTO turn_costs (correlation_id, actor, input_tokens, output_tokens,"
@@ -114,14 +122,17 @@ def test_the_readings_answer_from_rows_that_were_written() -> None:
         jobs = await job_activity(window)
         mine = [job for job in jobs.jobs if job.connector == PROBE_CONNECTOR]
         assert [
-            (job.job, job.runs, job.proposed_notes, job.distinct_requesters) for job in mine
+            (job.job, job.runs, job.recorded_notes, job.distinct_requesters) for job in mine
         ] == [(PROBE_JOB, 1, 1, 1)]
 
         after = await authorship(window)
-        assert after.proposed - before.proposed == 1
-        assert after.merged - before.merged == 1
-        playbooks = {row.note_type: row for row in after.note_types}
-        assert "playbook" in playbooks
+        assert after.attempted - before.attempted == 1
+        assert after.written - before.written == 1
+        writes = {row.tool: row for row in after.tools}
+        assert PROBE_WRITE_TOOL in writes
+        # The buckets close over whatever the trail holds, so a count can never go missing.
+        row = writes[PROBE_WRITE_TOOL]
+        assert row.attempted == row.written + row.refused + row.error + row.other
 
         spent = await spend(window)
         actor = {row.actor: row for row in spent.actors}[PROBE_ACTOR]
@@ -341,3 +352,19 @@ def test_every_name_this_system_serves_survives_the_bound() -> None:
         "slightly longer name disappears into '(unrecognised)' with no error anywhere. Re-measure "
         "the served surface and raise the cap deliberately, in the commit that adds the name."
     )
+
+
+def test_the_transcribed_write_tools_stay_a_subset_of_the_authorized_ones() -> None:
+    """`operations` may not import `agent`, so the one place that may import both checks it.
+
+    `activity.KNOWLEDGE_WRITE_TOOLS` is transcribed rather than imported (the layering forbids the
+    import, and a reader of history must not be bounded by today's producer). The failure mode a
+    transcription has is drift, and the direction that matters is a *new* graph-writing tool that
+    the reading never counts — so this asserts the relationship rather than equality: every name
+    here is authorized as a knowledge write, and the only ones deliberately left out are the
+    per-user preference tools, which are explicitly not knowledge.
+    """
+    transcribed = set(KNOWLEDGE_WRITE_TOOLS)
+    authorized = set(authz.KNOWLEDGE_WRITE_TOOLS)
+    assert transcribed <= authorized
+    assert authorized - transcribed == {"remember_preference", "forget_preference"}

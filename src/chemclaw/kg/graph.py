@@ -63,7 +63,7 @@ _LAST_SCAN: dict[str, float] = {}
 # 31×, because eight parses of the same tree contend on the GIL as well as duplicating each other.
 # That shape is not exotic here: a `gather_evidence` sweep runs its sources under `asyncio.gather`
 # with `load_notes` offloaded to a thread each, and every cold start and every `invalidate_cache`
-# (the PR-gate's parked-checkout repair, the note reindex) puts them all on a miss together.
+# (a note write, the note reindex) puts them all on a miss together.
 #
 # Re-entrant because `build_graph` holds it across `cached_notes`, so the parse and the assembly
 # behind one fingerprint happen once between all callers rather than once each.
@@ -104,7 +104,7 @@ def invalidate_cache(notes_dir: Path | None = None) -> None:
     """Drop cached notes/graph/age so the next read re-scans immediately (the explicit bust hook).
 
     The TTL window trades a little freshness for latency, but a change this process *makes* should
-    never wait it out — so every local writer of notes (today: the PR-gate submitter) calls this
+    never wait it out — so every local writer of notes (today: `kg/git_writer.py`) calls this
     and the authoring loop stays instant. Clearing every directory by default is deliberate: note
     writes are rare next to queries, so the cost of over-clearing is one extra scan, while the cost
     of under-clearing is serving a note the caller just wrote as absent.

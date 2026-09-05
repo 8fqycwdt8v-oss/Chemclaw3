@@ -8,10 +8,10 @@ with its provenance (D-160), it is read as evidence beside its own citations, an
 contradicted (`memory/failure.py`'s `contradicts` edge, `kg/conflicts.py`, `memory/supersede.py`,
 bi-temporal `valid_to`). **Correction, not pre-approval, is the control on knowledge.**
 
-**Why a file write is enough to make it global.** `settings.notes_path` is
-`note_repo_dir / knowledge_dir` — the one location `load_notes` reads and this module writes, which
-is the property `chemclaw.core.config.kg` introduced it for. So a note is in the graph the
-moment its bytes land; the commit that follows is durability and history, not publication.
+**Why a file write is enough to make it global.** `settings.knowledge_path` is `note_repo_dir /
+knowledge_dir` — the one location `load_notes` reads and the writer below commits into, which is the
+property `chemclaw.core.config.kg` introduced it for. So a note is in the graph the moment its bytes
+land; the commit that follows is durability and history, not publication.
 
 **The vocabulary lives here rather than in a module of its own.** `submission.py` existed because
 the durable proposal record had to hold the files a failed submission would have written, and
@@ -199,7 +199,7 @@ async def record_note(
     outcome = await writer.write(_build_write(note, directory, dependencies, superseded))
     if outcome.written:
         # Counted after the writer returns, so the number means "a note reached the graph" rather
-        # than "we tried" — the distinction `chemclaw_notes_proposed_total` was declared to make
+        # than "we tried" — the distinction `chemclaw_notes_recorded_total` was declared to make
         # and, until the gate was measured, did not.
         record_metric(lambda m: m.increment("chemclaw_notes_recorded_total"))
     return outcome.reference

@@ -1,14 +1,16 @@
-"""The ungated observations tier: what the agent noticed, kept out of the knowledge graph (D-161).
-
-Knowledge has had one tier and one gate. Anything an agent writes is proposed as a note and a
-human merges it before it counts — right for everything asserted as fact, and the reason there has
-been no proactive cross-project learning loop: every candidate learning would cost a reviewer a PR,
-and most candidates do not earn one.
+"""The observations tier: what the agent noticed, kept out of the knowledge graph (D-161).
 
 An observation is explicitly **not** truth. "Both projects that tried this coupling on an
-electron-poor aryl chloride got a poor outcome" is worth noticing and is not worth a PR. So the
-human gate does not disappear — it moves, from every observation to the few worth **promoting**
-into a playbook note, which still passes the same PR-gate as everything else.
+electron-poor aryl chloride got a poor outcome" is worth noticing and is not a claim.
+
+**Why this tier survives the gate's deletion, when its original justification did not.** D-161
+argued it as a cost argument about review: every candidate learning would cost a reviewer a pull
+request, and most do not earn one. There is no reviewer now
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so that argument is gone — and the tier
+is still right, for the reason underneath it. A note in `knowledge/` is *cited* and served as
+evidence; an observation is a pattern across projects that no single run supports, so serving it as
+evidence would let a hunch be cited as a finding. The threshold is what turns one into the other,
+and promotion writes an ordinary playbook note through the ordinary write path.
 
 Two rules make that safe, and both are enforced rather than documented:
 
@@ -20,8 +22,10 @@ Two rules make that safe, and both are enforced rather than documented:
   the chemist's own `interaction` note (`observation_mining`'s docstring restates why that, rather
   than "merged", is the property doing the work). Migration `025` additionally forbids an
   observation id from ever appearing in that column, because the dangerous failure is the agent
-  retrieving its own observation, counting it as corroboration, and inflating into a PR — a
-  self-confirming loop that looks exactly like cross-project evidence from the outside.
+  retrieving its own observation, counting it as corroboration, and inflating past the promotion
+  threshold — a self-confirming loop that looks exactly like cross-project evidence from the
+  outside, and one nothing downstream can now catch, because nothing reads a promoted note before
+  a chemist does.
 - **An observation never enters the evidence list.** `recall_observations` is its own tool and its
   results are labelled as what they are; nothing fuses them into `gather_evidence`'s ranked chunks.
   An observation may direct what you look for; it may never be the evidence for a claim.

@@ -4,7 +4,7 @@ Why this exists: "who ran what, with which inputs, when, did it succeed, and to 
 effect" must be answerable about work a chemist will cite, and it is also the first
 thing needed to troubleshoot an agent turn. Rather than sprinkle logging into each of the ~13 tools
 (duplication that would drift), one **tool-call middleware** wraps *every* registered
-tool uniformly — the audit trail is a single reusable piece (DRY), like the PR-gate.
+tool uniformly — the audit trail is a single reusable piece (DRY), like `kg/record.py`.
 
 It is observe-only: it never alters the arguments or the result. Each call records the
 correlation id (which conversation), the actor (who — a Phase-6 seam, the configured

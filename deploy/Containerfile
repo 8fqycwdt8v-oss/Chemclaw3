@@ -19,12 +19,13 @@ ARG BASE_IMAGE=registry.access.redhat.com/ubi9/python-311:latest
 FROM ${BASE_IMAGE}
 
 # uv drives the install to match local/CI exactly (same lockfile). Copy metadata first for layer reuse.
-# `git` is a hard runtime dependency, not a convenience: the PR-gate submitter shells out to it
-# (`kg/git_submitter.py`) and the knowledge-sync sidecar clones/pulls the note repo with it, so an
+# `git` is a hard runtime dependency, not a convenience: the note writer shells out to it
+# (`kg/git_writer.py`) and the knowledge-sync sidecar clones/fetches the note repo with it, so an
 # image without git silently breaks both directions of the knowledge layer.
 #
 # `rsync` is a hard runtime dependency for the same reason, and its absence was worse than a broken
-# feature. `knowledge-sync.sh` publishes the read replica with `rsync -a --delete`, and its fallback
+# feature. `knowledge-sync.sh` publishes the read replica with `rsync -a --delete` — on the one path
+# that still uses it, a pod with no writable clone of its own — and its fallback
 # for a failed rsync was `rm -rf "${publish_dir}"/*` followed by `cp -a`. This image never installed
 # rsync, and the rsync call swallowed stderr — so `command not found` was indistinguishable from a
 # transfer error and the *destructive* branch was the one that always ran, every sync interval,
@@ -32,10 +33,9 @@ FROM ${BASE_IMAGE}
 # fingerprint with a short TTL, so a retrieval landing inside that window saw a partial or empty
 # graph and the agent answered with no evidence — silently, because a missing note is not an error.
 #
-# `util-linux` is installed for `flock(1)`, and named here for the same reason rsync is. The publish
-# target is the PR-gate submitter's own checkout, so `knowledge-sync.sh` takes the submitter's
-# advisory lock (`kg/git_submitter.py`) around the `rsync --delete`. A missing `flock` would make
-# that guard a no-op, and the whole lesson of the rsync line above is that a missing binary must be
+# `util-linux` is installed for `flock(1)`, and named here for the same reason rsync is. The tree
+# the sidecar refreshes is the note writer's own checkout, so `knowledge-sync.sh` takes the writer's
+# advisory lock (`kg/git_writer.py`) around it. A missing `flock` would make that guard a no-op, and the whole lesson of the rsync line above is that a missing binary must be
 # a named dependency rather than a runtime discovery.
 USER 0
 # `dnf -y update` before installing, and it is not belt-and-braces. Red Hat rebuilds the UBI9 tag

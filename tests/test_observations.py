@@ -326,8 +326,13 @@ class TestTheInteractionMiner:
         assert len(found) == 1
         assert found[0].origin == "interaction"
         assert found[0].projects_seen == ["alpha", "beta"]
-        # The interaction note *and* its cited reactions — all merged, all legitimate support.
-        assert found[0].evidence_note_ids == ["interaction-42", "reaction-r1", "reaction-r2"]
+        # **The cited reactions only.** The interaction note names what was observed and is in
+        # `scope`, but it is `created_by: agent` and reaches the corpus with no human step, so
+        # counting it as its own support was the self-confirming loop: it alone carried a
+        # two-project interaction from support 2 to the promotion threshold of 3.
+        assert found[0].evidence_note_ids == ["reaction-r1", "reaction-r2"]
+        assert found[0].scope == "interaction:interaction-42"
+        assert found[0].support == 2, "below observation_promote_min_evidence, so it cannot promote"
 
     def test_an_interaction_inside_one_project_is_not_a_cross_project_finding(self) -> None:
         """Every confirmed answer would otherwise become an observation, which is just a log."""

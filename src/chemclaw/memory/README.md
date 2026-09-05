@@ -24,21 +24,22 @@ is explicitly not truth. "This transformation has gone badly in three projects" 
 and is not worth a reviewer's PR — and it is something the graph will never hold, since a playbook
 may only be distilled from successes.
 
-The human gate does not disappear; it moves. An observation that crosses both promotion thresholds
-opens one ordinary playbook PR through the ordinary `kg.pr_gate`. Two rules keep that safe and both
+The threshold is what separates the two tiers, and since
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` it is the *only* thing that does: an
+observation that crosses both promotion thresholds becomes an ordinary playbook note, written
+straight into `knowledge/` like every other agent-authored note. Two rules keep that safe and both
 are enforced rather than documented: support counts distinct *cited runs* — `reaction-<id>`
-references into the ungated transcription store since D-2026-08-25, plus the `interaction`
-notes — and an observation can never corroborate itself into a promotion (migration `025` makes
-the self-reference a CHECK). The promotion PR says which kind of evidence the count is, because
-the reviewer at that gate is the first human in the loop for the transcription half. And an
-observation never enters the evidence list (`recall_observations` is its own tool, not a bucket
-inside `gather_evidence`).
+references into the transcription store since D-2026-08-25, plus the `interaction` notes — and an
+observation can never corroborate itself into a promotion (migration `025` makes the self-reference
+a CHECK). The promoted note says which kind of evidence the count is, because nobody reads it before
+a chemist does at the point of use. And an observation never enters the evidence list
+(`recall_observations` is its own tool, not a bucket inside `gather_evidence`).
 
 ## Nothing here writes to the graph directly
 
-A distilled playbook is a *proposal*. It reaches `knowledge/` the same way every other
-agent-generated note does — through `kg.pr_gate`, as a pull request a human merges. Memory that
-wrote itself into the record would be exactly the thing the review line exists to prevent.
+Everything that reaches `knowledge/` goes through `kg.record.record_note`, the one write path, so a
+promoted playbook is subject to the same path validation, the same `created_by: agent` stamp and
+the same write ordering as anything else. What this package must not do is hold a second way in.
 
 ## The boundary against `retrieval/`
 

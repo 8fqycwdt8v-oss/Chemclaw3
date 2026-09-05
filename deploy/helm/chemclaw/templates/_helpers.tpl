@@ -462,7 +462,8 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end }}
 {{- end -}}
 
-{{- /* Sidecar: refresh on a cadence so a merged note reaches a *live* pod without a redeploy.
+{{- /* Sidecar: refresh on a cadence so a note another pod wrote reaches a *live* pod without a
+       redeploy.
 
        **With a liveness probe, because a wedged one used to be invisible.** `loop` catches a failing
        refresh deliberately — a dead git remote must not kill the pod — and the consequence was that
@@ -543,18 +544,18 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
   emptyDir: {}
 {{- end -}}
 
-{{- /* The PR-gate submitter's writable clone (gap DEP-2) — and, inside it at `knowledge_dir`, the
-       tree every reader resolves. Every component that can call `propose_note` needs one: the front
-       door (the `propose_knowledge_note` agent tool) and the background worker (job-result / BO /
-       memory publishes), but NOT a connector's own worker — a bundle returns its note in the job
-       envelope and core publishes it, so no connector process touches the note repo.
+{{- /* The note writer's writable clone (gap DEP-2) — and, inside it at `knowledge_dir`, the
+       tree every reader resolves. Every component that can write a note needs one: the front
+       door (the `record_knowledge_note` agent tool) and the background worker (job-result / BO /
+       memory writes), but NOT a connector's own worker — a bundle returns its note in the job
+       envelope and core writes it, so no connector process touches the note repo.
 
        One clone rather than a clone plus a published copy, because `Settings` offers one path for
-       both: `knowledge_path` is `note_repo_dir / knowledge_dir`, and `kg/git_submitter.py` returns
-       the checkout to the base branch after every submission *because* readers share it. The
-       shallow replica at `sync.checkoutPath` survives as what the publish copies **from**, which is
-       its stated reason for existing: a failed fetch must not be able to leave the directory the
-       app reads half-written.
+       both: `knowledge_path` is `note_repo_dir / knowledge_dir`, and `kg/git_writer.py` commits
+       onto the base branch in that same tree, which is what makes a recorded note readable at once.
+       The shallow replica at `sync.checkoutPath` is now only used by a pod that has *no* writable
+       clone; where there is one, `knowledge-sync.sh` fast-forwards it instead of copying a replica
+       over it, because copying could delete a note whose push had failed.
 
        This init container runs first — `git clone` refuses a non-empty destination and the publish
        directory is inside this one. */ -}}

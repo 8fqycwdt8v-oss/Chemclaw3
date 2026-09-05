@@ -1,24 +1,25 @@
 """The operational read model: what this system did, read back out of its own record.
 
 Every other package here answers a question about the chemistry. This one answers a question about
-the *work* — which tools were used, which jobs ran, what the agent proposed and what humans decided
-about it, and where the effort went. It reads the six tables no one could *aggregate* —
-`audit_events`, `job_records`, `note_proposals`, `plan_approvals`, `turn_costs` and
-`effects` — and it writes nothing. (Named rather than counted: this said "five" while the
-package read six, and a name is a thing `grep -ohE 'FROM [a-z_]+' src/chemclaw/operations/*.py`
-can check.)
+the *work* — which tools were used, which jobs ran, what the agent wrote into the graph, and where
+the effort went. It reads the five tables no one could *aggregate* — `audit_events`, `job_records`,
+`plan_approvals`, `turn_costs` and `effects` — and it writes nothing. (Named rather than counted:
+this said "five" while the package read six, and a name is a thing
+`grep -ohE 'FROM [a-z_]+' src/chemclaw/operations/*.py` can check. It reads five again since
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` took `note_proposals`' producer away, and
+the grep is why that is a fact rather than a hope.)
 
 **The original framing here was "five tables that had writers and no readers", and that is false
 for four of them** — `cli/explain.py` reads `audit_events` and `job_records`, `publish/backfill.py`
-and `durable/job_record_store.py` read `job_records`, `kg/record.py` reads `note_proposals`
-and `agent/plan_approval_store.py` reads `plan_approvals`. Only `turn_costs` had no reader at all,
-which is exactly what its own docstring said.
+and `durable/job_record_store.py` read `job_records`, and `agent/plan_approval_store.py` reads
+`plan_approvals`. Only `turn_costs` had no reader at all, which is exactly what its own docstring
+said.
 
 The true claim is the one in the sentence above, and the narrower version first written here was
 **also wrong**: it said "every existing reader is a point lookup", which holds only for
 `cli/explain.py` and `plan_approval_store`. `job_record_store._SEARCH` is a cross-record search over
-every connector's runs (it is what `find_past_jobs` calls), `proposal_store._SELECT_MANY` is a
-paginated listing, and `publish/backfill._JOBS` sweeps the whole table.
+every connector's runs (it is what `find_past_jobs` calls) and `publish/backfill._JOBS` sweeps the
+whole table.
 
 What none of them does is *aggregate*. "Who else has used this playbook", "how many hazard flags did
 the group raise last quarter" and "how much of that note was agent-written" were unanswerable from
@@ -41,7 +42,7 @@ from chemclaw.operations.activity import (
     Coverage,
     JobActivity,
     JobRun,
-    ProposalOutcome,
+    KnowledgeWrites,
     Spend,
     ToolUsage,
     ToolUse,
@@ -61,7 +62,7 @@ __all__ = [
     "EvidencePack",
     "JobActivity",
     "JobRun",
-    "ProposalOutcome",
+    "KnowledgeWrites",
     "Spend",
     "ToolUsage",
     "ToolUse",

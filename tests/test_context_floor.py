@@ -278,12 +278,20 @@ load_profiles()
 #: every test in this file green. So this raise buys nothing and hides nothing: it is the same
 #: surface, counted where it is paid.
 #:
-#: The headroom is 799 tokens, which is the property every raise above was chosen for — under what
-#: one `record_knowledge_note` costs (1,126, re-derived the same day), so the ceiling cannot absorb
-#: another tool of that size unnoticed. It is deliberately *not* the ~980 the branch point would
-#: have given: this tree already carries a sibling branch's docstring edit worth 160 tokens, and a
-#: ceiling set to today's measurement plus a fixed headroom is set against whatever else is in
-#: flight. The figure to judge a raise by is the headroom, not the ceiling.
+#: The headroom is what a raise is judged by, and it must stay *under* what one
+#: `record_knowledge_note` costs, so the ceiling cannot absorb another tool of that size unnoticed.
+#: A ceiling set to today's measurement plus a fixed headroom is set against whatever else is in
+#: flight, which is why the margin is deliberately thin.
+#:
+#: **The two figures this paragraph used to state were stale within four days, and one of them was
+#: stale when it was written.** It said 799 tokens of headroom against a 1,126-token tool; measured
+#: on 2026-09-05 the floor was 44,089 (headroom 411) against a 1,238-token tool, drifted by merges
+#: this file never saw — and this commit's own prose edits to tool docstrings moved it to 44,145
+#: (headroom 355), which is stated because a docstring is part of the bill and pretending otherwise
+#: is how the floor gets away from a ratchet. No raise: the property holds, more tightly than
+#: before. Both live figures come out of `_report`, so nobody has to trust this comment for them,
+#: and per `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` the ones written here are a
+#: claim about this commit and nothing later.
 #:
 #: **`agent_tool_result_clear_trigger` moves with it, by derivation rather than by retuning**
 #: (`core/config/agent.py`): its default is this ceiling plus the 30,000 of thread the setting has
@@ -349,7 +357,11 @@ KNOWN_OVERSIZED: dict[str, int] = {
     # instead — provenance, citations, correction — and that is 101 tokens the model is sent on
     # every call. Recorded rather than trimmed: the sentence it buys is the one that stops the model
     # asserting an unreviewed note as established fact.
-    "record_knowledge_note": 1_227,
+    #
+    # 1,227 → 1,238 in the fix-forward that followed, same cause: the `Returns:` line still said
+    # "the submitted PR reference". Re-recorded in the commit that moved it, which is what this
+    # dict's own test asks for and the reason it is +11 rather than a mystery inside the tolerance.
+    "record_knowledge_note": 1_238,
     # Both +22 against the re-measurement above, and it is the same 22 twice: they share the
     # `ExperimentDesign` schema, and the `max_length` ceilings
     # `D-2026-08-29-a-check-a-reader-never-sees-is-not-a-check` put on its six keyed lists render as

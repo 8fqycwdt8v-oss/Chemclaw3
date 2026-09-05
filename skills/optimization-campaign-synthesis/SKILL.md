@@ -44,4 +44,5 @@ table (conditions × outcomes per run) is deterministic; the *analysis* is here.
 - Every claim cites the member run(s) it rests on. Keep evidenced results separate from any
   extrapolation to untried conditions.
 - The synthesized narrative is recorded directly and read by a process chemist as machine-written
-  (D-005) — it is a reading of the data, not new fact, until merged.
+  — it is a reading of the data, not new fact, so every line of it must be checkable against a
+  cited member run.

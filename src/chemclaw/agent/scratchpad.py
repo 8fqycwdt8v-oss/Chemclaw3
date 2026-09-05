@@ -43,8 +43,9 @@ eval harness all run without ambient identity, and a memory written under an "an
 would be a memory nobody can erase and everybody can read. Those paths fall through to
 `StateBackend`, which is turn-scoped — they get a scratchpad and no memory, which is correct.
 
-**What this is not.** It is a working surface, not knowledge. Layer 4 stays Git plus Markdown behind
-the PR-gate: a conclusion worth keeping still goes through `record_knowledge_note` and a human.
+**What this is not.** It is a working surface, not knowledge. Layer 4 stays Git plus Markdown, and
+a conclusion worth keeping still goes through `record_knowledge_note` — which cites its evidence,
+carries `created_by: agent` and can be contradicted. A scratchpad file has none of that.
 Nothing under `/memories/` is evidence a citation can resolve to — `verifier.turn_evidence` scores
 against tool outputs, and a file the model wrote itself is not one.
 

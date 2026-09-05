@@ -1,11 +1,11 @@
 """The evidence pack: assembly, not capture.
 
-Every component has existed since it was written — the audit trail, `job_records`, `note_proposals`,
+Every component has existed since it was written — the audit trail, `job_records`,
 `plan_approvals`, `effects`. What was missing is the read that puts them beside each other, which is
 the artefact a regulated deployment is asked for and the one an engineer wants after an incident.
 
 Three properties are asserted rather than described, because each is a claim the pack makes about
-itself: it draws from all five stores, an empty pack says so rather than reading as "nothing
+itself: it draws from all four stores, an empty pack says so rather than reading as "nothing
 happened", and refusals are part of the record rather than a list of faults.
 """
 
@@ -33,13 +33,13 @@ async def _clear() -> None:
     leaves rows for every later test to trip over.
     """
     async with await connect(settings.postgres_dsn) as conn:
-        for table in ("audit_events", "job_records", "note_proposals", "effects", "plan_approvals"):
+        for table in ("audit_events", "job_records", "effects", "plan_approvals"):
             await conn.execute(f"DELETE FROM {table} WHERE session_id = %s", (SESSION,))
         await conn.commit()
 
 
 async def _seed() -> None:
-    """One row in each of the five stores, all for one session."""
+    """One row in each of the four stores, all for one session."""
     await _clear()
     async with await connect(settings.postgres_dsn) as conn:
         await conn.execute(
@@ -54,7 +54,7 @@ async def _seed() -> None:
         )
         await conn.execute(
             "INSERT INTO job_records (job_id, connector, job, rationale, requested_by, session_id,"
-            " summary) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            " summary, note_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 "pack-j-1",
                 "calc",
@@ -63,13 +63,8 @@ async def _seed() -> None:
                 "u-1",
                 SESSION,
                 "dG = -12.3 kJ/mol",
+                "note-1",
             ),
-        )
-        await conn.execute(
-            "INSERT INTO note_proposals (note_id, note_type, content_hash, content, branch, actor,"
-            " session_id, state, decided_at, decided_by) VALUES"
-            " (%s, %s, %s, %s, %s, %s, %s, %s, now(), %s)",
-            ("note-1", "playbook", "h", "body", "b", "agent", SESSION, "merged", "u-review"),
         )
         await conn.execute(
             "INSERT INTO effects (effect_id, connector, job, system, reversal, requested_by,"
@@ -97,11 +92,11 @@ async def _seed() -> None:
 
 
 def test_the_pack_draws_from_every_store_that_holds_part_of_the_record() -> None:
-    """Five reads rather than one join.
+    """Four reads rather than one join.
 
-    The stores are independent by design — an effect is recorded whether or not a note was
-    proposed, and a proposal survives the session's messages being pruned — so a join would
-    silently drop a row whose partner had been disposed of under a different retention rule.
+    The stores are independent by design — an effect is recorded whether or not a job ran, and a
+    job record survives the session's messages being pruned — so a join would silently drop a row
+    whose partner had been disposed of under a different retention rule.
     """
 
     async def _run() -> None:
@@ -112,9 +107,9 @@ def test_the_pack_draws_from_every_store_that_holds_part_of_the_record() -> None
         assert [call.tool for call in pack.tool_calls] == ["gather_evidence", "file_deviation"]
         assert [job.job for job in pack.jobs] == ["compute_thermochemistry"]
         assert pack.jobs[0].rationale == RATIONALE
-        assert [(p.note_id, p.state, p.decided_by) for p in pack.proposals] == [
-            ("note-1", "merged", "u-review")
-        ]
+        # The note a durable run recorded rides on its job, which is where its id now lives: the
+        # `proposals` section this replaced read a table nothing writes any more.
+        assert [job.note_id for job in pack.jobs] == ["note-1"]
         assert [(e.system, e.approved_by, e.external_ref) for e in pack.effects] == [
             ("the QMS", "u-qa", "DEV-2291")
         ]
