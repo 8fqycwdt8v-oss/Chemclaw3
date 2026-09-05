@@ -42,10 +42,16 @@ from starlette.types import Receive, Scope, Send
 from chemclaw.agent.session_events import claim_unconsumed
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentUser, resolve_session
-from chemclaw.api.events import ErrorEvent, JobCompletedEvent, JobFailedEvent
+from chemclaw.api.events import (
+    AwaitingAnswerEvent,
+    ErrorEvent,
+    JobCompletedEvent,
+    JobFailedEvent,
+)
 from chemclaw.api.state import state
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.durable.awaiting import AWAITING_KIND
 from chemclaw.durable.digest import DIGEST_KIND, digest_channel
 
 logger = logging.getLogger(__name__)
@@ -173,8 +179,22 @@ async def session_events(
         # route runs.
         try:
             async for pushed in front_door.stream_new_events(
-                session_id, kinds=("job_completed", "job_failed")
+                session_id, kinds=("job_completed", "job_failed", AWAITING_KIND)
             ):
+                # **A question the agent is waiting on is news on this channel too.**
+                # `AwaitAnswerWorkflow._push` has always written this row; nothing ever claimed it,
+                # because the tuple above named two kinds and this is a third. So the notification
+                # was written, never delivered, and aged out under retention — and the only thing a
+                # chemist saw was the `job_started` recorded beside it, of a kind no surface knows,
+                # which reads as a durable job that runs for seven days and then expires.
+                #
+                # Widening the claim steals from nobody: `AWAITING_KIND` had **no consumer at all**,
+                # and the claim is kind-scoped precisely so a selective consumer leaves other kinds
+                # for theirs. Named from `durable.awaiting` rather than written out again here — a
+                # second spelling of a wire constant is the drift this route would not notice.
+                if pushed.kind == AWAITING_KIND:
+                    yield _awaiting_event(pushed.payload)
+                    continue
                 job_id = str(pushed.payload.get("job_id", ""))
                 failed = pushed.kind == "job_failed"
                 reason = str(pushed.payload.get("reason", ""))
@@ -245,6 +265,33 @@ class Digest(BaseModel):
 
     query: str = ""
     note_ids: list[str] = Field(default_factory=list)
+
+
+def _awaiting_event(payload: dict[str, Any]) -> dict[str, str]:
+    """Read one claimed `awaiting-answer` row into the SSE frame the contract declares.
+
+    Lenient in the same way `_digest` is, and for a stronger version of the same reason: the row is
+    already claimed by the time this runs, so there is no re-delivery. A payload that failed
+    validation would take the notification with it, and the notification is the whole point — the
+    request itself is still open, still in `GET /pending`, and still on its deadline.
+
+    The two pushes carry different fields. The open (and every reminder) sends `kind`, `asked_of`
+    and `due_at`; the expiry sends `subject`, `state` and `reminders` and nothing else. `.get` with
+    the model's own defaults is what lets one reader take both without asking which it is.
+    """
+    event = AwaitingAnswerEvent(
+        request_id=str(payload.get("request_id", "")),
+        state=str(payload.get("state", "waiting")),
+        subject=str(payload.get("subject", "")),
+        kind=str(payload.get("kind", "")),
+        asked_of=str(payload.get("asked_of", "")),
+        due_at=str(payload.get("due_at", "")),
+        # `int()` on whatever arrived rather than a cast: a reminder count is a number in every
+        # payload this workflow writes, and a string there is a row from a build that is not this
+        # one — which is not a reason to lose the notification.
+        reminders=int(payload.get("reminders", 0) or 0),
+    )
+    return {"event": event.type, "data": event.model_dump_json()}
 
 
 def _digest(payload: dict[str, Any]) -> Digest:

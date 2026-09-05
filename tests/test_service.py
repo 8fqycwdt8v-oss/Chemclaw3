@@ -723,6 +723,154 @@ def test_job_pushback_streams_completed_events(monkeypatch) -> None:  # type: ig
     ]
 
 
+def test_pushback_streams_a_question_waiting_on_a_person(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An `awaiting-answer` row reaches the browser instead of aging out unclaimed.
+
+    `AwaitAnswerWorkflow._push` has written this row since the workflow existed, and this route
+    claimed `("job_completed", "job_failed")` — two kinds, and this is a third. So the notification
+    was written, never claimed and aged out under retention, while the only thing a chemist saw was
+    the `record_job_started(handle.id, "awaiting")` recorded beside it: an ask rendered as a durable
+    job that runs for seven days and then silently expires.
+
+    The claim is kind-scoped precisely so a selective consumer leaves other kinds for theirs, so
+    widening it steals from nobody — `AWAITING_KIND` had no consumer at all.
+    """
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.session_events import SessionEvent
+    from chemclaw.durable.awaiting import AWAITING_KIND
+
+    claimed: list[tuple[str, ...]] = []
+
+    async def _fake_stream(session_id: str, **kwargs: tuple[str, ...]) -> object:
+        claimed.append(kwargs.get("kinds") or ())
+        yield SessionEvent(
+            session_id=session_id,
+            kind=AWAITING_KIND,
+            payload={
+                "request_id": "await-9f2c",
+                "kind": "measurement",
+                "subject": "Isolated yield for arm B3",
+                "asked_of": "process-chemist",
+                "due_at": "2026-09-06T00:00:00Z",
+                "reminders": 0,
+                "state": "waiting",
+            },
+        )
+
+    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
+
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        events = []
+        with client.stream("GET", f"/sessions/{session_id}/events") as res:
+            assert res.status_code == 200
+            for line in res.iter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[len("data:") :].strip()))
+
+    assert events == [
+        {
+            "type": "awaiting_answer",
+            "request_id": "await-9f2c",
+            "state": "waiting",
+            "subject": "Isolated yield for arm B3",
+            "kind": "measurement",
+            "asked_of": "process-chemist",
+            "due_at": "2026-09-06T00:00:00Z",
+            "reminders": 0,
+        }
+    ]
+    # The kind really is claimed, rather than the payload merely being mapped: a route that mapped
+    # it without asking for it would pass the assertion above against this fake and deliver nothing
+    # against a database.
+    assert AWAITING_KIND in claimed[0]
+    # And the two kinds that were already claimed still are — widening must not narrow.
+    assert {"job_completed", "job_failed"} <= set(claimed[0])
+
+
+def test_pushback_streams_an_expired_question(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The expiry push carries fewer fields, and must not be lost to validation.
+
+    "Told, not silently abandoned" is the workflow's own reason for sending it, and it is the one
+    outcome nobody is watching for. It carries no `kind`, no `asked_of` and no `due_at` — so a model
+    that required them would drop exactly this notification, and the row is already claimed by the
+    time this route reads it, which means there is no second delivery.
+    """
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.session_events import SessionEvent
+    from chemclaw.durable.awaiting import AWAITING_KIND
+
+    async def _fake_stream(session_id: str, **_: object) -> object:
+        yield SessionEvent(
+            session_id=session_id,
+            kind=AWAITING_KIND,
+            payload={
+                "request_id": "await-9f2c",
+                "subject": "Isolated yield for arm B3",
+                "state": "expired",
+                "reminders": 3,
+            },
+        )
+
+    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
+
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        events = []
+        with client.stream("GET", f"/sessions/{session_id}/events") as res:
+            for line in res.iter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[len("data:") :].strip()))
+
+    assert events == [
+        {
+            "type": "awaiting_answer",
+            "request_id": "await-9f2c",
+            "state": "expired",
+            "subject": "Isolated yield for arm B3",
+            "kind": "",
+            "asked_of": "",
+            "due_at": "",
+            "reminders": 3,
+        }
+    ]
+
+
+def test_pushback_survives_an_awaiting_payload_from_another_build(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A payload this build did not write costs one blank field, never the notification.
+
+    Same rule `_digest` states for the same reason, one channel over: the row is claimed before this
+    code sees it, so a `ValidationError` here destroys a notification rather than deferring it — and
+    the request it names is still open, still on its deadline and still in `GET /pending`.
+    """
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.session_events import SessionEvent
+    from chemclaw.durable.awaiting import AWAITING_KIND
+
+    async def _fake_stream(session_id: str, **_: object) -> object:
+        yield SessionEvent(
+            session_id=session_id,
+            kind=AWAITING_KIND,
+            # `reminders` as a string, and no `state` at all.
+            payload={"request_id": "await-9f2c", "reminders": "2"},
+        )
+
+    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
+
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        events = []
+        with client.stream("GET", f"/sessions/{session_id}/events") as res:
+            for line in res.iter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[len("data:") :].strip()))
+
+    assert len(events) == 1
+    assert events[0]["request_id"] == "await-9f2c"
+    assert events[0]["reminders"] == 2
+    assert events[0]["state"] == "waiting"
+
+
 def test_pushback_for_unknown_session_is_404() -> None:
     """Subscribing to push-back for a session that never existed is a clean 404."""
     with _client(_FakeAgent()) as client:
@@ -1591,16 +1739,33 @@ def test_event_streams_are_capped_per_user(monkeypatch) -> None:  # type: ignore
     asyncio.run(_run())
 
 
-def test_events_route_claims_only_the_job_outcome_kinds(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """The push-back route scopes its (destructive) claim to the job-outcome kinds in the claim.
+def test_events_route_claims_a_named_set_of_kinds_and_not_every_kind(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The push-back route names the kinds it claims, and claiming is destructive.
 
-    The claim marks rows consumed atomically; claiming every kind and filtering afterwards would
-    silently destroy events of other kinds meant for other consumers. Both outcomes are claimed:
-    a job that failed after its turn ended has the same claim on the asker's attention as one that
-    succeeded, and until 2026-08-04 only the successful one had any way of reaching them.
+    The claim marks rows consumed atomically, so claiming every kind and filtering afterwards would
+    silently destroy events meant for another consumer. That is the invariant, and it is not the
+    same as any particular *number* of kinds — this test asserted `("job_completed", "job_failed")`
+    as a literal and so went red on the commit that legitimately added a third, which is a tripwire
+    doing its job and a name (`..._only_the_job_outcome_kinds`) that had stopped describing it.
+
+    Three are claimed, and each is here for its own reason:
+
+    * `job_completed` — a durable job that finished after its turn ended.
+    * `job_failed` — the same job dying. Until 2026-08-04 only the successful one could reach the
+      asker, so a failure left a "job started" promise standing for ever.
+    * `awaiting-answer` — a workflow that has stopped and is waiting for a person
+      (`D-2026-09-05-a-push-nobody-claims-is-not-a-push`). Written on every open, reminder and
+      expiry since the workflow existed, and claimed by nothing until that change.
+
+    The exact-set assertion is the point rather than a subset check: **`DIGEST_KIND` must stay
+    out.** Digests are claimed by `GET /digests` on a per-principal channel, and a session stream
+    that swept them up would consume them where nobody is rendering them — which, the claim being
+    destructive, is not a display bug but a deletion.
     """
     import chemclaw.api.app as app_module
     from chemclaw.agent.session_events import SessionEvent
+    from chemclaw.durable.awaiting import AWAITING_KIND
+    from chemclaw.durable.digest import DIGEST_KIND
 
     captured: dict[str, object] = {}
 
@@ -1614,7 +1779,10 @@ def test_events_route_claims_only_the_job_outcome_kinds(monkeypatch) -> None:  #
         with client.stream("GET", f"/sessions/{session_id}/events") as res:
             for _line in res.iter_lines():
                 pass
-    assert captured["kinds"] == ("job_completed", "job_failed")
+    claimed = captured["kinds"]
+    assert isinstance(claimed, tuple)
+    assert set(claimed) == {"job_completed", "job_failed", AWAITING_KIND}
+    assert DIGEST_KIND not in claimed
 
 
 def test_a_failed_job_reaches_the_asker_with_its_reason(monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -111,6 +111,24 @@ function applyEvent(evt, answerEl) {
       // shown, so it must not scroll past as one more grey line.
       add("warn", `\u2717 job ${evt.job_id} failed \u2014 ${evt.reason || "no reason reported"}`);
       return answerEl;
+    case "awaiting_answer":
+      // Also push-back, and also a warn lane rather than the trace — but for the opposite reason
+      // to `job_failed`: nothing is retracted, something is *asked*. A durable job has stopped
+      // until a person answers it, `GET /pending` lists it and `POST /pending/{id}/answer`
+      // releases it, and the deadline is the only part with a clock on it. `state` separates the
+      // two pushes: the open (and every reminder) carries the routing, the expiry carries the
+      // subject and how many reminders went unanswered.
+      add(
+        "warn",
+        evt.state === "expired"
+          ? `⏱ question ${evt.request_id} expired unanswered` +
+              `${evt.subject ? ` — ${evt.subject}` : ""}` +
+              `${evt.reminders ? ` (after ${evt.reminders} reminder(s))` : ""}`
+          : `? waiting on ${evt.asked_of || "anyone entitled"} — ` +
+              `${evt.kind || "question"} ${evt.request_id}` +
+              `${evt.due_at ? `, due ${evt.due_at}` : ""}`,
+      );
+      return answerEl;
     case "capability_degraded":
       // Its own lane, not the trace: this qualifies the answer that follows, and an answer
       // assembled without the ELN is indistinguishable from one assembled with it unless the
