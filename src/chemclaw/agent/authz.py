@@ -153,6 +153,30 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
 # that are not in-process at all (`index_*` are MCP tools behind an `allowed_tools` boundary),
 # inherited from `DEFAULT_WRITE_TOOL_GATES`. Those are correct entries and correctly absent from
 # the registry.
+# The reads that consult **the record** — what a turn looked at before it answered.
+#
+# A hand-written subset of `READ_ONLY_TOOLS` below, and the hand-writing is the honest part: authz
+# partitions tools by *what they may do without approval*, which is a different question from *did
+# this turn consult what we know*. `ask_clarifying_question` and `check_pending_requests` are
+# read-only and consult nothing; deriving this set from the authz partition would count a turn that
+# asked the chemist a question as a turn that searched the record.
+#
+# `tests/test_turn_knowledge.py` asserts this stays a subset of `READ_ONLY_TOOLS`, so a tool that
+# becomes state-changing cannot go on being counted as a read.
+KNOWLEDGE_READ_TOOLS: frozenset[str] = frozenset(
+    {
+        "assemble_evidence_pack",
+        "condense_protocols",
+        "expand_note",
+        "find_knowledge_gaps",
+        "find_notes",
+        "find_past_jobs",
+        "gather_evidence",
+        "recall_observations",
+        "recall_preferences",
+    }
+)
+
 READ_ONLY_TOOLS: frozenset[str] = frozenset(
     {
         "ask_clarifying_question",

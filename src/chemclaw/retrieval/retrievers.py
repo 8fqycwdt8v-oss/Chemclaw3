@@ -21,7 +21,7 @@ from chemclaw.kg.conflicts import NoteConflicts, conflict_index
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import Note, note_id_for_reaction, strip_links
 from chemclaw.kg.search import query_terms, term_frequencies
-from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip
+from chemclaw.retrieval.evidence import EvidenceChunk, Hits, RetrieverSkip
 from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
 from chemclaw.science.fingerprints.store import FingerprintInputError, FingerprintStore, Match
@@ -189,7 +189,7 @@ class GraphRetriever:
         self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
         self.name = name
 
-    async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
+    async def retrieve(self, query: str, filters: dict[str, Any]) -> Hits:
         """Return chunks from notes matching every term of `query`, ranked best first.
 
         Deterministic and case-insensitive over `chemclaw.kg.search.search_text` — the note's id,
@@ -260,10 +260,20 @@ class GraphRetriever:
         )
         chosen = ranked[: settings.retrieval_top_k]
         conflicts = await _conflict_index(self._dir)
-        return [
-            _chunk_for(note, self.name, confidence, conflicts.get(note.id), terms)
-            for _, _, confidence, note in chosen
-        ]
+        # **`found` is the pre-cut total, and this leg is the one that can honestly report it.**
+        # It scores every eligible note and then truncates, so both numbers exist here. Measured on
+        # 5,000 notes that all matched every term, `gather_evidence` reported `chunks=8,
+        # total_before_cap=8, truncated_by=None` while 4,992 matching notes were discarded inside
+        # this function — the model was told "8 found, nothing was cut" about a corpus it had seen
+        # 0.16% of. `EvidenceSweep` exists so "a cut does not look like a corpus"; this is the
+        # number that makes that true of the per-leg bound rather than only of the merge caps.
+        return Hits(
+            (
+                _chunk_for(note, self.name, confidence, conflicts.get(note.id), terms)
+                for _, _, confidence, note in chosen
+            ),
+            found=len(ranked),
+        )
 
 
 # BM25's saturation constant, in its usual range. Named rather than inlined because it is the one

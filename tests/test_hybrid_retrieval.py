@@ -271,3 +271,78 @@ def test_a_single_source_keeps_its_own_ranking(monkeypatch: pytest.MonkeyPatch) 
     out = asyncio.run(research_tools.gather_evidence("q")).chunks
 
     assert [chunk.source_note_id for chunk in out] == ["n0", "n1", "n2"]
+
+
+# --- the fused order and the number beside it -------------------------------------------------
+
+
+class _FixedRetriever:
+    """A source that returns a prepared ranked list, scored on its own scale."""
+
+    def __init__(self, name: str, scored: list[tuple[str, float]]) -> None:
+        """Answer with `scored` — `(note id, this source's own score)`, best first."""
+        self.name = name
+        self._scored = scored
+
+    async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
+        """Return the prepared list, ignoring the query."""
+        return [
+            EvidenceChunk(content=f"{note} body", source_note_id=note, retriever=self.name, score=s)
+            for note, s in self._scored
+        ]
+
+
+def _three_incomparable_legs() -> list[tuple[str, Any]]:
+    """Three sources whose scores live on three scales, as the real ones do.
+
+    A note's `confidence`, a `ts_rank` and a cosine are not comparable and never were; that is why
+    the fused list needs a number of its own rather than whichever finder got there first.
+    """
+    return [
+        ("graph", _FixedRetriever("graph", [("a", 0.30), ("b", 0.40)])),
+        ("lexical", _FixedRetriever("lexical", [("c", 0.02), ("a", 0.09)])),
+        ("vector", _FixedRetriever("vector", [("d", 0.60), ("c", 0.95)])),
+    ]
+
+
+def test_hybrid_mode_reports_the_fused_rank_not_the_finders_own_score(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After fusion the chunk's own score explains nothing a reader can see.
+
+    `EvidenceChunk.score`'s own field comment says it orders *one source's* list and nothing wider.
+    Fusion destroys that list: the order is a summed reciprocal rank, and each chunk still carried
+    its finder's number on its finder's scale. Measured over the shipped `knowledge/` corpus with
+    all three note legs, the reported score was monotone with the fused order on **0 of 7**
+    ordinary queries — on one, the column read 0.85 at position 1 and 0.90 at position 10.
+
+    So the model was handed a ranking and a number that contradict it, and had no way to tell which
+    to believe. What is reported now is the only quantity the fusion actually produced: rank.
+    """
+    monkeypatch.setattr(settings, "retrieval_mode", "hybrid", raising=False)
+    monkeypatch.setattr(research_tools, "_sources", lambda _anchor: _three_incomparable_legs())
+
+    sweep = asyncio.run(research_tools.gather_evidence("anything"))
+    scores = [chunk.score for chunk in sweep.chunks]
+
+    assert scores == sorted(scores, reverse=True), (
+        f"the score column is not monotone with the order it sits beside: {scores}"
+    )
+    assert scores[0] == 1.0
+    assert all(0.0 < score <= 1.0 for score in scores)
+
+
+def test_graph_mode_keeps_the_finders_own_score(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The absence, pinned — a blanket restatement would delete a real signal.
+
+    The `graph` merge is a round-robin interleave, which preserves each source's own ordering, so a
+    chunk's score still explains its position within the list it came from. Restating it there
+    would throw away KM-5's truncation signal (a more-trusted note surviving the cut first) for the
+    default deployment, which is every deployment that has not opted into hybrid.
+    """
+    monkeypatch.setattr(settings, "retrieval_mode", "graph", raising=False)
+    monkeypatch.setattr(research_tools, "_sources", lambda _anchor: _three_incomparable_legs())
+
+    sweep = asyncio.run(research_tools.gather_evidence("anything"))
+
+    assert {chunk.score for chunk in sweep.chunks} & {0.30, 0.40, 0.02, 0.09, 0.60, 0.95}
