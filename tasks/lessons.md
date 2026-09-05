@@ -1932,3 +1932,12 @@ schemes: `calc_server_url` ships as loopback `http://`, so `HTTP_PROXY` really d
 the fixture was measuring the shipped defaults rather than the property. **Rule: a fixture for a
 property test sets every input the property ranges over — a default left in place is an unstated
 arm.**
+
+**I attributed a difference between two full-suite runs to my own diff without checking the
+instrument.** The commit closing orphaned httpx clients claimed it "moved the suite's
+ResourceWarning count from 129 to 137". Four consecutive green runs read 129, 141, 137, 143 — the
+run *after* the fix was the highest — and driven directly, the two files involved emit 0 either
+way; the warnings belonged to a third file. **Rule: before attributing a metric's movement to a
+change, run the metric twice without the change. A number that moves on its own is not evidence,
+and a suite-wide aggregate of a GC-timing-dependent warning is exactly that kind of number.**
+The correction goes in the live prose, because `git log` keeps the wrong sentence either way.

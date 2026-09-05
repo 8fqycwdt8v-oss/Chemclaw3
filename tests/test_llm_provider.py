@@ -242,11 +242,25 @@ def _reset_gateway_clients() -> None:
     """Close the process-scoped gateway clients, then drop them from the cache.
 
     `_tls_http_clients` is `@cache`d and now holds a *pair*, so a bare `cache_clear()` orphans two
-    live connection pools instead of one — measured, that alone moved the suite's `ResourceWarning`
-    count by 8. Production never clears the cache (one pair per process is the point), so this is a
-    test concern only, and it is a helper rather than an autouse fixture because the tests that
-    clear are the tests that are *about* the cache: hiding the clear from them would hide what they
-    assert.
+    live connection pools where it used to orphan one. Closing what you orphan is the whole reason
+    — and the reason is **not** a `ResourceWarning` count, which is what the commit introducing
+    this claimed.
+
+    **That claim was measured wrong and is corrected here rather than left standing.** It read the
+    suite's warning total across full runs (129 → 137) as this change's effect. Those runs differ
+    for unrelated reasons: the totals across four consecutive green runs were 129, 141, 137 and
+    143, and the run *after* this helper landed was the highest of the four. Driven directly, three
+    runs of this file and `test_protocol_condense.py` emit **0** `ResourceWarning`s with the helper
+    and **0** without it — the warnings the grep found belong to `test_connector_identity.py`. A
+    number that moves without the code moving is not evidence about the code, which is
+    `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` with a noisy instrument instead of a
+    stale one.
+
+    So the justification is hygiene, stated plainly: a test that takes a live connection pool out of
+    the only reference holding it should close it first. Production never clears the cache (one pair
+    per process is the point), so this is a test concern only, and it is a helper rather than an
+    autouse fixture because the tests that clear are the tests that are *about* the cache — hiding
+    the clear from them would hide what they assert.
     """
     from chemclaw.agent.llm_provider import _tls_http_clients
 
