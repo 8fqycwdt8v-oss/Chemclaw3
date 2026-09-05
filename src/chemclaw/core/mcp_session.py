@@ -58,6 +58,8 @@ from mcp.types import (
     PingRequest,
 )
 
+from chemclaw.core.http import default_ssl_context
+
 # An `httpx` request hook: one coroutine taking the outbound request, called on every hop of a
 # redirect chain. Named here so both this module's two seams and their callers spell one type, and
 # so the parameter reads as what it is rather than as an opaque callable.
@@ -308,6 +310,9 @@ def short_connect_client(
             headers=headers,
             auth=auth,
             follow_redirects=True,
+            # One process-wide trust store; see `core.http.default_ssl_context` for what building
+            # one per client cost the event loop (156.1 ms per turn across the connector fleet).
+            verify=default_ssl_context(),
             # the calc backend is a loopback/in-cluster Service; ignore ambient proxies
             trust_env=False,
             event_hooks={"request": [request_hook]} if request_hook is not None else {},

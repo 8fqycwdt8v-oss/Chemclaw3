@@ -1052,3 +1052,31 @@ def _probe_tool() -> BaseTool:
         return "ok"
 
     return probe
+
+
+def test_both_client_factories_share_one_ssl_context() -> None:
+    """No client this system builds parses the CA bundle for itself.
+
+    `httpx.AsyncClient` with no `verify=` constructs a fresh `ssl.SSLContext` and loads certifi
+    into it. A turn opens one client per connector, so the shipped seven-connector deployment paid
+    that seven times per turn on the one event loop serving every user on the pod — measured at
+    ~110 ms against 0.26 ms with the context shared, a 400x difference, and it is *blocking* CPU
+    rather than await time.
+
+    Both factories are asserted here because they are the two independent places a client is built
+    and they drifted together once already: the fix has to hold at both or a turn still pays it at
+    whichever one was missed. Identity (`is`) rather than equality, because a *copy* of the context
+    costs exactly what this test exists to prevent.
+    """
+    from chemclaw.connectors.registry import connector_http_client
+    from chemclaw.core.http import default_ssl_context
+    from chemclaw.core.mcp_session import short_connect_client
+
+    shared = default_ssl_context()
+
+    def context_of(client: httpx.AsyncClient) -> object:
+        return client._transport._pool._ssl_context  # type: ignore[attr-defined]
+
+    endpoint = _endpoint("http://127.0.0.1:8815/mcp", "relax_structure")
+    assert context_of(connector_http_client("calc", endpoint)) is shared
+    assert context_of(short_connect_client(read_bound_seconds=30.0)()) is shared
