@@ -277,8 +277,13 @@ async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) ->
         record_metric(
             lambda m: m.increment("chemclaw_calc_backend_at_capacity_total", labels={"tool": tool})
         )
+        # Not "the job will be retried": this line is one above the sentence corrected for exactly
+        # that promise, and it was left carrying it. Both paths reach here — a durable job, whose
+        # `calculation_retry` backoff does wait and ask again, and the in-process tool surface,
+        # where nothing does — and the log cannot tell which, because this function is called the
+        # same way from both. What it can say is what happened.
         logger.warning(
-            "the calculation server refused %s because it is full; the job will be retried", tool
+            "the calculation server refused %s because every calculation slot was taken", tool
         )
         # **Worded so it is true on both paths, which is what it was not.** It promised "the
         # system will wait and ask again" — true of a durable job, whose `calculation_retry`
