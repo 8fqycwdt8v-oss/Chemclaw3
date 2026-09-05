@@ -272,3 +272,33 @@ def test_re_proposing_a_rejected_version_does_not_close_the_live_one_in_sql() ->
         assert await store.mark_merged(["pg-rejected-sweep"], "webhook") == 1
 
     asyncio.run(_run())
+
+
+def test_history_is_ordered_and_scoped_in_sql() -> None:
+    """The reviewer's read, against the statement that serves it rather than against the mirror.
+
+    Two things only the database decides here: that `ORDER BY id` is submission order across rows
+    written in separate transactions (the timestamp is the store's clock and two rows can share
+    it), and that the actor predicate is a filter rather than a no-op — the `(%s = '' OR actor =
+    %s)` idiom is easy to get right in Python and wrong in SQL, and getting it wrong fails *open*,
+    disclosing another chemist's rejected proposal to whoever asks.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        first = await store.upsert(_proposal("pg-history", content="v1", actor="chemist-a"))
+        await store.decide(first, ProposalState.REJECTED, "reviewer", "the claim is not evidenced")
+        second = await store.upsert(_proposal("pg-history", content="v2", actor="chemist-b"))
+        await store.upsert(_proposal("pg-history-other", content="v1", actor="chemist-a"))
+
+        every = await store.history("pg-history", "")
+        assert [version.id for version in every] == [first, second]
+        assert every[0].state is ProposalState.REJECTED
+        assert every[0].reason == "the claim is not evidenced"
+
+        theirs = await store.history("pg-history", "chemist-b")
+        assert [version.id for version in theirs] == [second]
+
+        assert await store.history("pg-history-absent", "") == []
+
+    asyncio.run(_run())
