@@ -169,13 +169,21 @@ async def fork_session_route(
     except SessionForkError as exc:  # a caller error: nothing to fork from yet
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
+        # **The slot first, because it is the release that nothing can retry.** This block used to
+        # open with the awaited durable release, and a second cancellation delivered while that
+        # shield is in flight — a forced shutdown, a nested timeout — re-raises out of it and
+        # skips whatever is below. Losing the *durable* claim that way costs one lease, which is
+        # why `_release_turn_claim` can afford to let cancellation through; losing the in-process
+        # slot is permanent, because a fork claims it with `deadline=math.inf` and nothing sweeps
+        # an entry that never expires. So the synchronous, unloseable release goes first and the
+        # awaited one last.
+        _release_turn_slot(front.active_turns, session_id, slot)
         if claimed and claims is not None:
             # Through the shielded release for the reason D-130 gives — this `finally` also runs
             # when the caller is cancelled, and a bare `await` in a cancelled task raises at its
             # first suspension point, so the release would start on every abandoned fork and finish
             # on none.
             await _release_turn_claim(claims, session_id)
-        _release_turn_slot(front.active_turns, session_id, slot)
     front.live_sessions.add(child_id, TurnSession(session_id=child_id), principal.oid, live.profile)
     log_event(
         logger,
@@ -379,6 +387,10 @@ async def delete_session(
             rows=sum(removed.values()),
         )
     finally:
+        # The slot first, for the reason `fork_session_route`'s `finally` states in full: it is
+        # claimed with `deadline=math.inf` and nothing sweeps it, so it is the one release a
+        # re-cancel inside the awaited shield below must not be able to skip.
+        _release_turn_slot(front.active_turns, session_id, slot)
         if claimed and claims is not None:
             # Ordinarily a no-op: the sweep deleted this session's claim row inside its own
             # transaction. It is here for the path where the sweep raised, so a failed delete does
@@ -388,7 +400,6 @@ async def delete_session(
             # suspension point, so the release would start on every abandoned delete and finish on
             # none.
             await _release_turn_claim(claims, session_id)
-        _release_turn_slot(front.active_turns, session_id, slot)
     return Response(status_code=204)
 
 

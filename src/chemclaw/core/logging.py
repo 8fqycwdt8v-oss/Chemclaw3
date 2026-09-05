@@ -74,15 +74,29 @@ def configure_logging() -> None:
     # connector registry off disk, so a pair per handler would repeat that work — and, when the
     # registry is broken, would log the ERROR and increment the failure counter once per handler
     # per call rather than once per startup, which `core/metrics.py` says it means.
-    context, redaction = ContextFilter(), SecretRedactingFilter()
-    for handler in _handlers_that_reach_an_output_stream():
+    handlers = _handlers_that_reach_an_output_stream()
+    # **`ContextFilter` is installed before `SecretRedactingFilter` is *constructed*, not merely
+    # before it is attached.** That constructor logs `degraded[log_redaction]` when the connector
+    # registry raises, and `log_format` demands `%(correlation_id)s`, which only `ContextFilter`
+    # puts on a record — so with the pair built in one statement, `Formatter.format` raised
+    # `ValueError: Formatting field not found in record: 'correlation_id'` and `handleError` dumped
+    # the record to stderr as a "--- Logging error ---" traceback, the raw `'degraded[%s]: …'` and
+    # `Arguments: ('log_redaction',)` on separate lines. The one *security* degradation in this file
+    # is the one line that could not be printed, so the log-stack rule matching the marker this
+    # module calls "the stable marker to alert on" never fired. Two statements, in the order the
+    # alarm needs.
+    context = ContextFilter()
+    for handler in handlers:
+        if not any(isinstance(f, ContextFilter) for f in handler.filters):
+            handler.addFilter(context)
+    redaction = SecretRedactingFilter()
+    for handler in handlers:
         # `force=True` above resets the *root's* handlers, so a second `configure_logging()` starts
         # them clean — but a non-propagating logger's handlers are not ours to reset and would
         # otherwise accumulate a pair per call, running redaction N times per record on the front
         # door's hot path. Measured 2 -> 4 -> 6 filters over three calls before this guard.
         installed = next((f for f in handler.filters if isinstance(f, SecretRedactingFilter)), None)
         if installed is None:
-            handler.addFilter(context)
             handler.addFilter(redaction)
             installed = redaction
         # The filter is fail-open by design, so a record it could not redact still reaches
@@ -711,15 +725,34 @@ def register_secret_env(name: str) -> None:
         _RUNTIME_SECRET_ENVS.add(name)
 
 
+def _named_token_env_vars() -> frozenset[str]:
+    """The environment variables the `*_token_env` settings point at, empty values dropped.
+
+    **One derivation with two readers, and it had two the day the second inventory arrived.**
+    `_SECRET_ENV_SETTINGS` was added for the log filter and `secret_env_names()` went on deriving
+    from `_SECRET_SETTINGS` alone — so the calculation backend's bearer, the labelling server's and
+    the read-only MCP face's were scrubbed from every log line and handed, in the clear, to every
+    `git` child `kg/git_submitter.py` starts, which is the exact class `_git_child_env` exists to
+    withhold. Two docstrings said the sets "cannot drift"; reading one list from both places is what
+    makes that a property of the code rather than a claim about it.
+
+    A `frozenset` because both callers want membership and neither wants an order.
+    """
+    named = (str(getattr(settings, field, "") or "") for field in _SECRET_ENV_SETTINGS)
+    return frozenset(variable for variable in named if variable)
+
+
 def secret_env_names() -> frozenset[str]:
     """The `CHEMCLAW_*` environment-variable names this process holds a secret *value* under.
 
-    Derived from the same `_SECRET_SETTINGS` inventory the log redaction reads, so a credential
-    added there is scrubbed from a subprocess environment by the same edit rather than a second one
-    that can drift. The use is least privilege: a child process (today, the KG git commands in
-    `kg/git_submitter.py`) has no need of this process's LLM credential, database DSNs, Temporal key
-    or the framing-envelope HMAC, and a git remote, credential helper or hook that reads its
-    environment must not find them there.
+    Both inventories the log redaction reads: `_SECRET_SETTINGS`, whose fields hold a credential's
+    value, and `_SECRET_ENV_SETTINGS`, whose fields hold the *name* of a variable a bearer lives in
+    (`_named_token_env_vars`). A credential added to either is scrubbed from a subprocess
+    environment by the same edit rather than a second one that can drift. The use is least
+    privilege: a child process (today, the KG git commands in `kg/git_submitter.py`) has no need of
+    this process's LLM credential, database DSNs, Temporal key, the framing-envelope HMAC or the
+    three bearers it sends to its own backends, and a git remote, credential helper or hook that
+    reads its environment must not find them there.
 
     `_KNOWLEDGE_REPO_TOKEN_ENV` is deliberately *not* here and not in `_SECRET_SETTINGS`: git's
     own credential for the notes remote reaches it through the remote URL or a credential helper, so
@@ -727,7 +760,8 @@ def secret_env_names() -> frozenset[str]:
     registered connector tokens are likewise omitted — they belong to MCP sessions, not a git child.
     """
     prefix = str(type(settings).model_config.get("env_prefix", ""))
-    return frozenset(f"{prefix}{name}".upper() for name in _SECRET_SETTINGS)
+    settings_values = frozenset(f"{prefix}{name}".upper() for name in _SECRET_SETTINGS)
+    return settings_values | _named_token_env_vars()
 
 
 def _configured_by(env_name: str) -> str:
@@ -1085,8 +1119,8 @@ def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...
     # therefore only ever arrive through the process environment, and skipping the fallback is what
     # keeps this per-record: measured, `_configured_by` was 7.0 us of the 7.7 us these three added
     # to a call that costs ~7.6 us without them.
-    for name in _SECRET_ENV_SETTINGS:
-        _consider(os.environ.get(str(getattr(settings, name, "") or ""), ""))
+    for variable in _named_token_env_vars():
+        _consider(os.environ.get(variable, ""))
     return tuple(sorted(values, key=len, reverse=True))
 
 

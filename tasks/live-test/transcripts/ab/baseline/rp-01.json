@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "rp-01",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here are the last six runs of the Suzuki biaryl coupling, straight out of my notebook:\n\n| Batch  | Scale (mmol) | Isolated yield (%) | HPLC purity (area %) |\n|--------|--------------|--------------------|----------------------|\n| SB-041 | 5.0          | 78                 | 97.2                 |\n| SB-042 | 5.0          | 81                 | 97.8                 |\n| SB-043 | 25.0         | 64                 | 94.1                 |\n| SB-044 | 25.0         | 69                 | 95.0                 |\n| SB-045 | 25.0         | 41                 | 88.6                 |\n| SB-046 | 5.0          | 80                 | 96.9                 |\n\nGive me a first-pass summary I can paste into my write-up.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a root cause for the SB-045 drop stated as established fact rather than hypothesis",
+      "any yield or purity number that is not in the pasted table, including invented means",
+      "a citation to a note id that was not returned by a retrieval call",
+      "a claim that these batch records were found in the knowledge graph"
+    ],
+    "direction": "Summarise from the pasted table only: the three 5 mmol runs cluster tightly at 78-81% and ~97% purity, the 25 mmol runs are both lower and far more scattered (41-69%, 88.6-95.0%), and SB-045 is the outlier on both axes. Arithmetic must be faithful to the table. Scale is the visible correlate and may be named as a hypothesis, explicitly labelled as one. If it searches the record for these batch ids it must report honestly that SB-0xx ids are not in the knowledge graph, rather than quietly attaching seed notes to them.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-01",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here are the last six runs of the Suzuki biaryl coupling, straight out of my notebook:\n\n| Batch  | Scale (mmol) | Isolated yield (%) | HPLC purity (area %) |\n|--------|--------------|--------------------|----------------------|\n| SB-041 | 5.0          | 78                 | 97.2                 |\n| SB-042 | 5.0          | 81                 | 97.8                 |\n| SB-043 | 25.0         | 64                 | 94.1                 |\n| SB-044 | 25.0         | 69                 | 95.0                 |\n| SB-045 | 25.0         | 41                 | 88.6                 |\n| SB-046 | 5.0          | 80                 | 96.9                 |\n\nGive me a first-pass summary I can paste into my write-up.",
+    "profile": "no-tools",
+    "answer": "I can give you a straightforward summary, but I want to flag what I'm seeing and what I'm *not* seeing:\n\n**What the data shows:**\n- **Small scale (5 mmol)**: Consistent performance. Three runs (SB-041, SB-042, SB-046) cluster tightly at 78–81% yield with 97–98% purity.\n- **Scale-up to 25 mmol**: Performance degrades. The first two runs (SB-043, SB-044) drop to 64–69% yield and 94–95% purity. SB-045 is a clear outlier at 41% yield and 88.6% purity—something went wrong there.\n\n**What I cannot tell you:**\n- *Why* the scale-up fails. Is it a mixing problem? Catalyst deactivation? Temperature control? Incomplete reaction? You'd need to compare conditions (temperature, time, solvent, reagent ratios, workup) between the 5 mmol and 25 mmol runs to know.\n- *Why* SB-045 crashed. Was it a procedural slip, a reagent issue, or inherent to larger scale? That single bad point doesn't establish a pattern.\n- Whether 64–69% is acceptable for your purposes at 25 mmol, or whether this needs fixing.\n\n---\n\n**Suggested summary for your write-up:**\n\n> *Suzuki biaryl coupling was performed at two scales. At 5 mmol scale (n = 3), consistent yields of 78–81% with ≥96.9% HPLC purity were obtained (SB-041, SB-042, SB-046). Scale-up to 25 mmol (n = 3) resulted in reduced yields of 41–69%, with one run (SB-045) showing significant loss of selectivity (88.6% purity). Runs SB-043 and SB-044 at 25 mmol scale gave 64–69% yields with 94–95% purity, suggesting reproducible but lower performance at larger scale.*\n\nThen follow with your diagnosis of why, if you know it—or flag it as \"under investigation\" if you don't yet.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.64,
+    "event_counts": {
+      "token": 20,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "7612aea42e5d4f0a9e1386c9cf215aba",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

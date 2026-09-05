@@ -177,6 +177,32 @@ class ConnectorSettings(BaseSettings):
     # development and for the transport's own tests, and those set this explicitly.
     connector_stdio_enabled: bool = False
 
+    # Which jobs may declare `awaits_answer: true` and so run with **no wall-clock ceiling at all**
+    # (`durable/connector_job.py::child_execution_timeout`), as `<bundle>.<job>` names separated by
+    # the OS path separator.
+    #
+    # **The branch is right and the declaration needed a gate.** A job that suspends on a person
+    # spends wall clock without doing work, and no finite ceiling is correct for it — a measured
+    # campaign is `(n_rounds + 1)` waits and the shipped spec alone spans 154 days, so any ceiling
+    # wide enough is a ceiling that reaps nothing. That argument is unchanged. What it does not
+    # answer is *who decides a job has that shape*, and the answer was "whoever wrote the file":
+    # `child_execution_timeout`'s own docstring states the invariant that "a manifest in this
+    # repository still cannot grant itself runtime the operator did not fund", and this was the one
+    # field that could. Measured — a manifest naming a bundle nobody vetted, no setting changed —
+    # an 18,000 s fleet ceiling became `None`.
+    #
+    # Default off for a manifest, on for the one bundle that ships with the shape, which is the
+    # same posture `connector_stdio_enabled` takes and for the same stated reason: a manifest is
+    # data. The consequence a site accepts by adding a name here is the one
+    # `child_execution_timeout` writes down — for that job the wall-clock reaper is gone, so a
+    # bundle worker that never returns leaves the run `running` rather than failing it in hours.
+    connector_jobs_awaiting_answer: str = "bo.start_optimization_campaign"
+
+    @property
+    def connector_jobs_awaiting_answer_list(self) -> list[str]:
+        """The `<bundle>.<job>` names allowed to run without a wall-clock ceiling."""
+        return [j for j in self.connector_jobs_awaiting_answer.split(os.pathsep) if j]
+
     @property
     def connectors_dirs(self) -> list[str]:
         """The connector bundle directories, split on the OS path separator (like `PATH`)."""

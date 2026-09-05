@@ -17,11 +17,19 @@ What is pinned here:
 """
 
 import asyncio
+import contextlib
 import json
 from collections.abc import MutableMapping
 from typing import Any
 
+import pytest
+from starlette.requests import Request
+
+from chemclaw.agent.session_store import SessionOwnerStore
 from chemclaw.api.app import create_app
+from chemclaw.api.auth import Principal
+from chemclaw.api.routes import sessions
+from chemclaw.api.state import LiveSession
 from chemclaw.core.config import settings
 
 
@@ -465,4 +473,123 @@ def test_a_disconnected_turn_still_resets_every_ambient_context_var() -> None:
     assert not awaits, (
         f"run_turn's finally block awaits ({len(awaits)} found); on the cancellation path that "
         "skips the context-var resets below it and leaks the turn's ambient identity"
+    )
+
+
+# --- the slot two routes hold across an awaited release ---------------------------------------
+
+
+class _ParkingClaims(_RecordingClaims):
+    """A claim store whose `release` parks until the test lets it go.
+
+    The park is the whole apparatus. What is under test is a *second* cancellation delivered while
+    the shielded durable release is still in flight — the instant `_release_turn_claim`'s own
+    docstring calls out ("Cancellation still propagates out of here") — and a fake that never
+    suspends cannot express it.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing held and nobody inside `release`."""
+        super().__init__()
+        self.inside = asyncio.Event()
+        self.let_go = asyncio.Event()
+
+    async def release(self, session_id: str, holder: str) -> None:
+        """Announce that the release started, then wait for the test before finishing it."""
+        self.entered += 1
+        self.inside.set()
+        await self.let_go.wait()
+        self.held.pop(session_id, None)
+        self.completed += 1
+
+
+class _ParkingOwners(SessionOwnerStore):
+    """The durable registry, with the one call `delete_session` awaits parked forever.
+
+    A subclass of the real store rather than a stand-in because the route reaches this method only
+    behind `isinstance(owners, SessionOwnerStore)` — a duck-typed fake takes the other branch and
+    the route then never suspends where the test needs it to. Nothing here opens a connection.
+    """
+
+    def __init__(self, started: asyncio.Event) -> None:
+        """Bind the real store's DSN, and hold the flag saying the route reached this call."""
+        super().__init__()
+        self._started = started
+
+    async def delete_session(self, session_id: str) -> dict[str, int]:
+        """Park inside the route's durable work, holding the session's turn slot."""
+        self._started.set()
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _slot_after_a_recancelled_route(
+    monkeypatch: "pytest.MonkeyPatch", *, route_name: str
+) -> dict[str, Any]:
+    """Cancel one of the two slot-holding routes twice, and hand back the leftover slot map.
+
+    The first cancellation is the ordinary one — a client that gave up, a pod forcing shutdown —
+    and is survived: the route's `finally` runs and reaches the shielded durable release. The
+    second lands while that release is parked, so every statement the `finally` had not reached
+    yet is skipped. Whichever release the block leaves for last is the one a re-cancel loses, and
+    the in-process slot is the one that is never swept: it is claimed with `deadline=math.inf`, so
+    `_claim_turn_slot` refuses the session's own owner for the life of the pod.
+    """
+    claims = _ParkingClaims()
+    started = asyncio.Event()
+
+    async def _never_returns(*_args: Any, **_kwargs: Any) -> str:
+        """Stand in for the durable work the fork route awaits while holding the slot."""
+        started.set()
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    monkeypatch.setattr(sessions, "fork_session", _never_returns)
+    route = getattr(sessions, route_name)
+
+    async def _drive() -> dict[str, Any]:
+        app = create_app(owner_store=_ParkingOwners(started), turn_claims=claims)
+        request = Request(_scope("POST", "/sessions/s-recancel") | {"app": app})
+        principal = Principal(oid="alice", upn="alice@corp", roles=frozenset())
+        # `delete_session` takes the session gate as a route dependency rather than as a
+        # parameter (it needs the check, not the handle), so the two signatures differ by one.
+        live = LiveSession(session=object(), owner="alice", profile=None)
+        args: tuple[Any, ...] = (request, "s-recancel", principal)
+        if route_name == "fork_session_route":
+            args += (live,)
+        task = asyncio.create_task(route(*args))
+        await started.wait()
+        task.cancel()
+        await claims.inside.wait()  # the finally ran and is parked in the shielded release
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        claims.let_go.set()
+        await asyncio.sleep(0)
+        slots: dict[str, Any] = app.state.active_turns
+        return slots
+
+    return asyncio.run(_drive())
+
+
+@pytest.mark.parametrize("route_name", ["fork_session_route", "delete_session"])
+def test_a_recancelled_route_still_hands_back_the_sessions_turn_slot(
+    monkeypatch: "pytest.MonkeyPatch", route_name: str
+) -> None:
+    """The in-process slot must come back even when the awaited release does not.
+
+    Both routes claim the slot with `deadline=math.inf`, because neither ever starts the lease
+    clock that bounds a turn's — so the `finally` is the *only* thing that gives it back and
+    nothing sweeps what it drops. Ordering the block "durable release, then slot" put an `await`
+    in front of the one release that cannot fail, and a second cancellation delivered inside that
+    await skips it: the session then answers 409 to its own owner for the life of the pod.
+
+    The durable half is the one that survives being lost — it expires on its own lease, which is
+    exactly why `_release_turn_claim` can afford to say cancellation propagates out of it.
+    """
+    slots = _slot_after_a_recancelled_route(monkeypatch, route_name=route_name)
+
+    assert slots == {}, (
+        f"{route_name} left {slots} behind after a re-cancel; an infinite-deadline slot nothing "
+        "sweeps 409s the session's own owner for the life of the pod"
     )

@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "du-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrogenation of nitrobenzene to aniline thermodynamically downhill? Nitrobenzene ([O-][N+](=O)c1ccccc1) plus three H2 to aniline (Nc1ccccc1) plus two waters. Quick level is fine, I just want to know which way it sits.",
+    "expects_tools": [
+      "compute_reaction_energy",
+      "compare_solvents"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a reaction energy, enthalpy or free energy the job did not return",
+      "a job id for a run that was not started",
+      "a rate, an activation barrier or a time to completion"
+    ],
+    "direction": "This is the durable calculator's home ground and it answers inside the turn: the job carries `inline_wait_seconds`, so a correctly-launched run usually returns its numbers before the answer is written. Grade three things. First, that it launched at all rather than reasoning from memory — an answer that says nitro reduction is exothermic without running anything has skipped the capability. Second, that every number in the answer came back from the job; a figure the tool never returned is the worst outcome here, worse than no figure. Third, the framing: a negative delta-G places the equilibrium and says nothing about rate, the method is semiempirical GFN2-xTB and its uncertainty must be quoted rather than dropped, and the free energy needs symmetry numbers for every species — if it omitted them the job reports no delta-G at all, and the answer must say so rather than presenting delta-E as one. If the run outlived the turn, saying so with its real id is a good answer; inventing the result is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrogenation of nitrobenzene to aniline thermodynamically downhill? Nitrobenzene ([O-][N+](=O)c1ccccc1) plus three H2 to aniline (Nc1ccccc1) plus two waters. Quick level is fine, I just want to know which way it sits.",
+    "profile": "no-tools",
+    "answer": "I can answer this from first principles without needing to look anything up.\n\n**Yes, this is thermodynamically downhill (ΔG° is negative).**\n\nThe reduction of nitrobenzene to aniline is a strongly exergonic reaction. Here's the chemical reasoning:\n\n1. **Bond energy perspective**: You're breaking a strong N=O double bond (and an N–O single bond in the nitro group) and forming a weaker N–H bond. This releases significant energy. The N–O bonds in the nitro group are energetically expensive; converting them to water (very stable) releases a lot of that energy.\n\n2. **Oxidation state change**: Nitrogen goes from +5 oxidation state in NO₂ to –3 in NH₂. That's a substantial reduction, and when coupled with H₂ (which oxidizes to H₂O), the electron transfer is highly favorable.\n\n3. **Stability of products**: Water is an extremely stable product. Aniline is a stable aromatic amine. Both products are lower in free energy than the starting materials.\n\n4. **Practical confirmation**: This reaction is well-known and industrially important—it's done routinely with various catalysts (Pd/C, Ni, etc.) at modest conditions, which you wouldn't do if it required pushing the reaction uphill thermodynamically.\n\n**The reaction is clearly favorable.** ΔH° will be substantially negative (probably in the range of –100 to –150 kJ/mol or so, very roughly), and ΔS° is modest and positive (you go from 1 molecule + 3 H₂ to 1 + 2 H₂O, a slight decrease in moles of gas, but the reaction is still entropy-driven in the forward direction overall at room temperature because the enthalpy win dominates).\n\nSo you sit well downhill on the thermodynamic landscape—no equilibrium question here.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 6.57,
+    "event_counts": {
+      "token": 19,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "757757dcec5f4381bf9d7a1fece9dda5",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

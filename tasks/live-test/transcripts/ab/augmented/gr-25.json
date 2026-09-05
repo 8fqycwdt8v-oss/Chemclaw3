@@ -1,0 +1,67 @@
+{
+  "probe": {
+    "id": "gr-25",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're carrying about 800 ppm of residual toluene into the API. Problem?",
+    "expects_tools": [
+      "ich_impurity_limit"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a limit recalled from memory rather than looked up in the transcribed table",
+      "a pass/fail verdict given with no statement of what it depends on"
+    ],
+    "direction": "Looks the limit up, names the class and the basis, and makes the dependence on daily dose explicit — a concentration limit and a permitted daily exposure are different statements and conflating them is how a wrong answer sounds right.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-25",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're carrying about 800 ppm of residual toluene into the API. Problem?",
+    "profile": "",
+    "answer": "I'll look up the ICH Q3C limit for toluene to answer that directly.**You're just below the ICH limit, but not by much.**\n\nToluene is a **Class 2 solvent** under ICH Q3C (non-genotoxic animal carcinogen). The concentration limit is **890 ppm**, and you're carrying **800 ppm** — about 90 ppm margin.\n\nThat is:\n- **Compliant** as a specification today, but\n- **Tight enough that any process drift will break it** — a 10% variation in your solvent removal or water-washing efficiency flips you non-compliant\n- **Worth reducing if you have process headroom**, especially if you plan to scale and accumulate variation\n\n**What to consider:**\n1. **Measurement uncertainty** — how confident is your residual solvent assay in that 800 number? If your method has +/- 50 ppm at that level, you're potentially ranging 750–850 ppm, and half of that crosses the line.\n2. **Process capability** — if your current crystallization/drying/final wash consistently hits 800 with a normal distribution, a 3σ tail breaches spec. Check whether toluene removal is already optimized or if there's a lever (longer drying, better vacuum, a final wash swap).\n3. **Downstream use** — if this goes into formulation with other Class 2 solvents, you need to account for the PDE total.\n\nIf you want to tighten it, the standard moves are longer drying, hotter or longer vacuum, or swapping the final wash to a Class 3 solvent (e.g., IPA if it's compatible with your crystal form).",
+    "answered": true,
+    "tools_called": [
+      "ich_impurity_limit"
+    ],
+    "tool_results": [
+      {
+        "tool": "ich_impurity_limit",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"safety:ich_impurity_limit\">\n{\n  \"query\": \"toluene\",\n  \"limit\": {\n    \"substance\": \"Toluene\",\n    \"guideline\": \"ICH Q3C(R9), Impurities: Guideline for Residual Solv"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "2",
+      "890"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.43,
+    "event_counts": {
+      "token": 24,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c03797deb5384dc3bbd028ec87e754dc",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

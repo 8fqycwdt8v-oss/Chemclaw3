@@ -230,7 +230,6 @@ def main() -> None:
             "pairs_file": str(args.pairs) if args.pairs is not None else None,
             "rolls": args.rolls,
             "judge_model": settings.model_routes.get("verifier", settings.llm_model),
-            "provider": settings.llm_provider,
         }
         # The pairs themselves ride along so the run is repeatable against the same corpus.
         report["corpus"] = [

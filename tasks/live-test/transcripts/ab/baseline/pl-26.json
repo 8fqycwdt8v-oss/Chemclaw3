@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "pl-26",
+    "section": 5,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Once the plates come off the synthesiser, route them automatically to LC-MS and pull the results back against the right well positions.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "that sample routing, transfer or analysis has been arranged or triggered",
+      "any named analytical instrument, queue or sample-tracking system",
+      "any well-position mapping presented as configured"
+    ],
+    "direction": "Two absent capabilities compound here: no hardware or sample-handling interface, and no chromatography or MS integration of any kind — no method store, no instrument link, no spectral interpretation. The answer must name both rather than only the first, because the user would otherwise assume the analysis half exists. It must not describe a routing that has been set up or a mapping that has been configured.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-26",
+    "section": 5,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Once the plates come off the synthesiser, route them automatically to LC-MS and pull the results back against the right well positions.",
+    "profile": "no-tools",
+    "answer": "I'm a chemistry assistant answering from my own knowledge. I don't have access to automation systems, scheduling tools, or instrument control software, and I can't configure workflows between your synthesiser and LC-MS.\n\nWhat you're describing requires:\n\n1. **Synthesiser integration** – A way to track which wells contain which compounds and signal when they're ready\n2. **Plate routing** – Physical automation (robotic arm, plate conveyor) or manual transfer with barcode tracking\n3. **LC-MS scheduling** – Software that accepts a plate manifest and queues analyses\n4. **Result mapping** – Linking LC-MS data back to well positions via plate ID, well index, or compound identifiers\n\nThis depends entirely on your specific instruments and software stack:\n\n- **Tecan, Agilent, or other synthesiser?** They may have native connectors to LC-MS vendors.\n- **Which LC-MS platform?** Sciex, Waters, Thermo, Shimadzu—each has different APIs and scheduling software.\n- **LIMS or ELN in place?** Many systems route through a LIMS that manages both plate metadata and instrument queues.\n\n**To move forward, I'd need to know:**\n- What synthesiser and LC-MS do you have?\n- Is there a LIMS or ELN handling the samples?\n- Are you looking to build this integration yourself, or does your vendor offer a turnkey solution?\n\nIf you have documentation or a specific integration point you're stuck on, I can help reason through it.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.19,
+    "event_counts": {
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "46b9ebe6e3dc48af97eefe31b26685f7",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

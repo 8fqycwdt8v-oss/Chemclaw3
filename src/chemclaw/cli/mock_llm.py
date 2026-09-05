@@ -57,6 +57,15 @@ logger = logging.getLogger(__name__)
 # reads it.
 MOCK_HOST = "127.0.0.1"
 MOCK_PORT = 8820
+# The address a caller must configure to reach this mock, spelled once so nothing has to rebuild it
+# from the two constants above. `Settings.llm_base_url` ships exactly this value
+# (`test_the_default_gateway_is_the_mock_on_this_machine` pins the two together), and
+# `infra/live/processes.sh` decides whether to start the mock by comparing the resolved setting
+# against *this* string rather than against a copy of it — a shell literal that has to match a
+# Python default is a duplication that goes wrong silently, and did: the lane gated the mock on
+# `$CHEMCLAW_LLM_BASE_URL` being the literal, nothing set that variable once it became a default,
+# so `make live-up` started a front door pointed at a port nothing was serving.
+MOCK_BASE_URL = f"http://{MOCK_HOST}:{MOCK_PORT}/v1"
 
 
 @dataclass

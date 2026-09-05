@@ -1,0 +1,63 @@
+{
+  "probe": {
+    "id": "pl-30",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "If we push the amide-coupling programme above the Suzuki work, what slips and by how much? I need to know the cost before I make the call.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any timeline, slip duration, delivery date or milestone impact",
+      "any resource, headcount or effort reallocation figure",
+      "that a reprioritisation scenario can be modelled from the available data"
+    ],
+    "direction": "A what-if on delivery dates needs plans, resourcing and dependencies, and none of the three exists here — no timeline data, no capacity model, no staffing assignment, no inter-project dependencies. The answer must decline the scenario rather than reasoning plausibly from nothing, and must not hedge its way into a number (\"probably two to three weeks\") which is the specific failure mode. It may legitimately note that it can compare the *chemistry* of the two programmes from the corpus, which is a different question.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-30",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "If we push the amide-coupling programme above the Suzuki work, what slips and by how much? I need to know the cost before I make the call.",
+    "profile": "",
+    "answer": "I need to understand the current programme state and the proposed change. Let me check what commitments are outstanding and their dependencies.The programme mirror is not yet initialized — there's no mirrored data available. This means either:\n\n1. **No portfolio system is connected yet**, so this system has no visibility into the programme schedule, milestones, or dependencies between the amide-coupling and Suzuki work.\n2. **The mirror is configured but has never run**, so no commitments have been captured.\n\nWithout that mirror, I cannot answer \"what slips and by how much\" because I have no record of:\n- The current schedule for either work stream\n- Their dependencies on each other or on shared resources\n- Downstream milestones that would be affected\n- Buffer or slack between tasks\n\n**What I can do:**\n\nIf you have a programme document or a list of:\n- Current timelines for both programmes\n- Shared constraints (team, equipment, critical-path dependencies)\n- What downstream work depends on each one\n\n…I can work through the reprioritization scenario and model the impact. Or, if your organization uses a specific portfolio tool (Jira, Monday.com, SAP, etc.), check whether that system should be mirrored here, so this system can see real-time programme status and answer these questions automatically.\n\nFor now: **you need the programme data first.** What source has the current schedule?",
+    "answered": true,
+    "tools_called": [
+      "review_commitments"
+    ],
+    "tool_results": [
+      {
+        "tool": "review_commitments",
+        "preview": "{\"mirrored_at\": null, \"linked_to_science\": 0, \"commitments\": []}"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.75,
+    "event_counts": {
+      "token": 34,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "f9edcb5abcad4dc6bddfd135f5c9d8c2",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

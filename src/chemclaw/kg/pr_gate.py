@@ -13,6 +13,7 @@ already imports that one.
 """
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.logging import redact_secrets
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.note import Note, note_relative_path
@@ -21,6 +22,7 @@ from chemclaw.kg.proposal import (
     ambient_provenance,
     record_proposal_failed,
     record_proposal_submitted,
+    rejected_version,
 )
 from chemclaw.kg.render import render_note
 from chemclaw.kg.submission import NoteFile, NoteSubmission, NoteSubmitter
@@ -154,6 +156,22 @@ async def propose_note(
         session_id=session_id,
         correlation_id=correlation_id,
     )
+    # **Asked before the push, because after it there is nothing left to prevent.**
+    # `ProposalStore.upsert` already refuses to reopen a rejected row — correctly — but it runs
+    # after `submit`, and a submitter never deletes a branch. So a re-proposed rejection pushed a
+    # live, mergeable branch, wrote no open row, and vanished from the review queue: measured, the
+    # store held one `rejected` row while the remote held `note/<id>` ready to merge. If somebody
+    # then merged it, `mark_merged` moved nothing (it moves `OPEN` rows only) and the record went
+    # on saying *rejected* for a note now in `knowledge/` and answering as evidence. A rejection
+    # that git does not hear about is not a rejection.
+    standing = await rejected_version(note.id, proposal.content_hash)
+    if standing is not None:
+        raise ChemclawError(
+            f"note {note.id!r} was already reviewed and rejected in this exact form"
+            + (f": {standing.reason}" if standing.reason else "")
+            + ". Change what the reviewer objected to and propose the revision, or propose a"
+            " different note — re-submitting the same bytes cannot reopen the decision."
+        )
     try:
         outcome = await submitter.submit(submission)
     except Exception as exc:

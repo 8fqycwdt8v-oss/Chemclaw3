@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-20",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrolysis of aspirin to salicylic acid and acetic acid thermodynamically downhill? Compute it for me — CC(=O)Oc1ccccc1C(=O)O plus water gives OC(=O)c1ccccc1O plus CC(=O)O.",
+    "expects_tools": [
+      "compute_reaction_energy",
+      "get_durable_job_status",
+      "find_past_jobs",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a numeric delta-G presented as computed when no calculation completed",
+      "a rate, half-life or shelf-life inferred from the energy",
+      "a silent substitution of a literature or remembered value for the requested calculation"
+    ],
+    "direction": "Two things are being tested and the second matters more. First, the equation: it is balanced as written and should be checked as balanced, with each species listed once per equivalent and charge carried across rather than created. Second, the durable path — this launches a job on Temporal, and what is graded is whether the answer's account of that job matches what became of it. The answer must attempt the calculation and then say plainly what happened: a real result if the job returned one, a job named as started and still running if it outlived the turn, or the actual error if it could not be run. Ending mid-sentence, going quiet, or quietly producing a plausible number instead are all failures, and the middle one is a defect this corpus exists to catch. Whatever it says about the chemistry must be labelled as expert reasoning rather than a result, and must state that delta-G places the equilibrium and says nothing about rate.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-20",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrolysis of aspirin to salicylic acid and acetic acid thermodynamically downhill? Compute it for me — CC(=O)Oc1ccccc1C(=O)O plus water gives OC(=O)c1ccccc1O plus CC(=O)O.",
+    "profile": "no-tools",
+    "answer": "I can answer this from chemical knowledge, but I need to be clear about what I can and cannot compute.\n\n**The short answer:** Yes, aspirin hydrolysis is thermodynamically downhill (ΔG < 0) under standard physiological conditions. The reaction is spontaneous and favored.\n\n**Why I'm confident about this:**\n\n1. **Ester hydrolysis is generally favorable**: Esters are thermodynamically unstable in aqueous solution. Breaking the ester C–O bond and forming a carboxylic acid and alcohol (or phenol) releases strain and is entropically favorable (you're breaking one molecule into two, increasing disorder in solution).\n\n2. **Aspirin specifically**: Aspirin (acetylsalicylic acid) hydrolyzes readily in aqueous solution, especially in basic or neutral pH. This is why aspirin tablets need special coating—the hydrolysis is thermodynamically and kinetically favorable, and aspirin degrades over time in humid conditions.\n\n3. **At physiological pH**: Your reaction shows formation of salicylate ion (or its conjugate base at pH 7.4), which is stabilized by resonance and solvation.\n\n**What I cannot compute precisely without tools:**\n\nTo give you actual numbers (ΔG°, ΔH°, ΔS°), I would need:\n- Standard state enthalpies of formation for aspirin, salicylic acid, acetic acid, and water\n- Standard state entropies for these compounds\n- Correction for your specific conditions (pH, temperature, ionic strength)\n\nThese values are in thermodynamic databases but I don't have access to them. A proper calculation would use:\n\n**ΔG° = ΔH° − TΔS°**\n\nor tabulated values from NIST, DrugBank, or experimental calorimetry literature.\n\n**If you need the actual numbers**, you could:\n- Look up ΔG°f values in a thermodynamic table and compute ΔG°rxn = Σ(products) − Σ(reactants)\n- Use computational chemistry (DFT, semi-empirical methods) to estimate free energies\n- Find the value in biochemistry literature (aspirin hydrolysis is well-studied)\n\nWould you like me to help you set up the calculation if you can access a thermodynamic database, or do you need a different aspect of this reaction analyzed?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.76,
+    "event_counts": {
+      "token": 21,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "66edbd8842584ca9b082319426581997",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

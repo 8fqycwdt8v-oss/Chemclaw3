@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "du-10",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What are we still waiting on, and how long has any of it been outstanding?",
+    "expects_tools": [
+      "check_pending_requests"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that this is a complete list of the team's open work",
+      "an item nobody raised through this system",
+      "a person's workload, capacity or responsiveness"
+    ],
+    "direction": "Answerable, with one boundary that has to be stated rather than implied. The inbox holds every question *this system* raised and is still waiting on, with what was asked, why, who it is routed to, when it is due and how many times it has been chased — so ordering by deadline and naming what is overdue is a real answer. The boundary is scope: it knows nothing about work raised anywhere else, so presenting it as the group's outstanding items would be a list that looks complete and is not. A request routed to nobody in particular is waiting on whoever is entitled, not on nobody, and should not be reported as unassigned in a way that implies it has been dropped.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-10",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What are we still waiting on, and how long has any of it been outstanding?",
+    "profile": "no-tools",
+    "answer": "I don't have access to any programme's records, tracking systems, or project management tools. I can't see what's outstanding, what you're waiting on, or how long anything has been pending.\n\nTo answer your question, I would need you to either:\n\n1. **Share the specific details** — tell me what items you're tracking and when they were initiated\n2. **Point me to a document or file** — if there's a tracking sheet, project plan, or status report you'd like me to review\n3. **Clarify the context** — what project or programme are you asking about?\n\nIf you have a file with this information, share it and I can help you analyze it. Otherwise, I can only answer based on information you provide directly.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 2.73,
+    "event_counts": {
+      "token": 8,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "cf12388e158f4a9ea43c06a9d75318f9",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

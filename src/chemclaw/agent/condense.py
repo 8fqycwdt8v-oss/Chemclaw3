@@ -300,12 +300,21 @@ def _prompt(protocol: Protocol) -> str:
 
 
 def _client() -> Any:
-    """The condensing chat client, built from the one provider seam on the routed task.
+    """The condensing chat client, built from the one seam on the routed task.
 
-    Imported inside the function and built inside the guard at the call site, which is
-    `verifier._default_client`'s measured lesson: a deployment whose `"protocol-digest"` route is
-    unreachable must get the *deterministic* digest, not no digest — and `build_chat_model` raising
-    at module import would take the tool out entirely.
+    Imported inside the function rather than at module scope, so a tool whose model is unreachable
+    still loads: the deterministic half of this comparison needs no model at all, and the whole
+    degrade story below depends on this module importing cleanly.
+
+    **Construction no longer tells you whether a model is reachable, and it used to.** This call
+    sat inside a `try/except` whose comment said "no reachable route is the deployment state this
+    degrade exists for" — true only because the seam's other arm preflighted `ANTHROPIC_API_KEY`
+    and raised. With one gateway (`D-2026-09-04-a-gateway-is-the-only-provider`) an empty
+    credential is a legitimate configuration and construction is pure config, so nothing raises
+    here and the branch was a control that could not fire. It was also *wrong*: it returned every
+    row as `recorded` with `complete=True`, which claims every protocol was read when none was.
+    Reachability is now discovered where it actually is — one call per protocol, degrading that
+    row to `unreadable` — which is what `_read_prose` was already written to do.
     """
     from chemclaw.agent.llm_provider import build_chat_model
 
@@ -571,8 +580,15 @@ async def condense_protocols(
     """Condense whole protocols into one comparison, reading each of them exactly once.
 
     The deterministic half needs no model and no credential: the figures come from each protocol's
-    `conditions` frontmatter. The model is asked only what the prose can answer, once per whole
-    protocol, bounded by `protocol_digest_max_parallel`.
+    `conditions` frontmatter, so an unreachable model costs the *prose* column and nothing else —
+    every recorded figure still compares, and that is what lets this tool ship with no enable flag.
+    The model is asked only what the prose can answer, once per whole protocol, bounded by
+    `protocol_digest_max_parallel`.
+
+    **A "no model at all" shortcut used to sit here and is gone** — see `_client`. It rested on
+    construction raising for a missing credential, which one gateway does not do, and it reported
+    `complete=True` over protocols nothing had read. An unreachable endpoint is now discovered per
+    protocol, so those rows are `unreadable` and `complete` is False, which is the true statement.
 
     `asyncio.Semaphore` rather than `durable.orchestrator.fan_out`, which starts child *workflows*
     and is unreachable from a tool. The corpus-scale case is already served by
@@ -590,31 +606,14 @@ async def condense_protocols(
     if not protocols:
         return Condensation(table="", complete=True)
     if client is None:
-        try:
-            client = _client()
-        except Exception:
-            # No reachable route is the deployment state this degrade exists for: the comparison is
-            # still rendered from every record's own figures, which is most of its value and needs
-            # nothing but the notes.
-            degraded(
-                logger,
-                "protocol_digest",
-                "no condensing model is reachable; comparing recorded figures only",
-            )
-            client = None
-    if client is None:
-        rows = [
-            ProtocolDigest(ref=p.ref, source=p.source, title=p.title, digest_source="recorded")
-            for p in protocols
-        ]
-    else:
-        limit = asyncio.Semaphore(settings.protocol_digest_max_parallel)
+        client = _client()
+    limit = asyncio.Semaphore(settings.protocol_digest_max_parallel)
 
-        async def _one(protocol: Protocol) -> ProtocolDigest:
-            async with limit:
-                return await _read_prose(protocol, client)
+    async def _one(protocol: Protocol) -> ProtocolDigest:
+        async with limit:
+            return await _read_prose(protocol, client)
 
-        rows = list(await asyncio.gather(*(_one(p) for p in protocols)))
+    rows = list(await asyncio.gather(*(_one(p) for p in protocols)))
     # Ordered once, here, so `rows` and `table` are the same sequence: "changed vs previous" is a
     # claim about the row above it, and two orderings would make it a claim about a different one.
     order = _ordered(protocols, rows)

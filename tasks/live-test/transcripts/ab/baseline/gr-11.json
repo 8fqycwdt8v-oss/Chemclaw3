@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "gr-11",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Four factors, twelve experiments of budget, no prior data. How do I spend them?",
+    "expects_tools": [
+      "generate_screening_design"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the design called exhaustive, full or complete",
+      "a design offered with no statement of what is confounded with what"
+    ],
+    "direction": "A screening design, with its resolution and its aliasing said out loud. Twelve runs over four factors is a real constraint and the answer has to name what it buys and what it gives up.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-11",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Four factors, twelve experiments of budget, no prior data. How do I spend them?",
+    "profile": "no-tools",
+    "answer": "I can offer you strategic thinking from general experimental design principles, though I should note upfront: the best allocation depends on specifics I don't have—your objectives, whether you're screening for activity, optimizing known effects, or mapping an interaction landscape.\n\nHere's how to think through it:\n\n**If you're doing initial screening** (testing which factors matter):\n- A **fractional factorial design** (like 2^4-1, a half-fraction) gives you 8 runs and estimates all main effects cleanly, assuming no high-order interactions. You'd have 4 runs left for replication or a confirmatory test.\n- This tells you which factors move your output. It's efficient for ruling things in or out.\n\n**If you suspect interactions matter**:\n- A **full factorial** 2^4 = 16 runs is too big for 12 experiments.\n- Instead, use a **Plackett-Burman design** (12 runs for up to 11 factors, but you have 4, so it's overkill—but it fits perfectly). It estimates main effects very well and some 2-factor interactions, with ~1 degree of freedom left over.\n- Or run **8 corner points of a 2^4 + 4 center replicates** to estimate main effects and check for curvature, leaving 0 spare runs.\n\n**If you want to optimize around a suspected sweet spot**:\n- Use a **central composite design (CCD)** or **Box-Behnken**: both fit 12 or close to it for 4 factors and let you fit a quadratic surface.\n\n**Practical recommendation without more context:**\n- **Start with a Plackett-Burman 12-run design** if factors are categorical or binary (low/high). You'll identify which factors matter and get some interaction hints.\n- **Or: 2^4-1 fractional factorial (8 runs) + 4 center/confirmation runs** if factors are continuous. Lighter on assumptions, leaves room to probe deeper in round 2.\n\n**What would help me advise better?**\n- Are your four factors **categorical (on/off, A vs B vs C) or continuous** (temperature, concentration, ratio)?\n- Is your **goal discovery** (what affects output?) **or optimization** (maximize output)?\n- Can you **replicate runs cheaply**, or is each run expensive?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.77,
+    "event_counts": {
+      "token": 23,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b8f16833252f4fd59ce2d73f4b570e26",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

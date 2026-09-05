@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "kn-01",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We've got the 4-bromoanisole + PhB(OH)2 coupling on the plan for next week. Has anyone here run that before, and what conditions did they end up on?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a yield, catalyst loading or temperature not stated in the retrieved notes",
+      "a literature reference",
+      "a run or campaign that is not in the record"
+    ],
+    "direction": "Cites rxn-suzuki-biaryl by id (and plausibly opt-suzuki-conditions or report-biaryl-development) and gives the conditions actually on file: Pd(OAc)2 at 1.5 mol% Pd, K2CO3 2.0 equiv, THF/water 4:1, 80 °C, 12 h, degassed, 76% isolated. A good answer adds the recorded reason this substrate is awkward — an electron-rich aryl bromide makes oxidative addition the slow step, so it is unusually ligand- and temperature-sensitive. Every number must trace to a cited note.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-01",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We've got the 4-bromoanisole + PhB(OH)2 coupling on the plan for next week. Has anyone here run that before, and what conditions did they end up on?",
+    "profile": "no-tools",
+    "answer": "I don't have access to your lab's ELN records or reaction database, so I can't tell you what conditions your team has used for that coupling before. I'm working from general chemistry knowledge only, not your programme's data.\n\nThat said, **4-bromoanisole + phenylboronic acid is a very standard Suzuki-Miyaura coupling**, and the literature is full of it. For that particular substrate pairing, you'd typically see:\n\n- **Catalyst**: Pd(PPh₃)₄ or PdCl₂(PPh₃)₂ (2–5 mol%)\n- **Base**: K₂CO₃ or Cs₂CO₃ (2–3 equiv)\n- **Solvent**: Toluene, dioxane, or aqueous mixtures (DME/water is common)\n- **Temperature**: 80–100 °C, sometimes reflux\n- **Time**: 2–24 hours depending on scale and setup\n\nThe electron-donating methoxy group makes 4-bromoanisole a fairly reactive coupling partner—not particularly strained or problematic.\n\n**To find what your team actually ran:**\n- Check your ELN directly for any prior runs with those substrates\n- Ask your lab colleagues or check a shared conditions spreadsheet\n- If it's a new compound for your group, literature precedent is a good starting point (Org. Lett., JACS, etc. all have examples)\n\nDo you want help thinking through conditions design if you don't find a prior run, or are you mainly looking for what's already been optimized internally?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.4,
+    "event_counts": {
+      "token": 169,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "0a67c352499a42b79d7d7de000dde737",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

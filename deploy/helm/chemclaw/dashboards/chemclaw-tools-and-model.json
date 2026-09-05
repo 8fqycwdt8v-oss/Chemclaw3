@@ -310,13 +310,13 @@
       },
       "targets": [
         {
-          "expr": "sum by (provider, outcome) (rate(chemclaw_model_calls_total[5m]))",
-          "legendFormat": "{{provider}} {{outcome}}",
+          "expr": "sum by (outcome) (rate(chemclaw_model_calls_total[5m]))",
+          "legendFormat": "{{outcome}}",
           "refId": "A"
         },
         {
-          "expr": "sum by (provider) (rate(chemclaw_model_fallbacks_total[5m]))",
-          "legendFormat": "{{provider}} served by fallback",
+          "expr": "sum(rate(chemclaw_model_fallbacks_total[5m]))",
+          "legendFormat": "served by the fallback endpoint",
           "refId": "B"
         }
       ]
@@ -365,13 +365,13 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(chemclaw_model_call_duration_seconds_bucket[5m])))",
-          "legendFormat": "{{provider}} p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(chemclaw_model_call_duration_seconds_bucket[5m])))",
+          "legendFormat": "gateway p95",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.50, sum by (le, provider) (rate(chemclaw_model_call_duration_seconds_bucket[5m])))",
-          "legendFormat": "{{provider}} p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(chemclaw_model_call_duration_seconds_bucket[5m])))",
+          "legendFormat": "gateway p50",
           "refId": "B"
         }
       ]

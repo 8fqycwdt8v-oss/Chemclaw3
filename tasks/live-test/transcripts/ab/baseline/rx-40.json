@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "rx-40",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "How do people usually work up a reaction that used tert-butoxide (CC(C)(C)[O-])? I would rather not guess at the quench.",
+    "expects_tools": [
+      "workup_precedent",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a quench procedure composed by the model rather than quoted from a record",
+      "a safety assessment of the quench",
+      "a workup presented as standard practice when only a handful of records support it"
+    ],
+    "direction": "This is the one precedent question no structural index can answer, and it is answered by showing what other people actually did: verbatim workup text from runs that recorded one, each with its citation. Reactions that used the reagent and wrote nothing down are not workup precedents and should not pad the answer. The answer must stay a report of the record — quoting and comparing procedures, noting how many there are — and must not synthesise a recommended quench, which is a safety-relevant judgment the corpus does not license.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-40",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "How do people usually work up a reaction that used tert-butoxide (CC(C)(C)[O-])? I would rather not guess at the quench.",
+    "profile": "no-tools",
+    "answer": "I can answer this from general chemistry knowledge.\n\nWhen a reaction uses a strong alkoxide base like potassium tert-butoxide (KOtBu), the workup depends on what you're trying to isolate and what the reaction generated. Here are the standard approaches:\n\n## Common Workup Strategies\n\n**1. Aqueous acid quench (most common)**\n- Add dilute HCl, H₂SO₄, or acetic acid to neutralize excess base and protonate alkoxide intermediates\n- This converts the alkoxide to the neutral alcohol (tert-butanol), which is volatile and easily removed\n- Follow with water extraction to remove salts and dissolved inorganic material\n- This is the default for most C–C bond formations (aldol, Wittig, SN2, etc.)\n\n**2. Saturated ammonium chloride solution**\n- Mild, slow quench that avoids heat generation\n- Useful if your product is acid-sensitive\n- Produces ammonia gas and ammonium salt; still need to extract with organic solvent afterward\n\n**3. Water alone**\n- Only appropriate if the alkoxide byproduct is harmless or if you're working at very low temperature with fast precipitation\n- Rarely sufficient on its own for complete neutralization\n\n**4. CO₂ (dry ice or CO₂ gas)**\n- Used when you want to trap the carbanion/nucleophile as a carboxylate\n- Common in Grignard and organolithium work, less common for alkoxide chemistry but possible\n\n## Why acid quench is standard:\n\n- Tert-butoxide base leaves behind potassium (or whatever the counterion is) that must be removed as a salt\n- Acid neutralizes excess alkoxide, preventing unwanted side reactions\n- Tert-butanol byproduct is volatile (bp ~82 °C) and separates cleanly into the aqueous layer\n- The combination is fast, cheap, and gives predictable ionic products\n\n**The key thing you should **not** guess**: whether your specific product is acid-stable. If you're making something with acid-labile groups (acetals, silyl ethers, etc.), you'd use the milder ammonium chloride route instead.\n\nWhat reaction are you planning? That would narrow down whether acid quench is appropriate for your product.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.8,
+    "event_counts": {
+      "token": 23,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c257f6ded075403289e62660f992a391",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -195,10 +195,13 @@ Chemiker: *"Wie ist die zu erwartende Regioselektivität für die späte C–H-F
     Rolle wie jeder andere Connector. Einen eigenen „MCP-Server"-Deployment-Typ gibt es nicht;
     `deploy/entrypoint.sh` kennt nur `service`, `background-worker`, `connector-worker-*` und
     `connector-*` (D-156 hat dieselbe Zeile in `deploy/README.md` bereits gestrichen).
-- **LLM**: internes OpenAI-kompatibles Endpoint (`src/chemclaw/agent/llm_provider.py`, `llm_provider=
-  openai_compatible`). Der Provider ist die *einzige* Stelle, die eine Client-Klasse importiert; ein
-  Provider-Wechsel ist eine Config-Änderung. Das LLM nutzt **eine generische API-Credential** (nicht
-  Entra) – die eine dokumentierte Ausnahme von der Entra-Durchgängigkeit.
+- **LLM**: **ein** internes OpenAI-kompatibles Gateway (`src/chemclaw/agent/llm_provider.py`,
+  `CHEMCLAW_LLM_BASE_URL`). Einen `llm_provider`-Schalter gibt es nicht mehr — welcher Anbieter
+  hinter der Adresse antwortet, ist Sache des Gateways
+  (`D-2026-09-04-a-gateway-is-the-only-provider`); `agent/llm_provider.py` ist weiterhin die
+  einzige Stelle, die eine Chat-Client-Klasse importiert, und ein Endpoint-Wechsel ist eine
+  Config-Änderung. Das LLM nutzt **eine generische API-Credential** (nicht Entra) – die eine
+  dokumentierte Ausnahme von der Entra-Durchgängigkeit.
 - ~~**HPC/Nextflow**~~: hier stand der Seqera-Platform/Tower-REST-Launcher hinter dem QM-Job (ADR
   **D-048**, Teilentscheidung D-A5a). **Entfallen** — Bundle, Launcher und alle `hpc_*`-Einstellungen
   sind gelöscht (`D-2026-08-26-semiempirical-is-the-whole-tier`). Die Rechnung läuft semiempirisch in

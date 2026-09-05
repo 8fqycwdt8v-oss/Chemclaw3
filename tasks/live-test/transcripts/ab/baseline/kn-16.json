@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "kn-16",
+    "section": 15,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Yes, that's right — the 100 °C run only looked better because of protodeboronation. Keep that answer, I'm tired of re-explaining it to people.",
+    "expects_tools": [
+      "record_confirmed_answer",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that the confirmed answer is merged or immediately searchable by others",
+      "a note id that was not retrieved",
+      "a measurement the cited notes do not contain"
+    ],
+    "direction": "Calls record_confirmed_answer with the question, the confirmed answer, and the evidence ids it rests on — opt-suzuki-conditions (79% LCAP / 68% isolated at 100 °C against 76% isolated at 80 °C) and failure-aqueous-protodeboronation. It should tell the chemist the exchange has been opened for human sign-off via the PR-gate, not that it is already knowledge. Storing this with remember_preference instead would be wrong and should be avoided: it is shared knowledge, not a personal working preference.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-16",
+    "section": 15,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Yes, that's right — the 100 °C run only looked better because of protodeboronation. Keep that answer, I'm tired of re-explaining it to people.",
+    "profile": "no-tools",
+    "answer": "I appreciate the context, but I need to be direct: I don't have a record of a previous answer in our conversation. This appears to be your first message to me, so I can't see what you're referring to or what explanation you've been repeating.\n\nIf you'd like me to keep or preserve an answer about protodeboronation at 100 °C, I can help — but I'll need you to either:\n\n1. **Paste the explanation** you want to keep, or\n2. **Point me to where it's stored** (an ELN note, a document, a previous chat), so I can retrieve it and help you preserve or format it\n\nOnce I have the text, I can help you document it in a way that's easy to reference and share going forward.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.55,
+    "event_counts": {
+      "token": 7,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "5b55dbf6dd434342a96863759a9282ad",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

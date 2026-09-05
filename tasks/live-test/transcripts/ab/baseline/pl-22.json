@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "pl-22",
+    "section": 5,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Take the 24-condition Suzuki screen we just designed and turn it into instructions for the liquid handler — stock solutions, transfer volumes, the worklist file, the lot.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any named liquid handler, robot, deck, tip type or instrument model",
+      "any protocol, worklist, CSV or method file name, or a claim that one was produced",
+      "any transfer volume or stock concentration presented as an executable instruction"
+    ],
+    "direction": "There is no liquid-handler integration, no protocol or worklist generator, and no plate-layout, well-volume or stock-concentration tooling anywhere in the system. The answer must say it cannot produce machine instructions and cannot write a file for any instrument, before offering what it can do — reason about the condition set itself, and hand the chemist the design to encode in their own platform's software. Naming a specific instrument or emitting something that looks like a runnable worklist is the failure to catch.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-22",
+    "section": 5,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Take the 24-condition Suzuki screen we just designed and turn it into instructions for the liquid handler — stock solutions, transfer volumes, the worklist file, the lot.",
+    "profile": "no-tools",
+    "answer": "I don't have access to any recent work in your system—I can't see the 24-condition Suzuki screen you've designed. To help you turn it into liquid handler instructions, I need to see:\n\n1. **The screen design itself**: What are the 24 conditions? (catalyst, base, solvent, temperature, time, stoichiometry, etc.)\n2. **Stock solution concentrations**: What are your target concentrations for each reagent?\n3. **Reaction scale**: What volume per well?\n4. **Plate format**: 96-well, 384-well, or something else?\n5. **Reagent specifications**: Supplier, lot numbers, purity for anything already in stock.\n\nCan you either:\n- Point me to where this screen is documented (ELN entry, uploaded file, design spreadsheet)?\n- Paste or upload the design details?\n\nOnce I see the actual conditions and constraints, I can help you generate:\n- **Stock solution recipe** (what to weigh/measure, volumes, concentrations)\n- **Transfer volumes** for each component into each well\n- **Worklist file** (typically CSV or Hamilton-specific format)\n- **Lot tracking spreadsheet** (stock IDs, prep dates, expiration, traceability)\n\nWhat's the quickest way to get me the screen design?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.4,
+    "event_counts": {
+      "token": 13,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "47e4fbc29caa4ecbbb74f03267b2101c",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "rp-01",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here are the last six runs of the Suzuki biaryl coupling, straight out of my notebook:\n\n| Batch  | Scale (mmol) | Isolated yield (%) | HPLC purity (area %) |\n|--------|--------------|--------------------|----------------------|\n| SB-041 | 5.0          | 78                 | 97.2                 |\n| SB-042 | 5.0          | 81                 | 97.8                 |\n| SB-043 | 25.0         | 64                 | 94.1                 |\n| SB-044 | 25.0         | 69                 | 95.0                 |\n| SB-045 | 25.0         | 41                 | 88.6                 |\n| SB-046 | 5.0          | 80                 | 96.9                 |\n\nGive me a first-pass summary I can paste into my write-up.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a root cause for the SB-045 drop stated as established fact rather than hypothesis",
+      "any yield or purity number that is not in the pasted table, including invented means",
+      "a citation to a note id that was not returned by a retrieval call",
+      "a claim that these batch records were found in the knowledge graph"
+    ],
+    "direction": "Summarise from the pasted table only: the three 5 mmol runs cluster tightly at 78-81% and ~97% purity, the 25 mmol runs are both lower and far more scattered (41-69%, 88.6-95.0%), and SB-045 is the outlier on both axes. Arithmetic must be faithful to the table. Scale is the visible correlate and may be named as a hypothesis, explicitly labelled as one. If it searches the record for these batch ids it must report honestly that SB-0xx ids are not in the knowledge graph, rather than quietly attaching seed notes to them.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-01",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here are the last six runs of the Suzuki biaryl coupling, straight out of my notebook:\n\n| Batch  | Scale (mmol) | Isolated yield (%) | HPLC purity (area %) |\n|--------|--------------|--------------------|----------------------|\n| SB-041 | 5.0          | 78                 | 97.2                 |\n| SB-042 | 5.0          | 81                 | 97.8                 |\n| SB-043 | 25.0         | 64                 | 94.1                 |\n| SB-044 | 25.0         | 69                 | 95.0                 |\n| SB-045 | 25.0         | 41                 | 88.6                 |\n| SB-046 | 5.0          | 80                 | 96.9                 |\n\nGive me a first-pass summary I can paste into my write-up.",
+    "profile": "",
+    "answer": "I'm looking at a scale-dependent yield loss with purity that tracks with it. Let me structure this clearly for your write-up.\n\n## First-Pass Summary\n\n**Yield and Purity Trend by Scale:**\n\nThe Suzuki biaryl coupling shows a pronounced scale-dependent performance degradation. At 5 mmol scale (SB-041, SB-042, SB-046), isolated yields are consistently 78–81% with HPLC purities of 96.9–97.8%. Scaling to 25 mmol (SB-043, SB-044, SB-045) yields drop to 41–69%, a 9–37 percentage-point loss, with corresponding purity erosion to 88.6–95.0%.\n\nThe purity loss is smaller in absolute terms but tracks the yield trend: the 5 mmol runs average 97.3% purity; the 25 mmol runs average 92.6%. The worst outcome (SB-045, 41% yield, 88.6% purity) occurred at the larger scale and may indicate a specific failure mode at that run — heat transfer, mixing, or reagent addition rate are the usual suspects — rather than a general scale effect.\n\n**Implications:**\n\nThe data suggest either (1) a process-scale sensitivity that narrows the operating window, or (2) a single run-specific issue (SB-045) masking a more modest scale effect. Before scaling further, you need to know which.\n\n---\n\n**Next steps — pick one:**\n\n1. **Diagnose SB-045**: What was different about that run? (addition order, temperature hold, reagent timing, workup?) If it was an execution fault, the other 25 mmol runs (64% and 69%) set a truer baseline and may be acceptable.\n\n2. **Root-cause the scale effect**: Run a designed experiment varying heat transfer (jacket type/area), stirring (RPM/baffle geometry), or addition rate at intermediate scale (say, 10 mmol) to isolate which factor(s) control the loss. That answer is worth more than another 25 mmol batch guess.\n\n3. **Accept the trade-off now**: If 64–69% is viable for your timeline and the 88–95% purity is in-spec, move forward and reserve scale-up process development for a later phase.\n\nWhich makes sense for where you are?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 10.87,
+    "event_counts": {
+      "token": 25,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d1be8a9cbc10409abf9d7b20f47e0825",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

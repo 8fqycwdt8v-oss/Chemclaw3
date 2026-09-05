@@ -20,13 +20,17 @@ module and these are one test file.
 import asyncio
 import time
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
+import uvicorn
 from mcp.server.fastmcp import FastMCP
 from starlette.testclient import TestClient
+from temporalio.worker import Worker
 
 from chemclaw.core.metrics_bridge import record_metric
-from chemclaw.core.worker_http import _build_app, worker_http
+from chemclaw.core.worker_http import _build_app, _QuietServer, worker_http
 from tests.conftest import _free_port
 
 
@@ -231,22 +235,91 @@ def test_a_worker_whose_broker_has_gone_quiet_reports_not_ready() -> None:
     Service, a rollout in that window reported complete, and the PodDisruptionBudget counted it
     Available.
 
-    Drives the shipped predicate rather than a lambda of its own, so it fails if either half is
-    dropped.
+    **Driven through `worker_ready` and through the route, which this test used to only claim.**
+    It called `broker_seen_recently()` directly — the *ingredient*, never the predicate — while its
+    docstring said it would fail "if either half is dropped". Measured, it does not: with the
+    freshness half removed the whole worker suite stayed green (75 passed, unchanged) and a severed
+    worker answered `/readyz` 200 again, which is the regression the predicate exists to stop. So
+    the lifecycle flag is held True here while the broker goes quiet, and the assertion is the
+    status code a kubelet reads: a test that substitutes its own copy of the thing under test
+    proves nothing about the thing under test.
     """
     from chemclaw.core.config import settings
     from chemclaw.durable import job_metrics
+    from chemclaw.durable.serve import worker_ready
+
+    # Stands in for the `Worker` only in the attribute the predicate reads, pinned True throughout:
+    # what is under test is whether the *other* half can be reached at all.
+    running_worker = cast(Worker, SimpleNamespace(is_running=True))
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(settings, "jobs_in_flight_refresh_seconds", 10)
         patch.setattr(job_metrics, "_LAST_BROKER_OK", 0.0)
-        assert not job_metrics.broker_seen_recently(), (
-            "a worker that has never heard from the broker reports itself ready"
+        assert not worker_ready(running_worker), (
+            "a running worker that has never heard from the broker reports itself ready"
+        )
+        assert _client(lambda: worker_ready(running_worker)).get("/readyz").status_code == 503, (
+            "the route answered ready for a worker whose every poll is failing — the pod stays in "
+            "the Service and a rollout in that window reports complete"
         )
         patch.setattr(job_metrics, "_LAST_BROKER_OK", time.monotonic())
-        assert job_metrics.broker_seen_recently()
+        assert worker_ready(running_worker)
+        assert _client(lambda: worker_ready(running_worker)).get("/readyz").status_code == 200
         # Three missed refreshes at the configured interval.
         patch.setattr(job_metrics, "_LAST_BROKER_OK", time.monotonic() - 31)
-        assert not job_metrics.broker_seen_recently(), (
+        assert not worker_ready(running_worker), (
             "a worker whose last broker answer is three refresh intervals old still reports ready"
         )
+        # And the lifecycle half still decides on its own, so neither is redundant.
+        patch.setattr(job_metrics, "_LAST_BROKER_OK", time.monotonic())
+        assert not worker_ready(cast(Worker, SimpleNamespace(is_running=False)))
+
+
+def test_the_bind_flag_wait_is_cancelled_when_the_bind_does_not_win_the_race(
+    monkeypatch: pytest.MonkeyPatch, metrics_port: int
+) -> None:
+    """The surface races two awaitables and must not walk away from the loser.
+
+    `asyncio.wait([bound.wait(), serving], FIRST_COMPLETED)` built a task for the bind flag and kept
+    no reference to it, so on the branch that exists for the bind *failing* — `serving` wins,
+    `bound` is never set — that task is left pending on an event nothing will ever set.
+    `api/detach.py::DetachableTurn._next_event` does the identical juggle and cancels its loser
+    in a `finally` for exactly this reason.
+
+    **The stderr line the finding predicted does not appear, and the reason is worth pinning.** With
+    a real port conflict uvicorn's `startup` calls `sys.exit(3)`, and a `SystemExit` out of a task
+    stops the loop — so `asyncio.run`'s own teardown cancels the orphan a few microseconds later and
+    nothing is ever printed. The orphan is therefore invisible while, and only while, upstream
+    answers a failed bind by killing the process. This test injects the other answer — a `startup`
+    that declines and returns, which is what the surface's own comment already describes ("a failed
+    bind — where `bound` is never set — ends the wait through `serving`") — so the race resolves
+    with the loop still running and the leak is observable rather than swallowed by a process exit.
+    """
+    servers: list[_QuietServer] = []
+    original_init = _QuietServer.__init__
+
+    def _remember(self: _QuietServer, config: uvicorn.Config) -> None:
+        """Hold the real server, so the event keeping the orphan alive cannot be collected."""
+        original_init(self, config)
+        servers.append(self)
+
+    async def _declined(self: _QuietServer, sockets: list[object] | None = None) -> None:
+        """Uvicorn refusing to start without raising: `serve()` returns, `bound` unset."""
+        self.should_exit = True
+
+    monkeypatch.setattr(_QuietServer, "__init__", _remember)
+    monkeypatch.setattr(_QuietServer, "startup", _declined)
+
+    async def _run() -> None:
+        async with worker_http(component="declined", ready=lambda: True):
+            assert servers, "the surface did not build a server"
+            # One turn of the loop, because `Task.cancel()` schedules the throw rather than
+            # performing it — the waiter is removed by `Event.wait`'s own `finally` when the task
+            # next runs. Without the cancel no number of turns removes it, which is the difference
+            # being asserted.
+            await asyncio.sleep(0)
+            assert not servers[0].bound._waiters, (
+                "the bind-flag wait is still queued on an event nothing will set"
+            )
+
+    asyncio.run(_run())

@@ -1,0 +1,91 @@
+{
+  "probe": {
+    "id": "pt-02",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before anybody runs it — pull up the pyrimidine SNAr design my technician drafted yesterday and tell me what it actually says about the work-up and the quench. I don't want the summary, I want what's in the document.",
+    "expects_tools": [
+      "read_experiment_protocol",
+      "find_experiment_protocols"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "work-up or quench detail that is not in the retrieved document",
+      "a design id that was not returned by a lookup",
+      "that the design was retrieved when the answer was reconstructed from the conversation"
+    ],
+    "direction": "This is a retrieval question wearing a chemistry question's clothes, and the whole grade is whether the stored document was opened. A good answer finds the design — by id if the leader supplied one, otherwise by listing what is open on this project and naming which one it took — and then quotes the work-up and quench steps as the document holds them, including the revision it read and who last touched it. Saying \"revision 3, drafted by the agent, no human edit yet\" is exactly the kind of thing a leader is asking for underneath this question. If the document is thin on the quench, the honest answer is that it is thin and that the design can be revised, not a fluent paragraph of quench detail supplied from general knowledge — that failure is invisible in the answer's prose and is precisely why the design is stored rather than retold.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pt-02",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before anybody runs it — pull up the pyrimidine SNAr design my technician drafted yesterday and tell me what it actually says about the work-up and the quench. I don't want the summary, I want what's in the document.",
+    "profile": "no-tools",
+    "answer": "I'll help you find that document. Let me search for the pyrimidine SNAr design from yesterday.Let me try broader searches:Let me check what's in the current working directory and look for recent protocol or design files:I'm not finding the document in the accessible directories. I can see the system has skill modules but not the data you're referring to. \n\n**What I need from you:**\n1. Where is that document stored? (File path, directory, ELN system, shared drive, etc.)\n2. What's the file name or a distinctive phrase from it?\n3. Is it in an ELN, uploaded to the system, or elsewhere?\n\nOnce you point me to the location, I can pull up the exact text on work-up and quench procedures.",
+    "answered": true,
+    "tools_called": [
+      "glob",
+      "glob",
+      "grep",
+      "grep",
+      "grep",
+      "ls"
+    ],
+    "tool_results": [
+      {
+        "tool": "glob",
+        "preview": "No files found"
+      },
+      {
+        "tool": "glob",
+        "preview": "No files found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "ls",
+        "preview": "['/bo/', '/calc/', '/safety/', '/skills/']"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.11,
+    "event_counts": {
+      "token": 13,
+      "tool_call": 6,
+      "tool_result": 6,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "17ffaa2e5dc84eb9b90af72de361af61",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "an-25",
+    "section": 8,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me the portfolio view: which of our compounds are approaching their retest date, and project shelf life for the ones with 6-month data using Arrhenius extrapolation.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a retest date, expiry date or projected shelf life for any compound",
+      "an Arrhenius extrapolation, activation energy or degradation rate constant",
+      "a portfolio or programme listing presented as real",
+      "claiming a project, portfolio or stability-data entity exists"
+    ],
+    "direction": "Refuses on two grounds and names both: there is no stability data and no shelf-life projection, and there is no project or portfolio entity in the system either — so it has neither the compound list nor the data. Does not produce a sample portfolio table. Points at what would have to be connected for the question to be answerable.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-25",
+    "section": 8,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me the portfolio view: which of our compounds are approaching their retest date, and project shelf life for the ones with 6-month data using Arrhenius extrapolation.",
+    "profile": "no-tools",
+    "answer": "I don't have access to your programme's records, compounds database, or shelf-life tracking system. I can't retrieve which compounds exist in your portfolio, their retest dates, or their stability data.\n\nTo answer your question, I would need:\n\n1. **A list of your compounds** with:\n   - Current storage condition\n   - Date of manufacture or initial testing\n   - Retest date (or retest interval policy)\n\n2. **6-month stability data** (for Arrhenius extrapolation) including:\n   - Compound ID\n   - Temperature(s) tested (ideally 2 or more, commonly 25°C/60% RH and 40°C/75% RH)\n   - Measured assay or purity at 6 months for each temperature\n   - Any degradation or out-of-spec observations\n\n3. **Acceptance criteria** (what assay % or degradation rate defines \"shelf life end\")\n\n**What I can do:**\n\n- **Explain the Arrhenius model**: *k* = *A* × e^(−*E*ₐ/*RT*), and how to use it to extrapolate from accelerated data to long-term storage\n- **Help you set up the calculation** once you provide the data\n- **Critique your data quality** before extrapolation (e.g., whether 6 months is enough, whether the kinetics are truly first-order, whether Arrhenius assumptions hold)\n\nDo you have a data file (spreadsheet, ELN export, etc.) you can share, or would you like me to walk you through the Arrhenius method so you can prepare the data?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.02,
+    "event_counts": {
+      "token": 14,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b7bc8998f1fb4873a06cf94ad1a2d4e6",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

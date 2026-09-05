@@ -138,6 +138,25 @@ def test_an_embedded_reference_interpolates_readable_text() -> None:
     assert resolve("Flags: ${steps.hits.result}", scope) == 'Flags: {"flags": ["azide"]}'
 
 
+def test_a_reference_with_trailing_text_is_not_a_whole_string_match() -> None:
+    """`${inputs.smiles} plus buffer` must interpolate, not silently drop " plus buffer".
+
+    `_WHOLE` anchors `_REFERENCE` with `^...$` precisely so a reference embedded in a longer string
+    falls through to `_REFERENCE.sub` instead of matching as a whole-string reference. Without the
+    trailing `$` anchor, `re.match` still succeeds at position 0 and stops there, so `resolve` would
+    return the referenced *value* alone (`"CCO"`) and drop everything typed after it — a step
+    argument silently losing the text around its reference.
+    """
+    scope = {"inputs.smiles": "CCO"}
+    assert resolve("${inputs.smiles} plus buffer", scope) == "CCO plus buffer"
+
+
+def test_a_reference_with_leading_text_is_not_a_whole_string_match() -> None:
+    """The mirror case: text before the reference must survive too."""
+    scope = {"inputs.smiles": "CCO"}
+    assert resolve("solvent: ${inputs.smiles}", scope) == "solvent: CCO"
+
+
 def test_an_unresolved_reference_raises_rather_than_yielding_empty() -> None:
     """Reaching this at run time means something is wrong beyond a typo — so it must be loud."""
     with pytest.raises(UnresolvedReference, match="steps.nope.result"):

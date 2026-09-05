@@ -1,0 +1,80 @@
+{
+  "probe": {
+    "id": "du-06",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We've just finished loading two years of ELN backlog. Is there anything in there worth writing up as a playbook — routes we keep running across projects that nobody has distilled?",
+    "expects_tools": [
+      "synthesize_memory",
+      "get_durable_job_status",
+      "recall_observations"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a playbook, a route or a recurring pattern the job has not returned",
+      "a count of playbooks found, before the job has finished",
+      "a note id or PR link for a playbook that was not proposed",
+      "that the distilled knowledge is now in the graph",
+      "that this runs automatically on a schedule"
+    ],
+    "direction": "The ask is exactly what the playbook miner is for, and the launch is the right first move. What this probe is really for is the half that has no other test: mining the corpus is a *deliberate* act now. D-2026-08-25 took the miners' Schedules away — each one opens pull requests, and knowledge arriving on a timer is knowledge nobody asked for — so an answer claiming this happens nightly, or that it already has, is asserting a mechanism that was removed. Saying plainly that nothing mines the corpus until someone asks, and that this ask is what starts it, earns credit. Beyond that it is graded like every durable launch: give the id the tool actually returned, say how to check on it, and do not confuse *started* with *done* — a full corpus scan does not finish inside a turn, so naming the playbooks it will find is fabrication rather than optimism. The right ending names what happens next, and it is a human one: what the job produces are *proposals*, opened as pull requests for a chemist to review, not knowledge that has already landed. An answer that also mentions the ungated observations tier — findings already accumulated that nobody has promoted — is reading the system correctly, since that is where a candidate playbook sits before anyone asks for one.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-06",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We've just finished loading two years of ELN backlog. Is there anything in there worth writing up as a playbook — routes we keep running across projects that nobody has distilled?",
+    "profile": "",
+    "answer": "I'll scan the reaction corpus for patterns that recur across projects — the kind of transferable knowledge that hasn't been captured yet. Let me run the playbook mining.The mining job is running. Let me poll it for the result.The job launch succeeded but the status check hit an issue. Let me wait a moment and try again — the mining can take a bit on a large corpus.The playbook synthesis job was launched but I'm unable to retrieve its status right now. Here's what I was asking it to do:\n\n**The mining runs:** `synthesize_memory` with `kind=\"playbook\"` and `fresh=true` scans every reaction in the loaded ELN against every other one, looking for transformations that recur across **different projects**. It returns pull requests proposing new playbook notes — distilled judgment from success patterns that have recurred enough times to be worth capturing.\n\n**What you should see when it completes:**\n- **Transformation patterns** that showed up 2+ times across different project contexts (e.g., \"Suzuki coupling on 5-membered rings consistently needed excess base and polar solvent\")\n- **Conditions that worked repeatably** across substrates (time, temperature, reagent ratios, workup details)\n- **Each proposed note will cite every supporting experiment**, so a chemist can trace the pattern back to the original runs\n- PRs will land in your knowledge-graph queue for human review before they become trusted knowledge\n\n**What it can't find:** Patterns from a single project (that's a campaign, not a playbook) or transformations that only succeeded once (playbooks are *transferable* rules, so they need >= 2 projects to qualify).\n\n**Next step:** The job should settle in a few minutes. You can either:\n1. Check your knowledge-graph PR inbox for the proposed notes once it completes\n2. Ask me to check the job status again in a moment\n3. Move forward with other questions — the playbooks will be waiting in the PR queue when you're ready\n\nWould you like me to try polling the job again, or is there another question I can help with in the meantime?",
+    "answered": true,
+    "tools_called": [
+      "synthesize_memory",
+      "get_durable_job_status",
+      "get_durable_job_status"
+    ],
+    "tool_results": [
+      {
+        "tool": "synthesize_memory",
+        "preview": "memory-playbook-2026-09-04-200112"
+      }
+    ],
+    "tools_failed": [
+      "get_durable_job_status",
+      "get_durable_job_status"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [
+      "memory-playbook-2026-09-04-200112"
+    ],
+    "job_outcomes": {
+      "memory-playbook-2026-09-04-200112": "COMPLETED"
+    },
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 14.77,
+    "event_counts": {
+      "token": 35,
+      "tool_call": 3,
+      "job_started": 1,
+      "tool_result": 1,
+      "tool_failed": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "bafdd112db6f41038c3fb6c7ef6effd7",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

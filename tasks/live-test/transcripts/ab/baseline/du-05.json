@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "du-05",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "We've just attached a results store to this deployment, but it's only showing calculations from today onwards — everything we computed before it existed is missing. Can you get the backlog into it?",
+    "expects_tools": [
+      "republish_calculations",
+      "get_durable_job_status",
+      "find_past_jobs"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a count of calculations republished, before the job has finished",
+      "that the backlog is now visible in the store",
+      "a job id for a republish that was not actually started",
+      "that ordinary publishing has to be triggered by hand"
+    ],
+    "direction": "The asker has diagnosed their own problem correctly and the fix is the one job this system exposes for it. What makes the probe worth having is that the capability is *only* reachable as a durable job — the tool surface is read/compute by rule, so a write arrives through `ConnectorJobWorkflow` with its gate, its rationale and its `job_records` row — and it is marked expensive, because the walk is bounded by the corpus rather than by the request. So a correct answer starts the job, gives the id it actually returned, and says how to check on it. What is graded hardest is the same gap du-03 tests from the other side: *started* is not *done*. A corpus walk over a deployment's whole history does not finish inside a turn, so reporting how many results landed, or that the store is now complete, is the failure this probe exists to catch. Two honest additions earn credit rather than lose it: that running it again is safe, because an already-queued calculation is not queued twice; and that going forward nothing needs doing, since publishing is automatic as each calculation completes — this job exists for the corpus that predates the store, not as a routine chore. If the launch could not be made — the role is not held, or the store is not configured — that must reach the asker as plain words rather than as an optimistic summary.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-05",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "We've just attached a results store to this deployment, but it's only showing calculations from today onwards — everything we computed before it existed is missing. Can you get the backlog into it?",
+    "profile": "no-tools",
+    "answer": "I appreciate the question, but I need to be clear about what I can and cannot do here.\n\n**What I cannot do:**\nI don't have tools to access calculation history, database backups, or import/export functionality for results stores. I'm a chemistry assistant without backend administration capabilities. I cannot retrieve historical computation data or load it into the newly attached store.\n\n**What you actually need:**\nThis is a DevOps/infrastructure task, not a chemistry question. You'll need to:\n\n1. **Contact your system administrator or DevOps team** — they can:\n   - Access database backups or transaction logs from before the results store was attached\n   - Query your computation history from whatever system was capturing it previously\n   - Export that data in the format your results store expects\n   - Run the appropriate import/load procedures\n\n2. **Check documentation for your results store** — it likely has:\n   - A migration or backfill procedure for historical data\n   - Import scripts or CLI tools\n   - Database connection/restore utilities\n\n3. **Verify data integrity** — when backfilling old calculations, someone should:\n   - Confirm the historical data source is complete and trustworthy\n   - Validate that timestamps and metadata transfer correctly\n   - Spot-check a sample of calculations\n\n**If you have questions about chemistry calculations themselves** — how they were done, what they mean, whether results look reasonable — I'm the right person to ask. But the plumbing to move them between systems requires someone with access to your infrastructure and databases.\n\nIs there a specific calculation result you'd like me to review or help interpret?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.52,
+    "event_counts": {
+      "token": 19,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "08a621d2a6cd4d3192f8a2accb252b59",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

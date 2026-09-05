@@ -1,0 +1,29 @@
+-- The index 056 removed without replacing, on the column four turn-time reads still filter by.
+--
+-- 052 made `reaction_id` the primary key and said so in as many words: "so the PK carries the
+-- lookup". 056 then widened the key to `(ingest_source, reaction_id)` — correctly, because one
+-- site's chemistry must not overwrite another's — and added nothing leading with `reaction_id`
+-- alone. A composite B-tree cannot serve a predicate on its second column, so every read by bare
+-- reaction id became a full scan of the primary key, and both migrations' comments went on
+-- describing a lookup that no longer existed.
+--
+-- The affected statements are `ingest/eln/records.py`'s `_SELECT_ONE` and `_SELECT_KNOWN` and the
+-- `eligible()` builder, and every one of their callers is inside a conversation turn:
+-- `expand_note` resolving a `reaction-<id>` citation, `protocol_tools`, the warehouse retriever,
+-- and `FingerprintReactionRetriever` filtering a structural search.
+--
+-- Measured with EXPLAIN (ANALYZE, BUFFERS) on 200,000 seeded rows, live PostgreSQL 16, one id:
+--
+--   with this index      Index Scan using reaction_records_id_idx     0.030 ms
+--   without it           Parallel Seq Scan, two extra workers        17.076 ms
+--
+-- A separate review measured the same shape at 500,000 rows / 390 MB — 38.9 ms and 3,955 buffers
+-- for one `read()`, and 76.3 ms over the 50 ids `eligible()` is handed at the shipped depth
+-- (`fingerprint_top_k` 10 x `retrieval_filter_overfetch` 5). `infra/sql/README.md` sizes this table
+-- at "a 3M-entry ELN ... a few GB", where the scan is larger again, and the cost is paid per
+-- candidate rather than per query.
+--
+-- No query changes: `read()` legitimately wants every row answering to an id so `records._one_of`
+-- can refuse an ambiguous one across sources.
+CREATE INDEX IF NOT EXISTS reaction_records_id_idx
+    ON reaction_records (reaction_id);

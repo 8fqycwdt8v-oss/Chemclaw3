@@ -1,0 +1,68 @@
+{
+  "probe": {
+    "id": "du-03",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Start a proper optimisation campaign on the Suzuki — computed reaction energy as the objective, over solvent and temperature, ten rounds. Leave it running and tell me how I check on it.",
+    "expects_tools": [
+      "start_optimization_campaign",
+      "get_durable_job_status",
+      "find_past_jobs"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "the campaign has finished",
+      "a best condition set produced by a campaign that is still running",
+      "a job id for a campaign that was not actually started",
+      "a completion time or a date the results will be ready"
+    ],
+    "direction": "A campaign is the long durable job — it outlives the turn by design, and that is exactly what makes it worth probing. The launch must be real and the answer must give the id the launch actually returned. What is graded hardest is the gap between *started* and *finished*: the correct answer says the campaign is running, names how to check on it (the status tool, by id), and reports no best point, because none exists yet. Presenting a result, a ranking or an expected completion date is the failure this probe exists to catch, and it is a failure even if the chemistry described is plausible. Checking whether a near-identical campaign is already on record before starting a tenth one is a good answer. If the launch could not be made, the failure must reach the asker in plain words — what was attempted, that nothing is running.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-03",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Start a proper optimisation campaign on the Suzuki — computed reaction energy as the objective, over solvent and temperature, ten rounds. Leave it running and tell me how I check on it.",
+    "profile": "",
+    "answer": "I need to clarify a few things before starting the campaign, because the setup has to be precise:\n\n1. **The Suzuki coupling** — I need the exact reactants and product SMILES. You've said \"the Suzuki\", which names something in your record, but I need to search for it first to get the right structure. Let me do that.\n\n2. **Computed reaction energy as objective** — Do you mean ΔG (Gibbs free energy), ΔH (enthalpy), or ΔE (electronic energy)? Each answers a different question, and the optimizer needs to know which one it is optimizing toward (minimize or maximize).\n\n3. **Solvent and temperature** — I can set up the decision space once I know:\n   - Which solvents should be in the screen? (e.g., DMF, DMSO, toluene, THF, water, …)\n   - Temperature range? (e.g., 25–100 °C, or narrower?)\n\nLet me start by searching your record for \"the Suzuki\":The search came back empty. **This could mean either no Suzuki notes are in the graph yet, or they are filed under a different name.** Can you give me:\n\n- The **reactants and product SMILES** (or names I can resolve: e.g., \"4-bromoanisole + phenylboronic acid → 4-methoxybiphenyl\")\n- The **objective metric**: minimize ΔG, ΔH, or ΔE?\n- The **solvent list** and **temperature range** you want to screen?\n\nOnce I have those, I'll set up the campaign, call `start_optimization_campaign`, and hand you back the job id. Then I'll tell you exactly how to check on it.",
+    "answered": true,
+    "tools_called": [
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 12.41,
+    "event_counts": {
+      "token": 24,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "34e286f38c3246f5b47a5be1b9dc0054",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

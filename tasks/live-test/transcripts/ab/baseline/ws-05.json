@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "ws-05",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Forget what I told you about DMF — the filing team came back and it is fine after all, and I do not want that constraint sitting there shaping your suggestions.",
+    "expects_tools": [
+      "forget_preference",
+      "recall_preferences"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that the preference had never been recorded, if it had",
+      "that anything beyond the named preference was removed"
+    ],
+    "direction": "A retraction, and it has to actually take effect rather than be agreed to. A good answer removes the DMF entry, confirms specifically what was removed, and leaves everything else alone — over-deleting is as bad as not deleting, because the asker cannot see the store. If no such preference is on file the answer says that instead of confirming a deletion that did not happen. Offering to re-check what remains is the natural close.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-05",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Forget what I told you about DMF — the filing team came back and it is fine after all, and I do not want that constraint sitting there shaping your suggestions.",
+    "profile": "no-tools",
+    "answer": "I don't have any record of what you told me about DMF in our conversation history. Each conversation starts fresh for me—I don't retain information between separate sessions, and I see only what's been said in this current exchange.\n\nIf you'd like me to proceed without a DMF constraint going forward in *this* conversation, I'm ready to do that. Just let me know what you're working on, and I'll help without that limitation in mind.\n\nIf you're referring to something documented in the system (a note, a record in a project, or an uploaded file), I can look at that if you point me to it—but I won't have carried over any oral instruction from a prior session.\n\nWhat would you like to work on?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 2.67,
+    "event_counts": {
+      "token": 8,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "fb86884363b34ac9885e439b0f68f9e0",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

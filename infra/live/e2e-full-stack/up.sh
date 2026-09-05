@@ -268,8 +268,28 @@ up() {
   local own_connectors
   own_connectors="$(cd "$REPO_ROOT" && uv run python -c \
     'import chemclaw.connectors, pathlib; print(pathlib.Path(chemclaw.connectors.__file__).parent)')"
-  export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$(printenv 'API-KEY' 2>/dev/null || true)}"
-  [ -n "$ANTHROPIC_API_KEY" ] || die "no ANTHROPIC_API_KEY and no 'API-KEY' env var to map it from"
+  # **The model destination, and why this no longer dies without a vendor key.** Every model call
+  # goes to the one OpenAI-compatible gateway `CHEMCLAW_LLM_BASE_URL` names
+  # (`D-2026-09-04-a-gateway-is-the-only-provider`); nothing in `src/` dials a vendor directly, so
+  # a bare `ANTHROPIC_API_KEY` is no longer a credential this stack can use. Name a gateway and
+  # this maps the environment's own key onto it; name nothing and the lane runs against
+  # `chemclaw.cli.mock_llm`, which `infra/live/processes.sh` starts on that default address.
+  #
+  # The cost is stated rather than hidden: without a gateway in front of a real vendor, this lane
+  # exercises every hop — front door, middleware chain, budget, audit, session store, connectors,
+  # Temporal — against scripted completions rather than real ones. `make live-probes` is the run
+  # that needs a real model behind the address.
+  if [ -n "${CHEMCLAW_LLM_BASE_URL:-}" ]; then
+    export CHEMCLAW_LLM_API_KEY="${CHEMCLAW_LLM_API_KEY:-$(printenv 'API-KEY' 2>/dev/null || true)}"
+    # The refusal first: the log line below would otherwise print `model: unset` and the next
+    # statement would kill the run *because* it is unset — a diagnostic that only ever appears
+    # beside the fatal error explaining it.
+    [ -n "${CHEMCLAW_LLM_MODEL:-}" ] || die "CHEMCLAW_LLM_BASE_URL is set but CHEMCLAW_LLM_MODEL is not"
+    log "model gateway: $CHEMCLAW_LLM_BASE_URL (model: $CHEMCLAW_LLM_MODEL)"
+  else
+    log "no CHEMCLAW_LLM_BASE_URL — running against the local mock LLM on 127.0.0.1:8820."
+    log "  set CHEMCLAW_LLM_BASE_URL + CHEMCLAW_LLM_MODEL to drive a real gateway instead."
+  fi
   export CHEMCLAW_CONNECTORS_DIR="$own_connectors:$MCP_REPO/manifests:$HARNESS_DIR/manifests"
   export CHEMCLAW_DATA_SOURCES="graph,eln-json,eln-ord"
   export CHEMCLAW_ELN_EXPORT_DIR="$MOCK_REPO/data/eln/exports"

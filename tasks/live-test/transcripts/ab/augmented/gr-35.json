@@ -1,0 +1,93 @@
+{
+  "probe": {
+    "id": "gr-35",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Draft the development report for the biaryl campaign - I'll review it before it goes out.",
+    "expects_tools": [
+      "request_development_report",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the report described as final, issued or approved",
+      "a figure or conclusion in the draft with no note id behind it"
+    ],
+    "direction": "Long-running and cited. The asker has said they will review it, so the answer should land as a draft awaiting that review, with every number traceable. Reporting it as done before the job has returned is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-35",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Draft the development report for the biaryl campaign - I'll review it before it goes out.",
+    "profile": "",
+    "answer": "I need to search the knowledge graph first to identify the biaryl campaign and understand what work has been done, so I can draft a comprehensive development report.The knowledge graph shows no campaign notes yet for a biaryl project. Let me check for past jobs and reactions that might be part of this work:Let me search for biaryl-related reactions with a proper reaction SMILES (reactants>>products):I need to clarify the state of your data. Based on the search results, I'm seeing:\n\n1. **The knowledge graph appears empty** – there are no biaryl campaign notes, no reaction notes, and no prior work records in the system yet.\n2. **The reaction fingerprint index is not built** – so I cannot search for similar reactions.\n\nBefore I draft a development report, I need to understand:\n\n**What biaryl work are you referring to?** Specifically:\n- Do you have an existing campaign in your ELN or project tracker that you want me to summarize from external sources?\n- Or have you been running biaryl synthesis experiments that should already be in this system's knowledge graph but haven't been ingested yet?\n- Or are you asking me to *structure* a development report *template* that you'll populate with your campaign data?\n\n**If the work is already in this system**, I would search for:\n- Specific reaction notes (e.g., Suzuki or Buchwald coupling runs)\n- Optimization campaign records\n- Any prior calculations or feasibility studies\n\n**If you have the campaign data outside this system**, please share:\n- Which reactions/transformations were run (starting materials, products, conditions)\n- The runs you want synthesized into a report (dates, yields, key parameters, observations)\n- Any specific focus areas (throughput, selectivity, robustness, scale-up readiness)\n\nOnce I have that, I can draft a cited development report using the `request_development_report` tool, which will retrieve evidence across all sources and structure it into sections you can review before release.\n\nWhat would be most helpful?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "find_past_jobs",
+      "similar_reactions",
+      "similar_reactions",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[JobRecordSummary(job_id='calc-survey_bond_strengths-aab42c1dc806ca89', connector='calc', job='survey_bond_strengths', rationale='<retrieved-note-00992008d52d9450 id=\"calc-survey_bond_strengths-aab42c"
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [
+      "similar_reactions"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 17.15,
+    "event_counts": {
+      "token": 25,
+      "tool_call": 6,
+      "evidence_source": 2,
+      "tool_result": 5,
+      "tool_failed": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b1f204f497e148d8bf1809850bef8c7c",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

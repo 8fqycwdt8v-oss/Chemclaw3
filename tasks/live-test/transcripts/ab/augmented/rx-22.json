@@ -1,0 +1,79 @@
+{
+  "probe": {
+    "id": "rx-22",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "The workup after my EDC/HOBt amide coupling emulsified badly — DCM and water, with DIPEA in there, and it sat for an hour without breaking. How do I stop this happening next time?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "predict_pka",
+      "predict_logd"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted interfacial tension, phase-separation time or emulsion stability",
+      "a claim that the emulsion caused the yield loss without evidence"
+    ],
+    "direction": "Should search the record first — the corpus holds an amide-coupling additive playbook and a recorded EDC-in-DCM failure whose real cause was the temperature ramp rather than the solvent, which is a useful correction if the user starts blaming DCM. Practical causes and fixes worth naming: urea by-product and DIPEA salts as the surfactant load, filtering the urea before separation, brine or a saturated salt wash, dilution, letting it stand versus filtering through a phase separator or celite, acid and base washes in the right order so the amine base is removed as a salt, and swapping DCM for a solvent with a larger density difference. Ionisation reasoning about where DIPEA and any acidic component sit at a given wash pH is legitimate here, with the usual caveat that the predicted pKa ranks rather than sets a pH.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-22",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "The workup after my EDC/HOBt amide coupling emulsified badly — DCM and water, with DIPEA in there, and it sat for an hour without breaking. How do I stop this happening next time?",
+    "profile": "",
+    "answer": "I'll search the record for what's been learned about this specific issue — EDC/HOBt amidation workups and emulsion handling.The knowledge graph has nothing on this yet, so let me draw on the chemistry and what you've told me to work forward from first principles.\n\nWhat you ran into is a textbook problem with that solvent pair and that base: **DCM-water with a tertiary amine (DIPEA) creates a perfect storm for emulsion** because:\n\n1. **DIPEA is a surfactant.** Tertiary amines at the DCM-water interface have a hydrophobic tail and a hydrophilic head (the lone pair on N), which is exactly what an emulsifier does. The longer the alkyl chains — DIPEA's isopropyl groups — the worse it gets.\n\n2. **DCM-water is already poor at separating cleanly.** Unlike more polar solvents (like ethyl acetate), DCM wets water just enough to form small droplets without breaking easily, so you're starting with a system that wants to emulsify.\n\n3. **The combination is sticky.** An hour of sitting tells you the system reached an equilibrium at the interface, which means mechanical separation (decanting or funnel tricks) won't work — you need to change the chemistry.\n\n**To prevent it next time:**\n\n- **Acidify the aqueous layer first, before adding it to the DCM.** A dilute acid (1 M HCl or even 10% citric acid) protonates DIPEA to [DIPEA-H]⁺, which is fully water-soluble and no longer a surfactant. Do this *in the organic layer* — add the acid carefully to the cooled DCM layer, stir briefly, then do your aqueous extraction. DIPEA will partition into the aqueous layer as its salt and stay there.\n\n- **Wash multiple times with small portions rather than one large aqueous portion.** Three 30 mL portions will separate cleaner than one 100 mL portion, because you never let enough DIPEA accumulate at the interface to stabilize a large emulsion.\n\n- **Use a different base if you can.** If the reaction allows, replace DIPEA with an inorganic base — sodium carbonate, potassium phosphate, or sodium hydroxide — for the workup or for the coupling itself. These do not emulsify. (If you need DIPEA *in situ* for the coupling, you can still use the acid wash after the reaction.)\n\n- **Add salt to break the emulsion if it happens.** Sodium chloride (saturation, ~360 g/L) or sodium sulfate (saturation) increases the ionic strength and salts out any emulsion. Add it to the aqueous layer *before* mixing with the organic layer, or add it between the phases if emulsion has already formed. This is your emergency option once the emulsion has set in.\n\n- **Switch organic solvents if the coupling allows.** Ethyl acetate or TBME separate from water far more readily than DCM, and if your substrate and product are soluble in them, the coupling can run there too. This removes the solvent-pair problem entirely, though it trades off against DCM's better substrate scope.\n\nThe acid wash is the most robust: it converts a surfactant into a salt without changing anything else about the reaction. If I find precedent in the record for how this was handled elsewhere, I can cite what worked; would you like me to check for other amide-coupling workups in the corpus to see what separation strategy they used?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "workup_precedent"
+    ],
+    "tool_results": [
+      {
+        "tool": "workup_precedent",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:workup_precedent\">\n{\n  \"question\": \"workups recorded for reactions using c1cc(nc(c1)c2ccccc2)c3cccnc3\",\n  \"hits\": [],\n  \"coverage\": {\n    \"labelled\": 0,\n    "
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 15.55,
+    "event_counts": {
+      "token": 394,
+      "tool_call": 3,
+      "evidence_source": 2,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c986c54bed1a4343a740c952fc2458b8",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -31,9 +31,15 @@ spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
       {{- include "chemclaw.imagePullSecrets" . | nindent 6 }}
       {{- /* The face had none, so it took Kubernetes' 30 s default while the front door has 615 and
-             a connector 3610 — a SIGKILL through whatever MCP tool call it was holding, plus no
-             room for the Endpoint to be withdrawn first (Kubernetes removes the Endpoint and sends
-             SIGTERM concurrently, which is the whole reason `service.drainSeconds` exists).
+             a connector 3610 — a SIGKILL through whatever MCP tool call it was holding.
+
+             **A grace period does not withdraw the Endpoint**, and this comment shipped saying it
+             did ("no room for the Endpoint to be withdrawn first"). It bounds how long the kubelet
+             waits *after* SIGTERM; Kubernetes removes the Endpoint and sends SIGTERM concurrently,
+             so what closes that race is the `preStop` sleep every other served pod here renders and
+             this one did not — `deploy/README.md` states the mechanism correctly. Both are below
+             now: the sleep so the router stops choosing this pod before it stops accepting, and the
+             grace period so the sleep plus the call it is holding both fit.
 
              Derived from the front door's pair rather than the connector's, and neither number is
              an accident: this process serves the same *in-process* read-only tools the front door
@@ -98,6 +104,15 @@ spec:
             periodSeconds: {{ .Values.probes.connector.liveness.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.connector.liveness.timeoutSeconds }}
             failureThreshold: {{ .Values.probes.connector.liveness.failureThreshold }}
+          {{- /* `service.drainSeconds`, from the same pair the grace period above is derived from:
+                 this pod is behind `chemclaw-mcp-face` exactly as the front door is behind
+                 `chemclaw`, and the router's reaction time is a property of the cluster rather than
+                 of what the pod serves. The grace period is that sleep plus the turn budget, so the
+                 two are the same arithmetic the front door does. */}}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", {{ .Values.service.drainSeconds | quote }}]
           resources:
             {{- toYaml .Values.resources.service | nindent 12 }}
           volumeMounts:

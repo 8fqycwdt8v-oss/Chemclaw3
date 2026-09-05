@@ -57,9 +57,11 @@ real durable job end to end — see "Live-test the whole stack" in `docs/guides/
 `8000` is not arbitrary: it is what `CHEMCLAW_LIVE_PROBE_BASE_URL` defaults to, so the probe
 runner reaches the front door with no override.
 
-The LLM provider is config-selected (`CHEMCLAW_LLM_PROVIDER`): an internal
-OpenAI-compatible endpoint in production (one generic credential, not Entra), or
-Anthropic for local dev. Set `CHEMCLAW_HARNESS_ENABLED=true` for the autonomous
+Every model call goes to one OpenAI-compatible gateway, `CHEMCLAW_LLM_BASE_URL`
+(one generic credential, not Entra). There is no provider selection — which vendor
+answers behind that address is the gateway's business. The default is the local
+mock (`python -m chemclaw.cli.mock_llm`), so a fresh checkout needs no credential.
+Set `CHEMCLAW_HARNESS_ENABLED=true` for the autonomous
 plan→approve→execute harness. Entra identity is enforced when
 `CHEMCLAW_ENTRA_REQUIRED=true` (off in dev).
 

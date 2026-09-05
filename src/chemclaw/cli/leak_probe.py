@@ -256,7 +256,6 @@ def main(argv: list[str] | None = None) -> int:
     # loopback host is not cosmetic either: `_refuse_unauthenticated_exposure` correctly refuses
     # to build an app that binds 0.0.0.0 with `entra_required` off.
     for key, value in (
-        ("CHEMCLAW_LLM_PROVIDER", "openai_compatible"),
         ("CHEMCLAW_LLM_BASE_URL", "http://127.0.0.1:8820/v1"),
         ("CHEMCLAW_LLM_MODEL", "mock"),
         ("CHEMCLAW_SERVICE_HOST", "127.0.0.1"),

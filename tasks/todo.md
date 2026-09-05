@@ -1,60 +1,58 @@
-# Deployment-readiness review and hardening — 2026-09-04
+# The capture half of the knowledge loop
 
-Branch `claude/code-review-hardening-lchtz5`. Goal: prove the tree is deployable, robust and
-maintainable, and fix what proves it is not. Every finding is a claim about a commit, so every
-finding carries a command and its output or it does not ship.
+Follow-on to `D-2026-09-04-a-ranker-that-sorts-alphabetically-is-not-a-ranker`, which closed the
+retrieval half and said plainly what it had not done: **data is captured automatically, conclusions
+are not.** All four review claims re-verified against `HEAD` before building — the tree had moved
+twice — and all four held.
 
-## Method
+## Done
 
-Fifteen fresh-context reviews, each with its own scope and no shared belief about the tree, over a
-running stack (`dockerd` + `make up` + `make db-migrate`) so the Postgres-backed half of the suite
-was evidence rather than a skip. Six cross-cutting sweeps, eight per-package reads, one asking
-whether the suite can fail. Then nine fixers on disjoint file territories, each required to
-reproduce a finding at `HEAD` before fixing it and to write the failing test first.
+- [x] 1. **Nine `run_*` procedures wrote no durable record.** `record_job` had one caller in the
+      tree (`durable/connector_job.py`), so a template run left no `job_records` row: never
+      findable by `find_past_jobs`, and `get_durable_job_status` answered for its id only until
+      Temporal retained its history away. A *failing* run left nothing anywhere.
+      `TemplateWorkflow` now records on both paths. Proven on a real broker, not just by the
+      builders: removing the success-path call makes `tests/test_template_job_record.py` report
+      "got 1" instead of 2.
+- [x] 2. **Two docstrings asserted the opposite in the present tense** (`agent/durable_tools.py`) —
+      both true of connector jobs alone. Corrected, and `find_past_jobs` now documents the
+      `connector="template"` filter.
+- [x] 3. **A correction was recorded as a confirmation.** `memory/interaction.py` rendered
+      `A (confirmed):` unconditionally while three docstrings and the system prompt said
+      "confirmed **or corrected**". `corrected_from` carries what the system had said; empty means
+      confirmed.
+- [x] 4. **The recording rule had no trigger.** "A computed value that matters beyond the
+      conversation" named no moment; now a comparison whose margin *clears* the stated uncertainty
+      does, with the inside-the-error-bar case pointed at the ceiling section.
+- [x] 5. **Nothing graded the write-up after a calculation.** `propose_knowledge_note` is named by
+      fourteen probes across seven files and by none in `durable.yaml` or
+      `multistep-calculation.yaml`. Two new probes, `ms-18` and `ms-19`.
 
-## Steps
+## Rejected, with the reasoning kept
 
-- [x] Baseline `make lint type test`: **6,406 passed, 1 failed, 17 skipped**.
-- [x] Wave 1 — fifteen reviews. **78 findings, 26 HIGH.**
-- [x] Wave 2 — triage; every fix reproduced at `HEAD` first. Several findings did not survive that
-      and were dropped; two reviewer-proposed fixes were measured and **rejected in favour of
-      something else** (see Review).
-- [x] Wave 3 — fixes, each with a test that fails before and passes after.
-- [x] Wave 4 — five ADRs, two `BACKLOG.md` rows closed, seven opened, full gate, PR.
+- [x] 6. **An automatic `publish_to_graph` over calc's twelve durable jobs.** Designed, reviewed and
+      **not built** — two of its premises were false (`job-result` *is* minted, by
+      `propose_knowledge_note`; the record does *not* stop at the cache, `_publish_result` runs for
+      every job), `skills/computational-evidence` already forbids it in as many words, roughly half
+      the notes would have read "this calculation could not distinguish them" at GFN2-xTB's ±3
+      kcal/mol, and neither default is defensible. The ADR keeps the whole argument so it is not
+      re-proposed from scratch.
 
-## Review
+## Two things measurement changed
 
-**Result: `make lint type test` green — 6,551 passed, 4 skipped, 0 failed.** From a baseline of
-6,406 passed / 1 failed / 17 skipped: +145 tests, the failure fixed, and thirteen fewer skips
-because `helm` was installed.
+**The eval fix as proposed would have made the probes weaker.** The recommendation was to add
+`propose_knowledge_note` to `expects_tools` on `ms-07`/`ms-08`. `evals/live.py` scores that field
+with `any()`, so a second name makes a probe pass on *either* tool — `ms-07` would then have been
+satisfied by a turn that recorded a note and never ranked anything. Separate probes instead.
 
-**What the method got right.** Installing `helm` was the single highest-yield act of the session.
-Twelve chart assertions skip in this sandbox as "helm is not installed", the epilogue this
-repository built to make skips loud does not cover that one, and five HIGH chart defects had
-survived every previous review because nobody had ever rendered the chart. A gate that cannot run
-is not a gate.
+**`turn_costs` already is the per-turn outcome row**, so the "no end-of-turn record" finding was
+half wrong: `tool_calls`, `tool_failures`, `jobs_started` and `outcome` are written every turn.
+What is missing is the knowledge dimensions (did this turn retrieve, cite, capture) — a much
+cheaper change than the new table that was proposed, and queued rather than rushed at the end of
+this one.
 
-Requiring reproduction-before-fix paid for itself repeatedly. Fixers rejected reviewer prescriptions
-on measurement four times: `ABANDON` as a parent-close policy is *worse* than the default, not
-better; writing an ingest record before its index rows breaks the invariant the replay-skip rests
-on; a 503-on-`None` for the plan routes would 503 every new conversation, because a healthy
-checkpointer and an outage are byte-identical there; and `Component.attributes` cannot hold
-per-product yields because nothing renders them for outcomes.
+## Cost, stated
 
-**What the method missed, and what caught it.** Each fixer ran `mypy --strict` over its own `src/`
-package and reported clean; the gate runs `mypy src examples tests`, and eleven errors were in the
-tests. Then the full suite found three regressions this branch itself introduced — a new error class
-not registered non-retryable, a new `DELETE` with no grant, and `core/config` acquiring a
-module-scope `psycopg` import that the datasource-isolation seam forbids transitively. All three
-were caught by gates this repository had already built. A per-package check is not the gate.
-
-**The finding no in-repo review could have produced**: `StatusIn` is `extra="forbid"` and the
-shipped `Chemclaw3_ui` has always sent `expected_status`, so **every protocol sign-off from the UI
-was a 422** — while twenty-seven route tests, `mypy --strict`, ten validators and a 6,406-test suite
-stayed green, because each test wrote the body the *server* expected.
-
-**Open, and named so its absence is not read as an answer**: no OpenShift cluster and no real
-Temporal broker beyond the dev server, so the live edges in `docs/planning/BACKLOG.md` stand. A
-rendered chart is not a deployed one. Seven new rows are queued, three of them mutants that survive
-— `core/fulltext.py`'s tokeniser can revert to the exact bug its own comment names while 349
-retrieval tests stay green and it measures 100% line and branch coverage doing it.
+The context floor moves 43,063 -> 43,316 against the unraised 43,500 ceiling: **184 tokens of
+headroom**, from one optional argument on `record_confirmed_answer`. That is tight enough to be the
+next person's problem, and the reclaim is already a `BACKLOG.md` row.

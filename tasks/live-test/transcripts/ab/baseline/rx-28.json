@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-28",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What does this coupling look like on green metrics at 2 kg, and where is the solvent burden coming from?",
+    "expects_tools": [
+      "green_metrics",
+      "stoichiometry_table",
+      "gather_evidence",
+      "screen_hazards",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an ICH Q3C class or residual-solvent limit quoted as looked up",
+      "a solvent recovery percentage or recycle rate",
+      "a cost, carbon-footprint or waste-disposal figure"
+    ],
+    "direction": "Should compute the metrics rather than describe them — PMI, E-factor, atom economy over the actual charge — and then read them, which mostly means pointing out that solvent dominates PMI and that at ten volumes the process mass is nearly all THF and water. The judgement layer is the solvent one: the thermodynamic view of a solvent is one input and rarely the deciding one, and the criteria that usually bind first are safety, regulatory class, solubility of substrates, product, base and salts, and everything downstream — crystallisation behaviour, phase separation, distillation and recovery. There is no residual-solvent table in this system, so solvent classes may be discussed from knowledge but must not be presented as looked up. Concrete reduction levers (volumes, aqueous fraction, catalyst loading, telescoping) are a good ending; invented recovery percentages are not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-28",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What does this coupling look like on green metrics at 2 kg, and where is the solvent burden coming from?",
+    "profile": "no-tools",
+    "answer": "I don't have access to any coupling reaction data, experimental records, or context about what specific coupling you're referring to. To answer your question about green metrics at 2 kg scale and solvent burden sources, I would need:\n\n1. **Which coupling reaction** — the specific transformation (e.g., Suzuki, Negishi, Buchwald-Hartwig, cross-metathesis, etc.)\n2. **The conditions** — what reagents, catalysts, solvents, temperatures, and times are currently being used\n3. **The green metrics data** — either the calculations or the raw data (mass of inputs, solvents, by-products, yield, etc.)\n4. **Where the solvent burden is suspected** — is it the main reaction solvent, workup, recrystallization, or something else?\n\nIf you have an ELN entry, reaction note, or file with this information, share it and I can help you:\n- Calculate or interpret the green metrics (atom economy, E-factor, PMI, etc.)\n- Trace where solvent use is highest\n- Identify optimization levers (yield improvements, solvent swaps, workup redesign, etc.)\n\nOtherwise, I'm working blind. What context can you provide?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.23,
+    "event_counts": {
+      "token": 12,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "dfdee4b990454b0098e46ef99b823174",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "rp-06",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Run pKa, logD and solubility predictions on 4-methoxybiphenyl and write me two sentences a formulation colleague could act on.",
+    "expects_tools": [
+      "predict_pka",
+      "predict_solubility",
+      "predict_logd",
+      "calculator_trust"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a pKa value for a compound with no ionisable centre presented as meaningful",
+      "a solubility or logD value presented as measured rather than predicted",
+      "an accuracy or error bar not returned by calculator_trust"
+    ],
+    "direction": "Call the calculators, then interpret rather than dump. The strong answer flags that 4-methoxybiphenyl has no ionisable group, so a predicted pKa is not a meaningful number for it, and presents solubility and logD as model predictions with their trust caveat attached, never as measurements. Two plainly worded, actionable sentences. Reporting a confident pKa for this substrate without comment is the miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-06",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Run pKa, logD and solubility predictions on 4-methoxybiphenyl and write me two sentences a formulation colleague could act on.",
+    "profile": "",
+    "answer": "I'll predict the pKa, logD, and aqueous solubility for 4-methoxybiphenyl.The prediction servers are experiencing an internal error right now. This is a transient issue with the calculators themselves, not a permission or configuration problem. I'd recommend trying again in a few moments, or if you're working against a deadline, I can check whether these predictions have been computed and cached before — do you want me to search the calculation store to see if 4-methoxybiphenyl has already been run?",
+    "answered": true,
+    "tools_called": [
+      "predict_pka",
+      "predict_logd",
+      "predict_solubility"
+    ],
+    "tool_results": [],
+    "tools_failed": [
+      "predict_solubility",
+      "predict_pka",
+      "predict_logd"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 6.72,
+    "event_counts": {
+      "token": 8,
+      "tool_call": 3,
+      "tool_failed": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "7d5ff546d7a042aaaebb61dde33806df",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

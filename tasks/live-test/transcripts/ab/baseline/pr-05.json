@@ -1,0 +1,130 @@
+{
+  "probe": {
+    "id": "pr-05",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Before I let anyone quote a predicted product in a report, I want to know what is actually behind these predictions in our deployment. Which models are running, which are not, and why not?",
+    "expects_tools": [
+      "list_available_models"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a model roster recited from general knowledge rather than read from the deployment",
+      "a count of running predictors that the tool did not report",
+      "a claim that a predictor is unavailable without the reason the deployment gave"
+    ],
+    "direction": "A governance question with a mechanical answer, and the graded behaviour is that the system *asks the deployment* instead of describing the software. A good answer lists the predictors this build knows about, which of them this deployment will answer with, and for each one that it will not, the reason the tool gives — a predictor can fail to load (a missing optional dependency) or be switched off by configuration, and those are different facts with different remedies. Each entry carries a citation, so an answer that attributes a prediction to the paper behind the model rather than to \"the server\" is doing the thing this tool exists for. The trap is answering from memory of what open reaction predictors exist: any roster not taken from this deployment is exactly the claim a manager asking this question is trying to avoid. The honest closing point is the one the server's own docstring makes — a deployment that expected five predictors and installed one still returns an answer wearing the word \"consensus\".",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pr-05",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Before I let anyone quote a predicted product in a report, I want to know what is actually behind these predictions in our deployment. Which models are running, which are not, and why not?",
+    "profile": "no-tools",
+    "answer": "I'll help you understand what models are deployed and their status. Let me explore the system to find this information.Let me look at the main skill directories and their configurations:Now let me search for model configurations and deployment information:Let me search for any documentation or configuration related to models:I need to be direct with you: **I have no access to your actual system configuration or deployment information.** \n\nI can see this system has:\n- **Skills** directories (`/skills/`) with domain judgment workflows\n- **Module directories** (`/bo/`, `/calc/`, `/safety/`) that appear empty at the filesystem level\n\nBut I cannot:\n- See deployed models or their configurations\n- Access deployment logs or status checks\n- Read model registry files, environment variables, or runtime configuration\n- View any backend service definitions\n- Check which predictive capabilities are active\n\n**What you actually need to audit:**\n\n1. **Configuration files** — Check your deployment configuration (environment files, docker-compose, Kubernetes manifests, cloud deployment configs, etc.) for:\n   - Which prediction services are deployed\n   - Model endpoint definitions\n   - Enable/disable flags for individual models\n\n2. **Runtime logs and status** — Check service health endpoints, container status, or your orchestration platform to see:\n   - Which services are running\n   - Which have failed to start and why\n   - Any logged errors from models that failed to load\n\n3. **This system's application code** — That would be outside these `/skills/` and module directories. You'll need to check:\n   - The actual ChemClaw application code repository\n   - Service definitions that call out to prediction models\n   - Which capabilities are conditionally enabled based on model availability\n\n4. **Tool and capability declarations** — The system mentions a **profile** (\"property-lookup\") that determines which tools an agent can call. That profile definition and which models back each tool would be in your system's core configuration, not in the skills library.\n\n**Who to ask:** Your platform/deployment team should have a deployment manifest or architecture document that lists which predictive models are running and their activation status.",
+    "answered": true,
+    "tools_called": [
+      "ls",
+      "glob",
+      "glob",
+      "ls",
+      "ls",
+      "ls",
+      "read_file",
+      "glob",
+      "glob",
+      "glob",
+      "grep",
+      "grep",
+      "grep"
+    ],
+    "tool_results": [
+      {
+        "tool": "ls",
+        "preview": "['/bo/', '/calc/', '/safety/', '/skills/']"
+      },
+      {
+        "tool": "glob",
+        "preview": "No files found"
+      },
+      {
+        "tool": "glob",
+        "preview": "['/skills/README.md', '/skills/campaign-narrative-synthesis/SKILL.md', '/skills/development-report/SKILL.md', '/skills/eln-reaction-extraction/SKILL.md', '/skills/optimization-campaign-synthesis/SKILL"
+      },
+      {
+        "tool": "ls",
+        "preview": "No files found"
+      },
+      {
+        "tool": "ls",
+        "preview": "No files found"
+      },
+      {
+        "tool": "ls",
+        "preview": "No files found"
+      },
+      {
+        "tool": "read_file",
+        "preview": " 1  # `skills/` — Agent Skills (domain judgment)\n 2  \n 3  **Responsibility:** \"how do I do X\" — domain judgment, loaded on demand via the\n 4  `SKILL.md` standard (progressive disclosure keeps agent co"
+      },
+      {
+        "tool": "glob",
+        "preview": "No files found"
+      },
+      {
+        "tool": "glob",
+        "preview": "No files found"
+      },
+      {
+        "tool": "glob",
+        "preview": "No files found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "/skills/README.md"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2",
+      "3",
+      "4"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 15.34,
+    "event_counts": {
+      "token": 212,
+      "tool_call": 13,
+      "tool_result": 13,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "91073787b49c47bd903db5b8d5c8bc9a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

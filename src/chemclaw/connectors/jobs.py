@@ -329,7 +329,33 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     Returns:
         An async tool function, unregistered — the registry call belongs to the caller that
         knows which connectors are enabled (`chemclaw.connectors.registry`).
+
+    Raises:
+        ConnectorJobError: The job declares `awaits_answer` and the deployment has not named it in
+            `connector_jobs_awaiting_answer`.
     """
+    # **The one field a manifest could use to grant itself runtime the operator did not fund.**
+    # `child_execution_timeout`'s argument stands — a job that suspends on a person has no correct
+    # finite ceiling — but that argument is about the *shape* of such a job, not about who gets to
+    # claim the shape, and nothing checked the claim: measured, a bundle from a directory on
+    # `connectors_dir` turned an 18,000 s fleet ceiling into `None` with no setting changed, in a
+    # tree that refuses `transport: stdio` by default because a manifest is data.
+    #
+    # Refused here rather than in `ConnectorJobInput`, because this is the one function both the
+    # runtime (`registry.job_tools`) and `make connector-validate` build a job through — so an
+    # ungated declaration is a red validator rather than a workflow that has already started.
+    # Refused rather than downgraded to `False`, for the reason the manifest's own
+    # `_a_job_that_waits_does_not_also_declare_what_it_costs` gives: honouring a control silently
+    # makes it a key that reads like a control and is not.
+    qualified = f"{connector}.{job.name}"
+    if job.awaits_answer and qualified not in settings.connector_jobs_awaiting_answer_list:
+        raise ConnectorJobError(
+            f"job {qualified!r} declares `awaits_answer: true`, which runs it with no wall-clock "
+            f"ceiling at all rather than the deployment's {settings.connector_job_timeout_seconds}s"
+            "; it is refused by default because a manifest is data. Add it to "
+            "CHEMCLAW_CONNECTOR_JOBS_AWAITING_ANSWER to accept that this job's runs are reaped by "
+            "their own waits and activity budgets rather than by a clock."
+        )
     params_model = _params_model(connector, job)
 
     async def launch(

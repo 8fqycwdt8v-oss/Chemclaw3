@@ -63,14 +63,97 @@ def test_skills_dirs_splits_the_path_list() -> None:
     assert trailing.skills_dirs == ["skills"]
 
 
-def test_llm_provider_defaults_to_anthropic() -> None:
-    """The default provider is the dev path, so the config singleton is valid with no endpoint."""
+def test_the_default_gateway_is_the_mock_on_this_machine() -> None:
+    """A fresh checkout is valid with no endpoint and no credential — and cannot leave the host.
+
+    The previous default was `llm_provider="anthropic"` with an empty `llm_base_url`, which meant a
+    process that configured nothing sent every prompt to the public vendor API. This one dials
+    `cli/mock_llm`'s port on loopback, so the worst an unconfigured deployment can do is be refused
+    a connection — loudly, on the first turn, rather than quietly and outbound
+    (`D-2026-09-04-a-gateway-is-the-only-provider`). A non-loopback bind on this default is refused
+    at boot by `api/middleware._refuse_unconfigured_llm_gateway`.
+
+    There is no `llm_provider` field to assert; that is the point, and
+    `test_no_provider_field_survives` is what says so.
+    """
+    from chemclaw.cli.mock_llm import MOCK_BASE_URL
+
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert settings.llm_provider == "anthropic"
-    # Unset, not 0.0: the default `agent_model` rejects an explicit temperature outright, so a
+    assert settings.llm_base_url == MOCK_BASE_URL
+    assert settings.llm_model == "mock"
+    # Unset, not 0.0: current frontier models reject an explicit temperature outright, so a
     # default of 0.0 made the shipped config fail every live turn with a 400.
     assert settings.llm_temperature is None
     assert settings.llm_max_tokens == 4096
+
+
+def test_the_live_lane_derives_its_bundle_list_rather_than_naming_one() -> None:
+    """A bundle set written into the shell goes stale the day a bundle is added.
+
+    `CHEMCLAW_CONNECTORS_REQUIRED` is true in this lane and `connectors_enabled` is unset, so
+    discovery is enablement and a bundle core enables that nothing starts is not a warning — it is
+    `ConnectorsUnavailable` and a front door that refuses to boot. That is not hypothetical:
+    wiring `rxnpredict` in as a declaration-only bundle broke `make live-up` against a
+    `for name in chem safety` loop, and it stayed broken because nothing here failed.
+
+    Two fixes were written for it independently, and the one that survived is the wider one — the
+    lane starts what is *enabled* rather than narrowing what is enabled. Constraining
+    `CHEMCLAW_CONNECTORS_ENABLED` to the fleet's bundles would have taken the core-served ones
+    (`bo`, `calc`, `molfp`, `rxnfp`, `results`) off the lane with it, which is why this asserts the
+    derivation exists and *not* that the lane pins its enabled set.
+    """
+    script = (
+        Path(__file__).resolve().parent.parent / "infra" / "live" / "processes.sh"
+    ).read_text()
+
+    assert "fleet_bundle_names()" in script, "the lane must derive its fleet bundles"
+    assert 'for name in $(fleet_bundle_names "$python"); do' in script, (
+        "start_fleet_bundles must iterate the derived names rather than a list written here"
+    )
+    assert "export CHEMCLAW_CONNECTORS_ENABLED" not in script, (
+        "the lane must not pin its enabled set: narrowing it drops the core-served bundles the "
+        "dev connector process provides, which is a second way to break the same boot"
+    )
+
+
+def test_the_live_lane_does_not_transcribe_the_gateway_address_into_shell() -> None:
+    """`infra/live/processes.sh` must ask this config for the gateway, never carry a copy of it.
+
+    The lane decides whether to start `cli/mock_llm` by comparing the *resolved* `llm_base_url`
+    against `MOCK_BASE_URL`, both read out of the interpreter it is about to launch every process
+    with. It used to compare `$CHEMCLAW_LLM_BASE_URL` against the address written out in the
+    script — which was true for as long as an operator had to set that variable, and false from
+    the moment `D-2026-09-04-a-gateway-is-the-only-provider` made it a `Settings` default that
+    nothing in the lane sets. Measured on `make live-up`: the mock never started, the front door
+    came up pointed at a closed port, and the run log named the gateway as though it were serving.
+
+    An absence test, because the failure is a *duplication* rather than a wrong value: the copy
+    agreed with the default on the day it was written, and a shell string cannot be re-derived
+    when the Python one moves. `.env.example` is deliberately not covered — a documented mirror of
+    every setting is what that file is for, and nothing branches on it.
+    """
+    from chemclaw.cli.mock_llm import MOCK_BASE_URL
+
+    script = Path(__file__).resolve().parent.parent / "infra" / "live" / "processes.sh"
+    text = script.read_text(encoding="utf-8")
+    for address in {MOCK_BASE_URL, Settings(_env_file=None).llm_base_url}:  # type: ignore[call-arg]
+        assert address not in text, (
+            f"{script.name} writes out {address!r}, which this config also defines. Read it from "
+            "`Settings`/`cli.mock_llm` instead — a shell copy of a Python default is exactly how "
+            "the lane came to start a front door pointed at a mock it did not start."
+        )
+
+
+def test_no_provider_field_survives() -> None:
+    """The concept is gone, not narrowed to one value — asserted, because that was the decision.
+
+    A one-value enum would have left every reader in place and the next vendor one commit away.
+    `agent_model` goes with it: a vendor model id in git whose only readers were the deleted
+    branch and an `or` tail behind `llm_model`.
+    """
+    assert "llm_provider" not in Settings.model_fields
+    assert "llm_prompt_caching" not in Settings.model_fields
+    assert "agent_model" not in Settings.model_fields
 
 
 def test_parity_defaults_are_backward_compatible() -> None:
@@ -110,21 +193,22 @@ def test_parity_json_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.tool_authz_default == "deny"
 
 
-def test_openai_compatible_requires_endpoint_and_model() -> None:
-    """Selecting the internal provider without a base_url/model fails at startup, clearly."""
+def test_a_blanked_gateway_address_is_refused() -> None:
+    """An empty base URL is not "no destination" — it is the SDK's own hardcoded public host.
+
+    This check was scoped to `llm_provider == "openai_compatible"`, which is exactly how the other
+    value came to ignore `llm_base_url` entirely. Unconditional now: both fields default to the
+    mock, so it fires only on a deployment that explicitly blanks one, which is the case worth
+    catching.
+    """
     with pytest.raises(ValueError, match="llm_base_url"):
-        Settings(_env_file=None, llm_provider="openai_compatible")  # type: ignore[call-arg]
+        Settings(_env_file=None, llm_base_url="")  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="llm_model"):
-        Settings(  # type: ignore[call-arg]
-            _env_file=None,
-            llm_provider="openai_compatible",
-            llm_base_url="https://llm.internal/v1",
-        )
+        Settings(_env_file=None, llm_model="")  # type: ignore[call-arg]
 
 
 def test_llm_base_url_overrides_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """The internal endpoint is a `CHEMCLAW_`-prefixed env var, like every other setting."""
-    monkeypatch.setenv("CHEMCLAW_LLM_PROVIDER", "openai_compatible")
     monkeypatch.setenv("CHEMCLAW_LLM_BASE_URL", "https://llm.internal/v1")
     monkeypatch.setenv("CHEMCLAW_LLM_MODEL", "internal-model")
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
@@ -257,18 +341,19 @@ def test_the_shipped_defaults_boot() -> None:
     )
 
 
-def test_openai_compatible_embeddings_require_endpoint_and_model() -> None:
-    """The embedding provider reuses `llm_base_url`; selecting it half-configured fails early."""
-    with pytest.raises(ValueError, match="llm_base_url"):
+def test_openai_compatible_embeddings_require_a_model_name() -> None:
+    """Selecting the endpoint embedder without naming its model fails at startup, in its own words.
+
+    The endpoint half is *not* asserted here, because this validator does not own it: an empty
+    `llm_base_url` is refused unconditionally by `_gateway_is_addressed`, which is declared first
+    and therefore raises before this one runs. This test used to pass `llm_base_url=""` and match
+    on `"llm_base_url"` — which is the other validator's message, so it stayed green with the
+    embedding branch deleted. Matching the embedding validator's own wording is what makes it a
+    test of the embedding validator (`test_a_blanked_gateway_address_is_refused` covers the rest).
+    """
+    with pytest.raises(ValueError, match="requires embedding_model"):
         Settings(  # type: ignore[call-arg]
             _env_file=None,
-            embedding_provider="openai_compatible",
-            embedding_model="internal-embed",
-        )
-    with pytest.raises(ValueError, match="embedding_model"):
-        Settings(  # type: ignore[call-arg]
-            _env_file=None,
-            llm_provider="openai_compatible",
             llm_base_url="https://llm.internal/v1",
             llm_model="internal-model",
             embedding_provider="openai_compatible",
@@ -729,19 +814,42 @@ def test_the_connection_budget_is_undeclared_by_default() -> None:
 
 
 def test_a_fleet_exactly_at_its_connection_ceiling_is_allowed() -> None:
-    """`>`, not `>=` — the shipped chart sits exactly on its own number.
+    """`>`, not `>=` — a chart may declare exactly the number it renders.
 
-    `values.yaml` declares 136 against 17 pooled processes × a pool of 8, deliberately, so the
-    ceiling ships as a statement of the current shape rather than as slack. Off by one here and
-    every pod the chart renders refuses to start.
+    The shipped ceiling carries headroom, but nothing about this check should force it to: a
+    release that provisions exactly what it opens is a correct release. Off by one here and every
+    pod it renders refuses to start.
     """
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
-        pg_fleet_pooled_processes=17,
+        pg_fleet_pools=17,
         pg_pool_max_size=8,
         pg_fleet_max_connections=136,
     )
     assert settings.pg_fleet_max_connections == 136
+
+
+def test_a_fleet_that_would_exhaust_the_server_is_refused_by_pools_not_by_pods() -> None:
+    """One front-door process opens 48 connections, and this check used to charge it 16.
+
+    The measured shape (`tests/test_fleet_pools.py`): a front-door process holds three pools — the
+    stores', the `/readyz` probe's own `(dsn, statement timeout)` key, and the LangGraph
+    checkpointer's registered autocommit pool — so at `pg_pool_max_size=16` it opens 48. The
+    validator multiplied `pg_pool_max_size` by a *process* count, so `1 × 16 = 16` cleared a
+    declared ceiling of 40 for a process that exhausts it, in the direction that lets a deployment
+    run the server out of `max_connections`.
+
+    Written against the single-process case deliberately: it is the smallest fleet that fails, so
+    the assertion is about the arithmetic and not about any chart's replica counts.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            pg_fleet_pools=3,  # one front door
+            pg_pool_max_size=16,
+            pg_fleet_max_connections=40,
+        )
+    assert "48 Postgres connections" in str(excinfo.value)
 
 
 def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> None:
@@ -750,19 +858,22 @@ def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> Non
     `core/config/store.py` stated "keep it under the server's max_connections" in prose and nothing
     computed the left-hand side, so the shipped chart ran every pod on the default pool of 16 and
     the fleet's real ceiling was ~272 against the max_connections=100 D-119 measured against. An
-    operator seeing this needs both numbers and both levers, not the name of one setting.
+    operator seeing this needs both numbers and both levers, not the name of one setting — and,
+    since the count moved from pods to pools, the sentence that says a process is not a pool: a
+    reader who reaches this message while looking at 14 pods needs to know why the number is 26.
     """
     with pytest.raises(ValueError) as excinfo:
         Settings(  # type: ignore[call-arg]
             _env_file=None,
-            pg_fleet_pooled_processes=17,
+            pg_fleet_pools=17,
             pg_pool_max_size=16,
             pg_fleet_max_connections=136,
         )
     message = str(excinfo.value)
     assert "272" in message and "136" in message
-    assert "17 pooled process" in message and "16 per pool" in message
+    assert "17 pool(s)" in message and "16 per pool" in message
     assert "pg_fleet_max_connections" in message and "pg_pool_max_size" in message
+    assert "the front door holds three" in message
 
 
 def test_the_calculation_backend_budget_is_undeclared_by_default() -> None:
@@ -1023,7 +1134,6 @@ def test_enforced_posture_refuses_a_plaintext_temporal_broker() -> None:
         "entra_required": True,
         "entra_audience": "api://x",
         "entra_tenant_id": "t",
-        "llm_provider": "openai_compatible",
         "llm_base_url": "http://llm:8000/v1",
         "llm_model": "m",
         "harness_enabled": True,
@@ -1045,7 +1155,6 @@ def test_enforced_posture_refuses_a_plaintext_postgres_dsn() -> None:
         "entra_required": True,
         "entra_audience": "api://x",
         "entra_tenant_id": "t",
-        "llm_provider": "openai_compatible",
         "llm_base_url": "http://llm:8000/v1",
         "llm_model": "m",
         "harness_enabled": True,
@@ -1071,7 +1180,6 @@ def test_enforced_posture_refuses_a_plaintext_session_store_dsn() -> None:
         "entra_required": True,
         "entra_audience": "api://x",
         "entra_tenant_id": "t",
-        "llm_provider": "openai_compatible",
         "llm_base_url": "http://llm:8000/v1",
         "llm_model": "m",
         "harness_enabled": True,
@@ -1112,7 +1220,6 @@ def test_the_tls_guard_reads_a_dsn_the_way_libpq_does(why: str, dsn: str) -> Non
         "entra_required": True,
         "entra_audience": "api://x",
         "entra_tenant_id": "t",
-        "llm_provider": "openai_compatible",
         "llm_base_url": "http://llm:8000/v1",
         "llm_model": "m",
         "harness_enabled": True,
@@ -1122,26 +1229,156 @@ def test_the_tls_guard_reads_a_dsn_the_way_libpq_does(why: str, dsn: str) -> Non
         Settings(postgres_dsn=dsn, **base)
 
 
-def test_the_tls_guard_still_exempts_the_forms_that_carry_no_network() -> None:
-    """A socket DSN and an IPv6 loopback URL are dev, not an unverified network connection.
+_ENFORCED_POSTURE: dict[str, Any] = {
+    "_env_file": None,
+    "entra_required": True,
+    "entra_audience": "api://x",
+    "entra_tenant_id": "t",
+    "llm_base_url": "http://llm:8000/v1",
+    "llm_model": "m",
+    "harness_enabled": True,
+    "temporal_tls_ca": "/ca.pem",
+}
 
-    Asserted beside the refusals above because reading a DSN with libpq's parser changes what the
-    exemption sees as well as what the refusal does: `postgresql:///db` has no host at all and
-    `[::1]` arrives unbracketed, and both must stay exempt or local dev under `entra_required`
-    stops booting.
+
+@pytest.mark.parametrize(
+    ("why", "dsn"),
+    [
+        # The spelling that used to start and stopped: the hand-rolled parser could not see `host=`
+        # inside a URL query, so this took the loopback exemption by not being seen at all.
+        ("URL with host= in the query", "postgresql://u:p@/chemclaw?host=/var/run/postgresql"),
+        ("the keyword form of the same", "host=/var/run/postgresql dbname=chemclaw user=u"),
+        # Linux's abstract namespace, libpq's `@` spelling — the same transport, no filesystem path.
+        ("an abstract-namespace socket", "host=@/var/run/postgresql dbname=chemclaw user=u"),
+        # A directory list is still only sockets.
+        ("two socket directories", "host=/var/run/postgresql,/tmp dbname=chemclaw user=u"),
+    ],
+)
+def test_the_tls_guard_exempts_a_unix_socket_because_a_socket_is_not_a_network(
+    why: str, dsn: str
+) -> None:
+    """`sslmode` is ignored outright on a Unix-domain connection, so requiring it is theatre.
+
+    libpq reads a `host` beginning with `/` as a socket *directory* (and `@` as the abstract
+    namespace) and applies no TLS to either — there is no network to encrypt. The rewrite onto
+    libpq's own parser closed a real hole (`host=` inside a URL query was invisible to the
+    hand-rolled read) and closed this with it: the class became uniformly refused, with the only
+    passing spelling being `sslmode=require` on a transport that ignores it, i.e. a lie written into
+    the DSN to satisfy a guard. A `pgbouncer` sidecar or a local cluster over a mounted socket could
+    not start under the enforced posture at all.
+    """
+    Settings(postgres_dsn=dsn, **_ENFORCED_POSTURE)
+
+
+@pytest.mark.parametrize(
+    ("why", "dsn", "escape"),
+    [
+        # `PQconninfoParse` reads the string; it does not open the service file, so the host and
+        # the sslmode that file carries are both invisible here.
+        (
+            "a service file resolves the host",
+            "service=chemclaw",
+            "service=chemclaw sslmode=require",
+        ),
+        (
+            "the same as a URL",
+            "postgresql:///chemclaw?service=chemclaw",
+            "postgresql:///chemclaw?service=chemclaw&sslmode=require",
+        ),
+        # No host and no service: libpq falls back to `PGHOST`, which is an environment this parse
+        # never looks at either.
+        (
+            "PGHOST resolves the host",
+            "dbname=chemclaw user=u",
+            "dbname=chemclaw user=u sslmode=require",
+        ),
+    ],
+)
+def test_the_tls_guard_refuses_a_dsn_that_names_no_host_at_all(
+    why: str, dsn: str, escape: str
+) -> None:
+    """A "could not tell" answer must refuse, and three of them were being exempted.
+
+    `_pg_dial`'s docstring already makes this argument for the *unparseable* case — `""` is a member
+    of `PG_LOOPBACK_HOSTS`, so any could-not-tell answer would exempt the connection. But
+    `conninfo_to_dict` is `PQconninfoParse`, which parses the string and applies **neither** libpq's
+    environment defaults (`PGHOST`, `PGSSLMODE`) **nor** a `service=` file. All three below parse
+    cleanly, return no host, and were therefore exempted through that same `""` — the exact
+    fail-open the paragraph says it closes. `CHEMCLAW_POSTGRES_DSN=service=chemclaw` naming a remote
+    host with no sslmode in the service file connected at libpq's `prefer`: silent plaintext,
+    carrying the transcripts.
+
+    Refused rather than resolved, because resolving it means a second implementation of libpq's own
+    precedence rules — the "one parser, because a second spelling is a second answer" error this
+    guard was rewritten to stop making. Both escapes are one honest line of configuration: name the
+    host (a socket directory is exempt above), or state the sslmode in the DSN.
+    """
+    with pytest.raises(ValueError, match="no host"):
+        Settings(postgres_dsn=dsn, **_ENFORCED_POSTURE)
+    # Stating the transport's own answer is enough; nothing here demands the host be spelled out.
+    Settings(postgres_dsn=escape, **_ENFORCED_POSTURE)
+
+
+def test_an_unparseable_dsn_is_refused_without_printing_its_password() -> None:
+    """The refusal that names the setting must not carry the value the setting holds.
+
+    `_pg_dial` interpolated psycopg's `ProgrammingError` into its own message, and libpq quotes the
+    offending token — which for a typo'd scheme or a stray leading space is the **whole DSN**,
+    userinfo included. This raise happens during `import chemclaw.core.config`, before
+    `configure_logging()` installs `SecretRedactingFilter`, so nothing downstream could scrub it: in
+    a pod the password went to the container log and to whatever ships it.
+
+    Both spellings are single-character slips in a `.env` or a ConfigMap, which is what makes this
+    reachable rather than theoretical. The guard's own docstring already promised the opposite —
+    "naming the setting rather than the DSN — the value carries a password" — so this asserts the
+    promise rather than the wording.
     """
     base: dict[str, Any] = {
         "_env_file": None,
         "entra_required": True,
         "entra_audience": "api://x",
         "entra_tenant_id": "t",
-        "llm_provider": "openai_compatible",
         "llm_base_url": "http://llm:8000/v1",
         "llm_model": "m",
         "harness_enabled": True,
         "temporal_tls_ca": "/ca.pem",
     }
-    Settings(postgres_dsn="postgresql:///chemclaw", **base)
+    secret = "S3cr3t-Pa55w0rd"
+    for dsn in (
+        f"postgres//chemclaw:{secret}@db.internal/chemclaw",
+        f" postgresql://chemclaw:{secret}@db.internal/chemclaw",
+    ):
+        with pytest.raises(ValueError) as raised:
+            Settings(postgres_dsn=dsn, **base)
+        assert secret not in str(raised.value), f"the refusal printed the password for {dsn!r}"
+        assert "postgres_dsn" in str(raised.value), "the refusal does not name the setting to fix"
+
+
+def test_the_tls_guard_still_exempts_the_forms_that_carry_no_network() -> None:
+    """A socket DSN and an IPv6 loopback URL are dev, not an unverified network connection.
+
+    Asserted beside the refusals above because reading a DSN with libpq's parser changes what the
+    exemption sees as well as what the refusal does: `[::1]` arrives unbracketed and the socket
+    directory arrives as the host, and both must stay exempt or local dev under `entra_required`
+    stops booting.
+
+    **The first case used to be `postgresql:///chemclaw` and is not any more.** That spelling names
+    no host, and "no host" is not "local": libpq goes on to read `PGHOST` or a `service=` file,
+    neither of which `PQconninfoParse` opens, so exempting it exempted a remote plaintext connection
+    on the strength of an answer nothing had. The dev convenience it was protecting survives one
+    character wider — naming the socket directory says the same thing and says it in the DSN.
+    """
+    base: dict[str, Any] = {
+        "_env_file": None,
+        "entra_required": True,
+        "entra_audience": "api://x",
+        "entra_tenant_id": "t",
+        "llm_base_url": "http://llm:8000/v1",
+        "llm_model": "m",
+        "harness_enabled": True,
+        "temporal_tls_ca": "/ca.pem",
+    }
+    Settings(postgres_dsn="postgresql:///chemclaw?host=/var/run/postgresql", **base)
     Settings(postgres_dsn="postgresql://u:p@[::1]:5432/chemclaw", **base)
 
 

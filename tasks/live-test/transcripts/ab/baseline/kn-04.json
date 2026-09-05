@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "kn-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Did we ever pin down where this Pd system stops working? I don't want to burn a plate finding out again.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a substrate-class outcome the corpus does not record",
+      "a scope conclusion extrapolated to substrates that were never run"
+    ],
+    "direction": "Cites campaign-biaryl-scope and states the recorded boundary: electron-rich aryl bromides couple at 80 °C in 12 h; electron-rich aryl *chlorides* do not couple at all under these conditions. A satisfying answer says explicitly that the boundary, not the yields, is the transferable result, and points onward to playbook-pd-cross-coupling-scope for what to change first (ligand before temperature).",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Did we ever pin down where this Pd system stops working? I don't want to burn a plate finding out again.",
+    "profile": "no-tools",
+    "answer": "I don't have access to your records or previous experiments, so I can't tell you what you've already discovered about your Pd system's limitations. \n\nTo help you avoid repeating work, I'd need you to:\n\n1. **Point me to the relevant notes** — lab notebook entries, reaction records, or ELN data where you or your team documented where the Pd system failed or stopped performing\n2. **Tell me what you mean by \"stops working\"** — does it mean:\n   - Poor conversion at certain scales?\n   - Failure with specific substrates or functional groups?\n   - Loss of selectivity?\n   - Catalyst deactivation under certain conditions?\n   - Something else?\n\nIf you upload or link those notes, I can review what was actually found and help you avoid repeating the experiment.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.07,
+    "event_counts": {
+      "token": 8,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "9d9fe3cb0d974df3900b45d2eccd8a03",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -976,8 +976,10 @@ def test_a_drafted_protocol_cannot_be_moved_back_to_requested(backend: str) -> N
 #: store. A test that reads the store's own map proves the code agrees with itself and nothing else;
 #: this is the decided table, so a row edited by accident fails on this side.
 #:
-#: Every self-transition (`X -> X`) is legal on top of these and is deliberately *not* written into
-#: the rows: it is one rule about retries rather than five decisions about the lifecycle.
+#: Every self-transition (`X -> X`) is exempt from these rows and is deliberately *not* written into
+#: them: it is one rule about retries rather than five decisions about the lifecycle. Exempt from
+#: the *table* only — the document rules still refuse three of the ten (status, head-kind) repeats,
+#: which `test_a_repeat_is_exempt_from_the_table_and_not_from_the_document_rules` pins.
 _LEGAL_MOVES_AS_DECIDED: dict[str, set[str]] = {
     "requested": {"draft", "abandoned"},
     "draft": {"approved", "abandoned"},
@@ -1045,6 +1047,33 @@ def test_every_pair_of_statuses_is_decided_by_the_transition_table() -> None:
                 f"the refusal of {current!r} -> {target!r} names neither where the design is nor "
                 f"where it was asked to go: {message!r}"
             )
+
+
+def test_a_repeat_is_exempt_from_the_table_and_not_from_the_document_rules() -> None:
+    """A repeat skips the table; it does not skip the question of what the document says.
+
+    `require_movable`'s docstring stated the exemption absolutely — "Every self-transition is
+    legal" — and gave it as the reason the table omits `X -> X`. Measured across all ten
+    (status, head-kind) repeats, three are refused: `requested` on a protocol head, and `approved`
+    and `executed` on a request head. The document rules run first and outrank the exemption exactly
+    as they outrank an edge.
+
+    Nothing here is behaviour that should change — those three states are unreachable while
+    `advanced()` demotes the status on every revision that changes the head's kind, which is
+    precisely why an absolute sentence could stand for as long as it did. What is pinned is the
+    *precedence*, because that sentence is what a reader adding a sixth status would rely on.
+
+    Expected from `_document_permits` rather than a written list of three, so the pairs follow the
+    decided rule instead of being restated beside it.
+    """
+    for status in get_args(DesignStatus):
+        for head_kind in ("request", "protocol"):
+            if _document_permits(status, head_kind):
+                require_movable(status, status, head_kind)
+                continue
+            with pytest.raises(UnstorableDocument) as refusal:
+                require_movable(status, status, head_kind)
+            assert status in str(refusal.value)
 
 
 def test_the_transition_table_covers_every_status_the_type_allows() -> None:

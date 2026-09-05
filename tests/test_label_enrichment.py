@@ -284,7 +284,7 @@ def test_an_outage_propagates_instead_of_becoming_200_doomed_single_calls() -> N
     asyncio.run(_run())
 
 
-def test_a_short_species_list_is_dropped_rather_than_shifting_every_role(
+def test_a_short_species_list_costs_the_roles_and_not_the_atom_map(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A species list that does not match what was sent is bad data, and nothing used to say so.
@@ -294,11 +294,15 @@ def test_a_short_species_list_is_dropped_rather_than_shifting_every_role(
     stops the read running off the end; it cannot see that an answer for 3 of 4 species has shifted
     every role by one, so a reactant is stored as the solvent and the solvent as the catalyst. The
     server is versioned separately from this repository (`_role`'s leniency is written for exactly
-    that), and the row is then stamped with the current `labeller_version`, so it leaves `stale()`
-    and no later pass revisits it.
+    that).
 
-    Dropping the whole answer puts it in the vocabulary the drain already has for an unusable one:
-    "not labelled this pass", which its `unlabelled` counter reports and its WARNING names.
+    **Only the positional half is unusable, and dropping the answer threw away the other half.**
+    A representation also carries `mapped_smiles`, which has nothing to do with the species
+    contract — and `enrich.label_stale` stamps *every* stale row with the current
+    `labeller_version` whether or not the server answered, so the reaction leaves `stale()` and no
+    later pass revisits it: the atom map was lost permanently, not "this pass". Blanking `species`
+    keeps the answer, and `merge._species` then takes the floor it already documents ("a short or
+    absent answer falls back to `species_role_from`", the coarse map of what the source recorded).
     """
 
     async def _run() -> None:
@@ -328,11 +332,26 @@ def test_a_short_species_list_is_dropped_rather_than_shifting_every_role(
             ]
         )
 
-        assert sorted(answers) == ["r2", "r3"], (
+        assert sorted(answers) == ["r1", "r2", "r3"]
+        assert answers["r1"].species == [], (
             "an answer for 3 of the 4 species sent is unusable: every role after the gap belongs "
             "to a different molecule"
         )
+        assert answers["r1"].mapped_smiles == "[Br:1][c:2]1ccccc1>>[c:2]1ccc(N)cc1", (
+            "the atom map is not positional and was not short; it must survive the species half"
+        )
         assert "r1" in caplog.text and "3" in caplog.text and "4" in caplog.text
+
+        # What the row is actually stamped with: the map kept, the roles from the source's own
+        # coarse map rather than from three answers matched onto four species.
+        merged = merge(_row(), LabelPolicy(), answers["r1"], None)
+        assert merged.mapped_smiles == "[Br:1][c:2]1ccccc1>>[c:2]1ccc(N)cc1"
+        assert [species.derived_role for species in merged.species] == [
+            SpeciesRole.STARTING_MATERIAL,
+            SpeciesRole.STARTING_MATERIAL,
+            SpeciesRole.REAGENT,
+            SpeciesRole.PRODUCT,
+        ], "the coarse floor, not three roles shifted onto four species"
 
     caplog.set_level("WARNING")
     asyncio.run(_run())
