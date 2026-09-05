@@ -172,18 +172,30 @@ async def _probe_database(front: FrontDoorState) -> bool:
     component's own internal timeout kwarg only ever bounds the part of the work it was told about.
 
     **The kwarg is not belt-and-suspenders, and calling it that is what nearly deleted it.** It is
-    also what keeps this probe *off* the stores' pool: `core/db` keys a pool on `(dsn, libpq
-    options)` and the options string carries the statement timeout, so asking for two seconds mints
-    a second pool this process holds for its life. That costs `pg_pool_max_size` connections of the
-    fleet budget for a leg that is single-flighted and needs one — and buys the thing that budget
-    exists to protect. Measured on the real app with all eight of the stores' pooled connections
-    held: with the separate pool `/readyz` answered **200 in 0.034 s**; sharing the stores' key it
-    answered **503 "database unreachable" in 2.005 s**, against a database that was healthy and
-    idle. That is readiness amplification — the kubelet pulls a pod out of the Route for being
-    *busy*, moving its load onto siblings that are equally busy — and it also misreports pool
-    saturation as an unreachable server, which is exactly the distinction
-    `chemclaw_pg_pool_requests_waiting` was introduced (D-119) to keep separate. The pool this
-    costs is counted rather than removed: see `pg_fleet_pools` in `core/config/store.py`.
+    also what keeps this probe *off* the stores' pool: `core/db` keys a pool on
+    `(loop, dsn, libpq options, requested max_size)` and the options string carries the statement
+    timeout, so asking for two seconds mints a second pool this process holds for its life — and
+    buys the thing the connection budget exists to protect. Measured on the real app with all eight
+    of the stores' pooled connections held: with the separate pool `/readyz` answered **200 in
+    0.026 s**; sharing the stores' key it answered **503 "database unreachable" in 2.005 s**,
+    against a database that was healthy and idle. That is readiness amplification — the kubelet
+    pulls a pod out of the Route for being *busy*, moving its load onto siblings that are equally
+    busy — and it also misreports pool saturation as an unreachable server, which is exactly the
+    distinction `chemclaw_pg_pool_requests_waiting` was introduced (D-119) to keep separate.
+
+    **That pool is one connection wide, because one is what this leg uses.** `_shared_probe`
+    collapses every concurrent caller onto a single in-flight task: measured at 1,000 concurrent
+    `/readyz` with the cache window off, 40 checkouts and a peak of **one** simultaneous checkout,
+    and a probe that blows its own budget releases before the next starts (`pool_available` is 1
+    immediately after an `asyncio.wait_for` cancellation, next checkout 0.002 s). Left at
+    `pg_pool_max_size` it declared eight connections of the fleet budget and *held three* — the
+    first checkout races the initial fill, so a `min_size=2` pool settles at three — per
+    front-door pod, for one `SELECT 1`. Sized here rather than in `core/db` because the bound is a
+    property of this route's single-flight, not of the database.
+
+    Labelled, because it is the one non-default borrower in `src/` and six samples a minute per pod
+    would otherwise land in `operation="unspecified"` — the hole `connection()`'s own docstring
+    calls the likeliest place for a slow query to hide.
     """
     try:
 
@@ -191,6 +203,8 @@ async def _probe_database(front: FrontDoorState) -> bool:
             async with db.connection(
                 settings.session_store_dsn or settings.postgres_dsn,
                 statement_timeout_seconds=settings.service_readiness_db_timeout_seconds,
+                operation="readyz_probe",
+                pool_max_size=1,
             ) as conn:
                 await conn.execute("SELECT 1")
 

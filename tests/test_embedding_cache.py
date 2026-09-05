@@ -166,8 +166,27 @@ def test_a_batch_larger_than_the_bound_still_returns_every_vector(
     assert len(embeddings._CACHE) <= 4
 
 
+@pytest.mark.timeout(600)
 def test_concurrent_batches_do_not_race_on_the_cache() -> None:
     """`_CACHE` is reached from several threads, and was a plain dict with no lock.
+
+    **Its own timeout, because the global 180 s cap fails it under `make cov` and nowhere else.**
+    The workload is deliberately large — 8 threads x 600 texts against a 2,048-entry cache — and
+    coverage tracing multiplies a tight 4,800-iteration loop by roughly thirty: measured on this
+    machine, 4.8 s bare and 132-216 s traced. Every observed run under 180 s passed and every run
+    over it failed, which is the cap and not the race. That made the whole gate red on a
+    sufficiently loaded machine while `pytest tests/test_embedding_cache.py` stayed green, so the
+    failure looked like a flake in the thing this test is about. 600 s is ~2.8x the slowest run
+    seen; shrinking the batch instead would have narrowed the race window the docstring below
+    explains was chosen to be wide.
+
+    **It is a loose cap on an untraced run, and `conftest.timeout_scale`'s docstring is the
+    standing objection to that** — a constant chosen for the slow condition is no cap at all in the
+    fast one, which throws away what these markers are for. Accepted here because the two runtimes
+    differ by ~30x rather than the ~6x a loaded machine costs, so no single constant is tight in
+    both, and because what this cap has to catch is a *hang* — a deadlock on `_CACHE_LOCK` never
+    finishes, at either speed. `PYTEST_TIMEOUT_SCALE` is not the lever: it relaxes every cap in the
+    suite for a condition that only slows the tight loops.
 
     Every retrieval runs its embedding through `asyncio.to_thread`, so concurrent turns land on the
     default executor together. Two races followed and both are reproduced by this shape at the
