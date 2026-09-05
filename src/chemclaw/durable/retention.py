@@ -718,19 +718,26 @@ class RetentionOutcome(BaseModel):
 
 
 class _Budget:
-    """The pass's wall-clock allowance, and whether it can afford one more sweep.
+    """The pass's wall-clock allowance, and whether it can afford one more unit of work.
 
     `retention_timeout_seconds` is the activity's start-to-close timeout, so a pass that simply ran
     until the deadline would be *killed* by Temporal at the moment it finished — the attempt lost,
-    the schedule's next fire the only recovery. This stops one whole sweep short of it.
+    the schedule's next fire the only recovery. This stops one whole unit short of it.
 
     **Measured, not guessed.** The obvious form is a fraction of the budget ("stop at 80%"), which
-    is a number nobody can derive: the right margin is however long the next sweep takes, and that
+    is a number nobody can derive: the right margin is however long the next unit takes, and that
     is a property of the deployment's backlog rather than of this module. So the margin is the
-    slowest sweep *this pass has already run* — a figure that exists by the time it is needed and
+    slowest unit *this pass has already run* — a figure that exists by the time it is needed and
     that adapts to a first pass over a year of history as readily as to a steady state.
 
-    The first sweep is always allowed: `_worst` starts at zero, so a pass never returns having done
+    **Two sizes of unit share it, deliberately.** A whole sweep is timed by `_prune_expired_rows`
+    and one `DELETE` batch by `_prune_by_age`, so once a sweep has been measured the batch loop
+    reserves a sweep's worth of margin rather than a batch's. That errs toward stopping early,
+    which is the safe direction: every batch and every branch commits its own work, so a pass that
+    stops with budget to spare has still kept everything it counted, while one that overruns loses
+    its attempt.
+
+    The first unit is always allowed: `_worst` starts at zero, so a pass never returns having done
     nothing, which is the one outcome a scheduled cleanup must not have.
     """
 
@@ -799,19 +806,20 @@ async def prune_expired_rows() -> RetentionOutcome:
 async def _prune_expired_rows() -> RetentionOutcome:
     """Sweep until the backlog is drained or the pass budget is spent, and report the total.
 
-    **The sweep was capped where it needed to be bounded, and those are different things.** Each
-    branch below stops at `retention_max_sessions_per_pass` (500) and says so through its
-    `*_deferred` flag, so one pass disposes of at most 500 conversations, 500 checkpoint threads and
-    500 ownership rows. At the load this system is sized for that cap is *below the arrival rate* —
-    200 chemists create on the order of 400–1 000 sessions a day against a daily schedule — so the
-    backlog does not drain slowly, it **grows**, and every pass reports success while it does.
+    **The sweep used to be capped where it needed to be bounded, and those are different things.**
+    Each branch stops at `retention_max_sessions_per_pass` and says so through its `*_deferred`
+    flag; until this function existed that flag was also the end of the pass, so one pass disposed
+    of at most one cap's worth of conversations, checkpoint threads and ownership rows. At the load
+    this system is sized for that cap sits *below the arrival rate* — 200 chemists create on the
+    order of 400–1 000 sessions a day against a daily schedule, against a shipped cap of 500 — so
+    the backlog did not drain slowly, it **grew**, and every pass reported success while it did.
 
-    A cap and a convergence are answered separately here. The cap stays exactly as it was, because
-    it is what bounds one transaction, one batch of round trips and one set of row locks. What
-    changes is that the pass no longer *ends* at it: it sweeps again while any branch says a tail
-    remains and the budget can still hold another sweep. So the cap now bounds a batch and the
-    clock bounds the pass, which is the pairing every other bounded loop in this module already
-    has.
+    A cap and a convergence are answered separately. The cap is unchanged, because it is what
+    bounds one transaction, one batch of round trips and one set of row locks; a bigger number
+    would not fix this, since any fixed number is below *some* arrival rate. What changed is that
+    the pass no longer *ends* at it: it sweeps again while a branch says a tail remains and the
+    budget can still hold another sweep. So the cap bounds a batch and the clock bounds the pass,
+    which is the pairing every other bounded loop in this module already has.
 
     **The budget is the activity's own `retention_timeout_seconds`, spent conservatively.** A pass
     that ran until the deadline would be killed by Temporal exactly as it finished; `_Budget` stops

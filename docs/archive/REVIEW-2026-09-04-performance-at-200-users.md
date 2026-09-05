@@ -163,9 +163,18 @@ seven MCP servers**, so there is no capacity lever to pull and any rollout is a 
 capability. Measured real work: `optimize_geometry` aspirin **24.5 s**, a 50-atom fragment
 **389.6 s**; refusal rate at concurrency 60 was **68%**.
 
-`crest_timeout_seconds=14400` against `connector.yaml`'s `request_timeout: 900` is a **16×** mismatch,
-and `asyncio.shield` (`admission.py:63-67`) holds the slot after the caller has given up — so the
-pod stays occupied for up to 4 h serving a request nobody is waiting for.
+`asyncio.shield` (`admission.py:63-67`) holds the slot after the caller has given up, so the pod
+stays occupied serving a request nobody is waiting for.
+
+> **Correction, 2026-09-05.** This paragraph also claimed a "16x mismatch" between
+> `crest_timeout_seconds=14400` and `connector.yaml`'s `request_timeout: 900`. There is no such
+> mismatch: that manifest is `mount: backend` and nothing reads its `request_timeout` at runtime. The
+> real defect is worse and was found while fixing the wrong one — the actual caller carries **three**
+> budgets and all three shipped *exactly equal* to this server's (900/900, 3600/3600, 14400/14400).
+> Equal is not tighter, because the caller's clock starts first, so **every actionable refusal this
+> server can produce was unreachable in production, on all three tiers.** Now held 120 s inside,
+> a margin measured from the deadline check's own granularity (one single point at the 500-atom cap
+> is 81 s).
 
 ### 3.5 — A capacity refusal is classified as bad data and never retried **[×3]**
 
@@ -236,8 +245,17 @@ Each such query pins one of `pg_pool_max_size=16` for 5–8 s **on the turn's cr
 
 ### 4.2 — Every MCP tool call re-validates its own schema against the meta-schema
 
-`mcp/server/lowlevel/server.py:536,573` call `jsonschema.validate` on input and structured output of
-every call. That helper runs `check_schema` — re-compiling a *static* schema — every time, on the
+`mcp/server/lowlevel/server.py:536,573` call `jsonschema.validate` on the input and the structured
+output of every call.
+
+> **Correction, 2026-09-05.** Only the **output** site runs. `FastMCP._setup_handlers` registers with
+> `call_tool(validate_input=False)` (`mcp/server/fastmcp/server.py:311`, verified end to end — a bad
+> argument returns pydantic's message, not jsonschema's). The magnitude below holds and the win is
+> entirely the output schema. A second correction: keying the memoised validators by object identity
+> — which this review suggested — is **unsafe**, because `FastMCP.list_tools` rebuilds every schema
+> dict per call and an address freed by one round is reused by the next; measured, round 3's
+> `outputSchema` landed at the address round 0's `inputSchema` had held, so an `id()` cache would
+> validate a *result* against the *arguments* schema. The shipped key is canonical JSON. That helper runs `check_schema` — re-compiling a *static* schema — every time, on the
 event loop, outside every offload.
 
 ```
@@ -305,8 +323,17 @@ Measured, 10 turns on one thread with incompressible content:
 
 At the review's load that is **~10–58 GB/day**; the chart's own 30-day example implies
 **300 GB – 1.7 TB**. `values.yaml:1240` states the row count; the byte volume is stated nowhere.
-`retention.py` prunes by *thread*, so an active session keeps every superseded copy — and
-`retention_enabled` is **absent from all 36 chart config keys**, so nothing prunes at all by default.
+`retention.py` prunes by *thread*, so an active session keeps every superseded copy.
+
+> **Correction, 2026-09-05.** This paragraph originally ended "`retention_enabled` is absent from all
+> 36 chart config keys, so nothing prunes at all by default". That is wrong, and it is wrong in the
+> way this document warns about everywhere else: it was carried from a track report into the
+> synthesis without being checked against the chart. `deploy/helm/chemclaw/templates/config.yaml:7-9`
+> makes **any** render `fail` unless a release states exactly one of `retention.windows` or
+> `retention.unboundedGrowthAccepted: true`, so "nothing prunes by default" is really "nothing
+> *renders* by default", and unbounded growth is a declared choice rather than a silent one. What
+> survives is narrower and still real: the byte volume above is stated nowhere, and the per-pass cap
+> does not converge against the arrival rate. Both are addressed.
 
 Two aggravating factors: every write is its own transaction (`checkpointer.py:537` autocommit), and
 `AsyncPostgresSaver._cursor` holds **one process-wide `asyncio.Lock`** (`aio.py:374`) so its

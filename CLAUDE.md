@@ -252,8 +252,21 @@ later it was 42,549 — drifted by a merge that touched a tool-schema module, wi
 paragraph's subject rewritten. Twice now a session has re-transcribed these numbers to correct them
 and been stale again within a merge, which is the same argument this file already makes about
 counting `make` targets and skipped tests: **the live number is whatever `tests/test_context_floor.py`
-measures, and the ceiling it ratchets against is the only figure worth reading here — 43,500.**
+measures, and the ceiling it ratchets against is the only figure worth reading here — 67,000.**
 The deferral itself stands.
+
+**That ceiling moved by 23,500 in one commit and nothing was added**
+(`D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system`). The ratchet called
+`build_langgraph_agent` without the `connectors=` argument that function accepts, so it measured 61
+tools where a shipped turn binds 113 — its docstring's claim that reading the `ToolNode` is why it
+cannot drift was true of the *method* and false of the *fixture*. The paragraph above is therefore
+right twice over: the number was stale, and it was stale in the direction that understated the
+thing it exists to bound. **The real shipped prefix is 75,695 tokens**, of which 9,538 come from
+bundles served out of `Chemclaw3-mcp` and are unratchetable here by construction — `SERVED_ELSEWHERE`
+names them and a test fails when that drifts. Its first consequence is that the compaction defaults
+were derived against the smaller prefix, so `agent_tool_result_clear_trigger` was floored at 1 while
+two places asserted it was not; they are re-derived, and the assertion now measures the prefix with
+connectors bound.
 
 M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is
 green with it uninstalled, which is how that was verified. Taking it out is also what exposed
