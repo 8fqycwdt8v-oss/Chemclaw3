@@ -188,8 +188,6 @@ This is the ledger the tests enforce: exactly the files beside it, in the order 
 
 | ADR | Title |
 |---|---|
-
-
 | [D-001](D-001-runtime-is-python.md) | Runtime is Python |
 | [D-002](D-002-maf-for-orchestration-temporal-for-durability-kept.md) | MAF for orchestration, Temporal for durability (kept separate) |
 | [D-003](D-003-agent-skills-skill-md-for-capability-integration.md) | Agent Skills (SKILL.md) for capability integration |

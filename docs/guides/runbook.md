@@ -127,8 +127,15 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
 ## Talk to the agent from a terminal (testing)
 
 The production ingress is Teams/Copilot with Entra-ID SSO (architektur.md §7). For local
-testing there is a CLI: `make chat` (or `uv run chemclaw --admin`). It needs `ANTHROPIC_API_KEY`
-in the environment — the chat client preflights it and fails with a clear message otherwise.
+testing there is a CLI: `make chat` (or `uv run chemclaw --admin`). It needs a model gateway
+answering at `CHEMCLAW_LLM_BASE_URL` — the default is `chemclaw.cli.mock_llm` on loopback, so a
+fresh checkout starts with no credential at all; point it at a real OpenAI-compatible gateway and
+put that gateway's credential on `CHEMCLAW_LLM_API_KEY`. **There is no credential preflight**
+(`D-2026-09-04-a-gateway-is-the-only-provider`): an empty key is a legitimate configuration,
+because many internal gateways ignore the bearer, so a gateway that does want one answers 401 on
+the first turn rather than at construction. What still fails at construction is a *blanked*
+`CHEMCLAW_LLM_BASE_URL`, which is a misconfiguration and is reported as one sentence and an exit
+code.
 
 - **Admin mode is required.** Entra auth is enforced at the *front door* (F4), and this CLI has no
   browser OIDC token to validate, so it runs only with `--admin`: it bypasses auth, advertises every skill, and stamps the audit trail with
@@ -161,7 +168,7 @@ make live-up        # connectors (:8810), the four Temporal workers, the front d
                     # backend (:8860) that every durable calculation job dials
 make live-status    # what is running
 make live-jobs      # STAGE A: a real durable job, no model needed
-make live-probes    # STAGE B: the probe corpus through the front door (needs ANTHROPIC_API_KEY)
+make live-probes    # STAGE B: the probe corpus through the front door (needs a real gateway)
 make live-down && make live-infra-down
 ```
 

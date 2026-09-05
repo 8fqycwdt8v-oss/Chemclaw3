@@ -634,9 +634,17 @@ green without saying what it skipped.**
 Some Claude Code Remote environments for this repo carry a working Anthropic credential for the
 live lane (`infra/live/`, `infra/live/e2e-full-stack/`) as an environment variable literally named
 `API-KEY` — hyphenated, so it is not `$`-referenceable in bash and has to be read with
-`printenv 'API-KEY'`. Where present, map it to `ANTHROPIC_API_KEY` before starting the front door;
-`infra/live/e2e-full-stack/up.sh` does this automatically. Never print or commit the value itself —
-this note records where to look, not what it is, and it may not exist in every environment.
+`printenv 'API-KEY'`. Never print or commit the value itself — this note records where to look,
+not what it is, and it may not exist in every environment.
+
+**What to map it onto is `CHEMCLAW_LLM_API_KEY`, and only beside a gateway**
+(`D-2026-09-04-a-gateway-is-the-only-provider`). Nothing in `src/` dials a vendor any more, so a
+bare `ANTHROPIC_API_KEY` is not a credential this stack can use: every model call goes to the one
+OpenAI-compatible endpoint `CHEMCLAW_LLM_BASE_URL` names. Set that plus `CHEMCLAW_LLM_MODEL` to a
+gateway fronting the vendor and the key belongs on `CHEMCLAW_LLM_API_KEY`;
+`infra/live/e2e-full-stack/up.sh` does exactly that mapping, and only when a base URL is named.
+Name no gateway and the lane runs against `chemclaw.cli.mock_llm` on loopback, which needs no
+credential at all — so the key is what `make live-probes` needs, not what the lane needs to start.
 
 ## Governance
 

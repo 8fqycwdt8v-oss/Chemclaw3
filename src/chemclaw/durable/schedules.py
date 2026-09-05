@@ -454,15 +454,16 @@ async def describe_schedules(client: Client | None = None) -> list[ScheduleHealt
     omission is indistinguishable from a healthy quiet job.
 
     **Concurrently and each bounded, because this is a probe on the front door's event loop.** The
-    lookups are independent and there are up to eleven of them; run in sequence with the SDK's own
-    retry underneath and no timeout, an unreachable broker made an authenticated route hang for
-    (retry budget × 11) — at exactly the moment an operator opens the "is the machinery running"
-    page. Both halves are already argued elsewhere in this repository, on the two probes that face
-    the same broker: `connectors/health.py` ("concurrent because probes are independent and a serial
-    sweep would make startup wait for the sum of the timeouts rather than the slowest one") and
-    `api/runner.py` ("`retry=False` keeps it a *probe* — the SDK's default retry would turn one
-    unreachable broker into a per-turn backoff loop"). A timeout is what bounds it here, since
-    `describe()` takes no `retry` argument.
+    lookups are independent and there is one per planned Schedule; run in sequence with the SDK's
+    own retry underneath and no timeout, an unreachable broker made an authenticated route hang for
+    (retry budget × the plan) — at exactly the moment an operator opens the "is the machinery
+    running" page. How many that is is not written here: the plan grows, and this sentence said
+    eleven over a plan of twelve. Both halves are already argued elsewhere in this repository, on
+    the two probes that face the same broker: `connectors/health.py` ("concurrent because probes
+    are independent and a serial sweep would make startup wait for the sum of the timeouts rather
+    than the slowest one") and `api/runner.py` ("`retry=False` keeps it a *probe* — the SDK's
+    default retry would turn one unreachable broker into a per-turn backoff loop"). A timeout is
+    what bounds it here, since `describe()` takes no `retry` argument.
 
     `gather` preserves order, so the report is still in plan order.
 
@@ -539,8 +540,8 @@ async def _last_outcome(connection: Client, info: ScheduleInfo) -> tuple[str, st
     obvious field on the action is precisely the one that would report a killed drain as normal.
 
     A run whose retention has expired no longer describes; that is `unknown` with the reason in
-    `note`, never an exception, because one unreadable run must not end the sweep for the other
-    ten schedules.
+    `note`, never an exception, because one unreadable run must not end the sweep for every other
+    planned Schedule.
     """
     in_flight = {_workflow_id(action) for action in (info.running_actions or [])}
     finished = [

@@ -565,7 +565,7 @@ resources:
 # Non-secret config → ConfigMap → CHEMCLAW_* env. Keys mirror chemclaw/config.Settings exactly.
 config:
   # The one model destination. **Stated rather than left to the code default**, for the reason
-  # `CHEMCLAW_CALC_SERVER_URL` above is: the default is the local dev mock on loopback, and a pod
+  # `CHEMCLAW_CALC_SERVER_URL` below is: the default is the local dev mock on loopback, and a pod
   # that inherited it would refuse to boot (`api/middleware._refuse_unconfigured_llm_gateway`).
   # There is no `CHEMCLAW_LLM_PROVIDER` — this address is the whole knob
   # (`D-2026-09-04-a-gateway-is-the-only-provider`).
