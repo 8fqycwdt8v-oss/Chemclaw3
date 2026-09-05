@@ -131,8 +131,15 @@ def test_a_connector_server_holds_one_pool() -> None:
 
     async def _run() -> int:
         await migrated_db_or_skip()
-        from chemclaw.connectors.molfp.server.app import app
+        from mcp.server.fastmcp import FastMCP
 
+        from chemclaw.connectors.server import connector_app
+
+        # A fresh `FastMCP` rather than an imported bundle's module-level `app`, because
+        # `StreamableHTTPSessionManager.run()` refuses a second call on one instance and four other
+        # test files run `molfp`'s. Importing it passed this file alone and failed the suite — an
+        # order dependence in the test, not in the composition root, which is the same either way.
+        app = connector_app(FastMCP("probe-fleet-pools"), name="probe")
         async with app.router.lifespan_context(app):
             await _touch_stores()
             return db._process_max_connections()

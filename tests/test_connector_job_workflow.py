@@ -602,6 +602,10 @@ def test_the_suspension_declaration_travels_from_the_manifest_to_the_started_chi
     (manifest,) = enabled()
     (job,) = manifest.jobs
     assert not job.awaits_answer, "the fixture bundle's job computes; the copy below makes it wait"
+    # Named in the allowlist for the same reason the stdio transport's own tests set
+    # `connector_stdio_enabled`: `build_job_tool` refuses an ungated declaration, and this test is
+    # about the two hops the declaration takes *after* it is allowed, not about the gate.
+    monkeypatch.setattr(settings, "connector_jobs_awaiting_answer", f"{manifest.name}.{job.name}")
     waiting = build_job_tool(manifest.name, job.model_copy(update={"awaits_answer": True}))
 
     launched: list[ConnectorJobInput] = []
