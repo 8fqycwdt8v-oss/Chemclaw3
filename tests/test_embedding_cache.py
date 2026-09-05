@@ -180,6 +180,14 @@ def test_concurrent_batches_do_not_race_on_the_cache() -> None:
     seen; shrinking the batch instead would have narrowed the race window the docstring below
     explains was chosen to be wide.
 
+    **It is a loose cap on an untraced run, and `conftest.timeout_scale`'s docstring is the
+    standing objection to that** — a constant chosen for the slow condition is no cap at all in the
+    fast one, which throws away what these markers are for. Accepted here because the two runtimes
+    differ by ~30x rather than the ~6x a loaded machine costs, so no single constant is tight in
+    both, and because what this cap has to catch is a *hang* — a deadlock on `_CACHE_LOCK` never
+    finishes, at either speed. `PYTEST_TIMEOUT_SCALE` is not the lever: it relaxes every cap in the
+    suite for a condition that only slows the tight loops.
+
     Every retrieval runs its embedding through `asyncio.to_thread`, so concurrent turns land on the
     default executor together. Two races followed and both are reproduced by this shape at the
     shipped `embedding_cache_size` of 2048: a trim evicting a key between another thread's insert
