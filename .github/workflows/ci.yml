@@ -51,13 +51,17 @@ concurrency:
   group: "${{ github.workflow }}-${{ github.head_ref || github.ref_name }}"
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
-# The one pin both jobs that install `helm` read, so it cannot drift between them the way it did
-# before this existed: 33 rendered-chart tests in `check` were gated on `shutil.which("helm")`,
-# which `check` never installed, so they skipped silently on every run while `chart` alone rendered
-# the chart with a *pinned* v3.13.0. Pinning it twice invited exactly that kind of divergence — one
-# job's `helm` a minor version ahead of the other's would validate two different renderers. One
-# value here, read by both `Install Helm` steps below, is what keeps that impossible rather than
-# merely unlikely.
+# The one pin both jobs that install `helm` read, so it cannot drift between them.
+#
+# **What this fixes is drift, not a dead gate**, and the first version of this comment said
+# otherwise — that the rendered-chart tests in `check` "skipped silently on every run" because the
+# job never installed `helm`. `D-2026-09-04-a-review-of-a-review-finds-the-fixes` had already
+# established the opposite: `ubuntu-latest` ships Helm, so `check` has been rendering the chart all
+# along — on whatever version the runner image happened to carry that week, while `chart` rendered
+# on a pinned v3.13.0. Two jobs validating the same chart against two different renderers is the
+# real defect, and one value here, read by both `Install Helm` steps below, is what ends it.
+# (The step is still what makes the *sandbox* claim true: `helm` is absent there, and
+# `tests/conftest.py::_report_helm_skips` is what says so out loud when it is.)
 env:
   HELM_VERSION: "v3.13.0"
 
@@ -151,12 +155,11 @@ jobs:
         run: uv sync --locked
 
       # Not `make helm-validate` — that stays `chart`'s alone (see the docstring on
-      # `test_every_gate_make_ci_runs_is_a_step_ci_yml_runs`). This is only the binary the 33
-      # rendered-chart tests in `tests/test_deploy_chart.py` gate on with
-      # `shutil.which("helm")`: without it they skip silently and this job stays green while
-      # never rendering the chart it claims to test. `HELM_VERSION` above is the one pin both
-      # this step and `chart`'s below read, so the two `helm`s this workflow installs cannot
-      # drift apart.
+      # `test_every_gate_make_ci_runs_is_a_step_ci_yml_runs`). This is only the binary the
+      # rendered-chart tests in `tests/test_deploy_chart.py` gate on with `shutil.which("helm")`.
+      # The runner image already carries one; this pins *which* one, so this job and `chart` below
+      # render through the same `helm` rather than through whatever two versions the image and the
+      # pin happen to be on that week.
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
