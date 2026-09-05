@@ -1533,6 +1533,25 @@ kubectl -n <ns> get configmap chemclaw-config -o yaml   # this is the newer rele
 Prefer rolling *forward* across that boundary. Note the cost the annotation buys this with:
 `helm uninstall` now leaves those two objects behind, which is what the older chart did.
 
+### `make helm-validate` says a binary is "not installed - see docs/guides/runbook.md"
+
+It meant this section, which did not exist: the Makefile has pointed here for three binaries the
+runbook never named, so the message read as "this cannot run here" and every session that hit it
+treated the chart gate as CI's job. It is not — all three install in under a minute and the whole
+target then passes locally.
+
+```
+helm         # https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz
+kubeconform  # https://github.com/yannh/kubeconform/releases  (linux-amd64 tarball)
+promtool     # https://github.com/prometheus/prometheus/releases  (bundled in the tarball)
+```
+
+Drop each on `PATH` and `make helm-validate` renders the chart, checks 31 and 35 manifests against
+the Kubernetes schemas, and runs `promtool check rules` over both monitoring arms. This is the same
+lesson the "sandbox is not offline" note in `CLAUDE.md` records about Docker: a tool that is merely
+*absent* reads exactly like a tool that is unavailable, and believing the second costs coverage in
+silence. The chart half of this repository's gate is the half a unit test cannot reach.
+
 ### `helm upgrade` refuses: "exists and cannot be imported into the current release"
 
 ```

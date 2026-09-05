@@ -2151,3 +2151,19 @@ a blind spot** — the only thing that finds it is changing the code and seeing 
 
 One of the six was a test I had already repaired once that same day, for a *different* vacuity, and
 it went green again on a mutation I had not thought to try.
+
+**"`kubeconform` not installed" is not "kubeconform cannot be installed", and I read it as the
+second for a whole session.** `make helm-validate` was the one gate step I never ran locally, on the
+strength of that message; I deferred it to CI eight times and said so each time as though it were a
+property of the sandbox. It took one `curl` and a `cp`. The target then passed on the first run —
+31 and 35 manifests valid, both PromQL arms clean — which means every chart change this session was
+verified only by a remote job I could have reproduced in a minute.
+
+The Makefile's message points at `docs/guides/runbook.md`, and the runbook named none of the three
+binaries, so the pointer was dangling and the misreading was the natural one. That section exists
+now.
+
+**Rule: before recording a gate step as unavailable, try to make it available once.** `CLAUDE.md`
+already carries exactly this argument about Docker — "that message describes a default, not a
+limit" — and I re-derived the same mistake against a different tool in the same session, having read
+that paragraph at session start.
