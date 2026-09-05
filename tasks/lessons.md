@@ -1944,3 +1944,57 @@ from inside the tree, and my own dev database had already applied it. **Rule: a 
 immutable from the commit that introduces it, not from the merge that ships it; a correction is a
 new file. And when a guard is skipped locally for an environmental reason, treat its subject as
 unchecked rather than as fine — the skip line says which.**
+
+## 2026-09-05 — six reviewers over one session's front-end and event work
+
+From reviewing the changes of this same session, in `Chemclaw3` (#319) and `Chemclaw3_ui` (#67).
+Three of what they found were regressions I had introduced hours earlier, and each was invisible to
+the gate I ran.
+
+**A CSS `@media print` rule is not covered by a green unit suite, and neither is anything else the
+browser's layout decides.** happy-dom evaluates neither `:has()` nor layout, so the print stylesheet
+I added — which hid every `#root` child on any page without a protocol document, i.e. a blank sheet
+for the conversation — passed 1,000 tests and a build. **Rule: a change whose effect is a computed
+style, a layout, or a selector match is not done until it is measured in a real browser; the fastest
+form is a standalone probe page loaded in the pinned Chromium, and the durable form is a Playwright
+arm asserting *both* the page it was written for and one it was not.**
+
+**"Reuse the shared counter" is a refactor, not a no-op, when the counter also sets a duration.** I
+replaced `backoff(6, …)` with `backoff(attempt, …)` to make a silent branch report — correct — and
+silently cut the concurrent-stream cap's first wait from 15–30 s to 1–2 s, because the literal was
+the *saturation point* and not a magic number. It surfaced as a ~50% test flake, not as a failure.
+**Rule: before replacing a literal with a variable, ask what the literal was *for*; if it is a
+saturation point, a ceiling or a floor, keep it as `max`/`min` around the variable.**
+
+**A flaky test is a message about the code, not about the test.** My first reading was "this test's
+window is too tight". The window was fine the day before; my change had moved the value it measured.
+**Rule: when a test starts flaking in a change that touched its subject, assume the change until the
+diff proves otherwise.**
+
+**Two files that say they do "the same thing for the same reason" will not.** `errorFromStatus` split
+the two 429s on whether `Retry-After` was *present*; `useJobStreams` split them on whether it
+*parsed*, under a docstring pointing at the other file. **Rule: when a docstring cites another
+module as the authority for a decision, open it and diff the predicate — a citation is not an
+implementation.**
+
+**A field written by two producers and read by nobody is dead, and the docstring will describe the
+reader it does not have.** `AwaitingBrief` carried `subject`, `kind` and `due_at` under "the four
+fields anything renders", where the badge reads `.length`. Deleting them also deleted a real defect
+they had grown. **Rule: for a new state field, grep the readers before writing the docstring, and
+let the grep write it.**
+
+**Extracting a function does not carry its fix.** Another branch extracted `sleep` from the module
+whose version had the abort-listener cleanup, and shipped the version without it, under a docstring
+saying it took the one "that got it right". **Rule: an extraction is a diff against the original, not
+a paraphrase of it — and the new home gets the test the old one had, on the function rather than
+through its caller.**
+
+**`git checkout <file>` is not "undo my last edit".** Twice in this session it discarded a whole
+file's uncommitted work while I was probing whether a test bites. **Rule: to probe a revert, copy the
+file to the scratchpad first and restore from the copy; never reach for `git checkout` on a file
+with uncommitted work in it.**
+
+**Running the gate means running all of it.** I pushed a branch where `tsc -b` was red — four
+construction sites of an interface I had given two required fields — because I had been running
+`vitest` and `eslint` on the files I touched. **Rule: after changing a shared type, run the whole
+typecheck, not the tests of the files that changed.**
