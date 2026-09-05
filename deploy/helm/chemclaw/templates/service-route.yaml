@@ -83,13 +83,26 @@ spec:
     {{- if .Values.service.autoscaling.occupancy.enabled }}
     {{- /* The saturation signal, first because it is the one that binds. A turn holds its permit
            for the whole 8.32 s it waits on the model and spends 0.581 s of CPU doing it, so the
-           pod is full at 44% of the CPU target below and no CPU threshold can reach it — measured
-           with the semaphore 100% full at 218 millicores, and again in the load lane as 33 of 48
-           turns shed at 35.0% of one core.
+           pod that is full sits under the CPU target below rather than over it — measured with
+           the semaphore 100% full at 218 millicores, 62% of the then-350 mC target, and again in
+           the load lane as 33 of 48 turns shed at 35.0% of one core. (That "62%" read "44%" until
+           it was divided: 218/500 is utilization against the request, not the target.)
 
-           `AverageValue`, not `Utilization`: the quantity is "permits held per pod", and the HPA's
-           own arithmetic (desired = ceil(replicas × current / target)) is then exactly the queue
-           the admission semaphore is. The target is derived from the permit count the pods
+           `AverageValue`, not `Utilization`: the quantity is "turns in flight per pod", and the
+           HPA's own arithmetic (desired = ceil(replicas × current / target)) then tracks the work
+           the pod is holding. **It is not "permits held", which this said until it was checked
+           against `api/app.py`'s binding.** The gauge counts *leases*: `_claim_turn_slot` takes one
+           at POST, before the semaphore, and `_release_permit` is `DetachableTurn`'s detach hook —
+           so a hung-up client gives its permit back while its turn keeps generating and keeps its
+           lease. A lease is therefore held both before a permit is acquired and after one is
+           returned, and the count can exceed the permit ceiling.
+
+           That is the better signal rather than a defect, which is why the metric stays and this
+           sentence moved: a queued turn is demand the pod is about to shed, and a detached turn is
+           CPU and model spend the pod is really carrying (`api/detach.py`). Both are load; neither
+           is a permit. The consequence to know is that the ratio in
+           `ChemclawFrontDoorAtItsPermitCeiling` can pass 1.0 without every permit being held.
+           The target is derived from the permit count the pods
            actually enforce rather than written out, so the two cannot drift; `max 1` because a
            target of 0 makes the HPA divide by zero and scale to its ceiling.
 

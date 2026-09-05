@@ -224,9 +224,10 @@ half-written.
 - **The HPA scales the front door on admission occupancy, with CPU beside it as a fallback**;
   workers scale by hand (queue depth), not HPA. CPU is the wrong quantity here and that was
   measured, not suspected: a turn is 8.32 s of wall clock and 0.581 s of CPU — 93% of it waiting on
-  the model — so with every permit held plus 150 idle SSE streams a pod drew 218 millicores, **44%
-  of the CPU target while completely full**, and the load lane shed 33 of 48 offered turns at 35%
-  of one core. So `service.autoscaling.occupancy` adds a `Pods` metric on
+  the model — so with every permit held plus 150 idle SSE streams a pod drew 218 millicores, **62%
+  of the then-350 mC target** (this read "44%", which is 218/500 — utilization against the
+  *request*, mislabelled as a fraction of the target), and the load lane shed 33 of 48 offered
+  turns at 35% of one core. So `service.autoscaling.occupancy` adds a `Pods` metric on
   `chemclaw_turns_in_flight`, targeted at a percentage of the permit count the pods enforce (the
   chart multiplies them out, so the two cannot drift).
   **This needs something the chart does not install**: a custom-metrics API — prometheus-adapter,

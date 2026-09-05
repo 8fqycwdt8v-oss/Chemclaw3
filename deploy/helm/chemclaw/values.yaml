@@ -66,15 +66,29 @@ service:
   # **CPU cannot see this service saturate, and that is measured rather than suspected.** A turn is
   # 8.32 s of wall clock and 0.581 s of CPU — 7% machinery, 93% waiting on the model — so occupancy
   # runs about 14× CPU and no CPU threshold tracks it. Driven with the admission semaphore *100%
-  # full* (every permit held, plus 150 idle SSE streams) the pod drew **218 millicores, 44% of the
-  # 350 mC target**: completely full and comfortably under the scale-up threshold. The fleet
-  # therefore sat at `minReplicas` while shedding, which is what the load lane saw directly — at
-  # offered concurrency 32, **33 of 48 turns shed with CPU at 35.0% of one core**. This was gap
-  # DEP-4, named here for a year with `chemclaw_turns_in_flight` and `chemclaw_turn_capacity`
-  # already exported and nothing reading them.
+  # full* (every permit held, plus 150 idle SSE streams) the pod drew **218 millicores — 62% of the
+  # then-350 mC target**, and ~31% of the 700 mC target the raised CPU request now implies. This
+  # said "44%", which is 218/500: utilization against the *request*, mislabelled as a fraction of
+  # the target. At 62% the pod was near the threshold rather than invisible to it, so the honest
+  # claim is that CPU is a *proxy that decouples* here, not that it cannot move.
   #
-  # So the HPA scales on **permits held**, which is the quantity that actually runs out, and keeps
-  # CPU beside it. Both metrics on one HPA is deliberate: the autoscaler takes the *highest*
+  # **Two of this branch's own measurements disagree by 2.6x and that is not resolved.** At
+  # 0.581 s of CPU per 8.32 s turn, twelve permits held continuously is ~838 mC of steady demand,
+  # and eight held for 28.4 s should be ~559 mC — against the 218 mC the saturation probe read.
+  # They reconcile only if that probe held eight *long* turns rather than eight permits cycling at
+  # the shipped rate, in which case 218 mC is not a saturated pod's draw. The re-measurement was
+  # started and lost; until it is redone, treat the magnitude as unproven. What is not in doubt is
+  # the direction: the fleet sat at `minReplicas` while shedding, which is what the load lane saw
+  # directly — at offered concurrency 32, **33 of 48 turns shed with CPU at 35.0% of one core**.
+  # This was gap DEP-4, named here for a year with `chemclaw_turns_in_flight` and
+  # `chemclaw_turn_capacity` already exported and nothing reading them.
+  #
+  # So the HPA scales on **turns in flight** — the work a pod is holding — and keeps CPU beside it.
+  # Not "permits held", which this said until the gauge was read: `chemclaw_turns_in_flight` counts
+  # leases, which a turn takes at POST before the semaphore and keeps after a hang-up has already
+  # returned its permit. That is the better quantity (a queued turn is demand, a detached turn is
+  # real spend) and it means the count can exceed the permit ceiling; see the template for the
+  # whole argument. Both metrics on one HPA is deliberate: the autoscaler takes the *highest*
   # recommendation, so CPU still catches a genuine compute burst, and — the half that matters if
   # the custom-metrics API is missing — a metric it cannot fetch never blocks a scale *up* driven by
   # one it can, it only holds off scale-down. That is the fallback, and it is the reason `occupancy`

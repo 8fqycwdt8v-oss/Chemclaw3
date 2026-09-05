@@ -1115,11 +1115,13 @@ def test_the_autoscaler_scales_on_the_quantity_that_actually_runs_out() -> None:
     """CPU cannot see this service saturate, so an HPA that only watches CPU never scales it.
 
     Measured with the admission semaphore 100% full — every permit held plus 150 idle SSE streams —
-    the pod drew 218 millicores against a 350 mC target: 44% of the scale-up threshold while
-    completely full. The load lane reached the same place from the other side, shedding 33 of 48
-    offered turns at 35.0% of one core. The cause is structural rather than tunable: a turn is
-    8.32 s of wall clock and 0.581 s of CPU, so occupancy runs ~14x CPU and no CPU threshold tracks
-    it. `values.yaml` named this as gap DEP-4 for a year with both gauges already exported.
+    the pod drew 218 millicores against the then-350 mC scale-up target: 62% of it while completely
+    full, near the threshold rather than blind to it. This docstring said "44%", which is 218/500 —
+    utilization against the *request*, mislabelled as a fraction of the target. The load lane
+    reached the same place from the other side, shedding 33 of 48 offered turns at 35.0% of one
+    core. The cause is structural rather than tunable: a turn is 8.32 s of wall clock and 0.581 s
+    of CPU, so occupancy runs ~14x CPU and no CPU threshold tracks it. `values.yaml` named this as
+    gap DEP-4 for a year with both gauges already exported.
 
     Four things, each of which was individually enough to leave the fleet at `minReplicas`:
     the occupancy metric exists, its target is *derived* from the permit count the pods enforce
@@ -1132,7 +1134,7 @@ def test_the_autoscaler_scales_on_the_quantity_that_actually_runs_out() -> None:
     occupancy = values["service"]["autoscaling"]["occupancy"]
 
     assert "type: Pods" in hpa and occupancy["metricName"] == "chemclaw_turns_in_flight", (
-        "the HPA does not scale on permits held, the one quantity this service runs out of"
+        "the HPA does not scale on turns in flight, the work a pod is actually holding"
     )
     assert ".Values.service.autoscaling.occupancy.metricName" in hpa
     assert "CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS" in hpa, (

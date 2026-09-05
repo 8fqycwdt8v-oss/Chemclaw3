@@ -382,7 +382,7 @@ spec:
             description: >-
               Chemists are being turned away in bulk and every refusal is an HTTP 200, so this is
               invisible to availability monitoring and to CPU (a turn is 93% waiting on the model,
-              so a completely full pod draws about 44% of the HPA's CPU target). Check
+              so a full pod drew 218 mC, under the HPA's CPU target rather than over it). Check
               `chemclaw_turns_in_flight` against `chemclaw_turn_capacity` per pod and whether the
               HPA is scaling: if the custom-metrics API is not serving
               `chemclaw_turns_in_flight`, the autoscaler is back on CPU and cannot see this.
