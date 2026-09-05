@@ -121,7 +121,7 @@ SERVER_INTERNAL_ERROR = "an internal error occurred"
 #
 # The literal is transcribed rather than imported: the two repositories share no package, so
 # nothing detects a reword automatically — each side pins the spelling it expects in a test of its
-# own (`tests/test_calc_remote.py` here, `servers/calc/tests/test_admission.py` there), which
+# own (`tests/test_calc_remote.py` here, the calc server's admission test there), which
 # fails whoever changes one side, not whoever changes the other.
 SERVER_AT_CAPACITY = "[calc-at-capacity]"
 

@@ -398,7 +398,7 @@ def test_the_marker_cannot_be_forged_from_a_tool_argument(
     rule pages "scale the calculation tier" on. A caller could manufacture that page from a tool
     argument.
 
-    The refusal text is the one `servers/calc/engine/solvents.py` actually produces for an
+    The refusal text is the one the calc server's solvent table actually produces for an
     unsupported solvent name, transcribed rather than built from this repository's constant, for
     the reason the test above gives: the two repositories share no package, so a literal is the
     whole contract.
