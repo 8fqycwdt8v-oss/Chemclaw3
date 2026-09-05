@@ -87,6 +87,39 @@ topic).
   env var somebody else set. That residual case, plus the guard being disableable
   (`CHEMCLAW_EGRESS_GUARD_ENABLED=false`), is what keeps this row open.
 
+- [ ] **A loopback proxy is outside the egress guard by construction, and a service mesh is exactly
+  that shape** — [M], opened 2026-09-05 by the pass that unified the two loopback predicates onto
+  `core/http.is_loopback_host`. The row above measured that a *named* proxy is refused and
+  concluded the guard is "a partial mitigation"; the half it did not measure is that a proxy on
+  **loopback needs no allowlisting at all**, because `netguard._check` exempts loopback by
+  construction — and must keep exempting it, since the process dials Postgres, Temporal and the
+  calc backend there. Measured with the allowlist deliberately empty, one local HTTP proxy and
+  `httpx` (`_refused` read off the module after each arm):
+
+  | arm | outcome | `netguard._refused` |
+  | --- | --- | --- |
+  | `proxy=http://proxy.corp:3128` → `http://exfil.example/steal` | refused at `getaddrinfo` | 1 |
+  | `proxy=http://127.0.0.1:<port>` → `http://exfil.example/steal` | **HTTP 200, body returned** | **0** |
+  | no proxy → `http://exfil.example/steal` (the control) | refused at `getaddrinfo` | 1 |
+
+  The middle arm is the finding: the request reached its external destination end to end, and the
+  counter never moved — so nothing logs at ERROR, nothing alerts, and `chemclaw_egress_refused_total`
+  reads as a clean pod. This is the *shipped* topology rather than an attacker-only one: an
+  OpenShift service mesh or egress sidecar is a loopback proxy by design, so
+  `HTTPS_PROXY=http://127.0.0.1:15001` on the pod re-terminates TLS for every prompt, completion
+  and `Authorization` bearer and forwards them wherever the sidecar is configured to.
+  `core/http.private_ca_transport` sets `trust_env=False` and closes it for the two LLM seams that
+  take it — on the CA-bundle branch only (the row above), and for no other `httpx`/`requests`
+  client in the tree.
+
+  **Not fixable by widening the loopback answer**, which is why this is a row and not a patch: the
+  guard's model is "which *host* may this process dial", and a proxy moves the destination out of
+  the address entirely. Closing it means treating proxy configuration as a destination — reading
+  `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` at arm time and refusing, or requiring the proxy to be
+  named in `CHEMCLAW_EGRESS_ALLOW` even when it is loopback — which changes behaviour for every
+  deployment behind a legitimate mesh and wants the same ADR the `trust_env=False` half of the row
+  above is already deferred to.
+
 - [ ] **The gateway boot guard reaches one process, and the worker is the other one** — [M],
   opened by `D-2026-09-04-a-gateway-is-the-only-provider`. `_refuse_unconfigured_llm_gateway` and
   `_refuse_unauthenticated_exposure` are called only from `api/app.py`, so a background worker
@@ -136,6 +169,25 @@ topic).
       resumed campaign cannot tell a marked actor from a verified one. Both columns keep the value
       for the audit trail, where that question can be answered. What stays open is unchanged: the
       string is still the caller's to choose.
+
+- [ ] **One third of the ambient-name refusal is guarded by nothing** — [S], found reviewing
+      `D-2026-09-04-a-helpers-file-crosses-back-and-stays`. `connectors/registry._bound_by_this_process`
+      unions three sets so a connector cannot claim a name this deployment already binds:
+      `skill_tool_names()` (the six scratchpad file verbs), `subagent_tool_names()` (`task`) and
+      `harness_tool_names()` (`write_todos`). Each set is stamped with its own reason string, and a
+      grep for the three over `src/` and `tests/` is the whole evidence: `"a scratchpad file verb"`
+      is asserted once, by
+      `tests/test_connector_registry.py::test_a_connector_cannot_claim_an_ambient_tool_name`, which
+      drives a bundle declaring `read_file`; `"the subagent spawner"` is now reached by
+      `tests/test_tool_framing.py`'s derived guard; `"a plan-harness tool"` appears **only** at its
+      own definition, `registry.py:664`. Confirmed by deleting each line in turn: the first two turn
+      a test red and the third turns **nothing** red anywhere. So a
+      refactor may silently re-open `write_todos` to a connector, and a connector that claimed it
+      would win `tools_by_name` over the plan harness the gate (`agent/plan_gate.py`) reads. The
+      guard was not added with the other two on purpose: `agent/tool_framing.py` does not sort by
+      that name, so asserting it there would be a control in the wrong file — it belongs beside the
+      registry's own refusal test. Anchors: `connectors/registry.py::_bound_by_this_process`,
+      `tests/test_connector_registry.py`, `agent/plan_gate.py`.
 
 ## 2 — Answers that are wrong without saying so
 
@@ -451,8 +503,10 @@ topic).
       half — lint and type now run in parallel in `static` — and deliberately left this one open,
       because the evidence for it is a *reading* rather than a measurement.
       **What the reading says**: the suite looks parallel-safe already. `tests/pg.py` suffixes its
-      `TEST_SCHEMA` with `os.getpid()` at import time, so an xdist worker gets its own
-      Postgres schema with no change at all, and the two files that use Temporal go through
+      `TEST_SCHEMA` with a fresh `uuid4` at import time (it was `os.getpid()` until 2026-09-04, and
+      this row went on naming the pid for a day after the commit that removed it), so an xdist
+      worker — its own process, re-importing the module — draws its own Postgres schema with no
+      change at all, and the two files that use Temporal go through
       `start_time_skipping()`, which binds an ephemeral port per environment. `pytest-cov` combines
       across workers natively, so the 84% floor survives.
       **Why it is not done**: "looks safe" is not a number, and the sandbox this was reviewed in ran
@@ -532,7 +586,7 @@ topic).
       any identifier minted before that fix inherits the collapse.
 
 - [ ] **A stalled append-only feed has no first-party signal** — [S]. `corpus_cursors`
-      (`infra/sql/063`) records where each feed's drain stopped, and nothing reads `updated_at`:
+      (`infra/sql/072`) records where each feed's drain stopped, and nothing reads `updated_at`:
       `ingest/labels/cursor.py::load_corpus_cursor` selects `after` only. The module declines a lag gauge for a
       stated reason — a keyset position is opaque, so "how far behind" would have to be invented,
       unlike `sync_cursors`' datetime twin which exports `chemclaw_ingest_cursor_lag_seconds`. What
@@ -662,6 +716,32 @@ topic).
 
 ---
 
+- [ ] **The `stated`-quote ambient reads the whole table's tail on every turn once a database has
+      other sessions in it** — [M], found reviewing `agent/session_store._SELECT_RECENT_USER_ROWS`,
+      the read `api/runner._turn_ambient` runs once per turn on the answer path. The statement is
+      `WHERE session_id = %s AND message_shape = %s AND message_original IS NULL AND
+      message->>'type' = 'human' ORDER BY id DESC LIMIT %s`, and the comment above it says
+      `(session_id, id)` (`infra/sql/008_sessions.sql`) serves the scan. In a table with one session
+      in it, it does. In a busy one it does not: Postgres has no statistics for the *expression*
+      `message->>'type'`, so it mis-estimates that predicate's selectivity, sees `ORDER BY id DESC
+      LIMIT 20` and walks the primary key backwards expecting to stop early. Measured on a replica
+      of the table with its real indexes — one 12,000-row session plus 120,000 newer rows from 300
+      other sessions, `VACUUM ANALYZE`, warm cache, 4 reps — the planner chose `Index Scan Backward
+      using session_messages_pkey` and discarded **119,740** table rows to return 20, on **every turn**,
+      growing with the whole table rather than with the session. The same statement forced onto
+      `session_messages_session_idx` visits **60** of them (20 kept, 40 removed), because `(session_id,
+      id)` *is* `session_id = %s ORDER BY id DESC` and carries the sort for free. Two independent
+      measurements agreed on the row counts and disagreed on the milliseconds by 50x, which is why
+      this row states counts: the wall clock is machine- and payload-dependent and the plan flip is
+      not. **What the fix is, is the decision, and this row deliberately proposes none.**
+      `CREATE STATISTICS` on the expression, a partial or expression index that makes the human rows
+      directly addressable, and hoisting the type test out of SQL are three different bets about a
+      table nobody has measured in production — and an index added to force a plan is a cost every
+      write pays forever. Note first that the degradation is invisible (the answer is correct, only
+      slow) and that it is bounded by `durable/retention.py`, so a deployment that prunes hard may
+      never reach it. Anchors: `agent/session_store.py::_SELECT_RECENT_USER_ROWS`,
+      `api/runner.py::_turn_ambient`, `infra/sql/008_sessions.sql`.
+
 ## 5 — Where the field moved past us
 
 Filed by the 2026-08-25 field benchmark — see
@@ -744,7 +824,7 @@ only holds defects can only ever restore the system to what it already intended 
       **Every absolute above is a lower bound, and the case is stronger rather than weaker for it.**
       All of them were measured on a basis the 2026-08-29 re-baseline corrected: the ratchet counted
       the registry's callables, not the tools the graph binds, and under-measured `default` by
-      **8,126 tokens (24%)** — 34,379 reported against 42,505 paid, ceiling now 43,500. So 28,114
+      **8,126 tokens (24%)** — 34,379 reported against 42,505 paid, ceiling now 44,500. So 28,114
       and −5,787 both understate what this narrowing is worth, and the eleven names should be
       re-measured on the bound basis when the row is worked. What does not change is why it is
       blocked: the saving is still partly in endpoint tools no offline floor can see, and it still
@@ -770,11 +850,14 @@ only holds defects can only ever restore the system to what it already intended 
       was blocked on is a re-run rather than a new instrument.
 
 - [ ] **Half the probe corpus tests one tool** — [S], and only the *concentration* half is still
-      open. `gather_evidence` is in `expects_tools` for **125 of 288** probes (re-counted
-      2026-08-29; 124/261 on 2026-08-27, 116/232 on 2026-08-25 — the corpus keeps growing and the
-      concentration is not shrinking with it, 43% against 47%); `find_notes` 96; `expand_note` 60;
-      bucket C is **48** probes against bucket A's 169; the tail is thin. So the corpus still mostly
-      measures one retrieval path, and widening it is what remains here.
+      open. `gather_evidence` is in `expects_tools` for **125 of 292** probes (re-counted
+      2026-09-05 — the numerator is unchanged and the **denominator was stale**, 292 top-level
+      probes today rather than 288, so the concentration is 43%; 124/261 on 2026-08-27, 116/232 on
+      2026-08-25, and the corpus keeps growing while the concentration does not shrink with it);
+      `find_notes` 96; `expand_note` 60; bucket C is **48** probes against bucket A's **173** — 169
+      was this row's own figure and is the *paired* count from the A/B run below, four short of the
+      corpus, which is a different quantity wearing the same sentence. The tail is thin. So the
+      corpus still mostly measures one retrieval path, and widening it is what remains here.
 
       **The second consequence is closed and it was the one blocked on a credential.**
       `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter` builds the arm
@@ -845,7 +928,7 @@ only holds defects can only ever restore the system to what it already intended 
       list, so a destination with no matching port still drops), and the token obligation in the
       comment `chem` already models.
 
-- [ ] **This environment's `API-KEY` comes and goes, and two rows are blocked exactly while it is
+- [ ] **This environment's `API-KEY` comes and goes, and one row is blocked exactly while it is
       down** — [S], and it is operational rather than code. It was three until 2026-09-04, when the
       credential answered and the tool-utility A/B was built and run through it in one session
       (`D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter`) — which is the row's own

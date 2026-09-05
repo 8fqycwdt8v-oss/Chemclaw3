@@ -152,7 +152,16 @@ def test_a_reference_with_trailing_text_is_not_a_whole_string_match() -> None:
 
 
 def test_a_reference_with_leading_text_is_not_a_whole_string_match() -> None:
-    """The mirror case: text before the reference must survive too."""
+    """The mirror case: text before the reference must survive too.
+
+    **It does not pin `_WHOLE`'s leading `^`, and reading it as if it does is the trap.** `_WHOLE`
+    is used once, as `_WHOLE.match(value)`, and `re.match` anchors at position 0 whatever the
+    pattern says — with no `re.MULTILINE`, `^` can never mean anything else. So deleting that `^`
+    is an *equivalent* mutant: no input distinguishes the two, this test passes either way, and
+    mutmut reporting it as a survivor would be a true statement about dead notation rather than
+    about this suite. The trailing `$` is the anchor that does work, and
+    `test_a_reference_with_trailing_text_is_not_a_whole_string_match` is what kills its mutant.
+    """
     scope = {"inputs.smiles": "CCO"}
     assert resolve("solvent: ${inputs.smiles}", scope) == "solvent: CCO"
 

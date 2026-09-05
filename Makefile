@@ -484,7 +484,7 @@ live-data:  ## Check the seeded corpus against the published factor tables, valu
 # there, and the suite checks the front door accepted the profile before it spends anything,
 # because a run whose control arm quietly fell back to the default agent would produce a report
 # comparing one agent with itself.
-live-ab:  ## Ask the probe corpus with and without tools and compare (needs ANTHROPIC_API_KEY).
+live-ab:  ## Ask the probe corpus with and without tools and compare (needs a real model gateway).
 	uv run python -m chemclaw.cli.live_probes --suite ab $(ARGS)
 
 live-plan-gate:  ## M12: plan -> approve -> execute -> re-gate, live (needs harness_autonomy=plan_only).

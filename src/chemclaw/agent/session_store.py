@@ -312,20 +312,42 @@ SELECT_SESSION_ROWS = (
 # transcript that silently omits its own beginning); this one has a different reader and a
 # different bound, and conflating them would put a cap on the transcript to serve a check.
 #
-# **Filtered in SQL rather than in Python, because the rows this skips are the expensive ones.** A
-# turn writes one human row and two more per tool call, each carrying a whole tool result, so a
-# `LIMIT n` over all rows would detoast megabytes of JSONB to find a handful of typed sentences —
-# and could return no human row at all for a tool-heavy turn, which is the same defect as a bound
-# in the wrong currency. `(session_id, id)` (migration 008) serves the scan; the two predicates are
-# a filter on top of it.
+# **Filtered in SQL rather than in Python, because a `LIMIT n` over all rows is a bound in the
+# wrong currency.** A turn writes one human row and two more per tool call, each carrying a whole
+# tool result, so taking the last n rows and sieving them here would ship megabytes of JSONB to
+# find a handful of typed sentences — and could return no human row at all for a tool-heavy turn.
+# `(session_id, id)` (migration 008) serves the scan; the JSONB predicate is a filter on top of it.
 #
-# `message_shape` is pinned to the LangChain shape rather than left open: an unstamped row is MAF
-# (`message_from_row`), written by an engine whose provider was called on every run rather than
-# once after the answer, so what carried the `user` role there is not the set this system can now
-# say a person typed. Excluding them is the conservative half of a rule about evidence.
+# **What that filter saves is other sessions, not this one, because `message->>'type'` detoasts.**
+# Reading a field out of a `jsonb` datum decompresses the whole datum first, so every row of *this*
+# session the scan passes is detoasted whether or not it turns out to be a human row; how much that
+# costs is a property of the payload rather than of the predicate, since an incompressible tool
+# result is fetched back out of the TOAST table while a pglz-compressible one of the same size is
+# not. The saving is on the other side of the `session_id` equality: that is the cheap qual,
+# evaluated first, so the rows of every *other* session are discarded on the heap page and their
+# payloads are never fetched at all.
+#
+# **Two predicates, one rule: a row this system recorded from a person.** `message_shape` pins the
+# LangChain shape and `message_original IS NULL` excludes the rows the M6 conversion pass rewrote —
+# `message_migration._MARK_CONVERTED` copies the pre-conversion payload into that column in the
+# same statement that stamps the row, so it marks every converted row and nothing else. The shape
+# alone was this rule for a while and it is not one that holds: `make db-migrate` and the chart's
+# post-upgrade Job both run that pass, which turns a MAF `role: user` row into
+# `message_to_dict(HumanMessage(...))` and stamps it `langchain`, so a row that was excluded before
+# an operator migrated was quotable afterwards with nothing about its provenance changed. Provenance
+# is the whole point here, because this is the evidence set `core/turn_text`'s ambient hands
+# `require_quotes_are_verbatim`: MAF's provider was called on every run rather than once after the
+# answer, so what carried the `user` role there is not the set this system can say a person typed,
+# and a converted one can carry text nobody typed.
+#
+# The exclusion therefore rides on the rollback column, and that is its one limit: an operator who
+# reclaims it (`UPDATE session_messages SET message_original = NULL` — 067's deliberate act of
+# giving up the rollback) gives up this exclusion with it, because nothing else on the row records
+# that it was converted.
 _SELECT_RECENT_USER_ROWS = (
     "SELECT message, message_shape FROM session_messages "
-    "WHERE session_id = %s AND message_shape = %s AND message->>'type' = 'human' "
+    "WHERE session_id = %s AND message_shape = %s AND message_original IS NULL "
+    "AND message->>'type' = 'human' "
     "ORDER BY id DESC LIMIT %s"
 )
 
