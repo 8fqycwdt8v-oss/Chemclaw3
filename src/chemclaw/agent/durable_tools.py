@@ -352,9 +352,15 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     so there is no second call to make.
 
     It answers for **finished** jobs indefinitely, not only while Temporal remembers them: a
-    completed connector job's result is also stored durably (D-157), so an id from months ago —
-    found with `find_past_jobs`, or quoted from an old conversation — still returns its result
-    after the workflow history has been retained away.
+    finished run's result is also stored durably (D-157), so an id from months ago — found with
+    `find_past_jobs`, or quoted from an old conversation — still returns its result after the
+    workflow history has been retained away.
+
+    That was true of connector jobs alone and this sentence claimed it of everything. A template
+    run (`run_*`) wrote no `job_records` row at all, because `record_job` had one caller in the
+    tree, so its id answered only until Temporal retained the history away and then answered
+    `null` — for the nine shipped procedures, one of whose whole product is a written brief.
+    `durable/template_job.py` records one now, on the success path and the failure path both.
 
     Args:
         job_id: The id returned by any durable launcher.
@@ -381,7 +387,24 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
             "completed" with an empty result would tell a chemist their calculation is done while
             silently withholding it.
     """
-    return await job_status(job_id, wait_seconds=settings.job_status_wait_seconds)
+    status = await job_status(job_id, wait_seconds=settings.job_status_wait_seconds)
+    # Framed **here**, in the `@tool`, and not in `job_status` below — which is the same mistake in
+    # the same shape as the one this fixes. `job_status` is also the whole body of the front door's
+    # `GET /jobs/{id}`, so framing inside it put envelope markup into an HTTP response that
+    # `GET /jobs` returns raw for the same row, breaking the property that module's docstring
+    # claims: a chemist polling in chat and one refreshing a page cannot disagree about a run. The
+    # envelope belongs to the model's context, so it belongs at the model's edge — which is exactly
+    # where `find_past_jobs` puts it, framing on top of a raw `search_job_records`.
+    #
+    # Both free-text fields, for `_framed_free_text`'s stated reason: they are the two columns of
+    # `job_records` a person (or their model) wrote, read back months later in somebody else's
+    # turn.
+    return status.model_copy(
+        update={
+            "summary": _framed_free_text(status.summary or "", job_id) or None,
+            "rationale": _framed_free_text(status.rationale, job_id),
+        }
+    )
 
 
 async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobStatus:
@@ -479,14 +502,14 @@ async def _recorded_status(job_id: str) -> DurableJobStatus | None:
     return DurableJobStatus(
         job_id=job_id,
         status=record.state,
-        summary=_framed_free_text(record.summary or record.failure_reason or "", job_id) or None,
+        summary=record.summary or (record.failure_reason or None),
         calc_refs=record.calc_refs,
         # Projected on the way out as well as on the way in, and the difference is *old rows*: a
         # record written before D-2026-08-21 holds the whole geometry, so a months-old conformer
         # search collected here would still spend a context window on coordinates. The projection
         # is idempotent, so applying it to a record already written without them costs a walk.
         result=without_geometry(record.result),
-        rationale=_framed_free_text(record.rationale, job_id),
+        rationale=record.rationale,
     )
 
 
@@ -513,11 +536,13 @@ def _framed_free_text(text: str, job_id: str) -> str:
 async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordSummary]:
     """Find durable jobs this system has already run, and why each of them was run.
 
-    The retrospective view over every campaign, calculation and report job that has ended —
-    **runs that failed as well as runs that succeeded**, including ones from other people's
-    conversations and from long before this one. Each hit carries the **reason the run was
-    started**, so "have we optimized this coupling before, and what were we trying to find out?"
-    is answerable without the original chat.
+    The retrospective view over every campaign, calculation, report and template run that has
+    ended — **runs that failed as well as runs that succeeded**, including ones from other people's
+    conversations and from long before this one. A connector job's hit carries the **reason the run
+    was started**, so "have we optimized this coupling before, and what were we trying to find
+    out?" is answerable without the original chat; a template run's `rationale` is empty by design,
+    because its `job` names a declared procedure whose purpose the template itself states. Filter
+    `connector="template"` for procedures alone.
 
     Read `state` before reading `summary`: a failed run has an empty summary, because a summary is
     what a run *produced* and a failed one produced nothing. Take its `job_id` to

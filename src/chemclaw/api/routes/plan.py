@@ -108,17 +108,33 @@ def _plan_gated(profile_name: str | None) -> bool:
 
 async def _owned_sessions(
     owners: SessionOwners, oid: str | None, budget: int
-) -> tuple[int, list[_OwnedSession]]:
+) -> tuple[int, list[_OwnedSession], bool]:
     """Every session of the caller's the inbox could still spend its scan budget on.
 
-    Returns how many sessions were enumerated and, of those, the plan-gated ones in listing order
-    (newest activity first) — the two numbers `considered` and `gated` report.
+    Returns how many sessions were enumerated, of those the plan-gated ones in listing order
+    (newest activity first), and whether the walk stopped before the listing ran out — the
+    `considered`, `gated` and `truncated` the response reports.
 
-    **The loop stops when another page could not change the answer**, which is what keeps it
-    bounded: once more than `budget` gated sessions are in hand, every further page would only add
-    rows past the scan ceiling, and `unread` already says the answer is partial. A short page ends
-    it too — that is the listing running out, and the only case where the inbox can honestly claim
-    to have seen everything.
+    **The loop stops when another page could not change the answer, or when it has spent its
+    budget** — and the second half is why this reads as two conditions rather than one. Once more
+    than `budget` gated sessions are in hand every further page only adds rows past the scan
+    ceiling, and `unread` already says the answer is partial; a short page ends it too, which is
+    the listing running out and the only case where the inbox can honestly claim to have seen
+    everything. Neither of those can fire when *nothing* is gated — `_plan_gated` is False for
+    every session with `harness_enabled` off, which is the code's own default — so the walk used
+    to page through the caller's whole history on every request and return `plans: []`: measured
+    at 5,000 sessions and the shipped page of 100, **51** keyset statements where the route before
+    paging issued one, repeatable by the caller at will.
+
+    So the walk spends the *same* budget the reads do, in the unit it spends it in: at most
+    `budget` pages. That is the honest ceiling rather than a second number, because a page can
+    contribute at most one page's worth of gated rows — in a gated deployment `budget` pages can
+    always fill a budget of `budget` reads, and in an ungated one no number of pages ever can,
+    which is exactly the case that has to be capped. Stopping there is reported rather than
+    silent: reaching the ceiling means the last page was *full*, so there is more listing behind
+    it (at most one page of false alarm, when the history ends on a page boundary), and an inbox
+    that quietly answers from a prefix of a chemist's history is the confident emptiness the three
+    counts exist to prevent.
 
     A registry that is not the durable store answers one call and is done: `page_for_owner` lives
     on `SessionOwnerStore` rather than on the `SessionOwners` protocol, and `GET /sessions` makes
@@ -127,18 +143,19 @@ async def _owned_sessions(
     """
     if not isinstance(owners, SessionOwnerStore):
         rows = await owners.list_for_owner(oid)
-        return len(rows), [row for row in rows if _plan_gated(row[4])]
+        return len(rows), [row for row in rows if _plan_gated(row[4])], False
     considered = 0
     gated: list[_OwnedSession] = []
     cursor: str | None = None
-    while True:
+    for _page in range(budget):
         page = await owners.page_for_owner(oid, after=cursor)
         considered += len(page)
         gated.extend(row for row in page if _plan_gated(row[4]))
         if len(page) < settings.service_max_listed_sessions or len(gated) > budget:
-            return considered, gated
+            return considered, gated, False
         session_id, _created_at, updated_at = page[-1][:3]
         cursor = encode_session_cursor(updated_at, session_id)
+    return considered, gated, True
 
 
 async def get_plan(
@@ -232,10 +249,16 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
     waiting on you" for good. Measured at a page of 2 over five owned sessions:
     `{"plans": [], "considered": 2, "gated": 2, "unread": 0}`.
 
-    Paging costs one indexed keyset statement per page and stops as soon as the *scan* budget can
-    no longer be spent — so the loop is bounded by the work the route was already allowed to do,
-    and the query it repeats is the cheap half. The expensive half is unchanged: still at most
-    `service_max_plan_scans` checkpointer reads, still serialized behind one lock.
+    Paging costs one indexed keyset statement per page and is bounded by the same
+    `service_max_plan_scans` the reads are, counted in pages — a sentence that used to say the
+    loop was "bounded by the work the route was already allowed to do" and was true only where
+    something is gated. With `harness_enabled` off nothing ever is, so the only remaining exit was
+    a short page and the walk ran the caller's whole history on every request; see
+    `_owned_sessions` for the measurement and for why a page ceiling is the same budget rather
+    than a second one. `truncated` is what that ceiling costs the answer, and it is a fourth
+    reading of an empty `plans` rather than a fifth kind of `unread`. The expensive half is
+    unchanged: still at most `service_max_plan_scans` checkpointer reads, still serialized behind
+    one lock.
     """
     owners = state(request).session_owners
     if owners is None:
@@ -244,7 +267,7 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
         # is a property of the deployment rather than of the caller's work.
         return PendingPlansOut(plans=[], considered=0, gated=0, unread=0)
     budget = settings.service_max_plan_scans
-    considered, gated = await _owned_sessions(owners, principal.oid, budget)
+    considered, gated, truncated = await _owned_sessions(owners, principal.oid, budget)
     unread = len(gated) - min(len(gated), budget)
     approvals = state(request).plan_approvals
     plans: list[PendingPlan] = []
@@ -263,7 +286,13 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
                     plan=read.todos,
                 )
             )
-    return PendingPlansOut(plans=plans, considered=considered, gated=len(gated), unread=unread)
+    return PendingPlansOut(
+        plans=plans,
+        considered=considered,
+        gated=len(gated),
+        unread=unread,
+        truncated=truncated,
+    )
 
 
 async def decide_plan(

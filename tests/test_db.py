@@ -8,10 +8,14 @@ live database is needed — the psycopg connect is monkeypatched to fail.
 
 import ast
 import asyncio
+import sys
+import threading
+import time
 from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg_pool import AsyncConnectionPool
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -284,3 +288,104 @@ def test_pooling_resets_its_state_even_when_the_block_raises() -> None:
     asyncio.run(_run())
     assert db._POOLING is False
     assert db._POOLS == {}
+
+
+# Long enough for the interpreter to offer a thread switch inside a reader's iteration of `_POOLS`,
+# short enough to stay a unit test: at 1e-6 s switch interval the unguarded registry failed 364
+# times in 2 s, and every one of those failures was in the first tenth of a second.
+_RACE_SECONDS = 1.0
+# Enough entries that a Python-level walk of `_POOLS` spans more than one switch. A front door
+# holds three; a pooled process that has run evals holds one more per short-lived loop until a
+# reader evicts them, so this is the shape of that dict at its widest, not an invented one.
+_RACE_SEEDED_POOLS = 40
+
+
+def test_reading_this_process_pools_while_another_thread_builds_them_does_not_raise() -> None:
+    """`_POOLS` is walked from several threads at once, so every walk must be under the lock.
+
+    The dict is cross-thread by construction: a pool is keyed on the loop that owns it, and a
+    second loop in a worker thread is the ordinary case rather than an exotic one —
+    `evals/retrieval._run_sync` starts one per live metric call, and `durable/eval_drift` runs
+    `run_eval` in a thread *inside* the background worker's `pooling()`. Both readers of the
+    registry evict the pools whose loop has ended before answering, and that eviction is a
+    Python-level iteration, which the interpreter may switch threads in the middle of. Measured
+    before the lock, three churn threads against three readers raised
+    `RuntimeError: dictionary changed size during iteration` 364 times in two seconds.
+
+    Where it lands is why this is not a metrics-only defect. On `/metrics` the bound gauge raises
+    and the pool series silently vanish. But the same eviction opens `_pool_for`, which is on the
+    request path, and a `RuntimeError` there is not a psycopg error: `_failure_kind` returns `None`,
+    so neither the `ConnectionError` handler nor `_database_unavailable` recognises it and the route
+    500s.
+
+    Driven with real threads, real loops, the real module dict and the real `_pool_for`, because the
+    defect *is* the interpreter switching threads mid-comprehension — a test that walks its own copy
+    of the registry would pass against the code that crashes. `setswitchinterval` only raises the
+    rate at which the switch is offered; it creates nothing.
+    """
+    dsn = "postgresql://chemclaw@localhost/nothing-is-connected-to"
+    seed_loop = asyncio.new_event_loop()
+    failures: list[str] = []
+    stop = threading.Event()
+    switch_interval = sys.getswitchinterval()
+
+    def _churn() -> None:
+        """`evals/retrieval._run_sync`'s shape: a loop per call that builds a pool and ends."""
+
+        async def _touch() -> None:
+            db._pool_for(dsn, None)
+
+        while not stop.is_set():
+            try:
+                asyncio.run(_touch())
+            except Exception as exc:  # the failure is what is being measured
+                failures.append(f"_pool_for {exc!r}")
+
+    def _read() -> None:
+        """The `chemclaw_pg_pool_*` gauges: a scrape thread asking what this process holds."""
+        while not stop.is_set():
+            try:
+                db.pool_stats()
+            except Exception as exc:  # the failure is what is being measured
+                failures.append(f"pool_stats {exc!r}")
+
+    try:
+        for index in range(_RACE_SEEDED_POOLS):
+            db._POOLS[(seed_loop, f"{dsn}?n={index}", None)] = AsyncConnectionPool(
+                conninfo=dsn, min_size=0, max_size=1, open=False
+            )
+        sys.setswitchinterval(1e-6)
+        threads = [threading.Thread(target=_churn) for _ in range(3)]
+        threads += [threading.Thread(target=_read) for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        time.sleep(_RACE_SECONDS)
+        stop.set()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(switch_interval)
+        db._POOLS.clear()
+        seed_loop.close()
+
+    assert not failures, f"{len(failures)} of them, e.g. {failures[:3]}"
+
+
+def test_every_walk_of_the_pool_registry_is_under_the_registry_lock() -> None:
+    """The lock is only worth having if no reader of `_POOLS` is left outside it.
+
+    The race above is a probabilistic witness — it fails loudly on the code that shipped, but a
+    seventh call site added later would be caught by it only if a scrape happened to be inside that
+    exact comprehension. So the invariant is also asserted statically: every function in `db.py`
+    whose body names `_POOLS` or `_FOREIGN_POOLS` must also enter `_POOL_REGISTRY_LOCK`. This is the
+    cheap half, and it is the half that fails on the *next* one rather than the one already found.
+    """
+    module = ast.parse(Path("src/chemclaw/core/db.py").read_text(encoding="utf-8"))
+    unguarded: list[str] = []
+    for node in ast.walk(module):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        names = {inner.id for inner in ast.walk(node) if isinstance(inner, ast.Name)}
+        if names & {"_POOLS", "_FOREIGN_POOLS"} and "_POOL_REGISTRY_LOCK" not in names:
+            unguarded.append(node.name)
+    assert not unguarded, f"these walk the pool registry without holding its lock: {unguarded}"

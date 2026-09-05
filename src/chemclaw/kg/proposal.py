@@ -156,6 +156,15 @@ class ProposalStore(Protocol):
         """Close every open proposal for the named notes as merged; return how many moved."""
         ...
 
+    async def decided_version(self, note_id: str, content_hash: str) -> NoteProposal | None:
+        """The *decided* row for exactly these bytes, or None when this version is undecided.
+
+        Asked **before** a submission reaches git, which is the only moment it can prevent
+        anything: `upsert` already refuses to reopen a rejection, but it runs after the push, so a
+        re-proposed rejection left a live, mergeable branch that no longer appeared in any queue.
+        """
+        ...
+
 
 class InMemoryProposalStore:
     """The same contract for a deployment whose durable records live in-process.
@@ -230,7 +239,10 @@ class InMemoryProposalStore:
         """Close the note's other open versions once `recorded` is the open one.
 
         Exactly one row per note may be `open`, because the branch the reviewer merges is per-note.
-        The Postgres store runs the same rule as a statement (`proposal_store._SUPERSEDE_OLDER`).
+        The Postgres store runs the same rule as a statement
+        (`proposal_store._SUPERSEDE_OTHER_OPEN`), down to the reason it writes: "another", not "a
+        newer" — a re-proposal of an older version reopens its row and closes the *newer* one, so
+        the sentence a reviewer reads must describe the rule rather than the first caller of it.
 
         **The trigger is the state the row now has, not the state the caller asked for**, which is
         the difference between the two backends agreeing and only appearing to. A `failed` record
@@ -250,7 +262,7 @@ class InMemoryProposalStore:
                 self._by_id[other_id] = other.model_copy(
                     update={
                         "state": ProposalState.SUPERSEDED,
-                        "reason": "superseded by a newer proposed version of this note",
+                        "reason": "superseded by another proposed version of this note",
                     }
                 )
 
@@ -307,6 +319,14 @@ class InMemoryProposalStore:
             moved += 1
         return moved
 
+    async def decided_version(self, note_id: str, content_hash: str) -> NoteProposal | None:
+        """The decided row for these exact bytes, keyed the same way `upsert` keys them."""
+        proposal_id = self._by_version.get((note_id, content_hash))
+        if proposal_id is None:
+            return None
+        proposal = self._by_id[proposal_id]
+        return proposal if proposal.state in DECIDED_STATES else None
+
 
 @cache
 def proposal_store() -> ProposalStore:
@@ -326,6 +346,21 @@ def proposal_store() -> ProposalStore:
 
         return PostgresProposalStore()
     return InMemoryProposalStore()
+
+
+async def rejected_version(note_id: str, content_hash: str) -> NoteProposal | None:
+    """The rejection standing against exactly these bytes, if there is one. Never raises.
+
+    Read by the gate before it submits. A store that cannot answer must not block a proposal — the
+    record exists to describe the gate, not to become a second way for it to fail — so an
+    unreachable database degrades to the behaviour that shipped before this check existed.
+    """
+    try:
+        decided = await proposal_store().decided_version(note_id, content_hash)
+    except Exception:
+        logger.warning("could not check for a standing rejection of %s; proceeding", note_id)
+        return None
+    return decided if decided is not None and decided.state is ProposalState.REJECTED else None
 
 
 async def record_proposal_submitted(proposal: NoteProposal) -> None:

@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "gr-09",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Somebody logged \"the mixture was stirred under nitrogen\" and nothing else. What were the conditions?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "ask_clarifying_question"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a temperature or hold time supplied from a sibling record as if it were logged",
+      "a typical value for the reaction class offered as what was run"
+    ],
+    "direction": "Several seeded records genuinely drop temperature and time from their procedure text, and their near-twins carry both. The tempting failure is to fill the gap from the sibling. A good answer says the record does not state it, offers the sibling explicitly as a comparison rather than a substitute, or asks which record is meant.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-09",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Somebody logged \"the mixture was stirred under nitrogen\" and nothing else. What were the conditions?",
+    "profile": "",
+    "answer": "I need to see the entry you're referring to. Can you tell me:\n\n1. **Where is this logged?** Is this in an ELN entry, a lab notebook, a reaction note in the knowledge graph, or somewhere else?\n2. **Do you have a reaction ID, experiment ID, or any other identifier** I can use to find it?\n3. **Alternatively, can you paste the full entry**, or tell me the substrate, product, or transformation so I can search for it?\n\nRight now, \"stirred under nitrogen\" is all you've quoted — it's a standard procedure phrase, not a complete condition set. The record would have needed to capture:\n- Temperature (ambient? reflux? a set point?)\n- Time (how long?)\n- Solvent(s) and volumes\n- Reagents, catalyst, base, additives — with equivalents or masses\n- Vessel type, stirring speed, any special equipment\n- Workup and isolation steps\n\nIf those fields exist in the ELN or the stored reaction but weren't quoted, I can fetch them once I know which entry to look at. If they genuinely aren't there, then the log is incomplete and that's the honest answer — \"stirred under nitrogen\" tells you only that they excluded air, not what the actual conditions were.\n\nGive me an identifier or paste the entry, and I'll pull everything the system holds.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.81,
+    "event_counts": {
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "bf1640550134419ca374d65d0e81e8ee",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

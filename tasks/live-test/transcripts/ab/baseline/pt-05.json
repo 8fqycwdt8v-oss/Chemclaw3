@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "pt-05",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I ran your SNAr procedure and the quench is wrong — you have me adding water to the reaction hot, and on this scale that's a foam-over. It needs to cool to below 30 first. Fix the design so the next person doesn't hit it.",
+    "expects_tools": [
+      "read_experiment_protocol",
+      "draft_experiment_protocol",
+      "workup_precedent",
+      "find_experiment_protocols"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that the correction was stored without a revision actually being written",
+      "that the original procedure was correct, or that the chemist's objection was mistaken",
+      "a revision number the store did not return",
+      "changes to parts of the design the chemist did not raise, described as part of their correction"
+    ],
+    "direction": "This is the most informative event the system can observe about its own output — an expert correcting a generated protocol with the context to know why — and the answer is graded on whether the correction was *captured* rather than merely accepted. A good answer reopens the stored design so the revision is derived from the current head rather than from memory of it, changes the quench step and only the quench step, and stores the result with a change note saying what changed and why, in the chemist's terms: cool below 30 before the aqueous quench, because a hot quench at this scale foams over. It reports the new revision number back. It does not argue with the technician — they have the vessel and the scale in front of them — and it does not quietly rewrite three other steps while it is in there, because a revision that bundles unrequested edits is one nobody can read later. Naming what the change does not fix, if the same hazard appears elsewhere in the procedure, is the extra that makes it useful.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pt-05",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I ran your SNAr procedure and the quench is wrong — you have me adding water to the reaction hot, and on this scale that's a foam-over. It needs to cool to below 30 first. Fix the design so the next person doesn't hit it.",
+    "profile": "no-tools",
+    "answer": "I appreciate you catching that safety issue, but I need to be clear about what I can and cannot do here.\n\n**I don't have access to any SNAr procedure document** that you or I created. I can't see:\n- Your lab's ELN entries\n- Any procedure I may have written previously\n- The specific reaction conditions or equipment you're using\n- Scale, solvents, or other context\n\nSo I cannot directly edit the procedure file. **You need to:**\n\n1. **Find and edit the procedure yourself** — locate it in your ELN or document system and change the quench step to: \"Allow reaction to cool to below 30 °C before adding water\" (or your preferred safe protocol)\n\n2. **OR point me to it** — if you can share the file path or paste the current quench language, I can help you rewrite that section and you can update your system\n\n**Why this matters:** Quench procedures directly control operator safety. A fix like this has to come from someone who:\n- Verified the cooling time needed at your specific scale\n- Confirmed the new procedure works in practice\n- Can take responsibility for the change\n\nWhat I *can* do once you have the text:\n- Help you write clearer language (\"cool below 30 °C **before** addition\" vs. \"cool during water addition\")\n- Flag other potential scale-up hazards in the procedure if you show it to me\n- Suggest contingencies (what if it won't cool fast enough?)\n\nCan you point me to the procedure, or paste the current quench section?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.47,
+    "event_counts": {
+      "token": 16,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "3cbe7f8145654691b05693d28b7d07a9",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

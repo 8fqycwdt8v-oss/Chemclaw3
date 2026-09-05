@@ -32,12 +32,13 @@ LLM provider).
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 import socket
 from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlsplit
+
+from chemclaw.core.http import is_loopback_host
 
 logger = logging.getLogger(__name__)
 
@@ -61,25 +62,6 @@ class EgressForbidden(OSError):
     host, which is why the ERROR log and the counter — not the exception alone — are what make a
     refusal auditable.
     """
-
-
-def _is_loopback(host: str) -> bool:
-    """Whether a host is the loopback interface — decided by address, never by name suffix.
-
-    `localhost` and any address that parses as a loopback or unspecified IP are exempt (the process
-    dials Postgres, Temporal and the calc backend on `localhost`/`127.0.0.1` by default). A *name*
-    is not resolved here — resolving it would itself be egress — so a `.localhost` suffix is not
-    trusted (the sibling guard's own bug: an `/etc/hosts` line or a wildcard zone turns the suffix
-    into "any destination"). A DNS name that is not literally `localhost` goes to the allowlist.
-    """
-    bare = host.strip("[]").lower()
-    if bare in {"localhost", ""}:
-        return True
-    try:
-        parsed = ipaddress.ip_address(bare.split("%", 1)[0])
-    except ValueError:
-        return False
-    return parsed.is_loopback or parsed.is_unspecified
 
 
 def _host_of(address: Any) -> str | None:
@@ -109,11 +91,21 @@ def _check(address: Any) -> None:
     allowlist — which holds hostnames — is consulted together with `_resolved_ips`, the IPs that an
     allowlisted name resolved to through the patched `getaddrinfo`. A name that reaches here
     directly (some clients pass a hostname to `connect`) is checked against the allowlist.
+
+    **"Loopback" is `core.http.is_loopback_host` and nothing else.** This module carried its own
+    parsed copy beside the front door's three-string set, and the two disagreed on `127.0.0.2` and
+    on `0.0.0.0` — enough that a pod bound non-loopback and pointed at a `127.0.0.2` gateway walked
+    past the boot check written to catch it. The local copy additionally exempted the *unspecified*
+    address, which the shared one deliberately does not (as a bind it is every interface), so
+    `0.0.0.0` and `""` now need an allowlist entry like any other destination. Measured before the
+    change: nothing dials them — there is no `0.0.0.0` URL in the tree, and asyncio,
+    `socket.create_server`, `http.server` and `socketserver` all bind an unspecified host without
+    the resolver seeing it.
     """
     host = _host_of(address)
     if (
         host is None
-        or _is_loopback(host)
+        or is_loopback_host(host)
         or host.strip("[]").lower() in _allowed
         or host.strip("[]") in _resolved_ips
     ):
@@ -170,8 +162,8 @@ def derive_allowed(settings: Any) -> frozenset[str]:
     Every entry is a host this process has a configured, legitimate reason to reach. Reading them
     off the settings object rather than a static list is what keeps the allowlist in step with the
     dial: a moved LLM endpoint or a new connector updates both at once. Loopback needs no entry
-    (`_is_loopback` covers it), so the dev defaults (Postgres/Temporal/calc on localhost) add
-    nothing here.
+    (`core.http.is_loopback_host` covers it), so the dev defaults (Postgres/Temporal/calc on
+    localhost) add nothing here.
 
     **The walk below is hand-written and the coverage is not.** "It cannot drift" was a claim about
     this list, and two settings had already drifted out of it; `tests/test_netguard.py` now gives
@@ -193,13 +185,13 @@ def derive_allowed(settings: Any) -> frozenset[str]:
         if host:
             hosts.add(host)
 
+    # The two model destinations, and there is no third: with the provider concept gone
+    # (`D-2026-09-04-a-gateway-is-the-only-provider`) no vendor host is ever added here. A branch
+    # used to put `api.anthropic.com` on the allowlist whenever `llm_provider == "anthropic"` —
+    # which was the shipped default — so the guard that exists to bound where prompts can go was
+    # opening the exact destination the exfiltration path used.
     add(settings.llm_base_url)
     add(settings.llm_fallback_base_url)
-    # The bare `anthropic` provider dials the public API; allow it only when that is the configured
-    # provider (the loopback/dev path — a network-exposed deployment on it is refused at
-    # boot by `_refuse_public_llm_exposure`). An `openai_compatible` deployment never reaches it.
-    if getattr(settings, "llm_provider", "") == "anthropic":
-        hosts.add("api.anthropic.com")
     add(settings.postgres_dsn, dsn=True)
     if getattr(settings, "postgres_migration_dsn", ""):
         add(settings.postgres_migration_dsn, dsn=True)

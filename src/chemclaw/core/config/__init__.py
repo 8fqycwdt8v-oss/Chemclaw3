@@ -87,7 +87,6 @@ from chemclaw.core.netguard import arm_from_settings as arm_egress_guard
 # arrive via import — which is all of them, now that the sections live in their own modules.
 __all__ = [
     "NOTE_INDEX_SOURCES",
-    "PG_POOLS_PER_FRONT_DOOR_PROCESS",
     "SCHEMA_VECTOR_DIM",
     "AgentSettings",
     "BoSettings",
@@ -116,6 +115,12 @@ __all__ = [
 
 
 _TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
+# `""` is in here for the callers that build a URL and ask whether its host is local — a value with
+# no host at all (`/var/chemclaw/outbox`) reads as local, which is what `publish/drivers/http.py`,
+# `deliver/driver.py` and `cli/validate_channels.py` want. **`require_pg_tls` deliberately does not
+# use that member**, and it is worth saying here rather than only there: for a Postgres DSN an empty
+# host does not mean local, it means libpq will resolve one from a `service=` file or from `PGHOST`,
+# neither of which the parse can see. See `_dial_is_offline` below.
 PG_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 
 # `durable/connector_job.py::_FINISH_STEPS`, restated because it cannot be imported.
@@ -134,23 +139,6 @@ PG_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 # * _WRAPPER_FINISH_STEPS` still holds — a fifth post-child step turns that red instead of leaving
 # this validator clearing a bound 30 s short.
 _WRAPPER_FINISH_STEPS = 4
-
-# How many Postgres pools one *front-door* process holds, and therefore the factor the fleet
-# connection budget was missing entirely.
-#
-# `core/db._pool_for` keys a pool on `(loop, dsn, options)`, so a process opens one per distinct
-# connection shape rather than one in total. A turn-serving process opens three: the stores' pool at
-# `pg_statement_timeout_seconds`, `/readyz`'s own pool at `service_readiness_db_timeout_seconds`
-# (`api/routes/ops.py`, a different `options` string and therefore a different key), and the
-# LangGraph checkpointer's, which builds its own `AsyncConnectionPool` at `pg_pool_max_size` and
-# registers it as a foreign pool.
-#
-# A literal here for the same reason `_WRAPPER_FINISH_STEPS` is one — `chemclaw.core` imports no
-# sibling, so this module cannot ask `core.db` what it holds — and pinned the same way:
-# `tests/test_config_pools.py` opens all three shapes against a live database and asserts
-# `db._process_max_connections() == PG_POOLS_PER_FRONT_DOOR_PROCESS * pg_pool_max_size`, so a fourth
-# pool turns that red instead of quietly restoring the under-count this constant exists to end.
-PG_POOLS_PER_FRONT_DOOR_PROCESS = 3
 
 
 def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
@@ -184,14 +172,47 @@ def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
     try:
         parts = conninfo.conninfo_to_dict(dsn)
     except ProgrammingError as exc:
+        # **The exception's message is deliberately not interpolated.** libpq quotes the offending
+        # token, and for two realistic single-character slips — a typo'd scheme, a stray leading
+        # space — that token is the whole DSN, userinfo included. This raise happens during
+        # `import chemclaw.core.config`, which is *before* `configure_logging()` installs
+        # `SecretRedactingFilter`, so a credential printed here reaches the container log with
+        # nothing able to scrub it. The docstring above already promised this ("naming the setting
+        # rather than the DSN — the value carries a password") and the first version of this code
+        # broke that promise in the same breath.
+        #
+        # The type is named because it is the one part of libpq's answer that carries no input, and
+        # it distinguishes "unparseable" from the other ways this can fail. `__cause__` keeps the
+        # original for a debugger; it is the traceback rather than the message, and a traceback is
+        # not what ships to a log aggregator from a startup refusal.
         raise ValueError(
-            f"{name} is not a connection string libpq can parse ({exc}), so nothing can say "
-            "whether it would connect with TLS. Refused under entra_required=true rather than "
-            "guessed at; the same DSN would fail at connect."
+            f"{name} is not a connection string libpq can parse "
+            f"({type(exc).__name__}), so nothing can say whether it would connect with TLS. "
+            "Refused under entra_required=true rather than guessed at; the same DSN would fail at "
+            "connect. The value is not repeated here because it carries a password."
         ) from exc
     return str(parts.get("hostaddr") or parts.get("host") or "").lower(), str(
         parts.get("sslmode") or "prefer"
     ).lower()
+
+
+def _dial_is_offline(host: str) -> bool:
+    """Whether every host libpq would dial is a Unix-domain socket rather than a network address.
+
+    libpq reads a `host` beginning with `/` as a socket *directory* and one beginning with `@` as an
+    abstract-namespace socket, and `sslmode` does not apply to either — there is no network to
+    encrypt, and libpq ignores the parameter outright on that transport. So a TLS guard has nothing
+    to require here, and requiring it anyway was a strict regression: the hand-rolled parse this
+    replaced could not see `host=` inside a URL query, so `postgresql:///db?host=/var/run/postgresql`
+    started, and the rewrite refused the whole class with the only passing spelling being
+    `sslmode=require` on a transport that ignores it — a lie written into a DSN to satisfy a guard.
+    A `pgbouncer` sidecar or a local cluster over a mounted socket is the deployment that means.
+
+    **Every element**, because `host` may be a comma-separated list libpq tries in order: one socket
+    directory beside one network host is a network connection, and `startswith` on the joined string
+    would answer otherwise.
+    """
+    return all(part.strip().startswith(("/", "@")) for part in host.split(","))
 
 
 def require_pg_tls(dsn: str, name: str) -> None:
@@ -201,10 +222,32 @@ def require_pg_tls(dsn: str, name: str) -> None:
     not offer it, and verifies no certificate even when it does negotiate. The full conversation
     transcript, the turn checkpoints and the audit trail all cross this connection, so under the
     enforced posture a non-loopback DSN must state `sslmode=require`/`verify-ca`/`verify-full`
-    (`verify-full` recommended, with `sslrootcert=`). Loopback dev is exempt.
+    (`verify-full` recommended, with `sslrootcert=`). Loopback dev and a Unix socket are exempt.
+
+    **An empty host is not the loopback exemption, and it used to take it.** `PG_LOOPBACK_HOSTS`
+    contains `""` for callers that ask the same question about a URL they built themselves, and
+    reading a DSN through that member is the fail-open `_pg_dial`'s docstring says it closes:
+    `conninfo_to_dict` is `PQconninfoParse`, which reads the *string* and applies neither libpq's
+    environment defaults (`PGHOST`) nor a `service=` file, so `service=chemclaw` and
+    `dbname=c user=u` both parse cleanly to no host and were exempted while libpq dialled a remote
+    server at `prefer`. Refused rather than resolved — resolving means a second implementation of
+    libpq's precedence rules, which is the "a second spelling is a second answer" error this guard
+    exists to have stopped making. Both escapes are one honest line: name the host, or state the
+    sslmode.
     """
     host, sslmode = _pg_dial(dsn, name)
-    if host in PG_LOOPBACK_HOSTS or sslmode in _TLS_SSLMODES:
+    if sslmode in _TLS_SSLMODES or _dial_is_offline(host):
+        return
+    if not host:
+        raise ValueError(
+            f"entra_required=true with a {name} that names no host and no sslmode: libpq resolves "
+            "the host from a service file or from PGHOST, neither of which this check can read, so "
+            "nothing here can say whether the connection would leave the pod — and it carries the "
+            "conversation transcripts, turn checkpoints and the audit trail. Name the host in the "
+            "DSN (a Unix socket directory such as host=/var/run/postgresql is exempt), or state "
+            "sslmode=verify-full&sslrootcert=<ca> so the answer does not depend on the host."
+        )
+    if host in PG_LOOPBACK_HOSTS:
         return
     raise ValueError(
         f"entra_required=true with a non-loopback {name} and sslmode={sslmode!r}: libpq's "
@@ -303,11 +346,13 @@ class Settings(
           the ceiling their endpoint can serve; undeclared, there is nothing to check against.
         - **A fleet opening more Postgres connections than the server will serve.** The same shape
           one subject over, and `core/config/store.py` had stated the multiplication in prose since
-          the pool landed: `pg_pool_max_size` bounds one process, and the deployment total is that
-          times every process that opens a pool. Nothing computed it, so the shipped chart ran all
+          the pool landed: `pg_pool_max_size` bounds one *pool*, and the deployment total is that
+          times every pool the fleet opens. Nothing computed it, so the shipped chart ran all
           of its pods on the default 16 and the fleet ceiling was ~272 against the
-          `max_connections=100` D-119 measured against. Same self-disabling convention: undeclared
-          means inert.
+          `max_connections=100` D-119 measured against. Then the computation itself counted
+          *processes*, which is the same error one level in: a front-door process holds three pools
+          and opens 48 connections where `1 × 16` said 16. Same self-disabling convention:
+          undeclared means inert.
         - **A fleet dispatching more concurrent calculations than the backend will serve.** The
           third instance of the same shape, one subject over again: the activity cap bounds one
           worker process and `servers/calc` is a single shared pod, so scaling the `calc` worker
@@ -453,32 +498,22 @@ class Settings(
                 "merely busy — killing every turn in flight on it. Raise "
                 "service_max_connections, or lower the stream/turn caps it has to cover."
             )
-        if self.pg_fleet_front_door_processes > self.pg_fleet_pooled_processes:
-            raise ValueError(
-                f"pg_fleet_front_door_processes ({self.pg_fleet_front_door_processes}) exceeds "
-                f"pg_fleet_pooled_processes ({self.pg_fleet_pooled_processes}): a front door is "
-                "one of the pooled processes, not a process beside them, so the second number "
-                "counts the first. The chart derives both from the same values block."
-            )
         if self.pg_fleet_max_connections:
-            # Front doors first, at their measured three pools each, then every other pooled
-            # process at one. Counting the whole fleet at one pool was the defect
-            # (`pg_fleet_front_door_processes`); counting the whole fleet at three would overstate
-            # every worker, connector server and MCP face by the same factor in the other direction.
-            front_doors = self.pg_fleet_front_door_processes
-            others = self.pg_fleet_pooled_processes - front_doors
-            pools = front_doors * PG_POOLS_PER_FRONT_DOOR_PROCESS + others
-            opened = pools * self.pg_pool_max_size
+            # **Pools, not processes.** `pg_pool_max_size` bounds one pool and a process holds one
+            # per distinct `(dsn, libpq options)` key plus any foreign pool it registers, so a
+            # front door holds three (stores, `/readyz`'s own statement timeout, the checkpointer's
+            # autocommit pool) and opens 3 × `pg_pool_max_size`. Multiplying by processes said
+            # `1 × 16 = 16` for a process measured at 48.
+            opened = self.pg_fleet_pools * self.pg_pool_max_size
             if opened > self.pg_fleet_max_connections:
                 raise ValueError(
                     f"this deployment may open {opened} Postgres connections "
-                    f"({front_doors} front-door process(es) × "
-                    f"{PG_POOLS_PER_FRONT_DOOR_PROCESS} pools each — the stores', /readyz's and "
-                    f"the checkpointer's — plus {others} other pooled process(es) × 1 pool, all at "
+                    f"({self.pg_fleet_pools} pool(s) × "
                     f"{self.pg_pool_max_size} per pool) against a declared server ceiling of "
-                    f"{self.pg_fleet_max_connections}. Lower pg_pool_max_size or the number of "
-                    "pooled processes, or raise pg_fleet_max_connections if the server's "
-                    "max_connections can serve it."
+                    f"{self.pg_fleet_max_connections}. A process holds one pool per distinct DSN "
+                    "and statement timeout, plus the checkpointer's — the front door holds three. "
+                    "Lower pg_pool_max_size or the number of pooled processes, or raise "
+                    "pg_fleet_max_connections if the server's max_connections can serve it."
                 )
         if self.calc_backend_max_concurrent_requests:
             # Three factors, not two: a solvent screen fans out inside one activity under
@@ -747,10 +782,13 @@ class Settings(
     def _the_heartbeat_fits_inside_the_budget_it_reports_within(self) -> Self:
         """A heartbeat timeout outside the budget it sits under is a control that does nothing.
 
-        `background_activity_heartbeat_timeout_seconds` is the heartbeat timeout for core's three
-        long background activities — the note reindex, the retention sweep and the result-publish
-        drain — and its own comment asserts as fact that it sits "far below every start-to-close
-        budget it sits under". Nothing checked that, and both directions of getting it wrong are
+        `background_activity_heartbeat_timeout_seconds` is the heartbeat timeout for core's long
+        background activities — the note reindex, the retention sweep, the result-publish drain and
+        the artifact eviction sweep, which said "three" here until eviction became the fourth — and
+        its own comment asserts as fact that it sits "far below every start-to-close budget it sits
+        under". The `min()` below is over the budgets rather than over a count, so the guard stayed
+        correct while the sentence went stale; eviction is budgeted by `retention_timeout_seconds`,
+        which is already in it. Nothing checked that, and both directions of getting it wrong are
         silent:
 
         - **Above the budget it guards.** `CHEMCLAW_RESULT_PUBLISH_TIMEOUT_SECONDS=30` with one

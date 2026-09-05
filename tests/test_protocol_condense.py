@@ -9,6 +9,7 @@ that true rather than described.
 import asyncio
 import re
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -149,10 +150,22 @@ def test_a_failed_extraction_costs_one_row_and_not_the_turn() -> None:
     assert next(r for r in result.rows if r.ref == "reaction-A").solvent == "2-MeTHF"
 
 
-def test_the_comparison_renders_with_no_model_at_all() -> None:
-    """No reachable route is a deployment state, not an outage.
+def test_the_comparison_still_renders_when_no_model_answers() -> None:
+    """An unreachable endpoint costs the prose column and nothing else.
 
-    The record's own figures still compare, which is what lets the tool ship on with no credential.
+    That is what lets this tool ship with no enable flag and no credential: the figures come from
+    each protocol's `conditions` frontmatter, so the comparison a chemist reads is intact.
+
+    **This used to assert `digest_source == "recorded"` and `complete is True`, and both were
+    wrong** — reached through a `try/except` around client *construction* that only ever fired
+    because the seam's second arm preflighted a vendor credential. One gateway constructs from
+    config and never raises, so that branch could not fire at all
+    (`D-2026-09-04-a-gateway-is-the-only-provider`); and had it fired it would have reported every
+    protocol read when none was. Reachability is discovered per protocol now, which is the true
+    statement and the one the row's own refusal text already made.
+
+    Driven with `client=None` against the shipped default endpoint, so it is the production path
+    with nothing answering on it — not an injected failure.
     """
     result = _run(
         [
@@ -161,9 +174,81 @@ def test_the_comparison_renders_with_no_model_at_all() -> None:
         ],
         None,
     )
-    assert all(row.digest_source == "recorded" for row in result.rows)
+    assert all(row.digest_source == "unreadable" for row in result.rows)
+    assert result.complete is False, "nothing was read, so the comparison is not complete"
+    assert sorted(result.degraded) == ["reaction-A", "reaction-B"]
+    # The half that needed no model is untouched, which is the property that matters.
     assert "61" in result.table and "74" in result.table
     assert "temperature 90 °C → 70 °C" in result.table
+    assert all("recorded figures are unaffected" in (row.refusal or "") for row in result.rows)
+
+
+def test_a_model_that_cannot_be_built_degrades_the_columns_and_not_the_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A transport this deployment cannot construct costs the prose columns, never the comparison.
+
+    **The production cause, driven rather than described.** `build_chat_model` ->
+    `_tls_http_client` -> `core.http.private_ca_transport` -> `ssl.create_default_context(
+    cafile=...)` raises `FileNotFoundError` when `CHEMCLAW_LLM_TLS_CA_BUNDLE` names a file that is
+    not on the pod — a mistyped path or an unmounted secret, before any socket is opened. Measured
+    on `aed402c`, that took the whole call: `condense_protocols` raised, and a chemist comparing
+    six protocols got an error instead of the six rows of recorded figures that need no model.
+
+    It is deliberately not the old behaviour either. Measured on `59585ef`, the same call returned
+    `complete=True` with every row `recorded` — "we read all six" over six nobody had read — which
+    is the worse of the two failures and is what #313 was right to delete. What this pins is the
+    third answer: the rows are `unreadable`, `complete` is False, and the recorded half compares.
+
+    The cache clear is load-bearing: `_tls_http_client` is `@cache`d, so an earlier test in this
+    process that built a client with no bundle configured would otherwise hand this one its cached
+    `None` and the raise would never happen.
+    """
+    from chemclaw.agent.llm_provider import _tls_http_client
+
+    monkeypatch.setattr(settings, "llm_tls_ca_bundle", str(tmp_path / "absent-ca-bundle.crt"))
+    _tls_http_client.cache_clear()
+    try:
+        result = _run(
+            [
+                _protocol("reaction-A", "Heat to 90 C.", temperature_c=90.0, yield_percent=61.0),
+                _protocol("reaction-B", "Heat to 70 C.", temperature_c=70.0, yield_percent=74.0),
+            ],
+            None,
+        )
+    finally:
+        _tls_http_client.cache_clear()
+
+    assert all(row.digest_source == "unreadable" for row in result.rows)
+    assert result.complete is False, "nothing read these protocols, so this is not complete"
+    assert sorted(result.degraded) == ["reaction-A", "reaction-B"]
+    # The half that never needed a model, which is the whole point of degrading rather than raising.
+    assert "61" in result.table and "74" in result.table
+    assert "temperature 90 °C → 70 °C" in result.table
+    assert all("no condensing model could be built" in (row.refusal or "") for row in result.rows)
+
+
+def test_a_client_that_cannot_be_constructed_is_a_degrade_whatever_raised() -> None:
+    """The same invariant with the mechanism taken out, so it outlives the transport that has it.
+
+    The test above drives the one construction failure this stack is known to have. This one drives
+    the *class*: whatever `_client()` raises — a bundle path today, a routing table or a library
+    swap tomorrow — a comparison that needs no model to be useful must not be lost to it. Written
+    separately rather than parametrised because the first is a measurement of a named defect and
+    this is a property; collapsing them would leave the property depending on `@cache` internals.
+    """
+    from chemclaw.agent import condense as condense_module
+
+    def _unbuildable() -> Any:
+        raise RuntimeError("the routed model could not be constructed")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(condense_module, "_client", _unbuildable)
+        result = _run([_protocol("reaction-A", "Heat to 90 C.", yield_percent=61.0)], None)
+
+    assert [row.digest_source for row in result.rows] == ["unreadable"]
+    assert result.complete is False
+    assert "61" in result.table
 
 
 def test_every_row_carries_the_citation_it_came_from() -> None:

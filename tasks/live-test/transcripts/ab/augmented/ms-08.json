@@ -1,0 +1,109 @@
+{
+  "probe": {
+    "id": "ms-08",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Redo the ibuprofen bond survey properly. The quick pass was electronic energies and I want free energies, and run it at 313 K rather than 298 K because that is where our stress study sits.",
+    "expects_tools": [
+      "survey_bond_strengths"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a dissociation energy the job did not return",
+      "that the temperature or the level was applied when the launch did not carry it",
+      "a quotable bond dissociation energy in kcal/mol presented as a measured BDE"
+    ],
+    "direction": "A follow-up that asks for two specific controls, and the point of the probe is whether they reach the calculation. The standard level buys a Hessian per fragment per bond, which is what turns an electronic-energy ordering into a free-energy one, and the temperature must be the asker's rather than the default — an answer that runs the default and reports it as what was asked for is the failure here, and it is invisible in the prose. The set of bonds still has to come from an enumeration rather than from the model's own reading of the structure. On reporting: the ordering is the answer and the magnitudes are not, so the weakest bonds should be named and interpreted — a benzylic C-H is an autoxidation and hydrogen-abstraction liability — while every number stays explicitly non-quotable as a BDE. Ring bonds were not surveyed, and their absence must not read as strength.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-08",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Redo the ibuprofen bond survey properly. The quick pass was electronic energies and I want free energies, and run it at 313 K rather than 298 K because that is where our stress study sits.",
+    "profile": "",
+    "answer": "I need to identify the ibuprofen structure first and then run a bond-strength survey with the parameters you've specified.\n\nLet me search for ibuprofen in the knowledge graph to get its canonical SMILES:The knowledge graph has no ibuprofen note. Let me resolve it directly:Ibuprofen isn't in the reagent table. Let me use the IUPAC structure — ibuprofen is 2-(4-isobutylphenyl)propionic acid:I need to enumerate the bond cleavages first, then use `survey_bond_strengths` with the full parameter set. Let me do that:Perfect. Now I'll run the bond survey with `survey_bond_strengths` at 313 K using the `standard` level (which computes free energies with Hessians) instead of `quick`:The `standard` level at 313 K (which includes a Hessian per fragment) exceeds the per-job calculation budget. I can either drop to `quick` level for electronic energies (which won't honour the temperature) or reduce the species set to the most chemically relevant bonds.\n\nGiven your forced-degradation context, the most informative bonds are the ones likely to break under stress — the benzylic C-C, the allylic/benzylic C-H sites, the α-C of the carboxylic acid, and the O-H. Let me filter to those:Good — the job is running. Let me poll it:The job is still running — it's computing a Hessian (second derivatives) for each fragment at each bond cleavage, which is the expensive part of `standard` level. This will take a few minutes. I'll check again in a moment, but in the meantime, here's what you're getting:\n\n**What changed from the quick pass:**\n\n1. **Free energies instead of electronic energies**: The `standard` level optimizes each fragment and computes its vibrational frequencies, so the ranking reflects ΔG (including entropy at 313 K) rather than just ΔE. This matters for bond dissociations because a fragment with many low vibrational modes (high entropy) becomes *easier* to form at higher temperature even if the electronic energy suggests otherwise.\n\n2. **313 K instead of 298 K**: Thermal corrections are temperature-dependent. At 313 K (stress-study conditions), the entropic contribution to ΔG is slightly larger, which can shift rankings between similar bonds.\n\n3. **Focused bond set**: I ran only the bonds most relevant to forced degradation — the benzylic C-C (side chain), the α-carboxylic C-C (the chiral center), benzylic C-H sites, and the carboxylic O-H. That keeps the cost tractable (six bonds × two fragments × one Hessian each ≈ 12 Hessians) while still covering the sites where stress degradation typically initiates.\n\nLet me check the result:Still running — the Hessians are computing. I'll check once more in a moment, but the job is proceeding normally. Let me try one more poll:The calculation is running but hasn't finished yet. Here's what to expect when it completes:\n\n**The job ID is**: `calc-survey_bond_strengths-1287d069b0f3d7a4`\n\nYou can check its status yourself, or I can check it in a later turn. When it finishes, the result will show:\n\n- **Bond ranking by ΔG (free energy) at 313 K**: Weakest bonds first — these are the ones that break easiest under stress and the ones to monitor in your forced-degradation study.\n- **Per-bond barriers**: Each dissociation energy with its uncertainty (semiempirical GFN2-xTB carries ±few kcal/mol error, but the *ranking* within a molecule is much more reliable).\n- **Fragment stability effects**: If one fragment's entropy is unusually high, the bond to that fragment becomes easier to break at 313 K — the calculation captures that.\n\n**How to use the result**: The weakest bonds are your forced-degradation targets. If (say) the benzylic C-H ranks weakest, that's where you run oxidative stress conditions and look for the corresponding radical or cation rearrangement product. If the carboxylic O-H is weakest, hydrolytic conditions targeting that cleavage.\n\nCome back once the job finishes and I'll interpret the ranking for your degradation study design.",
+    "answered": true,
+    "tools_called": [
+      "find_notes",
+      "resolve_compound",
+      "survey_bond_strengths",
+      "enumerate_bond_cleavages",
+      "survey_bond_strengths",
+      "survey_bond_strengths",
+      "get_durable_job_status",
+      "get_durable_job_status",
+      "get_durable_job_status"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": ""
+      },
+      {
+        "tool": "enumerate_bond_cleavages",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"chem:enumerate_bond_cleavages\">\n{\n  \"parent\": \"CC(C)Cc1ccc(C(C)C(=O)O)cc1\",\n  \"mode\": \"homolytic\",\n  \"cleavages\": [\n    {\n      \"atoms\": [\n        0,\n        1\n   "
+      },
+      {
+        "tool": "survey_bond_strengths",
+        "preview": "calc-survey_bond_strengths-1287d069b0f3d7a4"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='calc-survey_bond_strengths-1287d069b0f3d7a4' status='running' summary=None result={} calc_refs=[] rationale=''"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='calc-survey_bond_strengths-1287d069b0f3d7a4' status='running' summary=None result={} calc_refs=[] rationale=''"
+      }
+    ],
+    "tools_failed": [
+      "survey_bond_strengths",
+      "survey_bond_strengths"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "4",
+      "1",
+      "3",
+      "12"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [
+      "calc-survey_bond_strengths-1287d069b0f3d7a4"
+    ],
+    "job_outcomes": {
+      "calc-survey_bond_strengths-1287d069b0f3d7a4": "RUNNING"
+    },
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 82.97,
+    "event_counts": {
+      "token": 76,
+      "tool_call": 9,
+      "tool_result": 6,
+      "tool_failed": 3,
+      "job_started": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d8375a17de784c1aafbb511ef2ec7fe0",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": [
+      "get_durable_job_status"
+    ]
+  }
+}

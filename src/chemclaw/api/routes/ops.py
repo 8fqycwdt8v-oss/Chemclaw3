@@ -170,8 +170,20 @@ async def _probe_database(front: FrontDoorState) -> bool:
     `service_readiness_db_timeout_seconds` — the same class of defect the connector-queue sweep
     fixed the same way (`connectors/health.py::_probe_queues`): wrap the outer awaitable, because a
     component's own internal timeout kwarg only ever bounds the part of the work it was told about.
-    The kwarg stays, as a Postgres-side belt-and-suspenders bound on the query itself once a
-    connection is in hand.
+
+    **The kwarg is not belt-and-suspenders, and calling it that is what nearly deleted it.** It is
+    also what keeps this probe *off* the stores' pool: `core/db` keys a pool on `(dsn, libpq
+    options)` and the options string carries the statement timeout, so asking for two seconds mints
+    a second pool this process holds for its life. That costs `pg_pool_max_size` connections of the
+    fleet budget for a leg that is single-flighted and needs one — and buys the thing that budget
+    exists to protect. Measured on the real app with all eight of the stores' pooled connections
+    held: with the separate pool `/readyz` answered **200 in 0.034 s**; sharing the stores' key it
+    answered **503 "database unreachable" in 2.005 s**, against a database that was healthy and
+    idle. That is readiness amplification — the kubelet pulls a pod out of the Route for being
+    *busy*, moving its load onto siblings that are equally busy — and it also misreports pool
+    saturation as an unreachable server, which is exactly the distinction
+    `chemclaw_pg_pool_requests_waiting` was introduced (D-119) to keep separate. The pool this
+    costs is counted rather than removed: see `pg_fleet_pools` in `core/config/store.py`.
     """
     try:
 

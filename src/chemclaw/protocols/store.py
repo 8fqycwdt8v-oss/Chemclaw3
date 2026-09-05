@@ -753,11 +753,21 @@ class PostgresDesignStore:
 
         **`_SELECT_HEAD` reads the status under that same lock, and for a long time discarded it.**
         `head_row[1]` was never touched: the compare-and-set was on the document alone, so an
-        `approved` and an `abandoned` move from revision 1 both committed. Measured over
-        `asyncio.gather` before `expected_status` existed: **100 of 100** pairs took both writes
-        with no refusal, and the header landed `approved` 16 times and `abandoned` 84 — either way,
-        one of the two people was never told. Sequentially it needed no race at all. The status the
-        comparison reads is therefore the one the lock already holds, not a second read.
+        `approved` and an `abandoned` move from revision 1 both committed and one of the two people
+        was never told. Sequentially that needs no race at all, which is how
+        `test_two_people_at_one_revision_cannot_both_decide` drives it; as a race it is
+        `test_two_deciders_racing_from_one_status_take_exactly_one_write`, which picks two moves
+        the transition table permits in *both* directions so this comparison is the only thing that
+        can refuse either of them. Every round takes exactly one write and answers the other with
+        `StatusConflict`, and with the comparison neutered every round takes both.
+
+        **No split is quoted, because there is not one to quote.** Which of the two lands is the
+        lock queue's answer rather than a property of this code: driving approve against abandon on
+        this database, the surviving header came back 44/56, 51/49 and 47/53 over three runs of a
+        hundred, and a second reviewer measured 43/57 and 58/42. The 16/84 this docstring used to
+        publish was a property of one afternoon, which is why the test asserts a count and never a
+        ratio. The status the comparison reads is the one the lock already holds, not a second
+        read.
         """
         require_storable(None, design_id=design_id, actor=actor, reason=reason)
         async with self._connection() as conn:
@@ -982,18 +992,38 @@ def require_movable(current: DesignStatus, status: DesignStatus, head_kind: Revi
     protocol nobody had signed off, marked run. `_LEGAL_MOVES` above is the decided table, and
     each of its edges says there why it exists.
 
-    **Every self-transition is legal**, which the table does not spell out because it is one rule
-    about a repeat rather than five decisions about the lifecycle. `Chemclaw3_ui`'s sign-off panel
-    renders a *Mark X* button for all five statuses regardless of where the design is, so
-    `approved → approved` is one click away by construction — and a move whose response is lost is
-    reported to the chemist as "The status was not recorded" when it may well have been, so pressing
-    again is the ordinary recovery and it arrives here as `X → X`. Refusing it would turn a button
-    the client itself offers into a 422 on the one screen where the honest answer is "it already
-    worked". This tree relies on it too: the test that proves both SQL `CHECK (status IN (...))`
-    constraints accept every member of the Literal drives `draft → draft` and `requested →
-    requested` to do it. The move is not swallowed — the caller still gets its 204 and
-    `experiment_protocol_status_events` still gains a row, because a repeat is somebody acting a
-    second time and that table is the record of who moved a design and why.
+    **Every self-transition is exempt from the *table***, which it does not spell out because it is
+    one rule about a repeat rather than five decisions about the lifecycle. It is not a blanket
+    permission, and this sentence used to say it was: the document rules below outrank the exemption
+    exactly as they outrank an edge, so three of the ten (status, head-kind) repeats are refused —
+    `requested -> requested` on a protocol head, and `approved`/`executed` on a request head. Those
+    states are unreachable in practice, because `advanced()` demotes the status on every revision
+    that changes the kind, which is why an absolute claim survived here. A sixth status would be
+    decided by that precedence and not by this paragraph.
+
+    **What the exemption buys is a repeat by somebody who has read the design as it now stands**,
+    and that is not what this paragraph used to say. The case is a second approver co-signing, or
+    the same chemist recording a second reason — an act, not an accident. **It is deliberately not
+    argued from what any client renders**, which is how this paragraph went wrong the first time:
+    it justified the exemption by `Chemclaw3_ui` offering a *Mark X* button for all five statuses,
+    and that repository's sign-off panel now drives its buttons from this very table, so the
+    argument would have expired on somebody else's merge. A rule this store enforces cannot rest on
+    a sentence about a caller this store cannot see.
+
+    The case named here instead was the lost response — a move reported to the chemist as "The
+    status was not recorded" when it may well have been, pressed again — and
+    a retry only arrives here as `X → X` if the client re-read first. Measured on both backends, a
+    panel that has not re-read still shows the *pre*-move status, so the retry names that as
+    `expected_status` and `require_unmoved` refuses it as a `StatusConflict` before this function
+    is reached at all (`test_a_retry_that_has_not_re_read_is_refused_before_the_repeat`). So the
+    exemption covers the deliberate repeat and the retry that re-reads, where the honest answer is
+    "it already worked"; nothing rescues the retry that does not, and refusing the repeat on top of
+    that would refuse an act the record exists to capture. This tree relies on the exemption
+    too: the test that proves both SQL `CHECK (status IN (...))` constraints accept every member of
+    the Literal drives `draft → draft` and `requested → requested` to do it. The move is not
+    swallowed — the caller still gets its 204 and `experiment_protocol_status_events` still gains a
+    row, because a repeat is somebody acting a second time and that table is the record of who
+    moved a design and why.
 
     **The document rules run first, deliberately.** Where both refuse — `requested` on a protocol
     head, say — the more actionable message wins: "there is no procedure to approve" tells a chemist
@@ -1039,8 +1069,14 @@ def require_unmoved(expected: DesignStatus, actual: DesignStatus) -> None:
     cannot depend on which store a deployment runs.
 
     A no-op move is deliberately allowed through (`approved` → `approved` with `expected` equal to
-    it): the caller saw what is there, so nothing was lost, and refusing it would turn a double
-    click into an error a chemist has to interpret.
+    it): naming the status the design actually holds is what a caller who has *read* it does, so
+    nothing was lost, and refusing it would turn a deliberate second sign-off into an error a
+    chemist has to interpret. It is not what rescues a double click, which this used to claim:
+    both clicks name the status the panel was showing, so the second names the *pre*-move one and
+    is refused here — measured on both backends, and pinned by
+    `test_a_retry_that_has_not_re_read_is_refused_before_the_repeat`. That refusal is the honest
+    one (the caller is out of date), but it is reported to the chemist as somebody *else* having
+    decided, which is `Chemclaw3_ui`'s to answer for and not this function's.
 
     Raises:
         StatusConflict: somebody else moved the status between the caller's read and this move.

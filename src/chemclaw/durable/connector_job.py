@@ -452,14 +452,24 @@ def wrapper_execution_timeout() -> timedelta:
 
     **"Strictly above whatever the child gets" now has one exception, and this is where to read
     it.** A job declaring `awaits_answer` gets no child ceiling at all (`child_execution_timeout`),
-    so on the template path the wrapper's number is the *only* one, and a measured campaign started
-    as a template `job` step is still killed at roughly five hours — the very defect
-    `awaits_answer` removes from the direct path. That is not fixed here because it is not this
-    function's to fix: the template path bounds a *step*, and how a run whose step suspends for a
-    fortnight should be bounded is a question about `template_run_timeout_seconds`, which
-    `durable/template_job.py` and `Settings._the_template_run_ceiling_covers_one_step` own between
-    them. Stated rather than left to be rediscovered, because the direct path working is exactly
-    what makes the template path look like it must.
+    so on the template path this number is the *only* one bounding that job — which is a real
+    remaining limit and was, when this paragraph was first written, described wrongly in both
+    halves. It said the wrapper's number was already the only one and pointed the fix at
+    `template_run_timeout_seconds`. Measured, there were *two* ceilings and the child's was the
+    lower: `ResolvedJob` did not carry `awaits_answer`, so a template step handed the child
+    `awaits_answer=False` and it died at the fleet ceiling, not at this one. That half is fixed
+    where it belonged — `template_activities.ResolvedJob` and `durable/template_job.py` now carry
+    the field — and `template_run_timeout_seconds` was never the lever, because it is required to
+    *clear* this number rather than to set it
+    (`Settings._the_template_run_ceiling_covers_one_step`).
+
+    What is left is genuinely this function's subject and is deliberately not changed: a campaign
+    started as a template `job` step is still reaped here at roughly five hours, because a template
+    step is bounded and a wait for a plate is a fortnight. Raising it means raising
+    `connector_job_timeout_seconds` for the whole fleet and `template_run_timeout_seconds` above
+    that, which is an operator's decision about funded runtime rather than a manifest's — the
+    asymmetry `child_execution_timeout` is built on. Stated rather than left to be rediscovered,
+    because the direct path working is exactly what makes the template path look like it must.
 
     `_approve_effect` below is the same shape and predates it: an irreversible job's approval waits
     up to `effect_approval_days` *inside the wrapper*, so it works on the direct path for the one

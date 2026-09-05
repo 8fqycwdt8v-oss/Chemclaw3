@@ -26,7 +26,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from chemclaw.connectors.identity import HEADER_CORRELATION
 from chemclaw.core.asgi import BodySizeLimit
 from chemclaw.core.config import settings
-from chemclaw.core.http import LOOPBACK_HOSTS
+from chemclaw.core.http import is_loopback_host, is_loopback_url
 from chemclaw.core.identity_context import (
     reset_current_correlation_id,
     reset_current_identity,
@@ -131,8 +131,12 @@ def _refuse_unauthenticated_exposure() -> None:
     deployment).
     `service_allow_insecure=true` is the explicit, conscious opt-out — it boots with the loud
     warning instead. Loopback dev and Entra-enforced deployments are untouched.
+
+    **What counts as loopback is `core.http.is_loopback_host`, not a set of three strings.** That is
+    what this used to read, and a bind on `127.0.0.2` — loopback, and not in the set — was refused
+    as though it were network-exposed while `core.netguard` treated the same address as local.
     """
-    if settings.entra_required or settings.service_host in LOOPBACK_HOSTS:
+    if settings.entra_required or is_loopback_host(settings.service_host):
         return
     if not settings.service_allow_insecure:
         raise RuntimeError(
@@ -152,37 +156,44 @@ def _refuse_unauthenticated_exposure() -> None:
     )
 
 
-def _refuse_public_llm_exposure() -> None:
-    """Fail closed when a network-exposed process sends its LLM traffic to the public vendor API.
+def _refuse_unconfigured_llm_gateway() -> None:
+    """Fail closed when a network-exposed process still points at the *dev* model gateway.
 
-    `llm_provider="anthropic"` with no `llm_base_url` builds a client pointed at the public
-    Anthropic API (api.anthropic.com; agent/llm_provider._anthropic_model passes no base_url),
-    so a real deployment on that default sends every prompt, tool result and completion —
-    user free text and confidential chemistry — to a third-party SaaS instead of the internal
-    gateway. The client fails closed on a missing *credential* but not on this *destination*, and
-    D2's measurement confirmed the constructed client resolves to the public host.
+    **This replaces a guard that was false, and the replacement is the smaller claim.** What stood
+    here refused `llm_provider="anthropic"` with no `llm_base_url`, and returned early whenever
+    `llm_base_url` was truthy — its docstring said an `llm_base_url` naming a compatible gateway
+    "satisfies it". It did not: on that provider the base URL was never passed to the client at all,
+    so the one combination this was written to catch (a gateway configured, the provider left at its
+    shipped default) is precisely the one it waved through, while `core/netguard.derive_allowed`
+    added the public vendor host to the egress allowlist for the same reason. Measured before the
+    change, with `llm_base_url` set to an internal gateway and the provider left at its default:
+    the constructed client's `anthropic_api_url` was the vendor's public host, and this function
+    returned cleanly. (Both addresses are described rather than quoted, because
+    `tests/test_no_egress.py` scans this file's *text* for `http(s)://` host literals and cannot
+    tell a measurement in a docstring from a default in code — which is the guard working.)
 
-    Gated on the same non-loopback-bind signal as `_refuse_unauthenticated_exposure`, and checked
-    here at app boot rather than in the `Settings` validator, so it fires for an actual serving
-    process without breaking the many enforced-posture `Settings(...)` constructions in tests and in
-    `Chemclaw3_mock` that legitimately never dial an LLM. Loopback dev on a developer's own
-    Anthropic key is untouched; `openai_compatible` + `llm_base_url` (the shipped chart) satisfies
-    it, as does an `llm_base_url` naming an anthropic-compatible gateway.
+    With one client and one destination (`D-2026-09-04-a-gateway-is-the-only-provider`) there is no
+    public vendor default left to refuse — `llm_base_url` is where every prompt goes, always. What
+    *is* new is that the field ships with a value: `http://127.0.0.1:8820/v1`, the local mock
+    (`cli/mock_llm.MOCK_PORT`), so a fresh checkout needs no credential. That default is safe by
+    construction — a loopback address cannot leave the pod — but it is a default, and a deployment
+    that forgot to set the real one would discover it as a connection refusal on a chemist's first
+    question rather than at boot.
+
+    So this says it at boot instead, on the same non-loopback-bind signal as
+    `_refuse_unauthenticated_exposure`, and it is a *configuration* check rather than a destination
+    policy: where a real gateway points is the operator's decision and not this repository's.
+    Loopback dev against the mock is untouched.
     """
-    if settings.service_host in LOOPBACK_HOSTS or settings.llm_base_url:
+    if is_loopback_host(settings.service_host):
         return
-    if settings.llm_provider == "anthropic":
+    if is_loopback_url(settings.llm_base_url):
         raise RuntimeError(
             "SECURITY: this process binds a non-loopback interface "
-            f"({settings.service_host!r}) with llm_provider='anthropic' and no "
-            "CHEMCLAW_LLM_BASE_URL "
-            "— every prompt and completion (confidential chemistry) would go to the public "
-            "Anthropic API rather than the internal gateway. Set "
-            "CHEMCLAW_LLM_PROVIDER=openai_compatible with CHEMCLAW_LLM_BASE_URL pointing at the "
-            "internal endpoint (what the shipped chart does), or set CHEMCLAW_LLM_BASE_URL to an "
-            "anthropic-compatible gateway you host. The bare anthropic provider is the "
-            "loopback/dev "
-            "path only."
+            f"({settings.service_host!r}) while CHEMCLAW_LLM_BASE_URL still names a loopback "
+            f"address ({settings.llm_base_url!r}) — the local dev mock. Every turn would fail on a "
+            "refused connection. Set CHEMCLAW_LLM_BASE_URL to the model gateway this deployment "
+            "should use."
         )
 
 

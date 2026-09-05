@@ -142,40 +142,39 @@ def model_call_middleware() -> list[Any]:
     return [PromoteInvalidToolCalls(), RecordModelCalls()]
 
 
-def _observe(provider: str, outcome: str, seconds: float) -> None:
-    """Book one finished model call: its outcome, and how long the provider took over it."""
+def _observe(outcome: str, seconds: float) -> None:
+    """Book one finished model call: its outcome, and how long the gateway took over it.
+
+    **No `provider` label**, and its removal is the honest half of the collapse to one gateway
+    (`D-2026-09-04-a-gateway-is-the-only-provider`). It carried `settings.llm_provider`, which now
+    has exactly one possible value — a label with one value is a series that costs cardinality and
+    answers nothing, and keeping it as a hardcoded string would publish a distinction this
+    deployment can no longer make.
+    """
     record_metric(
-        lambda metrics: metrics.increment(
-            "chemclaw_model_calls_total", labels={"provider": provider, "outcome": outcome}
-        )
+        lambda metrics: metrics.increment("chemclaw_model_calls_total", labels={"outcome": outcome})
     )
-    record_metric(
-        lambda metrics: metrics.observe(
-            "chemclaw_model_call_duration_seconds", seconds, labels={"provider": provider}
-        )
-    )
+    record_metric(lambda metrics: metrics.observe("chemclaw_model_call_duration_seconds", seconds))
 
 
-def _record_failure(provider: str, exc: BaseException, seconds: float) -> None:
+def _record_failure(exc: BaseException, seconds: float) -> None:
     """Classify, count and log one failed model call, then let the caller re-raise.
 
-    The WARNING carries the provider and the **exception class**, never the message: a provider's
-    error text can quote the request, and the request is the chemist's question. The class and the
-    outcome are what separate a rate limit from a dead endpoint from a thread that no longer fits,
-    which is the whole distinction that was missing.
+    The WARNING carries the **exception class**, never the message: an endpoint's error text can
+    quote the request, and the request is the chemist's question. The class and the outcome are what
+    separate a rate limit from a dead endpoint from a thread that no longer fits, which is the whole
+    distinction that was missing.
     """
     outcome = classify_model_failure(exc)
-    _observe(provider, outcome, seconds)
+    _observe(outcome, seconds)
     log_event(
         logger,
         "model.call_failed",
-        "the %s endpoint failed after %.0f ms (%s: %s)",
-        provider,
+        "the model gateway failed after %.0f ms (%s: %s)",
         seconds * 1000.0,
         outcome,
         type(exc).__name__,
         level=logging.WARNING,
-        provider=provider,
         outcome=outcome,
         exception=type(exc).__name__,
         duration_ms=round(seconds * 1000.0, 1),
@@ -183,7 +182,7 @@ def _record_failure(provider: str, exc: BaseException, seconds: float) -> None:
 
 
 class RecordModelCalls(AgentMiddleware[Any, Any, Any]):
-    """Count and time every model call, by provider and by what went wrong.
+    """Count and time every model call, by what went wrong.
 
     Both hooks declared, for the reason `agent/compaction.RecordContextCompaction` gives at length:
     `create_agent` puts a middleware declaring *either* into *both* chains, so an async-only
@@ -199,14 +198,13 @@ class RecordModelCalls(AgentMiddleware[Any, Any, Any]):
         handler: Callable[[ModelRequest[Any]], Any],
     ) -> Any:
         """Record the call, then return what it produced (sync path)."""
-        provider = settings.llm_provider
         start = time.perf_counter()
         try:
             response = handler(request)
         except Exception as exc:
-            _record_failure(provider, exc, time.perf_counter() - start)
+            _record_failure(exc, time.perf_counter() - start)
             raise
-        _observe(provider, "ok", time.perf_counter() - start)
+        _observe("ok", time.perf_counter() - start)
         return response
 
     async def awrap_model_call(
@@ -215,14 +213,13 @@ class RecordModelCalls(AgentMiddleware[Any, Any, Any]):
         handler: Callable[[ModelRequest[Any]], Awaitable[Any]],
     ) -> Any:
         """Record the call — the path a turn actually takes."""
-        provider = settings.llm_provider
         start = time.perf_counter()
         try:
             response = await handler(request)
         except Exception as exc:
-            _record_failure(provider, exc, time.perf_counter() - start)
+            _record_failure(exc, time.perf_counter() - start)
             raise
-        _observe(provider, "ok", time.perf_counter() - start)
+        _observe("ok", time.perf_counter() - start)
         return response
 
 

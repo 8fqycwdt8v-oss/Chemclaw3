@@ -99,6 +99,7 @@ reader from assuming a guard that is not there.
 """
 
 import logging
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -145,6 +146,29 @@ logger = logging.getLogger(__name__)
 TOOL_RESULT_PLACEHOLDER = (
     "[Earlier tool result dropped to stay inside this session's context budget.]"
 )
+
+# The note ids inside a cleared result, so a citation index survives a clearing that its bodies do
+# not. Reads `EvidenceChunk.source_note_id` out of the result's own repr — this repository's model,
+# not an arbitrary tool's, which is the whole of why this is not the coupling the class docstring
+# below refuses.
+_CITED_NOTE_ID = re.compile(r"source_note_id='([^']+)'")
+# How many ids to name before the list is itself a budget problem. A cleared sweep at the shipped
+# `gather_evidence_max_chunks` holds at most 40, and naming twelve of them costs ~60 tokens against
+# the thousands the clearing reclaimed.
+_MAX_NAMED_CITATIONS = 12
+
+
+def cited_note_ids(content: object) -> list[str]:
+    """Every note id a tool result cites, in first-seen order, deduplicated.
+
+    Public because `tests/test_compaction.py` asserts against it directly: the property that matters
+    is that a cleared evidence sweep still names its sources, and reading that off the rendered
+    placeholder would be asserting the formatting rather than the behaviour.
+    """
+    seen: dict[str, None] = {}
+    for note_id in _CITED_NOTE_ID.findall(str(content)):
+        seen.setdefault(note_id, None)
+    return list(seen)
 
 
 @dataclass(slots=True)
@@ -204,6 +228,24 @@ class ClearOlderToolResultsEdit(ContextEdit):
         tokens = count_tokens(messages)
         if tokens <= budget:
             return
+        # **Read the citations before upstream deletes the bodies that carry them.**
+        # `ClearToolUsesEdit` is oldest-first, and the oldest result in a research turn is the
+        # `gather_evidence` sweep — the largest payload in the thread by design
+        # (`gather_evidence_max_chars` is 60,000) and therefore both the first candidate and the
+        # most attractive one. Measured: three tool results at the per-result ceiling, or one sweep
+        # and eight `expand_note` calls, and the sweep is gone before the model writes the answer
+        # it is supposed to cite. The chunk *bodies* are correctly reclaimable; the note ids are
+        # ~60 tokens that decide whether the answer can cite anything at all, and clearing them
+        # with the bodies is what turned a context saving into a grounding failure.
+        #
+        # This is not the "coupling the context policy to the shape of every tool's result" this
+        # class declines one docstring up. It reads one field of one first-party model, and one
+        # known shape is not every shape.
+        citations = {
+            message.tool_call_id: cited_note_ids(message.content)
+            for message in messages
+            if isinstance(message, ToolMessage)
+        }
         ClearToolUsesEdit(
             trigger=budget,
             keep=max(self.keep, newest_batch_size(messages)),
@@ -212,6 +254,18 @@ class ClearOlderToolResultsEdit(ContextEdit):
             clear_at_least=tokens - budget,
             placeholder=self.placeholder,
         ).apply(messages, count_tokens=count_tokens)
+        for message in messages:
+            if not isinstance(message, ToolMessage) or message.content != self.placeholder:
+                continue
+            cited = citations.get(message.tool_call_id) or []
+            if not cited:
+                continue
+            named = cited[:_MAX_NAMED_CITATIONS]
+            more = "" if len(cited) == len(named) else f", and {len(cited) - len(named)} more"
+            message.content = (
+                f"{self.placeholder[:-1]} It cited: {', '.join(named)}{more}. "
+                "Call expand_note on any of these to read it again.]"
+            )
 
 
 def newest_batch_size(messages: Sequence[AnyMessage]) -> int:

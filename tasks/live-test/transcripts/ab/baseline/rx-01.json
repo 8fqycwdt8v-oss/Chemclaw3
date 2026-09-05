@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "rx-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "My Suzuki stalled at 40% conversion overnight. 4-bromoanisole (COc1ccc(Br)cc1) plus phenylboronic acid, Pd(OAc)2/SPhos 1.5 mol%, K2CO3 2 equiv, dioxane/water 4:1, 80 °C, 16 h. The boronic acid bottle had been open on the bench for about three months and I sparged with nitrogen for maybe two minutes. What are the likely causes, ranked, and what do I change first?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "similar_reactions",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted conversion or yield for the changed conditions",
+      "a claim that raising the temperature is the first thing to try",
+      "a computed rate or turnover number for this catalyst system"
+    ],
+    "direction": "Should search the record before reasoning, and surface the two things the corpus actually holds: the Pd cross-coupling playbook (change the ligand before the temperature — bulkier biaryl phosphine, then higher L:Pd, then harder degassing, and only then more heat) and the aqueous protodeboronation failure mode (hotter aqueous conditions raise assay conversion while lowering isolated yield). Must connect the electron-rich aryl bromide to slow oxidative addition. Must treat the three-month-old boronic acid (boroxine/degradation, uncertain assay) and the two-minute sparge as separate named hypotheses, not merge them. Ranked list of causes with the cheapest discriminating experiment for each. Any quantitative claim about the fix is unsupported.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "My Suzuki stalled at 40% conversion overnight. 4-bromoanisole (COc1ccc(Br)cc1) plus phenylboronic acid, Pd(OAc)2/SPhos 1.5 mol%, K2CO3 2 equiv, dioxane/water 4:1, 80 °C, 16 h. The boronic acid bottle had been open on the bench for about three months and I sparged with nitrogen for maybe two minutes. What are the likely causes, ranked, and what do I change first?",
+    "profile": "no-tools",
+    "answer": "I'll work through this Suzuki coupling stall systematically. The 40% conversion plateau is your key diagnostic—it suggests the reaction didn't fail catastrophically (which would point to a major thermal or mixing issue) but rather stalled partway through.\n\n## Ranked likely causes:\n\n**1. Degraded phenylboronic acid (highest confidence)**\nThis is your most likely culprit. Phenylboronic acid is moisture-sensitive and air-oxidizes over time, especially after three months on a bench with only ~2 minutes of N₂ sparging. It forms dimeric anhydrides and higher oligomers that are poor transmetalation partners. The bottle being open in a lab atmosphere (with humidity and O₂) is harsh storage. You wouldn't see immediate failure—the remaining active boronic acid couples until depleted, then the reaction plateaus exactly as you describe.\n\n**2. Insufficient transmetalation (secondary, related to #1)**\nEven with working boronic acid, your arylation rate depends on transmetalation kinetics. 4-bromoanisole is moderately electron-rich, which *slows* oxidative addition (Pd(0) → Pd(II) is rate-limiting for electron-rich aryl halides). If your boron reagent is degraded *or* if you haven't achieved full solubilization of K₂CO₃, transmetalation becomes rate-limiting and you plateau.\n\n**3. K₂CO₃ solubility/basicity loss**\nLess likely but worth noting: K₂CO₃ in a 4:1 dioxane/water mix with poor mixing can form a solid suspension. Incomplete dissolution means inconsistent local pH and slower transmetalation. This is exacerbated by the organic-heavy solvent ratio.\n\n**4. Palladium catalyst deactivation**\nPd(OAc)₂/SPhos at 1.5 mol% is a solid loading for Suzuki couplings. SPhos is an excellent ligand and should be stable. However, Pd can reductively eliminate without turnover (protodeboronation competing with coupling) if the boron reagent is partly degraded—you're pushing more C–B → C–H than C–C coupling. This would show as lower than expected product and higher starting material recovery.\n\n**5. Temperature gradient or poor mixing (lower priority)**\n80 °C overnight in dioxane isn't extreme, but if your vessel has a dead zone or poor stirring, you could have local concentration variations. Less likely to cause a clean plateau at 40%.\n\n---\n\n## What to change first (action priority):\n\n**Start here:** Replace the phenylboronic acid bottle with fresh material from refrigerated storage. Don't reuse the opened bottle. This is the highest-ROI fix and costs little.\n\n**Second:** Stir vigorously and heat-gun the solid K₂CO₃ suspension (or add a catalytic amount of water to dissolve it fully) before adding your boron reagent. Make sure you're not dissolving it *in the reaction mixture*—pre-activate the base in dioxane under gentle heat if needed, then add boron reagent.\n\n**Third:** If a fresh batch still plateaus, screen a control with commercial pre-made 4-methoxybiphenyl standard: if it matches your crude composition, Pd isn't the issue. If the standard is higher purity, your Pd is fine and something else is limiting.\n\n**If still stuck:** \n- Increase Pd loading to 2–3 mol% (rules out Pd deactivation).\n- Raise temperature to 100 °C or use microwave heating (addresses kinetics in case of slow transmetalation).\n- Switch to phenylboronic acid pinacol ester (more stable, better coupling in electron-rich couplings).\n\n**Most pragmatic move:** Fresh boronic acid + aggressive stirring + check K₂CO₃ solubility. That solves ~85% of these stalls in my experience.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 12.79,
+    "event_counts": {
+      "token": 39,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "32389fdceb60439fb21f73510747cae3",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -582,13 +582,15 @@ def test_every_verb_this_deployment_binds_is_one_the_framer_defangs() -> None:
 def test_a_connector_tool_named_like_a_local_verb_is_framed_not_defanged(probe: int) -> None:
     """The stamp decides before a name does, and this is the case that makes the order matter.
 
-    The two name-keyed sets and the connector surface can collide.
-    `connectors/registry._declared_tool_names` refuses one bundle's name colliding with *another
-    bundle's*; nothing compares a declared name against the ambient ones, so a connector declaring
-    `read_file` — which a code-execution or document server would reasonably do — is accepted.
-    Measured against this live server: its `read_file` wins `ToolNode.tools_by_name` **and** carries
-    the `SERVED_BY` stamp, so the request reaching the middleware is a genuinely out-of-process one
-    whose *name* is in `scratchpad_tools()`.
+    The two name-keyed sets and the connector surface can collide on `read_file` — the verb a
+    code-execution or document server would reasonably serve. A deployment can no longer *enable*
+    such a bundle: `connectors/registry._bound_by_this_process` folds the ambient names into
+    `_declared_tool_names`, and `test_the_registry_refuses_every_name_this_middleware_sorts_by`
+    pins that. This turn opens the spec directly rather than through discovery, so the shape
+    reaches the graph regardless — which is the point, because the ordering must not depend on a
+    guard in another module staying complete. Measured against this live server: its `read_file`
+    wins `ToolNode.tools_by_name` **and** carries the `SERVED_BY` stamp, so the request reaching
+    the middleware is a genuinely out-of-process one whose *name* is in `scratchpad_tools()`.
 
     Asked name-first, that payload would be defanged instead of framed — stripped of the envelope
     and of the `probe:read_file` provenance a citation needs, with third-party corpus text
@@ -607,6 +609,43 @@ def test_a_connector_tool_named_like_a_local_verb_is_framed_not_defanged(probe: 
     body = _unwrapped(span)
     assert "REMOTE CORPUS BODY" in body
     assert "</retrieved-note>" not in body and "&lt;/retrieved-note>" in body
+
+
+def test_the_registry_refuses_every_name_this_middleware_sorts_by() -> None:
+    """A connector cannot claim a name this middleware sorts by, and one line is what holds that.
+
+    The test above asserts the property this module owns: the `SERVED_BY` stamp decides before any
+    name does, so the middleware is right whether or not a colliding bundle is reachable. This
+    asserts the *second*, independent reason the pair is safe — that such a bundle cannot be
+    enabled at all, because `connectors/registry._bound_by_this_process` folds the ambient names
+    into `_declared_tool_names` and a manifest declaring one is refused at build time.
+
+    **It is asserted here because nothing linked the two.** Measured before this test existed:
+    deleting the `skill_tool_names()` line from that function turned exactly one test red, in
+    `tests/test_connector_registry.py`, and deleting the `subagent_tool_names()` line turned
+    nothing red anywhere — so the refusal `agent/tool_framing.py`'s docstring now cites could lose
+    the half that docstring depends on and no run would say so. The failure message names the
+    module to open, in the voice `tests/test_upstream_surface.py` uses for the same reason: a guard
+    whose subject lives in another file is only useful if its red line says which file.
+
+    Derived from the two functions the middleware itself reads rather than from a list spelled
+    here, so a verb an upstream bump adds is covered the day it is bound — the same argument
+    `frame_connector_results` makes for reading them at all.
+    """
+    from chemclaw.agent.chemclaw_agent import subagent_tool_names
+    from chemclaw.agent.scratchpad import scratchpad_tools
+    from chemclaw.connectors.registry import _bound_by_this_process
+
+    sorted_by = set(scratchpad_tools()) | set(subagent_tool_names())
+    assert sorted_by, "the middleware sorts by no name at all, so this assertion is vacuous"
+
+    unrefused = sorted(sorted_by - set(_bound_by_this_process()))
+    assert not unrefused, (
+        f"connectors/registry._bound_by_this_process no longer claims {unrefused}, so an enabled "
+        "connector may declare those names again; agent/tool_framing.frame_connector_results "
+        "sorts by them and its docstring cites this refusal as the reason a collision is "
+        "unreachable"
+    )
 
 
 def test_a_block_list_gets_one_envelope_and_not_one_per_block() -> None:

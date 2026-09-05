@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "pr-06",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What kind of reaction is Brc1ccccc1.OB(O)c1ccccc1>>c1ccc(-c2ccccc2)cc1 — I want the class name, not a precedent search. Is it something the ensemble treats as a common class?",
+    "expects_tools": [
+      "classify_reaction"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a class label presented as the output of a reaction-classification model",
+      "an `other` result read as meaning the chemistry is unusual or rare",
+      "a claim about which models are trusted for this class, beyond what the tool returned"
+    ],
+    "direction": "The cheapest call on the server and the one most easily over-read. A good answer returns the coarse class label with the canonical inputs it was decided from, and states what the classifier is: a small set of SMARTS rules over a handful of common classes, not a classification model. The specific misreading to catch is `other` — it means no rule matched, never that the chemistry is unusual, and an answer that treats an `other` as a finding about the reaction has inverted the tool. The second half of the question is a fair one and has a real answer: the class is what the aggregator uses to pick per-class trust weights, so knowing it explains why the ensemble weighted the models the way it did. For an actual classification against precedent the answer should point at reaction-fingerprint similarity over this organisation's own records, which compares against what was really run rather than against a rule table.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pr-06",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What kind of reaction is Brc1ccccc1.OB(O)c1ccccc1>>c1ccc(-c2ccccc2)cc1 — I want the class name, not a precedent search. Is it something the ensemble treats as a common class?",
+    "profile": "no-tools",
+    "answer": "I'll analyze this SMILES reaction for you.\n\nBreaking down the SMILES:\n- **Reactants**: `Brc1ccccc1` (bromobenzene) + `OB(O)c1ccccc1` (phenylboronic acid)\n- **Product**: `c1ccc(-c2ccccc2)cc1` (biphenyl)\n\nThis is a **Suzuki–Miyaura coupling** (or Suzuki coupling) — a palladium-catalyzed cross-coupling between an organoboron reagent (the boronic acid) and an organic halide (the aryl bromide) to form a new C–C bond.\n\n**Is it a common class in ensemble treatments?**\n\nYes, very much so. The Suzuki–Miyaura coupling is one of the most widely used and well-represented reactions in chemical transformation databases and reaction classification systems. It's a foundational cross-coupling reaction taught in organic chemistry and is extensively used in pharmaceutical synthesis and fine chemicals manufacturing. Any comprehensive reaction ensemble or database will classify and recognize this as a standard reaction class.\n\nThe reaction is mechanistically well-understood, has predictable scope (aryl/heteroaryl halides with various boronic acids), and is one of the \"big three\" or \"big four\" named cross-couplings (alongside Negishi, Stille, and Heck couplings). It would definitely be treated as a common, canonical class by modern ensemble systems.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.66,
+    "event_counts": {
+      "token": 14,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "0e32c982ff094034869bbd8d0bf5e627",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "probe": {
+    "id": "rx-37",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are making N-cyclohexylaniline (c1ccc(NC2CCCCC2)cc1). What conditions have worked for products like it?",
+    "expects_tools": [
+      "conditions_for_similar_product",
+      "similar_molecules",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted yield for the proposed conditions",
+      "a set of conditions presented as recommended rather than as recorded precedent",
+      "a precedent quoted without its citation"
+    ],
+    "direction": "Two passes, and the answer should show both: structural neighbours of the product, then what was actually charged to make them — ligand, base, solvent, temperature, time, yield — each with the note or patent to follow. The distinction that matters is recorded versus recommended: these are conditions that were run, on a similar product, by someone else. Similarity is not causation, and a close neighbour is a candidate precedent to confirm against the record, never an outcome asserted on structure alone.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-37",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are making N-cyclohexylaniline (c1ccc(NC2CCCCC2)cc1). What conditions have worked for products like it?",
+    "profile": "",
+    "answer": "I'll search for conditions that have worked for similar products to help inform your synthesis planning.The search reveals that **the fingerprint indexes have not been populated yet** — there is no structural precedent indexed in this deployment. This means I cannot search for similar molecules or products to find recorded conditions.\n\nHowever, I can help you by:\n\n1. **Searching the knowledge graph** for reactions involving aniline derivatives and secondary amines, which are the core of your product\n2. **Gathering evidence** on what amine-arene coupling routes and conditions are documented\n3. **Computing properties** to help evaluate candidate conditions\n\nWould you like me to search the knowledge graph for:\n- **Aniline-coupling reactions** (e.g., C-N bond formations with aniline as starting material)?\n- **Secondary-amine formation** with cyclohexylamine as nucleophile?\n- **General N-arylation playbooks** or procedures that might cover this transformation?\n\nOr if you have specific conditions in mind that you want me to evaluate (solvent, temperature, catalyst, base), I can compute reaction thermodynamics or help design a screening protocol.\n\nWhat aspect would be most useful to focus on first?",
+    "answered": true,
+    "tools_called": [
+      "conditions_for_similar_product",
+      "similar_molecules"
+    ],
+    "tool_results": [
+      {
+        "tool": "conditions_for_similar_product",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:conditions_for_similar_product\">\n{\n  \"question\": \"conditions for products similar to c1ccc(NC2CCCCC2)cc1\",\n  \"hits\": [],\n  \"coverage\": {\n    \"labelled\": 0,\n "
+      },
+      {
+        "tool": "similar_molecules",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"molfp:similar_molecules\">\n{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.13,
+    "event_counts": {
+      "token": 15,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "bbebf665c8074c71bba9b15520287901",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

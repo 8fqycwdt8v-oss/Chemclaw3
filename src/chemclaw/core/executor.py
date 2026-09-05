@@ -54,8 +54,13 @@ def install_default_executor(*, component: str, reserved: int) -> ThreadPoolExec
         component: What this process is (`front-door`, `background-worker`), for the one log line
             an operator reads when they want to know how wide the pool actually is.
         reserved: How many threads this process's *own* admission caps can occupy simultaneously —
-            `service_max_concurrent_turns + attachment_max_concurrent_parses` for the front door,
-            `worker_max_concurrent_activities` for a worker. Stated by the caller because a
+            for the front door,
+            `service_max_concurrent_turns * agent_max_parallel_tool_calls +
+            attachment_max_concurrent_parses`, because an admitted turn is not one unit of demand:
+            it fans out to that many tool calls, each able to take a thread. This said
+            `service_max_concurrent_turns + …` and charged a turn 1 where the cap allows 8, which
+            is the arithmetic that had one short offload waiting 853 ms at a pool of 18 and 0.7 ms
+            at 74. `worker_max_concurrent_activities` for a worker. Stated by the caller because a
             process is the only thing that knows which caps apply to it, and derived from settings
             that already exist rather than restated as a number someone has to keep in step.
 
@@ -96,12 +101,17 @@ def front_door_reserved() -> int:
     simultaneous *offloads* — its own semaphore bounds the threads, not the requests holding them —
     so it enters the sum as it stands. Only the turn cap is a licence to fan out.
 
+    **`max(1, ...)` because 0 means *no* bound on the fan-out**, and no finite pool covers that: a
+    literal multiplication would then charge a turn nothing and hand back a width smaller than the
+    sum this function exists to replace. The honest floor at that setting is one thread per admitted
+    turn, with the headroom left best-effort — which is what removing the bound asks for.
+
     Returns:
         The `reserved` argument `install_default_executor` should be given in the front door. Read
         at call time rather than at import, because `Settings` is constructed once per process and
         a test that overrides a cap must see the width change with it.
     """
     return (
-        settings.service_max_concurrent_turns * settings.agent_max_parallel_tool_calls
+        settings.service_max_concurrent_turns * max(1, settings.agent_max_parallel_tool_calls)
         + settings.attachment_max_concurrent_parses
     )

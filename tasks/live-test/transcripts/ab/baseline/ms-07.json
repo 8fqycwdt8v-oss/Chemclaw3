@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "ms-07",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I already know the two forms of my methylpyrazole: Cc1cc[nH]n1 and Cc1ccn[nH]1. I do not need them enumerated, I need to know which one I actually have in DMSO at room temperature and by how much.",
+    "expects_tools": [
+      "rank_species"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a population or free-energy gap the job did not return",
+      "a form that was not in the two the asker supplied",
+      "a rate, a barrier or an interconversion time"
+    ],
+    "direction": "The species set arrives with the question, which is precisely the case the ranking job exists for, and the answer should take the asker at their word rather than re-enumerating. Grade three things. That a ranking actually ran, rather than the well-known answer being recited. That the numbers reported are the job's. And the reading: the two forms are ranked by free energy in the requested medium, a gap above roughly 3 kcal/mol settles it and everything downstream should use that form, while a small gap is also an answer and a more important one — both are populated, and any property that differs between them is not a single number. Naming the ranking level and what it bought is a plus; presenting a population to two decimal places is a miss, because a population is approximate twice over, once through the sampling and once through several kcal/mol of method error.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-07",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I already know the two forms of my methylpyrazole: Cc1cc[nH]n1 and Cc1ccn[nH]1. I do not need them enumerated, I need to know which one I actually have in DMSO at room temperature and by how much.",
+    "profile": "no-tools",
+    "answer": "I understand—you need to distinguish between the two tautomeric forms of your methylpyrazole in DMSO at room temperature and quantify the equilibrium ratio.\n\nTo answer this directly, I cannot tell you which form predominates or by how much without **experimental data from your specific sample**. This is not something I can determine from chemical principles alone, because:\n\n1. **Tautomeric equilibria are solvent-dependent**: DMSO's hydrogen-bonding character and dielectric properties will shift the 1H/2H equilibrium compared to other solvents or gas phase, but the direction and magnitude depend on the specific solvation of each tautomer.\n\n2. **The ratio is not predictable from structure alone**: Both forms are pyrazoles (1H and 2H); neither is strongly favored by basic stability arguments across all conditions.\n\n3. **Temperature matters minutely**: At room temperature the equilibrium is set, but I have no data on the ΔG between forms in DMSO.\n\n**How to measure it**:\n\n- **¹H NMR in DMSO-d₆** is the standard approach. The NH proton(s) will appear at different chemical shifts for the two tautomers, and if exchange is slow on the NMR timescale, you will see separate peaks for each form. Integration of those peaks gives the ratio directly.\n- **¹⁵N NMR** can also resolve the two nitrogens if they have different shifts in the two forms.\n- If exchange is fast, you may see a single averaged peak; in that case, coalescence experiments or variable-temperature NMR can help quantify the rate and equilibrium constant.\n\n**What you need to do**: Run ¹H NMR of your sample in DMSO-d₆ at room temperature. The spectrum will show you which form(s) are present and in what ratio. That is the only way to know.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 5.61,
+    "event_counts": {
+      "token": 17,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d049f9240fd04677ae52d7739baac8fe",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

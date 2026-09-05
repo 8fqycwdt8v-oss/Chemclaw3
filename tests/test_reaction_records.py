@@ -543,7 +543,7 @@ def test_a_record_lookup_by_id_is_served_by_an_index_leading_with_that_id() -> N
         )
 
     one, bodies, leading = asyncio.run(_run())
-    assert one == "reaction_records_reaction_id_idx", (
+    assert one == "reaction_records_id_idx", (
         f"a single-record read plans through {one!r}, which does not lead with reaction_id"
     )
     assert "reaction_id" in leading, (

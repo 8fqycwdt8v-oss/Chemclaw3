@@ -47,9 +47,12 @@ thread allowance falls by the prefix, and a configured budget *below* the prefix
 1, which means "reduce on every model call". `agent_tool_result_clear_trigger` shipped at 30,000
 against a 43,175-token prefix, which put the default configuration in exactly that state and is why
 `_note_floored_trigger` exists — the floor has to be said rather than arrive silently. The same
-commit that charged the prefix raised the default to 73,500, so the shipped configuration is no
-longer floored; `_note_floored_trigger` now serves the deployment that lowers it, which is the case
-it was written for. The live numbers are whatever `tests/test_compaction.py` and
+commit that charged the prefix raised the default above the prefix, and it is **derived** from
+`tests/test_context_floor.py`'s ratchet ceiling plus 30,000 of thread, so it moves when that
+ceiling does (74,500 as of 2026-09-05, when the ratchet started measuring the prompt half of the
+prefix on the wire rather than re-deriving it). The shipped configuration is therefore not floored;
+`_note_floored_trigger` serves the deployment that lowers it, which is the case it was written
+for. The live numbers are whatever `tests/test_compaction.py` and
 `tests/test_context_floor.py` measure, not these, for the reason
 `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` gives.
 
@@ -230,9 +233,10 @@ def _note_floored_trigger(configured: int, prefix: int, window: int) -> None:
     to have asked for and an indefensible thing for it to arrive at silently — which is precisely
     what happens when the prefix is charged unconditionally and a configured budget is smaller than
     the prefix. That was the shipped default's own state — 30,000 against a `default` profile prefix
-    measured at 43,175 on 2026-09-04 — until the default rose to 73,500 in the same commit; this now
-    fires for a deployment that configures a budget under its own prefix, which is a corner that
-    stays reachable because the prefix grows with every bound tool.
+    measured at 43,175 on 2026-09-04 — until the default rose above the prefix in the same commit
+    (74,500 today, derived from the ratchet ceiling rather than written down here); this now fires
+    for a deployment that configures a budget under its own prefix, which is a corner that stays
+    reachable because the prefix grows with every bound tool.
 
     WARNING rather than a counter, and the choice is about what an operator can do with it. The
     condition is static — the same for every turn of a process, decided by two settings and the

@@ -695,6 +695,68 @@ def test_an_exclusion_naming_one_molecule_is_not_the_exclusion_naming_another() 
     assert campaign_id_for(excluding("C1CCNCC1")) != campaign_id_for(excluding("c1ccncc1"))
 
 
+def test_a_lab_code_that_happens_to_parse_as_a_molecule_does_not_fork_its_space() -> None:
+    """The reduction is decided per *space*, because a one-label decision cannot see the space.
+
+    Deciding per label re-opened the fork the fold exists to close, on the labels a chemist is most
+    likely to type: `B`, `C`, `N`, `O`, `P`, `S`, `CO`, `CN` and `CS` are all legal SMILES, so a
+    screen over gas atmospheres `["CO", "N2", "H2"]` kept its case while the same space re-emitted
+    as `["co", "n2", "h2"]` folded — two campaigns, two empty histories, and `read_campaign_thread`
+    joining neither. Opaque catalyst codes `["A", "B", "C"]` did the same.
+
+    A label list is chemistry when *all* of it is chemistry. `N2` and `H2` are not molecules to
+    RDKit, so the space they are in is not a library, and the whole of it folds as text. The bound
+    below is the same one the per-label rule was introduced for and it still holds: a space whose
+    every label parses is reduced as chemistry, so piperidine and pyridine stay two campaigns.
+    """
+
+    def screen(categories: list[str]) -> OptimizationProblem:
+        return OptimizationProblem(
+            parameters=[CategoricalParameter(name="atmosphere", categories=categories)],
+            objectives=[Objective(name="yield", direction="maximize")],
+        )
+
+    assert campaign_id_for(screen(["CO", "N2", "H2"])) == campaign_id_for(
+        screen(["co", "n2", "h2"])
+    ), "a gas atmosphere that is also a legal SMILES re-cased into a second campaign"
+    assert campaign_id_for(screen(["A", "B", "C"])) == campaign_id_for(screen(["a", "b", "c"])), (
+        "an opaque catalyst code re-cased into a second campaign"
+    )
+    assert campaign_id_for(screen(["C1CCNCC1", "CCO"])) != campaign_id_for(
+        screen(["c1ccncc1", "CCO"])
+    ), "a space whose every label is a structure must still keep piperidine from pyridine"
+
+
+def test_an_exclusion_reduces_its_options_the_way_its_own_parameter_does() -> None:
+    """One label set, one reduction — the rule `_space_of` already states for `structures`.
+
+    An exclusion's options *are* category labels, so reducing them on their own asks the per-space
+    question of a subset and can answer it differently: over `["CO", "N2", "H2"]` the space folds
+    as text while the option list `["CO"]` is a molecule all by itself, and the fork the space no
+    longer has comes back through the constraint. The options are re-keyed through the parameter's
+    own map instead, for the reason `structures` and `descriptors` are: two reductions of one label
+    set can only ever disagree.
+    """
+
+    def excluding(atmosphere: str, solvent: str, categories: list[str]) -> OptimizationProblem:
+        return OptimizationProblem(
+            parameters=[
+                CategoricalParameter(name="atmosphere", categories=categories),
+                CategoricalParameter(name="solvent", categories=["THF", "DMF"]),
+            ],
+            objectives=[Objective(name="yield", direction="maximize")],
+            constraints=[
+                ExcludeConstraint(
+                    parameters=["atmosphere", "solvent"], options=[[atmosphere], [solvent]]
+                )
+            ],
+        )
+
+    assert campaign_id_for(excluding("CO", "THF", ["CO", "N2", "H2"])) == campaign_id_for(
+        excluding("co", "THF", ["co", "n2", "h2"])
+    ), "the excluded option re-cased into a second campaign after the space stopped doing so"
+
+
 def test_the_legacy_spelling_hashes_to_the_same_id_as_the_new_one() -> None:
     """A row on disk says `objective`; the problem in memory says `objectives`. One campaign."""
     for label, problem in _baseline_problems().items():

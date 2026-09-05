@@ -1,0 +1,73 @@
+{
+  "probe": {
+    "id": "kn-03",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "EDC coupling in DCM gave me 34%, but our own solvent screen said a chlorinated solvent should sit around 70. What did we get wrong?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "that DCM is simply a bad solvent for this coupling",
+      "a cause the failure-mode note does not record"
+    ],
+    "direction": "Retrieves failure-dcm-amide-coupling and gives the recorded cause: the run was held at 20 °C throughout instead of starting at 0 °C, so the O-acylisourea rearranges to the N-acylurea before the amine reaches it. The answer must actively resist the \"DCM is bad\" reading — the note exists precisely because that is the wrong lesson — and should reconcile the numbers with opt-amide-solvent, where DCM sits about 12 points below DMF, not 46. Cites note ids.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-03",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "EDC coupling in DCM gave me 34%, but our own solvent screen said a chlorinated solvent should sit around 70. What did we get wrong?",
+    "profile": "",
+    "answer": "I'll search your record for the EDC coupling and the solvent screen you're referring to, so I can compare what was run and identify where the gap appeared.The knowledge graph is empty right now, so I can't find your earlier solvent screen or coupling runs in the record. That's why I need more detail from you to diagnose the gap:\n\n**To pinpoint what went wrong, I need:**\n\n1. **The solvent screen you mentioned** — what reaction is it for? (What substrate, nucleophile, coupling reagent, base?) And which chlorinated solvent(s) gave ~70% in that screen?\n\n2. **The 34% run** — is it the *same* substrate and nucleophile as the screen, with EDC in that same chlorinated solvent? Or did other things differ (nucleophile loading, temperature, time, base, ratio to EDC)?\n\n3. **The coupling itself** — is this an amide coupling (carboxylic acid + amine)? If so, what base are you using?\n\nThe most common reasons for a big yield drop between a screen and a follow-up run are:\n\n- **Substrate or nucleophile identity changed** — a different amine or acid was used, and EDC couples some pairs less efficiently\n- **Loading or stoichiometry changed** — the screen may have used excess nucleophile or base; the 34% run may have used limiting ratios\n- **Temperature or time** — a screen often runs longer or warmer to get an upper bound on efficiency\n- **Base strength** — the screen may have used a tertiary amine (DIPEA, Et₃N); a weaker base in the 34% run would crash the yield hard\n- **Reagent quality** — EDC hydrolyzes in air; old stock or improper storage tanks yields dramatically\n\nOnce you tell me which screen and which conditions differed, I can either search the literature for precedent on *that specific pair*, or — if the record picks up after you input this — show you what actually ran and calculate what changed.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 11.13,
+    "event_counts": {
+      "token": 24,
+      "tool_call": 2,
+      "evidence_source": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "8fc315e249684623a60f723da24739dd",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

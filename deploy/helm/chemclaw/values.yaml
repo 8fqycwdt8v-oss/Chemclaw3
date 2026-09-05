@@ -492,17 +492,26 @@ workerMetricsPort: 9000
 postgres:
   # What the server will serve this deployment, in connections — the right-hand side of a bound
   # `core/config/store.py` stated in prose for a year and nothing computed
-  # (D-2026-08-05-the-connection-budget-is-a-fleet-number). Every pooled process opens up to
+  # (D-2026-08-05-the-connection-budget-is-a-fleet-number). Every pool opens up to
   # CHEMCLAW_PG_POOL_MAX_SIZE, so the number the database sees is that times
-  # `chemclaw.pooledProcesses`, and until this existed the shipped chart's product was ~272
+  # `chemclaw.fleetPools`, and until this existed the shipped chart's product was ~272
   # against the `max_connections=100` D-119 measured against.
   #
-  # **How many pooled processes that is, is not written here.** The sentence that was said "17
+  # **A pod is not a pool, and this number was computed as though it were.** The helper counted
+  # pods until 2026-09-05, while a front-door process holds the stores' pool, the `/readyz`
+  # probe's (a distinct `(dsn, options)` key, and that isolation is load-bearing) and the LangGraph
+  # checkpointer's — so the declared ceiling covered roughly two thirds of what the fleet opens.
+  # How many that is per front door is measured by `tests/test_fleet_pools.py` and multiplied by
+  # `chemclaw.fleetPools`, never written here. This value rose with the arithmetic, and the rise is
+  # the honest requirement becoming visible rather than a new one: the release always opened what
+  # it opens.
+  #
+  # **How many pools that is, is not written here.** The sentence that was said "17
   # pooled processes × the 8 below", which was 136 exactly — and by the time it was read the
   # `serverReplicas`/`workerReplicas` split had moved the render to 14, so the arithmetic in the
   # comment produced a number the chart no longer renders and the equality it claimed was false.
-  # `chemclaw.pooledProcesses` derives the count from the topology and
-  # `CHEMCLAW_PG_FLEET_POOLED_PROCESSES` carries it into every pod, which is where the number lives;
+  # `chemclaw.fleetPools` derives the count from the topology and
+  # `CHEMCLAW_PG_FLEET_POOLS` carries it into every pod, which is where the number lives;
   # `tests/test_deploy_chart.py::test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders`
   # refuses a chart whose product exceeds this ceiling and prints both sides when it does.
   #
@@ -510,7 +519,10 @@ postgres:
   # more connector or raising a replica count must not require re-provisioning the database in the
   # same change. Anything that *exceeds* it fails `Settings` validation at startup, in every pod,
   # naming both sides; the runtime half is `chemclaw_pg_fleet_max_connections` against
-  # `sum(chemclaw_pg_pool_max_size)`, which also catches a Deployment scaled by hand.
+  # `sum(chemclaw_pg_pool_max_size)`, which also catches a Deployment scaled by hand — and which
+  # was the *only* honest half while this one counted pods, since that gauge has summed a process's
+  # pools since D-2026-08-05. A chart whose startup check and whose alert disagree is a chart that
+  # passes deploy and pages afterwards.
   #
   # **A process is not a pool, and this ceiling was short by three times where it mattered.** A pool
   # is keyed on `(loop, dsn, options)`, so a *front-door* process holds three: the stores' pool, the
@@ -518,7 +530,7 @@ postgres:
   # different `options` string and therefore a different key), and the LangGraph checkpointer's.
   # Every other pooled process — a worker, a connector server, the MCP face — holds one. Measured
   # against a live server via `pg_stat_activity` and the `chemclaw_pg_pool_max_size` gauge, and
-  # pinned by `tests/test_config_pools.py`. The declared 136 was met by an arithmetic that counted
+  # pinned by `tests/test_fleet_pools.py`. The declared 136 was met by an arithmetic that counted
   # one pool per process; the fleet opened roughly 208. The *runtime* alert was honest the whole
   # time, because that gauge sums every pool the process holds — only the startup check, the one
   # that fires before the pods are up, was not.
@@ -532,7 +544,7 @@ postgres:
   # reach it.
   #
   # Set to 0 to declare no ceiling, which makes both the startup check and the alert inert.
-  maxConnections: 288
+  maxConnections: 256
 
 # The pre-install/pre-upgrade migration hook (D-034).
 migrateJob:
@@ -615,7 +627,11 @@ resources:
 
 # Non-secret config → ConfigMap → CHEMCLAW_* env. Keys mirror chemclaw/config.Settings exactly.
 config:
-  CHEMCLAW_LLM_PROVIDER: "openai_compatible"
+  # The one model destination. **Stated rather than left to the code default**, for the reason
+  # `CHEMCLAW_CALC_SERVER_URL` below is: the default is the local dev mock on loopback, and a pod
+  # that inherited it would refuse to boot (`api/middleware._refuse_unconfigured_llm_gateway`).
+  # There is no `CHEMCLAW_LLM_PROVIDER` — this address is the whole knob
+  # (`D-2026-09-04-a-gateway-is-the-only-provider`).
   CHEMCLAW_LLM_BASE_URL: "http://internal-llm.llm.svc:8000/v1"
   CHEMCLAW_LLM_MODEL: "gpt-oss"
   CHEMCLAW_HARNESS_ENABLED: "true"
@@ -636,7 +652,7 @@ config:
   # CHEMCLAW_VERIFIER_CONFIDENCE_THRESHOLD: "0.7"
   CHEMCLAW_SESSION_STORE: "postgres"
   # Stated rather than left to the code default (16), because the code default was chosen for one
-  # process and this chart runs a fleet of them — how many is `chemclaw.pooledProcesses`, derived
+  # pool and this chart runs a fleet of them — how many is `chemclaw.fleetPools`, derived
   # from the topology rather than counted here, because the count written here said seventeen while
   # the chart rendered fourteen. 8 used to be stated as "matching the front door's admission cap",
   # and that equality is gone twice over: the cap is 12 now, and a front-door process holds *three*

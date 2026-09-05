@@ -39,20 +39,49 @@ called it "the payload rather than an approximation of it". `_bound_tools` reads
 graph's `ToolNode`, so the ratchet gates what a deployment pays. The lesson is the file's own: a
 ratchet is only as honest as its basis, and a basis that is re-derived rather than observed will
 agree with itself forever.
+
+**And the prose half went on being re-derived for another week, which is that sentence happening
+inside the file that wrote it.** The tool half was read off the compiled graph; the prompt half was
+`instructions_for(profile)` plus `_skills_listing(...)` — this repository's own two contributions to
+a system message the deepagents middlewares also write into. Measured 2026-09-05 against the
+`SystemMessage` a model is actually handed: **7,006 derived against 7,484 sent, short by 458
+tokens**. Every one of those 458 is upstream's `SKILLS_SYSTEM_PROMPT` — the wrapper deepagents puts
+*around* the listing this file did measure, explaining progressive disclosure and how to read a
+`SKILL.md`. That is what a middleware section costs today; what matters is that a bump lengthening
+it, or any other middleware adding one, grows what every deployment pays on every turn with
+nothing here going red — and the ceiling had already been passed, silently: at this change's base
+commit the real prefix measured **43,521** against a ceiling of 43,500, with every test here green.
+
+`_observed_prefix` fixes it the same way `_bound_tools` fixed the other half: one model call against
+a capturing fake model, and the system message taken off the wire. The two derived halves stay in
+the breakdown as a *split* of that observed number rather than as the basis for it, so `_report`
+still says which half grew, and what neither half explains is a named line rather than a silence.
+
+**And the graph it was all measured against bound no connector at all**, which is the same sentence
+a third time and the largest of the three. `build_langgraph_agent` has taken a `connectors=`
+argument since M7 and this file's call omitted it, so every figure above described a turn nobody
+runs: the fixture bound the in-process surface while a shipped turn binds that *plus* every enabled
+bundle's endpoint tools. `_connector_tools` closes it by running this repository's own manifests
+through its own narrowing and its own MCP loader — derived from the tree rather than transcribed —
+and `SERVED_ELSEWHERE` names the bundles whose servers live in `Chemclaw3-mcp`, which no test here
+can measure at any price.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from functools import cache
+from pathlib import Path
 from typing import Any
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp.shared.memory import create_connected_server_and_client_session
+from pydantic import SecretStr
 
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.chemclaw_agent import _capability_tools, connector_specs, instructions_for
@@ -67,6 +96,7 @@ from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.connectors.registry import enabled, server_tools_module
 from chemclaw.connectors.transport import _allowed
+from chemclaw.core.config import Settings
 
 # Discovered at import, not in a fixture: `registered_profile_names()` parametrises the test below
 # and parametrisation is evaluated at *collection*, before any fixture runs. With the load in a
@@ -259,73 +289,52 @@ load_profiles()
 #: holds with less headroom than one `propose_knowledge_note` costs, which is the property every
 #: raise above was chosen for, and `_report` prints the day's figure so nobody has to trust this
 #: comment for it.
-#: **67,000 as of 2026-09-05, and again no tool was added — the fixture stopped lying instead.**
-#: `_bound_tools` compiled the graph with `connectors=None` while `build_langgraph_agent` has taken
-#: that argument since M7, so every figure above measured a turn with **no connector bound**:
-#: `default` binds **92** tools and measures **66,157**, where the connector-less fixture reported
-#: 61 and 42,730. The 23,427-token difference is 31 endpoint tools this repository serves itself,
-#: and a deployment has paid all of it on every model call since the first bundle shipped.
+#: **44,500 as of 2026-09-05, and nothing was added — the measurement got honest again.** The
+#: paragraph above is about the tool half; the prompt half was still re-derived, and re-derived it
+#: is 458 tokens short of the `SystemMessage` a model is handed (see the module docstring). On the
+#: observed basis `default` measures **43,701**, and it measured **43,521** at the commit this
+#: change branched from — over the 43,500 ceiling that was supposed to bound it, by 21 tokens, with
+#: every test in this file green. So this raise buys nothing and hides nothing: it is the same
+#: surface, counted where it is paid.
 #:
-#: **This is the same failure as the 2026-08-29 entry, one boundary further out**, and it is worth
-#: saying twice: that one measured the wrong *object* (a callable instead of the bound tool), this
-#: one measured the wrong *graph*. Both were invisible for the same reason — the assertion and the
-#: thing asserted were derived from the same short read — and both were found only by someone
-#: measuring a shipped turn rather than reading the test. The paragraph above promising that a
-#: connector "lands here the moment it is bound" was a statement about `_bound_tools`'s method that
-#: its own call site made false.
+#: The headroom is 799 tokens, which is the property every raise above was chosen for — under what
+#: one `propose_knowledge_note` costs (1,126, re-derived the same day), so the ceiling cannot absorb
+#: another tool of that size unnoticed. It is deliberately *not* the ~980 the branch point would
+#: have given: this tree already carries a sibling branch's docstring edit worth 160 tokens, and a
+#: ceiling set to today's measurement plus a fixed headroom is set against whatever else is in
+#: flight. The figure to judge a raise by is the headroom, not the ceiling.
 #:
-#: **What this still does not cover is named rather than implied**: `SERVED_ELSEWHERE`'s three
-#: bundles are `Chemclaw3-mcp`'s, ~8,600 tokens over 21 tools measured against the sibling checkout
-#: on 2026-09-05, so the real shipped prefix is ~74,700 and this ceiling gates the ~87% of it that
-#: is knowable from this tree alone. That remainder is a measurement
+#: **`agent_tool_result_clear_trigger` moves with it, by derivation rather than by retuning**
+#: (`core/config/agent.py`): its default is this ceiling plus the 30,000 of thread the setting has
+#: always meant, so raising the ceiling raises the trigger to 74,500 and every deployment's lossless
+#: edit fires slightly later than it did. That coupling is the reason to keep this number a
+#: *ceiling* rather than a measurement — see the config comment, which says why.
+#:
+#: **65,000 as of 2026-09-05, and for the third time nothing was added — the fixture stopped
+#: measuring a smaller system.** The two entries above are about the tool half's *objects* and the
+#: prompt half's *text*; this one is about the graph. `_bound_tools` read the compiled graph's
+#: `ToolNode` — the honest source — while the call that compiled it omitted the `connectors=`
+#: argument `build_langgraph_agent` has taken since M7, so the ratchet gated a turn with **no
+#: connector bound at all**. Measured both ways on this commit: **43,179 over 61 tools** with the
+#: argument omitted, **64,099 over 92** with it passed — 31 endpoint tools and **20,920 tokens**
+#: this deployment has paid on every model call since the first bundle shipped, sitting outside
+#: the only ratchet that could price them. The docstring promising that a connector would "land
+#: here the moment it is bound" was a claim about the *method* that its own call site made false,
+#: which is the 2026-08-29 entry's own shape one boundary further out.
+#:
+#: **What this still does not cover is named rather than implied.** `SERVED_ELSEWHERE`'s three
+#: bundles are `Chemclaw3-mcp`'s servers, so their schemas arrive at handshake from a process this
+#: repository does not build: 9,538 tokens over 21 tools measured against the sibling checkout on
+#: 2026-09-05, which puts the shipped `default` prefix at ~73,600 over 113 tools and makes this
+#: ceiling a gate on ~87% of it. `SERVED_ELSEWHERE_ALLOWANCE` is the bound for the rest and
+#: `PREFIX_BOUND` is the two added. That remainder is a measurement
 #: (`chemclaw_connector_tool_schema_tokens`), not a gap in the ratchet, and it cannot become one
 #: without this repository building somebody else's server.
 #:
-#: The headroom is ~840 tokens against 66,157 — the same tightness the entries above were chosen
-#: for, under what one `propose_knowledge_note` costs, so the next tool of that size cannot arrive
-#: unnoticed on either side of the process boundary.
-#: **64,000 as of 2026-09-05, lowered from 67,000, and this is the entry the file has been asking
-#: for since 2026-08-25: a ceiling that comes *down* because a reduction happened.** `default`
-#: measures **62,878** over the same 92 tools, where the entry above measured 66,157 — **-3,279
-#: tokens on every model call, with no tool removed and no argument taken away.**
-#:
-#: The cause was one model's prose, published five times. Pydantic renders a class docstring as its
-#: JSON-schema `description` and `convert_to_openai_tool` inlines it per *use*, so the design
-#: rationale on `CategoricalParameter`, `LinearConstraint`, `ExcludeConstraint`, `Observation`,
-#: `OptimizationProblem` and `CampaignSpec` — ADR ids, BoFire internals, why the constraint union
-#: has two members rather than five — travelled to the model inside all four `bo` endpoint tools
-#: *and* inside `start_optimization_campaign`. Measured per copy, the `OptimizationProblem` closure
-#: went **1,620 -> 1,029 tokens**, of which 920 -> 329 was description. Per tool:
-#: `suggest_next_experiment` 3,590 -> 2,951, `generate_screening_design` 2,900 -> 2,309,
-#: `predict_outcome` 2,839 -> 2,201, `campaign_progress` 2,726 -> 2,087,
-#: `start_optimization_campaign` 2,307 -> 1,535.
-#:
-#: **Nothing a caller can express changed** — every field, every default and every validator is
-#: untouched, and `tests/test_bo_tools.py` asserts both halves: that the published property set
-#: still covers `model_fields` for every model in the closure, and that the *load-bearing* guidance
-#: (when to give `structures`, that a one-parameter limit is a bound, that an exclusion needs an
-#: all-categorical problem) is still in the served `inputSchema`. The rationale is in `#` comments
-#: beside the fields, which is where `D-2026-08-28`'s fourth cause already put fifteen of them.
-#:
-#: **The `$defs` escape is still closed and is not what did this**, for the reason the
-#: `KNOWN_OVERSIZED` comment measures below: one tool references `OptimizationProblem` once, so
-#: there is no duplication inside a schema for a `$ref` to buy back. The four copies are four
-#: *tools*, and the OpenAI tools array has no cross-tool sharing at any price. What multiplies is
-#: the model, so what pays back five times is narrowing the model.
-#:
-#: The headroom is **1,122** tokens against 62,878 — under what one `propose_knowledge_note` costs
+#: The headroom is **901** tokens against 64,099 — under what one `propose_knowledge_note` costs
 #: (1,126), which is the property every entry above was chosen for, and it is stated here knowing
 #: it is a claim about this commit rather than about `HEAD`.
-#:
-#: **What is left in this prefix and is not a `bo` change**: 1,211 tokens of `title` and
-#: `discriminator` keys that no provider reads. `convert_to_openai_tool` strips titles via
-#: upstream's `_rm_titles`, which does not recurse into lists, so every model inside a `oneOf`
-#: keeps its field titles; and `dereference_refs` deletes `$defs` while leaving pydantic's
-#: `discriminator.mapping` pointing at `#/$defs/...` entries that no longer exist. 1,024 of the
-#: 1,211 is the five `bo` schemas, but the defect is in the conversion, not in the model — a fix
-#: belongs where every bundle's schema passes, and is a `docs/planning/BACKLOG.md` row rather than
-#: a `connectors/bo/` one.
-CEILINGS: dict[str, int] = {"__default__": 64_000}
+CEILINGS: dict[str, int] = {"__default__": 65_000}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
@@ -375,27 +384,38 @@ MAX_SINGLE_TOOL_TOKENS = 900
 #: below is the reason six of them stayed invisible for eleven weeks while a test claimed to catch
 #: exactly this. They are recorded rather than hidden by a bigger `MAX_SINGLE_TOOL_TOKENS`, which
 #: is the same choice the four original entries were recorded under; the bound stays 900.
-#: **Four names arrived on 2026-09-05 and, again, nothing was added.** `_bound_tools` began binding
+#:
+#: **Four names arrived on 2026-09-05 and, again, nothing was added.** The fixture began binding
 #: the connector surface a turn actually binds, and `bo`'s four `OptimizationProblem`-taking
 #: endpoint tools turned out to be the **widest schemas in the entire prefix** — wider than every
-#: in-process tool, and unseen for as long as the fixture compiled its graph with no connector.
-#: They are recorded here on the same terms as the six that arrived on 2026-08-29: this list is
-#: what makes debt visible, and refusing to record debt that was already being paid would only mean
-#: not measuring it. **The `MAX_SINGLE_TOOL_TOKENS` message's warning still stands for a tool that
-#: is new**; these are eleven weeks old and were merely invisible.
+#: in-process tool, and unseen for as long as the graph was compiled with no connector. They are
+#: recorded here on the same terms as the six that arrived on 2026-08-29: this list is what makes
+#: debt visible, and refusing to record debt that was already being paid would only mean not
+#: measuring it. **The `MAX_SINGLE_TOOL_TOKENS` message's warning still stands for a tool that is
+#: new**; these are eleven weeks old and were merely invisible.
 #:
-#: The cause is one model, inlined four times: `OptimizationProblem` is a discriminated union of
-#: feature kinds, and `convert_to_openai_tool` inlines rather than `$ref`s (see above for why
-#: `$defs` is *worse*, not better). It is the same document `start_optimization_campaign` carries
-#: at 2,307. **12,055 tokens on every default turn for four copies of one decision space** is the
-#: largest single narrowing left in this prefix, and it is a `connectors/bo/server/tools.py` change
-#: rather than a core one — `docs/planning/BACKLOG.md` carries the row.
-#: **Re-recorded 2026-09-05 after the narrowing the ceiling comment measures**, which is this
-#: file's own rule running the way it is supposed to: five figures moved, and the commit that moved
-#: them is the one that says so. `start_optimization_campaign` fell furthest in proportion (-33%)
-#: because `CampaignSpec` carried its own D-157 paragraph *and* the whole `OptimizationProblem`
-#: closure. All five stay on this list — a 900-token bound is not reachable by a tool that takes a
-#: BoFire decision space, for the same reason `ProtocolBody` puts the protocol writers here.
+#: **All five `bo` figures then came down in the same commit that first recorded them**, which is
+#: this file's own rule running the way it is supposed to. Pydantic renders a class docstring as
+#: its JSON-schema `description` and `convert_to_openai_tool` inlines it per *use*, so the design
+#: rationale on `CategoricalParameter`, `LinearConstraint`, `ExcludeConstraint`, `Observation`,
+#: `OptimizationProblem` and `CampaignSpec` — ADR ids, BoFire internals, why the constraint union
+#: has two members rather than five — travelled to the model inside all four `bo` endpoint tools
+#: *and* inside `start_optimization_campaign`. **Nothing a caller can express changed**: every
+#: field, every default and every validator is untouched, and `tests/test_bo_tools.py` asserts both
+#: halves — that the published property set still covers `model_fields` for every model in the
+#: closure, and that the *load-bearing* guidance is still in the served `inputSchema`. The
+#: rationale is in `#` comments beside the fields, which is where
+#: `D-2026-08-28`'s fourth cause already put fifteen of them. `start_optimization_campaign` fell
+#: furthest in proportion because `CampaignSpec` carried its own D-157 paragraph *and* the whole
+#: `OptimizationProblem` closure. All five stay on this list — a 900-token bound is not reachable
+#: by a tool that takes a BoFire decision space, for the same reason `ProtocolBody` puts the
+#: protocol writers here.
+#:
+#: **The `$defs` escape is still closed and is not what did this**, for the reason measured above:
+#: one tool references `OptimizationProblem` once, so there is no duplication inside a schema for a
+#: `$ref` to buy back. The four copies are four *tools*, and the OpenAI tools array has no
+#: cross-tool sharing at any price. What multiplies is the model, so what pays back five times is
+#: narrowing the model.
 KNOWN_OVERSIZED: dict[str, int] = {
     "suggest_next_experiment": 2_951,
     "generate_screening_design": 2_309,
@@ -438,12 +458,17 @@ KNOWN_OVERSIZED: dict[str, int] = {
 OVERSIZED_TOLERANCE = 0.05
 
 
-def _count(text: str) -> int:
-    """Tokens, by the same counter `agent/compaction.py` budgets the thread with."""
-    from langchain_core.messages import HumanMessage
+def _count(text: str | BaseMessage) -> int:
+    """Tokens, by the same counter `agent/compaction.py` budgets the thread with.
+
+    A message counts as itself rather than as its text: `count_tokens_approximately` charges a
+    per-message overhead, and the system message this file now measures is counted by production
+    (`context_budget.MeasureRequestPrefix`) exactly this way.
+    """
     from langchain_core.messages.utils import count_tokens_approximately
 
-    return int(count_tokens_approximately([HumanMessage(text)]))
+    message = text if isinstance(text, BaseMessage) else HumanMessage(text)
+    return int(count_tokens_approximately([message]))
 
 
 def _tool_name(tool: Any) -> str:
@@ -482,8 +507,6 @@ def _tool_schema(tool: Any) -> str:
 #: Named rather than left implicit, and asserted below, for the reason
 #: `cli/validate_connectors.py::unverified_tool_surfaces` gives about the identical blind spot one
 #: layer over: a check that quietly shrinks is worse than one that says what it did not look at.
-#: **Measured against the sibling checkout on 2026-09-05 they are ~8,600 tokens over 21 tools** —
-#: so the figure this file gates is the ~87% of the shipped prefix that is knowable offline.
 SERVED_ELSEWHERE = frozenset({"chem", "rxnpredict", "safety"})
 
 #: What to allow for `SERVED_ELSEWHERE`'s schemas when a *bound* on the whole prefix is needed.
@@ -512,8 +535,9 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: is `PREFIX_BOUND + 30,000` and the budget `PREFIX_BOUND + 57,000` — and
 #: `tests/test_compaction.py` asserts that relation rather than restating either figure. It is here
 #: rather than in the config because the ceiling is here: two numbers that must move together
-#: belong in one place, and the previous arrangement (a config comment quoting `43,500`) is exactly
-#: how the connector-less ceiling propagated into two settings that were floored for eleven weeks.
+#: belong in one place, and the previous arrangement (a config comment quoting a ceiling by value)
+#: is exactly how the connector-less ceiling propagated into two settings that were floored for
+#: eleven weeks.
 PREFIX_BOUND = CEILINGS["__default__"] + SERVED_ELSEWHERE_ALLOWANCE
 
 
@@ -524,9 +548,9 @@ def _served_tools(connector: str) -> tuple[Any, ...]:
     **Not a fixture and not a hand-written schema: the bundle's real `FastMCP` server, over a real
     MCP session, through `load_mcp_tools` — the same function
     `connectors/transport.py::HeldConnectorSession._hold` calls.** An in-memory transport is the
-    only thing substituted, so what is measured is the
-    `tools/list` payload a deployment's pod would answer with. A schema invented here would be a
-    second declaration of somebody else's surface, which is the defect this whole file is about.
+    only thing substituted, so what is measured is the `tools/list` payload a deployment's pod
+    would answer with. A schema invented here would be a second declaration of somebody else's
+    surface, which is the defect this whole file is about.
 
     Cached per connector because the servers behind these imports are the heavy half of the tree
     (`bo` pulls BoFire, `calc` its whole spec surface) and `_floor` is called once per profile per
@@ -558,8 +582,8 @@ def _connector_tools(profile: Any) -> list[Any]:
     return tools
 
 
-def _bound_tools(profile: Any) -> list[Any]:
-    """The tools this profile's compiled graph actually binds — every one, as the object it binds.
+def _bound_tools(graph: Any) -> list[Any]:
+    """The tools a compiled graph actually binds — every one, as the object it binds.
 
     **Read off the graph rather than re-derived, because re-deriving is the defect.** For eleven
     weeks this file measured `convert_to_openai_tool` over `_capability_tools(profile)`, and its own
@@ -578,24 +602,28 @@ def _bound_tools(profile: Any) -> list[Any]:
 
     Reading the `ToolNode` is deliberate and is why this cannot drift again: any future tool source
     — a middleware, a connector, upstream — lands here the moment it is bound, without this file
-    being taught about it. The backlog row that asked for this proposed spying on `bind_tools`
-    instead; the node holds the same tools and needs no model call to say so, so the graph is
-    built and never invoked.
+    being taught about it.
 
-    **That sentence was true of the method and false of this function, and `connectors=` is the
-    fix.** For as long as the paragraph above existed this call omitted the argument
-    `build_langgraph_agent` takes at line 148, so the ratchet measured a graph with **no connector
-    bound at all** — 61 tools where a shipped turn binds 92, and 42,730 tokens where the honest
-    figure is 66,157. A connector could not "land here the moment it is bound" because nothing here
-    ever bound one: the surface the deployment pays for was 35% larger than the number this file
-    gated, and the gap was the *whole* subject of the deferred-schema decision
-    (`D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`) sitting outside the only ratchet
-    that could have priced it.
+    **That sentence was true of the method and false of the call, and `connectors=` is the fix.**
+    For as long as the paragraph above existed, the graph handed to this function was compiled
+    without the argument `build_langgraph_agent` takes at line 148, so the ratchet measured a graph
+    with **no connector bound at all**. A connector could not "land here the moment it is bound"
+    because nothing here ever bound one, and the gap was the *whole* subject of the deferred-schema
+    decision (`D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`) sitting outside the only
+    ratchet that could have priced it. `_observed_prefix` now passes `_connector_tools(profile)`,
+    which derives that surface from this repository's own manifests rather than transcribing it,
+    and `SERVED_ELSEWHERE` names what it still cannot reach.
 
-    What is bound is derived rather than invented — `_connector_tools` runs this repository's own
-    manifests through its own narrowing and its own MCP loader — so it tracks the tree instead of
-    a transcription of it. `SERVED_ELSEWHERE` names what that still cannot reach, and the test
-    below fails if that set ever changes silently.
+    The backlog row that asked for this proposed spying on `bind_tools`
+    instead, and `_observed_prefix` now does that too — for the system message, which no node holds.
+    **The node is still what this ratchet charges, and the difference is measured rather than
+    assumed**: on 2026-09-05 the two lists held the same 61 names and differed by **20 tokens on
+    `grep` alone**, whose description `FilesystemMiddleware` trims before binding because this
+    deployment withholds `execute`. The node's copy is the larger one, so charging it over-counts by
+    20 — the safe direction for a ratchet, and the direction
+    `test_the_ratchet_charges_at_least_what_the_model_is_sent` pins so that a flip is red rather
+    than quiet. Reading `_tools_by_name` also keeps the three upstream shapes below with a subject:
+    `tests/test_upstream_surface.py` names this function in all three failure messages.
 
     **Three upstream shapes are read below, and all three are pinned in
     `tests/test_upstream_surface.py`**: the node key `"tools"`, `PregelNode.bound`, and the private
@@ -603,13 +631,71 @@ def _bound_tools(profile: Any) -> list[Any]:
     two thirds of the read able to break on a bump with nothing in the upstream-surface file going
     red — loudly rather than silently, but in the wrong file.
     """
+    return list(graph.nodes["tools"].bound._tools_by_name.values())
+
+
+#: What the last `_CapturingModel` was sent, and what was bound to it. Module level rather than
+#: instance state because a `BaseChatModel` is a pydantic model, so an annotated class attribute
+#: would become a *field* with a mutable default rather than a place to keep a measurement. Same
+#: shape, and for the same reason, as `tests/test_compaction.py`'s capturing model.
+_RECEIVED: list[Any] = []
+_BOUND: list[Any] = []
+
+
+class _CapturingModel(GenericFakeChatModel):
+    """A fake model that keeps what it was actually sent, so the prompt comes off the wire.
+
+    `GenericFakeChatModel` alone cannot be used for this: `BaseChatModel.bind_tools` raises
+    `NotImplementedError`, which a turn hits *after* the request is assembled — enough for a
+    middleware to have measured the prefix, not enough for the model to receive it.
+    """
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        """Record the surface and stay unbound — this model has no tool-calling path."""
+        _BOUND[:] = list(tools)
+        return self
+
+    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any) -> Any:
+        """Record the request, then answer as the fake model would."""
+        _RECEIVED[:] = list(messages)
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kw)
+
+
+def _observed_prefix(profile: Any) -> tuple[SystemMessage, list[Any], list[Any]]:
+    """One real model call: the system message as sent, the tools as bound, the node's own list.
+
+    **Driven rather than derived, which is this file's whole rule applied to its other half.** The
+    prompt a turn pays for is not `instructions_for(profile)` plus a skills listing: the deepagents
+    middlewares write into the same system message, and on 2026-09-05 their sections were 458 of the
+    7,484 tokens — all of it upstream's `SKILLS_SYSTEM_PROMPT`, the wrapper around the listing this
+    file already measured. That is invisible to any assertion built from this repository's own two
+    pieces, which is how the real prefix passed the ceiling by 21 tokens with this file green.
+
+    The turn is a real one: a compiled graph, invoked, answering with an empty message so the loop
+    ends after one model call. Nothing is stubbed between the profile and the wire, which is the
+    point — a capture taken anywhere earlier is a claim about what the request *would* become.
+
+    Returns:
+        The `SystemMessage` the model received, the tools bound to it, and the tools its `ToolNode`
+        holds. The last two are the same surface seen from two places, and
+        `test_the_ratchet_charges_at_least_what_the_model_is_sent` is what keeps them honest.
+    """
     graph = build_langgraph_agent(
-        model=GenericFakeChatModel(messages=iter([AIMessage(content="")])),
+        model=_CapturingModel(messages=iter([AIMessage(content="")])),
         profile=profile,
         audit_sink=NullAuditSink(),
         connectors=_connector_tools(profile),
     )
-    return list(graph.nodes["tools"].bound._tools_by_name.values())
+    bound = _bound_tools(graph)
+    _RECEIVED.clear()
+    _BOUND.clear()
+    graph.invoke({"messages": [HumanMessage("what does this turn cost?")]})
+    system = [message for message in _RECEIVED if isinstance(message, SystemMessage)]
+    assert system, (
+        "the model was called with no system message, so there is no observed prompt to charge — "
+        "check that `build_langgraph_agent` still passes its instructions as `system_message`"
+    )
+    return system[0], list(_BOUND), bound
 
 
 def _skills_listing(profile: Any, tools: list[Any]) -> str:
@@ -629,18 +715,29 @@ def _skills_listing(profile: Any, tools: list[Any]) -> str:
 def _floor(profile_name: str) -> tuple[int, dict[str, int]]:
     """The static prefix for one profile: its total, and the per-part breakdown behind it.
 
-    The two prose parts are measured from the *capability* tools deliberately, and only the tool
-    schemas come from `_bound_tools`. `build_langgraph_agent:228` hands `skills_backend` the raw
-    callables, so narrowing the skills listing by the bound list instead would measure a backend
-    production never builds — a second implementation of upstream's narrowing, which is the
-    mistake one layer over.
+    **The total is observed and the breakdown is derived, and the distinction is load-bearing.**
+    What is charged is the `SystemMessage` the model was handed plus every schema the graph's
+    `ToolNode` holds — two measurements, neither re-derived from what this repository believes it
+    writes. The three prompt lines below *split* that observed number: two are this repository's own
+    contributions, measured the way `build_langgraph_agent` builds them, and the third is the
+    remainder — every deepagents middleware's prompt section, named rather than uncounted.
+
+    The two derived halves stay measured from the *capability* tools deliberately.
+    `build_langgraph_agent` hands `skills_backend` the raw callables, so narrowing the skills
+    listing by the bound list would measure a backend production never builds. A negative remainder
+    would mean those two halves are no longer what production puts in the prompt — the split has
+    gone wrong, not the total, which is still what the model was sent.
     """
     profile = get_profile(profile_name)
+    system, _sent, bound = _observed_prefix(profile)
+    instructions = _count(instructions_for(profile))
+    listing = _count(_skills_listing(profile, _capability_tools(profile)))
     parts = {
-        "instructions": _count(instructions_for(profile)),
-        "skills-listing": _count(_skills_listing(profile, _capability_tools(profile))),
+        "instructions": instructions,
+        "skills-listing": listing,
+        "prompt:middleware-sections": _count(system) - instructions - listing,
     }
-    for tool in _bound_tools(profile):
+    for tool in bound:
         parts[f"tool:{_tool_name(tool)}"] = _count(_tool_schema(tool))
     return sum(parts.values()), parts
 
@@ -669,6 +766,45 @@ def test_the_static_prefix_stays_under_its_ceiling(profile_name: str) -> None:
     assert total <= ceiling, _report(total, parts, ceiling)
 
 
+def test_the_ratchet_charges_at_least_what_the_model_is_sent() -> None:
+    """The basis may over-count what a turn costs; it may never under-count it.
+
+    A ceiling is only a bound on spend while the number under it is at least the bill. This file has
+    been on the wrong side of that twice — 8,126 tokens of tool schema in 2026-08-29, 458 tokens of
+    middleware prompt until 2026-09-05 — and both times every assertion here was green, because the
+    basis and the assertion were derived from the same belief.
+
+    So the two surfaces are compared where they can disagree. `_bound_tools` reads the `ToolNode`,
+    which is what a graph *runs*; `bind_tools` receives what the model is *told about*, and they are
+    not the same objects: measured 2026-09-05, the same 61 names differ by 20 tokens on `grep`,
+    trimmed by `FilesystemMiddleware` on its way to the model. The node's copy is larger, so the
+    ratchet over-charges by 20 tokens — harmless, and asserted rather than assumed, because the day
+    the sign flips this file starts under-counting a bill somebody pays.
+    """
+    system, sent, bound = _observed_prefix(get_profile("default"))
+    charged = {_tool_name(tool): _count(_tool_schema(tool)) for tool in bound}
+    on_the_wire = {_tool_name(tool): _count(_tool_schema(tool)) for tool in sent}
+
+    uncharged = sorted(set(on_the_wire) - set(charged))
+    assert not uncharged, (
+        f"{uncharged} are bound to the model and are not in the surface this file charges, so the "
+        "ratchet does not bound what a turn costs. `_bound_tools` reads the graph's ToolNode; "
+        "whatever now puts a tool on the wire without putting it there has to be counted too."
+    )
+    prompt = _count(system)
+    total_charged = prompt + sum(charged.values())
+    total_sent = prompt + sum(on_the_wire.values())
+    differing = {
+        name: (charged[name], size) for name, size in on_the_wire.items() if charged[name] != size
+    }
+    assert total_charged >= total_sent, (
+        f"the ratchet charges {total_charged} tokens against {total_sent} the model is actually "
+        f"sent, so it under-counts by {total_sent - total_charged}. The tools the two bases "
+        f"disagree about, as (charged, sent): {differing}. Charge the surface `bind_tools` "
+        "receives instead, and move the upstream-surface pins that name `_bound_tools` with it."
+    )
+
+
 def test_no_single_tool_schema_dominates_the_floor() -> None:
     """A tool wider than `MAX_SINGLE_TOOL_TOKENS` is badly shaped, not merely expensive.
 
@@ -695,12 +831,45 @@ def test_no_single_tool_schema_dominates_the_floor() -> None:
     )
 
 
+def test_the_recorded_cost_of_a_known_oversized_tool_is_still_true() -> None:
+    """`KNOWN_OVERSIZED`'s numbers are a measurement, and a measurement nobody repeats is prose.
+
+    The sibling test above checks *membership* only, so for as long as this file has existed the
+    figures beside each name were unasserted: re-derived on 2026-09-04, `draft_experiment_protocol`
+    had drifted 2,590 → 2,738 and `structure_experiment_request` 1,075 → 1,095, with nothing red and
+    nothing said. That is `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` happening
+    inside the file that exists to prevent it, one level down from the ceiling it does assert.
+
+    **What this asserts is a band, not equality** — see `OVERSIZED_TOLERANCE` for why, and why it is
+    two-sided. Whoever trips it re-records the number in the same commit that moved it; that is the
+    whole remedy, and the message carries the value to paste.
+    """
+    _, parts = _floor("default")
+    drifted = {}
+    for name, recorded in KNOWN_OVERSIZED.items():
+        live = parts.get(f"tool:{name}")
+        if live is None:
+            continue  # No longer bound at all; the membership test above is what reports that.
+        if abs(live - recorded) > recorded * OVERSIZED_TOLERANCE:
+            drifted[name] = (recorded, live)
+    assert not drifted, (
+        "these KNOWN_OVERSIZED figures are no longer what the tool costs, by more than "
+        f"{OVERSIZED_TOLERANCE:.0%}: "
+        + ", ".join(
+            f"{name} recorded {rec} but measures {live} ({live - rec:+})"
+            for name, (rec, live) in sorted(drifted.items())
+        )
+        + ". Re-record them in the same commit that moved them, and say in the pull request what "
+        "moved them — a figure nobody re-derives is a claim about the afternoon it was taken."
+    )
+
+
 def _nested_descriptions(node: Any, path: str = "") -> list[tuple[int, str, str]]:
     """Every `description` below a tool's own, as (tokens, path, text).
 
     A tool's top-level description is its docstring and is deliberately excluded: that one is the
     prompt, argued for tool by tool. Everything under it is a *field* or a *model* description, and
-    a model's is published once per use — which is the multiplier this test exists to bound.
+    a model's is published once per use — which is the multiplier the test below exists to bound.
     """
     found: list[tuple[int, str, str]] = []
     if isinstance(node, dict):
@@ -746,17 +915,16 @@ def test_no_nested_schema_description_carries_a_design_note() -> None:
     the worst case and nothing in this file could see it: five schemas, each individually explicable
     at 2,300-3,600 tokens, sharing ~680 tokens of ADR ids and BoFire internals apiece.
     """
-    tool_names = {_tool_name(tool) for tool in _bound_tools(get_profile("default"))}
-    over: dict[str, tuple[int, str]] = {}
-    for tool in _bound_tools(get_profile("default")):
-        from langchain_core.utils.function_calling import convert_to_openai_tool
+    from langchain_core.utils.function_calling import convert_to_openai_tool
 
+    _, _, bound = _observed_prefix(get_profile("default"))
+    over: dict[str, tuple[int, str]] = {}
+    for tool in bound:
         function = convert_to_openai_tool(tool)["function"]
         for tokens, path, text in _nested_descriptions(function.get("parameters", {})):
             if tokens > MAX_NESTED_DESCRIPTION_TOKENS:
-                key = f"{function['name']}{path}"
-                over[key] = (tokens, text[:80])
-    assert tool_names and not over, (
+                over[f"{function['name']}{path}"] = (tokens, text[:80])
+    assert bound and not over, (
         f"these schema descriptions are over {MAX_NESTED_DESCRIPTION_TOKENS} tokens: {over}. "
         "A description below a tool's own is a field or a model explanation, and a model's ships "
         "once per tool that references it — move the design rationale into a `#` comment beside "
@@ -764,83 +932,86 @@ def test_no_nested_schema_description_carries_a_design_note() -> None:
     )
 
 
-def test_the_recorded_cost_of_a_known_oversized_tool_is_still_true() -> None:
-    """`KNOWN_OVERSIZED`'s numbers are a measurement, and a measurement nobody repeats is prose.
+def test_the_floor_measures_the_connector_surface_a_turn_actually_binds() -> None:
+    """The ratchet's basis includes the endpoint tools, and this is what would have caught it.
 
-    The sibling test above checks *membership* only, so for as long as this file has existed the
-    figures beside each name were unasserted: re-derived on 2026-09-04, `draft_experiment_protocol`
-    had drifted 2,590 → 2,738 and `structure_experiment_request` 1,075 → 1,095, with nothing red and
-    nothing said. That is `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` happening
-    inside the file that exists to prevent it, one level down from the ceiling it does assert.
+    **This is the assertion whose absence made the whole connector surface invisible.**
+    `_bound_tools` read the compiled graph's `ToolNode` — the honest source — and the call that
+    compiled that graph omitted the `connectors=` argument production passes, so the ratchet gated
+    a turn that does not exist. No test could see it: every figure was self-consistent, and the
+    docstring promising a connector would "land here the moment it is bound" was about the read,
+    not about the call.
 
-    **What this asserts is a band, not equality** — see `OVERSIZED_TOLERANCE` for why, and why it is
-    two-sided. Whoever trips it re-records the number in the same commit that moved it; that is the
-    whole remedy, and the message carries the value to paste.
+    What is asserted is *derived from the manifests*, not transcribed: every tool the enabled
+    bundles this repository serves declare must be in the bound set. A bundle added, a tool added
+    to a manifest, or `connectors=` dropped again all fail here, and the last one fails loudly
+    instead of shrinking the number in silence.
     """
-    _, parts = _floor("default")
-    drifted = {}
-    for name, recorded in KNOWN_OVERSIZED.items():
-        live = parts.get(f"tool:{name}")
-        if live is None:
-            continue  # No longer bound at all; the membership test above is what reports that.
-        if abs(live - recorded) > recorded * OVERSIZED_TOLERANCE:
-            drifted[name] = (recorded, live)
-    assert not drifted, (
-        "these KNOWN_OVERSIZED figures are no longer what the tool costs, by more than "
-        f"{OVERSIZED_TOLERANCE:.0%}: "
-        + ", ".join(
-            f"{name} recorded {rec} but measures {live} ({live - rec:+})"
-            for name, (rec, live) in sorted(drifted.items())
-        )
-        + ". Re-record them in the same commit that moved them, and say in the pull request what "
-        "moved them — a figure nobody re-derives is a claim about the afternoon it was taken."
+    _, _, bound_tools = _observed_prefix(get_profile("default"))
+    bound = {_tool_name(tool) for tool in bound_tools}
+    declared = {
+        tool
+        for manifest in enabled()
+        if manifest.endpoint is not None and manifest.name not in SERVED_ELSEWHERE
+        for tool in manifest.endpoint.tools
+    }
+    assert declared, "no in-repo connector declares an endpoint tool; this test now checks nothing"
+    assert declared <= bound, (
+        f"these declared connector tools are not in the floor's basis: {sorted(declared - bound)}. "
+        "The ratchet is measuring a turn with fewer tools than a deployment binds, which is the "
+        "exact defect `_observed_prefix`'s `connectors=` argument exists to prevent."
     )
 
 
-class _CapturingModel(GenericFakeChatModel):
-    """A model that records the prefix it is sent: the bound tool schemas and the system message.
+def test_the_bundles_this_floor_cannot_measure_are_exactly_the_ones_it_names() -> None:
+    """`SERVED_ELSEWHERE` is a claim about which schemas are out of reach, so it is checked.
 
-    Observed rather than re-derived, for the reason `_bound_tools` gives one function up: a prefix
-    assembled by this file is a second implementation of what the graph assembles, and the two
-    agreeing proves nothing about what leaves the process.
+    A blind spot that drifts is worse than one that is declared: a bundle whose server moved into
+    this tree would silently stay excluded from the ceiling, and a *new* bundle served elsewhere
+    would silently widen the unmeasured half while the ceiling comment kept quoting a share of the
+    prefix. Both directions fail here, which is the two-sidedness `OVERSIZED_TOLERANCE` is written
+    for one level down.
     """
-
-    def bind_tools(self, tools: Any, **kw: Any) -> Any:
-        """Record the schemas exactly as bound, in the order bound — order is part of the bytes."""
-        from langchain_core.utils.function_calling import convert_to_openai_tool
-
-        _SENT.append({"tools": [convert_to_openai_tool(tool) for tool in tools]})
-        return self
-
-    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any) -> Any:
-        """Record the system message this call carries, then answer."""
-        from langchain_core.messages import SystemMessage
-
-        _SENT[-1]["system"] = [m.content for m in messages if isinstance(m, SystemMessage)]
-        return super()._generate(messages, stop=stop, run_manager=run_manager, **kw)
+    endpoint_bundles = {m.name for m in enabled() if m.endpoint is not None}
+    unmeasurable = {name for name in endpoint_bundles if not _served_tools(name)}
+    assert unmeasurable == SERVED_ELSEWHERE & endpoint_bundles, (
+        f"this file can measure the tool schemas of {sorted(endpoint_bundles - unmeasurable)} and "
+        f"not of {sorted(unmeasurable)}, but SERVED_ELSEWHERE names {sorted(SERVED_ELSEWHERE)}. "
+        "Update it and the ceiling comment's share-of-the-prefix figure in the same commit."
+    )
 
 
-#: What `_CapturingModel` recorded, newest last. Module level because the model is constructed by
-#: the graph builder and there is nowhere else for a per-call observation to go.
-_SENT: list[dict[str, Any]] = []
+# --------------------------------------------------------------------------------------------
+# The only cache the shipped gateway has: a prefix whose bytes repeat.
+#
+# `cache_control` breakpoints left with the provider concept
+# (`D-2026-09-04-a-gateway-is-the-only-provider`): every model call goes to one OpenAI-compatible
+# endpoint, which has no such parameter. So the entire remedy for a prefix this size is the
+# *serving* stack recognising a repeated one (vLLM's `--enable-prefix-caching` and its
+# equivalents), which is a deployment decision — and this repository's half of it is that the
+# bytes are worth caching. That half is testable here and nowhere else, because this is the only
+# module that can obtain the request prefix at all.
+# --------------------------------------------------------------------------------------------
 
 
 def sent_prefix(actor: str, correlation_id: str) -> str:
     """The bytes a model call sends before the conversation, for one actor and correlation id.
 
-    Public because `tests/test_prompt_caching.py` drives it in a subprocess to compare two
-    processes; there is no second in-repo way to obtain this string, and re-deriving it there
-    would compare two derivations rather than two processes.
+    Public because the cross-process test below drives it in a subprocess; there is no second
+    in-repo way to obtain this string, and re-deriving it there would compare two derivations
+    rather than two processes.
+
+    Built on the same `_CapturingModel` `_observed_prefix` uses, for the reason that function
+    gives: a prefix assembled by this file would be a second implementation of what the graph
+    assembles, and the two agreeing would prove nothing about what leaves the process. The tool
+    schemas are serialised in the order they were bound, because order is part of the bytes.
     """
-    import asyncio
-    import uuid
+    from langchain_core.utils.function_calling import convert_to_openai_tool
 
-    from langchain_core.messages import HumanMessage
-
-    _SENT.clear()
-    model = _CapturingModel(messages=iter([AIMessage(content="done")]))
+    _RECEIVED.clear()
+    _BOUND.clear()
     graph = build_langgraph_agent(
-        model=model,
+        model=_CapturingModel(messages=iter([AIMessage(content="done")])),
         profile="default",
         actor=actor,
         correlation_id=correlation_id,
@@ -853,25 +1024,30 @@ def sent_prefix(actor: str, correlation_id: str) -> str:
             {"configurable": {"thread_id": uuid.uuid4().hex}},
         )
     )
-    return json.dumps(_SENT[-1], sort_keys=False)
+    return json.dumps(
+        {
+            "tools": [convert_to_openai_tool(tool) for tool in _BOUND],
+            "system": [
+                message.content for message in _RECEIVED if isinstance(message, SystemMessage)
+            ],
+        }
+    )
 
 
 def test_the_prefix_two_sessions_are_sent_is_the_same_bytes() -> None:
     """A prefix cache can only hit on bytes that repeat, so the prefix must not carry a turn in it.
 
-    **This is the precondition under every prompt-caching remedy, and nothing asserted it.** The
-    shipped provider is `openai_compatible` (`deploy/helm/chemclaw/values.yaml`), where
-    `llm_provider.prompt_caching_middleware` returns `[]` — there are no `cache_control`
-    breakpoints to place, so the entire saving depends on the *serving* stack recognising a
-    repeated prefix (vLLM's `--enable-prefix-caching` and its equivalents). That recognition is
-    byte-exact: one timestamp, one correlation id, one session id or one reshuffled tool order
-    anywhere in the prefix turns a fleet-wide cache hit into a full prefill, on every call, with
-    nothing anywhere reporting it.
+    **This is the precondition under the only prompt-caching remedy that still exists, and nothing
+    asserted it.** There are no `cache_control` breakpoints to place on an OpenAI-compatible
+    endpoint, so the entire saving depends on the serving stack recognising a repeated prefix, and
+    that recognition is byte-exact: one timestamp, one correlation id, one session id or one
+    reshuffled tool order anywhere in the prefix turns a fleet-wide cache hit into a full prefill,
+    on every call, with nothing anywhere reporting it.
 
-    Measured 2026-09-05 at 321,856 characters: two turns for different actors, different
-    correlation ids and different threads are **byte-identical**. So the request is shaped
-    correctly today and this test is what keeps it that way — the failure it guards against is a
-    one-line addition to a system prompt, and it would be invisible in every other test here.
+    Measured 2026-09-05: two turns for different actors, different correlation ids and different
+    threads are **byte-identical**. So the request is shaped correctly today and this test is what
+    keeps it that way — the failure it guards against is a one-line addition to a system prompt,
+    and it would be invisible in every other test here.
     """
     first = sent_prefix("alice@example.com", "corr-a")
     second = sent_prefix("bob@example.com", "corr-b")
@@ -886,51 +1062,90 @@ def test_the_prefix_two_sessions_are_sent_is_the_same_bytes() -> None:
     )
 
 
-def test_the_floor_measures_the_connector_surface_a_turn_actually_binds() -> None:
-    """The ratchet's basis includes the endpoint tools, and this is what would have caught it.
+#: What a child process prints: its envelope tag, and the prefix hashed with the tag masked out.
+_CHILD = """
+import hashlib, json, sys
+sys.path.insert(0, "tests")
+from chemclaw.agent.framing import ENVELOPE_TAG
+from test_context_floor import sent_prefix
+prefix = sent_prefix("alice@example.com", "corr-a").replace(ENVELOPE_TAG, "<TAG>")
+print("RESULT " + json.dumps(
+    {"tag": ENVELOPE_TAG, "masked": hashlib.sha256(prefix.encode()).hexdigest()}
+))
+"""
 
-    **This is the assertion whose absence cost 23,427 tokens of blindness.** `_bound_tools` read
-    the compiled graph's `ToolNode` — the honest source — and then compiled that graph without the
-    `connectors=` argument production passes, so the ratchet gated a turn that does not exist. No
-    test could see it: every figure was self-consistent, and the docstring promising a connector
-    would "land here the moment it is bound" was about the read, not about the call.
 
-    What is asserted is *derived from the manifests*, not transcribed: every tool the enabled
-    bundles this repository serves declare must be in the bound set. A bundle added, a tool added
-    to a manifest, or `connectors=` dropped again all fail here, and the last one fails loudly
-    instead of shrinking the number in silence.
-    """
-    bound = {_tool_name(tool) for tool in _bound_tools(get_profile("default"))}
-    declared = {
-        tool
-        for manifest in enabled()
-        if manifest.endpoint is not None and manifest.name not in SERVED_ELSEWHERE
-        for tool in manifest.endpoint.tools
-    }
-    assert declared, "no in-repo connector declares an endpoint tool; this test now checks nothing"
-    assert declared <= bound, (
-        f"these declared connector tools are not in the floor's basis: {sorted(declared - bound)}. "
-        "The ratchet is measuring a turn with fewer tools than a deployment binds, which is the "
-        "exact defect `_bound_tools`'s `connectors=` argument exists to prevent."
+def _child_prefix(**env: str) -> dict[str, str]:
+    """Build the request prefix in a *fresh* process and report its tag and masked hash."""
+    import os
+    import subprocess
+    import sys
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _CHILD],
+        capture_output=True,
+        text=True,
+        timeout=900,
+        env={**os.environ, **env},
+        cwd=str(Path(__file__).resolve().parent.parent),
     )
-
-
-def test_the_bundles_this_floor_cannot_measure_are_exactly_the_ones_it_names() -> None:
-    """`SERVED_ELSEWHERE` is a claim about which schemas are out of reach, so it is checked.
-
-    A blind spot that drifts is worse than one that is declared: a bundle whose server moved into
-    this tree would silently stay excluded from the ceiling, and a *new* bundle served elsewhere
-    would silently widen the unmeasured half while the ceiling comment kept quoting ~87%. Both
-    directions fail here, which is the two-sidedness `OVERSIZED_TOLERANCE` is written for one
-    level down.
-    """
-    endpoint_bundles = {m.name for m in enabled() if m.endpoint is not None}
-    unmeasurable = {name for name in endpoint_bundles if not _served_tools(name)}
-    assert unmeasurable == SERVED_ELSEWHERE & endpoint_bundles, (
-        f"this file can measure the tool schemas of {sorted(endpoint_bundles - unmeasurable)} and "
-        f"not of {sorted(unmeasurable)}, but SERVED_ELSEWHERE names {sorted(SERVED_ELSEWHERE)}. "
-        "Update it and the ceiling comment's share-of-the-prefix figure in the same commit."
+    assert completed.returncode == 0, f"child failed:\n{completed.stderr[-3000:]}"
+    line = next(
+        (ln for ln in completed.stdout.splitlines() if ln.startswith("RESULT ")),
+        None,
     )
+    assert line is not None, f"child printed no result:\n{completed.stdout[-3000:]}"
+    return dict(json.loads(line.removeprefix("RESULT ")))
+
+
+def test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce() -> None:
+    """Across processes the prefix varies in exactly one place, and config decides whether it does.
+
+    **This is the finding, and only a second process could have found it.** Within one process the
+    prefix is byte-identical for any two sessions (the test above asserts that). Across processes
+    it is not: `agent/framing.py::_envelope_nonce` falls back to `secrets.token_hex(8)` when
+    `framing_envelope_secret` is unset, and that value is written into the system prompt — so every
+    replica, and every restart, sends a *different* prefix. Measured 2026-09-05, two processes
+    differed in that one 16-character token and in nothing else.
+
+    A server-side prefix cache is the entire remedy for a prefix this size and it is byte keyed, so
+    an unset `CHEMCLAW_FRAMING_ENVELOPE_SECRET` bounds that cache to one entry per pod-process: at
+    `maxReplicas: 6` the fleet pays six cold prefills for the same bytes and pays them again on
+    every rollout. The secret is already a chart secret and `Settings` already warns when a
+    Postgres session store runs without it, for a *correctness* reason
+    (`D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment`) —
+    this is a second, independent reason to set the same variable.
+
+    **Both halves are asserted rather than one**, because they fail differently: the masked
+    comparison catches anything *else* that is per-process (a boot id, a build stamp, a
+    hash-ordered set — the seeds differ deliberately), and the tag comparison catches the nonce
+    itself losing its configured determinism.
+    """
+    configured = _child_prefix(CHEMCLAW_FRAMING_ENVELOPE_SECRET="probe-secret", PYTHONHASHSEED="0")
+    random = _child_prefix(CHEMCLAW_FRAMING_ENVELOPE_SECRET="", PYTHONHASHSEED="999")
+
+    assert configured["masked"] == random["masked"], (
+        "two processes send different prefixes for a reason other than the envelope nonce, so no "
+        "server-side prefix cache can hit across replicas or across a restart and every model "
+        "call on every pod pays a full prefill of the whole static prefix"
+    )
+    assert configured["tag"] != random["tag"], (
+        "the envelope tag did not vary with `framing_envelope_secret` — either the fallback "
+        "stopped being per-process or the secret stopped reaching it; `agent/framing.py`"
+    )
+    from chemclaw.agent.framing import _envelope_nonce
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "chemclaw.agent.framing.settings",
+            Settings(  # type: ignore[call-arg]
+                _env_file=None, framing_envelope_secret=SecretStr("probe-secret")
+            ),
+        )
+        assert configured["tag"].endswith(_envelope_nonce()), (
+            "a configured envelope secret must give every process the same tag; that determinism "
+            "is what makes one prefix-cache entry serve the whole fleet"
+        )
 
 
 def test_a_narrowing_profile_is_actually_cheaper_than_the_default() -> None:

@@ -1,12 +1,19 @@
-"""The LLM provider seam builds the right client per config, and only here (plan Phase F0).
+"""The LLM gateway seam builds one client, against the configured address, and only here (F0).
 
-These prove the *wiring* — that `build_chat_model` selects the configured provider and carries the
-endpoint/credential/transport into the constructed client — without any network call. The provider
-client classes are monkeypatched so the test asserts on what they were constructed with, not on live
-model behavior.
+These prove the *wiring* — that `build_chat_model` carries the endpoint, credential and transport
+into the constructed client — without any network call. The client is constructed for real, because
+a LangChain chat model exposes those values as attributes: the stronger assertion is available, and
+it doubles as a live check of this module's "construction only, no network call" claim.
+
+**Three of these are about a destination rather than a wiring**, and they are here because this is
+the module that decides one. `D-2026-09-04-a-gateway-is-the-only-provider` removed the provider
+concept after measuring that a second arm silently ignored `llm_base_url`; what makes that
+irreversible is not the deletion but the assertions below that no first-party module can name a
+second vendor's client again.
 """
 
-import sys
+import ast
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,6 +21,133 @@ from pydantic import SecretStr
 
 import chemclaw.agent.llm_provider as provider
 from chemclaw.core.config import Settings, settings
+
+_SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+
+# The distributions that ship a model client, and the *only* first-party modules that may name one.
+# Each entry says what it builds and why nothing else may build it — the sentence
+# `core/config/llm.py` used to make in prose ("No provider client class is imported outside
+# `agent/llm_provider.py`"), which was false in three places and enforced by nothing.
+_PROVIDER_ROOTS = frozenset({"openai", "anthropic", "langchain_openai", "langchain_anthropic"})
+
+_CLIENT_SEAMS: dict[str, str] = {
+    "agent/llm_provider.py": (
+        "the seam: `ChatOpenAI` against the gateway, plus the SDK exception classes the failure "
+        "taxonomy is written from"
+    ),
+    "core/embeddings.py": (
+        "the parallel embedding seam. It cannot go through `build_chat_model` — that builds a "
+        "*chat* model and `ChatOpenAI` cannot embed — so it builds `openai.OpenAI` against the "
+        "same gateway, with the same transport rule (`core/http.private_ca_transport`)"
+    ),
+}
+
+# Modules that name a provider distribution for its *response types* and never a client. The mock
+# gateway is the server side of this protocol: it emits the frames `langchain_openai` deserializes,
+# so it needs the types and would be wrong to hold a client.
+_TYPES_ONLY: dict[str, str] = {
+    "cli/mock_llm.py": "the mock gateway serves the protocol; it emits frames, it does not dial",
+}
+
+
+def _provider_imports() -> dict[str, list[str]]:
+    """Every first-party import of a provider distribution, as {relative path: [targets]}."""
+    found: dict[str, list[str]] = {}
+    for path in sorted(_SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        targets: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                targets += [a.name for a in node.names if a.name.split(".")[0] in _PROVIDER_ROOTS]
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                if node.module.split(".")[0] in _PROVIDER_ROOTS:
+                    targets.append(node.module)
+        if targets:
+            found[str(path.relative_to(_SRC))] = sorted(set(targets))
+    return found
+
+
+def test_a_provider_client_class_is_imported_only_at_the_two_declared_seams() -> None:
+    """The config comment's claim, as an assertion instead of a sentence.
+
+    It read "No provider client class is imported outside `agent/llm_provider.py`" and was false in
+    three places at once, with nothing checking it — `tests/test_third_party_layering.py` in fact
+    *licensed* three packages to import the `llm` stack. A present-tense claim about a control that
+    nothing enforces is the shape this repository has a standing rule against, so the sentence was
+    narrowed to what the tree actually guarantees and this is what holds it there.
+    """
+    declared = set(_CLIENT_SEAMS) | set(_TYPES_ONLY)
+    found = _provider_imports()
+    assert set(found) == declared, (
+        "a module gained or lost a provider-SDK import. Every one is a decision about where a "
+        "prompt can go, so declare it in _CLIENT_SEAMS/_TYPES_ONLY with its reason. "
+        f"unexpected: {sorted(set(found) - declared)}; "
+        f"stale rows: {sorted(declared - set(found))}"
+    )
+
+
+def test_a_types_only_module_holds_no_client() -> None:
+    """`cli/mock_llm.py` may name the wire format; it may not name something that dials.
+
+    The distinction is what makes the row above safe to grant: a server that imports response types
+    is implementing the protocol, and a server that imports a client is a second destination.
+    """
+    found = _provider_imports()
+    for path in _TYPES_ONLY:
+        for target in found[path]:
+            assert ".types" in target, (
+                f"{path} imports {target!r}, which is not a response-type module. "
+                f"{_TYPES_ONLY[path]} — a client here would be a second way out of the pod."
+            )
+
+
+def test_no_first_party_module_imports_the_anthropic_sdk() -> None:
+    """The absence, asserted, because a re-added import is how a second destination comes back.
+
+    `anthropic` and `langchain-anthropic` are no longer declared in `pyproject.toml`, but they stay
+    in the resolved closure because `deepagents` requires the wrapper — so "it is not installed" is
+    not the control and never was. The control is that nothing here imports it —
+    `evals/live_judge.py` was the last importer, and it posted that vendor's own protocol to
+    `<gateway>/v1/messages`,
+    which against an OpenAI-compatible gateway is a doubled path and a 404 degraded to `ungraded`
+    on every probe.
+    """
+    offenders = {
+        path: targets
+        for path, targets in _provider_imports().items()
+        if any(t.split(".")[0] in {"anthropic", "langchain_anthropic"} for t in targets)
+    }
+    assert not offenders, (
+        "a first-party module imports the Anthropic SDK again. Every model call goes through "
+        "`build_chat_model` to one OpenAI-compatible gateway "
+        f"(D-2026-09-04-a-gateway-is-the-only-provider): {offenders}"
+    )
+
+
+def test_a_configured_gateway_is_where_the_model_is_built(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole defect, as one assertion: the configured address is the address dialled.
+
+    Measured on the pre-change tree, with `llm_base_url` set to an internal gateway and the
+    provider left at its shipped default of `anthropic`::
+
+        build_chat_model("agent").anthropic_api_url == 'https://api.anthropic.com'
+
+    — the base URL was accepted by the config, passed every validator, and never reached a client.
+    `api/middleware._refuse_public_llm_exposure` then returned early *because* it was set, and
+    `core/netguard.derive_allowed` put the public host on the egress allowlist. There is no
+    configuration that reproduces it now, which is why this asserts the positive: there is one
+    branch, so the field either arrives or the test is red.
+    """
+    _use_settings(
+        monkeypatch,
+        llm_base_url="https://gateway.internal/v1",
+        llm_model="whatever-the-gateway-serves",
+    )
+    model = provider.build_chat_model("agent")
+    assert str(model.openai_api_base) == "https://gateway.internal/v1"
+    assert not hasattr(model, "anthropic_api_url"), (
+        "a vendor client was built; the gateway address would be ignored"
+    )
 
 
 def _use_settings(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> Settings:
@@ -23,42 +157,12 @@ def _use_settings(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> Settings
     return cfg
 
 
-def test_anthropic_path_preflights_missing_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The Anthropic dev path fails clearly when its key is absent (unchanged pre-seam behavior)."""
-    _use_settings(monkeypatch, llm_provider="anthropic")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
-        provider.build_chat_model()
-
-
-def _fake_openai_client_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Wire fake AsyncOpenAI + OpenAIChatClient and return the dict they capture kwargs into."""
-    captured: dict[str, Any] = {}
-    fake_openai = type(sys)("openai")
-    fake_openai.AsyncOpenAI = lambda **k: None  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "openai", fake_openai)
-    fake_af_openai = type(sys)("agent_framework.openai")
-    fake_af_openai.OpenAIChatClient = lambda **k: captured.update(k)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "agent_framework.openai", fake_af_openai)
-    return captured
-
-
-# --- the LangGraph half of the seam (D-2026-08-10, phase M1) ------------------------------------
-#
-# These construct the *real* `ChatOpenAI`/`ChatAnthropic` rather than faking them through
-# `sys.modules` as the MAF tests above must. That is not a style difference: the MAF clients are
-# faked because asserting on them means asserting on constructor kwargs, while a LangChain chat
-# model exposes the same values as attributes — so the stronger assertion is available, and it
-# doubles as a live check of this module's "construction only, no network call" claim.
-
-
 def test_openai_compatible_model_carries_endpoint_and_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`build_chat_model` points ChatOpenAI at the internal endpoint and honours the task route."""
     _use_settings(
         monkeypatch,
-        llm_provider="openai_compatible",
         llm_base_url="https://llm.internal/v1",
         llm_model="internal-large",
         llm_api_key=SecretStr("generic-key"),
@@ -73,18 +177,23 @@ def test_openai_compatible_model_carries_endpoint_and_route(
     assert default.request_timeout == 12.0
     assert default.max_retries == 5
 
-    # The route is the same dial both halves read, so a deployment cannot end up with the verifier
-    # on the cheap model under one engine and the expensive one under the other.
+    # One dial for every task, so the verifier cannot end up on a different model than the one a
+    # deployment routed it to.
     assert provider.build_chat_model("verifier").model_name == "internal-small"
 
 
 def test_keyless_endpoint_gets_placeholder_for_the_model_half(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A keyless internal endpoint still constructs — the placeholder applies to both halves."""
+    """A keyless gateway still constructs, which is why there is no credential preflight.
+
+    Many internal gateways ignore the bearer, and the OpenAI SDK refuses to construct with an empty
+    `api_key` — so an empty `CHEMCLAW_LLM_API_KEY` is a legitimate configuration served by a
+    placeholder, not a misconfiguration to fail at startup. That is what replaced D-037's eager
+    `ANTHROPIC_API_KEY` check, and `cli/chat.py` says so where it used to promise the check.
+    """
     _use_settings(
         monkeypatch,
-        llm_provider="openai_compatible",
         llm_base_url="https://llm.internal/v1",
         llm_model="internal-model",
         llm_api_key=SecretStr(""),
@@ -92,25 +201,11 @@ def test_keyless_endpoint_gets_placeholder_for_the_model_half(
     assert provider.build_chat_model().openai_api_key.get_secret_value()
 
 
-def test_anthropic_model_path_preflights_missing_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The graph engine gets the same eager credential failure, for a sharper reason.
-
-    Under MAF a missing key surfaced before the turn began. Under the graph engine the model is
-    built inside `build_graph`, so without this preflight the failure would be an opaque 401 in the
-    middle of a stream that has already emitted events — a turn that looks like it started working
-    and then died. Same message, same `_require_anthropic_key`, shared by both halves.
-    """
-    _use_settings(monkeypatch, llm_provider="anthropic")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
-        provider.build_chat_model()
-
-
 def test_the_openai_compatible_model_asks_the_endpoint_for_token_usage() -> None:
     """Without this the cost ledger reads zero, and nothing else notices.
 
     `ChatOpenAI` default-enables `stream_usage` only when *no* custom base URL and *no* custom HTTP
-    client are configured. `_openai_compatible_model` sets both — the internal endpoint and the
+    client are configured. `_openai_compatible_model` sets both — the gateway address and the
     private-CA bundle — so upstream turns it off, the endpoint is never asked to report usage, no
     usage chunk arrives, and `runner_usage.graph_usage_tokens` correctly reads nothing.
 
@@ -146,8 +241,8 @@ def test_an_endpoint_that_cannot_report_usage_can_be_told_so(
 def test_the_private_ca_client_is_built_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
     """A graph is compiled per turn, so an uncached client factory is a per-turn socket leak.
 
-    `build_chat_model` runs on every graph build, and on the `openai_compatible` + private-CA
-    path — the documented production target — it reaches `_tls_http_client`. Uncached, that built a
+    `build_chat_model` runs on every graph build, and with a private CA bundle — the documented
+    production target — it reaches `_tls_http_client`. Uncached, that built a
     fresh `AsyncClient` (its own pool, its own TLS context) per question asked, and nothing ever
     closed one. The verifier and challenge clients already pay `@cache` for exactly this on colder
     paths; this was the hot one.
@@ -185,8 +280,7 @@ def test_no_bundle_leaves_the_sdk_its_own_client(monkeypatch: pytest.MonkeyPatch
 
 
 def _openai_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Put the provider on the `openai_compatible` branch with a primary endpoint configured."""
-    monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
+    """Configure a primary gateway endpoint."""
     monkeypatch.setattr(settings, "llm_base_url", "https://primary.internal/v1")
     monkeypatch.setattr(settings, "llm_model", "internal-large")
     monkeypatch.setattr(settings, "llm_api_key", SecretStr("primary-key"))

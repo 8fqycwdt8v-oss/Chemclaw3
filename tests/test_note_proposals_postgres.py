@@ -215,8 +215,8 @@ def test_re_proposing_a_superseded_version_reopens_it_in_sql() -> None:
     `superseded` says a newer version took the queue slot, not that anyone judged the bytes — so an
     agent regenerating an earlier form (an ordinary miner path) must reopen that row, exactly as a
     landed retry reopens a `failed` one. With only the `failed` arm, re-proposing v1 refreshed v1's
-    row while leaving it superseded *and* `_SUPERSEDE_OLDER` closed v2: every row superseded, the
-    review queue empty while the branch awaited review, and `mark_merged` moving nothing.
+    row while leaving it superseded *and* `_SUPERSEDE_OTHER_OPEN` closed v2: every row superseded,
+    the review queue empty while the branch awaited review, and `mark_merged` moving nothing.
     """
 
     async def _run() -> None:
@@ -238,6 +238,10 @@ def test_re_proposing_a_superseded_version_reopens_it_in_sql() -> None:
         assert reopened.reference == "pr://note/again"
         newer = await store.read(second_id)
         assert newer is not None and newer.state is ProposalState.SUPERSEDED
+        # v1 is *older* than the row it closed. The statement's reason literal was written for the
+        # only case that used to reach it and is false on this path — and it is what a reviewer
+        # reads in the compliance table.
+        assert "newer" not in newer.reason, newer.reason
         # Exactly one open row, and the webhook can close it.
         assert await store.mark_merged(["pg-reverted"], "webhook") == 1
 
@@ -245,7 +249,7 @@ def test_re_proposing_a_superseded_version_reopens_it_in_sql() -> None:
 
 
 def test_re_proposing_a_rejected_version_does_not_close_the_live_one_in_sql() -> None:
-    """`_SUPERSEDE_OLDER` fires on the state the upsert produced, not on the one it was asked for.
+    """`_SUPERSEDE_OTHER_OPEN` fires on the state the upsert produced, not on the one asked for.
 
     Measured before the guard moved: v1 rejected, v2 open, re-propose v1 -> v1 still `rejected`
     (correct), v2 `superseded`, and no open row for the note at all. The `CASE` refusing to reopen

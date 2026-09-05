@@ -37,9 +37,11 @@ class ObservabilitySettings(BaseSettings):
     )
     # One JSON object per line instead of the `%`-format string above. Off in code and on in the
     # chart, the same split `budget_enabled` uses: a developer reading a terminal wants the string,
-    # and a cluster log stack wants to parse rather than guess. The `%`-format is left as the
-    # default *shape* rather than widened with the three ids, because `log_json` supersedes it and
-    # two formats to keep in step is how one of them goes stale.
+    # and a cluster log stack wants to parse rather than guess. (This comment used to close by
+    # arguing the `%`-format was deliberately *not* widened with the ids — which the field two lines
+    # above it had already been, and says why. A reader deciding whether to add `%(actor)s` got
+    # opposite answers from adjacent comments; the superseded half is deleted rather than reworded,
+    # because `log_format`'s own comment is where that argument is made and settled.)
     log_json: bool = False
     # The tool-audit trail (agents.audit): every agent tool call is logged once (name, args,
     # outcome, latency) by one tool-call middleware. Arguments are truncated to this many

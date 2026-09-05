@@ -42,6 +42,12 @@ die() { printf '\033[31m[live] %s\033[0m\n' "$*" >&2; exit 1; }
 # chart ships, and LIVE-8's lesson is exactly that: a configuration only production sets is a
 # configuration nothing tests.
 export CHEMCLAW_SERVICE_HOST="${CHEMCLAW_SERVICE_HOST:-127.0.0.1}"
+# The eval profile directory beside the shipped one, because the tool-utility A/B's control arm is
+# a profile (`data/evals/profiles/no-tools.yaml`) and a profile has to be registered by the process
+# that builds the agent. It is not in `data/profiles/` on purpose — a toolless agent is a
+# measurement instrument, and every deployment that starts the front door advertises what is in
+# there. This lane is where measurements run, so this is where the two directories meet.
+export CHEMCLAW_PROFILES_DIR="${CHEMCLAW_PROFILES_DIR:-data/profiles:data/evals/profiles}"
 export CHEMCLAW_ENTRA_REQUIRED="${CHEMCLAW_ENTRA_REQUIRED:-false}"
 
 # ---------------------------------------------------------------------------- enforced identity
@@ -92,6 +98,17 @@ mint_probe_token() {
 }
 export CHEMCLAW_SESSION_STORE="${CHEMCLAW_SESSION_STORE:-postgres}"
 export CHEMCLAW_CONNECTORS_REQUIRED="${CHEMCLAW_CONNECTORS_REQUIRED:-true}"
+# **This lane's bundles are derived, never listed.** `start_fleet_bundles` iterates
+# `fleet_bundle_names`, the intersection of core's endpoint-declaring bundles and the manifests the
+# fleet actually ships, so a bundle added to either side is picked up without editing this file.
+# That matters because `CHEMCLAW_CONNECTORS_REQUIRED` is true (set above): with `connectors_enabled`
+# unset, discovery is enablement, so a bundle core enables and nothing starts is not a warning —
+# it is a front door that refuses to boot. `rxnpredict` did exactly that when it was wired in
+# against a hardcoded pair, and the fix is to start what is enabled rather than to narrow what is
+# enabled: the core-served bundles (`bo`, `calc`, `molfp`, `rxnfp`, `results`) come from the dev
+# connector process, so constraining `CHEMCLAW_CONNECTORS_ENABLED` here would take those off the
+# lane too.
+
 # Traces, when something is listening for them. `make phoenix-up` puts an OTLP receiver on 4317;
 # with nothing there the exporter retries in the background and the run is unaffected, which is why
 # this is a probe rather than a flag somebody has to remember. Content stays suppressed:
@@ -158,12 +175,6 @@ start_worker() {
   local name="$1" port="$2"; shift 2
   echo "$port" >"$RUN_DIR/$name.port"
   CHEMCLAW_WORKER_METRICS_PORT="$port" start "$name" "$@"
-}
-
-# Whether a model can be reached at all. Asked once, in the same terms `agent/llm_provider.py`
-# branches on, so the two cannot disagree about what "configured" means.
-llm_configured() {
-  [ -n "${ANTHROPIC_API_KEY:-}" ] || [ "${CHEMCLAW_LLM_PROVIDER:-anthropic}" = "openai_compatible" ]
 }
 
 # Poll a URL until it answers 200, or fail naming the log to read. Never a bare sleep: a fixed
@@ -251,11 +262,55 @@ not the fix: it is the posture the chart ships and the one this lane exists to e
   fleet_python_bin || die "could not resolve an interpreter in $MCP_REPO"
 }
 
+# Which bundles this lane must take from the fleet, derived rather than listed.
+#
+# It *was* listed — `for name in chem safety` — and the list went stale the day a third endpoint
+# bundle was added here: `rxnpredict` was discovered, enabled and therefore required, no process
+# served it, and `make live-up` brought up eleven processes and then failed the front door on a
+# connector nobody had noticed was missing. A hardcoded list is a second declaration of a set that
+# already has two authorities, which is the failure this repository names in `manifests/`.
+#
+# So the set is the intersection of the two: a bundle whose manifest *here* declares an
+# `endpoint:` (so the front door will dial it) and which the fleet publishes a manifest for (so
+# this lane knows its port and its module). `bo`, `calc`, `molfp` and `rxnfp` declare an endpoint
+# too and are absent from the fleet's `manifests/`, which is exactly right — they are served by
+# this repository's own `connectors_dev` process, and the loop below rewrites their URLs.
+fleet_bundle_names() {
+  "$1" - "$REPO_ROOT" "$MCP_REPO" <<'PY'
+import pathlib, sys, yaml
+
+repo, fleet = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+for manifest in sorted((repo / "src/chemclaw/connectors").glob("*/connector.yaml")):
+    name = manifest.parent.name
+    if not (yaml.safe_load(manifest.read_text()) or {}).get("endpoint"):
+        continue
+    if (fleet / "manifests" / name / "connector.yaml").exists():
+        print(name)
+PY
+}
+
 start_fleet_bundles() {
   local python="$1" fleet_python="$2"
 
-  local name port
-  for name in chem safety; do
+  # Derived from the fleet, never a list here — see the note beside CONNECTORS_REQUIRED.
+  #
+  # Assigned first, then iterated. `for name in $(cmd)` does not propagate a non-zero exit under
+  # `set -e` — a traceback inside the derivation would print to stderr and the loop would then run
+  # over whatever partial output preceded it, starting some bundles and silently skipping others.
+  # The failure would surface minutes later as the front door's `ConnectorsUnavailable`, naming a
+  # connector nobody had noticed was missing, which is exactly the defect this derivation replaced.
+  # An assignment *does* propagate, so `|| die` here is what makes the guard real - the same shape
+  # `fleet_port` below already uses.
+  local names name port
+  names="$(fleet_bundle_names "$python")" || die "could not derive the fleet bundle list from \
+$REPO_ROOT/src/chemclaw/connectors and $MCP_REPO/manifests"
+  # An empty derivation is a wrong checkout, not a lane with nothing to start. `fleet_checkout_python`
+  # already refuses a missing `$MCP_REPO`; this catches one that exists and publishes no manifest
+  # this repository declares an endpoint for - which would otherwise start no fleet server at all and
+  # fail the front door minutes later on connectors it never mentions.
+  [ -n "$names" ] || die "no fleet bundle is served by both sides: this checkout declares endpoint \
+bundles that $MCP_REPO/manifests does not publish. Is CHEMCLAW_MCP_REPO the right checkout?"
+  for name in $names; do
     port="$(fleet_port "$python" "$name")" || die "no port in $MCP_REPO/manifests/$name/connector.yaml"
     # The same variable name on both sides, which is the manifest's `token_env` and the whole
     # reason a dev token works here: core reads it to send, the server reads it to verify.
@@ -268,8 +323,8 @@ start_fleet_bundles() {
     # address itself is what lets it name the cause instead of pointing at a log.
     if ! running "$name" && curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$port/healthz"; then
       die "$name: 127.0.0.1:$port is already served, and not by a process this lane started.
-This lane owns chem and safety; the four-repo lane reaches them by calling this script, so nothing
-should be starting them twice. Stop the other server, or run \`make live-e2e-full-stack\`."
+This lane owns every fleet bundle this repository declares an endpoint for; the four-repo lane
+reaches them by calling this script, so nothing should be starting them twice. Stop the other server, or run \`make live-e2e-full-stack\`."
     fi
     ( cd "$MCP_REPO" && start "$name" "$fleet_python" -m "uvicorn" "chemclaw_mcp_$name.app:app" \
         --host 127.0.0.1 --port "$port" )
@@ -442,37 +497,51 @@ up() {
   # assembler, the middleware stack, budget admission, the audit sink and the session store all sit
   # between the socket and the agent, and the in-process scripted client in `tests/` bypasses every
   # one of them — its own docstring records passing green while production failed 100% of the time.
-  if [ "${CHEMCLAW_LLM_BASE_URL:-}" = "http://127.0.0.1:8820/v1" ]; then
+  #
+  # **Which gateway this lane runs against is asked of the code that decides it.** The test is
+  # `Settings`' own resolved `llm_base_url` — the value the front door and every worker below will
+  # actually dial, from this same environment — against the address `cli/mock_llm` serves. Neither
+  # string is written here.
+  #
+  # It used to compare `$CHEMCLAW_LLM_BASE_URL` against the mock's address transcribed into this
+  # file, and that broke the moment the address became a `Settings` *default*: no shell in this
+  # lane sets that variable (`Makefile`'s `live-up` is a bare `bash infra/live/processes.sh up`),
+  # so the condition was false, the mock never started, and the front door came up pointed at a
+  # closed port while the line below named the gateway as though it were serving. The defect is
+  # the transcription, not the particular string — `tests/test_config.py` now fails if either
+  # address is written into this script again.
+  local llm_base_url mock_base_url
+  llm_base_url="$("$python" -c \
+    'from chemclaw.core.config import settings; print(settings.llm_base_url)')" \
+    || die "could not resolve the model gateway address — see the error above"
+  mock_base_url="$("$python" -c 'from chemclaw.cli.mock_llm import MOCK_BASE_URL; print(MOCK_BASE_URL)')"
+  if [ "$llm_base_url" = "$mock_base_url" ]; then
     start mock-llm "$python" -m chemclaw.cli.mock_llm
-    wait_for mock-llm "http://127.0.0.1:8820/__mock/stats"
+    wait_for mock-llm "${mock_base_url%/v1}/__mock/stats"
   fi
 
-  # The front door builds the agent — and therefore a chat client — during startup, so with no
-  # model credential it does not fail at the first turn, it fails to boot at all
-  # (`agent/llm_provider.py::_anthropic_client` raises on a missing key). That is correct
-  # behaviour, and it is also why the durable half of the lane is deliberately independent of it:
-  # `make live-jobs` drives Temporal and Postgres with no model in the loop, so it runs here.
-  if llm_configured; then
-    start api "$python" -m uvicorn chemclaw.api.app:create_app --factory \
-      --host 127.0.0.1 --port "$API_PORT"
-  else
-    # Clear any pid file from an earlier run that *did* start it, so `status` reports the
-    # front door as absent rather than as a process that died.
-    rm -f "$RUN_DIR/api.pid"
-    log "no ANTHROPIC_API_KEY and no openai_compatible endpoint — skipping the front door."
-    log "  'make live-jobs' (Temporal + Postgres) runs without it; 'make live-probes' needs it."
-  fi
+  # **The front door always starts now, and the `llm_configured` gate that used to guard it is
+  # gone.** It asked whether `ANTHROPIC_API_KEY` was set, because building the agent built a chat
+  # client and that client's constructor raised on a missing key — so with no credential the front
+  # door failed to *boot* rather than at the first turn. There is one client now
+  # (`D-2026-09-04-a-gateway-is-the-only-provider`), it takes a placeholder bearer for the many
+  # internal gateways that ignore one, and `CHEMCLAW_LLM_BASE_URL` always names a destination:
+  # the mock above by default. So there is nothing left to be un-configured, and a gate that always
+  # passes is worse than none.
+  #
+  # A gateway that *does* want a credential and was not given one is a 401 on the first turn, which
+  # `make live-probes` reports and `make live-jobs` — Temporal and Postgres, no model in the loop —
+  # does not care about.
+  start api "$python" -m uvicorn chemclaw.api.app:create_app --factory \
+    --host 127.0.0.1 --port "$API_PORT"
 
   for worker in worker-background worker-calc worker-bo worker-results; do
     wait_for "$worker" "http://127.0.0.1:$(cat "$RUN_DIR/$worker.port")/readyz"
   done
-  if llm_configured; then
-    wait_for api "http://127.0.0.1:$API_PORT/readyz"
-    log "live stack up. front door: http://127.0.0.1:$API_PORT · logs: $LIVE_DIR"
-    log "  from another terminal, first: eval \"\$(bash infra/live/processes.sh env)\""
-  else
-    log "live stack up (durable half only) · logs: $LIVE_DIR"
-  fi
+  wait_for api "http://127.0.0.1:$API_PORT/readyz"
+  log "live stack up. front door: http://127.0.0.1:$API_PORT · logs: $LIVE_DIR"
+  log "  model gateway: $llm_base_url"
+  log "  from another terminal, first: eval \"\$(bash infra/live/processes.sh env)\""
 }
 
 down() {
@@ -499,12 +568,10 @@ down() {
 
 status() {
   [ -d "$RUN_DIR" ] || { log "nothing running"; return; }
-  # A process that was deliberately skipped leaves no pid file, so it would simply be absent from
-  # the listing below — and "absent" reads the same as "never existed". The front door is the one
-  # that gets skipped on purpose, so it says so rather than going quiet.
-  if [ ! -e "$RUN_DIR/api.pid" ] && ! llm_configured; then
-    printf '  %-20s not started (no model credential — see `make live-up` output)\n' "api"
-  fi
+  # This block used to name the front door as "deliberately skipped" when no model credential was
+  # set, because "absent" reads the same as "never existed". Nothing is skipped any more — the
+  # front door needs no credential to boot — so a missing `api.pid` now means it died, which the
+  # loop below reports as DOWN.
   for pidfile in "$RUN_DIR"/*.pid; do
     [ -e "$pidfile" ] || continue
     local name pid

@@ -1,0 +1,34 @@
+# The control arm of the tool-utility A/B, and the only profile in this repository that exists to
+# be *measured against* rather than used.
+#
+# **Why it is here and not in `data/profiles/`.** Everything under `data/profiles/` is advertised by
+# every deployment that starts the front door, and a toolless agent is not a capability anybody
+# should be able to pick by accident. This directory is on `CHEMCLAW_PROFILES_DIR` only for a run
+# that is measuring — `make live-ab` sets it — so the shipped agent surface does not change. A run
+# that forgets it fails loudly rather than quietly comparing the default profile with itself:
+# `get_profile` raises on an unknown name, and `cli.live_probes --suite ab` checks the front door
+# registered this one before it spends a single model call.
+#
+# **`tool_names: []` is structural, not cosmetic.** `build_langgraph_agent` removes the tool from
+# `_capability_tools` and from every connector's allow-list before `create_agent` is called, so the
+# compiled graph's `ToolNode` never holds them (`agent/langgraph_agent.py`). The skills narrow with
+# it by the mechanism that already exists — a skill whose every declared tool is absent is dropped
+# (`agent/skill_access.py::ToolScopedSkills`) — so this arm carries neither the tools nor the
+# judgment about them.
+#
+# **What it still carries, stated because a control arm that overstates itself is worse than none.**
+# `SubAgentMiddleware` and `FilesystemMiddleware` are in `create_deep_agent`'s required set and
+# cannot be stripped by a profile, so `task` and six file verbs are still bound. None of them
+# reaches this programme's data: the helper is itself compiled from this profile, so it has no
+# capability tools either, and the file verbs write to scratch space that does not outlive the turn.
+# This is "the model answering from what it knows", not "a process with no verbs at all".
+instructions: >-
+  You are a chemistry assistant answering from your own knowledge. You have no tools, no database
+  and no access to this programme's records, so answer the question directly and state plainly
+  where you are uncertain, where a number would have to be measured or computed to be trusted, and
+  where you would be guessing. Do not describe what you would look up; answer, or say you cannot.
+
+# Empty, not absent. `None` means "do not narrow" and would give this arm the whole agent; the empty
+# set is the narrowing itself, and `refuse_undeclared_writes` is attached for it exactly as it is
+# for any other narrowing profile.
+tool_names: []

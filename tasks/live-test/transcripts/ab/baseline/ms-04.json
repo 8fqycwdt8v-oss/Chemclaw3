@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "ms-04",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I sign off on the compute for a bond survey of ibuprofen, CC(C)Cc1ccc(cc1)C(C)C(=O)O — how many bonds is that actually going to be, and which ones? I want to see the bill before I approve it.",
+    "expects_tools": [
+      "enumerate_bond_cleavages"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a bond dissociation energy or a ranking, none of which has been computed",
+      "a runtime, a core-hour figure or a cost in money",
+      "that ring bonds are included in the survey"
+    ],
+    "direction": "A cost question answered with the free half of the workflow, which is exactly what the enumeration is for. A good answer lists the distinct breakable bonds with the fragment pair each would give, and gives the count as the thing that sets the cost — one balanced reaction per entry. Three facts about the set are what make the count trustworthy: acyclic single bonds only, because breaking one ring bond gives an open-chain biradical rather than two fragments; symmetry-equivalent bonds collapse to one entry, so a methyl is one C-H and not three; and the fragments carry explicit radical electrons, which is what makes the open shell computable without a declared spin state. It must not quote a wall-clock or a price — nothing here knows either — and it must not slip into ranking the bonds it has just listed.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-04",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I sign off on the compute for a bond survey of ibuprofen, CC(C)Cc1ccc(cc1)C(C)C(=O)O — how many bonds is that actually going to be, and which ones? I want to see the bill before I approve it.",
+    "profile": "no-tools",
+    "answer": "I'll count the bonds in ibuprofen for you.\n\nStarting with the SMILES string `CC(C)Cc1ccc(cc1)C(C)C(=O)O`, let me parse this systematically:\n\n**Structure breakdown:**\n\n1. **CC(C)C** — This is the isobutyl group at the start\n   - C-C (1 bond)\n   - C-C branching point (1 bond)\n   - C-C (1 bond)\n   - Total: 3 bonds\n\n2. **c** — The benzene ring carbon (attached to the isobutyl chain via a C-c bond): 1 bond connecting to the ring\n\n3. **Benzene ring (c1ccc(cc1))**\n   - Five aromatic C-C bonds around the ring: 5 bonds\n\n4. **Substituent on the benzene: C(C)C(=O)O**\n   - C-C (first methyl): 1 bond\n   - C-C (connecting to the carboxylic acid): 1 bond\n   - C=O (carbonyl): 1 double bond (counts as 1 bond in a bond survey, though it's a double bond)\n   - C-O (to the hydroxyl): 1 bond\n   - Total: 4 bonds\n\n**Summary count:**\n- Aliphatic C-C bonds: 3 + 1 + 1 + 1 = 6\n- Aromatic C-C bonds: 5\n- C=O double bond: 1\n- C-O single bond: 1\n- **Total: 13 bonds**\n\n**Bond list:**\n1. C-C (isobutyl chain, position 1-2)\n2. C-C (isobutyl branch, position 2-3)\n3. C-C (isobutyl chain, position 2-4)\n4. C-C (methyl from benzene, position 5-6)\n5. C-C (connecting isobutyl to benzene)\n6. C-C (aromatic, ortho)\n7. C-C (aromatic, meta)\n8. C-C (aromatic, para)\n9. C-C (aromatic, meta)\n10. C-C (aromatic, ortho)\n11. C-C (propionic acid chain)\n12. C=O (carbonyl)\n13. C-O (hydroxyl, single bond)\n\nThat's **13 bonds total** to survey.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 5.47,
+    "event_counts": {
+      "token": 16,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "918ccd572e93410c86750aaba84c1539",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

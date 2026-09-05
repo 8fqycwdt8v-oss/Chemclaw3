@@ -168,6 +168,15 @@ class ResolvedJob(BaseModel):
     # that a field the template path does not carry is a field that silently means something else
     # on that path.
     timeout_seconds: float | None = None
+    # And its sibling, which arrived on `JobSpec` after that reminder was written and went missing
+    # in exactly the way the reminder describes: `awaits_answer` says the job spends wall clock
+    # waiting on a person, so `child_execution_timeout` hands it no ceiling. Absent here it
+    # defaulted to False, and a campaign that a chat turn may run for a fortnight was killed at the
+    # five-hour fleet ceiling when the same job was a template step. Every field the wrapper reads
+    # off a manifest now travels this model — `tests/test_template_job_step.py` derives that set
+    # from `JobSpec` and `ConnectorJobInput` rather than listing it, so a sixth lands in the check
+    # the day it is declared.
+    awaits_answer: bool = False
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -299,6 +308,7 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
         task_queue=bundle_queue(connector),
         publish_to_graph=job.publish_to_graph,
         timeout_seconds=job.timeout_seconds,
+        awaits_answer=job.awaits_answer,
         payload=payload,
     )
 

@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "rp-04",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "I'm not a chemist. In plain English, what does the team actually know about why our cross-coupling sometimes fails, and how confident should I be in that?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a confidence percentage, success rate or failure rate",
+      "a citation to a note id that was not returned by a retrieval call",
+      "a claim that the record contains more history than it does"
+    ],
+    "direction": "Retrieve first, then translate. The corpus documents two failure modes for this chemistry — protodeboronation under aqueous/basic conditions, and oxygen ingress, which is why degassing has its own playbook — and the answer should explain both without jargon and say roughly how much of the record backs each. Confidence must be qualitative and tied honestly to how thin the evidence base is (a handful of seed notes, not years of production data). A numeric confidence level or an invented failure rate is a fail even if the chemistry is right.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-04",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "I'm not a chemist. In plain English, what does the team actually know about why our cross-coupling sometimes fails, and how confident should I be in that?",
+    "profile": "no-tools",
+    "answer": "I don't have access to your team's records, notes, or experimental data. I can't see what they've documented about your cross-coupling failures—I have no tools to retrieve your ELN, lab notebooks, or any internal analysis.\n\n**To get an honest answer, you'd need to:**\n\n1. **Ask the chemists directly** — they can point you to specific experiments where it failed and what conditions they changed\n2. **Pull up your experimental records** — look for notes on failures, troubleshooting attempts, and any patterns they've identified\n3. **Check if there's a written summary** — optimization reports, playbooks, or meeting notes where they've synthesized what they learned\n\n**What I *can* tell you:** Cross-coupling failures are usually traced to one of a few categories (substrate reactivity, catalyst deactivation, ligand incompatibility, moisture/oxygen sensitivity, or competing side reactions), but **which one is actually happening in your system can only be known by looking at your specific data**—reaction conditions, substrate scope, what changed between runs that worked and runs that failed, and what analytical evidence exists.\n\nIf you can point me to your team's written analysis or experimental notes on the failures, I can help you evaluate how solid their conclusions are and what gaps remain. But I can't invent that information.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 4.85,
+    "event_counts": {
+      "token": 14,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "4b99c6a9f32940a2879de2549576dbff",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

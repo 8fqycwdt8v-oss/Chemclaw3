@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "gr-13",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The Suzuki conditions campaign has been running a while and the last few points went backwards. Do I keep pushing or reset?",
+    "expects_tools": [
+      "resume_campaign",
+      "suggest_next_experiment",
+      "gather_evidence",
+      "expand_note",
+      "recall_observations"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a surrogate model implied where none was fitted",
+      "a trend claimed without reading the runs in their recorded order"
+    ],
+    "direction": "Read the campaign in time order first. There are two defensible paths — reason from the series, or optimize over it — and the answer should say which it took and why. A few points going backwards is not automatically a signal; whether it is depends on the spread of what came before.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-13",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The Suzuki conditions campaign has been running a while and the last few points went backwards. Do I keep pushing or reset?",
+    "profile": "no-tools",
+    "answer": "I'd like to help you decide, but I need to see the actual campaign data to give you sound advice. I don't have access to your ELN or any records—I can only work with what you show me.\n\nTo give you a real answer, I would need to see:\n\n1. **What metric are you optimizing?** (yield, selectivity, cost, safety, etc.)\n2. **The actual data from recent runs**: conditions (temperature, catalyst, solvent, equivalents, time, etc.) and their outcomes\n3. **How far back the campaign goes** and what the trend looked like before the recent downturn\n4. **What changed** in the last few runs—were conditions varied systematically, or did something drift?\n\nThe decision hinges on:\n- **Whether the downturn is real or noise.** If you're at ±3% variation around a plateau, you might just be sampling noise. If you dropped from 85% to 65% yield, something shifted.\n- **Whether you've exhausted the lever you're turning.** If you've pushed temperature up and watched yield peak then decline, you've likely found the optimum and further pushing is just walking downhill.\n- **What headroom remains.** If you're at 92% yield and your goal is 95%, there's a reason to keep exploring. If you're at 45% and the last five runs have been 42%, 40%, 43%, 41%, 44%—you may have hit the method's ceiling.\n- **What reset means.** Changing catalyst? Solvent? Going back to literature conditions? That choice depends on *why* you think things went backwards.\n\n**Can you paste in the recent run table** (conditions and results), or point me to the ELN entry? Then I can help you read the trend and advise whether to keep, pivot, or reset.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.3,
+    "event_counts": {
+      "token": 21,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "294f86ea65cd44908af6e571deddff88",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

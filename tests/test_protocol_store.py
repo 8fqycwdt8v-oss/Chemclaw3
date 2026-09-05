@@ -12,6 +12,7 @@ did not know about. Two chemists editing one plate is the ordinary case.
 
 import asyncio
 from collections.abc import Callable, Coroutine
+from itertools import product
 from typing import Any, TypeVar, get_args
 from uuid import uuid4
 
@@ -795,9 +796,16 @@ def test_two_people_at_one_revision_cannot_both_decide(backend: str) -> None:
 
     `expected_revision` is a compare-and-set on the *document*, so it was silent about the
     decision. Measured before this: alice abandoning revision 1 and bob approving revision 1 both
-    returned, and the header read `approved` — 100 of 100 pairs over `asyncio.gather` as well, with
-    the header landing 16 `approved` / 84 `abandoned`. No race is needed; reading a design,
-    thinking, and clicking is enough.
+    returned, and the header read `approved`. No race is needed; reading a design, thinking, and
+    clicking is enough — which is why this test, the cheaper one, is the one that runs on both
+    backends over a plain sequence.
+
+    **The race is `test_two_deciders_racing_from_one_status_take_exactly_one_write` and it asserts a
+    count, not a split.** This docstring used to add "100 of 100 pairs over `asyncio.gather` as
+    well, with the header landing 16 `approved` / 84 `abandoned`", and neither figure was
+    reproducible: nothing in the tree drove the race at all, and *which* of the two deciders wins is
+    decided by the lock queue — measured 44/56, 51/49 and 47/53 over three runs of a hundred on one
+    commit.
     """
 
     async def _body() -> None:
@@ -830,6 +838,110 @@ def test_two_people_at_one_revision_cannot_both_decide(backend: str) -> None:
         )
         # And the refusal is not a quieter move: nothing was recorded either.
         assert [event.status for event in await store.status_history(design_id)] == ["abandoned"]
+
+    _run(_body)
+
+
+#: How many pairs the racing test drives. Unlike `_TORN_READ_ROUNDS` this is repetition rather than
+#: a probabilistic bound, and the difference is the mechanism: a torn read needs a scheduling window
+#: to open, while this outcome is decided by a row lock that is always taken. Measured 30/30 either
+#: way on both backends — every round took exactly one write, and every round took *both* with
+#: `require_unmoved` neutered — so one round would already be evidence. What the repetition buys is
+#: that both deciders get to be the winner: which one lands is the lock queue's answer, ~50/50 over
+#: 100 Postgres rounds and always the first coroutine in memory, and the assertion is the same
+#: either way. Twenty is what that costs 1.4 s of Postgres for.
+_RACING_DECIDER_ROUNDS = 20
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_two_deciders_racing_from_one_status_take_exactly_one_write(backend: str) -> None:
+    """Two people decide at once from the same status: one write lands, the other is told.
+
+    The race the test above drives sequentially, driven as a race — because nothing in this tree
+    did, while `set_status`, its ADR and the ledger row all quoted a figure from a `gather` run
+    (`100/100 -> 0/100`) that no test reproduced. This reproduces the half that is a property of the
+    code: the *count*. It never asserts which decider wins, because that is the lock queue's answer
+    and it moves from run to run.
+
+    **The pair is chosen so that `require_unmoved` is the only guard that can refuse either move.**
+    Both are legal from `approved`, and — the part that matters — each stays legal from where the
+    other leaves the design, so a refusal here cannot be the transition table's. That is asserted
+    below rather than reasoned about, since a table edit would otherwise quietly change what this
+    test is about.
+
+    Both backends, because `InMemoryDesignStore` is what a deployment without Postgres runs on.
+    Its arm is consistent by construction — nothing in its `set_status` awaits between reading the
+    status and writing it — which is exactly the property worth pinning: an `await` added there
+    would make the dict lose a decision the same way the missing comparison did.
+
+    Two mutations were run against it and both are caught at round 0: neutering `require_unmoved`
+    fails both arms, and dropping `_SELECT_HEAD`'s `FOR UPDATE` fails the Postgres arm alone — so
+    this covers the lock as well as the comparison, which is the pair `set_status` describes.
+    """
+    require_movable("draft", "abandoned", "protocol")
+    require_movable("abandoned", "draft", "protocol")
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        landed = refused = 0
+        for index in range(_RACING_DECIDER_ROUNDS):
+            design_id = _fresh_id(backend, f"race-decide{index}")
+            await store.append(design_id, _design(arms=1), [], author_kind="agent", status="draft")
+            await store.set_status(
+                design_id,
+                "approved",
+                expected_revision=1,
+                expected_status="draft",
+                actor="chemist-a",
+                reason="approved on the bench",
+            )
+
+            # Alice sends it back for another arm; bob retires it. Both read `approved` and neither
+            # sees the other.
+            outcomes = await asyncio.gather(
+                store.set_status(
+                    design_id,
+                    "draft",
+                    expected_revision=1,
+                    expected_status="approved",
+                    actor="alice",
+                    reason="one more arm before we run it",
+                ),
+                store.set_status(
+                    design_id,
+                    "abandoned",
+                    expected_revision=1,
+                    expected_status="approved",
+                    actor="bob",
+                    reason="the SM decomposes above 40 C",
+                ),
+                return_exceptions=True,
+            )
+            refusals = [item for item in outcomes if isinstance(item, BaseException)]
+            assert len(refusals) == 1, (
+                f"round {index}: {2 - len(refusals)} of the two writes landed; exactly one has to, "
+                "or one of the two people was never told their decision was overwritten"
+            )
+            assert isinstance(refusals[0], StatusConflict), (
+                f"round {index}: the loser was refused by something other than the status "
+                f"compare-and-set ({refusals[0]!r})"
+            )
+            landed += sum(1 for item in outcomes if not isinstance(item, BaseException))
+            refused += len(refusals)
+
+            # And the record agrees with the header: the setup's sign-off plus the one move that
+            # landed, newest first.
+            header = await store.summary(design_id)
+            events = await store.status_history(design_id)
+            assert header is not None
+            assert [event.status for event in events] == [header.status, "approved"], (
+                f"round {index}: the header says {header.status!r} and the trail says "
+                f"{[event.status for event in events]}"
+            )
+
+        # The count the store's own docstring quotes, reproduced: one write per pair and one
+        # refusal per pair, summed over the run rather than asserted only round by round.
+        assert (landed, refused) == (_RACING_DECIDER_ROUNDS, _RACING_DECIDER_ROUNDS)
 
     _run(_body)
 
@@ -976,8 +1088,10 @@ def test_a_drafted_protocol_cannot_be_moved_back_to_requested(backend: str) -> N
 #: store. A test that reads the store's own map proves the code agrees with itself and nothing else;
 #: this is the decided table, so a row edited by accident fails on this side.
 #:
-#: Every self-transition (`X -> X`) is legal on top of these and is deliberately *not* written into
-#: the rows: it is one rule about retries rather than five decisions about the lifecycle.
+#: Every self-transition (`X -> X`) is exempt from these rows and is deliberately *not* written into
+#: them: it is one rule about retries rather than five decisions about the lifecycle. Exempt from
+#: the *table* only — the document rules still refuse three of the ten (status, head-kind) repeats,
+#: which `test_a_repeat_is_exempt_from_the_table_and_not_from_the_document_rules` pins.
 _LEGAL_MOVES_AS_DECIDED: dict[str, set[str]] = {
     "requested": {"draft", "abandoned"},
     "draft": {"approved", "abandoned"},
@@ -988,9 +1102,16 @@ _LEGAL_MOVES_AS_DECIDED: dict[str, set[str]] = {
 
 #: The start states each head kind can actually hold. A `protocol` head cannot be `requested` (the
 #: document rule refuses it) and a `request` head cannot be `approved` or `executed` (same rule,
-#: read the other way), so the store matrix below drives 35 of the 25 pairs rather than all of them
-#: — the two it cannot reach, `approved -> requested` and `executed -> requested`, are covered
-#: against `require_movable` itself.
+#: read the other way), so each start state is driven on the head kind that can hold it.
+#:
+#: **Every one of the 25 (from, to) pairs is driven through a real store**, which the matrix now
+#: asserts rather than claiming here — this comment used to say it drove "35 of the 25 pairs",
+#: conflating the store-driven *moves* with the *pairs* they cover, and then named
+#: `approved -> requested` and `executed -> requested` as unreachable when both are driven, through
+#: the `pytest.raises(UnstorableDocument)` arm. What is true of those two is narrower and is the
+#: reason the pure-function test above exists: on the only head kind that can hold their start
+#: state, the refusal that arrives is the *document* rule's, because it runs first. The matrix
+#: asserts which pairs those are, so a start state added here has to say so.
 _PROTOCOL_HEAD_STATES: tuple[DesignStatus, ...] = ("draft", "approved", "executed", "abandoned")
 _REQUEST_HEAD_STATES: tuple[DesignStatus, ...] = ("requested", "draft", "abandoned")
 
@@ -1047,6 +1168,33 @@ def test_every_pair_of_statuses_is_decided_by_the_transition_table() -> None:
             )
 
 
+def test_a_repeat_is_exempt_from_the_table_and_not_from_the_document_rules() -> None:
+    """A repeat skips the table; it does not skip the question of what the document says.
+
+    `require_movable`'s docstring stated the exemption absolutely — "Every self-transition is
+    legal" — and gave it as the reason the table omits `X -> X`. Measured across all ten
+    (status, head-kind) repeats, three are refused: `requested` on a protocol head, and `approved`
+    and `executed` on a request head. The document rules run first and outrank the exemption exactly
+    as they outrank an edge.
+
+    Nothing here is behaviour that should change — those three states are unreachable while
+    `advanced()` demotes the status on every revision that changes the head's kind, which is
+    precisely why an absolute sentence could stand for as long as it did. What is pinned is the
+    *precedence*, because that sentence is what a reader adding a sixth status would rely on.
+
+    Expected from `_document_permits` rather than a written list of three, so the pairs follow the
+    decided rule instead of being restated beside it.
+    """
+    for status in get_args(DesignStatus):
+        for head_kind in ("request", "protocol"):
+            if _document_permits(status, head_kind):
+                require_movable(status, status, head_kind)
+                continue
+            with pytest.raises(UnstorableDocument) as refusal:
+                require_movable(status, status, head_kind)
+            assert status in str(refusal.value)
+
+
 def test_the_transition_table_covers_every_status_the_type_allows() -> None:
     """A sixth `DesignStatus` with no row in the table is a design nothing can move.
 
@@ -1073,72 +1221,111 @@ def test_both_backends_decide_every_reachable_lifecycle_move_identically(backend
 
     A refused move must also leave the header where it was, which is the half a store could get
     wrong on its own: raising after the UPDATE would refuse the caller and move the design anyway.
+
+    **What the walk covers is asserted before it runs**, because the comment above
+    `_PROTOCOL_HEAD_STATES` used to state it in prose and got it wrong in both halves — it counted
+    store-driven moves as if they were status pairs, and named two pairs unreachable that the walk
+    drives through its refusal arm.
     """
+    heads: tuple[tuple[RevisionKind, tuple[DesignStatus, ...], int], ...] = (
+        ("protocol", _PROTOCOL_HEAD_STATES, 2),
+        ("request", _REQUEST_HEAD_STATES, 0),
+    )
+    plan = [
+        (head_kind, current, target, arms)
+        for head_kind, states, arms in heads
+        for current in states
+        for target in get_args(DesignStatus)
+    ]
+    driven = {(current, target) for _, current, target, _ in plan}
+    assert driven == set(product(get_args(DesignStatus), repeat=2)), (
+        f"the walk drives {len(driven)} of the {len(get_args(DesignStatus)) ** 2} status pairs; "
+        "a pair no store test reaches is decided by the pure-function test alone"
+    )
+    # The pairs whose store-side refusal can only ever be the *document* rule's, on every head kind
+    # that can hold their start state — so the pure-function test above is the only place their
+    # *order* refusal is exercised. Derived from the walk and compared against the decided list, so
+    # a start state added to either tuple has to be argued rather than silently changing what the
+    # order rule is tested on.
+    document_only = {
+        (current, target)
+        for current, target in driven
+        if all(
+            not _document_permits(target, head_kind)
+            for head_kind, walked_from, walked_to, _ in plan
+            if (walked_from, walked_to) == (current, target)
+        )
+    }
+    assert document_only == {
+        ("requested", "approved"),
+        ("requested", "executed"),
+        ("approved", "requested"),
+        ("executed", "requested"),
+    }
 
     async def _body() -> None:
         store = await _backend(backend)
-        for head_kind, states, arms in (
-            ("protocol", _PROTOCOL_HEAD_STATES, 2),
-            ("request", _REQUEST_HEAD_STATES, 0),
-        ):
-            for current in states:
-                for target in get_args(DesignStatus):
-                    design_id = _fresh_id(backend, f"move-{head_kind[:4]}-{current}-{target}")
-                    design = _design(arms=arms)
-                    await store.append(
-                        design_id,
-                        design,
-                        [],
-                        author_kind="agent",
-                        status="draft" if arms else "requested",
-                    )
-                    # `expected_status` is required, so the walk states what it is leaving at
-                    # every step — which is also what makes the refusal below unambiguous: a
-                    # `StatusConflict` here would mean the fixture drifted, not that the table
-                    # refused, and the two raise different types.
-                    seen: DesignStatus = "draft" if arms else "requested"
-                    for step in _route_to(head_kind, current):
-                        await store.set_status(
-                            design_id, step, expected_revision=1, expected_status=seen
-                        )
-                        seen = step
-                    where = f"{head_kind} head, {current} -> {target}"
-                    if _order_permits(current, target) and _document_permits(target, head_kind):
-                        await store.set_status(
-                            design_id,
-                            target,
-                            expected_revision=1,
-                            expected_status=seen,
-                            actor="chemist-a",
-                        )
-                        summary = await store.summary(design_id)
-                        assert summary is not None and summary.status == target, where
-                        continue
-                    with pytest.raises(UnstorableDocument):
-                        await store.set_status(
-                            design_id,
-                            target,
-                            expected_revision=1,
-                            expected_status=seen,
-                            actor="chemist-a",
-                        )
-                    summary = await store.summary(design_id)
-                    assert summary is not None and summary.status == current, (
-                        f"the move was refused and the header moved anyway ({where})"
-                    )
+        for head_kind, current, target, arms in plan:
+            design_id = _fresh_id(backend, f"move-{head_kind[:4]}-{current}-{target}")
+            design = _design(arms=arms)
+            await store.append(
+                design_id,
+                design,
+                [],
+                author_kind="agent",
+                status="draft" if arms else "requested",
+            )
+            # `expected_status` is required, so the walk states what it is leaving at every step —
+            # which is also what makes the refusal below unambiguous: a `StatusConflict` here would
+            # mean the fixture drifted, not that the table refused, and the two raise different
+            # types.
+            seen: DesignStatus = "draft" if arms else "requested"
+            for step in _route_to(head_kind, current):
+                await store.set_status(design_id, step, expected_revision=1, expected_status=seen)
+                seen = step
+            where = f"{head_kind} head, {current} -> {target}"
+            if _order_permits(current, target) and _document_permits(target, head_kind):
+                await store.set_status(
+                    design_id,
+                    target,
+                    expected_revision=1,
+                    expected_status=seen,
+                    actor="chemist-a",
+                )
+                summary = await store.summary(design_id)
+                assert summary is not None and summary.status == target, where
+                continue
+            with pytest.raises(UnstorableDocument):
+                await store.set_status(
+                    design_id,
+                    target,
+                    expected_revision=1,
+                    expected_status=seen,
+                    actor="chemist-a",
+                )
+            summary = await store.summary(design_id)
+            assert summary is not None and summary.status == current, (
+                f"the move was refused and the header moved anyway ({where})"
+            )
 
     _run(_body)
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_a_repeated_sign_off_is_a_no_op_rather_than_a_refusal(backend: str) -> None:
-    """Every `X -> X` is legal, and this is the reason the table permits them.
+    """Every `X -> X` is legal, and this is the case that needs it: a repeat by somebody who read.
 
     `Chemclaw3_ui`'s sign-off panel renders a *Mark X* button for all five statuses whatever the
-    design's current one is, so `approved -> approved` is one click away by construction — and a
-    move whose response is lost is reported to the chemist as "The status was not recorded" when it
-    may well have been, so pressing again is the ordinary recovery. Forbidding the repeat would turn
-    a button the client offers into a 422 on the one screen where the answer is "it already worked".
+    design's current one is, so `approved -> approved` is one click away by construction — a second
+    approver co-signing, the same chemist recording a second reason, or a retry made *after* the
+    screen was reloaded. Forbidding the repeat would turn a button the client offers into a 422 on
+    the one screen where the answer is "it already worked".
+
+    **It is not the lost-response retry**, which this docstring and the comment below both used to
+    name: a panel that has not re-read still shows the pre-move status, so that retry names the old
+    status and is refused one guard earlier.
+    `test_a_retry_that_has_not_re_read_is_refused_before_the_repeat` drives that scenario, because
+    writing it as a no-op here fails.
 
     The event row is still written, which is the half worth asserting: a repeat is somebody acting a
     second time, and `experiment_protocol_status_events` is the record of who moved a design and
@@ -1149,24 +1336,83 @@ def test_a_repeated_sign_off_is_a_no_op_rather_than_a_refusal(backend: str) -> N
         store = await _backend(backend)
         design_id = _fresh_id(backend, "retry")
         await store.append(design_id, _design(arms=1), [], author_kind="agent", status="draft")
-        # Both clicks state `draft`, because that is what the panel was showing when the chemist
-        # pressed the button twice — a retry does not re-read. The second one therefore exercises
-        # `require_unmoved` *and* the table's self-transition together, which is the case that would
-        # break if either forbade it.
-        for reason in ("clicked approve", "clicked approve again"):
+        # Each click states what the panel was showing when it was pressed, which is what makes the
+        # second one a repeat at all: it names `approved`, because this chemist is looking at an
+        # approved design. That click exercises `require_unmoved` *and* the table's self-transition
+        # together, which is the case that would break if either forbade it.
+        clicks: tuple[tuple[DesignStatus, str], ...] = (
+            ("draft", "clicked approve"),
+            ("approved", "approved again, with the plate in front of me"),
+        )
+        for seen, reason in clicks:
             await store.set_status(
                 design_id,
                 "approved",
                 expected_revision=1,
-                expected_status="draft" if reason.endswith("approve") else "approved",
+                expected_status=seen,
                 actor="chemist-a",
                 reason=reason,
             )
         summary = await store.summary(design_id)
         assert summary is not None and summary.status == "approved"
         assert [event.reason for event in await store.status_history(design_id)] == [
-            "clicked approve again",
+            "approved again, with the plate in front of me",
             "clicked approve",
+        ]
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_retry_that_has_not_re_read_is_refused_before_the_repeat(backend: str) -> None:
+    """The lost response, driven as code — and it is a refusal, not the `X -> X` exemption.
+
+    `require_movable`'s exemption was justified by this scenario: a move whose response is lost is
+    reported to the chemist as "The status was not recorded" when it may well have been, so pressing
+    again is the ordinary recovery, "and it arrives here as `X -> X`". Measured on both backends it
+    does not arrive there at all. `Chemclaw3_ui` reloads the design only on a *successful* move, so
+    after a lost response the panel still shows the pre-move status, the retry sends that as
+    `expected_status`, and `require_unmoved` refuses it — `require_movable` is never reached.
+
+    Which guard answered is the assertion, and the exception type is what says so: `StatusConflict`
+    is `require_unmoved`'s alone, and a repeat refused by the table would be `UnstorableDocument`.
+
+    Nothing here argues the refusal is wrong — the caller *is* out of date, and the store cannot see
+    that the person it is out of date with is the caller themselves. What it is evidence against is
+    the sentence that said this path is exempt.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        design_id = _fresh_id(backend, "lost-response")
+        await store.append(design_id, _design(arms=1), [], author_kind="agent", status="draft")
+        await store.set_status(
+            design_id,
+            "approved",
+            expected_revision=1,
+            expected_status="draft",
+            actor="chemist-a",
+            reason="clicked approve",
+        )
+
+        # The response to that click never reached the browser, so the panel still reads `draft`
+        # and the second click says so.
+        with pytest.raises(StatusConflict, match="not 'draft' as you saw it"):
+            await store.set_status(
+                design_id,
+                "approved",
+                expected_revision=1,
+                expected_status="draft",
+                actor="chemist-a",
+                reason="clicked approve again",
+            )
+
+        summary = await store.summary(design_id)
+        assert summary is not None and summary.status == "approved"
+        # The first click is recorded once and the retry adds nothing, which is the half a reader of
+        # the old comment would have expected to be a second row.
+        assert [event.reason for event in await store.status_history(design_id)] == [
+            "clicked approve"
         ]
 
     _run(_body)

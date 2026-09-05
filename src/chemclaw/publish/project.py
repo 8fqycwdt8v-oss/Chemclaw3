@@ -32,7 +32,7 @@ from datetime import datetime
 from typing import Any
 
 from chemclaw.core.chem import canonical_smiles, compound_id
-from chemclaw.publish.properties import to_canonical
+from chemclaw.publish.properties import definition_for, to_canonical
 from chemclaw.publish.record import (
     CandidateFact,
     Conditions,
@@ -264,6 +264,37 @@ def _flag(name: str, value: bool | None, *, member: int | None = None) -> Proper
 def _kept(*facts: PropertyFact | None) -> list[PropertyFact]:
     """Drop the Nones — the one place absence is turned into an omitted row."""
     return [fact for fact in facts if fact is not None]
+
+
+def _facts_belong_in_the_scalar_table(facts: list[PropertyFact]) -> None:
+    """Refuse a projection that wrote a quantity the registry declares for another table.
+
+    This is the control `properties.ScopeKind` claims and did not have: nothing compared a fact's
+    property against `definition_for(name).scope_kind`, so a per-atom, per-point or per-conformer
+    quantity written as a scalar was stored rather than caught, and the placement a site's
+    `property_definition` table ships was a statement a consumer could not trust. Measured, one
+    shipped projection did exactly that — every species distribution published `relative_energy`,
+    a *per-conformer* quantity, as a calculation scalar.
+
+    **Here rather than on `PropertyFact`, because a registry mismatch is a projection bug and
+    cannot be caused by data — and only this side is a projection.** The model is also what
+    `durable/publish_results._drain_one` parses a queued document back through, so the same check as
+    a validator refused rows this system had already written and dead-lettered them; see the note on
+    `record.PropertyFact`. Raising is right where `_identify` degrades instead: the alternative to
+    failing a projection is a row nobody can find under a name that means something else.
+
+    `calculation` names the scalar table and covers *both* of that table's row scopes, so the
+    per-species facts a reaction publishes at `member` scope are not violations — `FactScope` on
+    the row is what distinguishes them.
+    """
+    for fact in facts:
+        declared = definition_for(fact.property).scope_kind
+        if declared != "calculation":
+            raise ProjectionError(
+                f"property {fact.property!r} is registered at {declared!r} scope, so its values "
+                f"belong in that table rather than in `property_value` — see "
+                "`publish.properties.ScopeKind`"
+            )
 
 
 def _warnings(messages: list[str]) -> list[FlagFact]:
@@ -1901,6 +1932,10 @@ def project(
     ran_on = structure_id or next(
         (member.structure_id for member in subject.members if member.structure_id), ""
     )
+    properties = list(extra.get("properties", []))
+    # Checked here, on the one funnel every projector and every multi-record emitter goes through,
+    # so a projector cannot avoid it by being written after this line.
+    _facts_belong_in_the_scalar_table(properties)
     return ResultRecord(
         calc_ref=calc_ref,
         calc_type=calc_type,
@@ -1911,7 +1946,7 @@ def project(
         conditions=conditions,
         level=level,
         structure_id=ran_on,
-        properties=extra.get("properties", []),
+        properties=properties,
         sites=extra.get("sites", []),
         points=extra.get("points", []),
         conformers=extra.get("conformers", []),

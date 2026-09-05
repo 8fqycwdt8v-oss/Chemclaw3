@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-02",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I need a catalyst and ligand shortlist for a Buchwald-Hartwig amination of an electron-rich aryl bromide with a cyclic secondary amine — think 4-bromoanisole plus morpholine as the model. What has actually worked, and what should I put on a first screen?",
+    "expects_tools": [
+      "similar_reactions",
+      "gather_evidence",
+      "find_notes",
+      "similar_molecules",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted yield for any ligand",
+      "a computed ligand ranking or a calculated ligand-metal binding energy",
+      "a literature or patent citation"
+    ],
+    "direction": "Evidence-grounded answer is genuinely possible here — the corpus holds the seed Buchwald note (Pd(OAc)2/RuPhos, 2:1 L:Pd, NaOtBu, toluene, 100 °C, 71%) and thousands of real published HTE amination records. A good answer names ligands that actually appear in the retrieved records rather than a generic phosphine list, says how many records it looked at, and distinguishes 'this lab's own recorded run' from 'published HTE screening data run under screening conditions'. It should not present HTE plate conditions as process conditions. No yield numbers attributed to the shortlist.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-02",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I need a catalyst and ligand shortlist for a Buchwald-Hartwig amination of an electron-rich aryl bromide with a cyclic secondary amine — think 4-bromoanisole plus morpholine as the model. What has actually worked, and what should I put on a first screen?",
+    "profile": "no-tools",
+    "answer": "I'm going to give you a straightforward answer from chemistry knowledge, since this is a well-established reaction class.\n\n## What Has Actually Worked\n\nThe **Buchwald-Hartwig amination is highly reliable for exactly this substrate pair** — electron-rich aryl bromide + cyclic secondary amine is one of the classic, proven combinations. You're in a favorable regime.\n\n**Catalyst/Ligand combinations with strong literature precedent:**\n\n1. **Pd(OAc)₂ + BINAP** — The original and still excellent. Robust, broad scope. Works at moderate temperatures (80–100 °C).\n\n2. **Pd(dba)₂ + BINAP** — Often preferred over Pd(OAc)₂ for this coupling. Similar performance, sometimes cleaner profiles.\n\n3. **Pd(OAc)₂ + DPEphos** — Excellent for secondary amines, including cyclic ones. Slightly faster than BINAP under equivalent conditions.\n\n4. **Pd₂(dba)₃ + XPhos or BrettPhos** — If you want to go more modern: XPhos is bulky and electron-rich, drives reductive elimination hard, works at lower catalyst loadings (0.5–2 mol %). BrettPhos is similar but with better air/moisture tolerance.\n\n5. **Pd(OAc)₂ + Xantphos** — Another solid option, especially if you're doing larger scale and want robustness.\n\n**Base:** Cs₂CO₃ is the standard and works very well here. NaOtBu is an alternative if you want something cheaper.\n\n**Temperature & Time:** 80–100 °C, typically 4–24 h depending on catalyst loading and base.\n\n## First Screen Recommendation\n\nIf I were running this tomorrow, I'd screen **three conditions in parallel**:\n\n| **Entry** | **Catalyst** | **Ligand** | **Equiv Base** | **Temp (°C)** | **Expected Profile** |\n|---|---|---|---|---|---|\n| 1 | Pd(dba)₂ (2 mol %) | BINAP (2.2 mol %) | Cs₂CO₃ (2) | 100 | Gold standard; reliable |\n| 2 | Pd(OAc)₂ (1 mol %) | XPhos (1.1 mol %) | Cs₂CO₃ (2) | 80 | Faster, modern, lower loading |\n| 3 | Pd(OAc)₂ (2 mol %) | DPEphos (2.2 mol %) | Cs₂CO₃ (2) | 100 | Excellent for secondary amines |\n\n**Why these three:**\n- **Entry 1** is the conservative, proven choice — if it works (and it should), you know you have a solid baseline.\n- **Entry 2** is modern and lower-loading — if XPhos works, you save money and get faster kinetics.\n- **Entry 3** is specifically tuned for cyclic secondary amines and often runs faster than BINAP.\n\nFor 4-bromoanisole + morpholine, you should expect **>80% conversion** across all three within 12–24 h, assuming your solvent is toluene or DMF and your aryl bromide/amine ratio is roughly 1:1.5–2.\n\n## Caveats\n\n- I'm answering from general knowledge of the literature; I haven't looked up what *your lab* or *your records* have specifically run.\n- If you have access to your own group's optimization notes or a reaction database, **check those first** — your lab may have refined conditions for your specific setup.\n- Morpholine is electron-donating and nucleophilic, so you're in the *easy* part of the scope. If you later screen on a more hindered or electron-poor amine, the ranking might change.\n\nDo you have access to prior runs in your group's records, or are you starting fresh?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 11.34,
+    "event_counts": {
+      "token": 34,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "cabd1f21afc34dab93b5433e3879ce51",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "probe": {
+    "id": "ms-16",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Where does an electrophile go on CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1? The single-geometry ranking you gave last week disagreed with what we saw at the bench, and I think the answer moves with the shape.",
+    "expects_tools": [
+      "run_regioselectivity_in_conformer",
+      "compute_ensemble_property"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a site ranking or Fukui index the calculation did not return",
+      "a ranking compared against another molecule's indices",
+      "a prediction of the reaction outcome as though sterics and the reagent were in the model"
+    ],
+    "direction": "The asker has diagnosed it themselves, and they are describing exactly the case this exists for: a flexible substrate whose single-conformer ranking disagreed with the bench. The right move is a ranking averaged over the populated conformers, and the spread is what turns it into an answer — a ranking that survives the spread is robust to shape, and one that does not is an artefact of whichever geometry was embedded, which is the finding the asker actually needs. Two reading rules must appear: the indices rank sites within this molecule only and never between molecules, and they describe electronic susceptibility alone, so sterics, the reagent and the solvent are outside the model. Reporting a winning site with no spread, or quietly presenting the electronic ranking as a prediction of the reaction, are the two ways this goes wrong.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-16",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Where does an electrophile go on CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1? The single-geometry ranking you gave last week disagreed with what we saw at the bench, and I think the answer moves with the shape.",
+    "profile": "",
+    "answer": "I need to check what turn this refers to, but first—you're asking a conformational regioselectivity question, and that's exactly the case where a single-geometry ranking can miss the answer. Let me run a conformer-weighted ranking so we see the site reactivity *across the populated shapes*.\n\nBefore I call the calculation, let me load the skill that governs this:Good — so the skill confirms that a single-geometry Fukui ranking on a flexible molecule can silently report the wrong site. You need the ensemble. Now let me search for what you're referring to from last week and then run the conformer-weighted ranking:Good, I've launched the conformer-weighted regioselectivity calculation. Let me poll it while we work:The job is computing—it's running a CREST conformer search on your substrate, then computing Fukui indices at each populated geometry and Boltzmann-averaging them. That will tell us whether the ranking really does shift with shape.\n\nIn the meantime, here's what the site map shows: your molecule has **aliphatic C-H sites** (the isobutyl side chain at atoms 0, 1, 3, 4), **amide nitrogens** (atom 5 on the Boc protecting group, atom 15 on the benzyl carbamate), **ester and amide carbonyls** (electrophilic), **a benzyl CH2** (atom 16), and a **benzene ring** with ortho, meta, and para positions. For electrophilic attack the ranking will focus on the C-H and aromatic sites.\n\nLet me also check the record to see if we have precedent for this substrate or similar ones, and what the earlier single-geometry answer was:The corpus indices aren't populated for molecules or reactions, so there's no precedent on file. That means your bench observation and the computational answer are the only evidence we have right now.\n\nLet me poll the regioselectivity job again:That job failed—likely a conformer-search issue. Let me instead run a single-geometry Fukui ranking *on a relaxed geometry* to at least give you a stable reference, then we can ask whether that one matches the bench observation better:Good. Now let me compute the Fukui indices on that relaxed geometry:Let me try the fresh-embedding version without the structure id:Good. Now let me map those atom indices to positions on the molecule:\n\nThe single-geometry Fukui ranking ranks electrophilic attack as follows:\n\n1. **Index 14 (carbonyl O of the benzyl carbamate, f_minus = 0.109)** — the amide carbonyl\n2. **Index 26 (H, f_minus = 0.0555)** — a hydrogen on the benzene ring (ortho position to the CH2)\n3. **Index 48 (H, f_minus = 0.0426)** — aromatic H on the benzene ring  \n4. **Index 7 (O, f_minus = 0.0423)** — the ester oxygen of the Boc protecting group\n5. **Index 5 (N, f_minus = 0.042)** — the nitrogen of the Boc protecting group\n\n**The key issue**: this ranking is reporting the *carbonyl oxygen* as the most electrophilic site, followed by aromatic hydrogens. But that's because the ranking includes every atom — and oxygens, with their lone pairs, rank high for nucleophilic *attack* (f_minus for nucleophilicity), not for electrophilic attack. The ranking mode here is backwards from what an electrophile sees.\n\nFor **where an electrophile attacks this molecule**, I need to think about which *carbon* sites are most susceptible. Looking at the ranking by carbon atoms and hydrogens (the reactive sites for an external electrophile):\n\n- The **benzene ring aromatic hydrogens** (indices 26, 48, 31–33) all rank in the top half, scattered between 0.025 and 0.055\n- The **benzyl CH2** is not specifically marked in the highest rankings\n- The **aliphatic C-H sites** from the isobutyl chain are lower\n\nThe bench disagreement suggests the single-geometry calculation is reporting an aromatic substitution (the benzene ring) when you're seeing attack somewhere else — likely on the **aliphatic chain or the amide** in a conformation where that site becomes more exposed.\n\n**To resolve this properly**, the conformer-weighted calculation should have told us whether the same sites rank differently as the molecule changes shape. Since that job failed, I need to dig into:\n\n1. What chemistry did you observe at the bench? (Which site was substituted, or which impurity appeared?)\n2. What was the electrophile or electrophilic condition you used?\n\nOnce I know that, I can either run the conformer search again or suggest which bond-rotations to profile if the calculation is blocking on CREST availability. The fact that last week's answer disagreed with your observation is a genuine signal that shape matters here — and that's worth understanding because it changes what the next experiment should measure.",
+    "answered": true,
+    "tools_called": [
+      "read_file",
+      "read_file",
+      "run_regioselectivity_in_conformer",
+      "describe_sites",
+      "get_durable_job_status",
+      "substrate_precedent",
+      "similar_molecules",
+      "get_durable_job_status",
+      "optimize_geometry",
+      "predict_site_reactivity",
+      "predict_site_reactivity"
+    ],
+    "tool_results": [
+      {
+        "tool": "read_file",
+        "preview": "  1  ---\n  2  name: conformational-analysis\n  3  description: >-\n  4    Judgment for molecular shape — reading a torsion profile, deciding when one conformer\n  5    is enough and when it silently inva"
+      },
+      {
+        "tool": "read_file",
+        "preview": "  1  ---\n  2  name: reactivity-descriptors\n  3  description: >-\n  4    Judgment for reading GFN2-xTB electronic descriptors — Fukui site rankings, the\n  5    conceptual-DFT panel, partial charges, bon"
+      },
+      {
+        "tool": "run_regioselectivity_in_conformer",
+        "preview": "template-regioselectivity-in-conformer-75ef6689c56454ca"
+      },
+      {
+        "tool": "describe_sites",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"chem:describe_sites\">\n{\n  \"smiles\": \"CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1\",\n  \"sites\": [\n    {\n      \"site_id\": \"site_1f4d60eb9143bed8\",\n      \"atoms\": [\n      "
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='template-regioselectivity-in-conformer-75ef6689c56454ca' status='running' summary=None result={} calc_refs=[] rationale=''"
+      },
+      {
+        "tool": "similar_molecules",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"molfp:similar_molecules\">\n{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      },
+      {
+        "tool": "substrate_precedent",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:substrate_precedent\">\n{\n  \"question\": \"reactions using CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1\",\n  \"hits\": [],\n  \"coverage\": {\n    \"labelled\": 0,\n    \"total\""
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='template-regioselectivity-in-conformer-75ef6689c56454ca' status='failed' summary='ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)' result={} calc_refs=[] rationale=''"
+      },
+      {
+        "tool": "optimize_geometry",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"calc:optimize_geometry\">\n{\n  \"smiles\": \"CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1\",\n  \"structure_id\": \"st_aace75a429e16046\",\n  \"method\": \"GFN2-xTB\",\n  \"engine\": \"tbl"
+      },
+      {
+        "tool": "predict_site_reactivity",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"calc:predict_site_reactivity\">\n{\n  \"smiles\": \"CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1\",\n  \"structure_id\": \"st_f0fb442e2aa9296c\",\n  \"method\": \"GFN2-xTB\",\n  \"solvent"
+      }
+    ],
+    "tools_failed": [
+      "predict_site_reactivity"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "0",
+      "1",
+      "3",
+      "4",
+      "5",
+      "15",
+      "16",
+      "14",
+      "0.109",
+      "2",
+      "26",
+      "0.0555",
+      "48",
+      "0.0426",
+      "7",
+      "0.0423",
+      "0.042",
+      "31",
+      "33"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [
+      "template-regioselectivity-in-conformer-75ef6689c56454ca"
+    ],
+    "job_outcomes": {
+      "template-regioselectivity-in-conformer-75ef6689c56454ca": "FAILED"
+    },
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 64.33,
+    "event_counts": {
+      "token": 72,
+      "tool_call": 11,
+      "tool_result": 10,
+      "job_started": 1,
+      "tool_failed": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "7f39d7513af04e6a991703ba53189144",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

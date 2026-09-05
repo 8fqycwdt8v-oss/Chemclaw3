@@ -1359,11 +1359,12 @@ def _resolved_model() -> str:
     label) — and the table had no such column and no writer. So the one place model attribution was
     said to live was the one place it did not.
 
-    Read from config rather than off the built model, and derived in one expression rather than by
-    re-walking `build_chat_model`'s provider branch: `model_routes["agent"]` wins where a deployment
-    routes per task, `llm_model` is required and non-empty under `openai_compatible` and empty
-    otherwise, and `agent_model` is the Anthropic default. So this resolves exactly what that
-    function would build, for both providers, without a second copy of the branch.
+    Read from config rather than off the built model, and in one expression:
+    `model_routes["agent"]` wins where a deployment routes per task, and `llm_model` is what
+    `build_chat_model` falls back to — validated non-empty, so there is nothing to default behind
+    it. An `or settings.agent_model` tail stood here while that field existed; it was a vendor
+    model id in git whose only other reader was the deleted Anthropic branch
+    (`D-2026-09-04-a-gateway-is-the-only-provider`).
 
     **One turn can span models and this column names the agent's**, deliberately: the verifier's
     judge runs on the `verifier` route (F10-E), which may be a different, cheaper model, and its
@@ -1371,7 +1372,7 @@ def _resolved_model() -> str:
     route table; the agent route is the one that produced the answer, and this is a comment saying
     so rather than a claim that the turn used exactly one model.
     """
-    return settings.model_routes.get("agent") or settings.llm_model or settings.agent_model
+    return settings.model_routes.get("agent") or settings.llm_model
 
 
 def _book_turn_spend(

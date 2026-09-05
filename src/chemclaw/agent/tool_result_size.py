@@ -94,6 +94,23 @@ def _notice(tool: str, removed: int, total: int) -> str:
     )
 
 
+def _brief_notice(tool: str, removed: int) -> str:
+    """The shortest honest form of the sentence above, for a share too small to hold it.
+
+    A batch's share is `agent_max_tool_result_chars // width`, so a wide enough fan-out drives it
+    below the explanatory notice — and the explanatory notice is then *longer than the budget it is
+    explaining*. Returning it anyway is what made the bound stop bounding: each result floored at
+    ~312 characters, so the batch total grew linearly with width (measured 124,800 characters at
+    width 400 against a 60,000 ceiling, and 312,000 at width 1000).
+
+    The model loses the advice about narrowing its question, which is the right thing to lose: at
+    this width it is not going to read four hundred copies of it. What it keeps is the three facts
+    it cannot act correctly without — that something was removed, how much, and that the removal is
+    the system's rather than the tool's, so an empty-looking answer is not read as an empty result.
+    """
+    return f"[{removed:,} chars cut from this {tool} result by the system]"
+
+
 def _spans(content: Any) -> list[str]:
     """Every span of text in a `ToolMessage.content`, in order.
 
@@ -118,7 +135,29 @@ def _block_text(block: Any) -> str:
     return ""
 
 
-def _kept(spans: list[str], limit: int, notice: str) -> list[str]:
+def _carrier(content: Any, spans: list[str]) -> int:
+    """The first block index whose text `_rebuilt` will actually keep.
+
+    `_kept` used to put the notice at index 0 unconditionally, and `_rebuilt` drops the text it
+    computed for any block that is neither a string nor a dict with a `text` key — so a result
+    whose first block is an image lost the notice entirely: measured, 9,000 characters removed, the
+    truncation counter incremented, and the model handed the image alone with nothing saying the
+    rest had gone. The silent cut this module exists to prevent, one block along.
+
+    Falls back to 0 when no block can carry text, which is the case where `_rebuilt` returns the
+    content untouched anyway and there is nothing to say.
+    """
+    if isinstance(content, str):
+        return 0
+    for index, _ in enumerate(spans):
+        block = content[index] if isinstance(content, list) and index < len(content) else None
+        carries_text = isinstance(block, dict) and isinstance(block.get("text"), str)
+        if isinstance(block, str) or carries_text:
+            return index
+    return 0
+
+
+def _kept(spans: list[str], limit: int, notice: str, carrier: int = 0) -> list[str]:
     """Per-span replacement text: a prefix from the front, a suffix from the back, nothing between.
 
     Positional rather than a concatenation, so a multi-block result keeps its blocks — and with
@@ -131,6 +170,8 @@ def _kept(spans: list[str], limit: int, notice: str) -> list[str]:
         spans: The result's text spans, in order.
         limit: Total characters the result may keep, notice excluded.
         notice: The sentence explaining the cut.
+        carrier: The earliest index whose text survives `_rebuilt`; the notice never lands
+            before it, because a block that carries no text span drops whatever is computed for it.
 
     Returns:
         One replacement per input span, same length and same order.
@@ -163,9 +204,12 @@ def _kept(spans: list[str], limit: int, notice: str) -> list[str]:
     # the result was silently shortened instead. `agent_max_tool_result_chars` is `ge=0`, so a
     # deployment can reach that, and `bounded_content` reaches it deliberately whenever the limit
     # is smaller than the sentence explaining the cut.
+    # The notice goes on the block that will survive `_rebuilt` — `max(last_head, 0)` decided
+    # where the *budget* ran out, which is not the same question as which block can hold a
+    # sentence, and on an image-first result the two answers differ.
+    at = max(last_head, carrier)
     return [
-        heads[index] + (notice if index == max(last_head, 0) else "") + tails[index]
-        for index in range(len(spans))
+        heads[index] + (notice if index == at else "") + tails[index] for index in range(len(spans))
     ] or [notice]
 
 
@@ -219,11 +263,29 @@ def bounded_content(content: Any, tool: str, limit: int) -> tuple[Any, int]:
     if limit <= 0 or total <= limit:
         return content, 0
     widest = len(_notice(tool, total, total))
+    carrier = _carrier(content, spans)
+    if limit < widest:
+        # The share is smaller than the sentence explaining the cut, so the sentence is the thing
+        # that has to give: keeping the explanatory form anyway floors every result at its ~312
+        # characters and makes the batch total grow with the width instead of being bounded by the
+        # ceiling — 124,800 characters at width 400 against a 60,000 ceiling, measured.
+        #
+        # **The brief form is not itself cut**, and that is the one place this function
+        # deliberately returns more than `limit`. Cutting it would buy the arithmetic and sell the
+        # contract: at a limit of 1 the result is `[`, which is a silent cut wearing a bracket.
+        # What it costs is bounded and unreachable in practice — the brief form is 19 characters,
+        # so the batch only exceeds the ceiling above width `ceiling // 19`, which at the shipped
+        # 60,000 is **3,158 tool calls in one assistant message**. Below that the total falls
+        # rather than rises, because 19 is far under the share it replaces.
+        brief = _brief_notice(tool, total)
+        if total <= len(brief):
+            return content, 0
+        return _rebuilt(content, _kept(spans, 0, brief, carrier)), total
     if total <= widest:
         return content, 0
     kept = max(limit - widest, 0)
     removed = total - kept
-    return _rebuilt(content, _kept(spans, kept, _notice(tool, removed, total))), removed
+    return _rebuilt(content, _kept(spans, kept, _notice(tool, removed, total), carrier)), removed
 
 
 def batch_width(request: Any) -> int:

@@ -127,8 +127,15 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
 ## Talk to the agent from a terminal (testing)
 
 The production ingress is Teams/Copilot with Entra-ID SSO (architektur.md §7). For local
-testing there is a CLI: `make chat` (or `uv run chemclaw --admin`). It needs `ANTHROPIC_API_KEY`
-in the environment — the chat client preflights it and fails with a clear message otherwise.
+testing there is a CLI: `make chat` (or `uv run chemclaw --admin`). It needs a model gateway
+answering at `CHEMCLAW_LLM_BASE_URL` — the default is `chemclaw.cli.mock_llm` on loopback, so a
+fresh checkout starts with no credential at all; point it at a real OpenAI-compatible gateway and
+put that gateway's credential on `CHEMCLAW_LLM_API_KEY`. **There is no credential preflight**
+(`D-2026-09-04-a-gateway-is-the-only-provider`): an empty key is a legitimate configuration,
+because many internal gateways ignore the bearer, so a gateway that does want one answers 401 on
+the first turn rather than at construction. What still fails at construction is a *blanked*
+`CHEMCLAW_LLM_BASE_URL`, which is a misconfiguration and is reported as one sentence and an exit
+code.
 
 - **Admin mode is required.** Entra auth is enforced at the *front door* (F4), and this CLI has no
   browser OIDC token to validate, so it runs only with `--admin`: it bypasses auth, advertises every skill, and stamps the audit trail with
@@ -161,7 +168,7 @@ make live-up        # connectors (:8810), the four Temporal workers, the front d
                     # backend (:8860) that every durable calculation job dials
 make live-status    # what is running
 make live-jobs      # STAGE A: a real durable job, no model needed
-make live-probes    # STAGE B: the probe corpus through the front door (needs ANTHROPIC_API_KEY)
+make live-probes    # STAGE B: the probe corpus through the front door (needs a real gateway)
 make live-down && make live-infra-down
 ```
 
@@ -181,8 +188,8 @@ it, because `note_repo_dir` defaults to the working checkout and every submissio
 note branch to that clone's origin, so the gate refuses it (G4) and the whole
 knowledge-contribution half of a run silently disappears.
 
-**`make live-storm` is the third stage, and it needs no model at all.** Point the lane at the mock
-(`CHEMCLAW_LLM_PROVIDER=openai_compatible`, `CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`,
+**`make live-storm` is the third stage, and it needs no model at all.** The shipped default already
+points the lane at the mock (`CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`,
 `CHEMCLAW_LLM_MODEL=mock`) and `make live-up` starts `chemclaw.cli.mock_llm` alongside everything
 else. The storm then drives load, adversarial model behaviour and the front door's own limits with
 zero LLM calls — the mock reports how many requests it served, which is how the run *proves* that
@@ -208,10 +215,13 @@ that never ran. Pass `ARGS='--only du-01 --no-judge'` to narrow a run.
 
 Notes on the stack itself:
 
-- **The front door will not boot without a model credential.** It builds the agent during startup,
-  so `ANTHROPIC_API_KEY` (or `CHEMCLAW_LLM_PROVIDER=openai_compatible` plus a base URL) is required
-  for Stage B. `make live-up` skips it and says so when neither is set; the workers still come up,
-  which is why Stage A is independent of it.
+- **The front door boots with no model credential, and that is a change.** It used to fail at
+  startup because building the agent built a client whose constructor raised on a missing
+  `ANTHROPIC_API_KEY`, so `make live-up` skipped it and said so. There is one client now
+  (`D-2026-09-04-a-gateway-is-the-only-provider`), it accepts a placeholder bearer for the many
+  internal gateways that ignore one, and `CHEMCLAW_LLM_BASE_URL` always names a destination — so
+  the front door always starts and a gateway that wanted a credential answers 401 on the first
+  turn. Stage B still needs a real model behind that address; Stage A never did.
 - **The lane pins `CHEMCLAW_SERVICE_HOST=127.0.0.1`.** With `entra_required=false` the front door
   refuses a non-loopback bind (SEC-2) and the default is `0.0.0.0`, so without this it would
   correctly fail to start.
@@ -727,7 +737,7 @@ Scrape `/metrics` and read the four spend counters together:
 
 ```
 chemclaw_input_tokens_total       # fresh prompt tokens, full price
-chemclaw_cache_read_tokens_total  # prompt tokens served from the provider's cache, ~10x cheaper
+chemclaw_cache_read_tokens_total  # prompt tokens served from the gateway's cache, ~10x cheaper
 chemclaw_cache_write_tokens_total # tokens written to the cache, priced above a fresh input token
 chemclaw_output_tokens_total      # completion tokens, unaffected by any of this
 ```
@@ -737,24 +747,31 @@ implies a different action:
 
 | Reading | What it means | What to do |
 | --- | --- | --- |
-| `cache_read` is a large fraction of prompt spend | The provider is already caching the prefix without being asked | Nothing. The saving is banked; a `cache_control` mechanism would add code for a benefit you already have. |
+| `cache_read` is a large fraction of prompt spend | The gateway is already caching the prefix without being asked | Nothing. The saving is banked; a `cache_control` mechanism would add code for a benefit you already have. |
 | `cache_read` ≈ 0 and `input` is large | The prefix is being re-billed every turn | There is a real saving to chase — see the caveats below before estimating it. |
 | `cache_write` grows while `cache_read` stays flat | The cache is being paid for and never used | Sessions are too short or too spread out to hit it; shortening the prefix beats caching it. |
 
-`cache_write` is **structurally 0 on the `openai_compatible` provider** — it reports cache reads but
-has no cache-write concept — so a zero there on the production provider is not a fault and not a
-signal. On the Anthropic dev path it is real.
+**Expect `cache_write` to read a flat 0**: an OpenAI-compatible endpoint caches implicitly and
+reports reads, and only some report a write count at all, so a zero there is the normal reading
+rather than a fault. `cache_read` is the number that says whether caching is happening.
+
+**There is no `cache_control` to switch on any more, and that is a cost this deployment accepted.**
+A `prompt_caching_middleware` marked the static prefix with Anthropic's `cache_control` breakpoints
+on the dev provider; the collapse to one OpenAI-compatible gateway removed the second client and
+took that with it (`D-2026-09-04-a-gateway-is-the-only-provider`). The mechanism was never reachable
+from the production path anyway: `cache_control` is a vendor spelling, and the gateway client is
+the one that does not know it — `grep -rc cache_control` over the two installed packages returns
+**zero** for `langchain_openai` against dozens for `langchain_anthropic` (62 on 1.6.1, but the
+count is not the point and goes stale on the next bump; the zero is). So what changed is that the
+*dev* path lost a saving the production path never had. Whether a prefix is cached is now entirely
+the gateway's decision, and these counters are how you find out.
 
 Two caveats that make the saving smaller than a naive prefix measurement suggests, both of which
 cost this review a wrong estimate:
 
-- **Measure the provider you actually run.** The ~14.6 k-token prefix figure that started REV-9 was
-  measured on the Anthropic dev path. Production is `openai_compatible`, where `langchain_openai`
-  contains **zero** occurrences of `cache_control` — the mechanism is not reachable from there at
-  all, so the fix is upstream work, not a config change here. This survived the rebuild of layer 1
-  unchanged, and it was re-measured rather than assumed to: the previous framework's OpenAI client
-  had the same zero, and `langchain_anthropic` has 74 occurrences, which is why the dev path can
-  do what the production path cannot.
+- **Measure the deployment you actually run.** The ~14.6 k-token prefix figure that started REV-9
+  was measured on the removed Anthropic dev path, against a mechanism the gateway path cannot
+  reach. Re-measure before quoting it.
 - **The system half is not cacheable as the prompt is assembled.** `deepagents.SkillsMiddleware`
   renders the skills manifest into a string with `system_prompt_template.format(...)` and appends
   it to the system message, so the half that changes least is welded to the half that changes most.
@@ -788,7 +805,7 @@ all described it, and nothing could have told you.
 | the line is absent from `/metrics` | You are not scraping this process | Not a compaction signal at all: `core/metrics.py` pre-seeds every declared counter, so both names render at `0` from the first scrape of a process that has served nothing. An absent line means the worker's `/metrics` port is unscraped (`CHEMCLAW_WORKER_METRICS_PORT`), not that the policy is unwired. |
 | rising steadily, `reclaimed` large per compaction | Long sessions are routinely over budget | Expected on a deployment with real chemists. Read it against `chemclaw_turn_duration_seconds`: reduction is cheap (sub-millisecond to ~6 ms per call), so a slow turn is not this. |
 | rising on almost every call | The budget is below this deployment's normal turn | Raise `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET` toward the model's real context window. Compacting a thread that would have fit spends estimator passes and drops context for nothing. |
-| rising on **every** call, from the first one | A configured trigger is below this request's own prefix, so it floors at 1 — "reduce on every model call" | Grep the process for `context.trigger_floored`, a WARNING naming the setting, its value and the measured prefix. Both context settings are budgets on the whole *request*: the system message, the skills listing and every bound tool schema come off them before the thread gets anything, and that prefix measured 43,175 estimated tokens on `default` on 2026-09-04. The shipped `CHEMCLAW_AGENT_TOOL_RESULT_CLEAR_TRIGGER` is 73,500, above that prefix, so a shipped deployment is **not** in this state and this row means someone lowered it; raise it back above the prefix (and keep it at or below the budget, which startup enforces). |
+| rising on **every** call, from the first one | A configured trigger is below this request's own prefix, so it floors at 1 — "reduce on every model call" | Grep the process for `context.trigger_floored`, a WARNING naming the setting, its value and the measured prefix. Both context settings are budgets on the whole *request*: the system message, the skills listing and every bound tool schema come off them before the thread gets anything, and that prefix measured 43,681 estimated tokens on `default` on 2026-09-05. The shipped `CHEMCLAW_AGENT_TOOL_RESULT_CLEAR_TRIGGER` is 74,500, above that prefix, so a shipped deployment is **not** in this state and this row means someone lowered it; raise it back above the prefix (and keep it at or below the budget, which startup enforces). |
 
 Per-model attribution for the same spend **is not on this surface, and is no longer missing**. The
 old framework emitted `gen_ai.client.token.usage` labelled by request model, response model,
@@ -1303,8 +1320,9 @@ outage does move.
 on the tools and data dashboards, taking `histogram_quantile(0.95, …)` over each histogram's
 `_bucket` series: `chemclaw_tool_duration_seconds` **by `tool`** — that label is what makes "which
 tool is slow" answerable at all, and it did not exist until this pass — then
-`chemclaw_model_call_duration_seconds` by provider, then `chemclaw_evidence_source_seconds` by
-source. Slow turns hold admission permits, so this tends to precede `ChemclawTurnsShed`.
+`chemclaw_model_call_duration_seconds` — the gateway's own latency, unlabelled because there is
+one endpoint — then `chemclaw_evidence_source_seconds` by source. Slow turns hold admission
+permits, so this tends to precede `ChemclawTurnsShed`.
 
 #### ChemclawTurnsTimingOut
 `warning`. Someone waited out `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` and got nothing. If
@@ -1510,6 +1528,54 @@ omitted `bo` and the capability stayed dark.) It does **not** undo a data conver
 `chemclaw-convert` is a `post-upgrade` hook whose backfill rewrites `session_messages` rows, and
 neither rollback nor uninstall re-runs or reverses it — which is also why this chart must not be
 deployed with `helm upgrade --atomic` (`deploy/jenkins/targets/openshift.sh` does not).
+
+**Rolling back *across* that move is the one rollback that is not routine.** A revision installed
+before `chemclaw-config` and the ServiceAccount became tracked has neither object in its manifest,
+so Helm deletes both while restoring Deployments that name them — and prints "Rollback was a
+success!". Both now carry `helm.sh/resource-policy: keep`, which Helm reads off the live object at
+deletion time, so they survive it; measured on k3s v1.29.9, with the annotation the same rollback
+leaves both standing and the pods start. What survives is the **newer** release's configuration,
+because the target revision has none to restore — so after a rollback past that boundary, check it:
+
+```
+helm history chemclaw -n <ns>                       # is the target revision from the older chart?
+kubectl -n <ns> get configmap chemclaw-config -o yaml   # this is the newer release's data
+```
+
+Prefer rolling *forward* across that boundary. Note the cost the annotation buys this with:
+`helm uninstall` now leaves those two objects behind, which is what the older chart did.
+
+### `helm upgrade` refuses: "exists and cannot be imported into the current release"
+
+```
+Error: UPGRADE FAILED: Unable to continue with update: ServiceAccount "chemclaw" in namespace
+"<ns>" exists and cannot be imported into the current release: invalid ownership metadata;
+annotation validation error: missing key "meta.helm.sh/release-name" ...
+```
+
+**Expected, once, for every release installed before `chemclaw-config` and the runtime
+ServiceAccount became tracked resources.** On the previous chart both were `pre-install,pre-upgrade`
+hooks with `hook-delete-policy: before-hook-creation`, so they persist between releases — and Helm
+creates hook resources with a plain `Create`, so they carry no ownership annotations. The current
+chart claims those same two names in the manifest, and Helm will not adopt an unowned object.
+
+Nothing is half-applied: this is a prepare-time refusal, before any hook runs, and
+`helm upgrade --dry-run` refuses identically. `deploy/jenkins/targets/openshift.sh` performs the
+adoption itself (and reports it without acting when `DRY_RUN=true`, its default), so the pipeline
+path needs nothing here. For a hand-run `helm upgrade`, adopt the two objects and re-run:
+
+```
+kubectl -n <ns> annotate --overwrite configmap/chemclaw-config serviceaccount/chemclaw \
+  meta.helm.sh/release-name=<release> meta.helm.sh/release-namespace=<ns>
+kubectl -n <ns> label --overwrite configmap/chemclaw-config serviceaccount/chemclaw \
+  app.kubernetes.io/managed-by=Helm        # already set by the old chart; harmless if unchanged
+helm upgrade --install <release> deploy/helm/chemclaw -n <ns> ...
+```
+
+Adopt only objects your own previous release created — check `helm.sh/hook` and
+`app.kubernetes.io/instance=<release>` on them first (`kubectl get -o yaml`). An object that
+collides for any other reason is somebody else's, and taking it over is a decision rather than a
+step.
 
 **The Job says a migration was edited after being applied.** `MigrationError`, and the fix is never
 to edit the file back: `schema_migrations` records a checksum precisely so an in-place change is

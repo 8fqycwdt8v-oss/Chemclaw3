@@ -300,19 +300,65 @@ def _prompt(protocol: Protocol) -> str:
 
 
 def _client() -> Any:
-    """The condensing chat client, built from the one provider seam on the routed task.
+    """The condensing chat client, built from the one seam on the routed task.
 
-    Imported inside the function and built inside the guard at the call site, which is
-    `verifier._default_client`'s measured lesson: a deployment whose `"protocol-digest"` route is
-    unreachable must get the *deterministic* digest, not no digest — and `build_chat_model` raising
-    at module import would take the tool out entirely.
+    Imported inside the function rather than at module scope, so a tool whose model is unreachable
+    still loads: the deterministic half of this comparison needs no model at all, and the whole
+    degrade story below depends on this module importing cleanly.
+
+    **Construction no longer tells you whether a model is *reachable*, and it can still raise.**
+    Those are two claims and only the first survived review. This call sat inside a `try/except`
+    whose comment said "no reachable route is the deployment state this degrade exists for" — true
+    only because the seam's other arm preflighted `ANTHROPIC_API_KEY` and raised. With one gateway
+    (`D-2026-09-04-a-gateway-is-the-only-provider`) an empty credential is a legitimate
+    configuration, so reachability is discovered where it actually is: one call per protocol,
+    degrading that row to `unreadable`, which is what `_read_prose` was already written to do. The
+    old branch was also *wrong* about what to do with it — it returned every row as `recorded` with
+    `complete=True`, claiming every protocol was read when none was — and that half is gone for
+    good.
+
+    **What came back with it is the guard against construction raising for another reason.**
+    Config alone can fail before a socket is ever opened: `CHEMCLAW_LLM_TLS_CA_BUNDLE` naming a
+    file that is not on the pod reaches `ssl.create_default_context(cafile=...)` through
+    `core.http.private_ca_transport` and raises `FileNotFoundError` — measured, and a mistyped path
+    or an unmounted secret is the likeliest misconfiguration of the documented production stack.
+    Unguarded, that costs the whole comparison rather than its prose columns. So the caller guards
+    this again and degrades to the *same* per-protocol `unreadable` rows a dead endpoint produces
+    — `agent/verifier.py::_default_client`'s recorded lesson, which is that moving a construction
+    out of its guard once cost a deployment its offline verification.
     """
     from chemclaw.agent.llm_provider import build_chat_model
 
     return build_chat_model("protocol-digest")
 
 
-async def _read_prose(protocol: Protocol, client: Any) -> ProtocolDigest:
+def _unreadable(
+    protocol: Protocol, base: ProtocolDigest, refusal: str | None = None
+) -> ProtocolDigest:
+    """The one shape of a row nothing could read: counted, marked, and excerpted from the source.
+
+    Three sites reach it — a call that failed, a call that answered with no structured value, and a
+    client that could never be built — and they must not drift apart, because `complete`, the
+    `degraded` list and the "Not read" column are all derived from `digest_source` alone. Written
+    once for the same reason `_changes` puts `both_recorded` inside the change helpers rather than
+    beside each caller: a rule copied per call site is a rule that holds at some of them.
+
+    `refusal` is optional because one of the three has nothing to add — a structured call that
+    returned the wrong type says nothing a chemist can act on that the row does not already say.
+    """
+    record_metric(
+        lambda m: m.increment("chemclaw_protocol_digests_total", 1, {"outcome": "degraded"})
+    )
+    return base.model_copy(
+        update={
+            "digest_source": "unreadable",
+            "evidence_excerpt": _excerpt(protocol.text, settings.note_excerpt_chars),
+            "refusal": refusal,
+        }
+    )
+
+
+async def _read_prose(protocol: Protocol, client: Any | None) -> ProtocolDigest:
     """Read one whole protocol's prose, degrading to the record alone rather than failing.
 
     **One protocol, one call, never a fraction of one.** The map unit is the whole procedure: a
@@ -344,6 +390,18 @@ async def _read_prose(protocol: Protocol, client: Any) -> ProtocolDigest:
                 ),
             }
         )
+    if client is None:
+        # No model was built at all. The caller says so by handing `None` rather than by failing
+        # mid-call, and it has already been through `degraded()` once — once per turn, not once per
+        # protocol, because one unbuildable client is one fact however many rows it costs. The row
+        # is marked exactly as a dead endpoint's is: "nothing read this" is the same statement
+        # whichever half failed, and a second `digest_source` for it would only invite a reader to
+        # think one of them is less unread than the other.
+        return _unreadable(
+            protocol,
+            base,
+            "no condensing model could be built; the recorded figures are unaffected",
+        )
     try:
         async with asyncio.timeout(settings.protocol_digest_timeout_seconds):
             response = await client.with_structured_output(
@@ -359,26 +417,11 @@ async def _read_prose(protocol: Protocol, client: Any) -> ProtocolDigest:
             "could not condense protocol %r; its recorded figures still stand",
             protocol.ref,
         )
-        record_metric(
-            lambda m: m.increment("chemclaw_protocol_digests_total", 1, {"outcome": "degraded"})
-        )
-        return base.model_copy(
-            update={
-                "digest_source": "unreadable",
-                "evidence_excerpt": _excerpt(protocol.text, settings.note_excerpt_chars),
-                "refusal": "the procedure could not be read; the recorded figures are unaffected",
-            }
+        return _unreadable(
+            protocol, base, "the procedure could not be read; the recorded figures are unaffected"
         )
     if not isinstance(response, _Extraction):
-        record_metric(
-            lambda m: m.increment("chemclaw_protocol_digests_total", 1, {"outcome": "degraded"})
-        )
-        return base.model_copy(
-            update={
-                "digest_source": "unreadable",
-                "evidence_excerpt": _excerpt(protocol.text, settings.note_excerpt_chars),
-            }
-        )
+        return _unreadable(protocol, base)
     record_metric(
         lambda m: m.increment("chemclaw_protocol_digests_total", 1, {"outcome": "extracted"})
     )
@@ -571,8 +614,20 @@ async def condense_protocols(
     """Condense whole protocols into one comparison, reading each of them exactly once.
 
     The deterministic half needs no model and no credential: the figures come from each protocol's
-    `conditions` frontmatter. The model is asked only what the prose can answer, once per whole
-    protocol, bounded by `protocol_digest_max_parallel`.
+    `conditions` frontmatter, so a model that is unreachable — or that could not be built at all —
+    costs the *prose* columns and the `complete` flag, never the comparison. Every recorded figure
+    still compares, and that is what lets this tool ship with no enable flag. The model is asked
+    only what the prose can answer, once per whole protocol, bounded by
+    `protocol_digest_max_parallel`.
+
+    **A "no model at all" shortcut used to sit here and it is not what came back.** That branch
+    reported `complete=True` over protocols nothing had read — a claim that every procedure was
+    read when none was — and it is gone for good. What is guarded again is only the *raise*:
+    building the client is pure config and config alone can fail (a private-CA bundle path that is
+    not on the pod raises `FileNotFoundError`, measured), and between #313 and this an unbuildable
+    model cost the entire call rather than one column. Those protocols are `unreadable` rows with
+    `complete` False now, exactly as a dead endpoint's are, and the degrade is counted once for the
+    turn rather than once per row.
 
     `asyncio.Semaphore` rather than `durable.orchestrator.fan_out`, which starts child *workflows*
     and is unreachable from a tool. The corpus-scale case is already served by
@@ -593,28 +648,25 @@ async def condense_protocols(
         try:
             client = _client()
         except Exception:
-            # No reachable route is the deployment state this degrade exists for: the comparison is
-            # still rendered from every record's own figures, which is most of its value and needs
-            # nothing but the notes.
+            # Construction opens no socket, so this is not the unreachable-endpoint case — that one
+            # is discovered per protocol below. It is the misconfigured-transport case, and it is
+            # the reason this call is guarded at all: a CA bundle path that is not on the pod
+            # raises out of `ssl.create_default_context`. Through `degraded()` because it is this
+            # repository's chokepoint for "we continued with less", and once here rather than once
+            # per protocol because one unbuildable client is one fact. `client` stays None, which
+            # `_read_prose` reads as "nothing to read the prose with".
             degraded(
                 logger,
                 "protocol_digest",
-                "no condensing model is reachable; comparing recorded figures only",
+                "no condensing model could be built; comparing recorded figures only",
             )
-            client = None
-    if client is None:
-        rows = [
-            ProtocolDigest(ref=p.ref, source=p.source, title=p.title, digest_source="recorded")
-            for p in protocols
-        ]
-    else:
-        limit = asyncio.Semaphore(settings.protocol_digest_max_parallel)
+    limit = asyncio.Semaphore(settings.protocol_digest_max_parallel)
 
-        async def _one(protocol: Protocol) -> ProtocolDigest:
-            async with limit:
-                return await _read_prose(protocol, client)
+    async def _one(protocol: Protocol) -> ProtocolDigest:
+        async with limit:
+            return await _read_prose(protocol, client)
 
-        rows = list(await asyncio.gather(*(_one(p) for p in protocols)))
+    rows = list(await asyncio.gather(*(_one(p) for p in protocols)))
     # Ordered once, here, so `rows` and `table` are the same sequence: "changed vs previous" is a
     # claim about the row above it, and two orderings would make it a claim about a different one.
     order = _ordered(protocols, rows)

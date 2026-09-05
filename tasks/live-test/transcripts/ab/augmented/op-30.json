@@ -1,0 +1,82 @@
+{
+  "probe": {
+    "id": "op-30",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Write up the Suzuki flow screen we have indexed as a campaign summary I can circulate — what was screened, what won, and what it doesn't tell us.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions",
+      "propose_knowledge_note",
+      "request_development_report"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a yield or condition not present in a cited record",
+      "the screen was run in order to achieve X (intent the records do not state)",
+      "I have circulated or sent this",
+      "the summary has been added to the knowledge graph"
+    ],
+    "direction": "Builds the summary from the indexed flow-Suzuki records with every claim attributable to a cited record: what factors were varied, what the best-performing conditions were, and what the spread looks like. The third part of the question is the one that separates a good answer — an explicit section on what the screen does not establish: substrates outside those screened, anything the records simply do not carry (which is said to be not recorded, never inferred), and the difference between what performed best in this screen and what would transfer. Causal or intent claims beyond the structural facts of the records are out of bounds. If the summary is to become durable it goes through the proposal route as agent-authored and human-reviewed, and the answer should say it is not yet approved.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-30",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Write up the Suzuki flow screen we have indexed as a campaign summary I can circulate — what was screened, what won, and what it doesn't tell us.",
+    "profile": "",
+    "answer": "I'll help you write up the Suzuki flow screen. Let me first find the indexed campaign and gather the details.Let me try a broader search:Let me check what campaigns are in the system:I'm not finding a Suzuki flow screen campaign note in the knowledge graph. Before I write a summary, I need you to clarify which campaign you're referring to:\n\n- **Do you have a campaign id or note id** for this screen? (e.g., `campaign-suzuki-flow-001` or similar)\n- **Or is this a set of runs you'd like me to synthesize?** If so, can you point me to:\n  - Where the runs are stored (a note id, an experiment protocol design id, or a reaction-note id)?\n  - What substrates, reagents, or conditions were varied in the screen?\n  - What the outcome metric was (yield, conversion, selectivity)?\n\nAlternatively, if this campaign exists in the ELN or in past job records but hasn't been written to the knowledge graph yet, I can search for it there — but I'd need to know how to find it (a project tag, date range, or the specific transformation).\n\nWhat can you tell me about where this screen lives?",
+    "answered": true,
+    "tools_called": [
+      "find_notes",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.59,
+    "event_counts": {
+      "token": 18,
+      "tool_call": 3,
+      "tool_result": 3,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "2968d86c1df648eea0b0d775e64b6b79",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

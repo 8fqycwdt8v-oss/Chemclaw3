@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "op-19",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nobody here has run this coupling before. I've got four solvents I can use and a temperature range of 40 to 120, and nothing else. Where do I start?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "ask_clarifying_question"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the model predicts",
+      "these are the optimal starting conditions",
+      "a prior run or historic yield that was not supplied"
+    ],
+    "direction": "Two things have to happen. First, the 120 C bound is challenged *before* the tool is called, against the solvents actually named — a bound past a solvent's reflux or decomposition point is not something to accept quietly and flag only once a candidate lands there. Asking which bound is meant, or proposing a defensible one with the reasoning, both count; proceeding silently does not. Second, the cold-start is named for what it is: with no observations the tool returns space-filling seed points, not model-informed proposals, so there is no prediction and no uncertainty attached to them — that absence is accurate, not missing data. It should say how many runs are needed before the surrogate has an opinion at all, and that feeding the first results back is what turns this into an optimization.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-19",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nobody here has run this coupling before. I've got four solvents I can use and a temperature range of 40 to 120, and nothing else. Where do I start?",
+    "profile": "no-tools",
+    "answer": "I'm a chemistry assistant working from general chemical knowledge, not from this programme's records or database.\n\n**General approach for an unexplored coupling:**\n\n1. **Start with literature precedent** – Even if your specific coupling hasn't been run here, the same or very similar couplings almost certainly have. Look for:\n   - Papers on the same coupling type (e.g., Suzuki, Negishi, Buchwald–Hartwig cross-coupling, etc.)\n   - The substrate types and coupling class will narrow the solvent and temperature window dramatically\n   - Typical conditions cluster around specific solvents (DMF, DMA, toluene, MeOH, etc.) and temperatures (60–100 °C for most modern cross-couplings)\n\n2. **Screen intelligently with your constraints:**\n   - Pick **one solvent** that matches literature precedent for your coupling type, run it at **one middle temperature** (e.g., 80 °C) first\n   - If that works, you've found a viable condition; if not, you know whether to change solvent or temperature next\n   - If it partially works, vary temperature first (cheaper than solvent swap) across your 40–120 °C range\n\n3. **Use your four solvents strategically:**\n   - Rank them by literature commonness for your coupling type\n   - Run your best-guess solvent at 80 °C; if it fails, try the next solvent at the same temperature\n   - Only after solvent screening varies temperature\n\n4. **Watch what matters most:**\n   - Conversion vs. selectivity trade-off (some couplings need heat; others prefer mild conditions to avoid side products)\n   - Whether your coupling is catalyst-limited, reagent-limited, or solvent-limited (literature will hint at this)\n\n**What I cannot tell you without more detail:**\n- Which four solvents you have\n- What coupling this is (Pd-catalyzed C–C, C–N, C–O, etc.)\n- What your substrates are\n- Whether you have catalyst/ligand freedom or those are fixed\n\nIf you can share those, I can give you a more specific starting point. Otherwise: **find the closest literature precedent for your coupling class and mimic its solvent and temperature, then vary from there.**",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.15,
+    "event_counts": {
+      "token": 22,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "648bcfc9e20c44feb30db4cd76e52e82",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

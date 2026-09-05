@@ -63,22 +63,21 @@ class AgentProfile(BaseModel):
     # How hard this agent is asked to think, overriding `llm_effort` for builds on this profile.
     # A `Literal` rather than `str` for the reason the field above is one: `extra="forbid"` catches
     # a misspelled field *name*, and only the type catches a misspelled *value*. That matters more
-    # here than for most settings — the value is sent to the endpoint as a parameter, and both
-    # clients are `extra="ignore"`, so a rejected value is either dropped in silence or comes back
-    # as a 400 that `llm_provider._failover_exceptions` deliberately does not fail over.
+    # here than for most settings — the value is sent to the endpoint as a parameter, and
+    # `ChatOpenAI` is `extra="ignore"`, so a rejected value is either dropped in silence or comes
+    # back as a 400 that `llm_provider._failover_exceptions` deliberately does not fail over.
     #
     # Typed here as a literal rather than imported from `LlmSettings` because this module
     # deliberately imports no settings (see the module docstring); the two are pinned against each
     # other by `tests/test_llm_effort.py` instead, the way `harness_autonomy` already is.
     #
-    # **Only meaningful on `llm_provider='openai_compatible'`**, refused elsewhere by
-    # `llm_provider.build_chat_model`: on the Anthropic path the same parameter enables extended
-    # thinking rather than setting an effort level (measured), which is a different decision with
-    # its own costs.
-    #
-    # The refusal is named precisely because this comment first credited
-    # `LlmSettings._effort_is_provider_scoped`, which reads `self.llm_effort` and therefore never
-    # sees this field at all — so the claim was false for exactly the input it was written on.
+    # **Usable on every deployment**, which it was not: `build_chat_model` used to *raise* on a
+    # non-`None` effort whenever the provider was Anthropic, because there the same parameter
+    # enables extended thinking rather than setting an effort level (measured). With one gateway
+    # there is one meaning, so the guard is gone
+    # (`D-2026-09-04-a-gateway-is-the-only-provider`). Whether the gateway honours the parameter is
+    # the gateway's business — it is `extra="ignore"` all the way down, which is why
+    # `tests/test_llm_effort.py` asserts the request payload rather than an attribute.
     effort: Literal["low", "medium", "high"] | None = None
     # Which entry of `settings.model_routes` this agent's model is built from — a **route key**,
     # never a model id. `build_chat_model(task)` already resolves a key to whatever model id a
@@ -102,7 +101,7 @@ class AgentProfile(BaseModel):
     # **A key with no entry in `model_routes` reuses the model already built** rather than building
     # a second, identical client per turn, so an unconfigured route is today's behaviour exactly.
     # `build_chat_model`'s own contract for an unrouted task is the same answer stated one level
-    # down (it falls back to `llm_model`/`agent_model`); this only declines to pay for that twice.
+    # down (it falls back to `llm_model`); this only declines to pay for that twice.
     model_route: str | None = None
 
 

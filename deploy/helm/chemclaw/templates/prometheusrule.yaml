@@ -557,9 +557,11 @@ spec:
             runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawfleetaboveitsconnectionceiling
             summary: The fleet can open more Postgres connections than it is allowed to
             description: >-
-              More pooled processes are running than `postgres.maxConnections` accounts for, so the
+              More Postgres pools are open than `postgres.maxConnections` accounts for, so the
               database can be asked for more connections than it will serve — which surfaces as
-              connect failures against a server that is not busy. Either scale back or raise
+              connect failures against a server that is not busy. Pools, not pods: this gauge sums
+              every pool a process holds (a front door holds three), which is why it can fire on a
+              fleet whose per-pod configuration validated. Either scale back or raise
               `postgres.maxConnections` with a number from the server's own `max_connections`.
 
     - name: chemclaw.cost
@@ -725,7 +727,8 @@ spec:
               it. Break it down with the same quantile over
               `chemclaw_tool_duration_seconds_bucket` **by `tool`**, which is what answers "which
               tool is slow" now that the histogram carries the label, and with
-              `chemclaw_model_call_duration_seconds_bucket` by provider for the other half.
+              `chemclaw_model_call_duration_seconds_bucket` — the gateway's own latency — for the
+              other half.
 
         {{- /* The turn budget's hard edge. A timeout is not a degraded answer, it is no answer
                after ten minutes of waiting, so the first one is worth knowing about. */}}

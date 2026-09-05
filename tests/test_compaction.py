@@ -38,6 +38,7 @@ from chemclaw.agent.compaction import (
     ClearOlderToolResultsEdit,
     KeepLastConversationGroupsEdit,
     RecordContextCompaction,
+    cited_note_ids,
     context_compaction_middleware,
     newest_batch_size,
 )
@@ -546,12 +547,16 @@ def test_the_counter_separates_not_needed_from_not_wired(monkeypatch: pytest.Mon
     a counter that never ticks is indistinguishable from the defect this replaced.
 
     **The clear trigger is pinned here because it is a confound this test never controlled**, and
-    charging the prefix unconditionally is what turned it into one. Left at its shipped 30,000
-    against a ~43,000-token prefix, `effective_trigger` floors it at 1 and the lossless edit clears
-    on every call — so the under-budget arm ticked and the failure read as "compaction fired on a
-    thread inside its budget" when the subject under test, the budget, was behaving exactly as
-    asserted. `test_the_shipped_clear_trigger_is_below_the_prefix_it_is_now_charged` is where that
-    state is asserted on purpose.
+    charging the prefix unconditionally is what turned it into one. At any trigger below the
+    request's ~43,000-token prefix — which is where the shipped 30,000 sat for the one commit
+    between charging the prefix and re-deriving this default — `effective_trigger` floors it at 1
+    and the lossless edit clears on every call, so the under-budget arm ticks and the failure reads
+    as "compaction fired on a thread inside its budget" when the subject under test, the budget, is
+    behaving exactly as asserted. Pinning it out of the way is what leaves the budget as the only
+    variable. **The shipped default is no longer in that state**, and
+    `test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged` is what asserts it stays out of
+    it; this paragraph cited that test under a name it had already been renamed away from, which
+    `grep` answers in one line and nothing else does.
     """
     monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 1)
     monkeypatch.setattr(settings, "agent_keep_last_conversation_groups", 2)
@@ -1012,58 +1017,172 @@ def test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window(
     )
 
 
+#: The thread allowance `agent_tool_result_clear_trigger`'s default is derived to leave.
+#:
+#: The default is `tests/test_context_floor.py`'s ratchet ceiling plus this — the 30,000 of thread
+#: the setting meant for as long as it was a thread budget (`core/config/agent.py` says why the
+#: ceiling and not a measurement). It is written here rather than imported because the config
+#: comment is prose and this is the assertion: if the two ever disagree, one of them is a claim
+#: nobody checked.
+CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
+
+
 def test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged() -> None:
-    """The lossless edit must have a budget left after the prefix, or it is not a budget.
+    """The lossless edit must have the *band* the derivation claims, not merely a positive one.
 
     This replaces a test that asserted the opposite. While `agent_tool_result_clear_trigger` meant
     *thread* spend, 30,000 was an order of magnitude below the budget so that clearing ran early
     and often. Charging the prefix made that same number mean "clear every reclaimable tool result
-    on every model call": the `default` prefix measures ~43,175, so `effective_trigger` floored it
-    at 1 and the model lost sight of evidence more than one step back. 73,500 is the old 30,000 of
-    thread re-expressed in the new unit.
+    on every model call": the `default` prefix measured ~43,175, so `effective_trigger` floored it
+    at 1 and the model lost sight of evidence more than one step back. The default is that same
+    30,000 of thread re-expressed in the new unit — the ratchet ceiling plus
+    `CLEAR_TRIGGER_THREAD_ALLOWANCE`.
 
-    **Asserted against the ratchet ceiling rather than against today's prefix**, which is the whole
-    reason this test is worth having. `tests/test_context_floor.py` bounds the bound tool surface;
-    a measurement moves whenever any tool schema changes, and a test written against one would
-    drift into passing for a reason nobody chose. Written against the ceiling, the day the surface
-    is allowed to grow past what this setting can absorb, this fails and names the trade instead of
-    the behaviour changing quietly.
+    **The band is what is asserted, and asserting only the clearance was the defect.** This test
+    used to check `trigger > prefix` and `trigger > ceiling`, which are two readings of one fact
+    while the prefix sits under the ceiling — and both stay green on a default that clears the
+    prefix by a hair. Measured: a default of 44,000 against a 43,681-token prefix passed here while
+    leaving the thread **319** estimated tokens, a configuration in which the lossless edit clears
+    almost everything on almost every call. The 30,000 the derivation rests on was asserted
+    nowhere; the band was asserted as `> 1`.
 
-    **And for eleven weeks it asserted all of that against a prefix no deployment sends.** Both
-    numbers it read — `_graph_prefix()` and the ratchet ceiling — came from a graph compiled with
-    `connectors=None`, so this test reported the shipped trigger cleared its prefix by 30,325 while
-    the shipped trigger was floored at 1 on every real turn: 73,500 against a **75,695**-token
-    prefix. A test written against a bound is only as good as the bound, and this one was measuring
-    the same short read the setting was derived from — the two could not disagree.
+    **Against the ratchet ceiling rather than today's prefix**, which is the whole reason this test
+    is worth having. `tests/test_context_floor.py`'s `CEILINGS` bounds the prefix; a measurement
+    moves whenever any tool schema changes, and a test written against one would drift into passing
+    for a reason nobody chose. Written against the ceiling, the day the surface is allowed to grow
+    past what this setting can absorb, this fails and names the trade instead of the behaviour
+    changing quietly. The second assertion then adds what a ceiling cannot say — that *today's*
+    deployment, at today's measured prefix, actually has the band.
 
-    Both arms are now honest about a different thing, deliberately. The measured arm binds the
-    connector surface this repository serves, so it fails on a real turn's arithmetic. The bound
-    arm reads `PREFIX_BOUND`, which is the ceiling *plus* the allowance for the three bundles
-    served from `Chemclaw3-mcp` — the half no test here can measure and the half that made the
-    original number wrong.
+    **And for eleven weeks all of that was asserted against a prefix no deployment sends.** Both
+    numbers this test read — `_graph_prefix()` and the ratchet ceiling — came from a graph compiled
+    with no `connectors=` argument, so it reported the shipped trigger clearing its prefix by tens
+    of thousands of tokens while the shipped trigger was floored at 1 on every real turn. A test
+    written against a bound is only as good as the bound, and this one was measuring the same short
+    read the setting was derived from — the two could not disagree.
+
+    Both arms are now honest about a different thing, deliberately. The bound arm reads
+    `PREFIX_BOUND`, which is the ratchet ceiling *plus* the allowance for the three bundles served
+    from `Chemclaw3-mcp` — the half no test here can measure and the half that made the original
+    number wrong. The measured arm binds the connector surface this repository serves, so it fails
+    on a real turn's arithmetic rather than on a fixture's.
     """
     from tests.test_context_floor import PREFIX_BOUND, _connector_tools
 
     prefix = _graph_prefix() + estimate_tool_schemas(_connector_tools(get_profile("default")))
     trigger = settings.agent_tool_result_clear_trigger
+    reset_calibration()
 
-    assert trigger > prefix, (
-        f"agent_tool_result_clear_trigger is {trigger} against a {prefix}-token prefix, so it "
-        "floors at 1 — the lossless edit would clear every reclaimable result on every model call"
+    assert trigger - PREFIX_BOUND >= CLEAR_TRIGGER_THREAD_ALLOWANCE, (
+        f"agent_tool_result_clear_trigger is {trigger} against a prefix bound of {PREFIX_BOUND}, "
+        f"so a surface grown to its permitted bound would leave the thread "
+        f"{trigger - PREFIX_BOUND} estimated tokens where the derivation claims "
+        f"{CLEAR_TRIGGER_THREAD_ALLOWANCE}. The default is that bound plus the allowance: move "
+        "them together, or say in the pull request which one is now wrong."
     )
-    assert trigger > PREFIX_BOUND, (
-        f"agent_tool_result_clear_trigger is {trigger} against a prefix bound of {PREFIX_BOUND}: "
-        "a surface grown to its permitted bound would floor this trigger, so either the ceiling, "
-        "the out-of-repo allowance or this setting has to move, deliberately"
-    )
-    # At the *bound*, not at today's measurement: a band that only exists while the surface happens
-    # to be small is not the band the two settings were derived to have.
-    token = _prefix_var.set(PREFIX_BOUND)
+    # And then at *today's* measurement, which is what a ceiling cannot say: the assertion above
+    # holds at the permitted bound, this one holds for the deployment that actually ships.
+    token = _prefix_var.set(prefix)
     try:
-        # It still has to leave a usable band below the destructive edit, which is the split's
-        # whole point: clearing is free, the window is not.
-        assert (
-            1 < effective_trigger(trigger) < effective_trigger(settings.agent_context_token_budget)
+        allowance = effective_trigger(trigger)
+        assert allowance >= CLEAR_TRIGGER_THREAD_ALLOWANCE, (
+            f"the shipped trigger of {trigger} against this deployment's measured {prefix}-token "
+            f"prefix leaves the thread {allowance} estimated tokens, not "
+            f"{CLEAR_TRIGGER_THREAD_ALLOWANCE}: clearing the prefix is not the property, having a "
+            "band above it is, and a trigger that clears it by a hair clears every reclaimable "
+            "tool result on almost every model call"
+        )
+        # It still has to fire before the destructive edit, which is the split's whole point:
+        # clearing is free, the window is not.
+        assert allowance < effective_trigger(settings.agent_context_token_budget), (
+            f"the lossless edit triggers at {allowance} and the window at "
+            f"{effective_trigger(settings.agent_context_token_budget)}, so the free edit no longer "
+            "runs first"
         )
     finally:
         _prefix_var.reset(token)
+
+
+# --- a cleared sweep still names its sources ---------------------------------------------------
+
+
+def test_a_cleared_evidence_sweep_leaves_its_citations_behind() -> None:
+    """The bodies are reclaimable; the note ids are what the answer is graded on.
+
+    `ClearToolUsesEdit` is oldest-first, and in a research turn the oldest tool result is the
+    `gather_evidence` sweep — by design the largest payload in the thread, so it is both the first
+    candidate for clearing and the most attractive one. Measured on the shipped configuration, three
+    results at the per-result ceiling are enough to clear it before the model writes its answer.
+
+    Clearing the chunk bodies is right. Clearing the note ids with them is what turns a context
+    saving into a grounding failure: the model is then asked to cite evidence it can no longer see,
+    and the citation gate downstream still grades it against the *recorded* result, so a citation
+    recalled from memory is marked verified. Keeping ~60 tokens of ids is what makes the difference
+    between "read it again" and "reconstruct it".
+    """
+    sweep = (
+        "EvidenceSweep(chunks=[EvidenceChunk(content='"
+        + ("body " * 4000)
+        + "', source_note_id='rxn-suzuki-biaryl', retriever='graph'), "
+        "EvidenceChunk(content='more', source_note_id='playbook-degassing', retriever='graph')])"
+    )
+    messages: list[AnyMessage] = [
+        HumanMessage(content="which conditions held?"),
+        AIMessage(content="", tool_calls=[{"name": "gather_evidence", "args": {}, "id": "c1"}]),
+        ToolMessage(content=sweep, tool_call_id="c1"),
+        AIMessage(content="", tool_calls=[{"name": "expand_note", "args": {}, "id": "c2"}]),
+        ToolMessage(content="x" * 40_000, tool_call_id="c2"),
+        AIMessage(content="", tool_calls=[{"name": "expand_note", "args": {}, "id": "c3"}]),
+        ToolMessage(content="y" * 40_000, tool_call_id="c3"),
+    ]
+    ClearOlderToolResultsEdit(trigger=1_000, keep=2, placeholder=TOOL_RESULT_PLACEHOLDER).apply(
+        messages, count_tokens=count_tokens_approximately
+    )
+
+    [cleared] = [
+        message
+        for message in messages
+        if isinstance(message, ToolMessage) and message.tool_call_id == "c1"
+    ]
+    assert TOOL_RESULT_PLACEHOLDER[:-1] in str(cleared.content), "the sweep should have cleared"
+    assert "rxn-suzuki-biaryl" in str(cleared.content)
+    assert "playbook-degassing" in str(cleared.content)
+    assert "expand_note" in str(cleared.content), "the model needs to be told how to read it again"
+    # And it is still a *reclaim*: the 20 kB of chunk bodies are gone.
+    assert len(str(cleared.content)) < 500
+
+
+def test_a_cleared_result_that_cites_nothing_keeps_the_plain_placeholder() -> None:
+    """No citation line where there are no citations — the placeholder is paid for per result."""
+    messages: list[AnyMessage] = [
+        HumanMessage(content="run it"),
+        AIMessage(
+            content="", tool_calls=[{"name": "compute_reaction_energy", "args": {}, "id": "c1"}]
+        ),
+        ToolMessage(content="z" * 60_000, tool_call_id="c1"),
+        AIMessage(
+            content="", tool_calls=[{"name": "compute_reaction_energy", "args": {}, "id": "c2"}]
+        ),
+        ToolMessage(content="w" * 40_000, tool_call_id="c2"),
+        AIMessage(
+            content="", tool_calls=[{"name": "compute_reaction_energy", "args": {}, "id": "c3"}]
+        ),
+        ToolMessage(content="v" * 40_000, tool_call_id="c3"),
+    ]
+    ClearOlderToolResultsEdit(trigger=1_000, keep=2, placeholder=TOOL_RESULT_PLACEHOLDER).apply(
+        messages, count_tokens=count_tokens_approximately
+    )
+
+    [cleared] = [
+        message
+        for message in messages
+        if isinstance(message, ToolMessage) and message.tool_call_id == "c1"
+    ]
+    assert str(cleared.content) == TOOL_RESULT_PLACEHOLDER
+
+
+def test_the_citation_reader_deduplicates_and_keeps_first_seen_order() -> None:
+    """Asserted on the function rather than the rendered string, so formatting stays free."""
+    content = "source_note_id='b-note' ... source_note_id='a-note' ... source_note_id='b-note'"
+    assert cited_note_ids(content) == ["b-note", "a-note"]
+    assert cited_note_ids("nothing here") == []

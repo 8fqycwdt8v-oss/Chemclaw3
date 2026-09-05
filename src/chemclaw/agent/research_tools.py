@@ -401,13 +401,24 @@ async def gather_evidence(
         for chunk in ranked
     ]
     kept, truncated_by = _within_budget(framed)
+    # Back to the *unframed* chunks for attribution below. `framed` is a 1:1 `model_copy` of
+    # `ranked`, and framing rewrites both halves of the dedup key — `content` gains the envelope and
+    # `source_note_id` is defanged — so matching a kept chunk against what a leg offered has to
+    # happen in one vocabulary or the other. The originals are the vocabulary the merge itself
+    # deduped in, which is what makes the two agree by construction rather than by coincidence.
+    origins = {id(copy): original for copy, original in zip(framed, ranked, strict=True)}
+    kept_origins = [origins[id(chunk)] for chunk in kept if id(chunk) in origins]
     # The post-merge, post-cap half of the pair `EvidenceSweep.sources` documents itself as
     # incomplete without: `chemclaw_evidence_source_chunks_total` (via `sweep_sources` above) counts
     # what a leg *handed over*, and this is what it *kept* after RRF/interleave and the budget —
     # the distinction `D-2026-08-01-a-cap-that-starves-a-source` exists to make alertable. Every
     # source asked is passed, not just the ones represented in `kept`, so a starved leg reads as a
-    # zero rather than being absent from the ratio's denominator.
-    record_kept_chunks(kept, (name for name, _ in sources))
+    # zero rather than being absent from the ratio's denominator. What each leg *offered* goes with
+    # it, because `chunk.retriever` names only the leg that found a note **first** — attributing by
+    # it credited every shared note to `graph` and pinned every other leg at zero.
+    record_kept_chunks(
+        kept_origins, {name: hits for (name, _), hits in zip(sources, ranked_lists, strict=True)}
+    )
     # Counted before the refusals are read, deliberately: a rejection is not a retrieved chunk and
     # must not enter the accounting a starved-source alert reads.
     refused, refusals_unavailable = await _refused_on_ingest(query)

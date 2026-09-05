@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "op-20",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Ran the two you gave me. 85 C / 1.8 eq came back 81%, 75 C / 2.2 eq gave 68%. Add them and give me the next point — same problem as before.",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "recall_observations",
+      "find_past_jobs"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "this is a new campaign",
+      "the earlier observations are unavailable",
+      "an observation that was never supplied"
+    ],
+    "direction": "Understands that a campaign is identified by its decision space, so the same problem with two more results appended continues the existing campaign rather than starting a fresh one — and quotes the campaign_id back to prove it. It must carry the earlier runs forward together with the two new ones, all marked as measured, not call the tool on the two new points alone. Returns a single next candidate as conditions to run, and it is worth reading the trend out loud: the higher-equivalents/lower-temperature point underperformed, which is information the model now has. Losing the earlier observations, or minting a new campaign for an unchanged decision space, is the failure. Asking the chemist to re-supply history it already holds is also a miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-20",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Ran the two you gave me. 85 C / 1.8 eq came back 81%, 75 C / 2.2 eq gave 68%. Add them and give me the next point — same problem as before.",
+    "profile": "no-tools",
+    "answer": "I need more context to help you. I don't have any record of:\n\n1. What the previous reactions or \"problem\" were\n2. What you're optimizing (substrate, reagent, transformation)\n3. What the variables mean (temperature, equivalents of what?)\n4. What metric you're optimizing for (yield, selectivity, etc.)\n5. What \"add them and give me the next point\" means—are you:\n   - Averaging conditions?\n   - Fitting a response surface?\n   - Following a specific optimization algorithm?\n\nCould you provide:\n- The two conditions you just ran (what I have: 85°C/1.8 eq → 81%; 75°C/2.2 eq → 68%)\n- The previous data point(s) or the original problem statement\n- What optimization strategy you're using\n\nOnce I see the full pattern, I can suggest the next experiment.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.32,
+    "event_counts": {
+      "token": 9,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a85fc54a2ab94561927be2247487d7dc",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "probe": {
+    "id": "op-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Ran five conditions on the 4-bromoanisole / PhB(OH)2 Suzuki last week. Everything else held:\n1.5 mol% Pd(OAc)2, K2CO3 2.0 eq, THF/water 4:1, 12 h, degassed.\n\n  70 C, 1.0 eq boronic acid -> 48%\n  70 C, 1.5 eq             -> 61%\n  80 C, 1.5 eq             -> 76%\n  90 C, 1.5 eq             -> 72%\n  80 C, 2.0 eq             -> 79%\n\nWhere next? Give me two conditions I can set up tomorrow.",
+    "expects_tools": [
+      "suggest_next_experiment"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "these candidates are measured results",
+      "the campaign has converged",
+      "a yield figure for a candidate presented as observed rather than predicted",
+      "a sixth historic run that was not supplied"
+    ],
+    "direction": "Frames the problem from what was actually given: temperature and boronic-acid equivalents as continuous variables with bounds that a real run of this reaction in THF/water could survive, a single objective (maximize yield), and all five runs passed through as measured observations — none dropped, none invented. Calls the tool for two candidates and reports the points the tool returned, not points it reasoned to. Quotes the campaign_id back and explains that asking again with tomorrow's result appended accumulates onto the same campaign. Each candidate is presented as conditions to run, with the surrogate's predicted value and spread distinguished from a measurement, and any extrapolation past the observed range (or past what the solvent system tolerates) called out. Silently choosing an unsupportable bound is a miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Ran five conditions on the 4-bromoanisole / PhB(OH)2 Suzuki last week. Everything else held:\n1.5 mol% Pd(OAc)2, K2CO3 2.0 eq, THF/water 4:1, 12 h, degassed.\n\n  70 C, 1.0 eq boronic acid -> 48%\n  70 C, 1.5 eq             -> 61%\n  80 C, 1.5 eq             -> 76%\n  90 C, 1.5 eq             -> 72%\n  80 C, 2.0 eq             -> 79%\n\nWhere next? Give me two conditions I can set up tomorrow.",
+    "profile": "",
+    "answer": "I'll start by setting up a Bayesian optimization problem from your runs to propose the next conditions.Two proposals, both exploiting the region your data has outlined:\n\n**Condition 1: 83 °C, 1.83 eq boronic acid**\nPredicted yield: 79% (±2.9%)\nThis sits slightly above your current best (79% at 80 °C, 2.0 eq) and sits in the upslope between your observed maximum at 80 °C and the slight downturn at 90 °C, paired with a boronic acid loading the model has learned helps.\n\n**Condition 2: 76 °C, 2.0 eq boronic acid**\nPredicted yield: 77% (±3.7%)\nThis explores whether you can hold yield with a lower temperature when boronic acid is at the top of your range — potentially valuable for process scale if 76 °C costs less to maintain than 80 °C or higher.\n\nThe model's posterior standard deviations (2.9–3.7%) are respectably low against the spread your five runs showed (48–79%), so these are proposals it has real confidence in, not just edge-of-space searches.\n\n**Campaign ID** for this series is `campaign-c25fbd54ecb06a38` — if you supply the results from either of these runs, I can propose the next point and track the full progression. Report whichever yield you actually get and I'll fold it back in.\n\nWould you like me to also check similar Suzuki reactions in the record to see what others have done with this substrate, or shall I wait for your results?",
+    "answered": true,
+    "tools_called": [
+      "suggest_next_experiment"
+    ],
+    "tool_results": [
+      {
+        "tool": "suggest_next_experiment",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"bo:suggest_next_experiment\">\n{\n  \"campaign_id\": \"campaign-c25fbd54ecb06a38\",\n  \"candidates\": [\n    {\n      \"params\": {\n        \"temperature_c\": 83.09975328851318,\n"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "83",
+      "1.83",
+      "79",
+      "2.9",
+      "2.0",
+      "2",
+      "76",
+      "77",
+      "3.7",
+      "48"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 31.59,
+    "event_counts": {
+      "token": 21,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "fa977c590a6b42be9886fa64cf789241",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

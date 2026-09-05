@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "op-02",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I've got to plan a week on the EDC/HOBt coupling for a new acid. One experiment a day, I'm the only one on it. What should the week actually be, and in what order?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions",
+      "propose_knowledge_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "I have scheduled or booked anything",
+      "instrument or bench time has been reserved",
+      "these results are what you will get"
+    ],
+    "direction": "Recognises this as the day-by-day progression question rather than a surrogate-model optimization, and says which it chose and why. Reads the in-house record first — the amide-coupling additive playbook and the DCM amide-coupling failure mode — and proposes an ordered sequence where each day tests one thing, with a falsifiable expectation stated for each, so a result either way tells the technician something. Later days are explicitly contingent on earlier outcomes rather than fixed. Offers the plan as a proposal a human approves, not as plan-of-record, and never implies anything was booked or scheduled.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-02",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I've got to plan a week on the EDC/HOBt coupling for a new acid. One experiment a day, I'm the only one on it. What should the week actually be, and in what order?",
+    "profile": "no-tools",
+    "answer": "I don't have access to your lab's records, existing data on this acid, or your specific constraints (scale, purity issues, solvent compatibility, etc.), so I can't prescribe your exact week. But I can sketch the logical order for EDC/HOBt coupling optimization as a single operator:\n\n## A sensible week structure:\n\n**Day 1: Solvent screen**\n- Run 3–4 parallel small-scale couplings in different solvents (DCM, DMF, DMSO, maybe NMP or a 1:1 mix).\n- Keeps throughput high, minimal operator time per reaction.\n- Tells you which solvent(s) give clean product and reasonable kinetics.\n- *Why first:* Solvent choice cascades into everything else; no point optimizing temperature or equivalents in the wrong solvent.\n\n**Day 2: Coupling ratio optimization**\n- Lock the best solvent from Day 1.\n- Vary EDC and HOBt loading (1.1 : 1.1, 1.5 : 1.5, 2 : 2 equiv. is typical).\n- *Why here:* You want to know if you're wasting coupling reagent or leaving starting material.\n\n**Day 3: Nucleophile screen** (if you have multiple amine partners or it's a choice point)\n- Or: **temperature/time**—vary 0 °C, RT, 40 °C with your best coupling conditions from Days 1–2.\n- *Why:* Kinetics and side reactions (racemization, oligomerization) are temperature-sensitive.\n\n**Day 4: Additive/pH screen** (optional but often high-ROI)\n- Base choice (DIPEA, TEA, Et₃N, or in situ generation).\n- Sometimes a co-base or pH buffer matters more than you'd expect.\n\n**Day 5: Scale/robustness**\n- Run your best conditions at realistic scale.\n- Check for heat/diffusion issues, workup efficiency, isolation yield vs. crude selectivity.\n\n**Days 6–7: Refinement or backup**\n- Repeat best from Day 5, or pivot to an unexpected finding (impurity profile, kinetic bottleneck).\n- Or: run your lead conditions again for reproducibility + sufficient material for next stage (characterization, or feeding into your next synthetic step).\n\n## Key caveats:\n\n- **If this is a hindered or unusual amine**, Day 3 might need to move up (coupling can stall).\n- **If you already know the acid and amine are \"normal\"** (primary amine, no fluorine or ortho-bulky groups), the above is close to optimal.\n- **If you have prior data** (e.g., this acid has been coupled before, or you've used HOBt extensively), you can skip Day 1 and use Day 1 for something you actually don't know.\n- **Workup and isolation** eat time; plan for that on Days 5–7, not every day.\n\nWhat's the amine partner like (primary, secondary, nucleophilicity)? And does the acid have any functional-group traps (ketone, ester, phenol nearby)? Those would shift the priorities.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 10.84,
+    "event_counts": {
+      "token": 376,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "046a681b2f4e46e3b48c072a57e435f5",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

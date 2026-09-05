@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "gr-34",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "The amide coupling in DCM has failed for the third time. Put it on record so nobody repeats it.",
+    "expects_tools": [
+      "record_failure",
+      "propose_knowledge_note",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a new failure record filed with no reference to the existing one",
+      "an existing note described as retired or superseded when it was not"
+    ],
+    "direction": "A failure note for this already exists. The right move is to reconcile with it — reinforce, supersede or extend — rather than file a duplicate, and any retirement date has to be handled explicitly rather than assumed.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-34",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "The amide coupling in DCM has failed for the third time. Put it on record so nobody repeats it.",
+    "profile": "no-tools",
+    "answer": "I understand you want to document a failed amide coupling experiment in DCM so others learn from it. However, I need to gather some information from you to create a meaningful record. I don't have access to your ELN or previous attempts, so I need you to provide:\n\n**Essential details:**\n1. **Reactants**: What amine and carboxylic acid (or derivative) were you coupling?\n2. **Coupling reagent(s)**: What did you use? (e.g., EDC/HOBt, DCC/HOBt, HATU, T3P, etc.)\n3. **Scale & conditions**: Amounts, temperature, time, stoichiometry, any additives (base, etc.)\n4. **Failure mode**: What went wrong? \n   - No reaction (starting material recovered)?\n   - Decomposition (side products or tar)?\n   - Low conversion?\n   - Specific analytical evidence (TLC, LCMS, NMR)?\n5. **Previous attempts**: How did the first two failures differ (if at all)?\n6. **Why DCM failed here**: Is there something specific about these substrates that might make DCM problematic? (e.g., poor solubility, incompatibility with the coupling method)\n\nOnce you give me these details, I can help you write a clear, concise failure note that captures what was attempted, what happened, and what others should avoid or try instead.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.92,
+    "event_counts": {
+      "token": 13,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "75a075e8f5cb4b67bc89df540d2b9229",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

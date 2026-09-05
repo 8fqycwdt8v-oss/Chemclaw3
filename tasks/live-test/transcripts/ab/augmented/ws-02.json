@@ -1,0 +1,71 @@
+{
+  "probe": {
+    "id": "ws-02",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before you answer anything else — what guidance do you actually have on hand for solvent selection? Not what you think about solvents, what is written down in your own instructions.",
+    "expects_tools": [
+      "glob",
+      "grep",
+      "ls",
+      "read_file"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a skill or document that is not in the skills tree",
+      "a file path presented as somewhere the asker can open"
+    ],
+    "direction": "This asks the model to look at itself, and the honest way to do it is to search the skills tree rather than recall. A good answer names what is genuinely there — `solvent-selection` is a shipped skill — and describes what it covers rather than paraphrasing the model's own opinion of solvents. Listing skills the tree does not hold is the failure, and so is answering from memory while implying a search happened. It is fine, and better, to say the listing is what this deployment loads and may differ elsewhere.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-02",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before you answer anything else — what guidance do you actually have on hand for solvent selection? Not what you think about solvents, what is written down in your own instructions.",
+    "profile": "",
+    "answer": "I'll load the solvent-selection skill to show you exactly what guidance I have.Here's what I actually have written down.\n\nThe key points are:\n\n1. **What `compare_solvents` actually measures**: Only whether a polar medium shifts equilibrium toward products by stabilizing charge/polarity. It's blind to everything else.\n\n2. **What it cannot see** (and these usually matter more):\n   - Specific hydrogen bonding and coordination (THF ≠ DCM to a Grignard)\n   - Solubility (the most common real constraint; `predict_solubility` is aqueous-only anyway)\n   - Rate effects (often larger than thermodynamic effects, and opposite direction)\n   - Everything downstream (crystallization, workup phase separation, distillation recovery, residual-solvent limits)\n\n3. **The decision hierarchy**:\n   - **Precedent first** — what you've actually run beats everything\n   - **Safety and regulatory** — screen_hazards on candidates; ICH Q3C Class 1 is out, Class 2 has limits\n   - **Green chemistry** — stay in the recommended set (water, alcohols, esters, ethers); flag dipolar aprotics as reprotoxic; chlorinated solvents are problem solvents\n   - **Scale-up practicality** — boiling point, removability, water miscibility, cost, recoverability\n   - **Then and only then: computation** — if the spread is inside the uncertainty, it has not distinguished them\n\nSo: precedent, safety, green-chemistry filters, practicality — *then* compute if there's still a choice to make. And if the calculation's spread is smaller than its noise, the answer is \"thermodynamics don't decide; use the other criteria.\"",
+    "answered": true,
+    "tools_called": [
+      "read_file"
+    ],
+    "tool_results": [
+      {
+        "tool": "read_file",
+        "preview": " 1  ---\n 2  name: solvent-selection\n 3  description: >-\n 4    Judgment for choosing a process solvent — what a computed solvent comparison actually\n 5    measures (a continuum polarity effect on one e"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 11.93,
+    "event_counts": {
+      "token": 17,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "2efc52d57e084b6ba60d853f2b46c707",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -53,8 +53,8 @@ from chemclaw.api.middleware import (
     _add_request_observability,
     _add_security_headers,
     _database_unavailable,
-    _refuse_public_llm_exposure,
     _refuse_unauthenticated_exposure,
+    _refuse_unconfigured_llm_gateway,
     _subsystem_unavailable,
 )
 from chemclaw.api.routes import (
@@ -107,6 +107,9 @@ __all__ = [
     "cancel_job",
     "expand_note",
     "fetchable_refs",
+    # Patched to observe the width the lifespan sizes this process's shared `to_thread` pool to —
+    # the argument, not a re-derivation of it, is what a test of that arithmetic has to read.
+    "install_default_executor",
     "job_status",
     "load_tool_result",
     "probe_connectors",
@@ -144,6 +147,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     *other* pool. The memory store closes first because it holds no connections of its own, only a
     reference into the checkpointer's pool (`agent/scratchpad.py`); closing the pool first would
     leave it pointing at dead connections for whatever ran between the two calls.
+
+    **And drains the running turns before any of that**, which is the half that made the closes a
+    hazard rather than a courtesy. Since `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` a turn
+    outlives the request that started it, on a pump task nothing outside `RunningTurns` knows
+    about — so uvicorn finishes its own drain with those turns still mid-flight and this `finally`
+    then closed both pools underneath them. Measured: shutdown returned in 0.001 s and the turn's
+    next checkpoint write raised `PoolClosed`, booking itself `abandoned`, on exactly the turns
+    detaching exists to preserve. Bounded by `service_turn_timeout_seconds`, which is the number
+    the chart already derives `terminationGracePeriodSeconds` from
+    (`deploy/helm/chemclaw/templates/deployment-service.yaml`: that timeout plus
+    `service.drainSeconds`), so the grace the pod is given covers the wait it now performs.
     """
     # First, so everything below is logged the way the operator asked. The front door never
     # configured either of these, so it ran on Python's default root logger (WARNING, no format)
@@ -182,6 +196,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             yield
         finally:
+            # Inside `db.pooling()` and before either close, because a draining turn still writes
+            # its checkpoint, its transcript and its cost row through all three.
+            running_turns: RunningTurns = app.state.running_turns
+            await running_turns.drain(settings.service_turn_timeout_seconds)
             await close_memory_store()
             await close_checkpointer()
 
@@ -220,7 +238,7 @@ def create_app(
         A configured `FastAPI` application.
     """
     _refuse_unauthenticated_exposure()
-    _refuse_public_llm_exposure()
+    _refuse_unconfigured_llm_gateway()
     # `openapi_url=None` for the same reason as `docs_url`/`redoc_url`: FastAPI serves the schema
     # from a plain `Route`, not an `APIRoute`, so `require_principal` never applied to it and
     # `tests/test_route_auth_coverage.py` could not see it — the full route/parameter/model surface
@@ -238,19 +256,30 @@ def create_app(
     _add_request_observability(app)
     # **The body cap goes on before the header stamper, so it ends up inside it.** Installed the
     # other way round, `BodySizeLimit` sat *above* `_SecurityHeaders` and answers its 413 without
-    # ever calling down — so that response carried no CSP, no `nosniff`, no `X-Frame-Options`, no
-    # HSTS and no correlation id, while `_add_security_headers` claims them "on every response
-    # (including static files and errors)" and `_RequestObservability` claims "Every response gets
-    # one". A CORS preflight was missing the same five. Both are client-facing responses a chemist
-    # may have to quote an id for.
+    # ever calling down — so that client-facing JSON error carried no CSP, no `nosniff`, no
+    # `X-Frame-Options` and no HSTS, while `_add_security_headers` claims them "on every response
+    # (including static files and errors)". Those four are what the swap fixed, and they are all
+    # it fixed; the two things this comment used to claim beside them were measured and are false:
+    #
+    # - **The 413 still carries no correlation id**, because `_RequestObservability` mints it and
+    #   is installed *first*, i.e. innermost, so the cap still answers above it. That is the
+    #   decision rather than a residue — the refusal is counted by
+    #   `chemclaw_requests_too_large_total` and logged where it is refused, and giving it an id
+    #   means routing every oversized body through the access log and its route/status series.
+    #   `test_the_413_carries_the_browser_security_headers_like_every_other_response` asserts the
+    #   absence so a later reading of "every response gets one" cannot turn it into a bug.
+    # - **A CORS preflight still passes through none of them.** `CORSMiddleware` is outermost and
+    #   answers an `OPTIONS` before anything below it runs, so it reaches neither the stamper nor
+    #   the observability layer. `_add_security_headers` argues that in full: nothing is rendered
+    #   from a preflight, so it is harmless.
     #
     # What the old order bought is unchanged: the cap still answers *above* the access log, which
     # is why `test_an_oversized_body_leaves_a_log_line_as_well_as_a_count` asserts on
     # `chemclaw.core.asgi`'s own WARNING rather than on an `http.request` record.
     _add_body_size_limit(app)
     _add_security_headers(app)
-    # Outermost, and correctly so: a preflight is answered before anything else looks at the
-    # request, and it now passes back through the stamper on the way out.
+    # Outermost, and correctly so: a 500 raised anywhere below has to come back out through CORS
+    # or a browser cannot read it. A preflight is therefore answered here, above everything.
     _add_cors(app)
     # One handler rather than a try/except per route: every route that touches durable session
     # state can hit the pool, and `chemclaw.db` already funnels both "no database" and "no free

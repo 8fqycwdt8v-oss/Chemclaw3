@@ -14,8 +14,9 @@ that starts a real server instead of being redefined per file (Rule of Three).
 for Temporal-backed modules, and `PYTEST_TIMEOUT_SCALE`, which is the one knob that relaxes *every*
 cap — including the per-test markers, which no command-line flag can reach.
 
-`pytest_terminal_summary` owns the two qualifications a run's headline number needs: which failures
-were wall-clock timeouts, and how many tests an unreachable Postgres took away.
+`pytest_terminal_summary` owns the qualifications a run's headline number needs: which failures
+were wall-clock timeouts, and how many tests an unreachable Postgres, an unstartable Temporal test
+server, or an absent `helm` binary took away.
 """
 
 import asyncio
@@ -384,6 +385,50 @@ def _report_public_schema_shadowing(terminalreporter: TerminalReporter) -> None:
     )
 
 
+# The reason `pytest.mark.skipif(shutil.which("helm") is None, ...)` puts on every rendered-chart
+# test in `tests/test_deploy_chart.py`. Matched the same way, for the same reason: the number a
+# reader needs is how many tests did not run, and only the run knows that.
+_HELM_SKIP = "helm is not installed"
+
+
+def _report_helm_skips(terminalreporter: TerminalReporter) -> None:
+    """Say how many rendered-chart tests an absent `helm` binary took away.
+
+    `helm` is not a Python dependency, so a plain `uv sync` never installs it, and the tests gated
+    on `shutil.which("helm")` skip silently and still print a green line — the same failure
+    `_report_postgres_skips` exists for, on a second dependency that had no such warning. A local
+    run that skips them is not evidence about the rendered chart, only about its static YAML.
+    Install it: https://helm.sh/docs/intro/install/.
+
+    **How many that is, the epilogue counts; this docstring does not, and the first version of it
+    did.** It said 33, over a set that measures **59** with `helm` off `PATH` — a number inherited
+    from a `BACKLOG.md` row rather than measured, which is the failure
+    `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` names, committed inside the change
+    that added the counter whose whole job is to make the count unnecessary.
+
+    **And it is a sandbox warning, not a CI one.** The same first version said these tests "skipped
+    silently on every run" in CI and that five HIGH chart defects survived "because nobody had
+    rendered the chart". `D-2026-09-04-a-review-of-a-review-finds-the-fixes` had already corrected
+    that a day earlier: `ubuntu-latest` ships Helm, so the `check` job has been rendering the chart
+    throughout, and those defects survived because the tests rendered **one** set of values. The
+    `Install Helm` step in that job is still worth having — it pins what was drifting with the
+    runner image — but it did not turn a dead gate on.
+    """
+    skipped = [
+        report
+        for report in terminalreporter.stats.get("skipped", [])
+        if _HELM_SKIP in str(report.longrepr)
+    ]
+    if not skipped:
+        return
+    terminalreporter.write_sep("=", "Rendered-chart tests did not run", yellow=True)
+    terminalreporter.write_line(
+        f"{len(skipped)} tests were skipped because `helm` is not installed, so this run is not "
+        "evidence about the rendered Helm chart — only about the chart's static YAML. Install "
+        "helm (https://helm.sh/docs/intro/install/) to run them."
+    )
+
+
 # The marker `tests/temporal_env.py::start_env_or_skip` puts in its skip reason. Matched the same
 # way, for the same reason: the number a reader needs is how many tests did not run.
 _TEMPORAL_SKIP = "Temporal test server unavailable"
@@ -424,8 +469,8 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
 
     Every section is about the same misreading: a run's headline number is believed without the
     things that qualify it. A timed-out test proves nothing about the assertions it never
-    reached, and a skipped Postgres or Temporal test proves nothing at all — see
-    `_report_postgres_skips` and `_report_temporal_skips`.
+    reached, and a skipped Postgres, Temporal or helm test proves nothing at all — see
+    `_report_postgres_skips`, `_report_temporal_skips` and `_report_helm_skips`.
 
     `FAILED tests/test_pka.py::test_… - Failed: Timeout (>180.0s) from pytest-timeout` in the
     short summary was read as a numerical failure by two separate reviewers of this repository, and
@@ -437,6 +482,7 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     """
     _report_postgres_skips(terminalreporter)
     _report_temporal_skips(terminalreporter)
+    _report_helm_skips(terminalreporter)
     _report_public_schema_shadowing(terminalreporter)
     timed_out = sorted(
         report.nodeid

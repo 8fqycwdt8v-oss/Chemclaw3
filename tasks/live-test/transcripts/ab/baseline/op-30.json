@@ -1,0 +1,91 @@
+{
+  "probe": {
+    "id": "op-30",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Write up the Suzuki flow screen we have indexed as a campaign summary I can circulate — what was screened, what won, and what it doesn't tell us.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions",
+      "propose_knowledge_note",
+      "request_development_report"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a yield or condition not present in a cited record",
+      "the screen was run in order to achieve X (intent the records do not state)",
+      "I have circulated or sent this",
+      "the summary has been added to the knowledge graph"
+    ],
+    "direction": "Builds the summary from the indexed flow-Suzuki records with every claim attributable to a cited record: what factors were varied, what the best-performing conditions were, and what the spread looks like. The third part of the question is the one that separates a good answer — an explicit section on what the screen does not establish: substrates outside those screened, anything the records simply do not carry (which is said to be not recorded, never inferred), and the difference between what performed best in this screen and what would transfer. Causal or intent claims beyond the structural facts of the records are out of bounds. If the summary is to become durable it goes through the proposal route as agent-authored and human-reviewed, and the answer should say it is not yet approved.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-30",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Write up the Suzuki flow screen we have indexed as a campaign summary I can circulate — what was screened, what won, and what it doesn't tell us.",
+    "profile": "no-tools",
+    "answer": "I need to find the Suzuki flow screen campaign in your system. Let me search for it.Let me search more broadly for campaign summaries and flow screens:Let me check what data sources are available:I don't have access to your ELN or graph records — this system doesn't store or retrieve indexed data; it only works with what you upload or reference directly. \n\n**To get me to write up this campaign summary, please:**\n\n1. **Provide the campaign identifier** (if you have one in your system)\n2. **Upload the ELN entries or a summary** of the Suzuki flow screen reactions you want synthesized\n3. **Or share the reaction notes** showing what was screened (conditions varied, catalysts tested, etc.) and outcomes\n\nOnce you give me the raw data, I can use the **campaign-narrative-synthesis** skill to:\n- Extract what was actually screened (catalysts, ligands, bases, flow parameters—whatever varied)\n- Identify which conditions gave the best results and on what metrics\n- Clearly flag what the screen *doesn't* address (scope limitations, mechanistic insight, scalability, etc.)\n- Write it up as a citable narrative where every claim traces back to your notes\n\nWhat data do you have to share?",
+    "answered": true,
+    "tools_called": [
+      "grep",
+      "grep",
+      "grep",
+      "grep",
+      "ls"
+    ],
+    "tool_results": [
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "/skills/campaign-narrative-synthesis/SKILL.md\n/skills/playbook-distillation/SKILL.md"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "ls",
+        "preview": "['/bo/', '/calc/', '/safety/', '/skills/']"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.47,
+    "event_counts": {
+      "token": 21,
+      "tool_call": 5,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c81339c566f145c194d99547cb3f1330",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

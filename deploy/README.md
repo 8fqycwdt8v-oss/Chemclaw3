@@ -273,6 +273,33 @@ a singleton (the PR-gate checkout lock is host-local, D-069), and over a singlet
 makes the pod un-evictable and blocks every drain in the cluster forever, while `maxUnavailable: 1`
 permits exactly what no PDB permits.
 
+## Upgrading a release installed before this chart
+
+`chemclaw-config` and the runtime ServiceAccount used to be `pre-install,pre-upgrade` **hooks**.
+Helm does not record hook resources in the release manifest, so `helm rollback` restored the pods
+and left the previous release's configuration live and `helm uninstall` left both behind. They are
+ordinary tracked resources now. That crossing costs two things, both one-time and both measured
+against a real API server (k3s v1.29.9):
+
+- **`helm upgrade` from the previous chart refuses**, because the live objects were created by a
+  hook and so carry no `meta.helm.sh/release-name`/`-namespace`: *"exists and cannot be imported
+  into the current release"*. It is a prepare-time refusal — nothing is half-applied, and
+  `--dry-run` refuses identically. `deploy/jenkins/targets/openshift.sh` adopts them itself
+  (reporting without acting under its default `DRY_RUN=true`); for a hand-run upgrade the two
+  commands are in `docs/guides/runbook.md` § (xi), keyed on `meta.helm.sh/release-name`.
+- **`helm rollback` to a pre-change revision would delete both**, while restoring Deployments that
+  name `chemclaw-config` in a non-optional `envFrom` and run as ServiceAccount `chemclaw` — and
+  Helm reports success. Both objects therefore carry `helm.sh/resource-policy: keep`, which Helm
+  reads off the live object at deletion time; with it, the same rollback leaves them standing. The
+  trade is stated where it is made (`templates/config.yaml`): **`helm uninstall` now leaves those
+  two objects behind**, which is what the old chart did. Everything else the move bought is intact
+  — `keep` skips deletion only, so a rollback inside this chart's lineage still restores the
+  previous revision's ConfigMap contents.
+
+Neither is permanent. When no release's retained history (`helm history`) still reaches a revision
+installed before this chart, the annotation is a line to delete and the adoption step has nothing
+left to adopt.
+
 ## Before a deploy that touches workflow code
 
 Temporal replays workflow **code** against recorded **history**, so a control-flow change deployed
@@ -381,6 +408,21 @@ declared ceiling and is self-disabling when none is declared:
 `ChemclawCalcBackendOverCommitted` (`sum(chemclaw_calc_requests_in_flight)` against
 `chemclaw_calc_backend_max_concurrent_requests`).
 
+**The connection one is charged in pools, and it used to be charged in pods.** `postgres.maxConnections`
+is compared against `chemclaw.fleetPools × CHEMCLAW_PG_POOL_MAX_SIZE`, and `pg_pool_max_size` bounds
+one *pool*: `core/db` keys a pool on `(dsn, libpq options)`, so a process holds one per distinct
+pair plus any foreign pool it registers. Measured by driving each role's composition root, a
+front-door process holds the stores' pool, the `/readyz` probe's (its own statement timeout is a
+distinct key — deliberately, since sharing the stores' pool makes readiness answer 503 while the
+pool is merely busy) and the LangGraph checkpointer's autocommit pool; every worker, connector
+server and the mcp-face holds one. Counting pods declared a ceiling covering about two thirds of
+what the shipped fleet opens, which is why `postgres.maxConnections` rose in the same commit that
+corrected the arithmetic — **a release provisioning to the old number has to raise its Postgres
+`max_connections` to the new one, or lower `CHEMCLAW_PG_POOL_MAX_SIZE` until the product fits.**
+The startup check names both sides in every pod; `sum(chemclaw_pg_pool_max_size)` has been the
+honest live reading throughout, which is why the alert could fire on a fleet whose per-pod
+validation passed.
+
 The last of those reads *held sessions* rather than a configured capacity, and the difference is
 forced rather than stylistic: two kinds of process dispatch to the calculation backend and they do
 not share a cap — a `calc` worker is bounded by `CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES`, while
@@ -427,6 +469,14 @@ a job whose whole body was an `echo`, and a stub is not a pipeline. Its trigger 
 its credentials — is recorded in `docs/planning/DEFERRED.md`. Migrations run as the pre-deploy Job
 (`templates/migrate-job.yaml`), never inside an app container.
 
-> **Verified offline:** pure-YAML parse + template brace-balance + `Settings` key mapping. `helm
-> template`/`kubeconform`/the image build run in CI (no helm/daemon in the dev sandbox) — this is
-> inherent to a deploy phase, not a gap in the manifests.
+> **Verified how, and where.** Pure-YAML parse, template brace-balance and `Settings` key mapping
+> run anywhere. `helm template` and `kubeconform` run wherever `helm` is on PATH — which includes
+> CI's `check` job, because the `ubuntu-latest` runner image ships Helm, so the
+> `shutil.which("helm")`-gated chart assertions have always run there even though `azure/setup-helm`
+> is pinned only in the `chart` job. **This note used to say helm runs "in CI (no helm/daemon in the
+> dev sandbox)" and read as though the sandbox was the gap.** It is not: the sandbox skips those
+> assertions silently, and installing helm there is one `curl`. What actually let five chart defects
+> through was narrower and worse — the tests rendered the *default* values and nothing else, so a
+> switch nobody flipped was a switch nobody checked. The render set is derived from `values.yaml`
+> now. A live cluster remains genuinely out of reach here, and `helm rollback` against a real API
+> server is the one thing a render cannot stand in for.

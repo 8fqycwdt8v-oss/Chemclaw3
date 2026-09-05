@@ -25,8 +25,8 @@ through the stores, because every store already resolves its own connection from
 parameter anywhere in product code. `tests/conftest.py` owns that redirect.
 """
 
-import os
 from urllib.parse import quote
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -39,12 +39,34 @@ from chemclaw.core.migrate import migrate
 # surface, and its parity tests (DA-1) require every field to be documented in `.env.example`.
 # A test-only knob does not belong there.
 #
-# Suffixed with the pid so two pytest runs against one database cannot collide: the session
+# Suffixed with a fresh uuid4 so two pytest runs against one database cannot collide: the session
 # fixture *drops* its schema on the way out, so a fixed name means a second run deletes the first
 # run's tables mid-flight. Found the hard way — running a single test file while the full suite
-# was going did exactly that. A hard kill can leave an orphan schema behind; it is inert, named
-# unmistakably, and dropped by the next run that happens to reuse the pid.
-TEST_SCHEMA = f"chemclaw_test_{os.getpid()}"
+# was going did exactly that. A hard kill can leave an orphan schema behind; it is inert and named
+# unmistakably (`chemclaw_test_` stays the prefix so a leaked one is still recognisable), but
+# nothing drops it for you and this repository ships no sweeper that would — the phrasing here said
+# "any existing `DROP SCHEMA chemclaw_test_%` cleanup still matches it", which reads as reassurance
+# for a safety net that does not exist. It matters slightly more than under the pid scheme: a pid
+# came back around and the next run that drew it dropped the orphan on the way in, and a uuid never
+# does, so an orphan is now permanent until somebody drops it by hand.
+#
+# **It used to be the pid, and a pid is a small number a kernel reissues.** Observed on a shared
+# dev database on 2026-09-04: six leaked `chemclaw_test_*` schemas were sitting there from earlier
+# hard-killed runs, and a later run whose pid happened to match one of them inherited its rows —
+# not a fresh, empty schema, but somebody else's leftover tables. CI's throwaway container never
+# saw this because its database dies with the job; a long-lived dev database is exactly where a
+# pid comes back around. `uuid4` draws from a space large enough that "a later run reuses today's
+# suffix" is not a real risk the way pid reuse was. Each xdist worker is its own process re-running
+# this module import, so the uniqueness this suffix exists for still holds per worker with no
+# further change — the property `docs/planning/BACKLOG.md`'s xdist row leans on.
+#
+# **Twelve hex digits, not thirty-two, and the bound is Postgres's.** An identifier is 63 bytes and
+# is *truncated silently* past it, so a derived name is the real constraint rather than this one:
+# `test_message_migration.py` builds `f"{TEST_SCHEMA}_no_checkpointer"`, which at a full uuid4 hex
+# came to 62 bytes — one byte of headroom, and a silent collision the first time anybody lengthens
+# that suffix or adds a second derived name. Twelve digits is 2^48 draws against the handful a
+# machine makes in a day, which is not a birthday problem at this scale, and it leaves 20 bytes.
+TEST_SCHEMA = f"chemclaw_test_{uuid4().hex[:12]}"
 
 
 def schema_dsn(dsn: str, schema: str = TEST_SCHEMA) -> str:

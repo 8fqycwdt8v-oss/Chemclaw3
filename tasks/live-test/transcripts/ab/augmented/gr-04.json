@@ -1,0 +1,72 @@
+{
+  "probe": {
+    "id": "gr-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me everything we know about that 1536-well 3-bromopyridine plate - not just the numbers, what the write-up actually says.",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "only headline yields, with no procedure or observational detail",
+      "experimental detail attributed to the plate that is not in the retrieved text"
+    ],
+    "direction": "Four wells off that plate are seeded as free-text records carrying the source paper's own general procedure prose, alongside 96-record screens of the same chemistry. The ask is explicitly for the prose, so reading only the yields is the shallow failure. Quoting the procedure and citing which record it came from is the answer.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me everything we know about that 1536-well 3-bromopyridine plate - not just the numbers, what the write-up actually says.",
+    "profile": "",
+    "answer": "I don't have any context from earlier in our conversation about a 1536-well 3-bromopyridine plate. Since you're asking for \"everything we know\" including the full write-up (not just numbers), I need to search the record for it first.\n\nLet me look this up:The record holds nothing on a 1536-well 3-bromopyridine plate. Can you provide more detail — when this plate was run, what project it was for, or the experiment/protocol name? With that I can search more specifically, or you could quote the note id or design id if you have it handy.\n\nAlternatively, if this is a plate design you're referencing that hasn't been run yet, I can retrieve the stored protocol if you have the `design-` id.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 6.89,
+    "event_counts": {
+      "token": 12,
+      "tool_call": 2,
+      "tool_result": 2,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "16a0874f22a2465f92851248d6dba731",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

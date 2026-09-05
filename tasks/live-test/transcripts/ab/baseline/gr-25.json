@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "gr-25",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're carrying about 800 ppm of residual toluene into the API. Problem?",
+    "expects_tools": [
+      "ich_impurity_limit"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a limit recalled from memory rather than looked up in the transcribed table",
+      "a pass/fail verdict given with no statement of what it depends on"
+    ],
+    "direction": "Looks the limit up, names the class and the basis, and makes the dependence on daily dose explicit — a concentration limit and a permitted daily exposure are different statements and conflating them is how a wrong answer sounds right.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-25",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're carrying about 800 ppm of residual toluene into the API. Problem?",
+    "profile": "no-tools",
+    "answer": "I need to know more context to give you a useful answer. The answer depends on:\n\n1. **What is the API?** (the active pharmaceutical ingredient itself)\n   - Some APIs are more sensitive to aromatic solvent residues than others\n   - The structure and functional groups matter\n\n2. **What are the regulatory/specification limits?**\n   - ICH Class 3 solvents (solvents with low toxic potential) include toluene, and the ICH guideline Q3C(R8) sets a concentration limit of **890 ppm** for toluene\n   - So 800 ppm is *just under* the ICH limit, but this is cutting it close\n   - Your specific drug's specification might be tighter than the ICH guideline\n\n3. **What's your downstream processing?**\n   - If toluene will be removed in crystallization, recrystallization, or further purification steps, 800 ppm might be acceptable as an intermediate\n   - If this is going directly into final formulation or product, it's problematic\n\n4. **Stability concerns?**\n   - Toluene can act as a solvent or plasticizer in some formulations\n   - It could affect stability in certain dosage forms\n\n**Bottom line:** 800 ppm toluene is right at the ICH Class 3 limit. If your API specification allows ≤890 ppm, you're technically compliant with the ICH guideline. But I'd check:\n- Your product's actual specification (it may be lower)\n- Whether further purification will remove it\n- Whether your formulation development has tested stability/compatibility at this level\n\nIs this an intermediate step, or is this the final API specification?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.1,
+    "event_counts": {
+      "token": 181,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "59197509003c4871943b8f92c8d8b7c7",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

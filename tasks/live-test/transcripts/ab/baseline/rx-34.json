@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "rx-34",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Put together a scale-up readiness summary on the coupling for the stage gate — what we know, what the risks are, and what is still open.",
+    "expects_tools": [
+      "request_development_report",
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an engineering or equipment readiness assessment",
+      "a timeline, cost or resourcing statement",
+      "a go/no-go recommendation presented as the system's own decision",
+      "a risk stated without the record entry it came from"
+    ],
+    "direction": "Should assemble from the record rather than compose from general knowledge, and should be explicit that anything it generates enters the knowledge base through the human review gate rather than as fact — a manager-facing document is exactly where that line matters. Content that is genuinely supported: the recorded conditions and isolated yield, the protodeboronation and amide-coupling failure modes, the ligand-before-temperature and degassing playbooks, and the reporting rule that a yield must be quoted with its purification. Content that must be flagged as absent, not filled in: heat transfer and exotherm, mixing, equipment, solid form and crystallisation behaviour, impurity control strategy, genotoxic impurity assessment, and any timeline or resource view — none of which exist in this system. A good answer separates 'what the record supports' from 'what a stage gate needs and we do not have', and the second list is the more useful half.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-34",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Put together a scale-up readiness summary on the coupling for the stage gate — what we know, what the risks are, and what is still open.",
+    "profile": "no-tools",
+    "answer": "I'd like to help you put together a scale-up readiness summary, but I need some context first. I'm not seeing any retrieved data about the coupling you're referring to, and I don't have access to your project records or the stage gate details.\n\nTo create this summary effectively, I'll need you to provide:\n\n1. **Which coupling reaction** are you assessing? (e.g., specific reactant pairs, coupling type—cross-coupling, amide coupling, etc.)\n2. **Do you have project notes or experimental data** you can share or point me to? (e.g., ELN entries, optimization campaigns, reaction protocols)\n3. **What stage of development** is this at? (e.g., route scouting, optimization, pilot batch)\n4. **What are the key scale-up concerns** you're thinking about? (e.g., exotherm, yield drop-off, cost, throughput, safety)\n\nAlternatively, if this data is in your system, you could:\n- Retrieve the relevant reaction notes or experiment summaries\n- Share attached files with coupling data\n- Point me to specific campaign or project identifiers\n\nOnce I have that evidence, I can structure a proper readiness summary covering:\n- **What we know**: Validated reaction conditions, yield/selectivity data, reproducibility\n- **Risks**: Potential failure modes at scale (exotherm, mass-transfer limits, cost drivers)\n- **Open questions**: What still needs to be de-risked before committing to scale-up\n\nPlease share the relevant data and I'll synthesize it into a stage-gate-ready summary.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.52,
+    "event_counts": {
+      "token": 143,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a3f924bbe7f84c1caa6b35edbf03fafa",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

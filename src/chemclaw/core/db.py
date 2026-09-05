@@ -39,6 +39,7 @@ parameters a dense search runs under — is the other.
 
 import asyncio
 import logging
+import threading
 import time
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
@@ -84,6 +85,24 @@ _UNNAMED_OPERATION = "unspecified"
 _PoolKey = tuple[asyncio.AbstractEventLoop, str, str | None]
 _Pool = AsyncConnectionPool[psycopg.AsyncConnection[TupleRow]]
 _POOLS: dict[_PoolKey, _Pool] = {}
+# **Every read and every write of the two containers below is under this lock**, and it is a
+# `threading` lock rather than an `asyncio` one because the threads are the hazard: the pools are
+# keyed on their loop precisely so that a *second* loop — `evals/retrieval._run_sync` starts one per
+# live metric call, `durable/eval_drift` runs `run_eval` in a thread inside the worker's `pooling()`
+# — builds its own, which means two threads mutate this dict while a third (a `/metrics` scrape
+# through the bound gauges) walks it. That used to be left to the GIL, and it held only while every
+# access was a single C-level dict op; `_forget_pools_of_ended_loops` added the first Python-level
+# walk and the interpreter is free to switch threads inside one. Measured: three churn threads
+# against three readers, 364 `dictionary changed size during iteration` in two seconds, on
+# `pool_stats` (the gauge silently drops the pool series) and on `_pool_for`, which is the request
+# path — and a `RuntimeError` there is not a psycopg error, so `_failure_kind` returns `None`,
+# nothing recognises it and the route 500s.
+#
+# **Never held across an `await` or across the release of the last reference to a pool.** Both would
+# turn a lock taken for microseconds into one held for seconds: `pool.close()` waits on its workers,
+# and psycopg's `__del__` gathers them with a five-second timeout. The two places that drop pools
+# therefore hand them to a local and let go outside the block.
+_POOL_REGISTRY_LOCK = threading.Lock()
 # Pools this module did not build but this process holds: today the LangGraph checkpointer's
 # autocommit pool (`agent/checkpointer.py`), which every turn's state write goes through. They are
 # registered rather than taught to the metrics separately, because `chemclaw_pg_pool_max_size` is
@@ -251,7 +270,9 @@ def _forget_pools_of_ended_loops() -> None:
     pool's shutdown on the loop it was opened in, so `close()` on an ended loop raises
     `RuntimeError: Event loop is closed` — the reason `pooling()`'s `finally` skips them too.
     Releasing the last reference is what shuts the connections: measured, the marked backend
-    disappeared from `pg_stat_activity` on the `pop` below, with no `gc.collect()` needed.
+    disappeared from `pg_stat_activity` the moment the pool was dropped, with no `gc.collect()`
+    needed. That release is the `clear()` below and not the `pop`, which only hands the pool to a
+    local so the drop happens outside the registry lock.
 
     Called from the two places that ask this module what pools exist — the lookup and the readings
     — so whichever runs first releases, and neither `chemclaw_pg_pool_max_size` (the per-process
@@ -259,8 +280,14 @@ def _forget_pools_of_ended_loops() -> None:
     nothing can borrow from. A read that evicts is deliberate: the resource is tied to an owner
     that no longer exists, and there is no other moment at which anyone learns it has gone.
     """
-    for key in [key for key in _POOLS if key[0].is_closed()]:
-        _POOLS.pop(key, None)
+    with _POOL_REGISTRY_LOCK:
+        dead = [key for key in _POOLS if key[0].is_closed()]
+        evicted = [_POOLS.pop(key) for key in dead]
+    # Released here, one statement outside the lock, and the placement is the whole point: dropping
+    # the last reference to a pool runs psycopg's `__del__`, which gathers the pool's background
+    # workers with a five-second timeout. Doing that under the lock would block every other reader
+    # of the registry — the request path included — for as long as it took.
+    evicted.clear()
 
 
 def _pool_for(dsn: str, options: str | None) -> _Pool:
@@ -273,12 +300,16 @@ def _pool_for(dsn: str, options: str | None) -> _Pool:
     DSN cannot end up with two pools for it.
 
     Keyed on the running loop as well, so a second loop builds and owns its own pool instead of
-    borrowing one whose waiters it cannot be woken by — see `_POOLS`.
+    borrowing one whose waiters it cannot be woken by — see `_POOLS`. That second loop is usually a
+    second *thread*, which is why the lookup and the insert are one critical section under
+    `_POOL_REGISTRY_LOCK`: this is a request-path read of a dictionary another thread is writing.
     """
     _forget_pools_of_ended_loops()
     key = (asyncio.get_running_loop(), dsn, options)
-    pool = _POOLS.get(key)
-    if pool is None:
+    with _POOL_REGISTRY_LOCK:
+        pool = _POOLS.get(key)
+        if pool is not None:
+            return pool
         pool = AsyncConnectionPool(
             conninfo=dsn,
             connection_class=psycopg.AsyncConnection[TupleRow],
@@ -301,7 +332,7 @@ def _pool_for(dsn: str, options: str | None) -> _Pool:
             open=False,
         )
         _POOLS[key] = pool
-    return pool
+        return pool
 
 
 def _failure_kind(exc: BaseException) -> str | None:
@@ -514,8 +545,12 @@ def bind_pool_metrics() -> None:
     pool this process holds**, not `settings.pg_pool_max_size`: a process routinely holds more than
     one — this module keys on `(dsn, options)` precisely so `/readyz` and the stores do not share
     connections, and the checkpointer registers a third — and measured against a live server that
-    was three pools and 48 connections reported as 16, which puts the shipped chart at ~184 real
-    connections against the 136 its values file provisions.
+    was three pools and 48 connections reported as 16. That under-count reached the fleet
+    validator too, which multiplied *processes* rather than pools: the shipped chart's real floor
+    is **208** where its values file provisioned 136. Both are fixed —
+    `pg_fleet_pools` counts pools and `postgres.maxConnections` provisions 256 — and the figure to
+    trust is whichever `tests/test_deploy_chart.py` derives from the rendered chart, not this
+    sentence.
 
     Imported inside the function: `core/metrics.py` is a sibling of this module and `core` keeps
     its no-module-scope-sibling-import rule (`tests/test_layering.py`), the same lazy exception
@@ -566,9 +601,14 @@ async def pooling() -> AsyncIterator[None]:
         # `_forget_pools_of_ended_loops` is the same act, performed as soon as the loop ends
         # instead of at shutdown. Production has one loop per process and closes what it opened.
         here = asyncio.get_running_loop()
-        mine = [key for key in _POOLS if key[0] is here]
-        pools = [_POOLS.pop(key) for key in mine]
-        _POOLS.clear()
+        with _POOL_REGISTRY_LOCK:
+            mine = [key for key in _POOLS if key[0] is here]
+            pools = [_POOLS.pop(key) for key in mine]
+            abandoned = list(_POOLS.values())
+            _POOLS.clear()
+        # Both drops happen outside the lock, for the reason `_forget_pools_of_ended_loops` gives:
+        # the release runs psycopg's five-second `__del__`, and `close()` awaits.
+        abandoned.clear()
         for pool in pools:
             await pool.close()
 
@@ -585,20 +625,23 @@ def register_pool(pool: Any) -> None:
     Registration only — the caller keeps the lifecycle, because `close_checkpointer` owns when that
     pool opens and closes and a second closer is how a live pool gets shut under a running turn.
     """
-    if pool not in _FOREIGN_POOLS:
-        _FOREIGN_POOLS.append(pool)
+    with _POOL_REGISTRY_LOCK:
+        if pool not in _FOREIGN_POOLS:
+            _FOREIGN_POOLS.append(pool)
 
 
 def unregister_pool(pool: Any) -> None:
     """Stop counting a foreign pool — called by its owner as it closes it."""
-    if pool in _FOREIGN_POOLS:
-        _FOREIGN_POOLS.remove(pool)
+    with _POOL_REGISTRY_LOCK:
+        if pool in _FOREIGN_POOLS:
+            _FOREIGN_POOLS.remove(pool)
 
 
 def _all_pools() -> list[Any]:
     """Every pool this process holds: the ones built here, plus the registered foreign ones."""
     _forget_pools_of_ended_loops()
-    return [*_POOLS.values(), *_FOREIGN_POOLS]
+    with _POOL_REGISTRY_LOCK:
+        return [*_POOLS.values(), *_FOREIGN_POOLS]
 
 
 def _process_max_connections() -> int:

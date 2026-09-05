@@ -277,6 +277,24 @@ class RetrievalSettings(BaseSettings):
     note_reindex_schedule_minutes: float = Field(default=60.0, gt=0)
     note_reindex_timeout_seconds: float = Field(default=600.0, gt=0)
 
+    # The two bounds that stop **one** note from freezing the whole derived index.
+    #
+    # `reindex_notes` embedded every changed note's whole `search_text` in a single `embed_texts`
+    # call and upserted the lot afterwards, so a note the embedding endpoint refuses took the entire
+    # pass down with it — measured, one 989 kB campaign note against a provider enforcing OpenAI's
+    # 8,192-token limit left **zero** notes indexed, including the short ones beside it. Because the
+    # `tsvector` is written in the same `INSERT`, the *lexical* leg froze too, and the hourly job
+    # reported success every hour thereafter.
+    #
+    # 24,000 characters is ~6k tokens, comfortably inside an 8,192-token window and the same figure
+    # `protocol_digest_max_chars` above uses for one map unit. Truncation loses the tail of a very
+    # long note's dense vector rather than the note: its `tsvector` is built from the same bounded
+    # text, and every other leg still sees it whole.
+    note_embed_max_chars: int = Field(default=24_000, ge=1_000)
+    # How many notes go into one embed-and-upsert round. A failure now costs its own batch instead
+    # of the corpus, and the batches that already landed stay landed.
+    note_embed_batch_size: int = Field(default=64, ge=1)
+
 
 # The `vector(N)` width every embedding column in this schema was migrated with —
 # `note_index.embedding` (`infra/sql/012`) and `document_chunks.embedding` (`infra/sql/037`).

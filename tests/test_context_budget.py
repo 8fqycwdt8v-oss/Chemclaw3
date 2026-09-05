@@ -227,14 +227,15 @@ def test_a_budget_the_prefix_exhausts_floors_at_one_and_says_so(
     the prefix was charged unconditionally it took a declared window narrower than its own prefix;
     it now takes any configured budget below the prefix — which is where the shipped
     `agent_tool_result_clear_trigger` sat, unnoticed, for as long as the number was derived from a
-    prefix measured with no connector bound: 73,500 against the 75,695 tokens a real turn sends.
-    Both defaults were re-derived on 2026-09-05 from the honest prefix and
+    prefix measured with no connector bound. Both defaults were re-derived on 2026-09-05 from the
+    honest prefix, and
     `tests/test_compaction.py::test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged` is
-    what asserts the shipped configuration is out of this state — against a prefix that includes
-    the connector surface, which is the half that made the previous assertion vacuous.
+    what asserts the shipped configuration is out of this state — the **opposite** state to the one
+    this test drives — against a prefix that includes the connector surface, which is the half that
+    made the previous assertion vacuous.
 
-    No shipped figure is restated here beyond that one, deliberately: this test is about the
-    mechanism, and a default quoted in it is a claim about a commit
+    No shipped figure is restated here beyond that, deliberately: this test is about the mechanism,
+    and a default quoted in it is a claim about a commit
     (`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`).
 
     Once per distinct `(configured, prefix, window)`, because the condition is static: it is the
@@ -395,9 +396,12 @@ def test_a_clean_overrun_reading_means_the_request_fits_its_budget(
     prefix alone exhausts the budget there is no room for any thread and the trigger floors at 1, so
     a thread of 0 or 1 estimated tokens reads clean on a request that is already over. That corner
     used to need a window narrower than its own prefix; it is now reachable from a plain
-    misconfiguration, and the shipped `agent_tool_result_clear_trigger` of 30,000 sits in it against
-    a 43,175-token prefix — which is why `effective_trigger` reports a floor instead of returning it
-    silently, and why `tests/test_compaction.py` pins that state end to end.
+    misconfiguration — any configured budget under a prefix that measured 43,175 tokens on
+    2026-09-04 and grows with every bound tool. That is why `effective_trigger` reports a floor
+    instead of returning it silently. **No shipped default sits in it**:
+    `agent_tool_result_clear_trigger` is derived as the ratchet ceiling plus 30,000 of thread, and
+    `tests/test_compaction.py::test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged` pins
+    that band end to end.
 
     The prefix is set on the contextvar directly here because the claim is about the arithmetic;
     that a *request*'s prefix reaches it is
@@ -454,5 +458,6 @@ def test_a_clean_overrun_reading_means_the_request_fits_its_budget(
     assert degenerate_undeclared, (
         "the floor was only ever reached with a window declared, so this sweep is not evidence "
         "about the corner the unconditional subtraction newly opens — a configured budget below "
-        "the prefix, which is the shipped agent_tool_result_clear_trigger's state"
+        "the prefix, which is what a deployment reaches by lowering either context setting under "
+        "its own bound tool surface"
     )

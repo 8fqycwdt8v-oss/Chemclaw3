@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "kn-15",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "spent two days rediscovering that the EDC coupling has to start at 0 °C or it dies. thats not written down anywhere obvious — can you capture it properly so the next person doesnt?",
+    "expects_tools": [
+      "propose_knowledge_note",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that the note is now saved, merged, or live in the knowledge base",
+      "a note id that was not retrieved",
+      "an approval that has already happened"
+    ],
+    "direction": "Checks the record before writing: failure-dcm-amide-coupling already records this exact cause, so the right move is to say so and propose an addition or a playbook that generalises it, rather than filing a duplicate. Then actually calls propose_knowledge_note with a body that cites the related notes as wikilinks. The answer must state that the note is authored as `agent` and goes to a human via the PR-gate before it becomes trusted knowledge — telling the chemist it is \"now in the knowledge base\" is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-15",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "spent two days rediscovering that the EDC coupling has to start at 0 °C or it dies. thats not written down anywhere obvious — can you capture it properly so the next person doesnt?",
+    "profile": "no-tools",
+    "answer": "I'll help you capture this properly. Before I create a note, let me understand the context better so it's useful for the next person:\n\n**Quick clarifications:**\n\n1. **Which EDC coupling reaction?** (e.g., carboxylic acid + amine → amide? alcohol + carboxylic acid? nucleotide ligation?)\n2. **What exactly \"dies\"?** (the reagent decomposes? the product forms but then degrades? the coupling simply doesn't proceed?)\n3. **Temperature details:** You say it has to *start* at 0 °C — does it fail if you add reagents at room temperature even if you cool after? Can it be allowed to warm after the initial coupling? Any maximum temperature after coupling?\n4. **Which conditions around it matter?** (solvent, base, additives, substrate scope, timeframe?)\n5. **Did you test the boundary?** (e.g., what happens at 5 °C or 10 °C? or did you just confirm 0 °C works?)\n\nOnce I have these details, I'll write a knowledge note formatted for the lab (clear, citable, actionable) that captures:\n- The exact requirement and failure mode\n- Why it matters (what you observed when you rediscovered it)\n- Any scope (does this apply to all substrates or specific ones?)\n- What NOT to do\n\nThis will go through review before it's live, so the next person sees it pinned and searchable rather than buried in your notebook or messages.\n\nWhat can you tell me about those points?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.24,
+    "event_counts": {
+      "token": 17,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "cc5714e9652a423aa1d93e2a98a09079",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

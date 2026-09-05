@@ -1,0 +1,142 @@
+{
+  "probe": {
+    "id": "an-22",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Rank the oxidation-prone sites on COc1ccc(-c2ccccc2C(=O)O)cc1 and tell me how easy the whole molecule is to oxidise.",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "converting the ranking into a degradation rate, a percentage or a shelf-life",
+      "presenting the ranking as a prediction of what will be observed",
+      "quoting Fukui indices as if they were measured quantities"
+    ],
+    "direction": "Runs the site ranking in electrophilic mode and reports the ordered sites in chemical language, plus the global measure (HOMO / ionisation-related descriptor) for \"how easy overall\". Sanity-checks the ranking against the classic liabilities for this structure — the methoxy-activated ring. States the ceiling: this says where the molecule is electronically vulnerable, not whether it will degrade or how fast.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-22",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Rank the oxidation-prone sites on COc1ccc(-c2ccccc2C(=O)O)cc1 and tell me how easy the whole molecule is to oxidise.",
+    "profile": "",
+    "answer": "I'll analyze this molecule for oxidation-prone sites and overall oxidation susceptibility. Let me start by examining the structure and its bond strengths.Now let me compute the bond dissociation energies to rank the sites by oxidation susceptibility:Let me use the correct tool signature:Let me correct the SMILES and use the simpler template version:Good, that's running. Let me also check the overall oxidation tendency by computing the electronic properties:Let me check what happened and try a simpler approach with the correct SMILES:Let me poll for the bond strength survey result:The bond strength survey is running. While we wait, let me gather what I can from a simpler analysis. Based on the structure **COc1ccc(-c2ccccc2C(=O)O)**, this is a biaryl system with a methoxy substituent and a carboxylic acid. Let me provide the analysis based on the structural features:Let me try a different approach and look at the molecule's degradation pathways:Good, now let me get both results:Both jobs are still computing. Let me provide a structural analysis while we wait, and I'll follow up once the calculations complete. Based on the molecule **COc1ccc(-c2ccccc2C(=O)O)** — a 4-methoxybenzoic acid biaryl:\n\n## Oxidation-Prone Sites (Ranked by Expected Susceptibility):\n\n**1. Methoxy group C-H bonds (most oxidation-prone)**\n   - The O-CH₃ methyl group is the most electron-rich C-H in the molecule\n   - Oxidation typically occurs at the benzylic carbon adjacent to the electron-donating methoxy group\n   - This C-H is activated by the para-positioned electron-donating methoxy on the aromatic ring\n   - **Expected mechanism**: Benzylic oxidation to aldehyde, then further oxidation to carboxylic acid\n\n**2. Aromatic C-H ortho to the methoxy group**\n   - Electron density on the methoxylated ring makes ortho/para positions more nucleophilic\n   - More susceptible to electrophilic oxidants than unsubstituted aromatics\n   - However, the aromatic ring itself is relatively resistant to oxidation\n\n**3. Benzylic C-H on the unsubstituted ring (ipso position)**\n   - The C-H at the ipso carbon where the biaryl bond attaches\n   - Flanked by two aromatic rings, making it more acidic and potentially more oxidizable\n   - Less reactive than the methoxy benzylic position\n\n**4. Aromatic C-H on the unsubstituted ring**\n   - Standard aromatic C-H, moderately stable\n   - No strong electronic activation from nearby groups\n\n**5. Carboxylic acid group**\n   - The O-H is relatively resistant to oxidation (carboxylic acids are already oxidized)\n   - Not a major oxidation liability\n\n## Overall Oxidation Susceptibility:\n\n**The molecule is moderately oxidation-prone**, primarily due to:\n- **Methoxy group**: This is the main liability. The benzylic C-H α to the methoxy oxygen is the weakest bond oxidatively\n- **Electron-donating effect**: The methoxy groups electron donation activates the para-positioned aromatic ring, making it more susceptible to oxidative attack\n- **Biaryl system**: The biphenyl core itself is reasonably stable, but the biaryl C-C bond may be susceptible under strongly oxidizing conditions\n\n**Key oxidation hazards in order of likelihood**:\n1. **Methoxy oxidation** → formaldehyde, formic acid, or related oxidized products\n2. **Aromatic ring oxidation** of the electron-rich (methoxylated) ring → quinone-like intermediates or ring-opened products\n3. **Biaryl bond cleavage** → under severe oxidizing conditions\n\nLet me check the computational results once they're ready.The bond strength survey is still computing. The degradant triage had an issue; let me provide a summary based on what we know from the structure and chemical principles.\n\n## Summary: Oxidation Susceptibility\n\n**Most oxidation-prone site**: **The methoxy group (OCH₃)** on the 4-position of the methoxylated ring\n- The benzylic C-H is the weakest bond to oxidative cleavage\n- Expected product: oxidation of CH₃ → CHO (formaldehyde equivalent) → COOH\n- This would yield hydroxylated or oxidized derivatives\n\n**Second**: **Aromatic C-H ortho to methoxy** (positions 2,6 on the methoxylated ring)\n- Activated by electron donation from the methoxy group\n- More susceptible than unsubstituted aromatic C-H\n\n**Third**: **Benzylic C-H at the biaryl junction** (ipso carbon on the unsubstituted ring)\n- Activated by being sandwiched between two aromatic rings\n- Less reactive than methoxy-activated positions\n\n**Overall assessment**: This molecule is **moderately oxidation-prone**. The methoxy group is the primary oxidation liability, making it vulnerable to:\n- H₂O₂ and peracids\n- Permanganate and chromate oxidants  \n- Catalytic aerobic oxidation\n- Photochemical oxidation\n\nThe biaryl core itself is reasonably stable except under very aggressive oxidizing conditions. The carboxylic acid is a stable functional group and not an oxidation risk.\n\nThe bond strength survey is still computing if you need the quantitative BDE values for each breakable bond.",
+    "answered": true,
+    "tools_called": [
+      "describe_sites",
+      "predict_site_reactivity",
+      "enumerate_bond_cleavages",
+      "survey_bond_strengths",
+      "survey_bond_strengths",
+      "run_bond_strength_survey",
+      "compute_electronic_properties",
+      "get_durable_job_status",
+      "run_bond_strength_survey",
+      "compute_xtb_energy",
+      "get_durable_job_status",
+      "get_durable_job_status",
+      "run_degradant_triage",
+      "get_durable_job_status",
+      "get_durable_job_status",
+      "get_durable_job_status",
+      "get_durable_job_status"
+    ],
+    "tool_results": [
+      {
+        "tool": "describe_sites",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"chem:describe_sites\">\n{\n  \"smiles\": \"COc1ccc(-c2ccccc2C(=O)O)cc1\",\n  \"sites\": [\n    {\n      \"site_id\": \"site_e624f08bbcb93d95\",\n      \"atoms\": [\n        0\n      ],"
+      },
+      {
+        "tool": "enumerate_bond_cleavages",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"chem:enumerate_bond_cleavages\">\n{\n  \"parent\": \"COc1ccc(-c2ccccc2C(=O)O)cc1\",\n  \"mode\": \"homolytic\",\n  \"cleavages\": [\n    {\n      \"atoms\": [\n        0,\n        1\n  "
+      },
+      {
+        "tool": "run_bond_strength_survey",
+        "preview": "template-bond-strength-survey-62384d3436dcc6c0"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='template-bond-strength-survey-62384d3436dcc6c0' status='failed' summary=None result={} calc_refs=[] rationale=''"
+      },
+      {
+        "tool": "run_bond_strength_survey",
+        "preview": "template-bond-strength-survey-69042a18042d3815"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='template-bond-strength-survey-69042a18042d3815' status='running' summary=None result={} calc_refs=[] rationale=''"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='template-bond-strength-survey-69042a18042d3815' status='running' summary=None result={} calc_refs=[] rationale=''"
+      },
+      {
+        "tool": "run_degradant_triage",
+        "preview": "template-degradant-triage-f02d998e977ff56f"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='template-degradant-triage-f02d998e977ff56f' status='running' summary=None result={} calc_refs=[] rationale=''"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='template-bond-strength-survey-69042a18042d3815' status='running' summary=None result={} calc_refs=[] rationale=''"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='template-bond-strength-survey-69042a18042d3815' status='running' summary=None result={} calc_refs=[] rationale=''"
+      }
+    ],
+    "tools_failed": [
+      "predict_site_reactivity",
+      "survey_bond_strengths",
+      "survey_bond_strengths",
+      "compute_electronic_properties",
+      "compute_xtb_energy",
+      "get_durable_job_status"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "4",
+      "1",
+      "2",
+      "3",
+      "5",
+      "6"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [
+      "template-bond-strength-survey-62384d3436dcc6c0",
+      "template-bond-strength-survey-69042a18042d3815",
+      "template-degradant-triage-f02d998e977ff56f"
+    ],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 88.39,
+    "event_counts": {
+      "token": 98,
+      "tool_call": 17,
+      "tool_result": 11,
+      "tool_failed": 6,
+      "job_started": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "6ce27b8a9dc347818c8daba20d72706a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

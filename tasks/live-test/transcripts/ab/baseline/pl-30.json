@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "pl-30",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "If we push the amide-coupling programme above the Suzuki work, what slips and by how much? I need to know the cost before I make the call.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any timeline, slip duration, delivery date or milestone impact",
+      "any resource, headcount or effort reallocation figure",
+      "that a reprioritisation scenario can be modelled from the available data"
+    ],
+    "direction": "A what-if on delivery dates needs plans, resourcing and dependencies, and none of the three exists here — no timeline data, no capacity model, no staffing assignment, no inter-project dependencies. The answer must decline the scenario rather than reasoning plausibly from nothing, and must not hedge its way into a number (\"probably two to three weeks\") which is the specific failure mode. It may legitimately note that it can compare the *chemistry* of the two programmes from the corpus, which is a different question.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-30",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "If we push the amide-coupling programme above the Suzuki work, what slips and by how much? I need to know the cost before I make the call.",
+    "profile": "no-tools",
+    "answer": "I don't have access to your project records, programme timeline, or cost data. To answer this question, I would need to see:\n\n1. **Your current project schedule** – which shows the amide-coupling programme, the Suzuki work, their current start/end dates, and resource allocation\n2. **Dependencies and critical path** – what work is linked to each programme and would slip if they were reordered\n3. **Resource constraints** – shared staff, equipment, or budget that would create the conflict\n4. **Cost structure** – how costs scale with timeline delay (labor burn, equipment rental, reagent shelf-life, etc.)\n\n**What slips and by how much** depends entirely on your specific constraints. For instance:\n- If the Suzuki work has a hard external deadline but the amide programme doesn't, the Suzuki work slips\n- If they share a bottleneck resource (one analyst, one reactor), whichever starts second will be delayed by the duration of the first\n- Cost impact scales with *what* slips: delaying a final purification costs less per day than delaying early synthesis if resources are then idle\n\n**To get a cost estimate, you'll need to:**\n- Map your current Gantt chart or timeline\n- Identify what resources are contended between the two programmes\n- Calculate the delay cascade (work scheduled after the shifted programme will compress or slip)\n- Multiply delayed person-days and equipment-days by your cost rates\n\nCan you share your project timeline or point me to where that data lives in your ELN or project management system?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.19,
+    "event_counts": {
+      "token": 17,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "188800f4b48644c29395f136bab07a40",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

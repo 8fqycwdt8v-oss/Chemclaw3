@@ -1,0 +1,73 @@
+{
+  "probe": {
+    "id": "rx-35",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Has 4-bromoanisole (COc1ccc(Br)cc1) been used as a starting material anywhere else in our records, or only in the coupling I know about?",
+    "expects_tools": [
+      "substrate_precedent",
+      "similar_molecules",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a count presented as complete when the coverage sentence says the corpus is partly labelled",
+      "a claim that the compound is unused, when nothing matching has been labelled yet",
+      "a reaction cited without the note or document it came from"
+    ],
+    "direction": "The question names a role, so the role filter is the point: `substrate_precedent` with `role='starting-material'` answers it directly, where a similarity search would return the compound's neighbours and not its uses. A good answer distinguishes the two empty results the tool distinguishes — no precedent in a labelled corpus is a finding, nothing labelled yet is not — and quotes the coverage sentence rather than a bare number. If it falls back to `similar_molecules`, it must say that those are structural neighbours rather than recorded uses.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-35",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Has 4-bromoanisole (COc1ccc(Br)cc1) been used as a starting material anywhere else in our records, or only in the coupling I know about?",
+    "profile": "",
+    "answer": "I'll search the records for reactions that used 4-bromoanisole as a starting material.The labelled reaction corpus has **no rows in scope** for 4-bromoanisole as a starting material — meaning nothing has been tagged with this reagent in the indexed reactions. This is **not** evidence that the coupling you know about is alone; it means the reaction-label index may not have 4-bromoanisole indexed, or the reactions containing it have not been labelled with the starting-material role yet.\n\nLet me search more broadly for reactions involving this structure in any form:The molecule fingerprint index is empty — so I cannot search by structural similarity either.\n\n**Bottom line**: The labelled reaction corpus has no tagged entries for 4-bromoanisole as a starting material, and the structural index is not populated. This means:\n\n- **The question was not answered by the record**, because the indexes that would carry it are either unpopulated or reactions have not been labelled with their starting materials.\n- This **is not evidence** that your coupling is the only use — it is evidence that the corpus may need indexing or labelling work.\n\nIf you know of other reactions using 4-bromoanisole, or if reactions have been logged to the ELN but not yet labelled with their starting materials, those would not appear in this search. You may want to check your ELN directly or ask your data team whether the reaction-label index is current.",
+    "answered": true,
+    "tools_called": [
+      "substrate_precedent",
+      "similar_molecules"
+    ],
+    "tool_results": [
+      {
+        "tool": "substrate_precedent",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:substrate_precedent\">\n{\n  \"question\": \"reactions using COc1ccc(Br)cc1\",\n  \"hits\": [],\n  \"coverage\": {\n    \"labelled\": 0,\n    \"total\": 0,\n    \"sources\": [],\n "
+      },
+      {
+        "tool": "similar_molecules",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"molfp:similar_molecules\">\n{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 15.2,
+    "event_counts": {
+      "token": 26,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d91931fd58444cd2890571171bfd8b6d",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

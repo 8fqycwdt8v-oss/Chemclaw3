@@ -274,6 +274,14 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ),
     ("chemclaw.retrieval", "postgres"): "the vector index is pgvector",
     ("chemclaw.evals", "httpx"): "the live probe drives the real front door over HTTP",
+    ("chemclaw.evals", "langgraph"): (
+        "the live-probe judge is a model call like any other, so it composes its prompt out of "
+        "`langchain_core` messages and reads the reply's `finish_reason` off `response_metadata` — "
+        "the truncation signal that separates `ungraded` from a fabricated `unserved`. It held the "
+        "`llm` row instead until the collapse to one gateway, because it built an `anthropic` "
+        "client itself; the model now comes from `agent/llm_provider`, which is the only module "
+        "that may name a provider client class"
+    ),
     ("chemclaw.evals", "temporal"): "the live probe polls real durable jobs",
     # cli: the outermost layer — every entrypoint, so it may reach anything below it.
     ("chemclaw.cli", "http"): "connectors_dev and mock_llm serve real ASGI apps",
@@ -309,7 +317,6 @@ _ALLOWED_LAZY_STACKS: dict[Edge, str] = {
         "unused, and what is left of agent's HTTP is one lazy client factory"
     ),
     ("chemclaw.cli", "llm"): "cli/mock_llm mirrors the provider's own response types on demand",
-    ("chemclaw.evals", "llm"): "the judge client is built per run",
     ("chemclaw.ingest", "warehouse"): (
         "both warehouse drivers are imported inside their own connect call, so a deployment that "
         "binds no warehouse never needs either installed (D-2026-08-04: the schema is a file, not "

@@ -1,0 +1,65 @@
+{
+  "probe": {
+    "id": "ws-03",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Something worth keeping: on this project we have decided not to use DMF at all, REACH authorisation makes it a headache downstream and we would rather take a yield hit than carry it into the filing. Hold on to that.",
+    "expects_tools": [
+      "remember_preference",
+      "write_file"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that the preference is shared with the team or applies to other users",
+      "a regulatory claim about DMF beyond what the asker said"
+    ],
+    "direction": "A standing instruction, and the right response is to record it rather than acknowledge it in prose that dies with the turn. A good answer stores it, says plainly what was stored and that it is scoped to this asker, and — the useful part — names what it will now do differently: propose an alternative dipolar aprotic on the next route question rather than waiting to be asked again. It should not restate the REACH reasoning as though the system had verified it; that is the asker's premise and it belongs quoted, not asserted.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-03",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Something worth keeping: on this project we have decided not to use DMF at all, REACH authorisation makes it a headache downstream and we would rather take a yield hit than carry it into the filing. Hold on to that.",
+    "profile": "",
+    "answer": "I'll record this as a project preference so it shapes future recommendations.Done. That's now part of your working context — whenever I'm building conditions, proposing a solvent screen, or drawing on precedent, I'll keep DMF off the table, even if the record shows it worked elsewhere. When a choice comes down to DMF versus something else with a lower yield, I'll flag the trade-off but steer toward the alternative that gets you through filing without a REACH authorization hurdle.",
+    "answered": true,
+    "tools_called": [
+      "remember_preference"
+    ],
+    "tool_results": [
+      {
+        "tool": "remember_preference",
+        "preview": "Remembered solvent_exclusion_DMF='Project decision: do not use DMF. REACH authorisation complexity is considered a greater burden than accepting a yield penalty. This constraint applies to all future "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 6.64,
+    "event_counts": {
+      "token": 8,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "f445f428cfac4925b37a8ec8d27030ea",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

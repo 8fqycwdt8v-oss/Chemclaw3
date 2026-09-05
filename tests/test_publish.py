@@ -98,6 +98,16 @@ def test_every_chemclaw_error_subclass_is_listed_non_retryable() -> None:
     # And an exemption must never also be listed — a name in both sets is a contradiction the
     # policy would resolve silently (the list wins, and the "retryable" claim becomes false).
     assert not _DECLARED_RETRYABLE & set(BAD_DATA_RETRY.non_retryable_error_types or [])
+    # Nor may the list say a name twice. Temporal matches by name, so a duplicate changes no
+    # behaviour at all — which is exactly why one survived a review: `StatusConflict` was added in
+    # two hunks of one merge, each carrying its own justification, and the first called itself "the
+    # one conflict in this list that a retry makes worse" four lines from the second making the
+    # identical argument for `RevisionConflict`. This list is the classification register the tests
+    # above walk, and a register with two entries for one class has two answers for it.
+    from chemclaw.durable.publish import _BAD_DATA_TYPES
+
+    duplicated = sorted({name for name in _BAD_DATA_TYPES if _BAD_DATA_TYPES.count(name) > 1})
+    assert not duplicated, f"_BAD_DATA_TYPES lists {duplicated} more than once"
 
 
 def test_every_authorization_error_subclass_is_listed_non_retryable() -> None:
