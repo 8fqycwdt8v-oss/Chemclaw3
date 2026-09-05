@@ -1,58 +1,54 @@
-# The capture half of the knowledge loop
+# Task — WikiSkill relevance: the skills tier boundary and the census's blind arm
 
-Follow-on to `D-2026-09-04-a-ranker-that-sorts-alphabetically-is-not-a-ranker`, which closed the
-retrieval half and said plainly what it had not done: **data is captured automatically, conclusions
-are not.** All four review claims re-verified against `HEAD` before building — the tree had moved
-twice — and all four held.
+Source: arXiv 2608.27454v1 (WikiSkill). Three review rounds established that two of the three
+"blockers" against a skill-evolution loop here do not hold, and that the third — the trajectory
+census (D-2026-08-27) — measures a signal this paper does not run on.
 
-## Done
+## Plan
 
-- [x] 1. **Nine `run_*` procedures wrote no durable record.** `record_job` had one caller in the
-      tree (`durable/connector_job.py`), so a template run left no `job_records` row: never
-      findable by `find_past_jobs`, and `get_durable_job_status` answered for its id only until
-      Temporal retained its history away. A *failing* run left nothing anywhere.
-      `TemplateWorkflow` now records on both paths. Proven on a real broker, not just by the
-      builders: removing the success-path call makes `tests/test_template_job_record.py` report
-      "got 1" instead of 2.
-- [x] 2. **Two docstrings asserted the opposite in the present tense** (`agent/durable_tools.py`) —
-      both true of connector jobs alone. Corrected, and `find_past_jobs` now documents the
-      `connector="template"` filter.
-- [x] 3. **A correction was recorded as a confirmation.** `memory/interaction.py` rendered
-      `A (confirmed):` unconditionally while three docstrings and the system prompt said
-      "confirmed **or corrected**". `corrected_from` carries what the system had said; empty means
-      confirmed.
-- [x] 4. **The recording rule had no trigger.** "A computed value that matters beyond the
-      conversation" named no moment; now a comparison whose margin *clears* the stated uncertainty
-      does, with the inside-the-error-bar case pointed at the ceiling section.
-- [x] 5. **Nothing graded the write-up after a calculation.** `propose_knowledge_note` is named by
-      fourteen probes across seven files and by none in `durable.yaml` or
-      `multistep-calculation.yaml`. Two new probes, `ms-18` and `ms-19`.
+- [x] 1. Census extension: a second recurrence arm over recurring **failure**, read from the same
+      `session_messages` read-model (`ToolMessage.status == "error"` is persisted — verified).
+      Existing keys and thresholds unchanged; new arm additive.
+- [x] 2. Tests for the new arm in `tests/test_trajectory_census.py`, holding each definition.
+- [x] 3. ADR: skills get D-161's two-tier treatment. Ungated personal tier, gated promotion,
+      the fitness-function constraint from D-2026-08-16, and the census's second arm.
+- [x] 4. Ledger row in `docs/decisions/README.md`.
+- [x] 5. BACKLOG row rewritten to name the second arm and the tier decision.
+- [x] 6. `make lint type test` green; report what the run skipped.
 
-## Rejected, with the reasoning kept
+## Deliberately NOT built
 
-- [x] 6. **An automatic `publish_to_graph` over calc's twelve durable jobs.** Designed, reviewed and
-      **not built** — two of its premises were false (`job-result` *is* minted, by
-      `propose_knowledge_note`; the record does *not* stop at the cache, `_publish_result` runs for
-      every job), `skills/computational-evidence` already forbids it in as many words, roughly half
-      the notes would have read "this calculation could not distinguish them" at GFN2-xTB's ±3
-      kcal/mol, and neither default is defensible. The ADR keeps the whole argument so it is not
-      re-proposed from scratch.
+- The per-actor personal skills directory. `_skill_directories()` (`langgraph_agent.py:759`) is
+  read per turn, so ambient identity is reachable there — but building it now with no generator
+  to write into it is `D-2026-08-15`'s "capability that ships off". The ADR names the seam.
+- The distiller itself. D-2026-08-27's posture is unchanged: define the measurement, build when
+  it says to. This adds the missing half of the measurement, not the generator.
+- The code that ungates agent-asserted notes. `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
+  decides it and explicitly does not claim it shipped: it needs a direct write path for job
+  results, campaign narratives, playbooks, report drafts and `failure_note`, the proposal queue
+  narrowed to behaviour cases, `durable/retention.py`'s `note_proposals` refusal re-argued, and
+  `GET /proposals` plus the CLI narrowed — a change to the core knowledge path that earns its own
+  verification.
 
-## Two things measurement changed
+## Review
 
-**The eval fix as proposed would have made the probes weaker.** The recommendation was to add
-`propose_knowledge_note` to `expects_tools` on `ms-07`/`ms-08`. `evals/live.py` scores that field
-with `any()`, so a second name makes a probe pass on *either* tool — `ms-07` would then have been
-satisfied by a turn that recorded a note and never ranked anything. Separate probes instead.
+**What shipped.** One code change (`chemclaw.cli.trajectory_census`, the second arm) with 11 new
+tests, and two ADRs. Split into two because the census arm and the gate boundary are two decisions,
+and CLAUDE.md's rule is that an id naming two of them is the failure the ledger prevents.
 
-**`turn_costs` already is the per-turn outcome row**, so the "no end-of-turn record" finding was
-half wrong: `tool_calls`, `tool_failures`, `jobs_started` and `outcome` are written every turn.
-What is missing is the knowledge dimensions (did this turn retrieve, cite, capture) — a much
-cheaper change than the new table that was proposed, and queued rather than rushed at the end of
-this one.
+**The user's correction, mid-implementation, changed the design and is the better line.** The draft
+had a *personal ungated skills tier*, gated only on promotion. The owner's axis is cleaner:
+knowledge global and automatic, behaviour gated, and the behaviour gate belongs to an admin rather
+than to a chemist. The personal tier is now recorded as rejected, with its reason — a per-user skill
+is still a behaviour change, and it fragments answers across users with nothing recording why.
 
-## Cost, stated
+**Two claims were checked rather than assumed before being written down.** That
+`session_messages` actually holds tool results with a `status` (it does — `api/runner.py` stores the
+tool exchanges, and leaving them out is recorded there as a silent regression), and that
+`entra_privileged_roles` is already the reviewer role (`api/deps.py::_is_reviewer`), so "an admin"
+names a role that exists rather than one this ADR invents.
 
-The context floor moves 43,063 -> 43,316 against the unraised 43,500 ceiling: **184 tokens of
-headroom**, from one optional argument on `record_confirmed_answer`. That is tight enough to be the
-next person's problem, and the reclaim is already a `BACKLOG.md` row.
+**Verification.** `make lint`, `make type`, `make test` green with Docker up, Postgres migrated —
+so the Postgres-backed tests actually ran rather than skipping. `make prose-validate` green.
+`make trajectory-census` run end to end against the live database: 0 sessions, both arms not
+greenlit, which is the same verdict D-2026-08-27 recorded and the reason nothing further is built.
