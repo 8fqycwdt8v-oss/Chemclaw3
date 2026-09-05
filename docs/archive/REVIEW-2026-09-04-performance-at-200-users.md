@@ -344,7 +344,7 @@ Two aggravating factors: every write is its own transaction (`checkpointer.py:53
 
 `tests/test_context_floor.py:406` calls `build_langgraph_agent(...)` **without the `connectors=`
 argument** that exists at `agent/langgraph_agent.py:148`. So the guard measures 61 tools / **42,730
-tokens** against its 43,500 ceiling (98% full), while a shipped turn also binds **52 connector tools
+tokens** against its then-43,500 ceiling (98% full), while a shipped turn also binds **52 connector tools
 with zero name overlap** — measured through `convert_to_openai_tool` at **~32,000 more tokens**, for
 a real prefix of **~74,700**.
 
@@ -358,9 +358,15 @@ Two consequences:
   *clear every reclaimable tool result on every model call*, and the thread budget collapses to
   25,300 of 100,000. `CLAUDE.md` and `agent/context_budget.py` both assert the shipped configuration
   is **not** floored, and `tests/test_compaction.py` asserts it — against the connector-less prefix.
-- **There is no prompt caching on the shipped provider.** `agent/llm_provider.py:405`:
-  `if settings.llm_provider != "anthropic": return []`, and `values.yaml:567` ships
-  `openai_compatible`. So ~74,700 tokens of identical bytes are re-prefilled at full price on every
+- **No request this system sends carries a cache breakpoint.**
+
+  > **Corrected 2026-09-05.** As written this read "`agent/llm_provider.py:405`:
+  > `if settings.llm_provider != "anthropic": return []`, and `values.yaml:567` ships
+  > `openai_compatible`". Both halves describe code that no longer exists — the gateway work (#313)
+  > deleted the provider concept entirely, so there is one branch building `ChatOpenAI` against
+  > `llm_base_url`. The conclusion is unchanged and its reason is simpler: `cache_control`
+  > breakpoints have no counterpart on an OpenAI-compatible endpoint, and every model call goes to
+  > one. Not "the shipped provider does not cache" — *nothing* does, and there is no second path. So ~74,700 tokens of identical bytes are re-prefilled at full price on every
   model call — **~88% of every request**. At 4,000 turns/hr that is ≈ **587k prompt tokens/second**.
 
 > **Highest-leverage fix in the review, and it is one flag on somebody else's endpoint:**
@@ -464,7 +470,7 @@ Ordered by measured payoff per line changed. None is architectural.
 | 7 | Enable `retention_enabled` in the chart + raise the per-pass cap | `values.yaml` | stops unbounded 10–58 GB/day growth |
 | 8 | Reclassify admission refusal as retryable | `durable/publish.py:203` + a distinct exception | durable calc jobs queue instead of failing |
 | 9 | Cross-check `max_event_streams_total` vs `max_connections` | `core/config/__init__.py` | closes the liveness cascade |
-| 10 | Bind `connectors=` in the floor ratchet | `tests/test_context_floor.py:406` | makes the 43,500 ceiling mean what it says |
+| 10 | Bind `connectors=` in the floor ratchet | `tests/test_context_floor.py:406` | makes the ceiling mean what it says; re-baselined to 65,000 on the merged tree |
 
 ---
 
