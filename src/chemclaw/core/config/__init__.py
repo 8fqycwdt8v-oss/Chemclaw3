@@ -311,6 +311,34 @@ class Settings(
             return self.note_reindex_enabled
         return bool(NOTE_INDEX_SOURCES & set(self.data_source_list))
 
+    @property
+    def longest_bundle_activity(self) -> tuple[float, str]:
+        """The longest activity budget a connector bundle's child can spend, and its setting name.
+
+        **One definition, because two readers need the same number and they bound each other.**
+        `_the_job_ceiling_covers_the_activity_it_bounds` needs it to check that the ceiling covers
+        one attempt, and `durable/publish.py::connector_queue_wait_timeout` needs it to derive the
+        *headroom* a queued job may spend waiting — ceiling minus this minus one activity's
+        overhead. Written twice, the two could disagree, and the disagreement would be exactly the
+        composite that ends a healthy job as a bare `WorkflowExecutionTimedOut`.
+
+        A property on the composed class rather than a constant in either module, because the max
+        spans two sections (`CalculatorSettings` and `PublishSettings`) and neither can see the
+        other — the same reason the validators that read it live here. A bundle that adds a longer
+        activity is covered by being added to the tuple below; `durable/publish.py` then narrows
+        its own wait bound for free, because the headroom is computed rather than configured.
+
+        Returns:
+            The largest activity budget in seconds and the name of the setting that carries it.
+        """
+        longest: tuple[float, str] = max(
+            (
+                (self.xtb_job_timeout_seconds, "xtb_job_timeout_seconds"),
+                (self.result_republish_timeout_seconds, "result_republish_timeout_seconds"),
+            )
+        )
+        return longest
+
     @model_validator(mode="after")
     def _guards_that_the_comments_already_demand(self) -> Self:
         """The combinations whose prose already forbids them, now enforced at startup.
@@ -758,13 +786,11 @@ class Settings(
         # this rule was first written against. Naming `xtb_job_timeout_seconds` alone is how the
         # `results` bundle's republish walk got past it: that walk scans two never-pruned tables
         # and was handed `connector_job_timeout_seconds` itself, which the ceiling equals rather
-        # than exceeds. A new long activity gets covered by being added here.
-        longest, budget = max(
-            (
-                (self.xtb_job_timeout_seconds, "xtb_job_timeout_seconds"),
-                (self.result_republish_timeout_seconds, "result_republish_timeout_seconds"),
-            )
-        )
+        # than exceeds. It is `longest_bundle_activity` above rather than a `max` written here,
+        # because `durable/publish.py` derives the queue wait from the *same* number: what is left
+        # of this ceiling once the longest attempt is paid for is exactly the headroom a queued job
+        # may spend waiting, and two spellings of one max is how that composite came apart.
+        longest, budget = self.longest_bundle_activity
         needed = longest + self.activity_timeout_seconds
         if self.connector_job_timeout_seconds <= needed:
             raise ValueError(

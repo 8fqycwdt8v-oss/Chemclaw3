@@ -356,21 +356,6 @@ def light_write_queue_wait_timeout() -> timedelta:
     return timedelta(seconds=settings.template_step_timeout_seconds)
 
 
-# What fraction of a connector job's own execution budget its activity may spend *waiting for a
-# slot*, before the wait is called a fault rather than backpressure. A ratio rather than a setting,
-# and derived rather than invented, for `durable/heartbeat.py::_HEARTBEATS_PER_TIMEOUT`'s reason:
-# the quantity that matters is the relationship, and two independently configured numbers can drift
-# apart into a bound that is either meaningless or fires on healthy load.
-#
-# **Half, because both halves have to be true at once.** Measured on the real broker at target load
-# (200 jobs, 8 slots, linear in activity duration), the `connector-calc` queue's wait is p50 ~1.04 h
-# and p95 ~1.98 h — genuine backpressure, and failing that would be a worse defect than the one
-# being fixed. Half of `connector_job_timeout_seconds` is 2.5 h at the shipped default: above that
-# p95, and strictly below the parent ceiling, which is what makes the failure *say* what happened
-# instead of arriving as a bare `WorkflowExecutionTimedOut` five hours later.
-_CONNECTOR_QUEUE_WAIT_FRACTION = 0.5
-
-
 def connector_queue_wait_timeout() -> timedelta:
     """How long a **connector bundle's** activity may sit unclaimed on its own queue.
 
@@ -381,24 +366,50 @@ def connector_queue_wait_timeout() -> timedelta:
     argument is still right, and it is *not* an argument for no bound at all — which is what the
     three bundles shipped. Measured at 200 users, a queued connector job's only ceiling was the
     child's `connector_job_timeout_seconds`, so a job that never got a slot told the chemist
-    "running" for up to five hours and then failed as a workflow execution timeout, which is
+    "running" for the whole ceiling and then failed as a workflow execution timeout, which is
     delivered to nobody and names neither the queue nor the reason.
 
     So the bound is the same mechanism at a different scale: generous enough that measured
     backpressure passes through it, tight enough that "no worker is serving `connector-calc`" stops
-    being indistinguishable from "every worker is busy". It is derived from the job's own budget
-    (`_CONNECTOR_QUEUE_WAIT_FRACTION`) rather than from core's hour, because the thing it must stay
-    below is that budget and nothing else.
+    being indistinguishable from "every worker is busy".
+
+    **It is the ceiling's *headroom*, not a fraction of the ceiling, and that distinction is the
+    whole correctness argument.** The wait precedes the work, so what the parent's execution budget
+    has to contain is `q + w`, never `q` alone. A fraction made `q` grow with the very ceiling it
+    had to fit inside — half of 18,000 s is 9,000 s, and 9,000 + 15,000 = 24,000 against a ceiling
+    of 18,000, so a job that waited inside its wait bound and then ran inside its work bound died
+    at the ceiling as a bare `WorkflowExecutionTimedOut` delivered to nobody: precisely the failure
+    the bound was added to remove (reproduced on the real broker scaled 1000:1). Nor could a
+    smaller fraction fix it — `q + w < C` under `q = fC` needs `C > w / (1 - f)`, so raising the
+    ceiling raised the wait with it and the composite stayed over. Subtracting instead makes the
+    composite fit **by construction**: at most `(C - w - overhead) + w = C - overhead`, whatever
+    the three numbers are, with no cross-check anyone can forget.
+
+    `longest_bundle_activity` is `Settings`' own max over the activity budgets a bundle child can
+    spend — the same one `_the_job_ceiling_covers_the_activity_it_bounds` checks the ceiling
+    against, read rather than restated, because two spellings of that max is how `q + w` came apart
+    in the first place. The shortest job on a bundle queue therefore gets the same generous wait as
+    the longest, which is right: the wait is a property of the queue, and what has to fit is the
+    worst composite on it.
+
+    What the deployment must fund is stated in `connector_job_timeout_seconds`' own comment: at the
+    shipped 25,200 s the headroom is 10,170 s, ~1.4x the measured p95 backpressure (~7,128 s) and
+    ~2.7x the p50 (~3,744 s). A site that lowers the ceiling towards the validator's floor buys
+    itself a tighter queue bound, and finds out by having queued jobs fail promptly and by name
+    rather than by a silent execution timeout hours later.
 
     Not retried, which is the behaviour wanted: a ScheduleToStart expiry means the queue is
     unserved, and asking the same absent worker again finds the same absence (measured in
     `tests/test_activity_queue_bound.py`).
 
     Returns:
-        The `schedule_to_start_timeout` every connector-bundle activity call passes.
+        The `schedule_to_start_timeout` every connector-bundle activity call passes. Strictly
+        positive by construction: `Settings` refuses a ceiling that does not exceed the longest
+        activity plus one activity's overhead.
     """
+    longest, _ = settings.longest_bundle_activity
     return timedelta(
-        seconds=settings.connector_job_timeout_seconds * _CONNECTOR_QUEUE_WAIT_FRACTION
+        seconds=settings.connector_job_timeout_seconds - longest - settings.activity_timeout_seconds
     )
 
 
