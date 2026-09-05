@@ -27,8 +27,19 @@ spec:
 
          `Recreate` rather than `maxSurge: 0`: a singleton worker has no availability to protect —
          Temporal redelivers an activity whose worker went away — so the honest statement is that
-         the old process is gone before the new one starts. The connector workers below keep the
-         default on purpose; nothing on their queues is host-local, so an overlap is only capacity. */}}
+         the old process is gone before the new one starts.
+
+         **This paragraph used to end "the connector workers below keep the default on purpose;
+         nothing on their queues is host-local, so an overlap is only capacity", and both clauses
+         are now false.** They do not keep the default: `chemclaw.rolloutStrategy` renders
+         `rollout.maxSurgePods` onto every pool-holding Deployment, this one excepted. And an
+         overlap is not only capacity — it is *connections*, which is the one resource a second
+         generation takes from the first, and that sentence is why the connection ceiling counted
+         one generation for as long as it did
+         (`D-2026-09-05-a-ceiling-that-counts-one-generation-is-not-a-rollout-budget`). What is
+         still true is the part that decided this Deployment: an overlap here races on a host-local
+         knowledge checkout, which is a correctness problem rather than a budget one, and it is why
+         this is the single role `chemclaw.fleetPools` leaves unsurged. */}}
   strategy:
     type: Recreate
   selector:

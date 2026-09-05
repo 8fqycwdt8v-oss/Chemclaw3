@@ -730,6 +730,22 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
        renders, the number `chemclaw.fleetPools` starts from, and the number the HPA's occupancy
        target is denominated against — and three copies of "the HPA ceiling, or the fixed replica
        count when the HPA is off" is three places for the fourth reader to get it wrong. */ -}}
+{{- /* The front-door processes a rolling update may run *at once* — the steady count plus the
+       surge, which is what both fleet ceilings have to be provisioned against.
+
+       `chemclaw.frontDoorProcesses` is the steady number: what `Settings` validates, because a pod
+       validates the shape it was handed. This is the peak: what the *live* fleet reaches during an
+       upgrade, and therefore what `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` must declare, for
+       exactly the reason `chemclaw.fleetPools` counts the peak one definition below.
+
+       This existed as a gap the connection commit created and its own ADR then argued away: that
+       the turn ceiling's overlap "is another system's decision" while the connection ceiling's is
+       the chart's. Both read the same `rollout.maxSurgePods`, rendered onto the same
+       `deployment-service.yaml`. Only one was raised. */ -}}
+{{- define "chemclaw.frontDoorProcessesAtRolloutPeak" -}}
+{{- add (include "chemclaw.frontDoorProcesses" . | int) (include "chemclaw.rolloutSurgePods" . | int) -}}
+{{- end -}}
+
 {{- define "chemclaw.frontDoorProcesses" -}}
 {{- if .Values.service.autoscaling.enabled -}}
 {{- .Values.service.autoscaling.maxReplicas | int -}}
@@ -753,7 +769,30 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
        nothing, and it says why in `deployment-workers.yaml`: `Recreate`, because two of it race
        on a host-local knowledge checkout. */ -}}
 {{- define "chemclaw.rolloutSurgePods" -}}
-{{- .Values.rollout.maxSurgePods | int -}}
+{{- $surge := .Values.rollout.maxSurgePods -}}
+{{- /* **Pods, not a percentage, and the render refuses rather than reinterprets.** Helm's `int`
+       is `toInt64`, which parses a leading integer and yields 0 for anything it cannot read — so
+       `maxSurgePods: 25%`, the single most likely operator input given that Kubernetes' own
+       default is 25% and this ADR is written about it, rendered `maxSurge: 0` on every
+       pool-holding Deployment *and* left the connection ceiling counting the steady state. That
+       is silently the one alternative the decision rejects by name: every connector here is a
+       single-replica Deployment, so a zero surge means the capability is down during its own
+       upgrade. A negative was worse — `maxSurge: -1` is refused by the API server, and it
+       *lowered* the declared ceiling, loosening the startup guard and the alert at once.
+
+       So: a number, and not a negative one. Both numeric kinds are accepted because the same
+       value arrives as two types depending on how it was set — `float64` from `values.yaml`,
+       which is how Helm's YAML loader types every unquoted number, and `int64` from `--set`.
+       Checking only one of them refuses the shipped default or every override, and the first
+       version of this guard refused `--set rollout.maxSurgePods=3`. Anything else — a string, a
+       percentage, a bool — falls to the `fail`. */ -}}
+{{- if not (or (kindIs "float64" $surge) (kindIs "int64" $surge)) -}}
+{{- fail (printf "rollout.maxSurgePods must be a whole number of pods, not %q (%s). It is multiplied into postgres.maxConnections by chemclaw.fleetPools, so a percentage renders maxSurge: 0 and counts nothing." (toString $surge) (kindOf $surge)) -}}
+{{- end -}}
+{{- if lt ($surge | int) 0 -}}
+{{- fail (printf "rollout.maxSurgePods is %v; a negative surge renders a Deployment the API server refuses and lowers the declared connection ceiling, loosening the guard and the alert together" $surge) -}}
+{{- end -}}
+{{- $surge | int -}}
 {{- end -}}
 
 {{- /* The rollout strategy every pool-holding Deployment shares, so the surge the ceiling is
@@ -772,7 +811,9 @@ strategy:
        false of connections, which are the one resource a second generation takes from the first.
        Measured against the shipped chart: 26 pools steady, 36 at the rollout peak, 288 connections
        where the ceiling declared 256. The consequence was not merely a wrong comment. A site that
-       provisioned Postgres to exactly the declared number lost 56 connections on every upgrade,
+       provisioned Postgres to exactly the declared number lost up to 56 connections on an
+       upgrade *at the HPA ceiling* — the alert reads a live sum, so with the front door at its
+       `minReplicas: 2` resting size the old peak was 192 of 256 and fitted with room,
        and `ChemclawFleetAboveItsConnectionCeiling` — which compares the *live* pool sum against
        that same declaration — was armed against a correct deployment: true for the length of every
        rolling update, paging whenever one outlasted its 10-minute `for:`. */ -}}

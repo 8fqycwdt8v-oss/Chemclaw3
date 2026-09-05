@@ -120,7 +120,8 @@ def test_the_checkpointer_pool_is_not_given_the_plan_mode_and_the_reason_is_stru
     for call in calls:
         passed = {keyword.arg for keyword in call.keywords}
         assert "options" not in passed, (
-            f"the checkpointer pool now passes `options` (keywords: {sorted(k for k in passed)}); "
+            "the checkpointer pool now passes `options` (keywords: "
+            f"{sorted(k for k in passed if k)}); "
             "`_FORCE_CUSTOM_PLAN` is excluded from it because its risky clauses sit behind an "
             "equality on the primary key's leading columns, and a pool that sets options at all "
             "is one whose exclusion needs re-deciding"

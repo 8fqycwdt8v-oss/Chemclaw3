@@ -151,7 +151,7 @@ def _redact(dsn: str) -> str:
 # `prepare=True` is measuring a client this code is not.
 #
 # **The statement at risk is the dense vector one, and the deciding variable is the embedding
-# width.** `retrieval/vector_index.py::_dense` renders `::vector(N)` from `settings.embedding_dim`,
+# width.** `_dense` in `retrieval/vector_index.py` renders `::vector(N)` from `embedding_dim`,
 # which `core/config` *raises* unless it equals the `vector(1536)` column migration 012 declares.
 # At 1536, `EXPLAIN (GENERIC_PLAN)` on that exact shape is `Seq Scan on note_index` under a `Sort`,
 # and serving it costs **1,762 ms against 0.93 ms** — about 1,890x. At 384 the same statement plans

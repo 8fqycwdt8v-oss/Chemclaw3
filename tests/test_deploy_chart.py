@@ -1090,6 +1090,22 @@ def test_the_shipped_fleet_ceiling_matches_the_fleet_the_chart_renders() -> None
         f"{declared}; every front-door pod would refuse to start"
     )
 
+    # And the *peak*, which is the number the live fleet reaches and the alert reads. A rolling
+    # update runs both generations, at `rollout.maxSurgePods` extra front-door pods each
+    # advertising its own admission cap, so this ceiling had the same defect the connection one
+    # was just fixed for — 84 live against a declaration of 72 at the HPA ceiling, with
+    # `ChemclawFleetAboveItsTurnCeiling` armed against a correct deployment. `Settings` still
+    # validates the steady product above, because a pod validates the shape it was handed; nothing
+    # but this could see the other one.
+    surge = int(values["rollout"]["maxSurgePods"])
+    peak = (replicas + surge) * workers * per_process
+    assert peak <= declared, (
+        f"a rolling update runs {replicas} + {surge} front-door pods × {workers} worker(s) × "
+        f"{per_process} turns = {peak} concurrent turns against a declared ceiling of {declared}; "
+        "the startup guard cannot see this because every pod's own configuration is valid, so the "
+        "first sign is ChemclawFleetAboveItsTurnCeiling firing on a correct deployment"
+    )
+
     # The fleet size must be *derived* from the autoscaling block, not written beside it. A second
     # copy of `maxReplicas` in `config:` goes stale the first time someone scales the front door —
     # which is precisely the silent multiplication the ceiling exists to catch, reintroduced by the
@@ -1233,7 +1249,9 @@ def _fleet_pools(values: dict[str, Any]) -> int:
     2026-09-05: a rolling update runs both generations, so every Deployment that surges holds its
     pools twice over for the length of the upgrade. Steady the shipped chart is 26 pools; at the
     peak it is 36, which is 288 connections against a ceiling that declared 256 — a shortfall a
-    site provisioned to the declared number met on every upgrade, while
+    site provisioned to the declared number met on an upgrade at the HPA ceiling — 192 of 256 at
+    the `minReplicas: 2` resting size, so the shortfall is the worst case rather than every
+    case — while
     `ChemclawFleetAboveItsConnectionCeiling`, which reads the live sum against that same
     declaration, was true for the length of every one of them and paged whenever a rollout
     outlasted its 10-minute `for:`.
@@ -2974,6 +2992,7 @@ def test_every_pool_holding_deployment_surges_by_the_number_the_ceiling_was_comp
 
     rolling: dict[str, Any] = {}
     recreate: set[str] = set()
+    pooled: set[str] = set()
     for doc in yaml.safe_load_all(rendered.stdout):
         if not doc or doc.get("kind") != "Deployment":
             continue
@@ -2983,6 +3002,18 @@ def test_every_pool_holding_deployment_surges_by_the_number_the_ceiling_was_comp
             recreate.add(name)
         else:
             rolling[name] = strategy
+        # A Deployment holds a Postgres pool exactly when its pods read this release's config,
+        # which is what carries the DSN. Collected off the *render* rather than off `values`,
+        # because `_fleet_pools` re-derives from values and therefore cannot see a role that
+        # exists only as a template — which is the third way this invariant breaks and the one
+        # neither assertion below used to cover.
+        containers = doc["spec"]["template"]["spec"].get("containers") or []
+        if any(
+            source.get("configMapRef", {}).get("name", "").startswith("chemclaw")
+            for container in containers
+            for source in container.get("envFrom") or []
+        ):
+            pooled.add(name)
 
     assert recreate == {"chemclaw-background-worker"}, (
         f"the roles that never overlap generations are {sorted(recreate)}; `_fleet_pools` leaves "
@@ -2996,6 +3027,29 @@ def test_every_pool_holding_deployment_surges_by_the_number_the_ceiling_was_comp
             f"rollout.maxSurgePods={surge}, and a Deployment that surges by anything else "
             "(Kubernetes defaults to 25% rounded up) peaks above the number the chart declared"
         )
+
+    # **And every pool-holding Deployment is one the arithmetic knows about.** The two assertions
+    # above check how a role rolls; neither could see a role that rolls correctly and is simply
+    # absent from `chemclaw.fleetPools`, which is the direction that actually costs connections.
+    # Demonstrated: a `deployment-audit-reader.yaml` with `replicas: 2`, the shared strategy and
+    # the shared `envFrom` passed the whole chart suite while putting three uncounted pools —
+    # 24 connections — outside the declared ceiling.
+    counted = {
+        "chemclaw-service",
+        "chemclaw-background-worker",
+        "chemclaw-mcp-face",
+        *(
+            f"chemclaw-connector-{half}{name}"
+            for name in _values()["connectors"]
+            for half in ("", "worker-")
+        ),
+    }
+    assert pooled <= counted, (
+        f"{sorted(pooled - counted)} read this release's config — so each pod opens a Postgres "
+        "pool — and chemclaw.fleetPools counts no term for it. Add the term in _helpers.tpl and "
+        "in tests/test_deploy_chart.py::_fleet_pools, or the declared ceiling is short by "
+        "replicas × pools-per-pod × CHEMCLAW_PG_POOL_MAX_SIZE with nothing able to say so"
+    )
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")

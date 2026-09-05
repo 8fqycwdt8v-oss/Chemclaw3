@@ -593,8 +593,12 @@ postgres:
   # `tests/test_deploy_chart.py::_fleet_pools`, which derives it and prints both sides when the
   # product no longer fits.
   #
-  # The rise keeps the same headroom above the render that the previous number carried, for the
-  # same reason: enabling one more connector must not be a database change in the same commit.
+  # The rise keeps the same *absolute* headroom the previous number carried, and that is the honest
+  # way to state it: the property it used to buy has shrunk. Each half of a server-plus-worker
+  # bundle now costs its surge as well as itself, so the same headroom absorbs one more bundle
+  # where it used to absorb three. Enabling one connector is still not a database change in the
+  # same commit; enabling two is. `tests/test_deploy_chart.py::_fleet_pools` is where that
+  # arithmetic lives and where a reader can get the current figures.
   #
   # Set to 0 to declare no ceiling, which makes both the startup check and the alert inert.
   maxConnections: 336
@@ -938,7 +942,19 @@ config:
   # 8.3 s / 3600, so 200 people at a turn a minute is 27.7 in flight and 200 people at a turn every
   # 30 s is 55.3. The old ceiling was 48 *and unreachable*, because the CPU-only HPA never left
   # `minReplicas: 2` = 16. Both halves had to move for either to matter.
-  CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS: "72"
+  #
+  # **And it is the rollout peak, for the same reason `postgres.maxConnections` is.** It shipped as
+  # the steady product with zero headroom, so an upgrade — which runs both generations, at
+  # `rollout.maxSurgePods` extra front-door pods each advertising its own admission cap — put the
+  # live sum above the declaration every time. `ChemclawFleetAboveItsTurnCeiling` reads that live
+  # sum and already named "a rollout that left both generations up" as a usual cause, so the alert
+  # was armed against a correct deployment: the failure the connection ceiling was just fixed for,
+  # one value away, and its ADR argued this one away on the grounds that a rollout's surge here is
+  # "another system's decision". It is not, and was not by the time that sentence was written —
+  # both ceilings read the same declared `rollout.maxSurgePods`, rendered onto the same
+  # `deployment-service.yaml`. `Settings` still validates the *steady* product, because a pod
+  # validates the shape it was handed; this is the number the live fleet actually reaches.
+  CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS: "84"
   # JSON logs in-cluster. Every line already carries correlation_id / actor / session_id from the
   # context filter; JSON is what lets a log stack index them instead of regexing a `%`-string.
   CHEMCLAW_LOG_JSON: "true"

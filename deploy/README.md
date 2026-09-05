@@ -428,7 +428,8 @@ the turn ceiling and false of this one, because a rollout's overlap is not a sur
 springs on the chart: it is `maxSurge`, which the chart now declares (`rollout.maxSurgePods`) and
 `chemclaw.fleetPools` multiplies by. So the declared ceiling is the peak an upgrade actually
 reaches rather than the steady state it settles at. Left as it was, a site that provisioned Postgres
-to exactly the declared number lost connections on every upgrade, and
+to exactly the declared number lost connections on an upgrade taken at the HPA ceiling — not at
+its resting size, where the old peak fitted — and
 `ChemclawFleetAboveItsConnectionCeiling`'s expression was true for the length of every rolling
 update, so it paged whenever one outlasted its 10-minute `for:` — an alert armed against a correct
 deployment, which is the failure mode that costs an operator the next real one.
