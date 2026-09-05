@@ -64,13 +64,13 @@ def test_an_unknown_chemist_has_no_preferences_rather_than_an_error() -> None:
 def test_preferences_never_reach_the_pr_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The design decision, pinned: a personal preference must not become a reviewed graph note.
 
-    If this ever routed through `propose_note`, reviewers would be asked to sign off on personal
+    If this ever routed through `record_note`, reviewers would be asked to sign off on personal
     trivia — which is exactly how a gate stops being taken seriously.
     """
     import chemclaw.agent.preferences as module
 
-    assert not hasattr(module, "propose_note")
-    assert "propose_note" not in module.__doc__ or "not" in module.__doc__.lower()
+    assert not hasattr(module, "record_note")
+    assert "record_note" not in module.__doc__ or "not" in module.__doc__.lower()
 
 
 def test_the_tools_are_scoped_to_the_calling_chemist(monkeypatch: pytest.MonkeyPatch) -> None:

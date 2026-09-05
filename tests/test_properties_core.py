@@ -41,7 +41,7 @@ from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings as config
 from chemclaw.core.ids import stable_hash
 from chemclaw.kg.note import Note, Relation, cited_ids, mentioned_ids, parse_note
-from chemclaw.kg.pr_gate import _build_submission
+from chemclaw.kg.record import _build_write
 from chemclaw.kg.render import render_note
 
 # JSON-native values, which is exactly what `stable_hash` documents itself as taking. Bounded in
@@ -336,7 +336,7 @@ def test_an_already_validated_field_is_refused_before_our_validator(
 def test_a_submission_writes_each_note_once_with_its_subject_first(
     note: Note, dependencies: list[Note], directory: str
 ) -> None:
-    """One path per note, subject first — the invariant `_build_submission`'s docstring claims.
+    """One path per note, subject first — the invariant `_build_write`'s docstring claims.
 
     It argues that a caller "may legitimately list the same dependency twice" and that writing one
     path twice in a commit is "at best noise and at worst two different renderings racing". Both
@@ -345,7 +345,7 @@ def test_a_submission_writes_each_note_once_with_its_subject_first(
     distinct notes that share an id and differ in body — the racing-renderings case, where the
     first occurrence must win rather than the last.
     """
-    submission = _build_submission(note, directory, dependencies)
+    submission = _build_write(note, directory, dependencies)
     paths = [file.path for file in submission.files]
     assert len(paths) == len(set(paths)), "a commit that writes one path twice"
     assert submission.files[0].path.startswith(f"{directory}/{note.type}/{note.id}")

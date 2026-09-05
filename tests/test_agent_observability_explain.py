@@ -84,7 +84,7 @@ def test_explain_orders_by_when_the_tool_ran_and_names_the_plan_step() -> None:
         sink = PostgresAuditSink()
         # Recorded out of order, as a drained batch can be.
         await sink.record(
-            _event("propose_note", ts=second, plan_step="write it up", session=session)
+            _event("record_note", ts=second, plan_step="write it up", session=session)
         )
         await sink.record(
             _event("predict_pka", ts=first, plan_step="measure the amine", session=session)
@@ -94,7 +94,7 @@ def test_explain_orders_by_when_the_tool_ran_and_names_the_plan_step() -> None:
         lines = await explain(session)
 
         rendered = [line for line in lines if line.strip().startswith("tool ")]
-        assert [line.split()[1] for line in rendered] == ["predict_pka", "propose_note"]
+        assert [line.split()[1] for line in rendered] == ["predict_pka", "record_note"]
         assert "for step: measure the amine" in rendered[0]
         assert "for step: write it up" in rendered[1]
 

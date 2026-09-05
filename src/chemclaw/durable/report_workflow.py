@@ -4,7 +4,7 @@ The report is a graph of sections; here each section is a Temporal activity, so 
 long report (hundreds of retrievals over years of data) is resumable and survives worker
 restarts — the same fire-and-forget durability as the QM spine (Phase 1). The workflow
 retrieves section by section, then a final activity renders the draft and proposes it through
-the PR-gate (5b.7). Retriever construction (the production sources) lives in the activities;
+the note-write path (5b.7). Retriever construction (the production sources) lives in the activities;
 the factory is module-level so tests swap it.
 """
 
@@ -92,23 +92,21 @@ async def retrieve_section(request: SectionRequest) -> SynthesizedSection:
 @durable_activity("background")
 @activity.defn
 async def propose_report(report: Report, requested_by: str = "", correlation_id: str = "") -> str:
-    """Render the gathered report as a PR-gated `report` note; return the reference.
+    """Render the gathered report as a recorded `report` note; return the reference.
 
     `correlation_id` is never read in this body, and that is the shape rather than an oversight:
     `durable/interceptor.py` binds an activity's ids from its *own* arguments, reading the four
     activities that carry them as bare strings off the function signature, so declaring the
-    parameter is the whole wiring. What it buys is that `kg/proposal.py`'s `ambient_provenance()`
-    stamps the turn on the `NoteProposal` — a draft that could otherwise be joined to the chemist
-    but not to the question they asked.
+    parameter is the whole wiring. What it buys is that the turn's id reaches the log lines this
+    write emits — a draft that could otherwise be joined to the chemist but not to the question
+    they asked.
 
-    `requested_by` stamps the ambient identity for the gate, for the same reason
-    `publish_memory_note_activity` takes one: `propose_note` records a durable `NoteProposal` whose
-    actor comes from `ambient_provenance()`, and an activity sets none. Without it the draft is
-    recorded with `actor=""`, `list_note_proposals` scopes a non-reviewer's queue to
-    `principal.oid`, and the chemist who asked cannot find the PR opened on their behalf.
-
-    This was missed in the first pass: the memory-note path was fixed and this one was not, while a
-    comment on `ReportRequest.requested_by` claimed both were.
+    `requested_by` stamps the ambient identity for the write, for the same reason
+    `publish_memory_note_activity` takes one, and **the reason is no longer the one written here
+    first**: both stamps existed for the PR-gate's `NoteProposal.actor`, and
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted that record. What reads them now
+    is `core/logging.ContextFilter`, so the stamp is what ties a durable note write's log lines back
+    to the chemist and the turn that asked for it.
     """
     if not requested_by:
         return await record_note(report_note(report), default_writer())
@@ -171,7 +169,7 @@ def _reconcile(
     end — its `execution_timeout` at `fan_out_child_timeout_seconds`, a cancellation, a failure
     raised outside the `execute_activity` call — is *dropped* by `fan_out`, which is that helper's
     documented contract and returns a shorter list. The draft then omitted the section while the
-    summary reported the smaller count, so a reviewer at the PR-gate could not tell a missing
+    summary reported the smaller count, so a chemist reading the draft could not tell a missing
     section from one nobody asked for. Making the invariant depend on which exception a child
     happened to raise is what made it untrue.
 
@@ -232,7 +230,7 @@ class DevelopmentReportWorkflow:
         It still publishes its own note rather than returning one for core to gate, and that is
         correct here for the reason it would be wrong in a bundle: the note *reference* is this
         workflow's result, so publishing is the work, not a side effect — and this is core's own
-        workflow, on the side of the boundary the PR-gate lives on.
+        workflow, on the side of the boundary the note-write path lives on.
         """
         sections = await fan_out(
             ReportSectionWorkflow,

@@ -17,7 +17,7 @@ so the shared tree is never switched at all (D-2026-08-05). These tests are the 
 for that, and they are a **rewrite** of the ones that pinned the old behaviour rather than a sign
 flip of them: three of those four drove raw `git checkout -B` by hand and asserted a property of
 *git*, so against the fixed submitter they would have gone green while proving nothing — the exact
-failure the file was written to prevent. Every assertion below drives `GitNoteSubmitter`, and every
+failure the file was written to prevent. Every assertion below drives `GitNoteWriter`, and every
 absence assertion is paired with a positive one, because "the note is not in the tree" is also true
 of a submission that never happened.
 """
@@ -30,9 +30,9 @@ from pathlib import Path
 
 import pytest
 
-from chemclaw.kg.git_submitter import GitNoteSubmitter, _checkout_lock
+from chemclaw.kg.git_writer import GitNoteWriter, _checkout_lock
 from chemclaw.kg.graph import invalidate_cache, load_notes
-from chemclaw.kg.submission import NoteFile, NoteSubmission
+from chemclaw.kg.record import NoteFile, NoteWrite
 
 _UNREVIEWED = "---\nid: agent-proposal\ntype: reaction\ncreated_by: agent\n---\n\nUnreviewed.\n"
 
@@ -57,9 +57,9 @@ def _git(repo: Path, *args: str) -> str:
     return result.stdout
 
 
-def _submission(note_id: str = "agent-proposal") -> NoteSubmission:
+def _submission(note_id: str = "agent-proposal") -> NoteWrite:
     """The real submission shape the PR-gate builds: one agent note under `knowledge/<type>/`."""
-    return NoteSubmission(
+    return NoteWrite(
         branch=f"note/{note_id}",
         files=[NoteFile(path=f"knowledge/reaction/{note_id}.md", content=_UNREVIEWED)],
         title=f"Add reaction note: {note_id}",
@@ -100,9 +100,9 @@ def knowledge_clone(tmp_path: Path) -> Path:
     return clone
 
 
-def _submitter(clone: Path) -> GitNoteSubmitter:
+def _submitter(clone: Path) -> GitNoteWriter:
     """A submitter pointed at the clone, with the config defaults the fixture establishes."""
-    return GitNoteSubmitter(repo_dir=str(clone), base_branch="main", remote="origin")
+    return GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin")
 
 
 def test_a_reader_never_sees_the_note_at_any_point_during_the_submission(
@@ -211,7 +211,7 @@ def test_a_failing_worktree_cleanup_does_not_destroy_a_pushed_submission(
     """Cleanup runs after the push, so nothing it raises may replace the branch name.
 
     Measured before the fix: with the cleanup raising, the branch was on origin with the note's
-    bytes on it while `submit` raised — `propose_note` then recorded the proposal `failed`, the
+    bytes on it while `submit` raised — `record_note` then recorded the proposal `failed`, the
     reviewer queue showed 0 and `close_merged_notes` moved 0. With `CancelledError`, a
     `BaseException` that `except Exception` does not catch, there was **no durable row at all**:
     a pushed, unreviewable, unrecorded note. Both cases are one defect — a `finally` that can raise

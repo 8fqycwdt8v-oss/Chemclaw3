@@ -4,7 +4,7 @@ Thin Temporal wrappers over `chemclaw.memory.jobs`: each activity reads the full
 the
 configured active ingest sources (`chemclaw.ingest.sources.registry`, the same set the ELN sync
 ingests — no new
-store) and proposes campaign / playbook notes via the PR-gate. No new infrastructure — only new
+store) and records campaign / playbook notes in the graph. No new infrastructure — only new
 note types produced by reusing existing pieces (Phase 5, G1).
 
 **Started on demand, never on a Schedule** (D-2026-08-25). These three used to fire hourly and open
@@ -150,22 +150,22 @@ async def build_optimization_notes_activity() -> list[SynthesisUnit]:
 @durable_activity("background")
 @activity.defn
 async def publish_memory_note_activity(unit: SynthesisUnit, actor: str = "") -> str:
-    """PR-gate one already-built memory note; return its reference (the fan-out publish step).
+    """Record one already-built memory note; return its reference (the fan-out publish step).
 
     Any compound note the note links is minted into the same submission (STO-7). Applying that rule
     here, at the one gate every machine-written note passes through, is what keeps it out of each
     connector: a note author states the link, and the gate makes it resolve.
 
-    `actor` stamps the ambient identity for the duration of the gate, because `propose_note` records
-    a durable `NoteProposal` whose `actor` comes from `ambient_provenance()` — and no activity under
-    `durable/` stamped one, so every proposal a durable job opened was recorded with `actor=""`.
-    `list_note_proposals` scopes a non-reviewer's queue to `principal.oid` and `_visible_proposal`
-    404s the detail view, so the chemist who launched the job could not see the PR opened on their
-    behalf. That surface's own docstring gives exactly that as the reason it exists.
+    `actor` stamps the ambient identity for the duration of the write. **Its original reader is
+    gone** — it existed so the PR-gate's `NoteProposal.actor` named the chemist a durable job was
+    writing on behalf of, and `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted that
+    record. What still reads it is `core/logging.ContextFilter`, which puts the actor and
+    correlation id on every log line the write emits; without the stamp a paged engineer has
+    nothing to grep back to the turn behind a durable note write.
 
     Empty is the honest default and stays supported: the memory-synthesis jobs are system-triggered
-    (a schedule, no user), and stamping a synthetic actor on them would make an unattributed
-    proposal look attributed. Absent means absent.
+    (a schedule, no user), and stamping a synthetic actor on them would make an unattributed write
+    look attributed. Absent means absent.
     """
     note = unit.note
     if not actor:
@@ -198,7 +198,7 @@ async def publish_memory_note_activity(unit: SynthesisUnit, actor: str = "") -> 
 # D-2026-08-27 has the per-workflow table.
 @workflow.defn(failure_exception_types=[Exception])
 class PublishNoteWorkflow:
-    """Publish one memory note through the PR-gate — the fan-out unit of a synthesis job (F10-D2).
+    """Record one memory note in the graph — the fan-out unit of a synthesis job (F10-D2).
 
     Each proposed note is its own child workflow so a single poison note (a bad git write that
     exhausts its retries) is isolated and dropped by the fan-out (D-030), while the rest of the
@@ -207,7 +207,7 @@ class PublishNoteWorkflow:
 
     @workflow.run
     async def run(self, unit: SynthesisUnit) -> str:
-        """Run the PR-gate publish activity for one unit with the bounded note-write retry."""
+        """Run the note-write activity for one unit with the bounded note-write retry."""
         return await workflow.execute_activity(
             publish_memory_note_activity,
             unit,
@@ -245,7 +245,7 @@ def _slice_for_this_run(
     These jobs rescan the whole corpus with no cursor and had no ceiling on what one run could
     propose. In practice they stay quiet — an id anchored on a cluster's smallest member reuses its
     branch, a byte-identical note produces no diff and no push — but nothing *bounded* them, and a
-    large corpus import would open a PR per cluster on the first night.
+    large corpus import would record a note per cluster on the first night.
 
     A plain cap would have replaced that with a worse bug. The builders are deterministic over the
     corpus, so `notes[:cap]` proposes the same first N every night and the tail is proposed *never*
@@ -309,14 +309,14 @@ async def _synthesize(build_activity: Any, id_prefix: str) -> list[str]:
 # poll, so a plain exception here is D-2026-08-16's measured hang exactly —
 # `get_durable_job_status` answering `running` forever for a run that will never finish.
 # Nothing is lost by failing instead: the scan is re-requestable, and a re-proposed note
-# is byte-identical, so it produces no second pull request. D-2026-08-27.
+# is byte-identical, so it produces no second commit. D-2026-08-27.
 @workflow.defn(failure_exception_types=[Exception])
 class CampaignSynthesisWorkflow:
     """Run episodic campaign synthesis durably; return the proposed note references."""
 
     @workflow.run
     async def run(self) -> list[str]:
-        """Detect chains, then fan each campaign note out to its own PR-gate child."""
+        """Detect chains, then fan each campaign note out to its own note-write child."""
         return await _synthesize(build_campaign_notes_activity, "campaign")
 
 
@@ -326,7 +326,7 @@ class CampaignSynthesisWorkflow:
 # poll, so a plain exception here is D-2026-08-16's measured hang exactly —
 # `get_durable_job_status` answering `running` forever for a run that will never finish.
 # Nothing is lost by failing instead: the scan is re-requestable, and a re-proposed note
-# is byte-identical, so it produces no second pull request. D-2026-08-27.
+# is byte-identical, so it produces no second commit. D-2026-08-27.
 @workflow.defn(failure_exception_types=[Exception])
 class PlaybookDistillationWorkflow:
     """Run semantic playbook distillation durably; return the proposed note references."""
@@ -343,7 +343,7 @@ class PlaybookDistillationWorkflow:
 # poll, so a plain exception here is D-2026-08-16's measured hang exactly —
 # `get_durable_job_status` answering `running` forever for a run that will never finish.
 # Nothing is lost by failing instead: the scan is re-requestable, and a re-proposed note
-# is byte-identical, so it produces no second pull request. D-2026-08-27.
+# is byte-identical, so it produces no second commit. D-2026-08-27.
 @workflow.defn(failure_exception_types=[Exception])
 class OptimizationCampaignWorkflow:
     """Run episodic optimization-campaign grouping durably; return the proposed note references."""

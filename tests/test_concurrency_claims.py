@@ -33,7 +33,7 @@ from chemclaw.api.budget import BudgetExceeded, BudgetTracker
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.core.executor import install_default_executor
-from chemclaw.kg.git_submitter import GitSubmitError, _checkout_lock
+from chemclaw.kg.git_writer import GitWriteError, _checkout_lock
 from tests.pg import migrated_db_or_skip
 
 
@@ -214,12 +214,12 @@ def test_the_overshoot_at_the_boundary_never_exceeds_the_admission_cap(_budgeted
 # sharing a PVC actually is.
 _SECOND_PROCESS = """
 import sys
-from chemclaw.kg.git_submitter import GitSubmitError, _checkout_lock
+from chemclaw.kg.git_writer import GitWriteError, _checkout_lock
 
 try:
     with _checkout_lock(sys.argv[1]):
         print("ACQUIRED")
-except GitSubmitError as exc:
+except GitWriteError as exc:
     print("REFUSED")
 """
 
@@ -269,7 +269,7 @@ def test_the_submit_lock_reports_a_missing_checkout_rather_than_proceeding(tmp_p
     The failure-open shape: if a missing lock path were treated as "nothing to exclude", a
     misconfigured `note_repo_dir` would silently remove the exclusion the control depends on.
     """
-    with pytest.raises(GitSubmitError, match="cannot open submit lock"):
+    with pytest.raises(GitWriteError, match="cannot open submit lock"):
         with _checkout_lock(str(tmp_path / "not-a-checkout")):
             pass
 

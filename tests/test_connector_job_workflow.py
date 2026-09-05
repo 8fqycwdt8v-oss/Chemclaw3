@@ -50,7 +50,7 @@ from chemclaw.durable.job_record import JobRecord, record_job
 from chemclaw.durable.memory_jobs import publish_memory_note_activity
 from chemclaw.durable.notify import record_session_event_activity
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.record import record_note
 from chemclaw.memory.jobs import SynthesisUnit
 from tests.fixtures.connectors.fixture.workflows import FixtureJobWorkflow
 from tests.temporal_env import pydantic_client, start_env_or_skip
@@ -102,7 +102,7 @@ def test_the_publish_activity_calls_the_pr_gate_the_way_the_pr_gate_expects(
 
     `publish_memory_note_activity` is the single path every machine-written note takes to the
     graph, and the only test exercising it needed a Temporal server — so it skipped on every local
-    run. When `propose_note` gained a `dependencies` argument (D-133) and the end-to-end test's
+    run. When `record_note` gained a `dependencies` argument (D-133) and the end-to-end test's
     stub did not, nothing local failed: the drift only surfaced in CI, as a note that was silently
     never published.
 
@@ -114,12 +114,12 @@ def test_the_publish_activity_calls_the_pr_gate_the_way_the_pr_gate_expects(
     seen: dict[str, Any] = {}
 
     async def _capture(*args: Any, **kwargs: Any) -> str:
-        bound = inspect.signature(propose_note).bind(*args, **kwargs)
+        bound = inspect.signature(record_note).bind(*args, **kwargs)
         seen.update(bound.arguments)
         return "pr://note/n"
 
-    monkeypatch.setattr("chemclaw.durable.memory_jobs.propose_note", _capture)
-    monkeypatch.setattr("chemclaw.durable.memory_jobs.default_submitter", lambda: object())
+    monkeypatch.setattr("chemclaw.durable.memory_jobs.record_note", _capture)
+    monkeypatch.setattr("chemclaw.durable.memory_jobs.default_writer", lambda: object())
 
     note = Note(id="n", type="job-result", created_by="agent", body="no links")
     unit = SynthesisUnit(note=note, retirements=[])
@@ -186,14 +186,14 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     async def _fake_propose(*args: Any, **kwargs: Any) -> str:
         """Capture the PR-gate proposal instead of pushing a git branch.
 
-        Bound against the *real* `propose_note` signature rather than restating it. A hand-written
+        Bound against the *real* `record_note` signature rather than restating it. A hand-written
         stub signature is invisible to `mypy --strict` (the patched attribute is untyped) and only
-        executes where a Temporal server exists — so when `propose_note` gained a `dependencies`
+        executes where a Temporal server exists — so when `record_note` gained a `dependencies`
         argument, this stub raised `TypeError` inside the activity, the note was never published,
         and the failure surfaced as `[] == ['fixture-benzene']` in CI alone. Binding makes the drift
         impossible to reintroduce: the stub accepts exactly what the real function accepts.
         """
-        bound = inspect.signature(propose_note).bind(*args, **kwargs)
+        bound = inspect.signature(record_note).bind(*args, **kwargs)
         note = bound.arguments["note"]
         published.append((note, bound.arguments.get("dependencies")))
         return f"note/{note.id}"
@@ -223,8 +223,8 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
 
     # Stub what the activities *do*, not the activities themselves — see the module docstring.
     monkeypatch.setattr("chemclaw.durable.job_record.default_job_record_sink", _CapturingSink)
-    monkeypatch.setattr("chemclaw.durable.memory_jobs.propose_note", _fake_propose)
-    monkeypatch.setattr("chemclaw.durable.memory_jobs.default_submitter", lambda: object())
+    monkeypatch.setattr("chemclaw.durable.memory_jobs.record_note", _fake_propose)
+    monkeypatch.setattr("chemclaw.durable.memory_jobs.default_writer", lambda: object())
     monkeypatch.setattr("chemclaw.durable.notify.record_session_event", _fake_record)
     monkeypatch.setattr("chemclaw.core.config.settings.background_task_queue", _CORE_QUEUE)
     tool = _fixture_job_tool(monkeypatch)

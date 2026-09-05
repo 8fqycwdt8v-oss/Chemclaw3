@@ -33,7 +33,7 @@ from chemclaw.retrieval.harness import (
     SectionRequest,
     SynthesizedSection,
 )
-from tests.conftest import FakeSubmitter
+from tests.conftest import FakeWriter
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
 
@@ -77,9 +77,9 @@ def test_default_retrievers_uses_the_configured_source_registry(
 
 def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     """The workflow retrieves each section durably and proposes one cited report note."""
-    fake = FakeSubmitter()
+    fake = FakeWriter()
     monkeypatch.setattr(report_workflow, "default_retrievers", lambda: [_FakeRetriever()])
-    monkeypatch.setattr(report_workflow, "default_submitter", lambda: fake)
+    monkeypatch.setattr(report_workflow, "default_writer", lambda: fake)
 
     async def _run() -> None:
         request = ReportRequest(
@@ -108,7 +108,7 @@ def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) ->
         assert result.data["note_ref"].startswith("pr://note/report-")
         assert result.data["sections"] == 2
         assert "Widget development" in result.summary
-        body = fake.submissions[0].files[0].content
+        body = fake.writes[0].files[0].content
         assert "[[reaction-a]]" in body  # the supported section cites its source
         assert "No supporting data found" in body  # the safety section is marked, not invented
 
@@ -117,9 +117,9 @@ def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_failed_section_is_marked_not_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
     """A section whose retrieval errors is shown as failed in the draft, never silently missing."""
-    fake = FakeSubmitter()
+    fake = FakeWriter()
     monkeypatch.setattr(report_workflow, "default_retrievers", lambda: [_FailingRetriever()])
-    monkeypatch.setattr(report_workflow, "default_submitter", lambda: fake)
+    monkeypatch.setattr(report_workflow, "default_writer", lambda: fake)
 
     async def _run() -> None:
         request = ReportRequest(
@@ -143,7 +143,7 @@ def test_failed_section_is_marked_not_dropped(monkeypatch: pytest.MonkeyPatch) -
                     id="report-fail-test",
                     task_queue=settings.background_task_queue,
                 )
-        body = fake.submissions[0].files[0].content
+        body = fake.writes[0].files[0].content
         assert "## Yield" in body  # the section still appears (not dropped)
         assert "Retrieval failed" in body  # and is explicitly marked incomplete
 

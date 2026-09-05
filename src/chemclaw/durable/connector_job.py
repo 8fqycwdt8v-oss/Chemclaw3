@@ -946,13 +946,13 @@ class ConnectorJobWorkflow:
             # The same PR-gate activity the memory-synthesis jobs use — one write path into the
             # graph, on the light background queue, bounded retries, never failing the job. The
             # note is stamped with the run and its reason on the way through, here rather than in
-            # each connector, so no bundle can forget and every merged note answers "why was this
+            # each connector, so no bundle can forget and every recorded note answers "why was this
             # done" as well as "what came out".
-            # `job.requested_by` travels with the note so the proposal is recorded against the
-            # chemist who launched the job. Without it `ambient_provenance()` yields `actor=""`,
-            # the row is invisible in that chemist's own review queue, and the PR opened on their
-            # behalf is one they cannot find — while the input carrying their identity sits one
-            # frame above, required and unused.
+            # `job.requested_by` travels with the note so the write is *attributed* to the
+            # chemist who launched the job. It was the PR-gate's `NoteProposal.actor` until
+            # `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`; what reads it now is the log
+            # filter, so without it a durable note write has no line joining it to the person who
+            # asked — while the input carrying their identity sits one frame above, unused.
             await publish_note_best_effort(
                 publish_memory_note_activity,
                 [

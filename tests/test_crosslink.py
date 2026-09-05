@@ -20,9 +20,9 @@ from chemclaw.ingest.eln.compound import compound_dependencies, compound_note
 from chemclaw.kg.crosslink import calc_ref_index, cited_calculations, notes_for_calculation
 from chemclaw.kg.graph import invalidate_cache
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.record import record_note
 from chemclaw.kg.render import render_note
-from chemclaw.kg.submission import NoteSubmission, SubmissionOutcome
+from chemclaw.kg.record import NoteWrite, WriteOutcome
 from chemclaw.kg.validate import validate
 
 _KEY = "xtb.hess@GFN2-xTB+tblite+0.4.0:ab12cd:34ef56"
@@ -34,12 +34,12 @@ class _Capturing:
 
     def __init__(self) -> None:
         """Start with nothing captured."""
-        self.submission: NoteSubmission | None = None
+        self.submission: NoteWrite | None = None
 
-    async def submit(self, submission: NoteSubmission) -> SubmissionOutcome:
+    async def submit(self, submission: NoteWrite) -> WriteOutcome:
         """Record the submission and return its branch."""
         self.submission = submission
-        return SubmissionOutcome(reference=submission.branch)
+        return WriteOutcome(reference=submission.branch)
 
 
 def test_a_note_may_cite_a_calculation_that_lives_outside_the_graph() -> None:
@@ -117,7 +117,7 @@ def test_the_reverse_lookup_reads_the_note_tree(tmp_path: Path) -> None:
 def test_a_note_and_the_compound_it_links_land_in_one_submission() -> None:
     """The actual unblocking change: a reviewable unit is a note *and what it needs*.
 
-    Before this a `NoteSubmission` was one path and one content, which is why a note could never
+    Before this a `NoteWrite` was one path and one content, which is why a note could never
     link a note that did not already exist on the base branch.
     """
 
@@ -131,7 +131,7 @@ def test_a_note_and_the_compound_it_links_land_in_one_submission() -> None:
             body=f"Computed for [[{compound_id(smiles)}]].",
         )
         submitter = _Capturing()
-        await propose_note(
+        await record_note(
             note, submitter, knowledge_dir="knowledge", dependencies=compound_dependencies(note)
         )
 
@@ -162,7 +162,7 @@ def test_that_submission_passes_kg_validate(tmp_path: Path) -> None:
             body=f"Computed for [[{compound_id(smiles)}]].",
         )
         submitter = _Capturing()
-        await propose_note(
+        await record_note(
             note, submitter, knowledge_dir="knowledge", dependencies=compound_dependencies(note)
         )
         assert submitter.submission is not None
@@ -204,7 +204,7 @@ def test_a_dependency_is_not_duplicated_however_many_times_it_is_named() -> None
         note = Note(id="n", type="job-result", created_by="agent", body="[[compound-x]]")
         duplicate = compound_note("CCO")
         submitter = _Capturing()
-        await propose_note(
+        await record_note(
             note,
             submitter,
             knowledge_dir="knowledge",

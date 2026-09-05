@@ -15,7 +15,7 @@ import pytest
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.ord import Component, OrdReaction, OutcomeClass, Role
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.record import record_note
 from chemclaw.kg.render import render_note
 from chemclaw.memory.campaign import campaign_note_from_chain
 from chemclaw.memory.chains import detect_chains
@@ -31,7 +31,7 @@ from chemclaw.memory.playbook import (
     playbook_note,
 )
 from chemclaw.memory.supersede import supersede_updates
-from tests.conftest import FakeSubmitter
+from tests.conftest import FakeWriter
 
 
 def _reaction(
@@ -258,7 +258,7 @@ def test_a_note_this_synthesis_never_minted_is_not_retired() -> None:
     drops a human-approved playbook out of every current-evidence sweep (`Note.is_current`).
 
     The human-authored variant of the same match is covered here too: it used to reach
-    `propose_note`, which refuses a `human` note — loud, but still a synthesis run crashing on a
+    `record_note`, which refuses a `human` note — loud, but still a synthesis run crashing on a
     note it had no business touching.
     """
     fresh = _memory_note(["r1", "r2"], note_type="playbook")
@@ -397,7 +397,7 @@ def test_a_playbook_states_which_of_its_two_producers_wrote_it() -> None:
 # --- jobs (5.3/5.4 wiring) ------------------------------------------------------------
 
 
-async def _build_and_propose(units: list[SynthesisUnit], submitter: FakeSubmitter) -> list[str]:
+async def _build_and_propose(units: list[SynthesisUnit], submitter: FakeWriter) -> list[str]:
     """Publish built notes the way the durable job does: one PR-gate proposal each.
 
     These three tests used to call `synthesize_campaigns` / `distill_playbooks`, which built and
@@ -406,30 +406,30 @@ async def _build_and_propose(units: list[SynthesisUnit], submitter: FakeSubmitte
     the tests take the same two steps the live path takes rather than a convenience wrapper that
     only tests had.
     """
-    return [await propose_note(unit.note, submitter, superseded=unit.retirements) for unit in units]
+    return [await record_note(unit.note, submitter, superseded=unit.retirements) for unit in units]
 
 
 def test_campaign_synthesis_proposes_notes_via_pr_gate() -> None:
     """The campaign job proposes one PR-gated campaign note per detected chain."""
     a = _reaction("a", ["CCO"], ["CC=O"], project="proj-x")
     b = _reaction("b", ["CC=O"], ["CC(O)O"], project="proj-x")
-    sub = FakeSubmitter()
+    sub = FakeWriter()
     refs = asyncio.run(_build_and_propose(build_campaign_notes([a, b]), sub))
     assert len(refs) == 1
-    assert sub.submissions[0].files[0].path.startswith("knowledge/campaign/campaign-")
+    assert sub.writes[0].files[0].path.startswith("knowledge/campaign/campaign-")
 
 
 def test_playbook_distillation_proposes_evidence_backed_notes() -> None:
     """The playbook job proposes a cross-project playbook note citing its evidence."""
     ester_x = _reaction("x", ["CCO", "CC(=O)O"], ["CCOC(C)=O"], project="proj-x")
     ester_y = _reaction("y", ["CCCO", "CC(=O)O"], ["CCCOC(C)=O"], project="proj-y")
-    sub = FakeSubmitter()
+    sub = FakeWriter()
     refs = asyncio.run(_build_and_propose(build_playbook_notes([ester_x, ester_y]), sub))
     assert len(refs) == 1
-    assert sub.submissions[0].files[0].path.startswith("knowledge/playbook/playbook-")
+    assert sub.writes[0].files[0].path.startswith("knowledge/playbook/playbook-")
     assert (
-        "proj-x" in sub.submissions[0].files[0].content
-        and "proj-y" in sub.submissions[0].files[0].content
+        "proj-x" in sub.writes[0].files[0].content
+        and "proj-y" in sub.writes[0].files[0].content
     )
 
 
@@ -444,10 +444,10 @@ def test_every_built_campaign_note_reaches_the_pr_gate() -> None:
     a = _reaction("a", ["CCO"], ["CC=O"], project="proj-x")
     b = _reaction("b", ["CC=O"], ["CC(O)O"], project="proj-x")
     units = build_campaign_notes([a, b])
-    sub = FakeSubmitter()
+    sub = FakeWriter()
     asyncio.run(_build_and_propose(units, sub))
-    assert len(units) == len(sub.submissions)
-    assert all(u.note.id in s.files[0].path for u, s in zip(units, sub.submissions, strict=True))
+    assert len(units) == len(sub.writes)
+    assert all(u.note.id in s.files[0].path for u, s in zip(units, sub.writes, strict=True))
     assert all(u.note.type == "campaign" for u in units)
 
 
@@ -502,14 +502,14 @@ def test_record_confirmed_answer_tool_uses_gate(monkeypatch: pytest.MonkeyPatch)
     """The agent tool routes a confirmed answer through the (fake) PR-gate (5.5 wiring)."""
     from chemclaw.agent import memory_tools
 
-    fake = FakeSubmitter()
-    monkeypatch.setattr(memory_tools, "default_submitter", lambda: fake)
+    fake = FakeWriter()
+    monkeypatch.setattr(memory_tools, "default_writer", lambda: fake)
     ref = asyncio.run(
         memory_tools.record_confirmed_answer(
             "q-42", "Best solvent?", "Aqueous dioxane at 90 C.", ["reaction-eln-2026-002"]
         )
     )
     assert ref == "pr://note/interaction-q-42"
-    submitted = fake.submissions[0]
+    submitted = fake.writes[0]
     assert submitted.files[0].path.endswith("interaction/interaction-q-42.md")
     assert "reaction-eln-2026-002" in submitted.files[0].content

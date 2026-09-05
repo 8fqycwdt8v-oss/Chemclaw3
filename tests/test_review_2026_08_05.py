@@ -32,8 +32,8 @@ from chemclaw.connectors import jobs as jobs_module
 from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import failure_reason
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import propose_note
-from chemclaw.kg.submission import SubmissionOutcome
+from chemclaw.kg.record import record_note
+from chemclaw.kg.record import WriteOutcome
 from tests.fakes import fed
 from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
@@ -485,16 +485,16 @@ def test_propose_note_deduplicates_dependencies_and_keeps_the_subject_first() ->
     captured: list[Any] = []
 
     class _Capturing:
-        async def submit(self, submission: Any) -> SubmissionOutcome:
+        async def submit(self, submission: Any) -> WriteOutcome:
             captured.append(submission)
-            return SubmissionOutcome(reference=str(submission.branch))
+            return WriteOutcome(reference=str(submission.branch))
 
     subject = _agent_note("subject-note", "see [[dep-a]] and [[dep-b]]")
     dep_a = _agent_note("dep-a", "the first dependency")
     dep_b = _agent_note("dep-b", "the second dependency")
     # `dep_b` comes *after* the duplicate on purpose: with `break` in place of `continue` the
     # duplicate would end the loop and silently drop it, which is the mutation this pins.
-    asyncio.run(propose_note(subject, _Capturing(), dependencies=[dep_a, dep_a, dep_b, subject]))
+    asyncio.run(record_note(subject, _Capturing(), dependencies=[dep_a, dep_a, dep_b, subject]))
 
     paths = [file.path for file in captured[0].files]
     assert paths[0].endswith("subject-note.md"), "the subject note must stay at files[0]"
@@ -515,11 +515,11 @@ def test_propose_note_honours_an_explicit_knowledge_directory() -> None:
     captured: list[Any] = []
 
     class _Capturing:
-        async def submit(self, submission: Any) -> SubmissionOutcome:
+        async def submit(self, submission: Any) -> WriteOutcome:
             captured.append(submission)
-            return SubmissionOutcome(reference=str(submission.branch))
+            return WriteOutcome(reference=str(submission.branch))
 
     asyncio.run(
-        propose_note(_agent_note("scoped-note", "body"), _Capturing(), knowledge_dir="elsewhere")
+        record_note(_agent_note("scoped-note", "body"), _Capturing(), knowledge_dir="elsewhere")
     )
     assert captured[0].files[0].path.startswith("elsewhere/")

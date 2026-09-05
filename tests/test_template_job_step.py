@@ -53,8 +53,9 @@ from chemclaw.durable.template_activities import (
     _acting_as,
     authorize_job_step,
 )
+from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
+from chemclaw.core.session_context import get_current_session_id
 from chemclaw.durable.template_job import TemplateWorkflow
-from chemclaw.kg.proposal import ambient_provenance
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "connectors"
 
@@ -93,9 +94,8 @@ def test_a_step_runs_under_the_correlation_id_its_run_was_launched_with() -> Non
 
     `StepIdentity.correlation_id` is `min_length=1` and its comment says it ties the run's audit
     events together; nothing stamped it, so every consumer of the *ambient* id saw none. The two
-    asserted here are the ones that hurt: `ambient_provenance` is what the PR-gate records on a note
-    a template proposes (`connectors/jobs.py` reads the same getter for the id it hands a launched
-    job), and `ContextFilter` is what puts the id on a log line — it writes `"-"` when there is
+    asserted here are the ones that hurt: the three ambient getters, which `connectors/jobs.py`
+    reads for the id it hands a launched job, and `ContextFilter`, which puts the id on a log line — it writes `"-"` when there is
     none, which is why a paged engineer looking at a running durable job had nothing to grep back to
     the turn behind it. The audit trail is deliberately *not* asserted: `agent/audit.py` falls back
     to the id each step activity passes it explicitly, so its rows were right all along and would
@@ -108,6 +108,16 @@ def test_a_step_runs_under_the_correlation_id_its_run_was_launched_with() -> Non
         actor="chemist-1", roles=[], correlation_id="template-run-1", session_id="s-tmpl"
     )
     context = ContextFilter()
+
+    def _ambient() -> tuple[str, str, str]:
+        """The three ambient values, read the way their consumers read them.
+
+        Read here rather than through a helper: `kg/proposal.ambient_provenance` used to bundle
+        them for the PR-gate's record, and went with it
+        (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). The invariant this test holds is
+        about the *stamp*, not about that wrapper.
+        """
+        return (get_current_actor(), get_current_session_id(), get_current_correlation_id())
 
     def _stamped() -> str:
         """The correlation id `ContextFilter` puts on a *fresh* record right now.
@@ -123,10 +133,10 @@ def test_a_step_runs_under_the_correlation_id_its_run_was_launched_with() -> Non
         return str(getattr(record, "correlation_id", ""))
 
     with _acting_as(identity):
-        assert ambient_provenance() == ("chemist-1", "s-tmpl", "template-run-1")
+        assert _ambient() == ("chemist-1", "s-tmpl", "template-run-1")
         assert _stamped() == "template-run-1"
 
-    assert ambient_provenance() == ("", "", "")
+    assert _ambient() == ("", "", "")
     assert _stamped() == "-"
 
 

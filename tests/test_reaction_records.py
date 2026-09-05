@@ -104,7 +104,7 @@ def test_ingesting_a_reaction_opens_no_pull_request(monkeypatch: pytest.MonkeyPa
     serialized git per ELN entry and a human merge per experiment.
     """
     monkeypatch.setattr(
-        "chemclaw.kg.git_submitter.default_submitter", lambda: _ExplodingSubmitter()
+        "chemclaw.kg.git_submitter.default_writer", lambda: _ExplodingSubmitter()
     )
 
     async def _run() -> ReactionRecord:

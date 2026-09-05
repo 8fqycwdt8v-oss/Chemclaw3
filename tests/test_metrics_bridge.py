@@ -16,22 +16,22 @@ from types import SimpleNamespace
 
 from chemclaw.core.metrics import METRICS
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import propose_note
-from chemclaw.kg.submission import NoteSubmission, SubmissionOutcome
+from chemclaw.kg.record import record_note
+from chemclaw.kg.record import NoteWrite, WriteOutcome
 
 
 class _Submitter:
     """A submitter that succeeds, so the count reflects a note that reached the branch."""
 
-    async def submit(self, submission: NoteSubmission) -> SubmissionOutcome:
+    async def submit(self, submission: NoteWrite) -> WriteOutcome:
         """Return a stable reference without touching git."""
-        return SubmissionOutcome(reference=f"ref:{submission.branch}")
+        return WriteOutcome(reference=f"ref:{submission.branch}")
 
 
 class _FailingSubmitter:
     """A submitter that raises, standing in for a broken token or unreachable remote."""
 
-    async def submit(self, submission: NoteSubmission) -> SubmissionOutcome:
+    async def submit(self, submission: NoteWrite) -> WriteOutcome:
         """Fail the way a real submitter fails."""
         raise RuntimeError("git push rejected")
 
@@ -49,7 +49,7 @@ def _agent_note(note_id: str) -> Note:
 def test_a_proposed_note_moves_the_counter() -> None:
     """The count rises by exactly one when a note reaches the branch."""
     before = METRICS.value("chemclaw_notes_proposed_total")
-    asyncio.run(propose_note(_agent_note("rev19-ok"), _Submitter()))
+    asyncio.run(record_note(_agent_note("rev19-ok"), _Submitter()))
     assert METRICS.value("chemclaw_notes_proposed_total") == before + 1
 
 
@@ -62,7 +62,7 @@ def test_a_failed_submission_does_not_move_the_counter() -> None:
     """
     before = METRICS.value("chemclaw_notes_proposed_total")
     try:
-        asyncio.run(propose_note(_agent_note("rev19-fail"), _FailingSubmitter()))
+        asyncio.run(record_note(_agent_note("rev19-fail"), _FailingSubmitter()))
     except RuntimeError:
         pass
     assert METRICS.value("chemclaw_notes_proposed_total") == before
@@ -73,7 +73,7 @@ def test_a_rejected_human_note_does_not_move_the_counter() -> None:
     human = _agent_note("rev19-human").model_copy(update={"created_by": "human"})
     before = METRICS.value("chemclaw_notes_proposed_total")
     try:
-        asyncio.run(propose_note(human, _Submitter()))
+        asyncio.run(record_note(human, _Submitter()))
     except ValueError:
         pass
     assert METRICS.value("chemclaw_notes_proposed_total") == before

@@ -639,15 +639,15 @@ def test_an_unreachable_durable_backend_says_nothing_was_started(
 
 
 def test_a_pr_gate_git_failure_reaches_the_model() -> None:
-    """`GitSubmitError` must surface, because its silence made the gate publish ungated.
+    """`GitWriteError` must surface, because its silence made the gate publish ungated.
 
     Told only "Error: Function failed.", the model retried five times permuting its arguments and
     then printed the unreviewed document into the chat as a fallback.
     """
-    from chemclaw.kg.git_submitter import GitSubmitError
+    from chemclaw.kg.git_writer import GitWriteError
 
     async def _git_failed() -> None:
-        raise GitSubmitError("note_repo_dir has no 'origin' remote; nothing was submitted")
+        raise GitWriteError("note_repo_dir has no 'origin' remote; nothing was submitted")
 
     ctx = _ctx("record_knowledge_note")
     _drive_domain_errors(ctx, _git_failed)
