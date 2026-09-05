@@ -546,12 +546,16 @@ def test_the_counter_separates_not_needed_from_not_wired(monkeypatch: pytest.Mon
     a counter that never ticks is indistinguishable from the defect this replaced.
 
     **The clear trigger is pinned here because it is a confound this test never controlled**, and
-    charging the prefix unconditionally is what turned it into one. Left at its shipped 30,000
-    against a ~43,000-token prefix, `effective_trigger` floors it at 1 and the lossless edit clears
-    on every call — so the under-budget arm ticked and the failure read as "compaction fired on a
-    thread inside its budget" when the subject under test, the budget, was behaving exactly as
-    asserted. `test_the_shipped_clear_trigger_is_below_the_prefix_it_is_now_charged` is where that
-    state is asserted on purpose.
+    charging the prefix unconditionally is what turned it into one. At any trigger below the
+    request's ~43,000-token prefix — which is where the shipped 30,000 sat for the one commit
+    between charging the prefix and re-deriving this default — `effective_trigger` floors it at 1
+    and the lossless edit clears on every call, so the under-budget arm ticks and the failure reads
+    as "compaction fired on a thread inside its budget" when the subject under test, the budget, is
+    behaving exactly as asserted. Pinning it out of the way is what leaves the budget as the only
+    variable. **The shipped default is no longer in that state**, and
+    `test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged` is what asserts it stays out of
+    it; this paragraph cited that test under a name it had already been renamed away from, which
+    `grep` answers in one line and nothing else does.
     """
     monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 1)
     monkeypatch.setattr(settings, "agent_keep_last_conversation_groups", 2)
@@ -1012,45 +1016,73 @@ def test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window(
     )
 
 
+#: The thread allowance `agent_tool_result_clear_trigger`'s default is derived to leave.
+#:
+#: The default is `tests/test_context_floor.py`'s ratchet ceiling plus this — the 30,000 of thread
+#: the setting meant for as long as it was a thread budget (`core/config/agent.py` says why the
+#: ceiling and not a measurement). It is written here rather than imported because the config
+#: comment is prose and this is the assertion: if the two ever disagree, one of them is a claim
+#: nobody checked.
+CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
+
+
 def test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged() -> None:
-    """The lossless edit must have a budget left after the prefix, or it is not a budget.
+    """The lossless edit must have the *band* the derivation claims, not merely a positive one.
 
     This replaces a test that asserted the opposite. While `agent_tool_result_clear_trigger` meant
     *thread* spend, 30,000 was an order of magnitude below the budget so that clearing ran early
     and often. Charging the prefix made that same number mean "clear every reclaimable tool result
-    on every model call": the `default` prefix measures ~43,175, so `effective_trigger` floored it
-    at 1 and the model lost sight of evidence more than one step back. 73,500 is the old 30,000 of
-    thread re-expressed in the new unit.
+    on every model call": the `default` prefix measured ~43,175, so `effective_trigger` floored it
+    at 1 and the model lost sight of evidence more than one step back. The default is that same
+    30,000 of thread re-expressed in the new unit — the ratchet ceiling plus
+    `CLEAR_TRIGGER_THREAD_ALLOWANCE`.
 
-    **Asserted against the ratchet ceiling rather than against today's prefix**, which is the whole
-    reason this test is worth having. `tests/test_context_floor.py` bounds the bound tool surface
-    at `MAX_PROFILE_TOKENS`; a measurement moves whenever any tool schema changes, and a test
-    written against one would drift into passing for a reason nobody chose. Written against the
-    ceiling, the day the surface is allowed to grow past what this setting can absorb, this fails
-    and names the trade instead of the behaviour changing quietly.
+    **The band is what is asserted, and asserting only the clearance was the defect.** This test
+    used to check `trigger > prefix` and `trigger > ceiling`, which are two readings of one fact
+    while the prefix sits under the ceiling — and both stay green on a default that clears the
+    prefix by a hair. Measured: a default of 44,000 against a 43,681-token prefix passed here while
+    leaving the thread **319** estimated tokens, a configuration in which the lossless edit clears
+    almost everything on almost every call. The 30,000 the derivation rests on was asserted
+    nowhere; the band was asserted as `> 1`.
+
+    **Against the ratchet ceiling rather than today's prefix**, which is the whole reason this test
+    is worth having. `tests/test_context_floor.py`'s `CEILINGS` bounds the prefix; a measurement
+    moves whenever any tool schema changes, and a test written against one would drift into passing
+    for a reason nobody chose. Written against the ceiling, the day the surface is allowed to grow
+    past what this setting can absorb, this fails and names the trade instead of the behaviour
+    changing quietly. The second assertion then adds what a ceiling cannot say — that *today's*
+    deployment, at today's measured prefix, actually has the band.
     """
     from tests.test_context_floor import CEILINGS
 
     ceiling = CEILINGS["__default__"]
-
     prefix = _graph_prefix()
     trigger = settings.agent_tool_result_clear_trigger
+    reset_calibration()
 
-    assert trigger > prefix, (
-        f"agent_tool_result_clear_trigger is {trigger} against a {prefix}-token prefix, so it "
-        "floors at 1 — the lossless edit would clear every reclaimable result on every model call"
-    )
-    assert trigger > ceiling, (
-        f"agent_tool_result_clear_trigger is {trigger} against a ratchet ceiling of "
-        f"{ceiling}: a surface grown to its permitted bound would floor this trigger, "
-        "so either the ceiling or this setting has to move, deliberately"
+    assert trigger - ceiling >= CLEAR_TRIGGER_THREAD_ALLOWANCE, (
+        f"agent_tool_result_clear_trigger is {trigger} against a ratchet ceiling of {ceiling}, so "
+        f"a surface grown to its permitted bound would leave the thread {trigger - ceiling} "
+        f"estimated tokens where the derivation claims {CLEAR_TRIGGER_THREAD_ALLOWANCE}. The "
+        "default is the ceiling plus that allowance: move both together, or say in the pull "
+        "request which one is now wrong."
     )
     token = _prefix_var.set(prefix)
     try:
-        # It still has to leave a usable band below the destructive edit, which is the split's
-        # whole point: clearing is free, the window is not.
-        assert (
-            1 < effective_trigger(trigger) < effective_trigger(settings.agent_context_token_budget)
+        allowance = effective_trigger(trigger)
+        assert allowance >= CLEAR_TRIGGER_THREAD_ALLOWANCE, (
+            f"the shipped trigger of {trigger} against this deployment's measured {prefix}-token "
+            f"prefix leaves the thread {allowance} estimated tokens, not "
+            f"{CLEAR_TRIGGER_THREAD_ALLOWANCE}: clearing the prefix is not the property, having a "
+            "band above it is, and a trigger that clears it by a hair clears every reclaimable "
+            "tool result on almost every model call"
+        )
+        # It still has to fire before the destructive edit, which is the split's whole point:
+        # clearing is free, the window is not.
+        assert allowance < effective_trigger(settings.agent_context_token_budget), (
+            f"the lossless edit triggers at {allowance} and the window at "
+            f"{effective_trigger(settings.agent_context_token_budget)}, so the free edit no longer "
+            "runs first"
         )
     finally:
         _prefix_var.reset(token)

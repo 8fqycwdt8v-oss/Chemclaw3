@@ -148,9 +148,16 @@ async def condense_protocols(protocol_refs: list[str]) -> str:
         ask the search that produced these references whether *it* was truncated.
 
     Raises:
-        ChemclawError: When more protocols are asked for than one turn may condense, or than one
-            turn's text budget allows. Narrow the set and ask again, or use the campaign synthesis
-            for a corpus-scale comparison — a partial answer that did not say so would be worse.
+        ChemclawError: In three cases, every one of them about the set you asked for: more
+            protocols than one turn may condense, more text than one turn's budget allows, and not
+            one reference that resolved to a protocol at all. Narrow the set and ask again, or use
+            the campaign synthesis for a corpus-scale comparison — a partial answer that did not
+            say so would be worse. **A condensing model that is unreachable, or that cannot be
+            built at all, is not one of them and never raises here**: the comparison comes back
+            with every recorded figure intact, the columns read out of the prose empty, and the
+            payload saying in words which protocols went unread. This paragraph said "or than one
+            turn's text budget allows" and stopped, over a third `ChemclawError` and a period in
+            which an unbuildable client did escape it.
     """
     refs = list(dict.fromkeys(r.strip() for r in protocol_refs if r.strip()))
     if not refs:
