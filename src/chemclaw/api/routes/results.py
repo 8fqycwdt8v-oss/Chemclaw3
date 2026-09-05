@@ -47,8 +47,8 @@ async def get_tool_result(
     *bytes*, so `text` cannot change — but `tool` and `correlation_id` collapse to `''` the moment a
     second call in this session returns the same text (`api/tool_results.py::_UPSERT_LINK`), so the
     body is not immutable and a year-long promise would pin a withdrawn label in the client.
-    `routes/caching.py` carries the whole argument, including why `public` on a per-owner resource
-    behind `resolve_session` is a hazard rather than a preference.
+    `api/routes/caching.py` carries the whole argument, including why `public` on a per-owner
+    resource behind `resolve_session` is a hazard rather than a preference.
     """
     stored = await front_door.load_tool_result(session_id, ref)
     if stored is None:

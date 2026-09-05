@@ -524,6 +524,16 @@ def test_agent_supplied_threshold_is_clamped() -> None:
         def __init__(self) -> None:
             self.thresholds: list[float] = []
 
+        @property
+        def approximate(self) -> bool:
+            """Never — this double scores nothing, so it can never miss a true neighbour.
+
+            Present because `FingerprintStore` gained the member when exactness became a
+            deployment's choice, and a double that answers "may I miss a neighbour?" with silence
+            would let `find_matches` read an unset attribute rather than a stated one.
+            """
+            return False
+
         async def add(self, record: FingerprintRecord) -> None:
             raise NotImplementedError
 

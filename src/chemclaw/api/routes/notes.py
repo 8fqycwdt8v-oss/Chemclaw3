@@ -55,8 +55,8 @@ async def get_note(
     under the same id — the neighbourhood is other notes' business, and `Note.is_current` is
     evaluated against `date.today()`, so a neighbour leaves this view on the day its `valid_to`
     passes with nothing written at all. None of that is content-addressed, which is why the
-    frontend's `immutable` premise does not hold here; `routes/caching.py` carries the argument and
-    the reason a `CurrentUser`-gated response is still not `public`.
+    frontend's `immutable` premise does not hold here; `api/routes/caching.py` carries the
+    argument and the reason a `CurrentUser`-gated response is still not `public`.
     """
     try:
         view = await front_door.expand_note(note_id, hops)
