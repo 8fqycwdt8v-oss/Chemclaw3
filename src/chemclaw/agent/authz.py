@@ -203,9 +203,9 @@ KNOWLEDGE_READ_TOOLS: frozenset[str] = frozenset(
 KNOWLEDGE_WRITE_TOOLS: frozenset[str] = frozenset(
     {
         "forget_preference",
-        "propose_knowledge_note",
         "record_confirmed_answer",
         "record_failure",
+        "record_knowledge_note",
         "remember_preference",
         "synthesize_memory",
     }
