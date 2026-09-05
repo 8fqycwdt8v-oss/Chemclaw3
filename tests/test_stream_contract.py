@@ -143,9 +143,66 @@ def test_a_push_back_stream_whose_tailer_dies_ends_in_an_error_event(
     assert [event["type"] for event in events] == ["job_completed", "error"]
     assert events[-1]["code"] == "storage_unavailable"
     assert events[-1]["retryable"] is True, "a database outage is the retryable failure"
+    # The join key, on the one error a chemist sees when the push-back channel dies. The turn
+    # route's four events were swept onto `get_current_correlation_id()`; this one was missed, so
+    # a chemist asked to quote an id had nothing to quote while the response header carried one.
+    assert events[-1]["correlation_id"], (
+        "the push-back stream's error carries no correlation id a chemist could quote"
+    )
     assert METRICS.render() != before, "the outage was invisible to chemclaw_db_unavailable_total"
     # The stream's admission slot comes back, as it already did — this must not regress.
     assert app.state.event_streams == {}
+
+
+def test_each_push_back_tailer_polls_on_an_interval_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """200 idle tabs on one pod must not arrive at the pool as one synchronised burst.
+
+    `stream_new_events` sleeps a constant `session_event_poll_seconds`, and a pod holds up to
+    `service_max_event_streams_total` (200) tailers whose clients are restarted together by a pod
+    roll, a deploy, or a floor of chemists reconnecting. With no spread, two tailers that once
+    coincided stay coincident for the pod's life. Measured on the shipped numbers against a live
+    database with nothing else running, 200 streams over 10 s and each stream's *first* poll
+    excluded (200 tailers created in one tick synchronise by construction, where 200 separate HTTP
+    requests do not): peak **29** waiters on a pool of 8 and a worst poll of 14 ms, against **0**
+    waiters and 5 ms once each stream has its own interval. The wait is paid by whatever needed
+    the store in that window — a turn's `store_tool_result`, a session claim.
+
+    Asserted at the seam the route chooses the interval on, which names where the fix lives: if
+    the spread ever moves into the tailer itself, this test goes red and should move with it.
+    """
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.session_events import SessionEvent
+
+    intervals: list[float] = []
+
+    async def _record(session_id: str, **kwargs: Any) -> AsyncIterator[SessionEvent]:
+        """Record the interval this stream was given, then end it immediately."""
+        intervals.append(float(kwargs.get("poll_seconds", settings.session_event_poll_seconds)))
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(app_module, "stream_new_events", _record)
+
+    with TestClient(_app()) as client:
+        for _ in range(12):
+            session_id = client.post("/sessions").json()["session_id"]
+            _sse_events(client, "GET", f"/sessions/{session_id}/events")
+
+    assert len(intervals) == 12
+    assert len(set(intervals)) == len(intervals), (
+        f"tailers share a poll interval and therefore a phase: {intervals}"
+    )
+    base = settings.session_event_poll_seconds
+    assert max(intervals) - min(intervals) > base * 0.1, (
+        f"the intervals are spread over {max(intervals) - min(intervals):.4f}s of a {base}s "
+        "period — too narrow to pull a synchronised fleet apart"
+    )
+    assert all(base * 0.75 <= interval <= base * 1.25 for interval in intervals), (
+        f"a stream was given {min(intervals)}..{max(intervals)}s against a configured {base}s; the "
+        "spread must not become a second, unstated poll interval"
+    )
 
 
 # --- F5: the in-process turn lease ------------------------------------------------------------

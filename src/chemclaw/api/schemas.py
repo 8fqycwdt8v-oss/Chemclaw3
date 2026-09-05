@@ -324,6 +324,11 @@ class PendingPlansOut(BaseModel):
       genuinely empty.
     - `unread > 0` — the scan hit `service_max_plan_scans` (or could not reach the checkpointer),
       so this answer is partial and the sessions it did not reach are the *older* ones.
+    - `truncated` — the *listing* walk stopped before it ran out of sessions, so there are older
+      conversations this answer never even classified. A fourth meaning of an empty `plans`, and
+      the one `unread` cannot carry: `unread` counts gated sessions that went unread, and a walk
+      that stops early has not learned whether the rows beyond it are gated at all. Folding it
+      into `unread` would invent plans that may not exist.
     """
 
     plans: list[PendingPlan]
@@ -333,6 +338,10 @@ class PendingPlansOut(BaseModel):
     gated: int
     # Gated sessions whose plan was not read, so `plans` is short by an unknown amount.
     unread: int
+    # Whether the listing walk itself stopped short of the caller's history (see above). Defaulted
+    # so it is additive on the wire: a surface that does not know the field reads the same answer
+    # it read before, and one that does can say "older conversations were not checked".
+    truncated: bool = False
 
 
 def session_title(message: str) -> str:

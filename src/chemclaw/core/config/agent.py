@@ -398,8 +398,11 @@ class AgentSettings(BaseSettings):
     # tool bodies, 40 audit rows and up to 40 plan-gate reads concurrently — against a Postgres
     # pool of 16. Applied as LangGraph's `max_concurrency` in `agent.state.turn_config`, so it
     # bounds a superstep's parallel work (subagent fan-outs included) rather than only tools.
-    # 8 matches the front door's own admission width (`service_max_concurrent_turns`) and the
-    # worker's activity slots, which are both sized to that pool; 0 removes the bound.
+    # 8 matches the worker's activity slots. It is *not* the front door's admission width: a turn
+    # admitted there may fan out to this many calls, so the front door's thread reservation
+    # multiplies the two rather than adding them (`core/executor.py`). This comment said the two
+    # "match", which read as though one turn cost one unit, and that reading was in the reservation
+    # itself. 0 removes the bound.
     agent_max_parallel_tool_calls: int = Field(default=8, ge=0)
 
     # How many of one reply's unparseable tool calls are promoted onto `tool_calls` and refused

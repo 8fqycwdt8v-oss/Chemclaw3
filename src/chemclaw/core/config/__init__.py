@@ -115,6 +115,12 @@ __all__ = [
 
 
 _TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
+# `""` is in here for the callers that build a URL and ask whether its host is local — a value with
+# no host at all (`/var/chemclaw/outbox`) reads as local, which is what `publish/drivers/http.py`,
+# `deliver/driver.py` and `cli/validate_channels.py` want. **`require_pg_tls` deliberately does not
+# use that member**, and it is worth saying here rather than only there: for a Postgres DSN an empty
+# host does not mean local, it means libpq will resolve one from a `service=` file or from `PGHOST`,
+# neither of which the parse can see. See `_dial_is_offline` below.
 PG_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 
 # `durable/connector_job.py::_FINISH_STEPS`, restated because it cannot be imported.
@@ -190,6 +196,25 @@ def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
     ).lower()
 
 
+def _dial_is_offline(host: str) -> bool:
+    """Whether every host libpq would dial is a Unix-domain socket rather than a network address.
+
+    libpq reads a `host` beginning with `/` as a socket *directory* and one beginning with `@` as an
+    abstract-namespace socket, and `sslmode` does not apply to either — there is no network to
+    encrypt, and libpq ignores the parameter outright on that transport. So a TLS guard has nothing
+    to require here, and requiring it anyway was a strict regression: the hand-rolled parse this
+    replaced could not see `host=` inside a URL query, so `postgresql:///db?host=/var/run/postgresql`
+    started, and the rewrite refused the whole class with the only passing spelling being
+    `sslmode=require` on a transport that ignores it — a lie written into a DSN to satisfy a guard.
+    A `pgbouncer` sidecar or a local cluster over a mounted socket is the deployment that means.
+
+    **Every element**, because `host` may be a comma-separated list libpq tries in order: one socket
+    directory beside one network host is a network connection, and `startswith` on the joined string
+    would answer otherwise.
+    """
+    return all(part.strip().startswith(("/", "@")) for part in host.split(","))
+
+
 def require_pg_tls(dsn: str, name: str) -> None:
     """Refuse a non-loopback Postgres DSN whose sslmode leaves plaintext or an unverified peer.
 
@@ -197,10 +222,32 @@ def require_pg_tls(dsn: str, name: str) -> None:
     not offer it, and verifies no certificate even when it does negotiate. The full conversation
     transcript, the turn checkpoints and the audit trail all cross this connection, so under the
     enforced posture a non-loopback DSN must state `sslmode=require`/`verify-ca`/`verify-full`
-    (`verify-full` recommended, with `sslrootcert=`). Loopback dev is exempt.
+    (`verify-full` recommended, with `sslrootcert=`). Loopback dev and a Unix socket are exempt.
+
+    **An empty host is not the loopback exemption, and it used to take it.** `PG_LOOPBACK_HOSTS`
+    contains `""` for callers that ask the same question about a URL they built themselves, and
+    reading a DSN through that member is the fail-open `_pg_dial`'s docstring says it closes:
+    `conninfo_to_dict` is `PQconninfoParse`, which reads the *string* and applies neither libpq's
+    environment defaults (`PGHOST`) nor a `service=` file, so `service=chemclaw` and
+    `dbname=c user=u` both parse cleanly to no host and were exempted while libpq dialled a remote
+    server at `prefer`. Refused rather than resolved — resolving means a second implementation of
+    libpq's precedence rules, which is the "a second spelling is a second answer" error this guard
+    exists to have stopped making. Both escapes are one honest line: name the host, or state the
+    sslmode.
     """
     host, sslmode = _pg_dial(dsn, name)
-    if host in PG_LOOPBACK_HOSTS or sslmode in _TLS_SSLMODES:
+    if sslmode in _TLS_SSLMODES or _dial_is_offline(host):
+        return
+    if not host:
+        raise ValueError(
+            f"entra_required=true with a {name} that names no host and no sslmode: libpq resolves "
+            "the host from a service file or from PGHOST, neither of which this check can read, so "
+            "nothing here can say whether the connection would leave the pod — and it carries the "
+            "conversation transcripts, turn checkpoints and the audit trail. Name the host in the "
+            "DSN (a Unix socket directory such as host=/var/run/postgresql is exempt), or state "
+            "sslmode=verify-full&sslrootcert=<ca> so the answer does not depend on the host."
+        )
+    if host in PG_LOOPBACK_HOSTS:
         return
     raise ValueError(
         f"entra_required=true with a non-loopback {name} and sslmode={sslmode!r}: libpq's "
