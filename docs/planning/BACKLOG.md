@@ -1029,6 +1029,53 @@ only holds defects can only ever restore the system to what it already intended 
       class); the command prints the verdict itself. Run 2026-08-27: 0 sessions, 0 turns, not
       greenlit. The day a deployment has sessions, this row is one command to check.
 
+      **That instrument was blind to half the signal, and now has two arms**
+      (`D-2026-09-05-a-census-that-counts-only-success-is-blind-to-half-the-signal`). Its definition
+      of recurrence is an identical tool-name *sequence*, which is the shape SkillRL and SkillForge
+      abstract; a recurring **failure** produces divergent sequences that end badly, so a corpus
+      dense in repeated mistakes reported zero. The second arm counts tools that errored across
+      sessions and the subset where an earlier session recovered before a later one failed again
+      (≥3 classes / ≥3 sessions / ≥1 repeat). `generator_greenlit` is unchanged; read
+      `any_greenlit`. Both still report zero on 0 sessions, so the block is unchanged.
+
+      **The tier question this row implied is settled and is no longer part of it**
+      (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): knowledge is global the moment it
+      is learned and ungated; a skill is **live for its own user before review** and reaches the
+      shared tree only after an **admin** merges it, so the end user never waits on a gate and no
+      unreviewed instruction reaches a second person. What is open here is now the generator alone —
+      plus the per-actor skills directory that tier needs, which is blocked on the same generator
+      (nothing writes one until a distiller exists) and whose invariants that ADR states — plus the follow-up that ADR names and does not claim shipped: the
+      direct write path that actually ungates agent-asserted notes, which owes D-161 migration
+      `025`'s self-confirmation guard.
+
+      **Review scaling and convergence, ideated 2026-09-05 and mostly not built.** The owner asked
+      how an admin avoids drowning in near-identical proposals, and how local and global skills stay
+      convergent. `D-2026-09-05-a-rejection-nobody-reads-is-a-decision-taken-twice` built the one
+      part that is real today — the reviewer now sees every earlier version of the note in front of
+      them, so a rejection is not re-derived or accidentally overturned. The rest waits on the
+      distiller and is recorded there rather than here in full: promotion thresholds on skills
+      (used N times **and** by ≥ 2 distinct chemists — D-161's two-threshold shape, and the single
+      most effective flood control available); duplicate suppression in the **generator** rather
+      than the queue (propose an edit to the nearest existing skill unless none is close — a
+      queue-side deduplicator is a bandage on a generator that should not have produced them);
+      cluster review over `cluster_by_similarity`; benefit-ranked triage over `evals/ab.py`, with
+      the machine ordering and the human still deciding, which is why it does not re-open
+      `D-2026-08-16`; and the convergence half — global-wins-on-conflict with the conflict
+      surfaced, promotion retiring the local variants that fed it via `memory/supersede.py`, expiry
+      on disuse read as a signal about the *distiller* rather than about review capacity, and
+      `skill-validate` run on local skills at write time so form converges even where content does
+      not. One constraint binds all of it: `D-2026-08-25` ends with **no Temporal Schedule opens a
+      pull request**, so a reconciliation job may cluster, measure and report, and a human opens the
+      proposal.
+
+      **Two findings from the reviewed framework (WikiSkill, arXiv 2608.27454) are recorded because
+      they contradict the obvious design and cost nothing to carry**: giving the *executing* agent
+      the accumulated experience measured **worse** than not (63.7% → 60.9%), while giving it to the
+      *proposer* was the largest ablation (+15.0pp) — so experience is compiled into skills, never
+      injected into the turn; and rejected proposals were load-bearing input, which this tree
+      already retains (`kg/proposal.py::rejected_version`, and `durable/retention.py` refuses to
+      prune `note_proposals`) and nothing reads back.
+
 ### The upstream-capability register — what our pinned dependencies now ship that we build ourselves
 
 *Re-derived 2026-08-25, and re-derive it whenever a dependency is bumped.* `make upstream-check` and

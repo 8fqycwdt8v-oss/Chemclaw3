@@ -93,6 +93,18 @@ _SELECT_MANY = f"""
 """
 
 _SELECT_ONE = f"SELECT {_COLUMNS} FROM note_proposals WHERE id = %s"
+
+# Every version of one note, oldest first — what a reviewer deciding this one needs to know was
+# already decided about it. `ORDER BY id` rather than `submitted_at` for the reason the listing
+# pages by id: the timestamp is the store's clock and two rows can share it, while the id is the
+# submission order itself. Migration 027 already indexes `(note_id, submitted_at DESC)`, so the
+# predicate is served; the sort is over a handful of rows for one note and is not what the index
+# is for (`D-2026-08-27-an-index-must-match-the-sort-it-serves` — checked, not assumed).
+_SELECT_HISTORY = f"""
+    SELECT {_COLUMNS} FROM note_proposals
+    WHERE note_id = %s AND (%s = '' OR actor = %s)
+    ORDER BY id
+"""
 # The decision standing against one exact version, asked before a submission reaches git. Ordered
 # and limited because `(note_id, content_hash)` is not unique across decided rows in every history
 # this table can hold; newest wins, which is the decision that is actually standing.
@@ -263,6 +275,14 @@ class PostgresProposalStore:
             moved = cursor.rowcount
             await conn.commit()
         return int(moved)
+
+    async def history(self, note_id: str, actor: str) -> list[NoteProposal]:
+        """Every version of one note, oldest first, optionally scoped to one proposer."""
+        async with _connect() as conn:
+            cursor = _rows(conn)
+            await cursor.execute(_SELECT_HISTORY, (note_id, actor, actor))
+            rows = await cursor.fetchall()
+        return [_proposal(row) for row in rows]
 
     async def decided_version(self, note_id: str, content_hash: str) -> NoteProposal | None:
         """The decision standing against these exact bytes, newest first, or None."""
