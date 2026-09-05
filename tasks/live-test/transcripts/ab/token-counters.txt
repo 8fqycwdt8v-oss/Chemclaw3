@@ -1,0 +1,36 @@
+# Front-door token counters, before and after the tool-utility A/B run of 2026-09-04.
+#
+# Scraped from the running front door's /metrics (`chemclaw_tokens_total` and its four
+# component counters, labelled by profile) immediately before the first turn and immediately
+# after the last one, so the run's spend is the difference. Committed because the cost table
+# in docs/archive/tool-utility-2026-09-04.md is otherwise a number nobody can re-derive —
+# every other figure in that document traces to evidence.json or a transcript beside it.
+#
+# The exposition prints floats in Prometheus text format, so values above ~1e6 arrive
+# rounded to six significant figures (1.32057e+06). The deltas are therefore exact to
+# about ten tokens, not to the digit, which is why the component columns in that table do
+# not sum to its stated totals.
+
+## before (19:59 UTC, after 8 pilot/tool-check turns and before the 442-turn run)
+chemclaw_tokens_total{profile="default"} 1.32057e+06
+chemclaw_tokens_total{profile="no-tools"} 19024
+chemclaw_input_tokens_total{profile="default"} 71
+chemclaw_input_tokens_total{profile="no-tools"} 12
+chemclaw_output_tokens_total{profile="default"} 4442
+chemclaw_output_tokens_total{profile="no-tools"} 1526
+chemclaw_cache_read_tokens_total{profile="default"} 1.14216e+06
+chemclaw_cache_read_tokens_total{profile="no-tools"} 8743
+chemclaw_cache_write_tokens_total{profile="default"} 173904
+chemclaw_cache_write_tokens_total{profile="no-tools"} 8743
+
+## after (20:23 UTC, all 442 turns complete, judging not yet finished)
+chemclaw_tokens_total{profile="default"} 4.96681e+07
+chemclaw_tokens_total{profile="no-tools"} 1.60049e+06
+chemclaw_input_tokens_total{profile="default"} 2947
+chemclaw_input_tokens_total{profile="no-tools"} 1312
+chemclaw_output_tokens_total{profile="default"} 166686
+chemclaw_output_tokens_total{profile="no-tools"} 116526
+chemclaw_cache_read_tokens_total{profile="default"} 4.86669e+07
+chemclaw_cache_read_tokens_total{profile="no-tools"} 448863
+chemclaw_cache_write_tokens_total{profile="default"} 831573
+chemclaw_cache_write_tokens_total{profile="no-tools"} 1.03379e+06
