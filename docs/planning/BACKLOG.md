@@ -100,6 +100,42 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **Nothing in `make test` ever lets a model choose a tool** — [L], and it is the gap under
+      every other finding about what the model is *told*. 34 test files drive a scripted or fake
+      chat model with the `tool_call` authored by the test
+      (`tests/test_langgraph_connectors.py:184` scripts `{"name": "echo", ...}`), and the corpus
+      that would test *selection* is only parsed: `tests/test_probe_coverage.py:87` asserts every
+      agent-callable tool is **named** in `data/evals/probes/`, never invoked. Execution is
+      `make eval`, which needs an LLM and sits outside the gate. So tool integration is proven from
+      the `tool_call` onward and never from the prompt — which is exactly the region where
+      `find_calculations` sat unadvertised in `_INSTRUCTIONS` for its whole life, unreachable by
+      any assertion. **The trigger** is an eval lane that can run in CI against the mock
+      OpenAI-compatible LLM the runbook already names on 8820: not a scored eval, just "does the
+      model reach for the tool the probe was written for". Until that exists, a prompt regression
+      is caught by a human reading a diff
+
+- [ ] **Dense retrieval is proven only against a token feature-hash** — [M].
+      `settings.embedding_provider` defaults to `"hash"` (pinned at `tests/test_config.py:96`) and
+      `core/embeddings.py:13-16` states what that is: *"token-overlap cosine similarity — NOT
+      neural-semantic retrieval"*. Yet `tests/test_vector_index.py:76` is named
+      `test_reindex_then_dense_search_finds_the_semantic_note` and comments "found without any
+      id/substring overlap" — its query and note share the tokens *epimerization*, *amide* and
+      *coupling*, so token overlap is precisely what passes it. The ranking mechanics and the
+      `embedding_key` staleness rule *are* genuinely proven, and after
+      `D-2026-09-05` the HNSW plan is too; semantic behaviour is not. **The trigger** is the first
+      deployment that sets a real embedding provider — until then the honest fix is to rename that
+      test so it stops claiming a property nothing checks
+
+- [ ] **Two vector adapters have never met their servers** — [M]. `retrieval/vectors/qdrant.py`
+      (85% covered) and `databricks.py` (74%, the lowest module in the retrieval path) run only
+      against injected fakes, and `tests/test_vector_store.py:7` says so outright: *"the fake
+      agrees with the adapter about the calls, which is a different claim from the server agreeing
+      with them."* This is not theoretical — `D-2026-09-05`'s fix for the external dense read had
+      to enforce `embedding_key` **against the note catalogue** rather than as a store-side filter,
+      precisely because a filter argument both adapters *accept* is not one either is known to
+      *apply*. **The trigger** is a live lane with a real Qdrant container, which is a
+      `docker-compose` service and a marker, not a design question
+
 - [ ] **The fingerprint index is keyed by source and the citation is not, so two sources collapse
       to one note id** — [M], and it is the half `D-2026-08-27-a-fingerprint-is-keyed-by-its-source`
       deliberately left. Migration 063 made the write side `(source, id)`, which is what stops one

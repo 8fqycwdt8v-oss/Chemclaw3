@@ -44,9 +44,10 @@ def _refuse_plaintext_connection(dsn: str, host: str, sslmode: str) -> None:
     which is no longer what decides this.
 
     **Unconditional, where `require_pg_tls`'s own caller is gated on `entra_required`, and the
-    asymmetry is the point** — see `drivers/http.py::_refuse_plaintext_sink` for the argument in
-    full. That guard governs this deployment's own database, inside the cluster the posture
-    describes; this one governs a store somebody else runs, which is where computed chemistry and a
+    asymmetry is the point** — see `publish/drivers/http.py::_refuse_plaintext_sink` for the
+    argument in full. That guard governs this deployment's own database, inside the cluster the
+    posture describes; this one governs a store somebody else runs, which is where the computed
+    chemistry and a
     password leave this deployment. `entra_required` is off by default and no shipped configuration
     turns it on, so gating on it put the control in exactly the deployments that had already opted
     into caring.
