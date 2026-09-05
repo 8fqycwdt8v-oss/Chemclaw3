@@ -715,9 +715,9 @@ topic).
       LIMIT 20` and walks the primary key backwards expecting to stop early. Measured on a replica
       of the table with its real indexes — one 12,000-row session plus 120,000 newer rows from 300
       other sessions, `VACUUM ANALYZE`, warm cache, 4 reps — the planner chose `Index Scan Backward
-      using session_messages_pkey` and filtered **119,740 rows** to return 20, on **every turn**,
+      using session_messages_pkey` and discarded **119,740** table rows to return 20, on **every turn**,
       growing with the whole table rather than with the session. The same statement forced onto
-      `session_messages_session_idx` visits **60 rows** (20 kept, 40 removed), because `(session_id,
+      `session_messages_session_idx` visits **60** of them (20 kept, 40 removed), because `(session_id,
       id)` *is* `session_id = %s ORDER BY id DESC` and carries the sort for free. Two independent
       measurements agreed on the row counts and disagreed on the milliseconds by 50x, which is why
       this row states counts: the wall clock is machine- and payload-dependent and the plan flip is
