@@ -14,7 +14,7 @@ KUBE_VERSION ?= 1.29.0
 # Bumped when the case set itself changes, because a baseline is only comparable to the set it was
 # recorded on — `eval-baseline-check` refuses to compare two versions rather than reporting a drift
 # between different quantities. 2026-08-25 added `autonomy-turn-cost`.
-EVAL_CASE_SET_VERSION ?= autonomy-2026-08-25
+EVAL_CASE_SET_VERSION ?= retrieval-2026-09-05
 
 # The two patterns that classify `deps-audit`'s output. Named here rather than inlined in the
 # recipe so `tests/test_deploy_chart.py` can assert the classification against the same strings

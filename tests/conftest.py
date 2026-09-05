@@ -29,6 +29,7 @@ import pytest
 from _pytest.config import UsageError
 from _pytest.terminal import TerminalReporter
 
+from chemclaw.agent.authz import knowledge_read_tools as _knowledge_read_tools
 from chemclaw.agent.authz import side_effecting_tools as _side_effecting_tools
 from chemclaw.connectors.reachability import forget_reachability as _forget_reachability
 from chemclaw.connectors.registry import discovered as _connectors_discovered
@@ -128,13 +129,15 @@ def _fresh_discovery_caches() -> Iterator[None]:
     _sources_discovered.cache_clear()
     # Derived from the first two, so it goes stale exactly when they do — a repointed
     # `connectors_dir` with this cache still warm would leave the write gates reading the old
-    # deployment's classification.
+    # deployment's classification, and the turn record counting the old one's searches.
     _side_effecting_tools.cache_clear()
+    _knowledge_read_tools.cache_clear()
     yield
     _connectors_discovered.cache_clear()
     _templates_discovered.cache_clear()
     _sources_discovered.cache_clear()
     _side_effecting_tools.cache_clear()
+    _knowledge_read_tools.cache_clear()
 
 
 @pytest.fixture(autouse=True)

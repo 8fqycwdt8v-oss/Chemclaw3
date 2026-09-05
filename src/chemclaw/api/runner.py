@@ -32,6 +32,11 @@ import psycopg
 from langchain_core.messages import AIMessage, HumanMessage
 
 from chemclaw.agent.audit import default_audit_sink
+from chemclaw.agent.authz import (
+    KNOWLEDGE_WRITE_TOOLS,
+    knowledge_read_tools,
+    side_effecting_tools,
+)
 from chemclaw.agent.checkpointer import checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.context_budget import (
@@ -69,6 +74,7 @@ from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.agent.turn_usage import TurnUsage, reset_turn_usage, set_turn_usage
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
+    AnswerEvent,
     ApprovalRequestEvent,
     CapabilityDegradedEvent,
     ErrorCode,
@@ -104,6 +110,7 @@ from chemclaw.core.temporal_client import connect
 from chemclaw.core.tracing import start_span
 from chemclaw.core.turn_signals import JobSignal
 from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_texts
+from chemclaw.kg.note import cited_ids
 
 logger = logging.getLogger(__name__)
 
@@ -445,6 +452,18 @@ async def run_turn(
             # below*, as sse-starlette sends the answer, so a flag set after it is still false
             # exactly when the teardown clause needs it to be true.
             ledger.answered = True
+            # **The one event that does not arrive through `_stream_into`.** `note_event` takes its
+            # counts off the graph's event stream, and the `AnswerEvent` is built here rather than
+            # streamed — so the three columns read off it (`answer_confidence`, `review_required`,
+            # `notes_cited`) were `NULL/false/0` on every row until this line existed. That is the
+            # `record_kept_chunks` shape: a reader with no caller, its own tests calling it directly
+            # and passing. `tests/test_turn_knowledge.py` now drives the booked row instead.
+            #
+            # Before the yield for the same reason `ledger.answered` is: the cancellation that
+            # reaches a finished turn is delivered while suspended in that yield, and the spend is
+            # booked in the teardown, so a count taken after it would be lost exactly when the turn
+            # completed normally enough to have one.
+            ledger.note_event(answer)
             yield answer
             # The turn used its authorization, so the authorization is spent (D-167). Here rather
             # than in the teardown, which also runs on the disconnect path where an `await` would
@@ -569,6 +588,25 @@ class _TurnLedger:
     tool_failures: int = 0
     tool_refusals: int = 0
     jobs_started: int = 0
+    # **The knowledge dimensions of a turn, which this row had every other dimension of.**
+    # `turn_costs` already recorded what a turn *spent* and how it *ended*; what it could not say
+    # was whether the turn consulted the record at all, whether the answer cited it, and whether
+    # anything was written back. Those are the three questions the retrieval and capture reviews
+    # each had to answer with a bespoke script, and none of them is derivable afterwards: the
+    # events are gone, and `session_messages` holds prose rather than which tool ran.
+    #
+    # Counted here because `note_event` is already "the one place the counts are taken", and every
+    # path — the model run, the mid-turn resume, a subagent's work — passes through it.
+    retrieval_calls: int = 0
+    capture_calls: int = 0
+    # From the turn's own `AnswerEvent`: `score_answer` computes all three on every production
+    # turn and they were **streamed and discarded** — `api/schemas.py` records that they are not
+    # persisted either, so the richest answer-quality signal this system produces was retained
+    # nowhere. `answer_confidence` stays `None` when the verifier did not run, which is not the
+    # same as a low score and must not be stored as one.
+    answer_confidence: float | None = None
+    review_required: bool = False
+    notes_cited: int = 0
 
     @property
     def answer_text(self) -> str:
@@ -597,6 +635,23 @@ class _TurnLedger:
                 self.first_token = time.perf_counter()
         elif isinstance(event, ToolCallEvent):
             self.tool_calls += 1
+            # **Both sides are stated subsets, and each has a test holding it inside the authz
+            # partition it belongs to.** Neither question authz answers is this one: it partitions
+            # by *what a tool may do without approval*, so deriving retrieval from the read-only
+            # set counts a turn that asked the chemist a question as a turn that searched the
+            # record, and deriving capture from the state-changing set counted a turn that
+            # computed one xTB energy as a turn that wrote knowledge back — 49 tools, six of them
+            # writes. A derived set is only better than a stated one when the derivation answers
+            # the question being asked.
+            #
+            # The retrieval half is a *union* rather than a bare set, because a bundle's searches
+            # are the bundle's own fact: `rxnfp`'s seven searches over the reaction corpus are as
+            # much "did this turn look at the record" as `gather_evidence` is, and counting them
+            # by naming them in core would be the copy D-118 exists to prevent.
+            if event.tool in knowledge_read_tools():
+                self.retrieval_calls += 1
+            elif event.tool in KNOWLEDGE_WRITE_TOOLS:
+                self.capture_calls += 1
         elif isinstance(event, ToolFailedEvent):
             if event.reason is None:
                 self.tool_failures += 1
@@ -604,6 +659,14 @@ class _TurnLedger:
                 self.tool_refusals += 1
         elif isinstance(event, JobStartedEvent):
             self.jobs_started += 1
+        elif isinstance(event, AnswerEvent):
+            # The grade this turn already computed, on its way past. Taking it off the event rather
+            # than from `score_answer`'s caller keeps every count in this one method, and means a
+            # path that emits an answer without going through the runner's own assembly is counted
+            # the same way.
+            self.answer_confidence = event.confidence
+            self.review_required = event.review_required
+            self.notes_cited = len(cited_ids(event.text))
 
     def note_signal(self, signal: Any) -> None:
         """Record a durable job launch, so the resume below knows what to wait for.
@@ -1164,8 +1227,6 @@ def _turn_acted(trace: ToolCallTrace) -> bool:
     one extra approval click where the cost of under-spending is a free second turn under a
     decision a person made once.
     """
-    from chemclaw.agent.authz import side_effecting_tools
-
     acting = side_effecting_tools()
     return any(name in acting for name in trace.called_tools)
 
@@ -1467,6 +1528,13 @@ def _book_turn_spend(
             # rather than the next turn's or nobody's.
             compacted=context.compacted if context is not None else False,
             context_unreducible=context.unreducible if context is not None else False,
+            # Straight off the ledger, which counted them from the same event stream every other
+            # count on this row comes from.
+            retrieval_calls=ledger.retrieval_calls,
+            capture_calls=ledger.capture_calls,
+            answer_confidence=ledger.answer_confidence,
+            review_required=ledger.review_required,
+            notes_cited=ledger.notes_cited,
         )
     )
     # **The same record as a log line, because a deployment may have no ledger to read.** The cost

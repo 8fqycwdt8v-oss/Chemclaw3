@@ -762,6 +762,25 @@ def state_changing_tool_names() -> list[str]:
     return sorted(names)
 
 
+def knowledge_read_tool_names() -> list[str]:
+    """Every enabled connector tool that consults the record, sorted.
+
+    The retrieval counterpart of `state_changing_tool_names`, and declared by the bundle for the
+    same reason: whether `substrate_precedent` searches the reaction corpus is `rxnfp`'s fact, not
+    something core can read off a name. Read by `chemclaw.agent.authz.knowledge_read_tools`, whose
+    only consumer is `turn_costs.retrieval_calls` — the column that says whether a turn looked at
+    what we know before answering.
+
+    Jobs are deliberately absent, where `state_changing_tool_names` includes them: a durable job is
+    spending, which is what that set is about, and none of the declared ones is a search.
+    """
+    names: set[str] = set()
+    for manifest in enabled():
+        if manifest.endpoint is not None:
+            names.update(manifest.endpoint.knowledge_read)
+    return sorted(names)
+
+
 def find_job(name: str) -> tuple[str, JobSpec]:
     """Resolve a declared job name to its connector and spec, or raise naming the valid ones.
 

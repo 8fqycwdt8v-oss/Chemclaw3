@@ -1871,6 +1871,36 @@ asserted "the last draw lands in the final tenth", which is false at n=2 where t
 stratified draw is the first probe of each half. **Rule: state the property (each band contributes
 one), never a proxy for it (the last one is near the end).**
 
+**A unit test that constructs the component is evidence about the component, never about whether
+anything calls it.** Six defects in one review round shared exactly that shape, and the worst of
+them was mine: `_TurnLedger.note_event` counted an `AnswerEvent` correctly, its tests called it
+directly, and the three columns it fills were `NULL/false/0` on every row a deployment could ever
+have written — because the event is *built* in `run_turn` rather than streamed, and never reached
+"the one place the counts are taken". **Rule: when a change adds a reader — a column, a counter, a
+gate, an index — the first test drives the production entry point and asserts on what the *sink*
+received. A test that calls the reader directly may exist, but never alone, and never first.**
+
+**A derived set is only better than a stated one when the derivation answers the question being
+asked.** I derived `capture_calls` from `side_effecting_tools()` and wrote a comment praising the
+derivation for being self-maintaining. It spans 49 tools, six of which write knowledge, so a turn
+that computed one xTB energy booked a knowledge capture. **Rule: before deriving a set from an
+existing partition, say out loud what question that partition answers and what question mine asks;
+if the sentences differ, the derivation is a coincidence that happens to type-check.**
+
+**A default is an assertion about every row that already exists.** `NOT NULL DEFAULT 0` on
+`retrieval_calls` backfilled the whole history of `turn_costs` with "answered without consulting the
+record" — the most interesting value the column can take — in a migration whose own next paragraph
+argued precisely this about the column beside it. **Rule: for a new column, ask what a query for its
+most interesting value would return on the day it ships. If that answer includes rows nobody
+measured, it is nullable.**
+
+**Writing a corpus for its retrieval shape is not the same as writing chemistry.** Two of the four
+chemistry errors in the 48-note eval corpus were inside gold sets: a Heck "at reflux" in DMF at
+110 °C, a Dean–Stark trap on an ethanol esterification. Every retrieval assertion passed throughout.
+**Rule: a fixture in a domain gets one read pass *as domain content*, separately from the pass that
+checks it exercises the code — and the corpus must not contradict itself, which is the half a
+non-expert reader can still check.**
+
 **A test can be red only under `make cov`, and lesson 38's rule sends you the wrong way.**
 `test_concurrent_batches_do_not_race_on_the_cache` failed the full gate and passed every time I ran
 it alone — which reads exactly like the contended-load case above, and is not it. Coverage tracing
@@ -1905,6 +1935,15 @@ nothing recording why) was still true. Deleting it with the rejection would have
 the design needs an inspectability invariant. **Rule: when a decision reverses, re-file the losing
 argument as a stated cost or as a requirement it generates — never delete it as though it had been
 wrong.**
+
+**"Nobody has applied it yet" is not a fact the repository can hold.** I edited migration 082 in
+place because it was unmerged, and `tests/test_migrations_are_additive.py` — skipped on this
+sandbox's truncated clone, run on CI's `fetch-depth: 0` — caught it against the commit that
+introduced the file. The rule is mechanical on purpose: who has applied a migration is unknowable
+from inside the tree, and my own dev database had already applied it. **Rule: a migration is
+immutable from the commit that introduces it, not from the merge that ships it; a correction is a
+new file. And when a guard is skipped locally for an environmental reason, treat its subject as
+unchecked rather than as fine — the skip line says which.**
 
 ## 2026-09-05 — six reviewers over one session's front-end and event work
 
