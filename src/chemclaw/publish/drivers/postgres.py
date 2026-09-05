@@ -22,7 +22,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from chemclaw.core.config import PG_LOOPBACK_HOSTS, require_pg_tls, settings
+from chemclaw.core.config import _TLS_SSLMODES, PG_LOOPBACK_HOSTS, require_pg_tls
 from chemclaw.core.connect import check_identifier
 from chemclaw.ingest.eln.warehouse.driver import (
     VectorDialect,
@@ -32,27 +32,53 @@ from chemclaw.ingest.eln.warehouse.driver import (
 from chemclaw.publish.connect import SinkConnectionError
 
 
-def _refuse_plaintext_connection(dsn: str, host: str) -> None:
-    """Refuse a non-loopback sink connection that cannot require TLS, under the enforced posture.
+def _refuse_plaintext_connection(dsn: str, host: str, sslmode: str) -> None:
+    """Refuse a non-loopback sink connection that cannot require TLS. Loopback is exempt.
 
     A published record is confidential chemistry and the connection carries the sink's password, so
-    under `entra_required` it must not cross a non-loopback network in cleartext — the same rule
-    `require_pg_tls` enforces for the system's own database. A `dsn` states its own `sslmode` and is
-    checked with that shared guard. The discrete `host=/password=` form has no `sslmode` keyword to
-    set, so a non-loopback discrete binding cannot express TLS at all and is refused with the
-    remedy: give a `dsn` with `sslmode=verify-full`. Loopback dev is exempt.
+    it must not cross a non-loopback network in cleartext. A `dsn` states its own `sslmode` and is
+    checked with `require_pg_tls`, the shared guard — reused rather than restated, because "does
+    this connection string require TLS" must have one definition. Its `ValueError` is re-raised as
+    this seam's own error: `durable/publish.py` matches non-retryable types by exact class name and
+    lists `SinkConnectionError`, not `ValueError`, and the shared message names `entra_required`,
+    which is no longer what decides this.
+
+    **Unconditional, where `require_pg_tls`'s own caller is gated on `entra_required`, and the
+    asymmetry is the point** — see `drivers/http.py::_refuse_plaintext_sink` for the argument in
+    full. That guard governs this deployment's own database, inside the cluster the posture
+    describes; this one governs a store somebody else runs, which is where computed chemistry and a
+    password leave this deployment. `entra_required` is off by default and no shipped configuration
+    turns it on, so gating on it put the control in exactly the deployments that had already opted
+    into caring.
+
+    **The discrete form can now express TLS, and until it could, refusing it outright was the only
+    honest answer.** This used to say the `host=/password=` form "has no sslmode keyword to set" —
+    true of the *driver's signature*, which is this block's schema
+    (`D-2026-08-26-the-driver-s-signature-is-the-schema`), and not of libpq, which takes `sslmode`
+    as a connection parameter either way. So the constructor takes one, and a discrete binding
+    states `sslmode: verify-full` exactly as a DSN would. Without that the shipped
+    `sinks/postgres/sink.yaml` could not be enabled at all under this rule: it uses the discrete
+    form, and moving it to a `dsn:` would put the password into the connection string, which the
+    manifest validators refuse for the same reason this guard exists.
     """
-    if not settings.entra_required:
-        return
     if dsn:
-        require_pg_tls(dsn, "postgres sink dsn")
+        try:
+            require_pg_tls(dsn, "postgres sink dsn")
+        except ValueError as exc:
+            raise SinkConnectionError(
+                "the postgres sink dsn is non-loopback and does not require TLS. A published "
+                "record is confidential chemistry and this connection carries the sink's "
+                "password, so add sslmode=verify-full&sslrootcert=<ca> to the DSN (or "
+                f"sslmode=require on a trusted net), or bind a loopback host for dev. [{exc}]"
+            ) from exc
         return
-    if host and host.lower() not in PG_LOOPBACK_HOSTS:
+    if host and host.lower() not in PG_LOOPBACK_HOSTS and sslmode.lower() not in _TLS_SSLMODES:
         raise SinkConnectionError(
-            f"entra_required=true with a non-loopback postgres sink host {host!r} given as "
-            "discrete connection parameters: that form has no sslmode keyword, so libpq's default "
-            "permits a silent plaintext fallback carrying the sink password. Provide a `dsn:` with "
-            "sslmode=verify-full (and sslrootcert=<ca>) instead, or bind a loopback host for dev."
+            f"non-loopback postgres sink host {host!r} with sslmode={sslmode or 'unset'!r}: "
+            "libpq's default permits a silent plaintext fallback and verifies no certificate, "
+            "and this connection carries the sink password and confidential chemistry. Set "
+            "`sslmode: verify-full` (with `sslrootcert:`) in the connection block, or bind a "
+            "loopback host for dev."
         )
 
 
@@ -116,6 +142,8 @@ class PostgresWarehouse:
         database: str = "",
         schema: str = "",
         dsn: str = "",
+        sslmode: str = "",
+        sslrootcert: str = "",
         query_timeout_seconds: int = 60,
     ) -> None:
         """Hold the connection parameters; connect on the first cursor.
@@ -123,6 +151,11 @@ class PostgresWarehouse:
         A `dsn` wins when given, because a site with an existing connection string should not have
         to decompose it. `schema` becomes a `search_path` option rather than a qualified table name
         in every statement, which is what keeps the SQL generator free of site-specific identifiers.
+
+        `sslmode`/`sslrootcert` are libpq's own names, passed straight through, and they exist so
+        the discrete form can state its transport: a manifest may not put a password inside a
+        connection string, so "use a `dsn:` instead" was not a remedy a site could take — see
+        `_refuse_plaintext_connection`.
         """
         if not 1 <= query_timeout_seconds <= 3600:
             # `statement_timeout=0` is Postgres' spelling of *no* timeout, so an out-of-range value
@@ -154,11 +187,13 @@ class PostgresWarehouse:
                 ("user", user),
                 ("password", password),
                 ("dbname", database),
+                ("sslmode", sslmode),
+                ("sslrootcert", sslrootcert),
             )
             if value
         }
         self._conn: psycopg.AsyncConnection[Any] | None = None
-        _refuse_plaintext_connection(dsn, host)
+        _refuse_plaintext_connection(dsn, host, sslmode)
 
     @property
     def placeholder(self) -> str:

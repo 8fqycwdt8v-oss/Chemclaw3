@@ -258,11 +258,18 @@ class RxnLabelServer:
             ) as session:
                 payload = await invoke(session, tool, arguments)
         except McpCredentialRefused as exc:
+            # `exc.sent is False` means the declared variable was unset and the request was refused
+            # here, so the server was never contacted — claiming it "is running and answering"
+            # would send an operator to inspect a service that has no part in this fault.
             raise LabelToolError(
                 f"the labelling server refused this client's credential (HTTP {exc.status} from "
                 f"{settings.rxnlabel_server_url}). It is running and answering; it does not accept "
                 f"the bearer taken from {settings.rxnlabel_server_token_env}. Retrying will not "
                 "help — set that variable to the value the server verifies."
+                if exc.sent
+                else f"no credential was sent to the labelling server, so nothing ran: "
+                f"{exc.reason} Retrying will not help, and "
+                f"{settings.rxnlabel_server_url} has not been contacted."
             ) from exc
         except McpConnectFailed as exc:
             raise LabelServerError(

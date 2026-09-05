@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from chemclaw.publish import project as projection
 from chemclaw.publish.project import project
@@ -1214,3 +1215,41 @@ def test_a_single_species_distribution_publishes_no_gap() -> None:
     )
 
     assert "species_gap" not in {f.property for f in record.properties}
+
+
+@pytest.mark.parametrize(
+    ("builder", "value"),
+    [("_text", "some-code"), ("_flag", True)],
+)
+def test_an_unregistered_property_fails_at_the_enqueue_whatever_its_value_kind(
+    builder: str, value: object
+) -> None:
+    """The enqueue is where an unprojectable shape has to fail, for every kind of fact.
+
+    `outbox.py` promises it in its own opening paragraph — projection happens at enqueue "not at
+    drain", because failing there means failing beside the calculation that produced it, "where the
+    context to diagnose it exists". `_fact` keeps that promise for numerics by routing through
+    `to_canonical` -> `definition_for`. `_text` and `_flag` did not touch the registry at all, so an
+    unregistered *coded* or *boolean* property's first contact with it was inside
+    `SqlResultSink.deliver` — at drain, hours later, in a background worker, which is precisely the
+    place that paragraph says it must not be.
+
+    **Measured, and the reviewed defect did not reproduce.** `_text` and `_flag` never call
+    `to_canonical`, so they were read as reaching the registry for the first time inside
+    `SqlResultSink.deliver` — at drain, hours later, in a background worker. They do not:
+    `PropertyFact._belongs_in_the_scalar_table` calls `definition_for(self.property)` on every
+    fact whatever its value kind, so construction raises and `records_for` fails at the enqueue,
+    where `enqueue_payload` counts it on `chemclaw_result_projection_failures_total`.
+
+    Asserted here rather than left implicit, because the guard is a *side effect* of a validator
+    written for a different question (which table a quantity belongs in), and a future change that
+    narrows that validator to numerics would reopen the hole with no test failing. The HTTP sink
+    never calls `rows_for` at all, so this is the only thing standing between an unregistered
+    coded or boolean property and a destination that cannot check it.
+    """
+    from chemclaw.publish import project
+    from chemclaw.publish.properties import UnknownPropertyError
+
+    with pytest.raises(ValidationError) as raised:
+        getattr(project, builder)("no_such_property_at_all", value)
+    assert isinstance(raised.value.errors()[0]["ctx"]["error"], UnknownPropertyError)

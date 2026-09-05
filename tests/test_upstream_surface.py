@@ -1347,3 +1347,37 @@ def test_the_task_tool_returns_a_dict_shaped_command_update() -> None:
         "rewriting a helper's report dropped another update key; those keys are how a fan-out's "
         "spend reaches the single budget it shares"
     )
+
+
+def test_the_task_tool_cannot_build_an_error_bearing_tool_message() -> None:
+    """An *absence*: nothing upstream sets `status="error"` on the message a helper's report rides.
+
+    Three observers decide "did this call fail" with `agent/audit.returned_failure`, which is
+    `isinstance(result, ToolMessage) and result.status == "error"` — and `task` does not return a
+    `ToolMessage`, it returns a `Command`. So `announce_tool_failures`, `surface_domain_errors`'
+    returned-failure arm and the audit row's `returned_error` all read a `Command` as a success, and
+    `audit.py`'s `getattr(result, "content", result)` stores the command's repr rather than the
+    report.
+
+    Today that costs nothing, and this test is what makes "today" checkable rather than believed:
+    `_return_command_with_state_update` builds `ToolMessage(content, tool_call_id=tool_call_id)`
+    with no status at all, and raises on a result missing `messages` rather than reporting it as a
+    failed call. **Nothing produces the shape**, so the three readers are complete, and widening
+    `returned_failure` to walk a `Command` would be a branch no test could reach honestly — the
+    same argument `agent/tool_result_shape.py` makes for handling only a dict-shaped update.
+
+    An absence rather than a workaround, in the style this file already uses twice: if upstream
+    starts marking a failed helper run with `status="error"`, this goes red naming the readers that
+    would silently book it as a success, instead of the failure quietly disappearing from the
+    chemist's transcript and from `audit_events`.
+    """
+    import deepagents.middleware.subagents as upstream_subagents
+
+    source = inspect.getsource(upstream_subagents._build_task_tool)
+
+    assert "status=" not in source, (
+        "deepagents' task tool now sets a status on the ToolMessage it puts in its Command. "
+        "agent/audit.returned_failure only inspects a bare ToolMessage, so announce_tool_failures, "
+        "surface_domain_errors and the audit row's returned_error would all read a failed helper "
+        "run as a success — widen returned_failure to look inside a Command.update['messages']"
+    )

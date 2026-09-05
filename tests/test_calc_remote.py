@@ -359,7 +359,14 @@ class _RaisingStore:
 
 
 def _real_session(monkeypatch: pytest.MonkeyPatch, transport: _Transport) -> None:
-    """Run the genuine `calc_session`, with only its two transport objects faked."""
+    """Run the genuine `calc_session`, with only its two transport objects faked.
+
+    The declared credential is present, because a deployment's always is: `open_session` refuses an
+    unset `token_env` before it opens anything rather than calling the backend anonymously
+    (`core.mcp_session.bearer_from_env`), so leaving it unset here would make every test using this
+    helper assert about a refusal instead of about the transport it means to exercise.
+    """
+    monkeypatch.setenv(settings.calc_server_token_env, "a-real-looking-token")
     monkeypatch.setattr("chemclaw.core.mcp_session.streamablehttp_client", _Wire())
     monkeypatch.setattr("chemclaw.core.mcp_session.ClientSession", transport)
 
@@ -530,7 +537,10 @@ def test_the_session_bounds_the_call_with_the_timeout_that_raises() -> None:
         yield (None, None, None)
 
     monkeypatch = pytest.MonkeyPatch()
+    # As `_real_session` above: the declared bearer is present, because `open_session` now refuses
+    # an unset one rather than dialling the backend without a credential.
     try:
+        monkeypatch.setenv(settings.calc_server_token_env, "a-real-looking-token")
         monkeypatch.setattr(mcp_session, "streamablehttp_client", _transport)
         monkeypatch.setattr(mcp_session, "ClientSession", _NullSession)
 
@@ -860,3 +870,36 @@ def test_a_failed_open_does_not_leak_a_permanent_unit_of_load(
 
     asyncio.run(_run())
     assert _in_flight() == 0.0
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        pytest.param({**_KEY, "calc_version": ""}, id="empty-version"),
+        pytest.param({**_KEY, "calc_version": "gfn 2"}, id="whitespace-in-version"),
+        pytest.param({**_KEY, "calc_type": "sol@ubility"}, id="delimiter-in-type"),
+        pytest.param({**_KEY, "input_hash": ""}, id="empty-input-hash"),
+    ],
+)
+def test_a_malformed_key_reads_as_an_unusable_key_not_as_a_pydantic_traceback(
+    monkeypatch: pytest.MonkeyPatch, malformed: dict[str, Any]
+) -> None:
+    """A missing field and a malformed field are the same fault and must read the same way.
+
+    `CalculationKey`'s four fields carry `pattern=` constraints — the flat form is the
+    `calculation_results` primary key, and an unconstrained one was ambiguous. Pydantic signals a
+    violation with `ValidationError`, which is a `ValueError` and neither a `KeyError` nor a
+    `TypeError`, so a server answer with an empty or whitespace-bearing field escaped the wrapping
+    below entirely and reached the chemist as a raw traceback about a model they have never heard
+    of, instead of a sentence naming the tool and the key.
+    """
+    _session(monkeypatch, _FakeSession(malformed, {}))
+
+    async def _run() -> None:
+        from chemclaw.connectors.calc.remote import calc_session
+
+        async with calc_session() as session:
+            await remote_key(session, "predict_solubility", {"smiles": "c1ccccc1"})
+
+    with pytest.raises(CalcToolError, match="unusable key for predict_solubility"):
+        asyncio.run(_run())

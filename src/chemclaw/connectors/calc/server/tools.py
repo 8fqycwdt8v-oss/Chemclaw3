@@ -66,7 +66,13 @@ from chemclaw.science.calc.models import (
 from chemclaw.science.calc.postgres_artifacts import default_artifact_store
 from chemclaw.science.calc.postgres_store import PostgresStore
 from chemclaw.science.calc.postgres_structures import default_structure_store
-from chemclaw.science.calc.store import CalculationQuery, ResultPayload, ResultStore, StoredResult
+from chemclaw.science.calc.store import (
+    CALCULATION_EPOCH,
+    CalculationQuery,
+    ResultPayload,
+    ResultStore,
+    StoredResult,
+)
 from chemclaw.science.calc.structures import require_structure
 from chemclaw.science.calc.thermo import ThermoSettings
 
@@ -78,6 +84,36 @@ logger = logging.getLogger(__name__)
 def default_store() -> ResultStore:
     """Return the production result store (Postgres). Overridden in tests."""
     return PostgresStore()
+
+
+def _inline_bound(seconds: float) -> float:
+    """`seconds`, lowered to what the *agent hop* can actually wait for on an inline tool.
+
+    **The one hop in this chain that had no assertion, and the only one that runs.** A tool call
+    from a turn crosses three bounds: this client's read bound to the calculation server (the
+    process hop, `tests/test_calc_tools.py`), the connector pod's termination grace (the pod hop,
+    `tests/test_deploy_chart.py`), and the manifest's `request_timeout` — which is what the agent
+    actually waits, and which `connectors/calc/connector.yaml` sets to the turn's own ceiling.
+    Declaring a longer client bound does not buy a longer wait; it buys a belief in one, because
+    the agent hop cancels first and the caller is gone.
+
+    For a *composite* inline tool that is survivable and argued for in the manifest: each primitive
+    it composed is cached as it landed, so the cancelled call made progress and the next one
+    resumes. For a tool that **is** one primitive — `compute_atomic_descriptors`,
+    `compute_surface_potential` — it is not: nothing is stored, so a run longer than the hop can
+    never complete, at any number of attempts, while the abandoned run holds a `servers/calc`
+    admission slot on a pod that pins one thread per calculation.
+
+    Derived rather than chosen: `registry.max_request_timeout_seconds()` is the same function the
+    hop itself derives its bound from, so the two cannot drift apart. Imported inside the function
+    to keep the registry — and the job launchers it builds — out of a connector server process that
+    has no use for either. A deployment whose turn deadline leaves no room to clamp into gets 0.0
+    from that function, which means "there is no ceiling to apply" rather than "wait zero seconds".
+    """
+    from chemclaw.connectors.registry import max_request_timeout_seconds
+
+    ceiling = max_request_timeout_seconds()
+    return min(seconds, ceiling) if ceiling > 0 else seconds
 
 
 def _version_of(payload: ResultPayload, tool: str) -> str:
@@ -275,6 +311,12 @@ class CalculationRecord(BaseModel):
     provenance: str
     computed_at: datetime | None = None
     compute_seconds: float | None = None
+    # Whether this row was written under the definition of a stored result that is current now:
+    # "current", "superseded", or "unrecorded" for a row written before the epoch was put on the
+    # row at all (migration 083). A superseded row is not necessarily wrong — the bump may have
+    # added a field its payload simply lacks — but it was computed under a *different* definition,
+    # and the epoch log says which. Say so when quoting one; do not present it as today's answer.
+    epoch_status: str = "unrecorded"
 
 
 @server.tool()
@@ -297,7 +339,15 @@ async def find_calculations(
 
     Use it before submitting anything expensive, and to answer "have we looked at this before?".
     An empty result is a real answer — say the store has nothing rather than implying the
-    calculation was tried and failed.
+    calculation was tried and failed. A `calc_type` this store has never held is **refused**, and
+    the refusal names every type it does hold: an empty list you were told to read as "nothing has
+    been computed" is the most expensive wrong answer this tool can give, and a misspelt filter is
+    the easiest way to get one.
+
+    Each record carries `epoch_status`. `superseded` means the row was computed under an earlier
+    definition of what that calculation stores — an epoch bump follows a ChemClaw-side fix or a
+    payload change, so such a row may carry a number since corrected or a panel since extended.
+    Quote it as history, not as the current answer, and recompute if the value matters.
 
     A returned `calc_ref` can be cited directly in a knowledge note, so an answer built on a
     stored value stays traceable to the run that produced it.
@@ -305,7 +355,7 @@ async def find_calculations(
     Args:
         smiles: Restrict to one molecule (any valid SMILES for it — matching is on the canonical
             form, so "CCO" and "OCC" find the same rows). Empty means every molecule. This reaches
-            the molecule-keyed calculators — pka, solubility, descriptors, dft. The xTB task
+            the molecule-keyed calculators — pka, solubility, developability. The xTB task
             results and geometry pointers are keyed by a 3-D structure, which a molecule alone
             does not determine, so address those with `structure_id`; asking for a molecule and a
             structure-keyed `calc_type` together is refused rather than answered with a
@@ -317,7 +367,11 @@ async def find_calculations(
             its Hessian — which a molecule cannot ask, because a molecule does not determine a
             geometry. It matches the calculation's input, so a relaxation is found by the geometry
             it started from rather than by the minimum it reached. Empty means every geometry.
-        calc_type: Restrict to one kind of calculation, e.g. "xtb", "pka", "dft". Empty means all.
+        calc_type: Restrict to one kind of calculation. Matching is exact, and the types are the
+            full names — "pka", "solubility", "developability", "xtb.sp", "xtb.opt", "xtb.hess",
+            "xtb.properties", "xtb.fukui", "xtb.conformers", "xtb.complex". A family prefix on its
+            own ("xtb") matches nothing and is refused, not answered with an empty list. Empty
+            means all.
         calc_version: Restrict to one calculator version. Empty means every version — useful
             precisely when asking whether an older version's number is still what is on file.
         since: ISO-8601 date or timestamp; only results computed at or after it.
@@ -337,7 +391,41 @@ async def find_calculations(
         until=_timestamp(until),
         limit=max(1, min(limit, settings.calc_find_max_results)),
     )
-    return [_record(stored) for stored in await default_store().find(query)]
+    store = default_store()
+    found = await store.find(query)
+    if not found and query.calc_type is not None:
+        await _refuse_an_unknown_type(store, query.calc_type)
+    return [await _record(stored) for stored in found]
+
+
+async def _refuse_an_unknown_type(store: ResultStore, calc_type: str) -> None:
+    """Raise if `calc_type` names a family this store has never held. Otherwise return.
+
+    **"Refuse rather than approximate", applied to the one answer this tool cannot afford.** The
+    docstring above instructs the model to report an empty list as "the store has nothing", and
+    matching is exact equality — so `calc_type="xtb"`, which this tool offered as its own worked
+    example while the real types are `xtb.sp`, `xtb.hess`, `xtb.fukui`, …, produced a confident
+    "nothing has ever been computed for this" about a store full of exactly those rows. A wrong
+    filter and an empty store were indistinguishable.
+
+    Asked only when a filtered search came back empty, and the store's own vocabulary is the
+    answer rather than a list written here: the types are minted by the calculation server, so a
+    literal set in this file would go stale the day it adds a primitive — and it is what carries a
+    deployment upgraded from the retired DFT tier, whose `dft` rows are still on disk and appear
+    here because they exist.
+
+    An **empty** store is not refused. "Nothing has ever been computed" is then exactly true, and
+    it is the answer the docstring already tells the model how to report.
+    """
+    known = await store.calc_types()
+    if not known or calc_type in known:
+        return
+    raise ValueError(
+        f"no calculation of type {calc_type!r} has ever been stored, so an empty result here "
+        "would not mean what it usually means. This store holds: "
+        f"{', '.join(sorted(known))}. Matching is exact — a family prefix such as 'xtb' is not "
+        "a type; ask for 'xtb.sp', 'xtb.hess' and so on by their full names."
+    )
 
 
 def _timestamp(value: str) -> datetime | None:
@@ -352,19 +440,25 @@ def _timestamp(value: str) -> datetime | None:
     return datetime.fromisoformat(value)
 
 
-def _record(stored: StoredResult) -> CalculationRecord:
+#: Payload fields holding an offloaded artifact's content address. `ArrayOffloadingStore` writes
+#: `<name>_artifact` for each array it moved out of the row (`_address`), and that spelling is the
+#: only thing a reader of the raw row has to go on.
+_ARTIFACT_FIELD_SUFFIX = "_artifact"
+
+
+async def _record(stored: StoredResult) -> CalculationRecord:
     """Flatten one stored result into the agent-facing record, bounded.
 
-    Two reductions, in the order that matters. Geometries become addresses first, because that is
+    Three reductions, in the order that matters. Geometries become addresses first, because that is
     lossless for a reader — a `structure_id` is what the *next* calculation takes, where the
     coordinates were something no tool accepted — and on the shapes that motivated the bound it is
-    most of the reduction. Only what is still over the ceiling afterwards is dropped, whole, with
-    `result_omitted` set.
+    most of the reduction. Offloaded arrays become artifact references. Only what is still over the
+    ceiling afterwards is dropped, whole, with `result_omitted` set.
 
     The ceiling is measured on the rendered JSON rather than on the parsed object, because
     characters are what the bound is about: this payload is going into a model's context.
     """
-    projected = without_geometry(stored.result)
+    projected = await _resolve_artifacts(stored, without_geometry(stored.result))
     rendered = len(json.dumps(projected, default=str))
     omitted = rendered > settings.calc_find_max_result_chars
     if omitted:
@@ -384,7 +478,63 @@ def _record(stored: StoredResult) -> CalculationRecord:
         provenance=stored.provenance,
         computed_at=stored.created_at,
         compute_seconds=stored.compute_seconds,
+        epoch_status=_epoch_status(stored.epoch),
     )
+
+
+def _epoch_status(epoch: str) -> str:
+    """Whether a row's `CALCULATION_EPOCH` is the current one, an earlier one, or not recorded.
+
+    Three states rather than two, because a row written before migration 083 carries no epoch and
+    nothing can recover it — the value is inside an opaque `params_hash`. Reporting such a row as
+    `superseded` would be as much of an invention as reporting it as current; `unrecorded` is what
+    is actually known about it.
+    """
+    if not epoch:
+        return "unrecorded"
+    return "current" if epoch == CALCULATION_EPOCH else "superseded"
+
+
+async def _resolve_artifacts(stored: StoredResult, payload: dict[str, Any]) -> dict[str, Any]:
+    """Replace each offloaded content address with the reference the artifact tools actually take.
+
+    **A raw content hash addressed nothing, before or after eviction.** `ArrayOffloadingStore` puts
+    the arrays in the artifact store and leaves `<name>_artifact: <64 hex>` on the row; `find`
+    delegates without restoring them, by design (rehydrating megabytes to build a listing would
+    make it the most expensive call in the system). So the model was handed a digest that
+    `fetch_artifact` — which takes `<calculation key>#<name>` — cannot resolve, and that no other
+    tool takes either.
+
+    Eviction is what makes it worse rather than merely useless. `durable/artifact_eviction.py`
+    deletes the blob, `calculation_artifacts` cascades (`infra/sql/019`), and `calculation_results`
+    keeps its row: measured, `ArrayOffloadingStore.get` correctly reported a miss and recomputed
+    while this listing went on rendering the same hash. The link table is the authority on what is
+    still there, so it is asked — a reference that resolves is returned, and one whose by-product
+    has been reclaimed is dropped rather than shown, because a row that no longer names an array is
+    a truthful description of a row that no longer has one.
+
+    One query, and only for a row that actually carries such a field — today that is `xtb.hess`
+    alone, so a page of ordinary results costs nothing.
+    """
+    fields = [field for field in payload if field.endswith(_ARTIFACT_FIELD_SUFFIX)]
+    if not fields:
+        return payload
+    calc_ref = stored.key.as_str()
+    stored_refs = await default_artifact_store().list_for(calc_ref)
+    live = {ref.content_hash: ref.as_str() for ref in stored_refs}
+    resolved = dict(payload)
+    for field in fields:
+        reference = live.get(str(resolved[field]))
+        if reference is None:
+            logger.info(
+                "%s names a %s that is no longer stored; it is left out of the listing",
+                calc_ref,
+                field,
+            )
+            del resolved[field]
+            continue
+        resolved[field] = reference
+    return resolved
 
 
 class StoredArtifact(BaseModel):
@@ -464,26 +614,15 @@ async def list_artifacts(calc_ref: str) -> list[StoredArtifact]:
 
 @server.tool()
 async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactContent:
-    """Read a stored calculation by-product a knowledge note cites in its `artifact_refs`.
+    """Read a *text* by-product an older knowledge note cites in its `artifact_refs`.
 
-    It refuses a binary artifact (a packed `.npy` array, an SCF restart) instead of returning
-    something unreadable — those exist to seed a further calculation, not to be read — and it
-    truncates at a configured ceiling, reporting `truncated` and the full `byte_size`, so a large
-    file costs a bounded amount of context; if `truncated` is set, say the value came from part of
-    the file.
+    **Every artifact this release stores is a packed binary array, so this refuses every one of
+    them** — they exist to seed a further calculation, not to be read. Do not come here for a
+    number: a geometry is the `structure_id` a calculation reports, and a spectrum is
+    `compute_thermochemistry`'s `modes`. Both are answers, not files.
 
-    **In this release every stored artifact is one of those packed arrays, so this refuses every
-    one of them.** Nothing here writes a text by-product; the calculators that once did are on
-    their own server and keep no files. So do not come to this tool for a number — come to it only
-    to open an `artifact_refs` citation an older note carries, and expect a refusal. The two things
-    it used to be reached for are each a calculation away:
-
-    - **A geometry** is the `structure_id` a calculation reports. It names the structure exactly
-      and the next calculation takes it directly, which is what quoting coordinates was ever a
-      substitute for.
-    - **A spectrum** is `compute_thermochemistry`'s `modes` — wavenumbers with IR intensities, as
-      many as `top_bands` asks for, with `mode_count` saying how many there were. Quoting bands
-      from there is quoting the calculation, not a rendering of it.
+    Text is truncated at a configured ceiling with `truncated` and the full `byte_size` reported;
+    if `truncated` is set, say the value came from part of the file.
 
     Args:
         artifact_ref: `<calculation key>#<name>`, as `list_artifacts` returns it and as a note's
@@ -494,6 +633,13 @@ async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactConte
     Returns:
         The artifact's text with its type and full size, and whether the text is all of it.
     """
+    # **Kept on the surface rather than deleted, and the cost that decided it was the prose.**
+    # A tool that can only refuse is worth its schema only if the refusal is cheap; the version
+    # this replaces spent most of a page explaining what to use instead, on every turn, forever.
+    # What is left is one sentence of that, and the capability is one `decode` away from being
+    # real again the day any producer writes a text by-product — where deleting it would strand
+    # `artifact_fetch_max_chars` with no reader and leave `agent/tool_framing.py`'s worked example
+    # naming a tool that does not exist.
     calc_key, separator, name = artifact_ref.rpartition("#")
     if not separator or not name:
         raise ValueError(
@@ -957,8 +1103,9 @@ async def compute_atomic_descriptors(
         "compute_atomic_descriptors",
         {"smiles": smiles, "solvent": solvent},
         # Pinned to the `xtb` binary (see above), whose own timeout can run to 3600 s — see
-        # `calc_atomic_timeout_seconds`'s docstring for why the client must wait at least that long.
-        timeout_seconds=settings.calc_atomic_timeout_seconds,
+        # `calc_atomic_timeout_seconds`'s docstring for the bound, and `_inline_bound` for why an
+        # inline tool may not advertise a wait longer than the agent hop.
+        timeout_seconds=_inline_bound(settings.calc_atomic_timeout_seconds),
     )
     return AtomicDescriptorResult.model_validate(payload)
 
@@ -991,8 +1138,9 @@ async def compute_surface_potential(
         default_store(),
         "compute_surface_potential",
         {"smiles": smiles, "solvent": solvent},
-        # Pinned to the `xtb` binary (see above); see `calc_atomic_timeout_seconds`'s docstring.
-        timeout_seconds=settings.calc_atomic_timeout_seconds,
+        # Pinned to the `xtb` binary (see above); see `calc_atomic_timeout_seconds`'s docstring
+        # and `_inline_bound`.
+        timeout_seconds=_inline_bound(settings.calc_atomic_timeout_seconds),
     )
     return SurfacePotentialResult.model_validate(payload)
 

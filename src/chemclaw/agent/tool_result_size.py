@@ -37,14 +37,29 @@ the property that what the model reads does not depend on which tool returned fi
 right and stay: each is an argument about what *that* tool should return, made where the tool's
 own trade-offs are visible. What none of them can be is a bound on the total, because none of them
 knows about the context budget or about each other — the two results above were 60 lines apart in
-`core/config/memory.py` and `core/config/sources.py`. This is the floor under all of them, applied
-at the one place every tool result passes.
+`core/config/memory.py` and `core/config/sources.py`. This is the floor under all of them.
 
-**Where it sits, and both neighbours are decisions.** *Inside* `frame_connector_results`, so the
-envelope wraps an already-bounded payload rather than this cutting the envelope's closing tag off.
-*Outside* the governance chain, so `audit_events.detail` still records what the tool returned
-rather than what the model was shown — the same split, for the same reason, that framing already
-argues for.
+**Applied at two places, and the second is not a leak in the first.** This paragraph said "at the
+one place every tool result passes" for as long as that was false. It is true of every result a
+tool *returns*; it was never true of the two this system **composes**.
+`surface_authorization_denials` and `surface_domain_errors` are at indices 0 and 1 of
+`tool_call_middleware` and the middleware below is at 3, so a gate that refuses by raising travels
+up past the cut and the converter manufactures the `ToolMessage` the model reads. Measured, against
+a 60,000-character ceiling: a **200,254**-character malformed-argument refusal and a
+**150,141**-character denial, both of them interpolating model-authored text. `bound_refusal_text`
+is that second point — one function, called from `agent/tool_authz._refusal_message`, which is the
+one function both converters compose through — and it shares this module's arithmetic, notice and
+counter rather than restating them.
+
+**Where the middleware sits, and all three neighbours are decisions.** *Inside*
+`frame_connector_results`, so the envelope wraps an already-bounded payload rather than this cutting
+the envelope's closing tag off. *Outside* `defang_tool_results`, because neutralising a forged
+delimiter **grows** the payload — every `<` becomes `&lt;` once a delimiter is disguised — and a
+rewrite that grows a result above this ceiling is a rewrite this ceiling does not bound: measured on
+the compiled graph at the shipped fan-out width, results cut to their 7,500-character share reached
+the model at **29,096** each. *Outside* the governance chain, so `audit_events.detail` still records
+what the tool returned rather than what the model was shown — the same split, for the same reason,
+that framing already argues for.
 
 **Head and tail, never head alone.** `agent/condense.py` makes this argument for a protocol and it
 generalises: a procedure states its yield and purity at the *end*, so a head-truncated result reads
@@ -254,6 +269,88 @@ def batch_width(request: Any) -> int:
     return 1
 
 
+def result_char_limit(request: Any) -> int:
+    """This call's share of `agent_max_tool_result_chars`; 0 when a deployment disabled the cap.
+
+    One function rather than two spellings of the same arithmetic, because the ceiling now has two
+    application points and a share computed differently at each would be a cap that depends on
+    which one ran. See `bound_refusal_text` for why the second point exists.
+
+    Never below 1 when a ceiling is configured: 0 is the deployment's own "no cap", and a share that
+    rounded to it would restore the unbounded behaviour exactly where the batch is widest.
+    """
+    ceiling = settings.agent_max_tool_result_chars
+    return max(ceiling // batch_width(request), 1) if ceiling else 0
+
+
+def _record_cut(label: str, tool: str, removed: int, limit: int) -> None:
+    """Count and log one cut, under a label the registry served rather than a string a model wrote.
+
+    The label clamp is `agent/audit.metric_tool_name`'s, reused rather than re-derived: `ToolNode`
+    dispatches an unregistered name through this chain, and an invented 90,000-character name once
+    minted a 90,054-character `chemclaw_tool_results_truncated_total{tool=…}` line on an
+    unauthenticated `/metrics`, one series per name.
+    """
+    record_metric(
+        lambda m: m.increment("chemclaw_tool_results_truncated_total", 1.0, {"tool": label})
+    )
+    log_event(
+        logger,
+        "tool_result.truncated",
+        "cut %d characters from the %s result to stay inside this batch's share of the ceiling",
+        removed,
+        tool,
+        tool=tool,
+        characters_removed=removed,
+        ceiling=limit,
+    )
+
+
+def bound_refusal_text(request: Any, text: str) -> str:
+    """Cut a refusal *this system composed* to the same share every tool result gets.
+
+    **The second application point, and it exists because the first cannot reach these.**
+    `bound_tool_results` is at index 3 of `tool_call_middleware`; `surface_authorization_denials`
+    and `surface_domain_errors` are at 0 and 1. A gate below raises, the exception travels up *past*
+    the cut, and the converter **manufactures** the `ToolMessage` the model reads — so the module
+    docstring's "the one place every tool result passes" was true of every returned result and false
+    for exactly the two this system writes itself.
+
+    That would be a footnote if those two sentences were this system's own words end to end. They
+    are not: both interpolate **model-authored** text, which this tree's own threat model treats as
+    attacker-influenceable — it is why `metric_tool_name` clamps the metric label and `bounded_repr`
+    clamps the audit row, and the thread was the one reader left unclamped. Measured on the real
+    chain against a 60,000-character ceiling: a 200,000-character malformed-argument document
+    (`agent/model_calls.refuse_unparsed_arguments` embeds `defang(str(document))`) reached the model
+    as a **200,254**-character result, and a 150,000-character invented tool name under
+    `tool_authz_default="deny"` as a **150,141**-character refusal. Neither is one-shot — the repeat
+    guard keys on name plus arguments, so each distinct invented name is a fresh call.
+
+    **Here rather than in each converter**, because `agent/tool_authz._refusal_message` is the one
+    function both compose through, and a bound applied at the two call sites is a bound the third
+    one forgets.
+
+    **The notice names the clamped tool, not the raw one, and that is load-bearing rather than
+    tidy.** `bounded_content` measures the notice at its widest and leaves a result shorter than
+    that alone — so interpolating a 150,000-character invented name would make `widest` exceed the
+    limit and the function would return the refusal **unbounded**, silently. The same clamp the
+    metric label uses is the one the notice must use.
+
+    Args:
+        request: The tool-call request the converter is answering.
+        text: The refusal or fault sentence the converter composed.
+
+    Returns:
+        `text`, cut head-and-tail with the usual notice if it was over this call's share.
+    """
+    label = metric_tool_name(request, str(request.tool_call["name"]))
+    limit = result_char_limit(request)
+    bounded, removed = bounded_content(text, label, limit)
+    if removed:
+        _record_cut(label, label, removed, limit)
+    return str(bounded)
+
+
 @wrap_tool_call
 async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any:
     """Cut an oversized result to its batch's share of `agent_max_tool_result_chars`.
@@ -287,31 +384,17 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
     # `chemclaw_tool_results_truncated_total{tool=…}` line on an unauthenticated `/metrics`, one
     # series per invented name. The same clamp `agent/audit.metric_tool_name` applies two
     # middlewares away, reused rather than re-derived; the notice the model reads keeps the raw
-    # name, because a result must say which call it belongs to.
+    # name, because a *returned* result must say which call it belongs to and the name it belongs
+    # to is bounded here by the result it rides on. `bound_refusal_text` cannot make that trade —
+    # see its docstring.
     label = metric_tool_name(request, tool)
-
-    ceiling = settings.agent_max_tool_result_chars
-    # The batch's share, never below 1: 0 is the deployment's own "no cap" and a share that rounded
-    # to it would restore the unbounded behaviour exactly where the batch is widest.
-    limit = max(ceiling // batch_width(request), 1) if ceiling else 0
+    limit = result_char_limit(request)
 
     def _bounded(message: ToolMessage) -> ToolMessage:
         content, removed = bounded_content(message.content, tool, limit)
         if not removed:
             return message
-        record_metric(
-            lambda m: m.increment("chemclaw_tool_results_truncated_total", 1.0, {"tool": label})
-        )
-        log_event(
-            logger,
-            "tool_result.truncated",
-            "cut %d characters from the %s result to stay inside this batch's share of the ceiling",
-            removed,
-            tool,
-            tool=tool,
-            characters_removed=removed,
-            ceiling=limit,
-        )
+        _record_cut(label, tool, removed, limit)
         return message.model_copy(update={"content": content})
 
     return rewritten_tool_messages(result, _bounded)

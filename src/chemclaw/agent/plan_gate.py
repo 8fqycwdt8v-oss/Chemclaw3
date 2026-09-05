@@ -468,9 +468,24 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     if not gated_call(name, request.tool_call.get("args") or {}):
         return await handler(request)
     session_id = get_current_session_id()
-    # No session means no plan to approve and no autonomous loop to gate — a template activity's
-    # tool step, or a one-shot CLI call. Not a hole: those paths still pass through
-    # `enforce_tool_authz` and `authorize_trigger`, which is what governs them.
+    # **The one branch of this gate that fails open, and it is deliberate.** No session means no
+    # plan to approve and no autonomous loop to gate — a template activity's tool step, or a
+    # one-shot CLI call. Every other way out below fails closed (`_UNANSWERABLE`, an empty plan
+    # whose `plan_identity([])` is `None`, an unreadable checkpoint whose `session_todos` is
+    # `None`), so the asymmetry is worth stating rather than leaving to be noticed.
+    #
+    # Failing closed here would not be a stricter posture, it would be a dead path: an approval is
+    # a durable row keyed by session (`plan_approval_store`), so a session-less caller cannot
+    # obtain one, and refusing would take every state-changing tool away from the CLI and from
+    # every template step of a `harness_enabled` deployment with no route to ever allow one.
+    #
+    # Not a hole, because those paths still pass through `enforce_tool_authz` and
+    # `authorize_trigger` — and that sentence is now checked rather than asserted:
+    # `tests/test_plan_gate.py::test_the_gate_the_session_less_caller_falls_through_to_is_actually
+    # _attached` pins that this gate is the conditional one and the authorization gate is not. The
+    # configuration this reasoning is about is the deployed one — `harness_enabled` is `False` by
+    # code default, so the gate is not attached locally at all, and the shipped chart sets it
+    # `true` with `plan_only`.
     if not session_id:
         return await handler(request)
     rewritten = plan_after_batch(request)

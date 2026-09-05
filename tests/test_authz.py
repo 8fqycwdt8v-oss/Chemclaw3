@@ -21,6 +21,7 @@ from chemclaw.agent.authz import (
     expensive_actions,
     require_actor,
 )
+from chemclaw.agent.profiles import get_profile
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from tests.surface import surface
@@ -211,6 +212,74 @@ def test_every_advertised_tool_is_classified_write_or_read() -> None:
     )
     assert not (advertised & STATE_CHANGING_TOOLS & READ_ONLY_TOOLS), (
         "a tool cannot be both a write and a read"
+    )
+
+
+#: The bound tools the write/read partition does **not** classify, each with what recovers it.
+#:
+#: Every one comes from a middleware rather than from `core/tool_registry`, so no walk of the
+#: registry can see it — which is why the test above, held over `registered_tool_names()`, was
+#: green while **7 of 61** bound tools sat outside the partition it exists to make complete. That is
+#: the same basis defect `tests/test_context_floor.py::_bound_tools` was written to end: a set
+#: re-derived from the callables agrees with itself forever, and only the compiled graph says what
+#: the model was actually offered.
+#:
+#: They are recorded rather than classified, and each entry is a decision:
+#:
+#: - `write_file` / `edit_file` — recovered by `writes_durable_memory`, which reads the *path*.
+#:   Classifying the names would refuse a turn its own `/scratch/` notepad under an unapproved plan,
+#:   which is the case that predicate exists for.
+#: - `read_file` / `ls` / `glob` / `grep` — reads of the same three roots. They would be honest
+#:   entries in `READ_ONLY_TOOLS`, and are left here instead so this set is one thing —
+#:   everything the registry cannot see — rather than two.
+#: - `task` — recovered twice over, and neither recovery is a classification. `subagents.helper_
+#:   profile` subtracts `side_effecting_tools()` from what a helper may hold, and the helper's own
+#:   graph is compiled by `build_langgraph_agent`, so every call it makes re-enters this same chain
+#:   under the same actor. Calling it state-changing would gate every delegation on plan approval;
+#:   calling it read-only would assert a helper cannot write, which is true of today's roster rather
+#:   than of the tool.
+_UNCLASSIFIED_BOUND_TOOLS = frozenset(
+    {"task", "ls", "read_file", "write_file", "edit_file", "glob", "grep"}
+)
+
+
+def test_every_tool_the_graph_binds_is_classified_or_recorded() -> None:
+    """The partition has to cover what the model is offered, not what the registry happens to hold.
+
+    `test_every_advertised_tool_is_classified_write_or_read` above reads
+    `registered_tool_names()`, and `FilesystemMiddleware` and `SubAgentMiddleware` put seven tools
+    on the graph that never pass through that registry. So the one assertion that exists to stop an
+    ungated write shipping silently could not see the tool whose whole job is to run other tools.
+
+    The surface is read off the compiled graph's `ToolNode`, the way `tests/test_context_floor.py`
+    reads it, so a future tool source lands here the moment it is bound rather than when somebody
+    remembers to teach a walk about it.
+
+    **Both directions**, which is what makes the recorded set an argument rather than a mute. A new
+    unclassified bound tool fails; so does a name in `_UNCLASSIFIED_BOUND_TOOLS` that has since been
+    classified, so the record cannot outlive its reason.
+    """
+    from chemclaw.agent.authz import side_effecting_tools
+    from tests.test_context_floor import _bound_tools
+
+    surface(None)
+    bound = {str(tool.name) for tool in _bound_tools(get_profile("default"))}
+    classified = side_effecting_tools() | READ_ONLY_TOOLS
+
+    assert bound - classified - _UNCLASSIFIED_BOUND_TOOLS == set(), (
+        f"these bound tools are classified neither state-changing nor read-only: "
+        f"{sorted(bound - classified - _UNCLASSIFIED_BOUND_TOOLS)}. The harness plan gate treats "
+        "an unknown name as a read, so an ungated write would ship looking exactly like a gated "
+        "one. Classify it in chemclaw.agent.authz, or add it to _UNCLASSIFIED_BOUND_TOOLS above "
+        "with the argument for why a name cannot decide it."
+    )
+    assert _UNCLASSIFIED_BOUND_TOOLS & classified == set(), (
+        f"{sorted(_UNCLASSIFIED_BOUND_TOOLS & classified)} are now classified, so their entry in "
+        "_UNCLASSIFIED_BOUND_TOOLS is a stale claim — delete it in the same commit"
+    )
+    assert _UNCLASSIFIED_BOUND_TOOLS <= bound, (
+        f"{sorted(_UNCLASSIFIED_BOUND_TOOLS - bound)} are recorded as unclassified bound tools and "
+        "are not bound any more — delete them"
     )
 
 

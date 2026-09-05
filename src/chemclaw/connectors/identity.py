@@ -200,9 +200,14 @@ def turn_identity_hook(endpoint_url: str) -> Callable[[httpx.Request], Awaitable
     redirected request from the previous request's headers — dropping only `Authorization`, and
     only cross-origin. So a connector answering `302` toward an origin an attacker controls would
     otherwise have
-    harvested the caller's Entra object id and full role set, on every turn, from a header set that
-    carries identity and nothing else strips. Declining to *re-add* them on a foreign origin is not
-    enough, because the copied originals arrive anyway; the hook therefore removes them.
+    harvested the caller's Entra object id, session id and correlation id — plus the W3C trace
+    context — on every turn, from a header set that carries identity and nothing else strips.
+    (Not "the full role set": `X-Chemclaw-Roles` was deleted by
+    `D-2026-08-26-an-entitlement-set-is-not-provenance`, as the module docstring twelve lines above
+    this one already says. The guard is unchanged; only this sentence's account of the stakes was
+    a snapshot of a header set that no longer exists.) Declining to *re-add* them on a foreign
+    origin is not enough, because the copied originals arrive anyway; the hook therefore removes
+    them.
 
     **And it removes everything `turn_headers()` produced, not a list of four.** That function ends
     with `headers.update(trace_headers())`, so `traceparent`, `tracestate` and `baggage` ride along

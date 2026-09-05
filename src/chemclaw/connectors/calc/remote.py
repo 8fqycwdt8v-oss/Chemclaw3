@@ -36,7 +36,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from mcp import ClientSession
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from chemclaw.connectors.identity import turn_identity_hook
 from chemclaw.core.config import settings
@@ -197,12 +197,22 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
         ) as session:
             yield session
     except McpCredentialRefused as exc:
+        # **Two faults, and only one of them is about the server.** This message used to assert
+        # "the service is running and answering" in both cases, which `exc.sent is False` makes
+        # knowably wrong: nothing was sent, nothing was reached, and the operator was sent to look
+        # at a server that may be perfectly healthy.
+        # `D-2026-08-28-the-durable-half-has-a-backend-too` records that misdescription; `sent` is
+        # what ends it.
         raise CalcToolError(
             f"the calculation service refused this client's credential "
             f"(HTTP {exc.status} from {settings.calc_server_url}). The service is running and "
             f"answering; it does not accept the bearer taken from "
             f"{settings.calc_server_token_env}. Set that variable to the value the server "
             f"verifies — retrying will not help."
+            if exc.sent
+            else f"no credential was sent to the calculation service, so nothing ran: {exc.reason} "
+            f"Set that variable to the value {settings.calc_server_url} verifies — retrying will "
+            f"not help, and the server itself has not been contacted."
         ) from exc
     except McpConnectFailed as exc:
         degraded(
@@ -325,7 +335,16 @@ async def remote_key(
             # and would match nothing. Absent for a molecule-keyed calculation.
             structure_id=str(identity.get("structure_id") or ""),
         )
-    except (KeyError, TypeError) as exc:
+    except (KeyError, TypeError, ValidationError) as exc:
+        # **`ValidationError` belongs in this tuple and was missing from it.** `CalculationKey`'s
+        # four fields carry `pattern=` constraints — the flat form is the `calculation_results`
+        # primary key, and an unconstrained one was ambiguous — and pydantic raises
+        # `ValidationError`, which is a `ValueError` and neither a `KeyError` nor a `TypeError`. So
+        # a server answer with an empty `calc_version`, or whitespace inside one, escaped this
+        # wrapping entirely and reached the chemist as a raw pydantic traceback about a model they
+        # have never heard of, instead of the sentence below naming the tool and the key. The
+        # missing field and the malformed field are the same fault — the server sent a key this
+        # client cannot address a row with — and they now read the same way.
         raise CalcToolError(f"calculation_key returned an unusable key for {tool}: {key}") from exc
 
 

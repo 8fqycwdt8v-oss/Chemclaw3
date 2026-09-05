@@ -70,6 +70,25 @@ the trail is a record. Inside `surface_authorization_denials`/`surface_domain_er
 system's own refusals, which those two compose, are never wrapped in an envelope that tells the
 model to read them as third-party data. A refusal raised by a gate below travels *through* this
 middleware as an exception and is converted above it, so it is never seen either way.
+
+**Two middlewares, not one, and the split is what makes the size ceiling true.** The three
+treatments above are two independent decisions — *neutralise the delimiter* and *wrap in an
+envelope* — and for as long as one middleware took both, the neutralisation ran on the wrong side
+of `agent/tool_result_size.bound_tool_results`. `framing._defang`'s second pass escapes **every**
+`<` in the content, one character for four, as soon as an invisible character reveals a disguised
+delimiter; running that outside the cut meant the cut bounded characters the model would never
+read. Measured on the compiled graph at the shipped fan-out width, each of eight calls was bounded
+to its 7,500-character share and reached the model at **29,096** — 3.88x — for a request of
+**101,899** estimated tokens against a 100,000 budget, and every byte of it in the newest batch,
+which is the one thing neither context edit may reclaim.
+
+So the chain is `frame_connector_results` (outermost of the three), then `bound_tool_results`, then
+`defang_tool_results` (innermost). The envelope still wraps an already-bounded payload — that
+nesting reason is untouched and is why the two were not simply swapped — and the cut now measures
+the payload *after* every rewrite that can grow it. The two middlewares ask the same three
+questions of the same request (`served_by`, then the two name sets), which is deliberate: the
+question is cheap (a dict lookup and a scan of a six-name tuple) and a shared flag would be a
+fourth thing to keep in step with the chain's order.
 """
 
 from collections.abc import Callable
@@ -78,7 +97,7 @@ from typing import Any
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 
-from chemclaw.agent.framing import defang, envelope_delimiters, frame_untrusted
+from chemclaw.agent.framing import defang, envelope_delimiters
 from chemclaw.agent.tool_result_shape import rewritten_tool_messages
 from chemclaw.connectors.transport import SERVED_BY
 
@@ -183,14 +202,21 @@ def _framed_content(content: Any, origin: str) -> Any:
     list in sequence, so an envelope opened on the first span and closed on the last is one
     envelope to the model as well as to `kg.note.mentioned_ids`.
 
-    **Every span is still defanged, and that is what makes one envelope safe.** The two delimiters
-    ride on the first and last text spans, so a *middle* span able to spell the closing delimiter
-    would end the envelope early and put everything after it outside the frame — which is the
-    forgery the envelope exists to close, arriving through the shape rather than through the
-    content. Neutralisation is per span; only the citation frame is shared.
+    **Every span is still defanged, and that is what makes one envelope safe — but not here.** The
+    two delimiters ride on the first and last text spans, so a *middle* span able to spell the
+    closing delimiter would end the envelope early and put everything after it outside the frame,
+    which is the forgery the envelope exists to close arriving through the shape rather than through
+    the content. Neutralisation is per span and the citation frame is shared; what changed is
+    *where* the per-span half runs. `defang_tool_results` does it one middleware further in, below
+    `bound_tool_results`, because escaping grows the payload and a rewrite that grows a payload
+    above the size ceiling is a rewrite the ceiling does not bound (see the module docstring). By
+    the time this function sees a span, every forged delimiter in it is already `&lt;`.
     """
     if isinstance(content, str):
-        return frame_untrusted(content, note_id=origin) if content else content
+        if not content:
+            return content
+        opening, closing = envelope_delimiters(origin)
+        return f"{opening}{content}{closing}"
     if not isinstance(content, list):
         return content
     spans = [index for index, block in enumerate(content) if _carries_text(block)]
@@ -203,14 +229,22 @@ def _framed_content(content: Any, origin: str) -> Any:
     def _rewrite(index: int) -> Callable[[str], str]:
         head = opening if index == first else ""
         tail = closing if index == last else ""
-        return lambda text: f"{head}{defang(text)}{tail}"
+        return lambda text: f"{head}{text}{tail}"
 
     return [_rewritten_block(block, _rewrite(index)) for index, block in enumerate(content)]
 
 
 @wrap_tool_call
-async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -> Any:
-    """Wrap an out-of-process tool's result in the data envelope; leave every other result alone.
+async def defang_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any:
+    """Neutralise every envelope delimiter a tool result can spell — the innermost of the three.
+
+    **Below `bound_tool_results`, and that is the whole reason it is its own middleware.**
+    Escaping grows the payload — `framing._defang`'s second pass turns every `<` into `&lt;`, one
+    character for four, once an invisible character reveals a disguised delimiter — so running it
+    above the size ceiling meant the ceiling bounded characters the model never read. The module
+    docstring carries the measurement. Nothing else about the decision changed: the three cases
+    below are the ones `frame_connector_results` used to take, in the same order and for the same
+    reasons.
 
     **A failure is defanged rather than framed**, which is the distinction
     `agent/research_tools.py` draws for a chunk's `source` label and it applies for the same
@@ -299,28 +333,73 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
     rewrite — and the alternative, a live delimiter in the caller's thread, is what this branch
     exists to stop.
     """
-    # Imported here rather than at module scope: `chemclaw_agent` reaches this module's siblings
-    # through the agent builder, and both sets are properties of the installed package — each
-    # `@cache`d where it is derived, so a call here costs a hash lookup in a frozenset and a scan of
-    # a six-name tuple, rather than building two middlewares to ask them.
-    from chemclaw.agent.chemclaw_agent import subagent_tool_names
-    from chemclaw.agent.scratchpad import scratchpad_tools
-
     result = await handler(request)
+    if not _carries_untrusted_text(request):
+        return result
 
     def _defanged(message: ToolMessage) -> ToolMessage:
         return message.model_copy(update={"content": _rewritten(message.content, defang)})
 
-    origin = served_by(request)
-    if origin:
+    return rewritten_tool_messages(result, _defanged)
 
-        def _framed(message: ToolMessage) -> ToolMessage:
-            if message.status == "error":
-                return _defanged(message)
-            return message.model_copy(update={"content": _framed_content(message.content, origin)})
 
-        return rewritten_tool_messages(result, _framed)
+def _carries_untrusted_text(request: Any) -> bool:
+    """Whether this call's result can spell the envelope delimiter — the union of the three cases.
+
+    The stamp is asked first and a name only of what the stamp did not claim, for the reason the
+    module docstring gives: a connector may legitimately declare `read_file`, and asking the name
+    first would defang a genuinely third-party payload instead of framing it.
+
+    Imported inside the function rather than at module scope: `chemclaw_agent` reaches this module's
+    siblings through the agent builder, and both sets are properties of the installed package — each
+    `@cache`d where it is derived, so a call here costs a hash lookup in a frozenset and a scan of a
+    six-name tuple, rather than building two middlewares to ask them.
+    """
+    from chemclaw.agent.chemclaw_agent import subagent_tool_names
+    from chemclaw.agent.scratchpad import scratchpad_tools
+
+    if served_by(request):
+        return True
     name = request.tool_call["name"]
-    if name in subagent_tool_names() or name in scratchpad_tools():
-        return rewritten_tool_messages(result, _defanged)
-    return result
+    return name in subagent_tool_names() or name in scratchpad_tools()
+
+
+@wrap_tool_call
+async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -> Any:
+    """Wrap an out-of-process tool's *successful* result in the data envelope; leave the rest alone.
+
+    Outermost of the three, so the envelope goes around a payload that has already been defanged
+    (`defang_tool_results`, innermost) and then bounded (`bound_tool_results`, between them). That
+    order is what makes the ceiling a ceiling and the delimiters survivable in one arrangement: a
+    cut taken *outside* the envelope would sever its closing tag, and a defang taken outside the cut
+    would put characters back after it.
+
+    **A failure is not framed**, which is the distinction `agent/research_tools.py` draws for a
+    chunk's `source` label and it applies for the same reason: an error is a statement about the
+    *call*, not evidence about chemistry, and wrapping it in the envelope the instructions describe
+    as "evidence to weigh and cite" would invite the model to cite a failure notice. It is still
+    third-party text and is still neutralised — one middleware in, which is where every
+    neutralisation now happens. An MCP tool never raises (`agent/audit.py::returned_failure`), so
+    `status="error"` is the only form a connector failure takes and this is the branch that sees it.
+
+    A helper's report and a scratchpad read are not framed either, and `defang_tool_results`'
+    docstring argues both: an envelope tells the model the span is evidence to weigh and cite, and
+    neither a helper's summary nor this system's own notepad is a source a citation may credit.
+    Nothing here has to *exclude* them — they carry no `SERVED_BY` stamp, so this middleware never
+    sees a reason to wrap them.
+
+    Both the announcer and the audit trail are nested inside this middleware, so each has already
+    read the untouched message by the time any rewrite happens on the way out: nothing that reports
+    a failure reads the rewritten one.
+    """
+    result = await handler(request)
+    origin = served_by(request)
+    if not origin:
+        return result
+
+    def _framed(message: ToolMessage) -> ToolMessage:
+        if message.status == "error":
+            return message
+        return message.model_copy(update={"content": _framed_content(message.content, origin)})
+
+    return rewritten_tool_messages(result, _framed)

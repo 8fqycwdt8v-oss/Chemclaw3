@@ -178,6 +178,7 @@ class InMemoryArtifactStore:
             return None
         digest = content_address(data)
         self._blobs.setdefault(digest, data)
+        previous = self._links.get((calc_key, name))
         ref = ArtifactRef(
             calc_key=calc_key,
             name=name,
@@ -186,6 +187,13 @@ class InMemoryArtifactStore:
             media_type=media_type,
         )
         self._links[(calc_key, name)] = ref
+        # Reclaim the predecessor this rewrite orphaned, on the same rule the Postgres backend
+        # applies: a blob outlives its link only while some *other* link still names it. Kept in
+        # parity deliberately — the in-memory store is what the suite exercises, so a leak the two
+        # backends do not share is a leak no test can see.
+        if previous is not None and previous.content_hash != digest:
+            if not any(link.content_hash == previous.content_hash for link in self._links.values()):
+                self._blobs.pop(previous.content_hash, None)
         return ref
 
     async def open(self, content_hash: str) -> bytes | None:
@@ -368,14 +376,54 @@ class ArrayOffloadingStore:
         await self._results.put(stored.model_copy(update={"result": payload}))
 
     async def find(self, query: CalculationQuery) -> list[StoredResult]:
-        """Delegate, deliberately without restoring anything.
+        """Delegate without restoring anything, and name each artifact as an address, not a digest.
 
         `find` answers "which calculations exist", which `find_calculations` renders as a listing.
         Rehydrating megabytes per row to build a table nobody reads the matrices from would make a
-        listing the most expensive call in the system. The rows come back naming their artifacts,
-        which is what `fetch_artifact` takes.
+        listing the most expensive call in the system, so the arrays stay where they are.
+
+        **What changed is what the row says about them.** The stored field holds a bare content
+        hash, and the docstring's claim that "the rows come back naming their artifacts, which is
+        what `fetch_artifact` takes" was false in both halves: `fetch_artifact` takes
+        `<calculation key>#<name>`, never a content address, and after
+        `durable/artifact_eviction.py` reclaims a cold blob the link row cascades away
+        (`infra/sql/019`) while `calculation_results` keeps its row — measured, `get` correctly
+        reported a miss and `find` went on serving the same 64-hex string. A reader was handed an
+        identifier that addressed nothing before eviction and nothing after it, with no way to tell
+        the two apart. The reference form does tell them apart, because `list_artifacts` and
+        `fetch_artifact` resolve it against the link table and say plainly when it is gone.
+
+        Rehydration is still refused, which is why this is a rewrite rather than an existence
+        probe: one query per row to learn whether a matrix nobody asked for is still there is the
+        cost this method exists to avoid.
         """
-        return await self._results.find(query)
+        rows = await self._results.find(query)
+        return [row.model_copy(update={"result": self._as_references(row)}) for row in rows]
+
+    def _as_references(self, stored: StoredResult) -> dict[str, object]:
+        """This row's payload with each offloaded content hash rewritten as an artifact reference.
+
+        `ArtifactRef.as_str()` is the one definition of that form, and the name comes from
+        `self._fields` rather than from reversing the field spelling — `_address` is not injective
+        over names a producer may choose.
+        """
+        payload: dict[str, object] = dict(stored.result)
+        for name in self._fields.values():
+            field = _address(name)
+            content_hash = payload.get(field)
+            if content_hash is None:
+                continue
+            payload[field] = ArtifactRef(
+                calc_key=stored.key.as_str(),
+                name=name,
+                content_hash=str(content_hash),
+                byte_size=0,
+            ).as_str()
+        return payload
+
+    async def calc_types(self) -> set[str]:
+        """Every `calc_type` the wrapped store holds — offloading changes no row's type."""
+        return await self._results.calc_types()
 
 
 def _address(name: str) -> str:

@@ -33,6 +33,20 @@ wherever a state is read, and neither counts nor gates. That is not a degraded c
 gate (`D-2026-08-08-a-degraded-check-must-not-clear-the-gate`): the sin there was a broken judge
 emitting the *same* verdict a working one emits, and `unknown` is a state no working probe returns.
 
+**A bundle this deployment cannot open at all is `unusable`, and it is asked before the socket**
+(`registry.unusable_reason`). A `transport: stdio` bundle with the transport turned off has a
+perfectly answerable `/healthz` and no reachable tool, so it used to report `unprobed` here —
+explicitly not counted and not gating — while killing every turn outright from
+`registry.mcp_connections`. Now `mcp_connections` degrades past it and this counts and gates it
+exactly as `unreachable` does, which is the half that keeps degrading from being the same thing as
+hiding. Unlike an outage it will not clear on its own, which is what the detail says.
+
+**What this still cannot see is a bundle whose bearer variable is unset**, and that is stated
+rather than left to be discovered: the probe is unauthenticated by design, so a server whose
+credential this deployment does not hold answers 200 and reads `healthy` while every tool call is
+refused. It is the same class of fault and belongs in the same verdict; `unusable_reason` records
+why adding it needs its own decision rather than a line here.
+
 **And there is a fourth consumer now: the per-turn open path**
 (`D-2026-08-27-the-breaker-is-the-readiness-verdict-already-taken`). Every verdict this sweep
 reaches is recorded in `connectors.reachability`, which `connectors.transport` reads before
@@ -57,20 +71,20 @@ from temporalio.client import Client
 
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.connectors.reachability import record_reachability
-from chemclaw.connectors.registry import enabled, health_url
+from chemclaw.connectors.registry import enabled, health_url, unusable_reason
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.temporal_client import connect
 
 logger = logging.getLogger(__name__)
 
-ConnectorState = Literal["healthy", "unreachable", "unpolled", "unknown", "unprobed"]
+ConnectorState = Literal["healthy", "unreachable", "unusable", "unpolled", "unknown", "unprobed"]
 
 #: The states that mean "this connector's capability cannot be used right now". The gauge and the
 #: `connectors_required` gate both read this rather than each naming their own set, because the two
 #: answers must be the same answer — a metric that alerts on one state while startup refuses on
 #: another is two definitions of "down" (D-2026-08-27).
-UNHEALTHY_STATES: frozenset[ConnectorState] = frozenset({"unreachable", "unpolled"})
+UNHEALTHY_STATES: frozenset[ConnectorState] = frozenset({"unreachable", "unusable", "unpolled"})
 
 
 class ConnectorHealth(BaseModel):
@@ -308,7 +322,19 @@ async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]
     endpoints: list[tuple[str, str]] = []
     queues: list[tuple[str, str]] = []
     unprobed: list[ConnectorHealth] = []
+    unusable: list[ConnectorHealth] = []
     for manifest in enabled():
+        # **Asked before the socket, because a bundle this deployment cannot open is not a bundle
+        # whose host has anything to say about it** (`registry.unusable_reason`). Both reasons that
+        # verdict covers — `transport: stdio` with the transport off, a declared bearer whose
+        # variable is unset — leave a perfectly healthy server answering `/healthz` 200 while every
+        # tool call fails, so probing first reported `healthy` for a capability that could not be
+        # used at all. It counts and gates exactly as `unreachable` does, which is what keeps
+        # `mcp_connections`' decision to degrade past it from making it silent.
+        refusal = unusable_reason(manifest.name, manifest.endpoint)
+        if refusal is not None:
+            unusable.append(ConnectorHealth(name=manifest.name, state="unusable", detail=refusal))
+            continue
         # Through the registry, never off the manifest: the deployment's `connector_urls` override
         # moves where a connector actually is, and reading the declared URL here probed the
         # loopback dev default in every cluster (D-131).
@@ -325,7 +351,7 @@ async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]
     probed, polled = await asyncio.gather(
         _probe_endpoints(endpoints, bound), _probe_queues(queues, bound)
     )
-    return sorted([*probed, *polled, *unprobed], key=lambda health: health.name)
+    return sorted([*probed, *polled, *unprobed, *unusable], key=lambda health: health.name)
 
 
 async def check_connectors_at_startup() -> list[ConnectorHealth]:

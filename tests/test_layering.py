@@ -448,6 +448,15 @@ _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
         "Lazy for the reason the core.logging exception above is: the outbound seam must not "
         "hard-depend on the connector registry at import time"
     ),
+    ("chemclaw.connectors", "chemclaw.templates"): (
+        "the connector registry's tool-name collision guard has to know every name core binds "
+        "itself, and template launchers are registered *after* the check runs on a process's first "
+        "agent build (`_register_generated_tools` evaluates `job_tools()` first, and that is what "
+        "runs the check) - so it asks the template registry what it will generate instead of "
+        "reading the tool registry and getting a different answer on build #1 than on build #2. "
+        "Lazy because `templates -> agent -> connectors` already exists at module scope, so a "
+        "module-scope import here would be a real import cycle rather than a permitted one"
+    ),
     ("chemclaw.kg", "chemclaw.connectors"): (
         "known_note_types/known_relations union core's closed vocabulary with what the enabled "
         "bundles declare, because two shipped note types (job-result, bo-candidate) are minted by "

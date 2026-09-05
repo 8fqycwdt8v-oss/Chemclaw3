@@ -107,12 +107,21 @@ def test_identical_bytes_dedupe_to_one_blob_but_keep_both_links() -> None:
     asyncio.run(_run())
 
 
-def test_overwriting_a_name_repoints_the_link_without_losing_the_old_blob() -> None:
-    """A second `put` under the same `(calc_key, name)` updates the link (D-124's upsert).
+def test_overwriting_a_name_repoints_the_link_and_reclaims_the_blob_it_orphaned() -> None:
+    """A second `put` under the same `(calc_key, name)` updates the link and frees its predecessor.
 
     `_UPSERT_LINK` is `ON CONFLICT (calc_key, name) DO UPDATE`, never a second row — so the link
-    must resolve to the *new* content afterwards, while the old blob (addressed by its own hash)
-    stays retrievable on its own hash, since eviction — not an overwrite — is what reclaims it.
+    must resolve to the *new* content afterwards. **What used to happen to the old blob was
+    nothing.** It kept no link, no `calculation_results` payload named it (the row is rewritten by
+    the same `put`), no note could cite it (`artifact_refs` are `<calc_key>#<name>`, resolved
+    through the link table), and no code path deleted it — measured, one rewrite left
+    `blobs=2 links=1 unlinked_blobs=1`.
+
+    This test previously asserted that as intended, on the reasoning that "eviction — not an
+    overwrite — is what reclaims it". That reasoning does not survive contact with the shipped
+    configuration: `artifact_store_max_bytes` and `artifact_evict_idle_days` are both 0, so both of
+    the sweep's triggers are off and *nothing* reclaims it, ever. An overwrite is also the one
+    moment where being orphaned is known for certain rather than inferred by a sweep.
     """
 
     async def _run() -> None:
@@ -127,8 +136,31 @@ def test_overwriting_a_name_repoints_the_link_without_losing_the_old_blob() -> N
         [ref] = await store.list_for(calc_key)
         assert ref.content_hash == second.content_hash
 
-        assert await store.open(first.content_hash) == b"stale hessian" * 5
+        assert await store.open(first.content_hash) is None, "an orphaned blob was left behind"
         assert await store.open(second.content_hash) == b"refreshed hessian" * 5
+
+    asyncio.run(_run())
+
+
+def test_a_rewrite_keeps_a_blob_another_calculation_still_links() -> None:
+    """The direction that makes the reclaim above safe rather than destructive.
+
+    Identical bytes are one blob shared by every calculation that produced them, so a rewrite may
+    only delete what *no* link still names. Deleting on the rewrite alone would take another
+    calculation's Hessian with it, which is strictly worse than the leak it was fixing.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        shared = b"a shared hessian" * 5
+        first = await store.put("pgart-shared-a:1", "hessian", shared)
+        second = await store.put("pgart-shared-b:1", "hessian", shared)
+        assert first is not None and second is not None
+        assert first.content_hash == second.content_hash
+
+        # Rewrite one of the two links; the other still names the blob.
+        await store.put("pgart-shared-a:1", "hessian", b"a different hessian" * 5)
+        assert await store.open(first.content_hash) == shared
 
     asyncio.run(_run())
 

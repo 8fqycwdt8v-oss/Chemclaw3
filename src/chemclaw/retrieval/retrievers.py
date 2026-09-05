@@ -261,17 +261,26 @@ _NOTE_FILTERS = ("type", "tag", "since", "until")
 
 @runtime_checkable
 class ReactionMetadata(Protocol):
-    """The one question this package asks of the ELN transcription tier.
+    """The two questions this package asks of the ELN transcription tier.
 
     Declared here rather than imported from `chemclaw.ingest.eln.records`, and that is a layering
     fact rather than a style preference: `ingest` depends on `retrieval`, so importing back would
-    make a cycle out of what is really a one-method need. A Protocol is structural, so the concrete
+    make a cycle out of what is really a two-method need. A Protocol is structural, so the concrete
     `ReactionRecordStore` satisfies this without either package knowing about the other — and the
     retriever ends up declaring what it needs instead of where it comes from.
+
+    The two are deliberately separate rather than one narrowing call. `eligible` answers "does this
+    record pass the filter I was given", which only a filtered search may ask; `known` answers "can
+    this citation be resolved at all", which every search must ask and which no filter may narrow.
+    Collapsing them would make an unfiltered sweep answer a question nobody posed.
     """
 
     async def eligible(self, reaction_ids: Sequence[str], filters: dict[str, Any]) -> set[str]:
         """Which of `reaction_ids` pass `filters` and are current."""
+        ...
+
+    async def known(self, reaction_ids: Sequence[str]) -> set[str]:
+        """Which of `reaction_ids` the corpus holds at all, regardless of currency or filter."""
         ...
 
 
@@ -306,12 +315,19 @@ class FingerprintReactionRetriever:
         The sweep's `sources_failed` channel is where that belongs, and `fanout._sweep` puts it
         there the moment this stops swallowing it — the same correction the share, warehouse and
         vendored halves already took.
-        Each match cites the corresponding `reaction-<id>` note. Unlike the graph retriever, this
-        cites from the fingerprint index, whose entries are written at ingestion while the note
-        is merged separately (D-018): a reaction indexed but whose note is still pending review
-        yields a citation the report PR's kg-validate flags as dangling — surfacing the pending
-        note to the reviewer (the PR-gate working), not silently corrupting the graph. Reports
-        are therefore run over the merged corpus, as campaigns are.
+        Each match cites the corresponding `reaction-<id>` note, **and every hit served is one the
+        corpus can resolve.** D-018's argument for serving an unresolvable one — the fingerprint is
+        written at ingestion while the note is merged separately, so a pending note yields a
+        dangling citation `kg-validate` surfaces on the report PR — was retracted by
+        `D-2026-08-25-an-eln-transcription-is-data-not-a-claim`: there is no note and no pull
+        request any more, because `ingest_reaction` writes the `reaction_records` row itself,
+        unconditionally, in the same call as the fingerprint. What is left in that gap is a write
+        that did not land. The record is written **last** of four, across four transactions, and
+        deliberately so (the replay-skip invariant was measured to break when the record went
+        first), so the window is real: measured, a fingerprint row whose record write was lost came
+        back as `('reaction-ORPHAN-1', 1.0)` — a Tanimoto 1.00 precedent, the strongest hit this
+        retriever can produce — which `expand_note` then refuses to open. A chemist asked for prior
+        art and got a perfect match to a run nobody can read.
 
         **`type`/`tag`/`since`/`until` narrow the result** when given (D-170). The fingerprint index
         holds bits and a label and knows nothing about note metadata, so the filter cannot go into
@@ -336,8 +352,11 @@ class FingerprintReactionRetriever:
             ).hits
         except FingerprintInputError:
             return []
-        if wanted:
-            matches = await self._eligible(matches, wanted, page)
+        matches = (
+            await self._eligible(matches, wanted, page)
+            if wanted
+            else await self._resolvable(matches)
+        )
         return [
             EvidenceChunk(
                 content=f"Similar reaction {match.label} (Tanimoto {match.similarity:.2f})",
@@ -349,6 +368,37 @@ class FingerprintReactionRetriever:
             )
             for match in matches
         ]
+
+    async def _resolvable(self, matches: list[Match]) -> list[Match]:
+        """Drop the hits whose reaction record cannot be resolved, and say so once if any were.
+
+        `known` rather than `eligible`: this is the citation-existence question `kg.validate` asks,
+        not the filter gate. An unfiltered sweep must keep serving a record that would fail a
+        `type`/`tag`/window narrowing — turning "can this be opened" into "does this pass a filter
+        nobody asked for" would make every structural sweep a filtered one, which is the D-170
+        behaviour the filtered path exists beside rather than instead of.
+
+        **One extra round trip, not an N+1**, and only when there are hits at all: the ids of at
+        most `fingerprint_top_k` matches go down as one array parameter and the known subset comes
+        back, which is the shape `_eligible` already has. Measured pooled against a live database,
+        median over 50 calls: the unfiltered retrieve goes from **2.99 ms to ~4.4 ms**, which is
+        what the filtered path already costs (**4.70 ms**). A per-hit lookup would have been ten.
+
+        WARNING rather than silence when something is dropped: an orphaned fingerprint means an
+        ingest half-landed, which nothing else in this system reports and which a re-sync fixes.
+        """
+        if not matches:
+            return []
+        known = await self._records.known([match.id for match in matches])
+        kept = [match for match in matches if match.id in known]
+        if len(kept) < len(matches):
+            log.warning(
+                "dropped %d structural hit(s) with no reaction record (%s); the ELN ingest "
+                "half-landed for these ids — re-sync the source to restore them",
+                len(matches) - len(kept),
+                ", ".join(match.id for match in matches if match.id not in known),
+            )
+        return kept
 
     @staticmethod
     def _depth(page: int) -> int:

@@ -271,6 +271,17 @@ _NOT_PRUNED: dict[str, str] = {
     # Records. Deleting a row does not reclaim a cache, it ends the ability to answer a question
     # about the past — so disposal belongs to whoever owns the record, never to a clock.
     "audit_events": "refused: the record of who ran what — see the docstring above",
+    # The local record of a *tool* composite, which has no other one: a primitive is a
+    # `calculation_results` row and a job composite a `job_records` row, and both of those are
+    # refused here for the same reason. Deleting one does not reclaim a cache — it ends this
+    # deployment's ability to republish a computed value it can no longer derive, because a
+    # composite's key names its own output and nothing can regenerate it but re-running the
+    # science. Bounded by how much composite chemistry a deployment computes, exactly as
+    # `calculation_results` is.
+    "result_composites": (
+        "refused: the only local record of a tool composite, and the source "
+        "`publish/backfill.backfill_composites` republishes from"
+    ),
     # The record of what this system changed in a system it does *not* own, and who approved
     # it when it could not be undone. Deleting one does not reclaim a cache; it ends the
     # ability to answer "did we file that, and on whose authority" about a change that is

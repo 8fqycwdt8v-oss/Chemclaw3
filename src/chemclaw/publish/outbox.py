@@ -39,13 +39,46 @@ from chemclaw.publish.registry import enabled_names, publishing_enabled
 
 logger = logging.getLogger(__name__)
 
-# `ON CONFLICT DO NOTHING` on the identity index is what makes every enqueue path idempotent: the
+# **The identity of an enqueue is not `calc_ref`; it is this calculation, for this sink, on behalf
+# of this requester.** The `ON CONFLICT` clause is what makes every enqueue path idempotent — the
 # three call sites need no coordination, a retried Temporal activity cannot double-queue, and the
-# backfill CLI can be run twice with no effect the second time.
+# backfill CLI can be run twice — and it stays for all three. What it must not do is drop a row
+# that carries a *different* publication.
+#
+# It did. `record.py` states the cardinality ("two chemists asking the same question share one
+# `calc_ref` ... N publications per record") and the shipped sink keys `calculation_publication` on
+# `(calc_ref, tenant_id, session_id, job_id)` precisely to hold several. `DO NOTHING` dropped the
+# whole second row, and with it the second chemist's provenance: measured, alice then bob for one
+# `calc_ref` gave `alice_rows=1 bob_rows=0` and one stored document naming alice.
+#
+# So the row is merged rather than dropped. A publication the stored document does not already
+# contain is appended and the row goes back on the queue; a publication it does contain changes
+# nothing, which is every replay the clause exists for. `@>` is the containment test rather than
+# equality, so an *empty* incoming `publications` (the cache hook, which has no requester to name)
+# is contained by definition and writes nothing — exactly the old behaviour for the path that has
+# no publication at all.
+#
+# `coalesce`, because `jsonb_set` returns NULL for a NULL new value: a document written by a
+# release that had no `publications` key would otherwise be blanked rather than extended.
+#
+# `revision` is bumped on every merge and is what `_MARK_DELIVERED` checks — see `_CLAIM`.
 _ENQUEUE = """
     INSERT INTO result_publications (sink, calc_ref, document, schema_version)
     VALUES (%s, %s, %s, %s)
-    ON CONFLICT (sink, calc_ref, schema_version) DO NOTHING
+    ON CONFLICT (sink, calc_ref, schema_version) DO UPDATE
+    SET document = jsonb_set(
+            result_publications.document,
+            '{publications}',
+            coalesce(result_publications.document->'publications', '[]'::jsonb)
+                || coalesce(EXCLUDED.document->'publications', '[]'::jsonb)
+        ),
+        revision = result_publications.revision + 1,
+        state = 'pending',
+        attempts = 0,
+        last_error = '',
+        delivered_at = NULL
+    WHERE NOT coalesce(result_publications.document->'publications', '[]'::jsonb)
+              @> coalesce(EXCLUDED.document->'publications', '[]'::jsonb)
 """
 
 # **Claiming spends the attempt, in the same statement that selects the row.** A plain
@@ -64,24 +97,49 @@ _ENQUEUE = """
 #
 # Oldest first, so a backlog drains in the order it accumulated and a burst of fresh results cannot
 # starve what was already waiting.
+#
+# **`id` breaks the tie, and `enqueued_at` alone does not order this table.** `enqueue` writes an
+# aggregate and each of its parts in one transaction, so a solvent screen's three rows share one
+# `enqueued_at` to the microsecond. Postgres does not promise a stable relative order for tied rows
+# across the separate statements that fetch consecutive batches, so a part could be claimed in one
+# pass and its aggregate in the next — a read-consistency gap at the destination for as long as the
+# two passes are apart. `publish/backfill.py` fixed the identical tie on its own walk with a `key`
+# tiebreaker and wrote down why; this is that argument applied to the sibling that lacked it.
+#
+# **`claimed_revision` is the revision this pass is about to deliver.** The claim commits before
+# anything is sent, so an enqueue can merge a new publication into a row that is already in flight
+# (`_ENQUEUE`). Snapshotting the revision here is what lets `_MARK_DELIVERED` tell "delivered what
+# is in this row" from "delivered what *was* in this row", instead of settling a row whose newest
+# publication never left the building.
 _CLAIM = """
     UPDATE result_publications
-    SET attempts = attempts + 1
+    SET attempts = attempts + 1, claimed_revision = revision
     WHERE id IN (
         SELECT id
         FROM result_publications
         WHERE sink = %s AND state = 'pending' AND attempts < %s
-        ORDER BY enqueued_at
+        ORDER BY enqueued_at, id
         LIMIT %s
         FOR UPDATE SKIP LOCKED
     )
     RETURNING id, calc_ref, document
 """
 
+# **`revision = claimed_revision` is the guard, and without it this fix would have leaked the very
+# thing it repairs.** A delivery is not held inside the claim's transaction, so between `_CLAIM`
+# reading a document and this statement settling the row, an `_ENQUEUE` merge can have appended a
+# publication the pass never sent. Marking that row delivered would drop it permanently and
+# silently. The row instead stays `pending` with `attempts = 0` (the merge reset them) and the next
+# pass delivers the whole document, which the far side's content-addressed upserts make free.
+#
+# `RETURNING id` for the same reason `_MARK_FAILED` returns its state: the count has to be
+# transitions, not arguments, or `chemclaw_results_published_total` would book a row the guard
+# refused to settle.
 _MARK_DELIVERED = """
     UPDATE result_publications
     SET state = 'delivered', delivered_at = now(), last_error = ''
-    WHERE id = ANY(%s)
+    WHERE id = ANY(%s) AND revision = claimed_revision
+    RETURNING id
 """
 
 # Records why an attempt failed, and retires the row once its budget is gone. **It does not
@@ -103,6 +161,10 @@ _MARK_DELIVERED = """
 # is `pending` by construction (`_CLAIM` spends the attempt and leaves the state alone) — so it is
 # narrower than `state <> 'failed'` for free, and a `delivered` row can no longer be walked
 # backwards into `failed` by a mis-partitioned id list either.
+#
+# **The budget is spent only by a fault that could go away.** `%s` below is the attempt ceiling for
+# a retryable failure and `0` for one the sink has *answered* about — see `mark_failed(retryable=)`
+# and `publish/driver.py`, whose two exception classes exist to decide exactly this and did not.
 _MARK_FAILED = """
     UPDATE result_publications
     SET last_error = %s,
@@ -249,9 +311,20 @@ async def enqueue_payload(
     solvent screen is three rows rather than one.
 
     The single entry point every hook uses, so "what gets published" is decided in one place rather
-    than three. A payload this release has no projector for is skipped with a debug line, not an
-    error: `calculation_results` is never pruned, so a deployment legitimately holds rows from
-    calculators that no longer ship.
+    than three.
+
+    **A payload this release has no projector for is counted and named, not skipped in silence.**
+    It used to return 0 behind a `logger.debug` line, on the argument that `calculation_results` is
+    never pruned and a deployment legitimately holds rows from calculators that no longer ship.
+    That argument is sound and it belongs to the *backfill*, which pre-filters with the same
+    `projector_for` call and reports its own `skipped` count — so the legitimate case never reaches
+    here at all. What does reach here is the three live hooks, where an unregistered `payload_kind`
+    means a connector job publishing nothing while every dashboard, alert and gauge reads normal:
+    measured, `calc_type="newconnector.newjob"` with an unregistered kind gave `written=0`,
+    `counters_moved={}` and nothing at INFO or above. It is counted on
+    `chemclaw_result_projection_failures_total`, whose own declaration is exactly this fault —
+    "stored payloads this release could not project into a record (a code gap, not an outage)" —
+    and a projector that *raises* has always been on it.
 
     `payload_kind` is the model's own name and is what routes a *composite*: its `calc_type` is
     `<connector>.<job>`, a route, and no projector prefix matches one. Empty falls back to the
@@ -265,7 +338,20 @@ async def enqueue_payload(
     from chemclaw.publish.project import projector_for, records_for
 
     if projector_for(calc_type, payload_kind) is None:
-        logger.debug("publish: no projector for %s; not queued", calc_type)
+        log_event(
+            logger,
+            "publish.unprojectable",
+            "publish[project]: no projector for %s (payload_kind=%r); %s was not queued and "
+            "nothing else will publish it",
+            calc_type,
+            payload_kind,
+            calc_ref,
+            level=logging.WARNING,
+            stage="projection",
+            calc_type=calc_type,
+            payload_kind=payload_kind,
+        )
+        record_metric(lambda m: m.increment("chemclaw_result_projection_failures_total"))
         return 0
     try:
         records = records_for(
@@ -339,28 +425,60 @@ async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
     return [(int(row[0]), str(row[1]), row[2]) for row in rows]
 
 
-async def mark_delivered(ids: list[int]) -> None:
-    """Record that these rows reached their sink."""
+async def mark_delivered(ids: list[int]) -> int:
+    """Record that these rows reached their sink. Returns how many were actually settled.
+
+    **Fewer than `len(ids)` is a correct answer, not an error.** A row whose document gained a
+    publication while this pass was delivering is left `pending` deliberately, so that publication
+    reaches the sink on the next pass rather than being marked delivered unsent — see
+    `_MARK_DELIVERED`. The count is the number of transitions, so the published counter cannot book
+    a row the guard held back.
+    """
     if not ids:
-        return
+        return 0
     async with _connect("outbox_mark_delivered") as conn:
-        await conn.execute(_MARK_DELIVERED, (ids,))
+        cursor = await conn.execute(_MARK_DELIVERED, (ids,))
+        settled = len(await cursor.fetchall())
         await conn.commit()
-    record_metric(lambda m: m.increment("chemclaw_results_published_total", len(ids)))
+    if settled:
+        record_metric(lambda m: m.increment("chemclaw_results_published_total", settled))
+    if settled < len(ids):
+        logger.info(
+            "publish[delivery]: %d of %d row(s) gained a publication mid-delivery and stay queued",
+            len(ids) - settled,
+            len(ids),
+        )
+    return settled
 
 
-async def mark_failed(ids: list[int], reason: str) -> None:
-    """Record a failed attempt, retiring a row only once it has spent its attempt budget.
+async def mark_failed(ids: list[int], reason: str, *, retryable: bool = True) -> None:
+    """Record a failed attempt, retiring a row once retrying it can no longer help.
 
     A retired row is never deleted: it is the record that something was *not* published, and an
     operator re-queues it with the backfill CLI once the cause is fixed. Deleting it would turn an
     outage into a silent gap.
+
+    **`retryable=False` retires the row now**, and it is what makes `publish/driver.py`'s two
+    exception classes mean what that module says they mean. Its docstring states that the split
+    against `SinkRejectedError` "is not descriptive: it decides whether the outbox tries again" —
+    and nothing decided anything, because the drain called this identically in both branches. So a
+    sink that had *answered* about a record — a site that never ran the DDL, a column that will
+    reject this content forever — spent all eight attempts on a fault that fails identically every
+    time: two hours of retries at the shipped fifteen-minute schedule before the row reached the
+    dead-letter state it was destined for from the first answer. The end state is the same; what
+    changes is that an operator sees it on the first pass instead of the eighth, and that seven
+    passes of a real backlog are not spent on it.
     """
     if not ids:
         return
     async with _connect("outbox_mark_failed") as conn:
         cursor = await conn.execute(
-            _MARK_FAILED, (reason[:2000], settings.result_publish_max_attempts, ids)
+            _MARK_FAILED,
+            (
+                reason[:2000],
+                settings.result_publish_max_attempts if retryable else 0,
+                ids,
+            ),
         )
         states = [str(row[0]) for row in await cursor.fetchall()]
         await conn.commit()
@@ -377,14 +495,16 @@ async def mark_failed(ids: list[int], reason: str) -> None:
     log_event(
         logger,
         "publish.attempt_failed",
-        "publish[delivery]: %d row(s) failed an attempt, %d retired to dead-letter: %s",
+        "publish[delivery]: %d row(s) failed a%s attempt, %d retired to dead-letter: %s",
         len(ids),
+        "" if retryable else " non-retryable",
         retired,
         reason[:200],
         level=logging.WARNING if retired else logging.INFO,
         stage="delivery",
         rows=len(ids),
         dead_lettered=retired,
+        retryable=retryable,
     )
 
 

@@ -53,6 +53,7 @@ from pydantic import BaseModel
 
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.publish.composites import record_composite
 from chemclaw.publish.outbox import enqueue_payload
 from chemclaw.publish.registry import publishing_enabled
 
@@ -153,6 +154,12 @@ async def publish_tool_result(
     less important than returning it. Zero is the ordinary answer — no sink configured, or a result
     this hook does not publish — and is not a failure.
 
+    **The recovery path, stated because until now there was none.** A declared composite is written
+    to `result_composites` *before* it is queued, and `publish/backfill.backfill_composites` walks
+    that table. So a composite whose enqueue failed, or one computed before a results store was
+    attached, is re-queued by the same backfill that recovers the calculation cache and the job
+    record — the property the other two published shapes always had and this one did not.
+
     Args:
         connector: The bundle serving the tool, which is the first half of the route recorded as
             `calc_type`. A route names where the work was dispatched and never what came back, so
@@ -164,15 +171,30 @@ async def publish_tool_result(
         result: Whatever the tool returned. Anything that is not a pydantic model, or whose model
             is not named in `TOOL_COMPOSITES`, is left alone.
     """
-    if not publishing_enabled() or not isinstance(result, BaseModel):
+    if not isinstance(result, BaseModel):
         return 0
     kind = type(result).__name__
     if kind not in TOOL_COMPOSITES:
         return 0
     try:
         payload = result.model_dump(mode="json")
+        calc_ref = _composite_ref(connector, tool, payload)
+        # **The local record first, and it is written whether or not a sink is enabled.** It is the
+        # only durable copy this shape has: a primitive is recovered from `calculation_results` and
+        # a job composite from `job_records`, and a tool composite is in neither by construction —
+        # so before this the enqueue below was the sole copy, and `enqueue_payload` swallows every
+        # failure by design. See `publish/composites.py` for what that costs and why it is paid.
+        await record_composite(
+            calc_ref=calc_ref,
+            calc_type=f"{connector}.{tool}",
+            payload_kind=kind,
+            input_hash=stable_hash(arguments),
+            payload=payload,
+        )
+        if not publishing_enabled():
+            return 0
         return await enqueue_payload(
-            calc_ref=_composite_ref(connector, tool, payload),
+            calc_ref=calc_ref,
             # A route, exactly as the job hook builds one. It identifies where this came from; the
             # `payload_kind` beside it is what identifies the shape.
             calc_type=f"{connector}.{tool}",

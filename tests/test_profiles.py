@@ -102,6 +102,10 @@ def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
         # Inside the framing so the envelope wraps a bounded payload, and outside the trail so the
         # audit row still records what the tool returned (`agent/tool_result_size.py`).
         "bound_tool_results",
+        # Inside the cut: neutralising a forged delimiter escapes every `<` when the delimiter is
+        # disguised, which grows the payload, and a rewrite that grows a payload above the ceiling
+        # is a rewrite the ceiling does not bound (`agent/tool_framing.py`).
+        "defang_tool_results",
         "announce_tool_failures",
         "object",  # the audit middleware, a stand-in here
         "refuse_undeclared_writes",

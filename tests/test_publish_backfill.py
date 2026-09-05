@@ -200,3 +200,76 @@ def test_requeue_failed_returns_failed_rows_to_pending() -> None:
         assert tuple(row) == ("pending", 0, "")
 
     asyncio.run(_run())
+
+
+def test_a_dropped_tool_composite_comes_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The recovery source a tool composite did not have.
+
+    `publish/outbox.enqueue` swallows every failure by construction — a completed calculation must
+    not be failed by a queue write — and a *tool* composite is written to neither
+    `calculation_results` nor `job_records`, because its key would name its own output. So the
+    outbox row was the only copy: measured on the shipped code with the outbox unwritable, the hook
+    returned 0, `backfill_cached` and `backfill_jobs` found nothing, and there was no third walk to
+    run. Nothing in this deployment could produce that result again without re-running the science.
+
+    `result_composites` is that record and `backfill_composites` is the walk over it.
+    """
+    from chemclaw.publish import composites, hooks, outbox
+    from chemclaw.science.calc.models import LogdResult
+
+    result = LogdResult(
+        smiles="CC(=O)Nc1ccc(O)cc1", ph=7.4, clogp=1.35, pka=9.5, log_d=1.35, uncertainty=0.7
+    )
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        monkeypatch.setattr(hooks, "publishing_enabled", lambda: True)
+        monkeypatch.setattr(outbox, "publishing_enabled", lambda: True)
+        monkeypatch.setattr(outbox, "enabled_names", lambda: ["alpha"])
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute("DELETE FROM result_composites")
+            await conn.execute("DELETE FROM result_publications WHERE sink = 'alpha'")
+            await conn.commit()
+
+        # The local database is briefly unwritable for the *queue*, which is exactly the case the
+        # outbox is built to swallow.
+        def _explode(_operation: str) -> Any:
+            raise ConnectionError("the outbox is unreachable")
+
+        monkeypatch.setattr(outbox, "_connect", _explode)
+        queued = await hooks.publish_tool_result(
+            connector="calc",
+            tool="predict_logd",
+            arguments={"smiles": result.smiles},
+            result=result,
+        )
+        assert queued == 0, "the enqueue failed, and the tool still returned its answer"
+
+        monkeypatch.undo()
+        monkeypatch.setattr(outbox, "publishing_enabled", lambda: True)
+        monkeypatch.setattr(outbox, "enabled_names", lambda: ["alpha"])
+        seen, requeued, skipped = await backfill.backfill_composites(dry_run=False, batch=10)
+        assert (seen, requeued, skipped) == (1, 1, 0)
+
+        async with db.connection(settings.postgres_dsn) as conn:
+            cursor = await conn.execute(
+                "SELECT document->>'payload_kind' FROM result_publications WHERE sink = 'alpha'"
+            )
+            assert [row[0] for row in await cursor.fetchall()] == ["LogdResult"]
+
+        # And it is idempotent, like its two siblings: the walk is safe to run twice.
+        assert (await backfill.backfill_composites(dry_run=False, batch=10))[1] == 0
+        assert (
+            await composites.record_composite(
+                calc_ref=hooks._composite_ref(
+                    "calc", "predict_logd", result.model_dump(mode="json")
+                ),
+                calc_type="calc.predict_logd",
+                payload_kind="LogdResult",
+                input_hash="x",
+                payload=result.model_dump(mode="json"),
+            )
+            is False
+        )
+
+    asyncio.run(_run())

@@ -19,7 +19,12 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.durable.connector_job import ConnectorJobResult
     from chemclaw.durable.registry import durable_activity, durable_workflow
-    from chemclaw.publish.backfill import backfill_cached, backfill_jobs, requeue_failed
+    from chemclaw.publish.backfill import (
+        backfill_cached,
+        backfill_composites,
+        backfill_jobs,
+        requeue_failed,
+    )
 
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.publish import BAD_DATA_RETRY
@@ -53,6 +58,15 @@ async def _walk(spec: RepublishSpec) -> dict[str, int]:
         dry_run=False, batch=spec.batch
     )
     jobs_seen, jobs_queued, jobs_skipped = await backfill_jobs(dry_run=False, batch=spec.batch)
+    # **The third walk, and the one whose absence made a shape unrecoverable.** `backfill_cached`
+    # reaches `calculation_results` and `backfill_jobs` reaches `job_records`; a tool composite is
+    # written to neither, because its key would name its own output. Until `result_composites` its
+    # outbox row was the only copy, and that enqueue is best-effort by construction — so a dropped
+    # `ThermochemistryResult` had no recovery path at all. A walk that exists and is not called
+    # from here would be the same gap with a function in it.
+    comp_seen, comp_queued, comp_skipped = await backfill_composites(
+        dry_run=False, batch=spec.batch
+    )
     return {
         "requeued": requeued,
         "calculations_seen": cached_seen,
@@ -61,6 +75,9 @@ async def _walk(spec: RepublishSpec) -> dict[str, int]:
         "jobs_seen": jobs_seen,
         "jobs_queued": jobs_queued,
         "jobs_skipped": jobs_skipped,
+        "composites_seen": comp_seen,
+        "composites_queued": comp_queued,
+        "composites_skipped": comp_skipped,
     }
 
 

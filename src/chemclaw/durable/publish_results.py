@@ -18,6 +18,7 @@ is a per-sink account, so a scheduled run's history is the record of how publish
 """
 
 import logging
+import time
 from datetime import timedelta
 
 from pydantic import BaseModel, Field
@@ -35,6 +36,14 @@ with workflow.unsafe.imports_passed_through():
 from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 logger = logging.getLogger(__name__)
+
+# How much of a sink's own activity budget a drain pass may spend claiming further batches. Not a
+# setting: it is a *margin* on `result_publish_timeout_seconds` rather than a policy, and the thing
+# it protects against is the last batch being started with no room to finish — a delivery cut off
+# by the activity timeout spends an attempt on rows the destination may well have accepted. A
+# quarter of the budget left for the final batch is generous against a `batch_size` of 100 and
+# costs a fraction of a pass when the queue is empty anyway.
+_PASS_BUDGET_FRACTION = 0.75
 
 
 class SinkOutcome(BaseModel):
@@ -63,17 +72,49 @@ class PublishOutcome(BaseModel):
 
 
 async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> SinkOutcome:
-    """Claim and deliver one batch for one sink.
+    """Claim and deliver batches for one sink until the queue is empty or the budget is spent.
 
-    One batch per run rather than draining to empty, deliberately. A backlog then takes several
-    scheduled passes to clear, which is the right shape: it bounds how long a single activity holds
-    a connection and how much a single failure re-attempts, and the schedule is frequent enough
-    that a real backlog still drains steadily. An operator in a hurry runs the backfill CLI.
+    **One batch per run was a throughput ceiling, not a bound.** It shipped with the argument that
+    a backlog takes several scheduled passes to clear and that this bounds how long an activity
+    holds a connection — the second half is worth keeping and the first was a rate: at the shipped
+    `result_publish_batch_size=100` and `result_publish_schedule_minutes=15` it is **400
+    records/hour/sink**, with nothing on the production side to hold it there. `enqueue` never
+    blocks, refuses or samples, and one solvent screen emits 1+N records, so a modest campaign
+    produces faster than the drain consumes — permanently, and the only signal is
+    `chemclaw_outbox_oldest_pending_seconds` rising, which reads identically to a drain that has
+    stopped.
+
+    So the loop is bounded by *time* rather than by one batch, and by the budget the activity was
+    already given: `result_publish_timeout_seconds` is what the workflow allots per sink, and this
+    stops well inside it so the last batch has room to finish rather than being cut off mid-
+    delivery and spending an attempt. No new knob — the number that decides how long a pass may
+    take is the number that already decides it.
+
+    A failure ends the pass for this sink, deliberately: a destination that just refused or went
+    away is not a destination to send ninety-nine more batches to, and the rows are still queued.
     """
     outcome = SinkOutcome(sink=manifest_name)
+    deadline = time.monotonic() + settings.result_publish_timeout_seconds * _PASS_BUDGET_FRACTION
+    while True:
+        before = outcome.failed
+        empty = await _drain_batch(manifest_name, sink, batch_size, outcome)
+        if empty or outcome.failed != before or time.monotonic() >= deadline:
+            return outcome
+
+
+async def _drain_batch(
+    manifest_name: str, sink: ResultSink, batch_size: int, outcome: SinkOutcome
+) -> bool:
+    """Claim and deliver one batch, accumulating into `outcome`. True when the queue was empty.
+
+    Split out of `_drain_one` so that the loop above says only what bounds a pass, and this says
+    only what one batch does — the two are different decisions and one function stating both is how
+    the batch's own rules (a poison row is one row's problem; a refusal is not an outage) got read
+    as rules about a pass.
+    """
     claimed = await outbox.claim(manifest_name, batch_size)
     if not claimed:
-        return outcome
+        return True
     # **Parsed per row, never per batch.** One row projected by an older writer whose record shape
     # this release cannot read is one row's problem: validating the batch inside a single `try`
     # meant a single unreadable document marked every id in the claim failed, retiring up to
@@ -87,18 +128,22 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
         try:
             records.append(ResultRecord.model_validate(document))
         except Exception as exc:
-            # Will not fix itself on a retry, so it spends an attempt rather than looping forever.
             unreadable.append(row_id)
             outcome.reason = str(exc)[:500]
             continue
         ids.append(row_id)
     if unreadable:
+        # **Retired on the first pass, not the eighth.** This comment already said "will not fix
+        # itself on a retry" while spending one attempt of eight on it, which is seven more reads
+        # of a document that parses identically every time.
         await outbox.mark_failed(
-            unreadable, f"stored document is not a readable record: {outcome.reason}"
+            unreadable,
+            f"stored document is not a readable record: {outcome.reason}",
+            retryable=False,
         )
-        outcome.failed = len(unreadable)
+        outcome.failed += len(unreadable)
     if not records:
-        return outcome
+        return False
 
     try:
         await sink.deliver(records)
@@ -114,7 +159,7 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
         await outbox.mark_failed(ids, str(exc))
         outcome.failed += len(ids)
         outcome.reason = str(exc)[:500]
-        return outcome
+        return False
     except Exception as exc:
         # **A refusal is about one record, so it is re-attempted one record at a time.** This used
         # to share the handler above, which made the delivery side do the opposite of the parse
@@ -131,16 +176,27 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
         # content hash, so re-sending a record that already landed is a no-op. It costs one
         # delivery per record for the one pass in which a refusal occurs, which is bounded by the
         # batch size and is the smaller harm by far.
+        #
+        # **The two lists below are the retry contract**, and keeping them as one was why
+        # `publish/driver.py`'s split did not decide anything. `refused` holds rows the sink
+        # *answered* about, which is a `SinkRejectedError` — the same content fails identically on
+        # every retry, so those retire now. `abandoned` holds the rows a mid-replay outage never
+        # reached, which is nobody's statement about the content and must stay claimable. One list
+        # for both meant a destination that went away halfway through a replay retired every row
+        # behind it, and a site that had simply not run the DDL spent all eight attempts — measured
+        # at 5 rows, 8 attempts each, two hours of the shipped schedule for a fault that answered
+        # identically the first time.
         outcome.reason = str(exc)[:500]
         delivered: list[int] = []
         refused: list[int] = []
-        for row_id, record in zip(ids, records, strict=True):
+        abandoned: list[int] = []
+        for index, (row_id, record) in enumerate(zip(ids, records, strict=True)):
             try:
                 await sink.deliver([record])
             except SinkUnavailableError as outage:
                 # The destination went away mid-replay: everything not yet delivered is the
                 # outage's, not the poison's, and must stay claimable.
-                refused.extend(ids[len(delivered) + len(refused) :])
+                abandoned.extend(ids[index:])
                 outcome.reason = str(outage)[:500]
                 break
             except Exception as refusal:
@@ -149,13 +205,14 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
             else:
                 delivered.append(row_id)
         if refused:
-            await outbox.mark_failed(refused, outcome.reason)
+            await outbox.mark_failed(refused, outcome.reason, retryable=False)
+        if abandoned:
+            await outbox.mark_failed(abandoned, outcome.reason)
         ids = delivered
-        outcome.failed += len(refused)
+        outcome.failed += len(refused) + len(abandoned)
 
-    await outbox.mark_delivered(ids)
-    outcome.delivered = len(ids)
-    return outcome
+    outcome.delivered += await outbox.mark_delivered(ids)
+    return False
 
 
 @durable_activity("background")

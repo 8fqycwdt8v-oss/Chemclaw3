@@ -16,6 +16,10 @@ import chemclaw.agent.research_tools as research_tools
 from chemclaw.agent.research_tools import gather_evidence
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.ingest.eln.records import (
+    InMemoryReactionRecordStore,
+    ReactionRecord,
+)
 from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 
@@ -40,6 +44,22 @@ def _seed_store() -> InMemoryFingerprintStore:
     return store
 
 
+def _seed_records() -> InMemoryReactionRecordStore:
+    """The transcription behind `rxn-1`, which the structural sweep now resolves every hit against.
+
+    A fingerprint with no record is a half-landed ingest rather than a pending note
+    (`tests/test_filtered_similarity.py`), so a fixture that indexes one and stores no record is
+    asserting that case by accident.
+    """
+    store = InMemoryReactionRecordStore()
+    asyncio.run(
+        store.record(
+            [ReactionRecord(reaction_id="rxn-1", body="Ester run.", source="eln:test")], "eln-json"
+        )
+    )
+    return store
+
+
 def test_gather_unions_graph_and_fingerprint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -48,6 +68,8 @@ def test_gather_unions_graph_and_fingerprint(
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
     store = _seed_store()
     monkeypatch.setattr(research_tools, "_reaction_store", lambda: store)
+    records = _seed_records()
+    monkeypatch.setattr(research_tools, "_record_store", lambda: records)
 
     chunks = asyncio.run(gather_evidence("yield", reaction_smiles=_ESTER)).chunks
 
@@ -337,8 +359,8 @@ def test_the_character_budget_does_not_starve_a_source(
     # What this pins is the **currency** change specifically. A score-re-sorted cut still passes
     # against this fixture, because at 1,200 characters both legs happen to survive it; that shape
     # is guarded by `test_a_mounted_share_is_not_starved_by_a_larger_graph` above and by the
-    # cross-source sort being gone from `_interleave_dedup` — said out loud rather than left for
-    # someone to discover this test was weaker than it reads.
+    # cross-source sort being gone from `merge.interleave_dedup` — said out loud rather than
+    # left for someone to discover this test was weaker than it reads.
     assert surviving["sharedrive"] > 0 and surviving["graph"] > 0, (
         f"a source was starved by the character budget: {dict(surviving)} — "
         "which is D-2026-08-01 reintroduced in a new currency"
@@ -367,7 +389,9 @@ def test_the_budget_charges_the_whole_chunk_and_not_only_its_content(
 
     # Same corpus, same content, but every chunk now carries a long provenance label. Nothing about
     # `content` changed, so a content-only budget would keep exactly as many chunks as before.
-    real_chunks = research_tools._interleave_dedup
+    from chemclaw.retrieval import merge
+
+    real_chunks = merge.interleave_dedup
 
     def _padded(ranked_lists: Any) -> Any:
         return [
@@ -375,7 +399,7 @@ def test_the_budget_charges_the_whole_chunk_and_not_only_its_content(
             for chunk in real_chunks(ranked_lists)
         ]
 
-    monkeypatch.setattr(research_tools, "_interleave_dedup", _padded)
+    monkeypatch.setattr(merge, "interleave_dedup", _padded)
     padded = asyncio.run(gather_evidence("yield"))
 
     assert lean.chunks, "sanity: the corpus answers at all"
@@ -430,4 +454,57 @@ def test_gather_evidence_records_the_kept_half_of_the_source_metric_pair(
     assert after > before, (
         "gather_evidence did not move chemclaw_evidence_source_kept_total — the metric has no "
         "producer on its one production path"
+    )
+
+
+def test_a_share_document_s_wikilinks_do_not_reach_the_model_as_graph_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`[[playbook-degassing]]` in a share document is not a reference to a knowledge note.
+
+    Content reaches the model framed as evidence to cite, which closes delimiter forgery and says
+    nothing about *link semantics*: `[[…]]` is this repository's citation syntax, and a share
+    document is written by whoever wrote it. Measured before the fix, the envelope carried
+    `SOP: degas per [[playbook-degassing]] and see [[precursor-of:compound-x]].` verbatim, so a
+    file on a mounted drive could name a note that does not exist, or a different note that does,
+    and the model reads it as this system's own citation.
+
+    The report renderer has stripped these since `harness._as_evidence` was written, and the
+    argument there is the same one: "a share or warehouse document is written by whoever wrote it;
+    the report's citations must come from the report". The note-backed retrievers strip in
+    `retrievers._excerpt`, and `_excerpt`'s own docstring says why that was never the whole
+    guarantee — the share and warehouse retrievers build content from raw document text and never
+    reach it. This is that guarantee on the conversational path, through the same one stripper.
+    """
+    from chemclaw.ingest.documents.binding import load_binding
+    from chemclaw.ingest.documents.index import InMemoryDocumentIndex
+    from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
+    from chemclaw.ingest.documents.sync import sync_share
+
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path / "empty"))
+    mount = tmp_path / "share" / "Docs"
+    mount.mkdir(parents=True)
+    (mount / "sop.md").write_text(
+        "Degas per [[playbook-degassing]] and see [[precursor-of:compound-x]] for the yield.",
+        encoding="utf-8",
+    )
+    binding = {
+        "mount": str(tmp_path / "share"),
+        "roots": [{"path": "Docs"}],
+        "extensions": [".md"],
+        "public": True,
+    }
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share("sharedrive", load_binding(binding), index))
+    share = ShareDocumentRetriever(binding=binding, name="sharedrive", index=index)
+    monkeypatch.setattr(research_tools, "_text_retrievers", lambda: [share])
+
+    chunks = asyncio.run(gather_evidence("yield")).chunks
+
+    assert chunks, "sanity: the share answered"
+    body = "\n".join(chunk.content for chunk in chunks)
+    assert "[[" not in body, f"a share document's wikilinks reached the model verbatim: {body}"
+    assert "playbook-degassing" in body, "the target is kept as prose, not deleted"
+    assert "compound-x" in body and "precursor-of:compound-x" not in body, (
+        "a typed edge reduces to its target, as `strip_links` does everywhere else"
     )

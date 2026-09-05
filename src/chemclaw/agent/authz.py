@@ -272,6 +272,19 @@ def writes_durable_memory(name: str, arguments: Mapping[str, Any]) -> bool:
     those name a path too; treating an unreadable argument as the ungated case is how a gate
     becomes bypassable by malformed input.
 
+    **`write_file` is deliberately not in `DEFAULT_WRITE_TOOL_GATES`, and that has been weighed.**
+    A durable memory write is therefore open to any authenticated user under the shipped
+    `tool_authz_default="allow"` — which reads alarming beside `propose_knowledge_note` sitting
+    behind a privileged role, and is not the same question. Three things bound it, and it is
+    recorded here so the next reviewer weighs the same three rather than re-raising the shape:
+    `scratchpad.memory_namespace` scopes the store per actor, so what one user writes is not a
+    thing another user can read or overwrite; this predicate puts the write behind the plan gate,
+    which the shipped chart runs (`harness_enabled=true`, `plan_only`); and a memory is prose the
+    model wrote for its own later turns, not a claim entering the knowledge graph — the thing
+    `DEFAULT_WRITE_TOOL_GATES` exists to close by default. Adding the *name* would take a turn its
+    own `/scratch/` notepad as well, since one name serves both roots, which is exactly what this
+    function was written to avoid.
+
     Args:
         name: The tool being called.
         arguments: That call's arguments, as the model supplied them.

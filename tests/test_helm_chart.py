@@ -380,8 +380,16 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     through-ninth kind, arriving with the `rxnpredict` bundle that made `Chemclaw3-mcp`'s
     reaction/condition predictors addressable from this release at all. Its manifest names the
     variable with `token_env`, `_EnvBearerAuth` reads it per request, and unset means every
-    prediction raises `MissingConnectorCredential` rather than degrading — the same fail-closed
-    direction, and the same operator obligation, as `chem` and `safety`.
+    prediction raises `MissingConnectorCredential` inside the handshake — the same operator
+    obligation as `chem` and `safety`.
+
+    **"Rather than degrading" is what that sentence used to say, and it was false.** The refusal is
+    raised inside `session.initialize()`, so `transport.absorb_connect_failure` catches it and the
+    bundle simply contributes no tools: fail-closed at the call, degraded at the turn. What changed
+    is that the warning now names the variable instead of rendering the wrapping `ExceptionGroup`
+    (`connectors/transport.describe_failure`), which is the half that made this diagnosable. The
+    *backend* hops (`core/mcp_session.bearer_from_env`) do fail closed outright, and did not before
+    — they sent no `Authorization` header at all.
 
     Both maps are asserted, because "which secrets does this chart name" is one question and
     splitting the answer across two values is exactly how a key comes to be in neither.

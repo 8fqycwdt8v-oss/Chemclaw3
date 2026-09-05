@@ -1052,7 +1052,10 @@ def test_the_shipped_driver_satisfies_the_shipped_sink() -> None:
     from chemclaw.ingest.eln.warehouse.driver import Warehouse
     from chemclaw.publish.drivers.postgres import PostgresWarehouse
 
-    driver = PostgresWarehouse(dsn="postgresql://unused/never-connected")
+    # Loopback, because the plaintext guard is no longer gated on `entra_required` — a sink is
+    # somebody else's store and is where computed chemistry and a password leave this deployment,
+    # so a non-loopback DSN now states its `sslmode`. Nothing here connects either way.
+    driver = PostgresWarehouse(dsn="postgresql://127.0.0.1/never-connected")
     assert isinstance(driver, Warehouse), (
         "the shipped Postgres driver fails the shipped sink's own runtime check; "
         f"missing: {sorted(set(dir(Warehouse)) - set(dir(driver)) - {'_is_runtime_protocol'})}"

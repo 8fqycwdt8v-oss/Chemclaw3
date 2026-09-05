@@ -30,7 +30,6 @@ from chemclaw.durable.effect_ledger import (
     begin_effect,
     get_effect,
     settle_effect,
-    unsettled,
 )
 from tests.pg import migrated_db_or_skip
 
@@ -97,7 +96,10 @@ def test_the_ledger_records_the_attempt_before_it_is_made() -> None:
 
     This system may have filed the deviation and lost the acknowledgement. A ledger that recorded
     only successes would answer "nothing happened" for exactly the case an operator most needs to
-    investigate — which is why `unsettled` has an index of its own.
+    investigate — which is why `state = 'attempting'` has a partial index of its own
+    (`effects_unsettled_idx`). Asserted here against that predicate rather than against a Python
+    reader: the `unsettled()` helper this file used to call had no caller in `src/` and was deleted
+    for it, and the *invariant* is the row's state, not a function.
     """
 
     async def _run() -> None:
@@ -117,8 +119,6 @@ def test_the_ledger_records_the_attempt_before_it_is_made() -> None:
         )
         await begin_effect(record)
 
-        open_now = {row.effect_id for row in await unsettled()}
-        assert "eff-crash" in open_now
         stored = await get_effect("eff-crash")
         assert stored is not None and stored.state == "attempting"
 
@@ -126,7 +126,6 @@ def test_the_ledger_records_the_attempt_before_it_is_made() -> None:
         settled = await get_effect("eff-crash")
         assert settled is not None
         assert (settled.state, settled.external_ref) == ("applied", "DEV-2291")
-        assert "eff-crash" not in {row.effect_id for row in await unsettled()}
 
     asyncio.run(_run())
 
@@ -241,8 +240,8 @@ def test_a_failure_after_the_change_landed_cannot_rewrite_the_applied_row() -> N
     whose `except BaseException` settles `failed`. So a `ValidationError` out of the note write, or
     the documented cancellation path, arrived at the ledger as "this did not happen" about a
     deviation standing in somebody's QMS — and an operator reading the only record of what this
-    system changed outside itself would file it a second time. `unsettled()` could not surface it
-    either, because that reads `attempting`.
+    system changed outside itself would file it a second time. The unsettled query could not
+    surface it either, because that reads `attempting`.
 
     Asserted as the *second* settle being refused rather than as the first succeeding, because the
     first always worked; it was the overwrite that lied.

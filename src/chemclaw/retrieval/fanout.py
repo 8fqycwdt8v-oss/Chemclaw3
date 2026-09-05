@@ -40,7 +40,6 @@ the index of the source it ran, and the fan-in restores that order before return
 import logging
 import operator
 import time
-from collections import Counter
 from collections.abc import Iterable
 from typing import Annotated, Any
 
@@ -174,8 +173,10 @@ def _record_seconds(name: str, seconds: float) -> None:
     )
 
 
-def record_kept_chunks(kept: Iterable[EvidenceChunk], asked: Iterable[str]) -> None:
-    """Count the chunks that **survived** the merge and both caps, per source.
+def record_kept_chunks(
+    kept: Iterable[EvidenceChunk], found: Iterable[tuple[str, list[EvidenceChunk]]]
+) -> None:
+    """Count how much of what each source **found** reached the answer, per source.
 
     `chemclaw_evidence_source_chunks_total` counts what a retriever *handed over* — `EvidenceSweep`
     says so in as many words ("Counts are pre-merge") — which is measured before RRF or the
@@ -188,24 +189,44 @@ def record_kept_chunks(kept: Iterable[EvidenceChunk], asked: Iterable[str]) -> N
     The alert is the ratio `kept / chunks` going to zero for one source, which is that ADR's table
     expressed as a number a dashboard can hold.
 
+    **A chunk's `retriever` field is the wrong thing to count it by, and counting it that way made
+    this alert cry wolf.** Both merges keep one chunk per note, attributed to the *first* list that
+    found it — so a leg whose every find some earlier leg also found survives with a `retriever`
+    label that is never its own. Measured over 20 queries on the committed 38-note corpus with
+    `graph,vector,lexical`: in `hybrid` mode the lexical leg read **0.18** kept/found and hit a
+    flat zero on **6 of the 15 queries it answered at all**, while contributing real chunks to
+    every one of them. That is the normal state of any leg whose notes an earlier leg also finds,
+    and it is indistinguishable from the state the alert exists to fire on — so the alert would
+    have been switched off long before `D-2026-08-01` recurred.
+
+    So a source is credited when a chunk it found survives, **whoever the merge attributed it to**:
+    membership is by `source_note_id`, which is the unit both merges dedup down to. On the same
+    corpus that reads 1.00 for all three legs in both modes, because nothing there is starved —
+    and it still goes to zero for a leg whose notes are all cut by the budget, which is the
+    genuine starvation and the only thing left that can produce a zero.
+
+    **The consequence, stated because it is a real change to what the number means:** these
+    per-source counts no longer partition `kept`. Two legs that both found a surviving note are
+    both credited for it, so their sum can exceed the number of chunks the sweep returned. The
+    series answers "how much of what this leg found reached the answer", which is the question the
+    ratio was always read as asking; it does not answer "how did the answer divide among the legs",
+    and it never honestly could, because a deduped note came from more than one leg.
+
     **Every asked source is seeded at zero**, and that is a deliberate exception to this registry's
     rule against invented zero series. It is not invented: a source that was asked and kept nothing
     is an *observation*, and without the seeded series the ratio has no denominator at exactly the
     moment it matters — a starved leg would be absent from the metric rather than reading zero.
+    Passing what each source found rather than only its name is what carries that seed now: a
+    source that found nothing appears here with an empty list and books its zero.
 
     Args:
         kept: The chunks that reached the caller, after merging and both budget caps.
-        asked: Every source name this sweep asked, so a starved one is present as a zero.
+        found: `(source name, that source's pre-merge hits)` for every source this sweep asked, in
+            any order. A source that found nothing must still appear, so its zero is recorded.
     """
-    surviving: Counter[str] = Counter(chunk.retriever for chunk in kept)
-    named = set(asked)
-    for name in named:
-        _record_kept(name, surviving.get(name, 0))
-    # A chunk whose `retriever` is not among the asked names would otherwise be dropped silently;
-    # counting it keeps the two series comparable rather than quietly under-reporting the numerator.
-    for name in surviving:
-        if name not in named:
-            _record_kept(name, surviving[name])
+    surviving = {chunk.source_note_id for chunk in kept}
+    for name, hits in found:
+        _record_kept(name, sum(1 for hit in hits if hit.source_note_id in surviving))
 
 
 def _record_kept(name: str, count: int) -> None:

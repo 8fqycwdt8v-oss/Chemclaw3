@@ -80,18 +80,29 @@ class SqlResultSink:
         self._schema = str(self._connection_binding.get("schema") or "")
         self._warehouse: Warehouse | None = None
         self._columns: dict[str, set[str]] | None = None
+        # **The refusal is cached beside the answer**, because the probe is one round trip either
+        # way and only the success was remembered. A target missing a table raised before
+        # `self._columns` was assigned, and the drain's per-record replay — the right handling for
+        # a refusal about *one* record, and this one is about all of them — then re-probed
+        # `information_schema` once per record: measured, **16 round trips for 5 queued screens**
+        # (15 records), on every one of the attempts the row used to be given. Scoped to the
+        # sink's lifetime like the answer, which is one drain pass, so a DBA applying the DDL is
+        # picked up on the next pass rather than the next restart.
+        self._refusal = ""
 
     async def aclose(self) -> None:
         """Close the held connection and forget the probed schema.
 
         The drain builds a sink per run, so without this each pass leaked one connection — see
-        `PostgresWarehouse.aclose`. The cached column set goes with it because the two are scoped
-        together: the probe is cached for the sink's lifetime precisely so a site that applies a
-        migration is picked up on the next pass rather than the next restart.
+        `PostgresWarehouse.aclose`. The cached column set — and the cached *refusal* — go with it
+        because the three are scoped together: the probe is cached for the sink's lifetime
+        precisely so a site that applies a migration is picked up on the next pass rather than the
+        next restart.
         """
         warehouse = self._warehouse
         self._warehouse = None
         self._columns = None
+        self._refusal = ""
         closer = getattr(warehouse, "aclose", None)
         if closer is not None:
             # Not every `Warehouse` holds something to close — the Protocol does not require it of
@@ -119,6 +130,8 @@ class SqlResultSink:
         """
         if self._columns is not None:
             return self._columns
+        if self._refusal:
+            raise SinkRejectedError(self._refusal)
         # **Qualified by the same schema the writes resolve through.** The statements this class
         # builds name no schema and are resolved by the connection's `search_path`, so a probe that
         # asked by table *name* alone was answering about a different table the moment the target
@@ -163,10 +176,11 @@ class SqlResultSink:
                 found.setdefault(table, set()).add(column)
         missing = [table for table in TABLE_ORDER if table not in found]
         if missing:
-            raise SinkRejectedError(
+            self._refusal = (
                 f"result sink {self._name!r}: the target has no {', '.join(missing)}. "
                 "Run `python -m chemclaw.cli.sink_schema` and apply the printed DDL."
             )
+            raise SinkRejectedError(self._refusal)
         self._columns = found
         return found
 

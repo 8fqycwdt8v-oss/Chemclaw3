@@ -598,18 +598,26 @@ _COUNTERS: dict[str, str] = {
     # `science/calc/store.py` has promised this counter to "the metrics layer (Phase 2b)" since it
     # was written. Until now the only way to see the cache working was DEBUG on a hot path.
     "chemclaw_calc_cache_total": (
-        "Calculation-cache lookups, by outcome (hit / shared / miss) — `shared` is a concurrent "
-        "miss on one key that `cached_compute` single-flighted onto another caller's computation."
+        "Calculation-cache lookups, by outcome (hit / shared / miss / unstored) — `shared` is a "
+        "concurrent miss on one key that `cached_compute` single-flighted onto another caller's "
+        "computation, and `unstored` is a miss whose result was computed and returned but could "
+        "not be written, so it does not partition with the other three: the call was already "
+        "counted `miss` at lookup and is counted again here when the persist failed."
     ),
     # --- ingest and retrieval ------------------------------------------------------------------
     "chemclaw_ingest_records_total": (
         "Records seen by an ingest pass, by source and outcome (ingested / rejected / skipped)."
     ),
     "chemclaw_evidence_source_kept_total": (
-        "Chunks from each source that survived merge and the evidence budget. Read against "
-        "`chemclaw_evidence_source_chunks_total`, which counts what a leg *handed over* before "
+        "Chunks each source *found* that survived merge and the evidence budget, credited to that "
+        "source whichever leg the merge attributed the surviving chunk to. Read against "
+        "`chemclaw_evidence_source_chunks_total`, which counts what a leg handed over before "
         "RRF and the cap — so a leg contributing 30 and surviving 0, which is exactly the state "
-        "D-2026-08-01 was written about, still read as healthy on the pre-merge counter alone."
+        "D-2026-08-01 was written about, still read as healthy on the pre-merge counter alone. "
+        "Counting by the surviving chunk's own `retriever` label instead made the ratio read 0.18 "
+        "for a healthy lexical leg in hybrid mode, because both merges keep one chunk per note "
+        "attributed to the first leg that found it; these counts therefore do not partition the "
+        "kept chunks and may sum to more than the sweep returned."
     ),
     "chemclaw_vector_unresolved_points_total": (
         "Ranked points an external vector store returned that no `document_chunks` row could "

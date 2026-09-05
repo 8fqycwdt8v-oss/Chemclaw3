@@ -228,6 +228,22 @@ def test_the_sink_gate_checks_the_block_against_the_driver_and_its_env_names() -
 
     assert _driver_problems(_manifest(password_env="RESULTS_DB_PASSWORD")) == []
 
+    # **The other half of the same rule, and this gate could not see it.** `check_env_name` guards
+    # a key that *already* ends in `_env`; every other key was handed to the driver verbatim, so
+    # `password: hunter2` — the realistic mistake, because that is where a password goes in every
+    # other tool — validated clean, went unregistered for log redaction, and sat in a repository.
+    # The leak path downstream is clean; the harm is the secret being in a file under review.
+    inline = _driver_problems(_manifest(password="hunter2"))
+    assert len(inline) == 1 and "password_env" in inline[0], inline
+    embedded = _driver_problems(
+        _manifest(dsn="postgresql://chemclaw:hunter2@results.internal/chemclaw_results")
+    )
+    assert len(embedded) == 1 and "inline" in embedded[0], embedded
+    plain = _driver_problems(_manifest(dsn="postgresql://results.internal/chemclaw_results"))
+    assert plain == [], (
+        "a connection string with no credential in it is how one is normally written"
+    )
+
     pasted = _driver_problems(_manifest(password_env="hunter2"))
     assert pasted and "NAME of an environment variable" in pasted[0], pasted
 

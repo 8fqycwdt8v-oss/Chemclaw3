@@ -100,12 +100,24 @@ class McpConnectFailed(Exception):
 
 
 class McpCredentialRefused(Exception):
-    """The server was reached and refused this client's credential; `status` is 401 or 403."""
+    """This client cannot present a credential the server accepts, so nothing ran.
 
-    def __init__(self, status: int) -> None:
-        """Record the refusing status so the caller can name it in an operator-facing message."""
-        super().__init__(f"HTTP {status}")
+    Two shapes, one classification, because what a caller must do about them is identical: neither
+    comes back on its own, so a durable job must not spend `activity_max_attempts` rediscovering it.
+
+    * `sent=True` — the server was reached and refused what we sent; `status` is its 401 or 403.
+    * `sent=False` — there was nothing to send. The declared `token_env` is unset or empty, so the
+      request was refused here rather than made anonymously (`open_session`). `status` stays 401
+      because that is what the far side would have answered, and `reason` is the sentence that
+      names the variable — the thing a 401 from the far side could never say.
+    """
+
+    def __init__(self, status: int, *, sent: bool = True, reason: str = "") -> None:
+        """Record the status, whether a credential was sent, and the operator-facing reason."""
+        super().__init__(reason or f"HTTP {status}")
         self.status = status
+        self.sent = sent
+        self.reason = reason or f"HTTP {status}"
 
 
 class McpRequestRefused(Exception):
@@ -250,15 +262,44 @@ async def _ask_server_to_cancel(session: ClientSession, request_id: int, send_re
         )
 
 
-def bearer_from_env(variable: str) -> str | None:
-    """The bearer held in `variable`, or `None` when it is unset or empty.
+def bearer_from_env(variable: str) -> str:
+    """The bearer held in `variable`, or refuse the connection naming the variable.
 
-    Unset is not an error here, and the reason is that the server decides: a development server
-    started without a credential accepts an unauthenticated call, and refusing to send one would
-    make this module reject a request the server would have served. A server that *does* enforce
-    one answers 401, which surfaces as `McpCredentialRefused`.
+    **This used to return `None` on an unset variable and send no `Authorization` header at all**,
+    on the reasoning that the server decides: a development server started without a credential
+    would accept an anonymous call, and refusing would reject a request that would have been
+    served. Three things make that the wrong trade here.
+
+    It is not what the rest of the system does. A *connector's* hop fails closed on exactly this
+    condition (`connectors.identity._EnvBearerAuth` raises `MissingConnectorCredential`), and these
+    are the same trust boundary reached by two clients; an asymmetry there is a deployment
+    believing one hop is authenticated when it is not.
+
+    It is not what the deployment believes. `deploy/helm/chemclaw/values.yaml` documents
+    `calcToken` as "unset means `MissingConnectorCredential` on the very first call ... rather than
+    a degraded one", which is true of every bundle that reads it through `_EnvBearerAuth` and was
+    never true of this path.
+
+    And it made the resulting failure misdescribe itself.
+    `D-2026-08-28-the-durable-half-has-a-backend-too` records the operator-visible error from
+    exactly this state: "it does not accept the bearer taken from CHEMCLAW_CALC_TOKEN" — while no
+    bearer had been taken or sent, because the variable was unset. The far side's 401 cannot
+    distinguish "wrong token" from "no token", and only this side knows which.
+
+    Raises:
+        McpCredentialRefused: with `sent=False` and a reason naming the variable.
     """
-    return os.environ.get(variable) or None
+    token = os.environ.get(variable)
+    if not token:
+        raise McpCredentialRefused(
+            401,
+            sent=False,
+            reason=(
+                f"${variable} is unset or empty, so this client has no bearer to present and the "
+                "request was refused before it was made. Mount that secret."
+            ),
+        )
+    return token
 
 
 def short_connect_client(
@@ -376,13 +417,20 @@ async def open_session(
     other.
 
     Raises `McpCredentialRefused` or `McpConnectFailed` when the connection cannot be established.
+    The first covers both "the server refused what we sent" and "there was nothing to send" — an
+    unset `token_env` is refused here, before a socket is opened, because sending an anonymous
+    request instead is how a deployment comes to record a credential-gated hop that is not one
+    (`bearer_from_env`).
     Anything raised inside the caller's `async with` body passes through **untouched** — that is
     what the `connected` flag is for, and it is not a nicety: relabelling those was a live defect,
     where a Postgres outage inside the body was reported to the chemist as "the calculation service
     is not answering" and, worse, was reclassified from bad data into a retryable outage.
     """
-    token = bearer_from_env(token_env)
-    headers = {"Authorization": f"Bearer {token}"} if token else None
+    # Outside the `try` below deliberately: that block reclassifies anything raised before the
+    # connection is established as `McpConnectFailed` ("the service is not answering"), which is a
+    # *retryable* outage — and an unset secret is the opposite of transient. Refusing here keeps the
+    # non-retryable classification the caller's error vocabulary already gives a refused credential.
+    headers = {"Authorization": f"Bearer {bearer_from_env(token_env)}"}
     connected = False
     try:
         async with streamablehttp_client(

@@ -49,4 +49,15 @@ config:
     port: 5432
     database: chemclaw_results
     schema: public
+    # **The transport, stated rather than left to libpq.** Its default is `sslmode=prefer`: it
+    # tries TLS, silently falls back to cleartext when the server does not offer it, and verifies
+    # no certificate when it does. A published record is confidential chemistry and this
+    # connection carries the sink's password, so a non-loopback binding that does not require TLS
+    # is refused outright — whatever `entra_required` says, because that is off by default and a
+    # results store is somebody else's database.
+    #
+    # `verify-full` also needs `sslrootcert:` pointing at the CA that signed the results database,
+    # which a deployment adds when it mounts its own copy of this folder. On a network where the
+    # site accepts an unverified peer, `require` is the weaker value this guard still permits.
+    sslmode: verify-full
     query_timeout_seconds: 60

@@ -59,6 +59,7 @@ from chemclaw.connectors.reachability import recently_unreachable, record_reacha
 from chemclaw.core.config import settings
 from chemclaw.core.mcp_session import cancel_on_timeout
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.metrics_bridge import degraded
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,31 @@ def transport_failure(exc: BaseException) -> bool:
     return module.startswith(("httpx", "anyio"))
 
 
+def describe_failure(exc: BaseException) -> str:
+    """Render `exc` as the cause an operator can act on, seeing through an `ExceptionGroup`.
+
+    **A `TaskGroup`'s wrapper is not a diagnosis, and rendering it as one hid a whole class of
+    configuration fault.** `create_session` opens the MCP client inside an `anyio` task group, so
+    everything a handshake raises arrives wrapped: `type(exc).__name__` is `ExceptionGroup` and
+    `str(exc)` is "unhandled errors in a TaskGroup (1 sub-exception)". Measured against a real
+    connector with its bearer variable unset, the whole of what an operator saw was
+
+        WARNING connector calc is unreachable (ExceptionGroup: unhandled errors in a TaskGroup
+        (1 sub-exception)); its tools are unavailable this turn
+
+    while the sub-exception was `MissingConnectorCredential` carrying the *name of the variable to
+    set*. Two docstrings promised that error would be visible; the wrapper is where it went.
+
+    Flattened recursively because a group may nest, and every leaf is rendered rather than the
+    first: a handshake that failed for two reasons has two reasons, and picking one is how the
+    interesting one gets dropped. An empty group — which anyio does not produce but the type
+    permits — falls back to the group itself rather than to an empty string.
+    """
+    if isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+        return "; ".join(describe_failure(member) for member in exc.exceptions)
+    return f"{type(exc).__name__}: {exc}"
+
+
 def absorb_connect_failure(connector: str, exc: BaseException) -> None:
     """Treat `exc` as "this connector is absent this turn" — unless the caller cancelled us.
 
@@ -94,6 +120,10 @@ def absorb_connect_failure(connector: str, exc: BaseException) -> None:
     failure family is wide (a refused TCP connection, a DNS miss, a TLS error, a timeout, an MCP
     `ToolException`, an `anyio` cancel-scope error from a half-finished handshake) and enumerating
     it means the next unlisted member silently restores the fatal behaviour.
+
+    **What it says is the cause, not the wrapper** (`describe_failure`). Absorbing broadly is only
+    defensible if the line left behind is diagnosable, and for everything raised inside the MCP
+    client's task group it was not.
 
     Args:
         connector: The bundle's name, for the log line an operator reads.
@@ -106,10 +136,9 @@ def absorb_connect_failure(connector: str, exc: BaseException) -> None:
     if isinstance(exc, asyncio.CancelledError) and _is_really_cancelled():
         raise exc
     logger.warning(
-        "connector %s is unreachable (%s: %s); its tools are unavailable this turn",
+        "connector %s is unreachable (%s); its tools are unavailable this turn",
         connector,
-        type(exc).__name__,
-        exc,
+        describe_failure(exc),
     )
 
 
@@ -309,7 +338,11 @@ class HeldConnectorSession:
                 # with nobody holding the answer (`core.mcp_session.cancel_on_timeout`).
                 cancel_on_timeout(session)
                 self._tools = _stamped(
-                    _allowed(await load_mcp_tools(session), self._spec.allowed_tools),
+                    _allowed(
+                        await load_mcp_tools(session),
+                        self._spec.allowed_tools,
+                        self._spec.name,
+                    ),
                     connector=self._spec.name,
                     revision=handshake.serverInfo.version,
                 )
@@ -322,16 +355,55 @@ class HeldConnectorSession:
             self._opened.set()
 
 
-def _allowed(tools: list[BaseTool], allowed: tuple[str, ...]) -> list[BaseTool]:
-    """Keep only the tools a connector's allow-list names.
+def _allowed(tools: list[BaseTool], allowed: tuple[str, ...], connector: str) -> list[BaseTool]:
+    """Keep only the tools a connector's allow-list names, saying so when the server is short.
 
     `load_mcp_tools` returns whatever the server advertises, so the allow-list has to be applied
     here or a profile's narrowing would stop at the process boundary. There is no "no allow-list"
     case to fall through: a manifest may not declare an empty `tools` list, so what a server
     advertises beyond the declaration is dropped rather than bound.
+
+    **A declared tool the server no longer serves is a phantom capability, and this is the only
+    place in the process that can see one.** The intersection is silent by construction — a name in
+    the manifest and not in the handshake simply produces no tool — while every *reader* of the
+    manifest goes on counting it: `advertised_tool_names()`, `state_changing_tool_names()`, the
+    plan gate's classification, `skill-validate`'s name resolution and the skills backend. Measured
+    against a probe serving `echo` behind a manifest declaring `["echo", "does_not_exist"]`: one
+    tool bound, zero log output, and `make connector-validate` exiting 0 — that gate imports the
+    bundle's own `server/` module, and a bundle we do not run ships none, so for exactly the
+    connectors most likely to drift it checks nothing and says so under `unverified_tool_surfaces`.
+    The visible symptom is a skill offered for a tool the model can never call.
+
+    **The connector stays usable, and that direction is argued rather than defaulted.** Marking it
+    unhealthy would be fail-closed, and fail-closed is right where a *classification* can be wrong
+    by omission — an unclassified state-changing tool slipping past the plan gate is the failure
+    `manifest._check_classification` refuses to load for. This drift is not that: a tool nobody can
+    call cannot be called around a gate, so the gate's partition is still sound over the surface
+    that exists. What the other choice would cost is real and asymmetric — one renamed tool on a
+    server would take *every* tool it still serves out of the turn, and out of every turn until an
+    operator noticed — which inverts this module's own trade one function above. So: keep what is
+    served, report the drift as a degradation with the count behind it, and leave the repair to the
+    manifest or the server. `Chemclaw3-mcp`'s `assert_manifest_matches` is where the same
+    disagreement is caught *before* a release, against its running server, which is the only place
+    it can be caught for a bundle this repository does not build.
     """
     keep = set(allowed)
-    return [tool for tool in tools if tool.name in keep]
+    bound = [tool for tool in tools if tool.name in keep]
+    missing = sorted(keep - {tool.name for tool in tools})
+    if missing:
+        degraded(
+            logger,
+            "connector_tool_drift",
+            "connector %s declares %d tool(s) its server does not advertise (%s); they are "
+            "counted by the plan gate, the skills backend and every validator, and cannot be "
+            "called. Its remaining %d tool(s) are bound as usual",
+            connector,
+            len(missing),
+            ", ".join(missing),
+            len(bound),
+            exc_info=False,
+        )
+    return bound
 
 
 #: What `_stamped` writes and `agent/audit.py::_served_by` reads. One constant, because a key

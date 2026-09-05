@@ -11,6 +11,7 @@ Bundles are written to `tmp_path` and `connectors_dir` is pointed at it, so noth
 on which connectors the repo happens to ship today.
 """
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -23,13 +24,20 @@ from chemclaw.connectors.registry import (
     declared_note_types,
     declared_relations,
     discovered,
+    discovery_problems,
     enabled,
     health_url,
     job_tools,
+    max_request_timeout_seconds,
+    mcp_connections,
+    request_timeout_seconds,
     server_tools_module,
     skills_dirs,
+    unusable_reason,
 )
-from chemclaw.core.tool_registry import _REGISTRY
+from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
+from chemclaw.core.tool_registry import _REGISTRY, registered_tool_names
 from chemclaw.kg.note import KNOWN_NOTE_TYPES, known_note_types
 from chemclaw.kg.relations import KNOWN_RELATIONS, known_relations
 
@@ -135,8 +143,11 @@ def test_a_manifest_name_must_match_its_directory(
     """Otherwise it is enabled under one name and looked up under another — the `SKILL.md` rule."""
     _bundle(tmp_path, "alpha", _http_manifest("beta"))
     _use(monkeypatch, tmp_path)
+    assert "alpha" not in discovered(), "a bundle that does not load is not a bundle"
+    assert "lives in directory" in discovery_problems()["alpha"]
+    # Loud where it is enabled, which with an empty enable-list is everywhere (`enabled`).
     with pytest.raises(ConnectorError, match="lives in directory"):
-        discovered()
+        enabled()
 
 
 def test_malformed_yaml_is_a_named_configuration_error(
@@ -145,8 +156,10 @@ def test_malformed_yaml_is_a_named_configuration_error(
     """A parse failure names the file, so it is fixable without reading a traceback."""
     _bundle(tmp_path, "alpha", "name: [unclosed\n")
     _use(monkeypatch, tmp_path)
+    assert "alpha" not in discovered()
+    assert "alpha/connector.yaml" in discovery_problems()["alpha"]
     with pytest.raises(ConnectorError, match="alpha/connector.yaml"):
-        discovered()
+        enabled()
 
 
 # The opening of `Chemclaw3-mcp`'s `manifests-internal/calc/connector.yaml`, copied verbatim down to
@@ -202,8 +215,9 @@ def test_a_backend_manifest_is_refused_rather_than_partially_adopted(
     """
     _bundle(tmp_path, "calc", _BACKEND_MANIFEST)
     _use(monkeypatch, tmp_path)
+    assert "calc" not in discovered(), "a backend manifest must not become a usable bundle"
     with pytest.raises(ConnectorError, match="mount") as raised:
-        discovered()
+        enabled()
     assert "calc/connector.yaml" in str(raised.value), "the error must name the file to fix"
 
 
@@ -398,6 +412,84 @@ def test_a_connector_cannot_claim_an_ambient_tool_name(
         job_tools()
 
 
+def test_a_connector_cannot_claim_a_template_launcher_name_on_the_first_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard that only worked from the *second* agent build of a process onward.
+
+    `_bound_by_this_process` read `registered_tools()`, and `_register_generated_tools` evaluates
+    `[*job_tools(), *template_tools()]` — so `job_tools()`, which is what runs the check, ran while
+    no `run_<template>` had been registered yet. Measured with this exact bundle: build #1 passed
+    and the connector tool *shadowed* the template launcher (`ToolNode` keys by name and connector
+    tools are appended last, so `run_tautomer_resolution` reached the MCP server instead of the
+    durable template), while build #2 onward raised and killed the turn. One configuration, two
+    outcomes, decided by how many agents the process had already built —
+    `python -m chemclaw.cli.validate_connectors` exited 0 either way, because a validator registers
+    no template launchers at all.
+
+    Driven with the registry *empty of launchers*, which is the state a first build is in: the
+    autouse fixture in `tests/conftest.py` leaves it so, and this test deliberately does not seed
+    it. That is what makes the assertion about ordering rather than about the check's wording.
+    """
+    _bundle(tmp_path, "alpha", _http_manifest("alpha", tools="run_tautomer_resolution"))
+    _use(monkeypatch, tmp_path)
+    assert "run_tautomer_resolution" not in registered_tool_names(), (
+        "this test is only evidence about the first build if nothing registered the launcher first"
+    )
+    with pytest.raises(ConnectorError, match="a template launcher"):
+        job_tools()
+
+
+def test_a_request_timeout_above_the_turn_deadline_is_lowered_to_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`gt=0` was the whole bound, so a bundle could outlive the turn it is called inside.
+
+    A tool call that outlives `request_timeout` returns a recoverable transport error the model can
+    answer around; one that outlives `service_turn_timeout_seconds` takes the whole conversation.
+    So the first must fire first, and a third-party manifest declaring 100000 got the opposite. The
+    clamp is `min(what the bundle asks, what the deployment funds)` — `JobSpec.timeout_seconds`'s
+    shape — and it is announced with both numbers rather than applied quietly.
+    """
+    _bundle(
+        tmp_path,
+        "alpha",
+        _http_manifest("alpha").replace(
+            "  health_url:", "  request_timeout: 100000\n  health_url:"
+        ),
+    )
+    _use(monkeypatch, tmp_path)
+    monkeypatch.setattr("chemclaw.core.config.settings.service_turn_timeout_seconds", 600.0)
+    (manifest,) = enabled()
+    assert isinstance(manifest.endpoint, HttpEndpoint)
+
+    with caplog.at_level(logging.WARNING, logger="chemclaw.connectors.registry"):
+        bound = request_timeout_seconds(manifest.endpoint, "alpha")
+    assert bound == max_request_timeout_seconds() == 595.0
+    assert "100000" in caplog.text and "600" in caplog.text
+
+
+def test_the_shipped_calc_bundle_is_bounded_by_the_turn_it_runs_inside(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The manifest this repository actually ships, at the number it actually declares.
+
+    `connectors/calc/connector.yaml` declares `request_timeout: 600` against a 600 s turn deadline
+    and says in a comment that "anything past the turn deadline is cancelled by the turn anyway" —
+    which is the race rather than a reason: at equal numbers *which* of the two fires is
+    undetermined, and if the turn wins the chemist loses the whole answer instead of one tool call.
+    The clamp settles it from this side without a manifest edit, so the bound that raises is always
+    the one that fires.
+    """
+    manifest = next(m for m in enabled() if m.name == "calc")
+    endpoint = manifest.endpoint
+    assert isinstance(endpoint, HttpEndpoint) and endpoint.request_timeout is not None
+    assert endpoint.request_timeout >= settings.service_turn_timeout_seconds, (
+        "if calc's declaration drops below the turn deadline this test is measuring nothing"
+    )
+    assert request_timeout_seconds(endpoint, "calc") < settings.service_turn_timeout_seconds
+
+
 def test_a_generated_launcher_is_not_read_back_as_a_collision_on_a_second_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -508,8 +600,9 @@ def test_a_malformed_vocabulary_name_is_refused_at_load(
     """
     _bundle(tmp_path, "alpha", _http_manifest("alpha") + "note_types:\n  - Assay Result\n")
     _use(monkeypatch, tmp_path)
+    assert "alpha" not in discovered()
     with pytest.raises(ConnectorError, match="lowercase hyphenated"):
-        discovered()
+        enabled()
 
 
 def test_a_bundle_with_no_server_package_has_no_server_module() -> None:
@@ -596,6 +689,15 @@ def test_a_stdio_manifest_does_not_launch_its_command_unless_the_deployment_allo
 
     No shipped bundle declares stdio. The transport stays reachable for local development and for
     its own tests, which say so explicitly — the default refuses.
+
+    **Refusing is not the same as raising, and this test used to pin the wrong one of the two.**
+    `connector_specs()` is called inline by `api/runner.py` before the first token of every turn,
+    and nothing in `api/` or `agent/` catches `ConnectorError` — so one such manifest landing on
+    `connectors_dir` (the documented PATH-style operator override) ended every conversation, while
+    the startup sweep called that bundle `unprobed` and `connectors_required` never saw it. The
+    refusal is unchanged; what it costs is now the bundle's own tools. `unusable_reason` is the one
+    predicate, and `test_a_bundle_this_deployment_cannot_open_is_unusable_not_unprobed` in
+    `test_connector_health.py` is the other half — the one that keeps degrading from being hiding.
     """
     _bundle(
         tmp_path,
@@ -606,8 +708,37 @@ def test_a_stdio_manifest_does_not_launch_its_command_unless_the_deployment_allo
     )
     _use(monkeypatch, tmp_path)
 
-    with pytest.raises(ConnectorError, match="disabled by default"):
-        connector_specs()
+    (manifest,) = enabled()
+    assert "disabled by default" in (unusable_reason(manifest.name, manifest.endpoint) or "")
+    assert connector_specs() == [], "the bundle costs its own tools"
 
     monkeypatch.setattr("chemclaw.core.config.settings.connector_stdio_enabled", True)
     assert [spec.name for spec in connector_specs()] == ["local"]
+
+
+def test_an_unusable_bundle_costs_its_tools_and_not_the_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One unopenable bundle must not take the openable ones with it, and must be announced.
+
+    The failing half of the same defect: `mcp_connections` built every spec in one comprehension,
+    so the raise did not merely cost `local` its tools — it cost `remote` its tools too, and the
+    turn with them. Both halves are asserted here because a fix that only stopped raising would
+    still be a capability that vanished with nothing said.
+    """
+    _bundle(tmp_path, "remote", _http_manifest("remote"))
+    _bundle(
+        tmp_path,
+        "local",
+        "name: local\ndescription: a local capability\n"
+        "endpoint:\n  transport: stdio\n  command: /bin/sh\n  args: ['-c', 'true']\n"
+        "  tools:\n    - compute\n  read_only:\n    - compute\n",
+    )
+    _use(monkeypatch, tmp_path)
+
+    before = METRICS.value("chemclaw_connectors_unreachable_total")
+    with caplog.at_level(logging.WARNING, logger="chemclaw.connectors.registry"):
+        specs = mcp_connections()
+    assert [spec.name for spec in specs] == ["remote"], "the healthy bundle still binds"
+    assert "local" in caplog.text and "CHEMCLAW_CONNECTOR_STDIO_ENABLED" in caplog.text
+    assert METRICS.value("chemclaw_connectors_unreachable_total") == before + 1

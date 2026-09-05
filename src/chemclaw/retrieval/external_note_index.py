@@ -137,8 +137,58 @@ class ExternalVectorNoteIndex(PostgresNoteIndex):
 
         A zero query vector is short-circuited here as well as in the store, because it has cosine 0
         to everything and the round trip would only confirm that.
+
+        **`embedding_key` is a predicate on this read too, and it is enforced against the
+        catalogue.** The base statement binds `embedding_key = %(key)s` for the reason its own
+        comment records: repointing `embedding_model` at another model of the same width raises
+        nothing at insert, and every stored vector then scores against the *new* model's query —
+        "cross-space garbage cited as evidence", with the citations resolving because the note ids
+        are real. This subclass namespaced the key it *stores* and the key the *rebuild* diffs on,
+        and left the read unfiltered; measured, a vector written under model A came back at 0.9939
+        after a switch to model B while pgvector returned nothing for the same corpus.
+
+        **Against the catalogue rather than as a store-side filter, and that is the safer half of
+        the fix.** `VectorPoint` carries an id, a vector and one group and deliberately no other
+        metadata (`chemclaw.retrieval.vectors.base` argues why), so there is no payload for a key
+        to live in — and
+        neither adapter has ever been run against its real server (`tests/test_vector_store.py`),
+        so a filter argument they both *accept* is not yet a filter either of them is known to
+        *apply*. `note_index` is where the key already lives, the lookup is `note_id = ANY(...)`
+        over at most `top_k` ids on the primary key, and a fake store cannot make it pass.
+
+        **The residual, stated rather than hidden: this filters after the cut, and the pgvector
+        statement filters before it.** So mid-re-embed, where some rows carry the live key and some
+        do not, this leg can return fewer than `top_k` where pgvector would return `top_k`. Both
+        return the same *set* of valid notes at the top; only the depth differs, the window is one
+        `reindex_notes` run, and `fanout._sweep` already reports a short dense leg honestly. The
+        pre-cut alternative is to send the store the eligible id set, which for an unscoped search
+        is the whole corpus on every query — a permanent cost to bound a transient shortfall.
         """
         if not any(query_embedding):
             return []
         matches = await self._store.search(self._collection, query_embedding, top_k, within)
-        return [IndexHit(note_id=match.id, score=match.score) for match in matches]
+        current = await self._embedded_under_current_key([match.id for match in matches])
+        return [
+            IndexHit(note_id=match.id, score=match.score)
+            for match in matches
+            if match.id in current
+        ]
+
+    async def _embedded_under_current_key(self, note_ids: list[str]) -> set[str]:
+        """Which of `note_ids` the catalogue records as embedded under the live configuration.
+
+        A note the catalogue does not know at all is left out by the same query, which is the right
+        answer for the orphaned point `retire_absent`'s ordering deliberately permits: a vector
+        whose row is gone is not evidence about anything.
+        """
+        if not note_ids:
+            return set()
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT note_id FROM note_index "
+                    "WHERE note_id = ANY(%(ids)s::text[]) AND embedding_key = %(key)s",
+                    {"ids": note_ids, "key": self._read_key()},
+                )
+                rows = await cur.fetchall()
+        return {row[0] for row in rows}

@@ -51,6 +51,45 @@ logger = logging.getLogger(__name__)
 # they share is that the secret is *named* here, never written.
 ENV_SUFFIX = "_env"
 
+# Key stems that name a credential, refused unless they carry `ENV_SUFFIX`.
+#
+# **The `_env` discipline was one-sided and that made it advisory.** `check_env_name` guards a key
+# that *already* ends in `_env`; every other key was passed to the driver verbatim, so
+# `password: hunter2` — or a `dsn:` with the password inline — was accepted by the loader, accepted
+# by `sink-validate` (which binds the driver's signature, not its values), unregistered for log
+# redaction, and committed to a repository. The leak path downstream is clean, and that is not the
+# point: the harm is a live credential in a file under review, in the one place this module's whole
+# docstring says a credential must never be.
+#
+# Matched on the stem rather than by substring, so a `password_env` passes (it names a variable)
+# and a `token_bucket_size` is not mistaken for one. `key` is deliberately absent: it is a column
+# name in half the bindings this seam attaches — `api_key` and `secret_key` are the credential
+# spellings and are here.
+_CREDENTIAL_KEYS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "auth",
+        "client_secret",
+        "credential",
+        "credentials",
+        "passwd",
+        "password",
+        "pwd",
+        "secret",
+        "secret_key",
+        "token",
+    }
+)
+
+# Connection strings, which carry a credential *inside* a value that also carries an address. A
+# `postgresql://user:hunter2@host/db` in a manifest is the same secret in the same file, wearing a
+# key nothing would flag. Only the `user:password@` form is refused — a bare `user@` names no
+# secret, and a DSN with no userinfo at all is the ordinary way to write one here.
+_DSN_KEYS = frozenset({"dsn", "uri", "url", "connection_string"})
+_INLINE_PASSWORD = re.compile(r"://[^/@\s:]+:[^/@\s]+@")
+
 # What an environment variable name looks like. Not a security boundary — an author determined to
 # paste a secret still can — but it catches the realistic mistake, which is filling in
 # `password_env: hunter2` because the field sits where a password goes in every other tool.
@@ -90,6 +129,51 @@ def check_env_name(key: str, value: str, *, error: type[Exception]) -> None:
         raise error(
             f"{key} holds the NAME of an environment variable (like DATABRICKS_TOKEN), "
             f"never its value; got {value!r}"
+        )
+
+
+def check_no_inline_credential(key: str, value: Any, *, error: type[Exception]) -> None:
+    """Raise if `key` carries a credential rather than naming the variable holding one.
+
+    The other half of `check_env_name`, and it did not exist. That function refuses a *value* under
+    a key that already ends in `_env`; nothing refused the key `password` itself, so the realistic
+    mistake — writing the secret where every other tool puts it — produced a working configuration
+    with a live credential in git, invisible to `sink-validate` and unregistered for redaction.
+
+    Credential-*named* keys only (`password`, `token`, `api_key`, …), because this runs on every
+    block that reaches a driver and not all of them come from a file: a `dsn:` legitimately carries
+    its own credentials, and this repository's own `postgres_dsn` is one. The file-only half —
+    a connection string with `user:password@` in it — is `check_no_inline_dsn_password`, called by
+    the manifest validators, where the value provably came from a manifest.
+    """
+    stem = key.lower()
+    if stem in _CREDENTIAL_KEYS:
+        raise error(
+            f"{key!r} carries a credential in the manifest. Rename it {key}{ENV_SUFFIX} and give "
+            "the NAME of an environment variable holding the value (like DATABRICKS_TOKEN), so "
+            "the secret is read at connect time and registered for log redaction rather than "
+            "committed to a repository."
+        )
+
+
+def check_no_inline_dsn_password(key: str, value: Any, *, error: type[Exception]) -> None:
+    """Raise if a manifest's connection string carries its password inline. Manifests only.
+
+    Separate from `check_no_inline_credential` because the two have different scopes and merging
+    them would be wrong in the direction that matters. A `dsn:` with `user:password@` in a *file*
+    is a secret in a repository; the identical string built at runtime from
+    `settings.postgres_dsn` is the ordinary way this system connects to its own database. So this
+    one is called by the validators, which only ever see manifests, and not by `connect_options`,
+    which sees both.
+
+    Only the `user:password@` form: a bare `user@` names no secret, and a DSN with no userinfo at
+    all is how one is normally written here.
+    """
+    if key.lower() in _DSN_KEYS and isinstance(value, str) and _INLINE_PASSWORD.search(value):
+        raise error(
+            f"{key!r} carries a password inline in its connection string. Move the credential to "
+            f"a password{ENV_SUFFIX} key naming an environment variable, or to a libpq passfile; "
+            "a connection string in a manifest is a secret in a repository."
         )
 
 
@@ -182,12 +266,17 @@ def connect_options(
     same failure, and letting the second through would reach the database as an anonymous login.
     An empty *name* is the same failure one level up and raises for the same reason — see
     `check_env_name`, which owns that rule so the manifest validators refuse it at load too.
+
+    **A key that is not `*_env` is checked too**, which it was not: every other key went to the
+    driver verbatim, so a credential written where a credential normally goes was accepted in
+    silence. `check_no_inline_credential` is that half.
     """
     options: dict[str, Any] = {}
     for key, value in connection.items():
         if key == "driver":
             continue
         if not key.endswith(ENV_SUFFIX):
+            check_no_inline_credential(key, value, error=error)
             options[key] = value
             continue
         variable = str(value or "")

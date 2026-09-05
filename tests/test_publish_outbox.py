@@ -11,6 +11,7 @@ Three properties, and each was a design decision rather than an implementation d
 """
 
 import asyncio
+import logging
 from typing import Any
 
 import psycopg
@@ -18,7 +19,14 @@ import pytest
 
 from chemclaw.core.config import settings
 from chemclaw.publish import outbox
-from chemclaw.publish.record import Conditions, ResultRecord, Subject, SubjectMember, TheoryLevel
+from chemclaw.publish.record import (
+    Conditions,
+    Publication,
+    ResultRecord,
+    Subject,
+    SubjectMember,
+    TheoryLevel,
+)
 from tests.pg import migrated_db_or_skip
 
 
@@ -324,7 +332,9 @@ def test_one_unreadable_document_does_not_retire_its_whole_batch(
             rows = {row[0]: (row[1], row[2]) for row in await cursor.fetchall()}
         assert rows["good-1"][0] == "delivered"
         assert rows["good-2"][0] == "delivered"
-        assert rows["poison"][0] == "pending", "one failed attempt, not yet retired"
+        # A stored document this release cannot parse parses identically on every retry, which
+        # the drain's own comment said while spending one attempt of eight on it. It retires now.
+        assert rows["poison"] == ("failed", 1)
 
     asyncio.run(_run())
 
@@ -441,7 +451,13 @@ def test_one_refused_record_does_not_retire_its_neighbours(
         assert rows == {
             "a-1": "delivered",
             "a-2": "delivered",
-            "poison": "pending",
+            # **Retired on the first answer, not on the eighth.** `publish/driver.py` says the
+            # split between its two exception classes "decides whether the outbox tries again";
+            # until it did, a `SinkRejectedError` — a sink that has *answered* about this content —
+            # spent all eight attempts on a fault that fails identically forever, two hours of the
+            # shipped fifteen-minute schedule before reaching the state it was destined for from
+            # the first pass. `--requeue` is how it comes back once the cause is fixed.
+            "poison": "failed",
             "z-1": "delivered",
         }, f"a row committed at the far end must never be booked failed; got {rows}"
 
@@ -605,5 +621,220 @@ def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
             assert await cursor.fetchone() == ("pending", 2), (
                 "the row must still be pending — this is the bound doing the work, not the state"
             )
+
+    asyncio.run(_run())
+
+
+def test_a_second_chemists_publication_is_not_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two chemists running the same calculation produce one record and **two** publications.
+
+    `record.py` states exactly that, and the shipped sink schema is built for it: the
+    `calculation_publication` primary key is `(calc_ref, tenant_id, session_id, job_id)` and
+    `calculation_publication_actor_idx` exists so a site can ask who ran what. The outbox's
+    `ON CONFLICT (sink, calc_ref, schema_version) DO NOTHING` used to drop the whole second row —
+    the document, and with it the second publication — so the sink learned about alice and never
+    about bob. Measured before the fix: `alice_rows=1 bob_rows=0`.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect("test_fixture") as conn:
+            await _reset(conn)
+
+        alice = Publication(actor="alice", session_id="s-alice")
+        bob = Publication(actor="bob", session_id="s-bob")
+        assert (
+            await outbox.enqueue(
+                [_record("shared-key").model_copy(update={"publications": [alice]})]
+            )
+            == 1
+        )
+        await outbox.enqueue([_record("shared-key").model_copy(update={"publications": [bob]})])
+
+        actors: set[str] = set()
+        for _, _, document in await outbox.claim("alpha", 10):
+            actors.update(publication["actor"] for publication in document.get("publications", []))
+        assert actors == {"alice", "bob"}, "both chemists' provenance must reach the sink"
+
+    asyncio.run(_run())
+
+
+def test_re_enqueueing_the_same_publication_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The idempotency the `ON CONFLICT` clause exists for, unchanged.
+
+    Three call sites write with no coordination, a retried Temporal activity must not double-queue,
+    and the backfill CLI must be re-runnable. Each of those replays the *same* publication, so the
+    identity that has to hold is "this calculation, for this sink, on behalf of this requester".
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect("test_fixture") as conn:
+            await _reset(conn)
+
+        record = _record("replayed").model_copy(
+            update={"publications": [Publication(actor="alice", session_id="s1", job_id="j1")]}
+        )
+        assert await outbox.enqueue([record]) == 1
+        assert await outbox.enqueue([record]) == 0, "a replay writes nothing"
+
+        async with outbox._connect("test_fixture") as conn:
+            cursor = await conn.execute(
+                "SELECT count(*), max(state) FROM result_publications WHERE calc_ref = 'replayed'"
+            )
+            assert await cursor.fetchone() == (1, "pending")
+
+    asyncio.run(_run())
+
+
+def test_a_payload_this_release_cannot_project_is_counted_and_named(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A shape no projector knows must not be dropped in silence.
+
+    A projector that *raises* increments `chemclaw_result_projection_failures_total`; a payload
+    kind that was never registered used to return 0 with a `logger.debug` line, so a new connector
+    job publishing nothing left every dashboard, alert and gauge reading normal. Both are the same
+    fault — this release cannot turn this payload into a record — which is exactly what that
+    counter's own declaration says it counts.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    _with_sink(monkeypatch, "alpha")
+    before = METRICS.value("chemclaw_result_projection_failures_total")
+    with caplog.at_level(logging.WARNING, logger="chemclaw.publish.outbox"):
+        written = asyncio.run(
+            outbox.enqueue_payload(
+                calc_ref="new@v1:a:b",
+                calc_type="newconnector.newjob",
+                payload={"x": 1},
+                payload_kind="BrandNewResult",
+            )
+        )
+    assert written == 0
+    assert METRICS.value("chemclaw_result_projection_failures_total") == before + 1
+    assert any("BrandNewResult" in record.getMessage() for record in caplog.records), (
+        "the unpublishable shape has to be named where an operator will see it"
+    )
+
+
+def test_an_aggregate_and_its_parts_are_claimed_in_the_order_they_were_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`enqueue` writes an aggregate and its parts in one transaction, so they share a timestamp.
+
+    `ORDER BY enqueued_at` alone is then not a total order, and Postgres does not promise a stable
+    relative order for tied rows across the separate statements that fetch consecutive batches —
+    the exact tie `publish/backfill.py` fixed with a `key` tiebreaker on its own walk. A part can
+    therefore be claimed in one pass and its aggregate in the next, which is a read-consistency gap
+    at the destination for as long as the two passes are apart.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect("test_fixture") as conn:
+            await _reset(conn)
+        await outbox.enqueue([_record("screen"), _record("screen#0"), _record("screen#1")])
+
+        async with outbox._connect("test_fixture") as conn:
+            cursor = await conn.execute(
+                "SELECT count(DISTINCT enqueued_at), count(*) FROM result_publications"
+            )
+            assert await cursor.fetchone() == (1, 3), "one transaction, one timestamp"
+
+        # One row per pass, settled before the next claim, which is what a `batch_size` smaller
+        # than the burst does. Which row each pass takes must be decided by the statement rather
+        # than by whatever the plan happens to return for tied keys.
+        seen: list[str] = []
+        for _ in range(3):
+            claimed = await outbox.claim("alpha", 1)
+            seen.extend(ref for _, ref, _ in claimed)
+            await outbox.mark_delivered([row_id for row_id, _, _ in claimed])
+        assert seen == ["screen", "screen#0", "screen#1"]
+        assert "ORDER BY enqueued_at, id" in outbox._CLAIM, (
+            "the order has to be total in the statement: with ties this common, a run that "
+            "happens to come back in insertion order is not evidence that the next one will"
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_drain_pass_empties_the_queue_rather_than_taking_one_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass is bounded by time, not by one batch — because one batch is a rate, not a bound.
+
+    At the shipped `result_publish_batch_size=100` and `result_publish_schedule_minutes=15`, one
+    batch per pass is **400 records/hour/sink**. Nothing on the production side holds a deployment
+    under that: `enqueue` never blocks, refuses or samples, and one solvent screen emits 1+N
+    records — so a backlog that grows faster than 400/hour never drains, and the only signal is an
+    oldest-pending age that rises exactly as it would if the drain had stopped altogether.
+
+    Measured at 250 queued rows with a batch size of 100: one pass delivered **100** before this
+    change and **250** after, in the same activity budget.
+    """
+    from chemclaw.durable import publish_results
+
+    class _Sink:
+        async def deliver(self, records: Any) -> None:
+            """Accepts everything; this test is about how much a pass claims."""
+
+        async def aclose(self) -> None:
+            """Holds nothing; present because `ResultSink` requires it of every sink."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect("test_fixture") as conn:
+            await _reset(conn)
+        await outbox.enqueue([_record(f"bulk-{index:03d}") for index in range(250)])
+
+        outcome = await publish_results._drain_one("alpha", _Sink(), 100)
+        assert outcome.delivered == 250, (
+            f"a pass must drain what is queued rather than 100 of it; delivered={outcome.delivered}"
+        )
+        assert await outbox.claim("alpha", 10) == []
+
+    asyncio.run(_run())
+
+
+def test_a_publication_merged_mid_delivery_is_not_marked_delivered_unsent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The race the publication merge would otherwise open, closed by `revision`.
+
+    `claim` commits before anything is delivered — a delivery may take the better part of a minute
+    and must not hold a row lock across it — so a second chemist's enqueue can merge a publication
+    into a row that is already in flight. Settling that row would drop the new publication
+    permanently and silently, which is the very defect the merge exists to fix arriving through the
+    back door.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect("test_fixture") as conn:
+            await _reset(conn)
+        await outbox.enqueue(
+            [_record("inflight").model_copy(update={"publications": [Publication(actor="alice")]})]
+        )
+
+        claimed = await outbox.claim("alpha", 10)
+        # Bob arrives while the pass is delivering what it claimed.
+        await outbox.enqueue(
+            [_record("inflight").model_copy(update={"publications": [Publication(actor="bob")]})]
+        )
+        assert await outbox.mark_delivered([row_id for row_id, _, _ in claimed]) == 0
+
+        again = await outbox.claim("alpha", 10)
+        assert len(again) == 1, "the row stays queued until the merged document has gone out"
+        actors = {row["actor"] for row in again[0][2]["publications"]}
+        assert actors == {"alice", "bob"}
+        assert await outbox.mark_delivered([row_id for row_id, _, _ in again]) == 1
 
     asyncio.run(_run())

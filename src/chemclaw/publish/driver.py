@@ -32,7 +32,12 @@ class SinkUnavailableError(ConnectionError):
     between its query error and an unreachable warehouse, for exactly this reason.
 
     So the distinction against `SinkRejectedError` is not descriptive: it decides whether the
-    outbox tries again.
+    outbox tries again — and for a while it decided nothing, because
+    `durable/publish_results._drain_batch` caught both families and called `outbox.mark_failed`
+    identically in each, so a refusal spent all `result_publish_max_attempts` on a fault that fails
+    identically forever. The decision is now made where it is taken:
+    `mark_failed(..., retryable=False)` on the refusal paths, which retires the row on its first
+    answer instead of two hours later.
     """
 
 

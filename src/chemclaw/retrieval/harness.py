@@ -20,6 +20,7 @@ from chemclaw.core.ids import stable_hash
 from chemclaw.kg.note import Note, require_note_slug, split_link, strip_links
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 from chemclaw.retrieval.fanout import sweep_sources
+from chemclaw.retrieval.merge import Truncation, merge_ranked_lists, within_budget
 
 # Each section declares which memory layer it draws on, so the report keeps evidenced history
 # (episodic) and transferred generalization (semantic) structurally apart, not just by prose.
@@ -45,11 +46,15 @@ class ReportRequest(BaseModel):
     # while `request_development_report` called `require_actor()` and discarded the result.
     #
     # Two things followed. An entitlement-gated source contributes nothing to the report, because
-    # `ShareDocumentRetriever._entitled()` correctly declines when no identity is set — and
-    # `gather_section` only concatenates, so an un-entitled source is indistinguishable from one
-    # with no matches and `retrieval_failed` stays False. The chemist gets a draft that reads as a
-    # complete sweep of every internal source. And the PR-gated draft is proposed unattributed, so
-    # it does not appear in the requester's own review queue.
+    # `ShareDocumentRetriever._entitled()` correctly declines when no identity is set — and at the
+    # time `gather_section` only concatenated, so an un-entitled source was indistinguishable from
+    # one with no matches and the chemist got a draft that read as a complete sweep of every
+    # internal source. That second half is closed twice over now and the sentence is kept in the
+    # past tense for that reason: the decline is a `RetrieverSkip`, `gather_section` records it in
+    # `SynthesizedSection.sources_skipped`, and `report_note` renders the source's own words above
+    # the section. Carrying the actor is still what makes the share *answer* rather than decline.
+    # And the PR-gated draft is proposed unattributed, so it does not appear in the requester's own
+    # review queue.
     #
     # `min_length=1`, matching `ConnectorJobInput.requested_by` and `TemplateRunInput.requested_by`.
     # An earlier version left it optional to keep "a scheduled report" expressible — but there is no
@@ -123,22 +128,48 @@ class SectionRequest(BaseModel):
 
 
 class SynthesizedSection(BaseModel):
-    """A section after retrieval: its cited evidence, and whether retrieval succeeded.
+    """A section after retrieval: its cited evidence, and how completely it was gathered.
 
     `retrieval_failed` distinguishes "retrieval errored (this section is incomplete)" from the
     ordinary "retrieval ran and found nothing" — a distinction a chemist signing the report at the
     PR-gate must see, since a durable report must never let a failed section masquerade as a
     genuinely empty one (F10-D2). It stays False on every success path.
+
+    **`sources_skipped` is the third fact, and it used to be folded into the second.** The sweep
+    below already separates "asked, found nothing" (an empty hit list), "could not ask" (`failed`)
+    and "would not ask, and said why" (`RetrieverSkip`) — `fanout.FanState` carries three channels
+    for exactly that reason. This model carried two, so a decline rendered as an outage: a chemist
+    was told retrieval had failed and to re-run, and the re-run declined again, identically.
     """
 
     heading: str
     memory_layer: str
     evidence: list[EvidenceChunk]
     retrieval_failed: bool = False
+    # Which budget cut this section's evidence, or `None` when nothing did — the same field and the
+    # same values `EvidenceSweep.truncated_by` carries, because a report section is now bounded by
+    # the same two settings a conversational sweep is. Rendered rather than kept internal: a cut
+    # this reviewer cannot see is a section that reads as the whole of what the corpus holds, which
+    # is the distinction `retrieval_failed` already exists to preserve one cause over.
+    #
+    # Defaulted, because this type crosses the durable boundary: a workflow history written before
+    # the field existed must still deserialize into a worker that has it.
+    truncated_by: Truncation = None
+    # Each source that declined, mapped to its own stated reason. Defaulted for the reason
+    # `truncated_by` is: this type crosses the durable boundary and a history written before the
+    # field existed must still deserialize.
+    sources_skipped: dict[str, str] = Field(default_factory=dict)
 
     @property
     def supported(self) -> bool:
-        """True iff retrieval succeeded and at least one evidence chunk backs this section."""
+        """True iff retrieval succeeded and at least one evidence chunk backs this section.
+
+        A *skip* does not unsupport a section, while a failure does. The asymmetry is the point:
+        a failure means the sweep could not see part of the corpus and a re-run might change the
+        answer, whereas a decline is a source stating that this question is not one it can answer —
+        re-running produces the identical decline. Holding a section unsupported on the second
+        would mark every filtered section of every report on a share-enabled deployment.
+        """
         return not self.retrieval_failed and bool(self.evidence)
 
 
@@ -195,22 +226,39 @@ async def gather_section(
     That is the honest reading of what the flag documents — a section a chemist signs must not let
     an incomplete sweep pass as a genuinely empty one — and it is strictly more informative than
     before, because the section is marked incomplete *and* keeps what was retrieved.
+
+    **The merge and both budgets are the conversational path's, and this path had neither.** The
+    line here was `[chunk for chunks in ranked_lists for chunk in chunks]` — a flat concatenation,
+    so a note any two legs found arrived twice and a note all three found arrived three times, with
+    nothing bounding the total. Measured on the committed 38-note corpus with `graph,vector,lexical`
+    and the query "palladium catalyst yield": **24 chunks over 12 distinct notes**, 7 of them
+    repeated, three of them three times with byte-identical content — and `report_note` rendered all
+    24 as bullets carrying 24 citations. That renderer's own docstring is the argument against it
+    ("a report is the one output where two agreeing-looking bullets are most likely to be read as
+    two independent confirmations"), and this is the PR-gated artifact a chemist signs. It scales as
+    legs x `retrieval_top_k`. `retrieval.merge` is the one implementation both paths now use.
     """
     ranked_lists, failed, skipped = await sweep_sources(
         [(retriever.name, retriever) for retriever in retrievers],
         section.query,
         section.filters,
     )
-    evidence = [chunk for chunks in ranked_lists for chunk in chunks]
-    # A skip counts as incompleteness here, deliberately: for the conversational sweep a declined
-    # source is an answer the model can relay, but a *report* is signed by a chemist, and a
-    # section swept without the share leg (an unentitled service actor, a filter the source
-    # cannot serve) is a section about less than the whole corpus, whatever the reason.
+    evidence, truncated_by = within_budget(merge_ranked_lists(ranked_lists))
+    # A skip travels as itself rather than as a failure. It used to be folded into
+    # `retrieval_failed` on the argument that a section swept without the share leg is a section
+    # about less than the whole corpus, whatever the reason — which is true, and is an argument for
+    # *showing* the gap rather than for calling it an outage. `ShareDocumentRetriever` declines
+    # whenever `note_type` is set, because a file on a share has no knowledge-graph note type, so
+    # every filtered section of every report on a share-enabled deployment rendered "_Some
+    # retrieval sources failed… re-run required_" — on the normal path, where a re-run declines
+    # again, identically, forever. `report_note` renders the decline with the source's own words.
     return SynthesizedSection(
         heading=section.heading,
         memory_layer=section.memory_layer,
         evidence=evidence,
-        retrieval_failed=bool(failed or skipped),
+        retrieval_failed=bool(failed),
+        truncated_by=truncated_by,
+        sources_skipped=skipped,
     )
 
 
@@ -323,6 +371,17 @@ def report_note(report: Report) -> Note:
     lines = [f"# {report.title}\n"]
     for section in report.sections:
         lines.append(f"## {section.heading} [layer: {section.memory_layer}]\n")
+        if section.sources_skipped:
+            # Before the failure branches and outside them, because two of those `continue`: a
+            # section that found nothing *because* the only source that could answer declined is
+            # exactly where the reviewer needs the reason, and that is the branch that would have
+            # swallowed it. The source's own words, for the reason `RetrieverSkip` carries them —
+            # "the share requires an entitled actor" is actionable and "a source was skipped" is
+            # not — and sorted, so two runs of one report render identically.
+            declined = "; ".join(
+                f"{name} — {reason}" for name, reason in sorted(section.sources_skipped.items())
+            )
+            lines.append(f"_Not every source was asked: {declined}._\n")
         if section.retrieval_failed and section.evidence:
             # A partially-failed section keeps what was retrieved. `retrieval_failed` is set by
             # *any* failed source, and `gather_section` was changed specifically so a dead share
@@ -343,6 +402,13 @@ def report_note(report: Report) -> Note:
         elif not section.supported:
             lines.append("_No supporting data found; section left unsupported._\n")
             continue
+        if section.truncated_by:
+            # Said before the bullets rather than after them, because the reader's question is
+            # whether this list is the whole of what was found, and they ask it while reading.
+            lines.append(
+                f"_More evidence was retrieved than this section can hold (cut by "
+                f"{section.truncated_by}); narrow the query to see the rest._\n"
+            )
         for chunk in section.evidence:
             provenance = [_citation(chunk.source_note_id), f"via {chunk.retriever}"]
             if chunk.created_by == "agent":

@@ -82,8 +82,21 @@ class BearerAuth(BaseModel):
 
     `token_env` names the variable rather than carrying the token, so no credential is ever
     written to a manifest in the repo. It is read per request, not at import, so a rotated
-    secret is picked up without a restart — and a missing variable fails the call with a clear
-    error instead of silently sending an empty `Authorization` header.
+    secret is picked up without a restart — and a missing variable refuses to send an
+    `Authorization` header at all rather than sending an empty one.
+
+    **What a missing variable actually does, because this paragraph used to promise the wrong
+    thing.** It said the call fails "with a clear error", and `identity._EnvBearerAuth` does raise
+    `MissingConnectorCredential` — inside `session.initialize()`, inside the MCP client's task
+    group, where `connectors.transport` absorbs it as an unreachable connector. So the bundle
+    *degrades*: its tools are absent for the turn, and until `describe_failure` unwrapped the
+    `ExceptionGroup` the operator's only line named neither the exception nor the variable.
+    Degrading is the right trade at the turn (`connectors.transport`'s own first paragraph), so
+    what changed is everything around it: the WARNING now names the cause,
+    `registry.unusable_reason` decides it from the environment before a socket is opened, and
+    `connectors.health` reports such a bundle `unusable` — which counts in
+    `chemclaw_connectors_unhealthy` and refuses startup under `connectors_required`. A deployment
+    that forgot the secret is told so at boot rather than by a chemist.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -112,6 +125,15 @@ class HttpEndpoint(BaseModel):
     the MCP client, which has no default of its own: it reaches `anyio.fail_after(None)` and waits
     forever, so `None` means "take the registry's `_DEFAULT_REQUEST_TIMEOUT_SECONDS`" rather than
     "unbounded". `chemclaw.connectors.registry.request_timeout_seconds` is where that is decided.
+
+    **And it is bounded above by the deployment, not only below by this schema.** `gt=0` was the
+    whole constraint, so a bundle could declare `100000` and be obeyed — at which point the front
+    door's `service_turn_timeout_seconds` fires first and the chemist loses the *turn* instead of
+    receiving the recoverable `transport_error_result` this bound exists to produce.
+    `registry.request_timeout_seconds` clamps to `registry.max_request_timeout_seconds()` and says
+    so once per process, the same `min(what the bundle asks, what the deployment funds)` shape
+    `JobSpec.timeout_seconds` already has. Clamping rather than refusing, because this number is
+    read on the turn path and a refusal there is the failure `registry.mcp_connections` documents.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

@@ -17,10 +17,14 @@ before. `default_store` is patched on the tools module and the session is patche
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
+import yaml
 
 import chemclaw.connectors.calc.server.tools as calc_tools
+from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint
+from chemclaw.connectors.registry import request_timeout_seconds
 from chemclaw.core.config import settings
 from chemclaw.science.calc.store import InMemoryStore
 from tests.calc_server_fake import FAKE_VERSION, FakeCalcServer, install
@@ -79,22 +83,34 @@ def test_electronic_properties_tool_returns_the_populated_result(
     assert server.count("compute_electronic_properties") == 1
 
 
-def test_the_two_binary_only_calculators_get_the_binary_s_own_wait_budget(
+def test_the_two_binary_only_calculators_wait_no_longer_than_the_agent_hop(
     server: FakeCalcServer,
 ) -> None:
-    """The client must wait as long as the binary-only calculators' own server-side budget.
+    """The hop that actually runs, and the one nothing asserted.
 
-    `compute_atomic_descriptors`/`compute_surface_potential` are pinned to the `xtb` binary
-    regardless of `CHEMCLAW_XTB_ENGINE`, whose own server-side timeout can run to 3600 s —
-    `calc_server_timeout_seconds`'s default of 900 s would abandon a calculation the server is
-    still computing, and Temporal then retries the (retryable) activity, doubling the cost while
-    the first, orphaned run keeps burning CPU. See `calc_atomic_timeout_seconds`'s own docstring.
+    Three bounds sit between a chemist and a calculation: this client's read bound to the
+    calculation server (the process hop), the connector pod's termination grace (the pod hop,
+    `tests/test_deploy_chart.py`), and the manifest's `request_timeout` — the agent hop, which is
+    what the turn actually waits and which each of the other two had a test for.
+
+    `compute_atomic_descriptors` and `compute_surface_potential` are inline `tools:` entries and
+    were passing `calc_atomic_timeout_seconds` (3600 s) through a manifest declaring
+    `request_timeout: 600`. That is not a longer wait, it is a belief in one: the hop cancels
+    first, and because each of these two *is* a single primitive rather than a composite, nothing
+    is stored when it does — so a run between the two numbers can never complete, at any number of
+    attempts, while the abandoned run holds a `servers/calc` admission slot on a pod that pins one
+    thread per calculation. The clamp is derived from the same function the hop derives its own
+    bound from, so the two cannot drift apart.
 
     The fake server does not implement either tool's payload — that is not what this test is
     about — so both calls are expected to fail; what is asserted is the session's own read bound,
     which `install()` records before any tool is dispatched.
     """
-    assert settings.calc_atomic_timeout_seconds >= settings.calc_server_timeout_seconds
+    manifest = ConnectorManifest.model_validate(
+        yaml.safe_load((Path(calc_tools.__file__).parents[1] / "connector.yaml").read_text())
+    )
+    assert manifest.endpoint is not None, "the calc bundle declares an endpoint; that is the hop"
+    hop = request_timeout_seconds(manifest.endpoint, manifest.name)
 
     async def _run() -> None:
         for call in (
@@ -105,10 +121,31 @@ def test_the_two_binary_only_calculators_get_the_binary_s_own_wait_budget(
                 await call("O")
 
     asyncio.run(_run())
-    assert server.timeouts[-2:] == [
-        settings.calc_atomic_timeout_seconds,
-        settings.calc_atomic_timeout_seconds,
-    ]
+    assert server.timeouts[-2:] == [hop, hop], (
+        "an inline tool declared a client bound the agent hop cannot honour; the hop cancels "
+        "first and a single-primitive tool stores nothing when it does"
+    )
+
+
+def test_the_manifest_and_the_turn_ceiling_are_the_same_number(
+    server: FakeCalcServer,
+) -> None:
+    """The clamp is derived from the turn ceiling, so the manifest may not quietly diverge from it.
+
+    `connector.yaml` sets `request_timeout: 600` and says in the same breath that this is
+    "the turn's own ceiling (`service_turn_timeout_seconds`)". `_inline_bound` reads
+    `registry.max_request_timeout_seconds()`, which is that ceiling less the read-timeout grace —
+    so if either number moved on its own the clamp would stop being the hop's bound and the test
+    above would be asserting a coincidence.
+    """
+    manifest = ConnectorManifest.model_validate(
+        yaml.safe_load((Path(calc_tools.__file__).parents[1] / "connector.yaml").read_text())
+    )
+    assert isinstance(manifest.endpoint, HttpEndpoint)
+    assert manifest.endpoint.request_timeout == int(settings.service_turn_timeout_seconds)
+    assert request_timeout_seconds(manifest.endpoint, manifest.name) <= (
+        manifest.endpoint.request_timeout
+    )
 
 
 def test_a_second_fukui_mode_re_ranks_the_cached_result_rather_than_serving_the_first(

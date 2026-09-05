@@ -349,7 +349,9 @@ def test_a_connection_key_the_driver_will_not_take_is_caught_offline() -> None:
     assert problems and "role" in problems[0], problems
 
 
-def test_a_key_the_driver_will_not_take_fails_as_this_seams_error_at_connect_time() -> None:
+def test_a_key_the_driver_will_not_take_fails_as_this_seams_error_at_connect_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The gate sees the manifests this repository ships; a deployment mounts its own.
 
     So the signature check runs again where the driver is actually built. The error class is the
@@ -361,10 +363,14 @@ def test_a_key_the_driver_will_not_take_fails_as_this_seams_error_at_connect_tim
     """
     from chemclaw.core.connect import open_connection
 
+    # `access_token_env`, not `access_token`: this fixture wrote the credential inline, which the
+    # seam now refuses outright (`check_no_inline_credential`) — before it ever gets to the
+    # signature check this test is about.
+    monkeypatch.setenv("TEST_DATABRICKS_TOKEN", "dapi-token")
     block = {
         "driver": "chemclaw.ingest.eln.warehouse.databricks:DatabricksWarehouse",
         "server_hostname": "adb.example.net",
-        "access_token": "dapi-token",
+        "access_token_env": "TEST_DATABRICKS_TOKEN",
         "warehouse_id": "abc123",
         "role": "CHEMCLAW_READER",
     }
