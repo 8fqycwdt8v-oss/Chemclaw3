@@ -1042,7 +1042,10 @@ only holds defects can only ever restore the system to what it already intended 
       (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): knowledge is global the moment it
       is learned and ungated; a skill is **live for its own user before review** and reaches the
       shared tree only after an **admin** merges it, so the end user never waits on a gate and no
-      unreviewed instruction reaches a second person. What is open here is now the generator alone —
+      unreviewed instruction reaches a second person. The knowledge half of that is **built** —
+      `D-2026-09-05-the-gate-is-deleted-not-dormant` deleted the PR-gate outright (all nine callers
+      were knowledge, so ungating left it with no subject) and `kg/record.py` is the one write path.
+      What is open here is now the generator alone —
       plus the per-actor skills directory that tier needs, which is blocked on the same generator
       (nothing writes one until a distiller exists) and whose invariants that ADR states — plus the follow-up that ADR names and does not claim shipped: the
       direct write path that actually ungates agent-asserted notes, which owes D-161 migration
