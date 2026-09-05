@@ -387,12 +387,6 @@ spec:
               HPA is scaling: if the custom-metrics API is not serving
               `chemclaw_turns_in_flight`, the autoscaler is back on CPU and cannot see this.
 
-        {{- /* The leading indicator, and the one the HPA is supposed to act on. This is the pair
-               `chemclaw_turns_in_flight` / `chemclaw_turn_capacity` was exported for and that
-               nothing read for a year (gap DEP-4). It fires *before* the shed alerts, which is the
-               whole point: at the ceiling the next turn is refused, and the fleet's only remedy is
-               more replicas. Self-disabling in a deployment with no capacity gauge, because an
-               absent series makes every arm an empty vector. */}}
         - alert: ChemclawCalculationBackendRefusingForCapacity
           expr: >-
             sum(rate(chemclaw_calc_backend_at_capacity_total[15m])) > 0.05
@@ -413,6 +407,12 @@ spec:
               ones. This is deliberately not on `chemclaw_degraded_total`, so it never fires the
               backend-is-dark alert.
 
+        {{- /* The leading indicator, and the one the HPA is supposed to act on. This is the pair
+               `chemclaw_turns_in_flight` / `chemclaw_turn_capacity` was exported for and that
+               nothing read for a year (gap DEP-4). It fires *before* the shed alerts, which is the
+               whole point: at the ceiling the next turn is refused, and the fleet's only remedy is
+               more replicas. Self-disabling in a deployment with no capacity gauge, because an
+               absent series makes every arm an empty vector. */}}
         - alert: ChemclawFrontDoorAtItsPermitCeiling
           expr: >-
             sum(chemclaw_turns_in_flight) / sum(chemclaw_turn_capacity) > 0.9

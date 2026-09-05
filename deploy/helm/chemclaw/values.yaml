@@ -101,8 +101,11 @@ service:
       # (`CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` under `config`). A percentage rather than an
       # absolute count so the two cannot drift: the template multiplies them out, so raising the
       # permit count raises the scale-up point with it instead of leaving a stale quantity behind.
-      # 60 leaves four of twelve permits free at the moment a new pod is asked for, which is roughly
-      # one turn's 8.3 s of scheduling and image-cached start.
+      # The rendered target is the *floor* of the product — Helm's `div` truncates — so what this
+      # leaves free is `permits - (permits * targetPercent / 100 | floor)`, which the chart's own
+      # test derives with the same `//` rather than restating here. The size to aim for is one
+      # turn's worth of scheduling and image-cached start (~8.3 s of wall clock), which is what a
+      # new pod costs before it can take its first turn.
       targetPercent: 60
 
 # Core's own Temporal worker. Only one: every expensive workflow belongs to a connector bundle
@@ -634,6 +637,21 @@ config:
   # (`D-2026-09-04-a-gateway-is-the-only-provider`).
   CHEMCLAW_LLM_BASE_URL: "http://internal-llm.llm.svc:8000/v1"
   CHEMCLAW_LLM_MODEL: "gpt-oss"
+  # The window of the model on the line above, so the context policy's *second* bound is real.
+  # `llm_context_window_tokens` defaults to 0 in code — "undeclared", the honest default for an
+  # endpoint this repository cannot interrogate — and 0 means the configured budget is the only
+  # thing standing between a turn and a request the gateway rejects outright, which loses the whole
+  # turn rather than a conversation group. `D-2026-09-04-a-budget-that-excludes-the-prefix-is-not-a-
+  # budget` was written about a request that did not fit a 128k model, and a review on 2026-09-05
+  # found the shipped budget permitting one again with this key set nowhere in this chart. It is
+  # set here now: `effective_trigger` takes the smaller of `agent_context_token_budget` and
+  # `window - llm_max_tokens`, so a budget raised past what this endpoint holds is clamped instead
+  # of being sent and refused.
+  #
+  # 131072 is `gpt-oss`'s published window, so this key and `CHEMCLAW_LLM_MODEL` move together —
+  # a release that repoints the model has to restate the window, and a release that routes tasks
+  # across models with different windows declares the **smallest** (`core/config/llm.py`).
+  CHEMCLAW_LLM_CONTEXT_WINDOW_TOKENS: "131072"
   CHEMCLAW_HARNESS_ENABLED: "true"
   CHEMCLAW_HARNESS_AUTONOMY: "plan_only"
   # The LLM-as-judge over every answer's citation faithfulness is a **deployment opt-in**, off by

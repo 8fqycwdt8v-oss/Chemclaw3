@@ -1043,9 +1043,11 @@ def _sibling_python() -> tuple[Path | None, str]:
     """
     import os
 
-    root = Path(os.environ.get("CHEMCLAW_MCP_CHECKOUT", "")) or Path(__file__).parents[2] / (
-        "Chemclaw3-mcp"
-    )
+    # `Path("")` is `Path(".")` and is truthy, so the empty override has to be rejected as a
+    # *string* — the first version of this fell into exactly that and measured this repository's
+    # own `.venv` against the sibling's allowance.
+    declared = os.environ.get("CHEMCLAW_MCP_CHECKOUT", "").strip()
+    root = Path(declared) if declared else Path(__file__).resolve().parents[2] / "Chemclaw3-mcp"
     if not root.is_dir():
         return None, f"no Chemclaw3-mcp checkout at {root} (set CHEMCLAW_MCP_CHECKOUT)"
     interpreter = root / ".venv" / "bin" / "python"
@@ -1074,7 +1076,7 @@ def _served_elsewhere_tokens() -> tuple[dict[str, tuple[int, int]], str]:
             capture_output=True,
             text=True,
             timeout=300,
-            cwd=str(interpreter.parents[1]),
+            cwd=str(interpreter.parents[2]),
         )
     except (OSError, subprocess.SubprocessError) as error:  # pragma: no cover - environment
         return {}, f"could not run the sibling's interpreter: {error}"

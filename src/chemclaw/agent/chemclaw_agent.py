@@ -24,6 +24,7 @@ by construction rather than by discipline, and `tests/test_subagents.py` proves 
 graphs that compile rather than against the two declarations.
 """
 
+import threading
 from dataclasses import replace
 
 # Importing this module runs every `@tool` decorator, populating the capability-tool
@@ -47,7 +48,12 @@ from chemclaw.connectors.registry import (
 )
 from chemclaw.connectors.transport import ConnectorSpec
 from chemclaw.core.config import settings
-from chemclaw.core.tool_registry import register_tool, registered_tool_names, registered_tools
+from chemclaw.core.tool_registry import (
+    CapabilityTool,
+    register_tool,
+    registered_tool_names,
+    registered_tools,
+)
 from chemclaw.templates.registry import template_tool_names, template_tools
 
 _INSTRUCTIONS = (
@@ -359,8 +365,7 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     # against a re-registration when `build_langgraph_agent` is called for a second profile) is what
     # makes the audit middleware, `tool_role_gates` and the prose-contract validator address them by
     # name.
-    _register_generated_tools()
-    inprocess = registered_tools()
+    inprocess = _register_generated_tools()
     if prof.tool_names is not None:
         _reject_unknown_tool_names(prof)
         # Names belonging to a connector are not missing, just not *here* — `connector_specs`
@@ -537,18 +542,40 @@ def _narrow_allowed_specs(specs: list[ConnectorSpec], keep: frozenset[str]) -> l
     return narrowed
 
 
-def _register_generated_tools() -> None:
+#: Serializes the generated launchers' check-and-register below. Module-private and held here
+#: rather than inside `core/tool_registry.py` because what has to be atomic is not one insertion
+#: but the whole *test-then-insert-then-read* — a registry-level lock would leave two threads both
+#: seeing a name absent and the second one raising, which is the failure this exists to close.
+_GENERATED_TOOLS_LOCK = threading.Lock()
+
+
+def _register_generated_tools() -> list[CapabilityTool]:
     """Register the generated launchers — connector jobs and templates — exactly once per process.
 
     `build_langgraph_agent` may run several times (one agent per profile, and once per test), while
     the registry is module state keyed by tool name and rejects a duplicate registration as the
     programming error it usually is. The already-registered check makes repeat builds idempotent
     without weakening that guard for hand-written tools.
+
+    **Once per process, and until 2026-09-05 that was true only of a process serving one turn at a
+    time.** `runner.py` builds a turn's graph in `asyncio.to_thread`, so a fresh pod's first burst
+    of concurrent turns runs this function in as many threads at once, each reading a registry no
+    thread has filled yet: measured on the shipped 12 permits, **11 of 12** concurrent builds
+    raised `capability tool 'start_optimization_campaign' already registered` and their turns
+    failed. It is self-healing — the twelfth succeeded and every later turn found the names present
+    — which is exactly what made it invisible: the window is one burst per process, and a rollout
+    or an HPA scale-up is a burst arriving at a fresh pod by construction.
+
+    The lock covers the registry *read* as well as the writes, and returns the snapshot rather than
+    leaving the caller to take its own: `registered_tools()` is `list(_REGISTRY.values())`, so a
+    reader running beside a writer is a dictionary changed during iteration.
     """
-    known = set(registered_tool_names())
-    for tool_fn in [*job_tools(), *template_tools()]:
-        if tool_fn.__name__ not in known:
-            register_tool(tool_fn)
+    with _GENERATED_TOOLS_LOCK:
+        known = set(registered_tool_names())
+        for tool_fn in [*job_tools(), *template_tools()]:
+            if tool_fn.__name__ not in known:
+                register_tool(tool_fn)
+        return registered_tools()
 
 
 def _narrow(
