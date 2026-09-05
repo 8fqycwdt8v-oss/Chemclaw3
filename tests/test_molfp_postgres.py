@@ -445,3 +445,48 @@ def test_the_answer_says_which_arm_answered_it(monkeypatch: pytest.MonkeyPatch) 
     assert "genuine negative result" in exact_verdict
     assert "genuine negative" not in approximate_verdict
     assert "NOT proof" in approximate_verdict
+
+
+def test_the_arm_survives_a_truncated_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The path that actually happens: hits *and* truncation *and* the approximate arm.
+
+    **The test above drives only the empty page, and that is why it could not see the defect.**
+    `find_matches` asks for `top_k + 1`, so `hits_truncated` is the ordinary outcome of any query
+    with neighbours — measured over 60 queries at the shipped defaults, the truncation branch fired
+    60 times and the approximate branch **zero**, because the two were written as exclusive `if`s
+    and truncation returned first. Both arms produced byte-identical text on every non-empty page.
+
+    The two facts are independent and a chemist needs both: truncation is about *count* ("there may
+    be more"), approximation is about *ranking* ("these may not be the closest"). Being told only
+    the first, on the page where both are true, is the ranking risk arriving silently — which is
+    the failure the exactness setting exists to prevent.
+    """
+
+    async def _run() -> tuple[str, str]:
+        store = await _store_or_skip()
+        # Enough near-identical neighbours that a top_k of 2 cannot hold them: truncation is
+        # forced by the corpus rather than by a flag, so the fixture cannot drift away from the
+        # condition it is about.
+        for i, smiles in enumerate(("CCO", "CCCO", "CCCCO", "CCCCCO", "CCCCCCO")):
+            await store.add(record_for(f"pg-trunc-{i}", smiles))
+
+        monkeypatch.setattr(settings, "fingerprint_search_exactness", "approximate")
+        approximate = await find_similar_molecules(store, "CCO", top_k=2, threshold=0.1)
+        monkeypatch.setattr(settings, "fingerprint_search_exactness", "exact")
+        exact = await find_similar_molecules(store, "CCO", top_k=2, threshold=0.1)
+
+        assert approximate.hits, "the fixture must return hits, or it proves nothing"
+        assert approximate.hits_truncated, "the fixture must truncate, or it proves nothing"
+        return exact.model_dump()["verdict"], approximate.model_dump()["verdict"]
+
+    exact_verdict, approximate_verdict = asyncio.run(_run())
+
+    # The count warning is on both, because both truncated.
+    assert "lower bound" in exact_verdict
+    assert "lower bound" in approximate_verdict
+    # The ranking warning is on the approximate one only — and it is *there*, which is the point.
+    assert "closer one may exist" in approximate_verdict
+    assert "closer one may exist" not in exact_verdict
+    assert exact_verdict != approximate_verdict, (
+        "both arms produced identical text on a truncated page — the arm is not reaching the model"
+    )

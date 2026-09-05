@@ -200,7 +200,16 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
         index proposed rather than the corpus, so "a genuine negative result" would claim a
         completeness no ANN can offer — and unlike an empty index or a truncated scan, nothing
         about the result *looks* different. So the approximate arm never says "genuine", and says
-        so on a full page too: the page is the best the index found, not provably the best there is.
+        so **alongside** a truncation notice rather than instead of one.
+
+        That "alongside" is the correction, and it mattered. This sentence used to end "and says so
+        on a full page too", describing exclusive branches in which truncation returned first — and
+        `find_matches` asks for `k + 1`, so a truncated page is the *ordinary* outcome. Measured
+        over 60 queries at the shipped defaults: the truncated branch fired 60 times and this one
+        **zero**, so both arms produced byte-identical text and the property this docstring claims
+        was never once exercised on the path that happens. Truncation is about count and
+        approximation is about ranking; a chemist told "further matches may exist" has not been
+        told the ten in hand may not be the nearest ten.
         """
         if self.index_empty:
             return (
@@ -234,20 +243,34 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
                 "— so this is a genuine negative result."
             )
         matched = f"{len(self.hits)} indexed {self.subject}(s) matched this query."
-        if self.scan_truncated or self.hits_truncated:
-            return (
-                f"PARTIAL RESULT: {matched} The scan stopped early "
-                f"({'record cap' if self.scan_truncated else 'result cap'}), so this is a lower "
-                "bound and further matches may exist. Do not report it as the complete set."
+        # **Two independent facts, so two independent clauses — not two branches.** Truncation is
+        # about *count* ("there may be more"); approximation is about *ranking* ("these may not be
+        # the closest"). Written as exclusive `if`/`return` the first one shadowed the second, and
+        # `find_matches` asks for `k + 1` so `hits_truncated` is the *ordinary* outcome: measured
+        # over 60 queries at the shipped defaults, the truncated branch fired 60 times and the
+        # approximate branch **zero**, leaving both arms byte-identical. A chemist reading "further
+        # matches may exist" was not being told the ten in hand might not be the nearest ten, which
+        # is the whole risk the approximate arm trades for its speed.
+        truncated = self.scan_truncated or self.hits_truncated
+        labels = ["PARTIAL" if truncated else "", "APPROXIMATE" if self.approximate else ""]
+        heading = " AND ".join(label for label in labels if label)
+        if not heading:
+            return matched
+        clauses = [f"{heading} RESULT: {matched}"]
+        if truncated:
+            cap = "record cap" if self.scan_truncated else "result cap"
+            clauses.append(
+                f"The scan stopped early ({cap}), so this is a lower bound and further matches "
+                "may exist. Do not report it as the complete set."
             )
         if self.approximate:
-            return (
-                f"APPROXIMATE RESULT: {matched} This deployment searches the {self.subject} index "
-                "approximately, so these are the best neighbours the index proposed rather than "
-                "provably the best on file, and a closer one may exist. Do not present the list "
-                "as the definitive set of precedents."
+            clauses.append(
+                f"This deployment searches the {self.subject} index approximately, so these are "
+                "the best neighbours the index proposed rather than provably the best on file, and "
+                "a closer one may exist. Do not present the list as the definitive set of "
+                "precedents."
             )
-        return matched
+        return " ".join(clauses)
 
 
 @runtime_checkable

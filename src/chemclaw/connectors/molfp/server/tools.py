@@ -45,6 +45,10 @@ async def similar_molecules(
     holds nothing and the question was not answered — it is not a finding of novelty. And
     `hits_truncated: true` means more molecules cleared the threshold than `top_k` could return,
     so the count is a lower bound: raise `top_k` before saying how many analogs exist.
+    And `approximate: true` means this deployment searched the index approximately —
+    the neighbours returned are the best it proposed, not provably the best on file, so
+    a closer one may exist and the list is not a definitive set of precedents. The two
+    are independent: a result can be both, and `verdict` says so when it is.
     """
     return await find_similar_molecules(_store, smiles, top_k, threshold)
 

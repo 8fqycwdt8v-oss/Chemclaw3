@@ -63,6 +63,10 @@ async def similar_reactions(
     has been indexed and the question was not answered — never report it as "we have no precedent".
     `hits_truncated: true` means more reactions cleared the threshold than `top_k` could return, so
     the count is a lower bound on the precedent on file, not the amount of it.
+    And `approximate: true` means this deployment searched the index approximately — the
+    neighbours returned are the best it proposed, not provably the best on file, so a closer
+    precedent may exist and the list is not definitive. The two are independent: a result can
+    be both, and `verdict` says so when it is.
     """
     search = await find_similar_reactions(_store, reaction_smiles, top_k, threshold)
     return search.model_copy(
