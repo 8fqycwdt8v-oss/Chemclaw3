@@ -163,46 +163,47 @@ def test_for_log_says_that_it_cut_rather_than_cutting_silently() -> None:
 
 
 @pytest.mark.parametrize(
-    "branch",
+    "message",
     [
         "",
-        "note/with a space",
-        "note/with\nnewline: forged log line",
-        "note/with\x00null",
-        "note/" + "b" * 300,
-        "note/..",
-        "note/a..b",
-        "/note/leading-slash",
-        "note/trailing.",
-        "note/a.lock",
+        "Add note: x\nforged: log line",
+        "Add note: \x00null",
+        "b" * 256,
     ],
 )
-def test_a_branch_that_is_not_a_ref_is_refused_at_the_model(branch: str) -> None:
+def test_a_commit_message_a_log_record_could_not_survive_is_refused_at_the_model(
+    message: str,
+) -> None:
     """Nothing bounded this field's charset or length before it reached a log record.
 
-    `pr_gate` builds `note/<id>` from a slug `Note.id` already validates — but `proposal_store`
-    rebuilds a `NoteWrite` from a **database row**, and a submission can be constructed
-    directly. A newline in it forges a log line; an unbounded one stalls every thread behind the
-    redaction filter's regex scan.
+    Inherited verbatim from the branch-name rule this replaces
+    (`D-2026-09-05-the-gate-is-deleted-not-dormant` removed the branch): `git_writer._git`
+    interpolates the message into a log record, so a newline forges a log line and an unbounded one
+    stalls every thread behind the redaction filter's regex scan. `record._build_write` composes it
+    from a `Note.id` this repository validates, so on the shipped path the check is redundant — and
+    it is not redundant against a `NoteWrite` constructed directly, which is the only reason a
+    model-level constraint is the right place for it.
     """
-    with pytest.raises(ValueError, match="not a usable git ref"):
+    with pytest.raises(ValueError, match="not usable"):
         NoteWrite(
-            branch=branch,
             files=[NoteFile(path="knowledge/compound/x.md", content="body\n")],
-            title="t",
-            body="b",
+            message=message,
         )
 
 
 @pytest.mark.parametrize(
-    "branch", ["note/job-crash", "note/bo-reizman_suzuki-a1b2", "note/evil", "note/dash", "main"]
+    "message",
+    [
+        "Add job-result note: job-crash",
+        "Add campaign note: bo-reizman_suzuki-a1b2 with 2 supporting note(s)",
+        "Add compound note: benzene — 1,2-dichloroethane",
+    ],
 )
-def test_the_branches_this_repository_actually_mints_are_accepted(branch: str) -> None:
-    """The constraint is git's rule, not a naming convention — it may not narrow what works."""
-    submission = NoteWrite(
-        branch=branch,
+def test_the_messages_this_repository_actually_mints_are_accepted(message: str) -> None:
+    """The constraint bounds control characters and length; it may not narrow what `_build_write`
+    composes — including the em dash and the parenthesised supporting-note count it really emits."""
+    write = NoteWrite(
         files=[NoteFile(path="knowledge/compound/x.md", content="body\n")],
-        title="t",
-        body="b",
+        message=message,
     )
-    assert submission.branch == branch
+    assert write.message == message
