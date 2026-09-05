@@ -1905,3 +1905,30 @@ nothing recording why) was still true. Deleting it with the rejection would have
 the design needs an inspectability invariant. **Rule: when a decision reverses, re-file the losing
 argument as a stated cost or as a requirement it generates — never delete it as though it had been
 wrong.**
+
+**A deletion's blast radius is a measurement, not an estimate — take it before planning.** Ungating
+knowledge sounded like editing nine call sites. Measured first: 348 files mentioned the gate, 15
+imported it, 11 of 11 eval probe files graded the agent on its behaviour, and — the finding that
+changed the whole shape — *all nine callers were knowledge*, so the change deleted a subsystem
+rather than rewiring one. **Rule: before planning a removal, grep for importers, for prose mentions,
+and for tests/evals that assert the behaviour, and report the three numbers. The one that reframes
+the task is usually the third.**
+
+**When a removal leaves a subsystem with no caller, that is the user's decision, not a detail to
+resolve while editing.** "Delete it" and "keep it dormant for the decided-but-unbuilt subject" are
+both defensible and cost very different things. I put it to the owner with the line count and both
+costs. **Rule: if finishing a task as specified would delete or orphan a working subsystem the spec
+did not name, stop and ask — the spec's author usually did not know it was in scope.**
+
+**A test that fails after a redesign is sometimes reporting a regression, not staleness.** The
+poisoned-index test failed because the gate's linked worktree had its own index and my writer shares
+one — so a plain `git commit` swept unrelated staged files into the note's commit. The reflex of
+"the design changed, update the assertion" would have shipped that. **Rule: for every test that
+fails after a redesign, name which of the two it is — the assertion is obsolete, or the guarantee
+it encoded is one I just broke — and say so in the commit.**
+
+**Prose that cites a symbol is code that can dangle.** `test_docstring_paths` found 22 files
+pointing at modules I had deleted, and `prose-validate` found seven more including a setting name
+inside my own replacement text explaining that the setting was gone. **Rule: after any rename or
+deletion, run the repository's own prose validators before believing the sweep is done — a
+docstring pointer is not caught by mypy, ruff or the test suite.**
