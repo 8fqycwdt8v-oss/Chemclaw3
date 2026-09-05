@@ -25,6 +25,15 @@
       "approval_id": "str",
       "prompt": "str"
     },
+    "awaiting_answer": {
+      "asked_of": "str",
+      "due_at": "str",
+      "kind": "str",
+      "reminders": "int",
+      "request_id": "str",
+      "state": "str",
+      "subject": "str"
+    },
     "capability_degraded": {
       "connectors": "list[str]"
     },

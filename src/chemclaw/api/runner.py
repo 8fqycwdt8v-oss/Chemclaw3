@@ -1617,7 +1617,7 @@ async def _with_pushed_job_results(session_id: str, user_message: str) -> str:
     `session_events` row, and until this existed the row's only consumer was the browser's SSE
     stream — so with the tab closed the completion reached nobody, and the model started its next
     turn not knowing work it launched had finished. Claimed with the same atomic claim the stream
-    uses, scoped to the same two kinds, so the two consumers cannot double-deliver one row and
+    uses, scoped to a subset of its kinds, so the two consumers cannot double-deliver one row and
     neither can starve the other of kinds it does not handle.
 
     The chemist's words lead and the push-back follows, framed
