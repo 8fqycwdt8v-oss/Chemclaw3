@@ -52,7 +52,7 @@ from chemclaw.core.mcp_session import (
     open_session,
 )
 from chemclaw.core.metrics import METRICS
-from chemclaw.core.metrics_bridge import degraded
+from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.science.calc.store import (
     CALCULATION_EPOCH,
     CalculationKey,
@@ -269,9 +269,12 @@ async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) ->
         # working — the backend refusing promptly instead of queueing a calculation nobody will
         # still be waiting for — so putting it on `chemclaw_degraded_total{subsystem=calc_server}`
         # would fire the outage alert on ordinary busy-ness and make the one series an operator
-        # trusts for "the backend is dark" mean two different things. What it *does* deserve is a
-        # counter of its own; see this module's report note, there is no declared metric for
-        # backend saturation yet.
+        # trusts for "the backend is dark" mean two different things. It gets a counter of its own
+        # instead: `chemclaw_calc_backend_at_capacity_total` is the calculation tier's saturation
+        # signal, and the only thing in the system that asks for more calc capacity.
+        record_metric(
+            lambda m: m.increment("chemclaw_calc_backend_at_capacity_total", labels={"tool": tool})
+        )
         logger.warning(
             "the calculation server refused %s because it is full; the job will be retried", tool
         )

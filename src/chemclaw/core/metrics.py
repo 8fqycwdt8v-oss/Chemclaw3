@@ -601,6 +601,17 @@ _COUNTERS: dict[str, str] = {
         "Calculation-cache lookups, by outcome (hit / shared / miss) — `shared` is a concurrent "
         "miss on one key that `cached_compute` single-flighted onto another caller's computation."
     ),
+    # The backend refusing for *capacity* rather than for bad data — the third category
+    # `durable/publish.py` gained when a pod-full refusal stopped being classified as a permanent
+    # error. It is counted separately from `chemclaw_degraded_total` deliberately: a busy backend is
+    # ordinary operation, and folding it into the degradation signal would fire an outage alert on
+    # a working system. It is the saturation signal for the calculation tier — one pod, four slots,
+    # and a CREST search charged all four — so a rising rate here is the fleet asking for more calc
+    # capacity, and it is the only place that asks.
+    "chemclaw_calc_backend_at_capacity_total": (
+        "Calculation-backend calls refused because every slot was busy, by tool. Retried with "
+        "backoff rather than failed; a sustained rate means the backend is under-provisioned."
+    ),
     # --- ingest and retrieval ------------------------------------------------------------------
     "chemclaw_ingest_records_total": (
         "Records seen by an ingest pass, by source and outcome (ingested / rejected / skipped)."
@@ -901,6 +912,7 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_jobs_finished_total": ("connector", "outcome"),
     "chemclaw_activity_failures_total": ("activity",),
     "chemclaw_calc_cache_total": ("outcome",),
+    "chemclaw_calc_backend_at_capacity_total": ("tool",),
     "chemclaw_ingest_records_total": ("source", "outcome"),
     "chemclaw_evidence_source_kept_total": ("source",),
     "chemclaw_embedding_calls_total": ("outcome",),
