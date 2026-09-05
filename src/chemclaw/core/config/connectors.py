@@ -200,8 +200,17 @@ class ConnectorSettings(BaseSettings):
 
     @property
     def connector_jobs_awaiting_answer_list(self) -> list[str]:
-        """The `<bundle>.<job>` names allowed to run without a wall-clock ceiling."""
-        return [j for j in self.connector_jobs_awaiting_answer.split(os.pathsep) if j]
+        """The `<bundle>.<job>` names allowed to run without a wall-clock ceiling.
+
+        Stripped, because this list grants an *entitlement* and the cost of a stray space is not
+        one unfunded job: `require_funded_ceiling` refuses the launch, so a typo silently removes a
+        grant the release ships with. The repository has two list idioms — `os.pathsep` without
+        stripping (`connectors_dir`, `skills_dir`) and comma-plus-strip (`data_sources`,
+        `entra_privileged_roles`) — and this is the second family wearing the first's separator.
+        The separator stays for compatibility with anything already set; the stripping does not.
+        """
+        entries = self.connector_jobs_awaiting_answer.split(os.pathsep)
+        return [name for name in (entry.strip() for entry in entries) if name]
 
     @property
     def connectors_dirs(self) -> list[str]:

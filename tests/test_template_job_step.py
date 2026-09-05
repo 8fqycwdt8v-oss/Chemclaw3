@@ -34,6 +34,7 @@ from pydantic import ValidationError
 from temporalio import activity, workflow
 
 from chemclaw.agent.authz import AuthorizationError
+from chemclaw.connectors.jobs import ConnectorJobError
 from chemclaw.connectors.manifest import JobSpec
 from chemclaw.connectors.registry import ConnectorError, enabled, find_job
 from chemclaw.core.config import _WRAPPER_FINISH_STEPS, settings
@@ -210,16 +211,50 @@ def test_a_job_that_waits_on_a_person_is_unbounded_as_a_template_step_too(
     The fixture bundle's job does not declare it — no in-tree fixture does — so the declaration is
     substituted at `find_job`, which is where the manifest enters this activity. That keeps the
     subject the *resolution*: everything after the substitution is the shipped path.
+
+    **The grant is what this test was missing, and its absence was the defect.** A declaration the
+    operator has not funded is refused by `require_funded_ceiling` inside `prepare_job_launch`,
+    which this activity shares with the chat launcher. Until that moved, the refusal lived in
+    `build_job_tool` — which a template step never calls — so this test substituted an ungated
+    `awaits_answer: true` onto a bundle nobody had granted and asserted the *unbounded* child as
+    correct. It passed, and what it pinned was the bypass. The sibling on the chat path
+    (`tests/test_connector_job_workflow.py`) had to grant first for exactly this reason; one
+    substitution, two launchers, one grant.
     """
     connector, job = find_job(fixture_bundle)
     waiting = job.model_copy(update={"awaits_answer": True})
     monkeypatch.setattr(template_activities, "find_job", lambda _name: (connector, waiting))
+    monkeypatch.setattr(
+        settings, "connector_jobs_awaiting_answer", f"{connector}.{waiting.name}"
+    )
     resolved = asyncio.run(authorize_job_step(_step(fixture_bundle, subject="benzene")))
     assert resolved.awaits_answer is True
     assert child_execution_timeout(resolved.timeout_seconds, resolved.awaits_answer) is None, (
         "a job that suspends on a durable answer was handed a wall-clock ceiling because it "
         "reached the child through a template step instead of a chat turn"
     )
+
+
+def test_a_template_step_cannot_launch_a_wait_the_operator_never_funded(
+    monkeypatch: pytest.MonkeyPatch, fixture_bundle: str
+) -> None:
+    """The bypass this file's sibling test used to assert as correct.
+
+    `awaits_answer` runs a job with no wall-clock ceiling at all, so it is refused unless the
+    operator has named the job — and the refusal first shipped in `build_job_tool`, which a
+    template step never calls. Measured on this path before the move: the activity resolved
+    `awaits_answer=True` for a bundle nobody had granted, and the child started unbounded.
+
+    So this drives the *ungated* case, which is the half the grant hides. Refused inside
+    `prepare_job_launch` — before the workflow starts, and before the bundle's own precondition
+    runs — with the message naming the setting an operator has to change.
+    """
+    connector, job = find_job(fixture_bundle)
+    waiting = job.model_copy(update={"awaits_answer": True})
+    monkeypatch.setattr(template_activities, "find_job", lambda _name: (connector, waiting))
+    monkeypatch.setattr(settings, "connector_jobs_awaiting_answer", "")
+    with pytest.raises(ConnectorJobError, match="CHEMCLAW_CONNECTOR_JOBS_AWAITING_ANSWER"):
+        asyncio.run(authorize_job_step(_step(fixture_bundle, subject="benzene")))
 
 
 def test_an_unknown_job_fails_the_activity_naming_what_is_declared() -> None:

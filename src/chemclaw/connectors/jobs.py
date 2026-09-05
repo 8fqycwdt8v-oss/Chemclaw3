@@ -265,6 +265,60 @@ def job_workflow_id(connector: str, job: str, payload: dict[str, Any]) -> str:
     return f"{connector}-{job}-{stable_hash([connector, job, payload])}"
 
 
+def require_funded_ceiling(connector: str, job: JobSpec) -> None:
+    """Refuse a job whose manifest grants it a runtime the operator has not funded.
+
+    **The one field a manifest could use to grant itself runtime nobody agreed to.**
+    `child_execution_timeout`'s argument stands — a job that suspends on a person has no correct
+    finite ceiling — but that argument is about the *shape* of such a job, not about who may claim
+    the shape, and nothing checked the claim: measured, a bundle from a directory on
+    `connectors_dir` turned an 18,000 s fleet ceiling into `None` with no setting changed, in a
+    tree that refuses `transport: stdio` by default because a manifest is data.
+
+    **Called from the shared pre-flight, which is the whole point of there being one.** This check
+    first shipped inside `build_job_tool`, on the argument that it was "the one function both the
+    runtime and `make connector-validate` build a job through" — and it is not: the template
+    workflow's job step resolves a job through `authorize_job_step` -> `prepare_job_launch` and
+    never builds a tool at all. Measured on that path, an ungated `awaits_answer: true` reached
+    `ConnectorJobInput` and the child started with no ceiling. That is D-168's defect exactly, in
+    the function whose docstring was written to describe it — the template's `ResolvedJob` had
+    already dropped `expensive` and `precondition` the same way, and the fix then was to have one
+    pre-flight rather than two. A control added beside that pre-flight instead of inside it is the
+    second launcher rediscovering it.
+
+    **Refused at launch rather than at registration, which is a different moment on purpose.**
+    Raising while a tool is *built* takes `registry.job_tools()` with it, and that rebuilds every
+    enabled bundle's launchers — so one unfunded declaration, or one typo in the allowlist, refused
+    the whole in-process tool surface on every turn, reported to the chemist as
+    `bad_tool_arguments` because `runner.py` classifies the `ValueError` family that way. Refusing
+    here bounds the blast radius to the job that is actually being launched, and still refuses
+    before any workflow starts. `make connector-validate` calls this directly so a declaration is
+    still a red gate in CI rather than a surprise in production.
+
+    Refused rather than downgraded to `False`, for the reason the manifest's own
+    `_a_job_that_waits_does_not_also_declare_what_it_costs` gives: honouring a control silently
+    makes it a key that reads like a control and is not.
+
+    Args:
+        connector: The owning connector's name — half of the name the operator grants.
+        job: The declared job.
+
+    Raises:
+        ConnectorJobError: The job declares `awaits_answer` and the deployment has not named it in
+            `connector_jobs_awaiting_answer`.
+    """
+    qualified = f"{connector}.{job.name}"
+    if job.awaits_answer and qualified not in settings.connector_jobs_awaiting_answer_list:
+        raise ConnectorJobError(
+            f"job {qualified!r} declares `awaits_answer: true`, which runs it with no wall-clock "
+            f"ceiling at all rather than the deployment's {settings.connector_job_timeout_seconds}s"
+            "; it is refused by default because a manifest is data. Add it to "
+            "CHEMCLAW_CONNECTOR_JOBS_AWAITING_ANSWER — which *replaces* the default rather than "
+            "extending it, so list every job you mean to fund, including any this release already "
+            "ships."
+        )
+
+
 def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, Any]:
     """Everything that must be true before a job's durable work starts, and the payload it yields.
 
@@ -301,6 +355,10 @@ def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, A
     # already-built model too: a caller that holds one (a test, a template step) is not wrong, and
     # `model_validate` is the one entry point that takes either.
     spec = _params_model(connector, job).model_validate(params)
+    # The declaration the operator has to have funded, checked before the launch rather than when
+    # the tool was built — see `require_funded_ceiling`. First of the four so an unfunded job is
+    # refused without running its precondition, which is a bundle's own code.
+    require_funded_ceiling(connector, job)
     # Authorize the expensive trigger against the turn's user *before* any durable work (F4-T5), so
     # an autonomously-planned todo — or a template step — cannot start a costly run outside the
     # user's entitlements.
@@ -330,32 +388,10 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         An async tool function, unregistered — the registry call belongs to the caller that
         knows which connectors are enabled (`chemclaw.connectors.registry`).
 
-    Raises:
-        ConnectorJobError: The job declares `awaits_answer` and the deployment has not named it in
-            `connector_jobs_awaiting_answer`.
+    Building a tool refuses nothing. An `awaits_answer` declaration the operator has not funded is
+    refused by `require_funded_ceiling` at *launch*, through `prepare_job_launch` — see there for
+    why the two are not the same moment.
     """
-    # **The one field a manifest could use to grant itself runtime the operator did not fund.**
-    # `child_execution_timeout`'s argument stands — a job that suspends on a person has no correct
-    # finite ceiling — but that argument is about the *shape* of such a job, not about who gets to
-    # claim the shape, and nothing checked the claim: measured, a bundle from a directory on
-    # `connectors_dir` turned an 18,000 s fleet ceiling into `None` with no setting changed, in a
-    # tree that refuses `transport: stdio` by default because a manifest is data.
-    #
-    # Refused here rather than in `ConnectorJobInput`, because this is the one function both the
-    # runtime (`registry.job_tools`) and `make connector-validate` build a job through — so an
-    # ungated declaration is a red validator rather than a workflow that has already started.
-    # Refused rather than downgraded to `False`, for the reason the manifest's own
-    # `_a_job_that_waits_does_not_also_declare_what_it_costs` gives: honouring a control silently
-    # makes it a key that reads like a control and is not.
-    qualified = f"{connector}.{job.name}"
-    if job.awaits_answer and qualified not in settings.connector_jobs_awaiting_answer_list:
-        raise ConnectorJobError(
-            f"job {qualified!r} declares `awaits_answer: true`, which runs it with no wall-clock "
-            f"ceiling at all rather than the deployment's {settings.connector_job_timeout_seconds}s"
-            "; it is refused by default because a manifest is data. Add it to "
-            "CHEMCLAW_CONNECTOR_JOBS_AWAITING_ANSWER to accept that this job's runs are reaped by "
-            "their own waits and activity budgets rather than by a clock."
-        )
     params_model = _params_model(connector, job)
 
     async def launch(
