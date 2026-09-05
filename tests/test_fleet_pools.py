@@ -13,7 +13,10 @@ right reading rather than how many connections happen to be live.
 """
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -26,10 +29,19 @@ from tests.pg import migrated_db_or_skip
 # "which one went missing" rather than "3 != 2".
 FRONT_DOOR_POOLS = (
     "the stores' pool, at `pg_statement_timeout_seconds`",
-    "the `/readyz` probe's, at `service_readiness_db_timeout_seconds` — a distinct pool key, and "
-    "deliberately so: sharing the stores' key answers 503 while the pool is merely busy",
+    "the `/readyz` probe's, at `service_readiness_db_timeout_seconds` and one connection wide — a "
+    "distinct pool key, and deliberately so: sharing the stores' key answers 503 while the pool is "
+    "merely busy",
     "the LangGraph checkpointer's registered autocommit pool (`agent/checkpointer.py`)",
 )
+
+
+# What a front-door process may open: two pools at `pg_pool_max_size` and the readiness probe's
+# one. Written as the sum rather than `3 × max_size` because that product is what the fleet budget
+# used to compute — 208 declared for a fleet opening 166, which refused a legal `maxReplicas: 9`.
+def _front_door_ceiling() -> int:
+    """The connections a front-door process may hold, as a sum over pools of unequal width."""
+    return 2 * settings.pg_pool_max_size + 1
 
 
 def _modules_containing(*needles: str) -> set[str]:
@@ -97,7 +109,12 @@ def test_a_front_door_process_holds_three_pools(monkeypatch: pytest.MonkeyPatch)
         "matching change to POOLS_PER_FRONT_DOOR and chemclaw.fleetPools mis-declares every "
         "release's Postgres ceiling."
     )
-    assert ceiling == len(FRONT_DOOR_POOLS) * settings.pg_pool_max_size
+    assert ceiling == _front_door_ceiling(), (
+        f"a front-door process declared {ceiling} connections, not {_front_door_ceiling()}: two "
+        "pools at pg_pool_max_size plus the readiness probe's one. Settings."
+        "fleet_connections_per_server charges exactly this per front-door replica, so a change "
+        "here without a matching change there mis-declares every release's Postgres ceiling."
+    )
 
 
 def test_a_worker_process_holds_one_pool() -> None:
@@ -160,14 +177,17 @@ def test_the_readiness_probe_is_the_only_call_site_that_mints_a_second_pool() ->
     change, and because the point is to fail on the *addition*, not on a path a test happened to
     drive.
     """
-    assert _modules_containing("statement_timeout_seconds=") == {
+    assert _modules_containing("statement_timeout_seconds=", "pool_max_size=") == {
         "core/db.py",
         "api/routes/ops.py",
     }, (
-        "the set of call sites borrowing with an explicit statement timeout changed. "
-        "Each one outside core/db.py is a distinct pool key and so an extra pg_pool_max_size on "
+        "the set of call sites borrowing with an explicit statement timeout or an explicit pool "
+        "size changed. Each one outside core/db.py is a distinct pool key and so an extra pool on "
         "every process that reaches it — update POOLS_PER_FRONT_DOOR, chemclaw.fleetPools and "
-        "postgres.maxConnections together, or route the call through the default timeout."
+        "postgres.maxConnections together, or route the call through the defaults. A sizing call "
+        "site is scanned for beside a timeout one because it moves the same budget by a different "
+        "keyword: `Settings.fleet_connections_per_server` charges one narrow pool per front-door "
+        "replica, so a *second* narrow pool would be counted at full width."
     )
 
 
@@ -190,4 +210,171 @@ def test_only_the_front_door_reaches_the_checkpointers_pool() -> None:
     assert {module.split("/")[0] for module in openers} <= {"agent", "api", "cli"}, (
         f"a module outside the front door reaches the checkpointer's pool: {sorted(openers)}. "
         "That role now holds a pool chemclaw.fleetPools does not count for it."
+    )
+
+
+def test_the_readiness_probes_pool_is_one_connection_wide(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The narrow pool is real, and it is narrow on both ends.
+
+    `Settings.fleet_connections_per_server` charges one connection per front-door replica for this
+    pool. That is a claim about `api/routes/ops.py`, made in `core/config`, and nothing but this
+    connects the two: if the route stopped asking for a size the budget would under-declare every
+    front door by `pg_pool_max_size - 1` and no other test would notice.
+
+    `min_size` is asserted with it because psycopg refuses `min_size > max_size`, and
+    `pg_pool_min_size` defaults to 2. Raised inside `_pool_for` that lands on the request path, is
+    not a `psycopg.Error`, and `_probe_database` does not catch it — `/readyz` would 500 rather
+    than answer. One warm connection is also what the probe wants: measured, a cold pool pays a
+    14.6 ms handshake on its first checkout against 2.1 ms warm.
+    """
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_host", "127.0.0.1")
+
+    async def _run() -> list[tuple[int, int]]:
+        await migrated_db_or_skip()
+        from chemclaw.api.app import create_app
+
+        app = create_app()
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://probe"
+            ) as client:
+                assert (await client.get("/readyz")).status_code in (200, 503)
+            # Keyed on the requested size, so the probe's pool is the one whose key asks for 1.
+            return [
+                (int(pool.min_size), int(pool.max_size))
+                for key, pool in db._POOLS.items()
+                if key[3] == 1
+            ]
+
+    sized = asyncio.run(_run())
+    assert sized == [(1, 1)], (
+        f"the readiness probe's pool is {sized}, not [(1, 1)]. Settings."
+        "fleet_connections_per_server charges one connection per front-door replica for it; a "
+        "wider pool means every release under-declares its Postgres ceiling, and min_size above "
+        "max_size makes /readyz raise a ValueError nothing on that path catches."
+    )
+
+
+def test_the_readiness_probe_never_holds_two_connections_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One connection is enough only because `_shared_probe` collapses every concurrent caller.
+
+    This is the measurement the size rests on, and it is asserted as a *peak* rather than a count:
+    how many probes a fixed number of requests produces depends on how the loop batches them, so a
+    faster machine would read as a regression. What must hold is that two probes never overlap —
+    which is a property of the single-flight, not of the cache window, so the window is off here.
+    Left unasserted, a future edit that dropped the single-flight would turn `pool_max_size=1` into
+    a self-inflicted `pg_pool_timeout_seconds` wait on an unauthenticated route.
+    """
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_host", "127.0.0.1")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+
+    live = 0
+    peak = 0
+    probes = 0
+    real = db.connection
+
+    @asynccontextmanager
+    async def counting(dsn: str, **kwargs: Any) -> AsyncIterator[Any]:
+        nonlocal live, peak, probes
+        if kwargs.get("operation") != "readyz_probe":
+            async with real(dsn, **kwargs) as conn:
+                yield conn
+            return
+        live += 1
+        probes += 1
+        peak = max(peak, live)
+        try:
+            async with real(dsn, **kwargs) as conn:
+                yield conn
+        finally:
+            live -= 1
+
+    monkeypatch.setattr(db, "connection", counting)
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        from chemclaw.api.app import create_app
+
+        app = create_app()
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://probe"
+            ) as client:
+                for _ in range(5):
+                    await asyncio.gather(*(client.get("/readyz") for _ in range(20)))
+
+    asyncio.run(_run())
+    assert probes >= 2, (
+        f"only {probes} probe(s) ran across five waves with the cache window off, so this run is "
+        "not evidence about overlap"
+    )
+    assert peak == 1, (
+        f"{peak} readiness probes held a connection at once across 100 requests. The probe's pool "
+        "is one connection wide, so the second would wait pg_pool_timeout_seconds and answer 503 "
+        "on an unauthenticated route — either restore the single-flight or widen the pool and the "
+        "fleet budget together."
+    )
+
+
+def test_a_split_session_store_adds_one_pool_to_every_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `+1` that `Settings.fleet_connections_per_server` puts on the second server.
+
+    `core/db` keys a pool on the DSN *string*, so pointing the session layer anywhere else splits
+    every key that resolves `session_store_dsn or postgres_dsn`. A second string over the same
+    database is the whole condition and keeps the probe connectable; what it cannot show is the
+    second *server*, which is why the ceiling for one is declared rather than derived.
+
+    The front door goes to four because its `/readyz` and checkpointer pools move to the session
+    DSN while the stores' session pool is new — the arithmetic in `core/config` says the primary
+    keeps one full pool per pooled process, and this is what makes that a measurement.
+    """
+    from psycopg import conninfo
+
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_host", "127.0.0.1")
+    monkeypatch.setattr(
+        settings,
+        "session_store_dsn",
+        conninfo.make_conninfo(settings.postgres_dsn, application_name="chemclaw-split-probe"),
+    )
+
+    async def _front_door() -> int:
+        from chemclaw.agent.checkpointer import close_checkpointer
+        from chemclaw.api.app import create_app
+        from chemclaw.api.runner import _turn_checkpointer
+
+        app = create_app()
+        async with app.router.lifespan_context(app):
+            await _touch_stores()
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://probe"
+            ) as client:
+                assert (await client.get("/readyz")).status_code in (200, 503)
+            await _turn_checkpointer()
+            try:
+                return len(db._all_pools())
+            finally:
+                await close_checkpointer()
+
+    async def _worker() -> int:
+        async with db.pooling():
+            await _touch_stores()
+            return len(db._all_pools())
+
+    async def _run() -> tuple[int, int]:
+        await migrated_db_or_skip()
+        return await _front_door(), await _worker()
+
+    front_door, worker = asyncio.run(_run())
+    assert (front_door, worker) == (len(FRONT_DOOR_POOLS) + 1, 2), (
+        f"a split session store gave the front door {front_door} pools and a worker {worker}, not "
+        f"{len(FRONT_DOOR_POOLS) + 1} and 2. Settings.fleet_connections_per_server puts one full "
+        "pool per pooled process on postgres_dsn's server and everything else on the session "
+        "store's; a different split makes both declared ceilings wrong."
     )

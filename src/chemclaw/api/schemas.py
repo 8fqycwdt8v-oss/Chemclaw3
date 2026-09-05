@@ -199,6 +199,11 @@ class ProposalDetail(ProposalSummary):
     dependencies: list[ProposalFile] = Field(default_factory=list)
     session_id: str
     correlation_id: str
+    # Every *other* recorded version of this note, oldest first. `ProposalSummary` rather than a
+    # shape of its own because it already carries exactly what a history entry is — the decision,
+    # who took it and why — and carries no body, which is the property that matters here: a
+    # reviewer is being shown what was decided, not handed a second document to read.
+    history: list[ProposalSummary] = Field(default_factory=list)
 
 
 class ProposalDecisionIn(BaseModel):
