@@ -342,7 +342,14 @@ MAX_SINGLE_TOOL_TOKENS = 900
 #: is the same choice the four original entries were recorded under; the bound stays 900.
 KNOWN_OVERSIZED: dict[str, int] = {
     "start_optimization_campaign": 2_307,
-    "record_knowledge_note": 1_126,
+    # 1,126 → 1,227 on 2026-09-05, and the cause is prose rather than schema: the tool was renamed
+    # from `propose_knowledge_note` and its docstring rewritten, because the old one told the model
+    # the note went to a human for review and that stopped being true
+    # (`D-2026-09-05-the-gate-is-deleted-not-dormant`). The replacement says what a reader now has
+    # instead — provenance, citations, correction — and that is 101 tokens the model is sent on
+    # every call. Recorded rather than trimmed: the sentence it buys is the one that stops the model
+    # asserting an unreviewed note as established fact.
+    "record_knowledge_note": 1_227,
     # Both +22 against the re-measurement above, and it is the same 22 twice: they share the
     # `ExperimentDesign` schema, and the `max_length` ceilings
     # `D-2026-08-29-a-check-a-reader-never-sees-is-not-a-check` put on its six keyed lists render as
