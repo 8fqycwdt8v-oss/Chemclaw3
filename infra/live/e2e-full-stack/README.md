@@ -50,9 +50,15 @@ egress. See `chemclaw_mcp_rxnpredict.engine.base_doubles.register_requested`.
   - `CHEMCLAW_MCP_REPO` (default `/workspace/8fqycwdt8v-oss/chemclaw3-mcp`)
   - `CHEMCLAW_MOCK_REPO` (default `/workspace/8fqycwdt8v-oss/chemclaw3_mock`)
   - `CHEMCLAW_UI_REPO` (default `/workspace/8fqycwdt8v-oss/chemclaw3_ui`)
-- An Anthropic credential: `ANTHROPIC_API_KEY`, or an env var literally named `API-KEY` (this
-  script maps it — see `CLAUDE.md`'s "Local live/e2e credentials" note for where that comes from
-  in this environment).
+- **A model, optionally.** Every model call goes to the one OpenAI-compatible gateway
+  `CHEMCLAW_LLM_BASE_URL` names (`D-2026-09-04-a-gateway-is-the-only-provider`), so this lane needs
+  no vendor credential to run: with nothing set it drives `chemclaw.cli.mock_llm` on
+  `127.0.0.1:8820`, which exercises every hop — front door, middleware chain, budget, audit,
+  session store, connectors, Temporal — against scripted completions. Set
+  `CHEMCLAW_LLM_BASE_URL` + `CHEMCLAW_LLM_MODEL` to drive a real gateway; `up.sh` then maps the
+  environment's own key (an env var literally named `API-KEY` — see `CLAUDE.md`'s "Local live/e2e
+  credentials" note) onto `CHEMCLAW_LLM_API_KEY`. A bare `ANTHROPIC_API_KEY` is no longer usable
+  here: nothing in `src/` dials a vendor directly any more.
 
 ## Running it
 

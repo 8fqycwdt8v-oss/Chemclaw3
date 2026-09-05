@@ -95,10 +95,14 @@ class EvalSettings(BaseSettings):
     # Where transcripts land. Every probe writes one file: the full event stream is the evidence
     # a finding cites, and a finding whose reproduction is not on disk is prose.
     live_probe_transcript_dir: str = "tasks/live-test/transcripts"
-    # The judge that grades an answer against its probe's `direction`. Deliberately a different,
-    # stronger model than the agent under test: grading is where model quality buys the most,
-    # and it is one call per probe against the agent's many.
-    live_probe_judge_model: str = "claude-sonnet-5"
+    # The judge that grades an answer against its probe's `direction` is routed, not named here.
+    # `model_routes["live-probe-judge"]` picks it, the way the verifier and the protocol condenser
+    # are picked — this was a `live_probe_judge_model` setting defaulting to a vendor model id,
+    # which is a site's model name checked into this repository and is exactly what `model_routes`
+    # exists so that nobody has to do (`D-2026-09-04-a-gateway-is-the-only-provider`). Deliberately
+    # a different, stronger model than the agent under test: grading is where model quality buys
+    # the most, and it is one call per probe against the agent's many — so `evals/live_judge.py`
+    # says at WARNING when the route is unset and the judge is therefore sharing the agent's model.
     # The judge's own output ceiling. It must clear a verdict plus a reason plus a claims array
     # comfortably: at 1024 the reply was truncated mid-JSON on long answers and the parse failure
     # was recorded as a verdict of `unserved`, mislabelling 65 of 190 probes in the first run.

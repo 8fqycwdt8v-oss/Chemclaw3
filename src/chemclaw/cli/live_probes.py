@@ -50,7 +50,12 @@ from chemclaw.evals.live import (
     run_probes,
     run_turn,
 )
-from chemclaw.evals.live_judge import Judgement, judge_outcome, judgement_from_transcript
+from chemclaw.evals.live_judge import (
+    Judgement,
+    judge_model,
+    judge_outcome,
+    judgement_from_transcript,
+)
 from chemclaw.evals.probe import Probe, ProbeSet
 from chemclaw.evals.tool_utility import by_bucket, paired_tasks
 
@@ -394,7 +399,7 @@ def _ab_report(
         f"- pairs scored: **{len(tasks)}**"
         + (f" ({len(dropped)} dropped ungraded: {', '.join(dropped)})" if dropped else ""),
         f"- baseline arm: `{_AB_BASELINE_PROFILE}` (`tool_names: []`)",
-        f"- judge: `{settings.live_probe_judge_model}`",
+        f"- judge: `{judge_model()}`",
         "",
         "| set | n | helped | hurt | no effect | net delta |",
         "| --- | --- | --- | --- | --- | --- |",

@@ -31,6 +31,7 @@ its docstring).
 """
 
 import logging
+import random
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -45,10 +46,41 @@ from chemclaw.api.deps import CurrentUser, resolve_session
 from chemclaw.api.events import ErrorEvent, JobCompletedEvent, JobFailedEvent
 from chemclaw.api.state import state
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.digest import DIGEST_KIND, digest_channel
 
 logger = logging.getLogger(__name__)
+
+#: How far one tailer's poll interval is spread either side of `session_event_poll_seconds`.
+#:
+#: **A pod holds up to `service_max_event_streams_total` of these and nothing staggered them.**
+#: `stream_new_events` sleeps a constant interval, so once two tailers are in phase they stay
+#: there for the pod's life: 200 checkouts inside a few milliseconds every two seconds, with
+#: anything else needing the store at that instant (a turn's `store_tool_result`, a session claim,
+#: the ownership lookup) queued behind them. Measured on the shipped numbers against a live
+#: database with nothing else running, 200 streams over 10 s, **steady state** — the first poll of
+#: each stream excluded, because a probe that creates 200 tailers in one tick synchronises them by
+#: construction where 200 separate HTTP requests do not: peak **29** waiters on a pool of 8 and a
+#: worst poll of 14 ms, against **0** waiters and 5 ms with the spread. Raising `pg_pool_max_size`
+#: does not fix a burst that is a multiple of the pool.
+#:
+#: Drawn **once per stream** rather than per poll, which is the cheaper and the stronger of the
+#: two: distinct periods pull a synchronised fleet apart within about two polls, where a
+#: re-randomised interval is a random walk that needs dozens. The cost is stated rather than
+#: assumed — a stream at the top of the band learns of a finished job up to 25% later than the
+#: configured interval promises, which is why the band is narrow.
+#:
+#: A module constant rather than a setting, on the `detach._QUEUE_SIZE` precedent: it is a property
+#: of how a fleet of pollers de-phases, not a deployment's choice, and the number a deployment does
+#: choose (`session_event_poll_seconds`) is the one this spreads around.
+_POLL_SPREAD = 0.25
+
+
+def _spread_poll_interval() -> float:
+    """This stream's own poll interval: the configured one, off-phase from every other stream."""
+    interval = settings.session_event_poll_seconds
+    return interval * random.uniform(1.0 - _POLL_SPREAD, 1.0 + _POLL_SPREAD)
 
 
 class _SlotBoundEventStream(EventSourceResponse):
@@ -144,6 +176,12 @@ async def session_events(
     failed after its turn ended has exactly the same claim on the asker's attention as one that
     succeeded, and only one of the two used to have a way to reach them.
     """
+    # **Read here, not where the error is built** — the rule `post_message` states and this route
+    # was not swept with: `ErrorEvent.correlation_id` is the join key an operator asks a chemist to
+    # quote, and the generator below runs long after this handler returned, in a task whose context
+    # is a *copy* of this one. Reading it at the top makes "the event's id is this request's id" a
+    # fact of the code rather than of the runtime, exactly as the turn route's four events do.
+    correlation_id = get_current_correlation_id() or ""
     streams: dict[str, int] = state(request).event_streams
     at_user_cap = streams.get(principal.oid, 0) >= settings.service_max_event_streams_per_user
     at_pod_cap = sum(streams.values()) >= settings.service_max_event_streams_total
@@ -173,7 +211,13 @@ async def session_events(
         # route runs.
         try:
             async for pushed in front_door.stream_new_events(
-                session_id, kinds=("job_completed", "job_failed")
+                session_id,
+                kinds=("job_completed", "job_failed"),
+                # This stream's own interval, so a pod's idle tabs do not poll as one wavefront —
+                # see `_POLL_SPREAD`. Chosen here rather than inside the tailer because this route
+                # is the only thing that runs many of them at once, and it is what caps how many
+                # (`service_max_event_streams_total`).
+                poll_seconds=_spread_poll_interval(),
             ):
                 job_id = str(pushed.payload.get("job_id", ""))
                 failed = pushed.kind == "job_failed"
@@ -218,6 +262,7 @@ async def session_events(
                 ),
                 code="storage_unavailable",
                 retryable=True,
+                correlation_id=correlation_id,
             )
             yield {"event": lost.type, "data": lost.model_dump_json()}
 

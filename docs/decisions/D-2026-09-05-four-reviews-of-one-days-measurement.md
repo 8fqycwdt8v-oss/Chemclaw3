@@ -43,18 +43,29 @@ measured: the assignment form dies, the loop form reached the end and exited 0. 
 is refused too — `fleet_checkout_python` already catches a missing checkout, and this catches a
 present one that publishes no manifest this repository declares an endpoint for.
 
-**Handing the judge the agent's cached client armed a footgun rather than defusing one.**
+**Handing the judge the agent's cached client armed a footgun rather than defusing one — and the
+fix for it is not in this commit, because `main` had already made the whole thing moot.**
 `_tls_http_client` is a process-wide singleton the agent holds for its whole life, and
 `AsyncAnthropic` stores a caller-supplied `http_client` unwrapped and `aclose()`s it from its own
-`close()`/`__aexit__`. So one idiomatic `async with AsyncAnthropic(...)` in the judge would close the
-agent's client for the rest of the process — in exactly the private-CA configuration the change
-existed to fix. Nothing triggers it today, which is what makes it worth fixing now rather than after.
-The fix shares the **policy** instead of the pool: `tls_verify()` returns the `SSLContext`, an
-immutable configuration with no owner, and each side builds its own client from it. It is
-deliberately not `@cache`d, and that is the second thing this review found in its own fix — with
-`@cache` on it, `test_the_private_ca_client_is_built_once_per_process` passed alone and failed in
-file order, because its neighbour cleared one cache and not the other. **A second cache keyed off
-one setting is a second thing every test has to clear, and the two disagreeing is a stale CA.**
+`close()`/`__aexit__`. So one idiomatic `async with AsyncAnthropic(...)` in the judge would have
+closed the agent's client for the rest of the process — in exactly the private-CA configuration
+#308's change existed to fix. Nothing triggered it, which is what made it worth fixing before rather
+than after.
+
+The fix written here shared the *policy* instead of the pool — a `tls_verify()` returning the
+`SSLContext`, immutable configuration with no owner — and **it was thrown away on the merge**:
+`D-2026-09-04-a-gateway-is-the-only-provider` (#313) landed while this review was running and
+rebuilt `live_judge` on `build_chat_model`, so the judge no longer constructs an Anthropic client at
+all and reaches the private CA through the one seam that already handles it. Taking that instead of
+carrying a second answer is the correct outcome, and it cost nothing but the writing. **The finding
+was real and the remedy was superseded**, which is the ordinary shape of a review that runs while
+its base branch moves — and is why this ADR records it rather than quietly dropping it.
+
+One thing from that discarded fix is worth keeping on record, because it is about caches rather than
+about Anthropic: with `@cache` on `tls_verify`,
+`test_the_private_ca_client_is_built_once_per_process` passed alone and failed in file order,
+because its neighbour cleared one cache and not the other. **A second cache keyed off one setting is
+a second thing every test has to clear, and the two disagreeing is a stale CA.**
 
 **And a guard that leaked what it was checking.** `_assert_baseline_profile` opens a session to prove
 the front door knows the control profile, and never deleted it — one orphan `session_owners` row per
@@ -115,6 +126,11 @@ edited seventy lines of the same file.
   `f"{TEST_SCHEMA}_no_checkpointer"` at 62 bytes against PostgreSQL's 63, which truncates silently
   rather than erroring. Twelve hex digits is 2^48 draws against the handful a machine makes in a day
   and leaves twenty bytes.
+- **A review that runs while its base branch moves must re-read the base before it merges.** Three
+  PRs landed during this one; #313 rewrote both files the judge finding touched, and #312/#311 did
+  not collide. The conflict was the *cheap* way to find that out — had the judge fix merged cleanly
+  into a tree that no longer needed it, this repository would have carried two answers to the same
+  question, which is the failure its own `connectors/README.md` opens with.
 - **What this review did not do is re-run the measurement.** Every number in the result stands —
   all of the pairing, verdict, transition, tool-use and ratio figures reproduced exactly from the
   committed evidence, which is what made the four that did not stand out.

@@ -1855,7 +1855,11 @@ are two claims and only one of them was tested.**
 **A claim is checkable against `main`, not against the branch point.** The ADR contradicting my helm
 rationale merged while I was working. I never re-read `main` before merging. **Rule: before merging,
 re-read what landed on the base branch since the branch point, specifically for claims my prose
-makes about the same subsystem.**
+makes about the same subsystem.** It happened again in the review itself, and cost more: three PRs
+landed while four reviewers ran, and one of them rebuilt the judge on the provider seam — so the TLS
+fix I had written, tested and described in an ADR was obsolete before it merged, and the merge
+conflict was the only thing that told me. **Corollary: re-read the base *before* writing the fix,
+not before pushing it, whenever a review takes long enough for the base to move.**
 
 **Committing the result and not the artifact behind it is how a number becomes unre-derivable.** I
 committed 442 transcripts and left the token counters in `/tmp`, so the one table nobody could check

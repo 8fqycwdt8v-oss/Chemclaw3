@@ -181,8 +181,8 @@ it, because `note_repo_dir` defaults to the working checkout and every submissio
 note branch to that clone's origin, so the gate refuses it (G4) and the whole
 knowledge-contribution half of a run silently disappears.
 
-**`make live-storm` is the third stage, and it needs no model at all.** Point the lane at the mock
-(`CHEMCLAW_LLM_PROVIDER=openai_compatible`, `CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`,
+**`make live-storm` is the third stage, and it needs no model at all.** The shipped default already
+points the lane at the mock (`CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`,
 `CHEMCLAW_LLM_MODEL=mock`) and `make live-up` starts `chemclaw.cli.mock_llm` alongside everything
 else. The storm then drives load, adversarial model behaviour and the front door's own limits with
 zero LLM calls — the mock reports how many requests it served, which is how the run *proves* that
@@ -208,10 +208,13 @@ that never ran. Pass `ARGS='--only du-01 --no-judge'` to narrow a run.
 
 Notes on the stack itself:
 
-- **The front door will not boot without a model credential.** It builds the agent during startup,
-  so `ANTHROPIC_API_KEY` (or `CHEMCLAW_LLM_PROVIDER=openai_compatible` plus a base URL) is required
-  for Stage B. `make live-up` skips it and says so when neither is set; the workers still come up,
-  which is why Stage A is independent of it.
+- **The front door boots with no model credential, and that is a change.** It used to fail at
+  startup because building the agent built a client whose constructor raised on a missing
+  `ANTHROPIC_API_KEY`, so `make live-up` skipped it and said so. There is one client now
+  (`D-2026-09-04-a-gateway-is-the-only-provider`), it accepts a placeholder bearer for the many
+  internal gateways that ignore one, and `CHEMCLAW_LLM_BASE_URL` always names a destination — so
+  the front door always starts and a gateway that wanted a credential answers 401 on the first
+  turn. Stage B still needs a real model behind that address; Stage A never did.
 - **The lane pins `CHEMCLAW_SERVICE_HOST=127.0.0.1`.** With `entra_required=false` the front door
   refuses a non-loopback bind (SEC-2) and the default is `0.0.0.0`, so without this it would
   correctly fail to start.
@@ -727,7 +730,7 @@ Scrape `/metrics` and read the four spend counters together:
 
 ```
 chemclaw_input_tokens_total       # fresh prompt tokens, full price
-chemclaw_cache_read_tokens_total  # prompt tokens served from the provider's cache, ~10x cheaper
+chemclaw_cache_read_tokens_total  # prompt tokens served from the gateway's cache, ~10x cheaper
 chemclaw_cache_write_tokens_total # tokens written to the cache, priced above a fresh input token
 chemclaw_output_tokens_total      # completion tokens, unaffected by any of this
 ```
@@ -737,24 +740,31 @@ implies a different action:
 
 | Reading | What it means | What to do |
 | --- | --- | --- |
-| `cache_read` is a large fraction of prompt spend | The provider is already caching the prefix without being asked | Nothing. The saving is banked; a `cache_control` mechanism would add code for a benefit you already have. |
+| `cache_read` is a large fraction of prompt spend | The gateway is already caching the prefix without being asked | Nothing. The saving is banked; a `cache_control` mechanism would add code for a benefit you already have. |
 | `cache_read` ≈ 0 and `input` is large | The prefix is being re-billed every turn | There is a real saving to chase — see the caveats below before estimating it. |
 | `cache_write` grows while `cache_read` stays flat | The cache is being paid for and never used | Sessions are too short or too spread out to hit it; shortening the prefix beats caching it. |
 
-`cache_write` is **structurally 0 on the `openai_compatible` provider** — it reports cache reads but
-has no cache-write concept — so a zero there on the production provider is not a fault and not a
-signal. On the Anthropic dev path it is real.
+**Expect `cache_write` to read a flat 0**: an OpenAI-compatible endpoint caches implicitly and
+reports reads, and only some report a write count at all, so a zero there is the normal reading
+rather than a fault. `cache_read` is the number that says whether caching is happening.
+
+**There is no `cache_control` to switch on any more, and that is a cost this deployment accepted.**
+A `prompt_caching_middleware` marked the static prefix with Anthropic's `cache_control` breakpoints
+on the dev provider; the collapse to one OpenAI-compatible gateway removed the second client and
+took that with it (`D-2026-09-04-a-gateway-is-the-only-provider`). The mechanism was never reachable
+from the production path anyway: `cache_control` is a vendor spelling, and the gateway client is
+the one that does not know it — `grep -rc cache_control` over the two installed packages returns
+**zero** for `langchain_openai` against dozens for `langchain_anthropic` (62 on 1.6.1, but the
+count is not the point and goes stale on the next bump; the zero is). So what changed is that the
+*dev* path lost a saving the production path never had. Whether a prefix is cached is now entirely
+the gateway's decision, and these counters are how you find out.
 
 Two caveats that make the saving smaller than a naive prefix measurement suggests, both of which
 cost this review a wrong estimate:
 
-- **Measure the provider you actually run.** The ~14.6 k-token prefix figure that started REV-9 was
-  measured on the Anthropic dev path. Production is `openai_compatible`, where `langchain_openai`
-  contains **zero** occurrences of `cache_control` — the mechanism is not reachable from there at
-  all, so the fix is upstream work, not a config change here. This survived the rebuild of layer 1
-  unchanged, and it was re-measured rather than assumed to: the previous framework's OpenAI client
-  had the same zero, and `langchain_anthropic` has 74 occurrences, which is why the dev path can
-  do what the production path cannot.
+- **Measure the deployment you actually run.** The ~14.6 k-token prefix figure that started REV-9
+  was measured on the removed Anthropic dev path, against a mechanism the gateway path cannot
+  reach. Re-measure before quoting it.
 - **The system half is not cacheable as the prompt is assembled.** `deepagents.SkillsMiddleware`
   renders the skills manifest into a string with `system_prompt_template.format(...)` and appends
   it to the system message, so the half that changes least is welded to the half that changes most.
@@ -1259,8 +1269,9 @@ outage does move.
 on the tools and data dashboards, taking `histogram_quantile(0.95, …)` over each histogram's
 `_bucket` series: `chemclaw_tool_duration_seconds` **by `tool`** — that label is what makes "which
 tool is slow" answerable at all, and it did not exist until this pass — then
-`chemclaw_model_call_duration_seconds` by provider, then `chemclaw_evidence_source_seconds` by
-source. Slow turns hold admission permits, so this tends to precede `ChemclawTurnsShed`.
+`chemclaw_model_call_duration_seconds` — the gateway's own latency, unlabelled because there is
+one endpoint — then `chemclaw_evidence_source_seconds` by source. Slow turns hold admission
+permits, so this tends to precede `ChemclawTurnsShed`.
 
 #### ChemclawTurnsTimingOut
 `warning`. Someone waited out `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` and got nothing. If
