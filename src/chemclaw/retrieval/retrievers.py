@@ -20,7 +20,7 @@ from chemclaw.core.embeddings import embed_texts
 from chemclaw.kg.conflicts import NoteConflicts, conflict_index
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import Note, note_id_for_reaction, strip_links
-from chemclaw.kg.search import query_terms, term_frequencies
+from chemclaw.kg.search import query_terms, term_coverage, term_frequencies
 from chemclaw.retrieval.evidence import EvidenceChunk, Hits, RetrieverSkip
 from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
@@ -218,28 +218,36 @@ class GraphRetriever:
         """
         terms = query_terms(query)
         scored: list[tuple[int, float, float, Note]] = []
-        frequencies: list[tuple[dict[str, int], Note]] = []
+        frequencies: list[tuple[int, dict[str, int], Note]] = []
         for note in (await _eligible_notes(self._dir, filters)).values():
-            counts = term_frequencies(note, terms)
-            if counts:
-                frequencies.append((counts, note))
+            # **Membership is `term_coverage`, weight is `term_frequencies`, and they disagree on
+            # purpose.** Coverage is substring — the coarseness that makes `ester` find `polyester`
+            # — so gating on the frequency dict instead would silently narrow the hit set, which is
+            # a recall decision this ranking change has no business taking.
+            coverage = term_coverage(note, terms)
+            if not coverage:
+                continue
+            frequencies.append((coverage, term_frequencies(note, terms), note))
         # Document frequency over the *matched* population, which is the same number as over the
         # eligible one: a term's df counts the notes containing it, and a note containing it
         # matched. So the rarer term in a two-term query earns the larger weight without a second
         # pass over the corpus.
         population = len(frequencies)
         document_frequency: dict[str, int] = {}
-        for counts, _ in frequencies:
+        for _, counts, _ in frequencies:
             for term in counts:
                 document_frequency[term] = document_frequency.get(term, 0) + 1
-        for counts, note in frequencies:
+        for coverage, counts, note in frequencies:
             confidence = (
                 note.confidence
                 if note.confidence is not None
                 else settings.retrieval_default_confidence
             )
+            # `coverage`, not `len(counts)` — the widening and the complete-match rule are keyed
+            # on how many terms *matched*, which is the substring question, while `counts` holds
+            # only the terms that matched as whole tokens and is the weight.
             scored.append(
-                (len(counts), _relevance(counts, document_frequency, population), confidence, note)
+                (coverage, _relevance(counts, document_frequency, population), confidence, note)
             )
         complete = [entry for entry in scored if entry[0] == len(terms)]
         # RRF reads each source's list as ranked best-first, so the list must be ordered by this

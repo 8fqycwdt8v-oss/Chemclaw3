@@ -32,7 +32,11 @@ import psycopg
 from langchain_core.messages import AIMessage, HumanMessage
 
 from chemclaw.agent.audit import default_audit_sink
-from chemclaw.agent.authz import KNOWLEDGE_READ_TOOLS, side_effecting_tools
+from chemclaw.agent.authz import (
+    KNOWLEDGE_WRITE_TOOLS,
+    knowledge_read_tools,
+    side_effecting_tools,
+)
 from chemclaw.agent.checkpointer import checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.context_budget import (
@@ -448,6 +452,18 @@ async def run_turn(
             # below*, as sse-starlette sends the answer, so a flag set after it is still false
             # exactly when the teardown clause needs it to be true.
             ledger.answered = True
+            # **The one event that does not arrive through `_stream_into`.** `note_event` takes its
+            # counts off the graph's event stream, and the `AnswerEvent` is built here rather than
+            # streamed — so the three columns read off it (`answer_confidence`, `review_required`,
+            # `notes_cited`) were `NULL/false/0` on every row until this line existed. That is the
+            # `record_kept_chunks` shape: a reader with no caller, its own tests calling it directly
+            # and passing. `tests/test_turn_knowledge.py` now drives the booked row instead.
+            #
+            # Before the yield for the same reason `ledger.answered` is: the cancellation that
+            # reaches a finished turn is delivered while suspended in that yield, and the spend is
+            # booked in the teardown, so a count taken after it would be lost exactly when the turn
+            # completed normally enough to have one.
+            ledger.note_event(answer)
             yield answer
             # The turn used its authorization, so the authorization is spent (D-167). Here rather
             # than in the teardown, which also runs on the disconnect path where an `await` would
@@ -619,16 +635,22 @@ class _TurnLedger:
                 self.first_token = time.perf_counter()
         elif isinstance(event, ToolCallEvent):
             self.tool_calls += 1
-            # **The two sides are classified differently, on purpose.** Capture comes off the
-            # shipped partition, so a write tool a bundle adds next year is counted the day it is
-            # enabled — the argument `agent/subagents.py` makes for deriving the helper's roster
-            # rather than naming it. Retrieval cannot: authz partitions by *what a tool may do
-            # without approval*, and "did this turn consult the record" is a different question,
-            # so `KNOWLEDGE_READ_TOOLS` is a stated subset with a test holding it inside the
-            # read-only set.
-            if event.tool in KNOWLEDGE_READ_TOOLS:
+            # **Both sides are stated subsets, and each has a test holding it inside the authz
+            # partition it belongs to.** Neither question authz answers is this one: it partitions
+            # by *what a tool may do without approval*, so deriving retrieval from the read-only
+            # set counts a turn that asked the chemist a question as a turn that searched the
+            # record, and deriving capture from the state-changing set counted a turn that
+            # computed one xTB energy as a turn that wrote knowledge back — 49 tools, six of them
+            # writes. A derived set is only better than a stated one when the derivation answers
+            # the question being asked.
+            #
+            # The retrieval half is a *union* rather than a bare set, because a bundle's searches
+            # are the bundle's own fact: `rxnfp`'s seven searches over the reaction corpus are as
+            # much "did this turn look at the record" as `gather_evidence` is, and counting them
+            # by naming them in core would be the copy D-118 exists to prevent.
+            if event.tool in knowledge_read_tools():
                 self.retrieval_calls += 1
-            elif event.tool in side_effecting_tools():
+            elif event.tool in KNOWLEDGE_WRITE_TOOLS:
                 self.capture_calls += 1
         elif isinstance(event, ToolFailedEvent):
             if event.reason is None:
