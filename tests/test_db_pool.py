@@ -548,3 +548,34 @@ def test_a_narrow_pool_does_not_raise_on_the_request_path(
             return int(pool.min_size), int(pool.max_size)
 
     assert asyncio.run(_run()) == (1, 1)
+
+
+def test_a_falsy_pool_size_does_not_mint_a_second_pool_of_the_default_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pool key carries the *effective* width, not the width that was asked for.
+
+    `size = max_size or settings.pg_pool_max_size` resolves a falsy request to the default, and the
+    key used to carry the raw request — so `pool_max_size=0` and an omitted one were two keys
+    resolving to one width, and a process held two identical pools on the same DSN, options and
+    ceiling. Both count against the fleet budget; neither is wrong on its own; nothing would have
+    said so.
+
+    Unreachable from `src/` today, where the only caller passes a literal `1`. Pinned because the
+    parameter exists for call sites that do not exist yet, and "0" is what a settings-driven one
+    would pass when its setting is undeclared.
+    """
+    monkeypatch.setattr(settings, "pg_pool_max_size", 4)
+
+    async def _run() -> list[int]:
+        await migrated_db_or_skip()
+        async with db.pooling():
+            for requested in (None, 0, settings.pg_pool_max_size):
+                async with db.connection(settings.postgres_dsn, pool_max_size=requested):
+                    pass
+            return sorted(int(pool.max_size) for pool in db._all_pools())
+
+    assert asyncio.run(_run()) == [4], (
+        "an omitted size, a falsy one and the default spelled out are one pool of one width; "
+        "keying on the request rather than the resolution made them two"
+    )

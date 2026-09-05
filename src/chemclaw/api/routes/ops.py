@@ -158,8 +158,26 @@ async def _probe_database(front: FrontDoorState) -> bool:
     authenticated request needing the store in that window queued behind them and, past
     `pg_pool_timeout_seconds`, was shed 503.
 
-    **`asyncio.wait_for` around the whole leg, not `statement_timeout_seconds` alone, is what makes
-    `service_readiness_db_timeout_seconds` a budget.** That kwarg becomes a Postgres-side
+    **`asyncio.wait_for` around the whole leg bounds the *acquisition*, and it is not a budget for
+    the query.** That distinction is this paragraph's own correction: it claimed the wrapper made
+    `service_readiness_db_timeout_seconds` a budget outright, which holds for the connect leg it
+    was measured on and fails on the leg it names. Driven against a *paused* Postgres — the
+    "blackholed, not refused" case below, produced with `docker pause` — a warm pooled connection
+    ran past the wrapper twice over: once answering `200 ready` after 7.6 s for a database it could
+    not reach, once never returning at all. The mechanism is upstream and reproduces with no code
+    from this repository in the way: `AsyncConnection.wait()` catches the `CancelledError`, calls
+    `_try_cancel` (which dials the same frozen server), and then re-waits on the socket with no
+    timeout of its own.
+
+    What bounds it in a deployment is the kubelet, not this function: the chart derives
+    `readinessProbe.timeoutSeconds` from this setting plus the connector budget plus a margin — 5 s
+    on the shipped values, `failureThreshold: 3` — so a 7.6 s answer is a failed probe whatever it
+    says, and the pod goes not-ready, which is the correct outcome reached by the wrong route. The
+    residual is recorded rather than papered over, because the honest fix is upstream and the
+    alternative here would be a second timeout that cannot cancel what the first one could not.
+
+    The kwarg is still what bounds the query on a server that is *answering*. That kwarg becomes a
+    Postgres-side
     `statement_timeout` GUC (`db._merged_options`) — it bounds a query's execution *after* a
     connection already exists, and does nothing for however long acquiring one takes. Acquisition
     is bounded by two settings this probe does not read at all: `pg_connect_timeout_seconds` for a

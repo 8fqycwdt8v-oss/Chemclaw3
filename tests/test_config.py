@@ -1745,49 +1745,31 @@ def test_the_refusal_prints_a_breakdown_that_reaches_its_own_number() -> None:
     """
     import re
 
-    def _refusal(**kwargs: object) -> str:
+    def _refusal(pools: int, per_pool: int, replicas: int, ceiling: int, session: str = "") -> str:
         with pytest.raises(ValueError) as excinfo:
-            Settings(_env_file=None, postgres_dsn="postgresql://u:p@primary:5432/c", **kwargs)  # type: ignore[arg-type]
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                postgres_dsn="postgresql://u:p@primary:5432/c",
+                pg_fleet_pools=pools,
+                pg_pool_max_size=per_pool,
+                service_fleet_replicas=replicas,
+                pg_fleet_max_connections=ceiling,
+                session_store_dsn=session,
+            )
         return str(excinfo.value)
 
-    for label, kwargs in (
-        (
-            "split",
-            {
-                "pg_fleet_pools": 26,
-                "pg_pool_max_size": 8,
-                "service_fleet_replicas": 6,
-                "pg_fleet_max_connections": 100,
-                "session_store_dsn": "postgresql://u:p@sessions:5432/s",
-            },
-        ),
-        (
-            "no split",
-            {
-                "pg_fleet_pools": 26,
-                "pg_pool_max_size": 8,
-                "service_fleet_replicas": 6,
-                "pg_fleet_max_connections": 100,
-            },
-        ),
-        (
-            "pair too small for its readiness pools",
-            {
-                "pg_fleet_pools": 2,
-                "pg_pool_max_size": 16,
-                "service_fleet_replicas": 3,
-                "pg_fleet_max_connections": 10,
-            },
-        ),
+    for label, message in (
+        ("split", _refusal(26, 8, 6, 100, "postgresql://u:p@sessions:5432/s")),
+        ("no split", _refusal(26, 8, 6, 100)),
+        ("pair too small for its readiness pools", _refusal(2, 16, 3, 10)),
     ):
-        message = _refusal(**kwargs)
-        total, wide, per_pool, narrow = (
-            int(n)
-            for n in re.search(
-                r"may open (\d+) Postgres connections on .*?\((\d+) pool\(s\) of (\d+) plus (\d+) of one\)",
-                message,
-            ).groups()
+        found = re.search(
+            r"may open (\d+) Postgres connections on .*?"
+            r"\((\d+) pool\(s\) of (\d+) plus (\d+) of one\)",
+            message,
         )
+        assert found is not None, f"{label}: the refusal printed no breakdown at all: {message}"
+        total, wide, per_pool, narrow = (int(n) for n in found.groups())
         assert wide * per_pool + narrow == total, (
             f"{label}: the refusal says {total} and shows {wide}x{per_pool} + {narrow} = "
             f"{wide * per_pool + narrow}"
