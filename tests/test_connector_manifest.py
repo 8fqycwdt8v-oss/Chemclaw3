@@ -251,6 +251,25 @@ def test_a_typo_in_the_classification_is_refused_rather_than_ignored() -> None:
         )
 
 
+def test_a_tool_listed_twice_in_one_endpoint_is_refused_where_it_is_readable() -> None:
+    """The partition collapsed `tools` to a set, so a repeat validated here and failed later.
+
+    `registry._declared_tool_names` walks the raw list, so `make connector-validate` and every
+    agent build then reported the bundle colliding with *itself* — "connector 'x' declares tool 'a',
+    which connector 'x' already provides as a tool", which is true and unactionable without reading
+    the source to learn it means "you listed `a` twice". The manifest is the only place that can
+    still see the repetition, so it is the place that names it.
+    """
+    with pytest.raises(ValidationError, match="lists tool.*more than once"):
+        HttpEndpoint.model_validate(
+            {
+                "url": "http://127.0.0.1:8899/mcp",
+                "tools": ["resolve_compound", "resolve_compound"],
+                "read_only": ["resolve_compound"],
+            }
+        )
+
+
 def test_an_unclassified_tool_refuses_to_load() -> None:
     """Silence is not "read-only": a bundle has to say, because core cannot tell.
 
@@ -302,6 +321,22 @@ def test_a_job_may_declare_its_own_ceiling_and_a_bad_number_is_refused() -> None
     for bad in (0, -1, "soon"):
         with pytest.raises(ValidationError):
             JobSpec.model_validate({**_JOB, "timeout_seconds": bad})
+
+
+def test_a_job_cannot_both_wait_on_a_person_and_declare_what_it_costs() -> None:
+    """`awaits_answer` and `timeout_seconds` are opposite claims, so declaring both is refused.
+
+    `timeout_seconds` says what this job's whole durable run costs; `awaits_answer` says the run
+    has no wall-clock bound worth stating, because most of it is a person not having answered yet.
+    Honouring both would rebuild the defect the field was added for — `_measure`'s fortnight-long
+    wait under a ceiling sized for a CREST search — and honouring one silently would leave the
+    other looking like a control it is not. Absent by default, because every job in the tree but
+    one computes.
+    """
+    assert JobSpec.model_validate(_JOB).awaits_answer is False
+    assert JobSpec.model_validate({**_JOB, "awaits_answer": True}).awaits_answer is True
+    with pytest.raises(ValidationError, match="no wall-clock ceiling to declare"):
+        JobSpec.model_validate({**_JOB, "awaits_answer": True, "timeout_seconds": 900})
 
 
 def test_a_bad_ceiling_in_a_real_manifest_names_the_file_it_is_in(tmp_path: Path) -> None:

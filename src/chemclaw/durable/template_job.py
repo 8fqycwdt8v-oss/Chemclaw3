@@ -322,6 +322,15 @@ class TemplateWorkflow:
                     # exactly as the same job launched from a chat turn is — a field this path
                     # drops is a field that quietly means something else here.
                     timeout_seconds=resolved.timeout_seconds,
+                    # Its sibling, and the third field this literal has silently defaulted. A job
+                    # declaring `awaits_answer` gets no child ceiling (`child_execution_timeout`)
+                    # because it spends wall clock waiting on a plate rather than computing;
+                    # dropped here it read False, so the shipped campaign job was handed the
+                    # five-hour fleet ceiling on this path and killed 67x short of the fourteen-day
+                    # deadline its own wait opens. What still bounds it here is the *wrapper's*
+                    # `execution_timeout` below, which is a step-level bound and a different
+                    # question — see `wrapper_execution_timeout`.
+                    awaits_answer=resolved.awaits_answer,
                     publish_to_graph=resolved.publish_to_graph,
                 ),
                 # Named from the run's *execution*, not just its id — `TemplateWorkflow` is also

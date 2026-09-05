@@ -154,6 +154,38 @@ def test_a_database_outage_drains_the_pod_without_restarting_it(
         assert client.get("/healthz").status_code == 200
 
 
+def test_a_raising_connector_sweep_still_answers_a_readiness_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Connector health is *reported, never gating* — so it must not be able to fail the probe.
+
+    `_probe_database` catches its own failures and returns `False`; `_sweep_connectors` caught
+    nothing and leaned entirely on `probe_connectors`'s "never raises" docstring. That promise
+    covers the gathered probes, not the loop above them (`enabled()`, `health_url`,
+    `bundle_queue`) or a `_probe_queues` failure outside its own except clause. Measured with the
+    sweep replaced by a raiser: `readyz` answered **500** with
+    `{"detail": "The request could not be completed due to an internal error."}` — a hard failure
+    on the pod's readiness probe, draining it, from a signal this route's own docstring says must
+    not gate, and with no diagnosis for the operator running `curl`.
+
+    Whether the shipped sweep *can* raise is not what this pins; it pins the half the route owns.
+    """
+    monkeypatch.setattr(settings, "session_store", "memory")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+
+    async def _raises() -> Any:
+        raise RuntimeError("the connector registry could not be read")
+
+    monkeypatch.setattr("chemclaw.api.app.probe_connectors", _raises)
+    with _client(_FakeAgent()) as client:
+        res = client.get("/readyz")
+        again = client.get("/readyz")
+
+    assert res.status_code == 200, f"an unmeasurable connector fleet failed the pod: {res.text}"
+    assert res.json()["status"] == "ready"
+    assert again.status_code == 200, "the failure was cached into a permanently unready pod"
+
+
 def test_readyz_does_not_probe_a_database_a_memory_deployment_does_not_have(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1824,3 +1856,57 @@ def test_readyz_does_not_name_the_connector_fleet_to_an_unauthenticated_caller(
     assert "calc" not in rendered and "molfp" not in rendered, rendered
     assert "connection refused" not in rendered, rendered
     assert body["connectors_unhealthy"] == 1
+
+
+def test_the_thread_pool_covers_the_tool_calls_one_admitted_turn_can_fan_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`reserved` is the front door's claim about its own caps, and it charged a turn one thread.
+
+    `install_default_executor`'s contract is "how many threads this process's *own* admission caps
+    can occupy simultaneously". A turn's tool batch runs under LangGraph's `max_concurrency` =
+    `agent_max_parallel_tool_calls` (`agent/state.turn_config`), and every tool body both offloads
+    (`asyncio.to_thread` in `graph_tools`/`protocol_tools`) and borrows a pooled connection — so an
+    admitted turn holds up to that many threads, not one. Passing
+    `service_max_concurrent_turns + attachment_max_concurrent_parses` therefore claimed 8 where the
+    caps allow 64, and `service_thread_pool_headroom` — documented as "reserved for the calls that
+    are microseconds long and must never wait: token validation, a readiness probe, an SSE
+    reconnect" — was not reserved at all. Measured on the real app with a model emitting 8 parallel
+    tool calls across 8 concurrent turns: peak 18 concurrent `to_thread` bodies against a pool of
+    18, headroom included. Timed directly at that demand, one short offload waited **854.1 ms**
+    against a pool of 18 and **0.6 ms** against the pool this arithmetic asks for. That is
+    precisely the regression `core/executor.py` was written to close, reopened one factor up.
+
+    Asserted against the product read from settings — the specification — rather than against the
+    expression in `app.py`, and observed on the argument the real lifespan actually passes.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from chemclaw.api import app as app_module
+
+    real = app_module.install_default_executor
+    seen: list[ThreadPoolExecutor] = []
+
+    def _spy(*, component: str, reserved: int) -> ThreadPoolExecutor:
+        executor = real(component=component, reserved=reserved)
+        seen.append(executor)
+        return executor
+
+    monkeypatch.setattr(app_module, "install_default_executor", _spy)
+    app = app_module.create_app(connector_factory=_no_connectors)
+
+    async def _boot() -> None:
+        async with app.router.lifespan_context(app):
+            pass
+
+    asyncio.run(_boot())
+
+    fan_out = settings.service_max_concurrent_turns * max(1, settings.agent_max_parallel_tool_calls)
+    caps = fan_out + settings.attachment_max_concurrent_parses
+    floor = caps + settings.service_thread_pool_headroom
+    assert seen, "the lifespan installed no executor"
+    assert seen[0]._max_workers >= floor, (
+        f"the front door sized its shared to_thread pool at {seen[0]._max_workers}; its own caps "
+        f"can occupy {caps} of it, leaving nothing of the "
+        f"{settings.service_thread_pool_headroom} threads reserved for token validation"
+    )

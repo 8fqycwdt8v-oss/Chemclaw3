@@ -879,6 +879,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_degraded_total": ("subsystem",),
     # Bounded by this module's own declarations: the label domain is `declared_metric_names()`.
     "chemclaw_gauge_read_failures_total": ("metric",),
+    # Its sibling, and bounded the same way — the metric that hit the cardinality cap can only be
+    # one of the names declared above. Unlabelled until 2026-09-04, which left an operator alerting
+    # on it knowing that *something* was undercounting and nothing about what.
+    "chemclaw_metric_series_dropped_total": ("metric",),
     # The route *template* from `request.scope["route"].path`, enumerable from `app.routes` — which
     # is the bound, and is why no count is written here: the one that was said 23 while `create_app`
     # registered 21. Never `request.url.path`, which is caller-controlled and unbounded, and which
@@ -1162,17 +1166,24 @@ class Metrics:
             series[key] = series.get(key, 0.0) + amount
 
     def _note_series_cap(self, name: str) -> None:
-        """Record that `name` hit the series cap. Caller holds the lock.
+        """Record that `name` hit the series cap, labelled with it. Caller holds the lock.
 
         The cap used to leave nothing behind but one WARNING per metric per process lifetime, so
         "this metric is undercounting and has been for two days" was a log line nobody re-reads
         rather than a series anybody can alert on. It counts itself now — into a metric that is
         deliberately *not* itself capped, since its whole label domain is the declared metric
         names.
+
+        **Written straight into `_series` rather than through `increment`, for two reasons that
+        both have to hold.** The caller holds `self._lock`, which is a plain `Lock`, so re-entering
+        the public method would deadlock; and the cap check lives in `increment`, so bypassing it
+        is what makes "not itself capped" literally true rather than merely argued — this counter
+        keeps recording after every other one has stopped. The cardinality that buys is bounded by
+        `_COUNTERS` itself, which is a table in this file.
         """
-        self._counts["chemclaw_metric_series_dropped_total"] = (
-            self._counts.get("chemclaw_metric_series_dropped_total", 0.0) + 1.0
-        )
+        key = (("metric", name),)
+        series = self._series.setdefault("chemclaw_metric_series_dropped_total", {})
+        series[key] = series.get(key, 0.0) + 1.0
         if name not in self._capped:
             self._capped.add(name)
             log.warning(

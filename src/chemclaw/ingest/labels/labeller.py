@@ -33,6 +33,7 @@ reaction with a solvent. Sending the list makes the request unambiguous and the 
 positional against something we chose.
 """
 
+import logging
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -49,6 +50,8 @@ from chemclaw.core.mcp_session import (
     open_session,
 )
 from chemclaw.science.labels.vocabulary import VOCABULARY_VERSION
+
+logger = logging.getLogger(__name__)
 
 
 class LabelServerError(SubsystemUnavailableError):
@@ -173,7 +176,26 @@ class RxnLabelServer:
             One representation per id the server answered for. A reaction the server could not
             represent is simply absent, so the caller can record what it did get; the drain treats
             a missing entry as "not labelled this pass" rather than as an error.
+
+            **An answer whose species list is neither empty nor the length sent keeps everything
+            except that list**, which is what makes "positional" a contract rather than a hope.
+            `merge._species` reads `answered[index]`, and its `index < len(answered)` guard only
+            stops the read running off the end: an answer for 3 of 4 species shifts every role past
+            the gap onto a different molecule — a reactant stored as the solvent, the solvent as the
+            catalyst. `LabelToolError`'s own docstring already calls a species list that does not
+            match the reaction bad data; nothing checked it, and the server is versioned separately
+            from this repository, which is precisely why it has to be checked here.
+
+            **Blanked rather than dropped, because the rest of the answer is not positional.** The
+            representation also carries `mapped_smiles`, and dropping the whole object threw that
+            away too — permanently, not for one pass: `enrich.label_stale` stamps every stale row
+            with the current `labeller_version` whether or not the server answered, so the reaction
+            leaves `stale()` and nothing revisits it until that version changes. An empty list is
+            the shape `merge._species` already documents a floor for ("a short or absent answer
+            falls back to `species_role_from`"), so the roles degrade to the source's coarse map
+            while the atom map survives.
         """
+        sent = {rid: len(species) for rid, _smiles, species in reactions}
         payload = await self._call(
             "represent_reactions",
             {
@@ -183,10 +205,27 @@ class RxnLabelServer:
                 ]
             },
         )
-        return {
-            item.id: item
-            for item in (ReactionRepresentation.model_validate(r) for r in _results(payload))
-        }
+        answers: dict[str, ReactionRepresentation] = {}
+        for item in (ReactionRepresentation.model_validate(r) for r in _results(payload)):
+            expected = sent.get(item.id)
+            # An id this batch never sent is left to `enrich._placed`, which already drops it with
+            # the warning that names it as unplaceable — two warnings for one answer would read as
+            # two problems.
+            mismatched = (
+                expected is not None and bool(item.species) and len(item.species) != expected
+            )
+            if mismatched:
+                logger.warning(
+                    "the labelling server answered for %d of the %d species sent for reaction %r; "
+                    "the roles are matched back by position, so that half of the answer is "
+                    "discarded and the species roles fall back to what the source recorded. The "
+                    "atom map is not positional and is kept",
+                    len(item.species),
+                    expected,
+                    item.id,
+                )
+            answers[item.id] = item.model_copy(update={"species": []}) if mismatched else item
+        return answers
 
     async def name(self, reactions: list[tuple[str, str]]) -> dict[str, ReactionNaming]:
         """Classify a batch into named reactions, keyed by the ids given.

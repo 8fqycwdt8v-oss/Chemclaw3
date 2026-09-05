@@ -38,6 +38,7 @@ from chemclaw.api.state import (
     state,
 )
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
@@ -138,16 +139,43 @@ async def post_message(
         METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "process"})
         raise HTTPException(status_code=409, detail="a turn is already running for this session")
 
+    # **The id the header, the audit trail and `turn_costs` are all keyed on.** Read once, here,
+    # rather than in the generator: the observability middleware minted it for this request and
+    # stamped it as an ambient, and the generator runs in this request's context, so both resolve
+    # to the same string — but reading it at the top is what makes that a fact of the code rather
+    # than of the runtime. Every `ErrorEvent` this module builds carries it, because
+    # `ErrorEvent.correlation_id` is the join key an operator is asked to quote and three of the
+    # four events built here used to default it to `""` while the answer sat on the response
+    # header. `run_turn`'s own events already carry the same id through `ledger.correlation_id`.
+    correlation_id = get_current_correlation_id() or ""
+
+    # **Held out here, because two different endings give it back and only one of them is the
+    # turn's.** The turn's own `finally` releases it at the pump's true end; `_release_permit` is
+    # also handed to `DetachableTurn` as its detach hook, so a client that hangs up stops charging
+    # *admission* for work nobody is watching. Admission is fairness to a waiting client and a
+    # detached turn has none — see `chemclaw.api.detach`'s module docstring for the measurement
+    # (eight hang-ups, 0 permits free, every other chemist shed). The flag makes it idempotent, and
+    # nothing between the test and the release can suspend, so whichever ending arrives first wins.
+    permit = False
+
+    def _release_permit() -> None:
+        """Give the process's admission permit back, exactly once, whoever gets here first."""
+        nonlocal permit
+        if permit:
+            permit = False
+            semaphore.release()
+
     async def _turn_events() -> AsyncIterator[dict[str, str]]:
-        # Release the permit and the session's turn slot when the stream ends — normal
-        # completion, error, timeout, or client disconnect (the generator is closed, running
-        # this finally) — so neither is ever leaked.
+        # Release the session's turn slot, its durable claim and — unless the detach hook already
+        # did — the admission permit when the *turn* ends: normal completion, error, timeout, or
+        # a stop. Since the pump, that is the turn's true end rather than the reader's, so this is
+        # what keeps the session 409-locked for exactly as long as work is in flight.
         heartbeat = (
             None
             if claims is None
             else asyncio.create_task(_hold_turn_claim(claims, session_id, lease))
         )
-        permit = False
+        nonlocal permit
         # **The turn, not its error events** (M7). This used to be one increment per `error` event
         # inside the loop below, and `runner.py` can yield *two* for one turn: the loop cap and the
         # empty answer are independent predicates and a runaway turn satisfies both — so
@@ -178,7 +206,19 @@ async def post_message(
                     METRICS.increment("chemclaw_turns_shed_total")
                     # Retryable and honestly so: shedding says "not now", not "not ever",
                     # and it is the one failure where trying again shortly is exactly right.
-                    shed = ErrorEvent(message=_AT_CAPACITY, code="budget_exhausted", retryable=True)
+                    # **`at_capacity`, not `budget_exhausted`.** Both used to be the second,
+                    # with opposite `retryable` values — two populations with opposite remedies
+                    # under one code, on a taxonomy whose whole contract is that each member is a
+                    # different thing for the user to do. A surface switching on `code` could not
+                    # tell "we are busy, retry in a moment" from "your budget is gone, stop
+                    # retrying". `_AT_CAPACITY` was already the one literal for this condition;
+                    # now the code names the same thing the wording does.
+                    shed = ErrorEvent(
+                        message=_AT_CAPACITY,
+                        code="at_capacity",
+                        retryable=True,
+                        correlation_id=correlation_id,
+                    )
                     yield {"event": shed.type, "data": shed.model_dump_json()}
                     return
             else:
@@ -189,9 +229,13 @@ async def post_message(
             # it before any of them has recorded a thing: measured with production-shaped values
             # (8 permits, 40 concurrent POSTs, a 1-turn cap) as 40 answers and 40,000 tokens
             # booked, against a documented overshoot bound of 8. Re-checking here is what makes
-            # that bound true, because a turn holding a permit is one of at most
-            # `service_max_concurrent_turns`, and every turn that finished ahead of it has
-            # already been booked by `record`.
+            # that bound a small number rather than the request concurrency: a turn reaching this
+            # line holds a permit, so it is one of at most `service_max_concurrent_turns` *newly
+            # admitted* turns, and every turn that finished ahead of it has already been booked by
+            # `record`. It is no longer exactly 8, because a detached turn gives its permit back
+            # and keeps spending (see `_release_permit`) — the bound is that number plus whatever
+            # detached before this turn was admitted, which `chemclaw_turns_in_flight` shows
+            # against `chemclaw_turn_capacity`.
             #
             # An event rather than a status code (D-166): the response is open by now, and the
             # shed branch above answers the same way for the same reason. Not retryable — the
@@ -201,7 +245,12 @@ async def post_message(
                 front.budget.check(session_id, principal.oid)
             except BudgetExceeded as exc:
                 METRICS.increment("chemclaw_turns_refused_budget_total")
-                refused = ErrorEvent(message=str(exc), code="budget_exhausted", retryable=False)
+                refused = ErrorEvent(
+                    message=str(exc),
+                    code="budget_exhausted",
+                    retryable=False,
+                    correlation_id=correlation_id,
+                )
                 yield {"event": refused.type, "data": refused.model_dump_json()}
                 return
             METRICS.increment("chemclaw_turns_started_total")
@@ -265,6 +314,7 @@ async def post_message(
                     # Not retryable unchanged: the same question will take the same time. The
                     # useful next step is a narrower question, not another wait.
                     retryable=False,
+                    correlation_id=correlation_id,
                 )
                 yield {"event": timeout_event.type, "data": timeout_event.model_dump_json()}
         except Exception as exc:
@@ -285,15 +335,15 @@ async def post_message(
             # runner uses, so a client cannot get two different accounts of one kind of failure.
             turn_failed = True
             logger.exception("turn stream failed for session %s", session_id)
-            failed = failure_event(exc, session_id, uuid.uuid4().hex)
+            failed = failure_event(exc, session_id, correlation_id or uuid.uuid4().hex)
             yield {"event": failed.type, "data": failed.model_dump_json()}
         finally:
             if turn_failed:
                 METRICS.increment("chemclaw_turns_failed_total")
             if heartbeat is not None:
                 heartbeat.cancel()
-            if permit:
-                semaphore.release()
+            # A no-op when the reader already went and the detach hook gave it back.
+            _release_permit()
             _release_turn_slot(active_turns, session_id, slot)
             if claims is not None:
                 await _release_turn_claim(claims, session_id)
@@ -341,13 +391,16 @@ async def post_message(
         # The turn runs on a pump task of its own from this moment
         # (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`): the SSE response is a *view* of
         # it, so a client disconnect detaches the view and the turn runs to completion — its
-        # answer lands in the transcript, its teardown releases the permit, the lease and the
-        # claim at the turn's true end. Stopping is the explicit route below, which cancels the
-        # pump and delivers the same `CancelledError` a disconnect used to.
+        # answer lands in the transcript, its teardown releases the lease and the claim at the
+        # turn's true end. The **permit** goes back earlier, at the detach itself, because it is
+        # the one thing here that belongs to the replica rather than to the session; see
+        # `_release_permit`. Stopping is the explicit route below, which cancels the pump and
+        # delivers the same `CancelledError` a disconnect used to.
         turn = DetachableTurn(
             _turn_events(),
             session_id=session_id,
             survive_disconnect=settings.service_turn_survives_disconnect,
+            on_detach=_release_permit,
         )
         front.running_turns.register(session_id, turn)
         response = _TurnStream(

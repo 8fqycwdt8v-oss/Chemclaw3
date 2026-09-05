@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "ws-07",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Stop telling me about the biaryl scope campaign. It finished, and the updates are just noise now.",
+    "expects_tools": [
+      "stop_watching",
+      "list_watches"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that other watches were removed",
+      "that the campaign itself was closed, archived or altered"
+    ],
+    "direction": "Unsubscribing is the whole ask, and the failure mode is a silent no-op that reads as success. A good answer removes that one watch, names it back, and confirms the others are untouched. The second thing it must not do is act on the campaign: \"stop telling me about it\" is about the subscription, not the work, and an answer that closes or archives the campaign has done something the asker did not authorise. If no such watch exists, say so rather than confirming a removal.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-07",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Stop telling me about the biaryl scope campaign. It finished, and the updates are just noise now.",
+    "profile": "no-tools",
+    "answer": "I don't have access to your notification settings or preferences in this system. To stop receiving updates about the biaryl scope campaign, you'll need to:\n\n1. **Check your notification settings** — look for campaign or project-specific notification controls in the ELN/system interface\n2. **Archive or close the campaign** — if the system supports marking campaigns as complete, that may mute updates\n3. **Contact your system administrator** — if you need help disabling notifications for completed projects, they can adjust your settings\n\nIs there a specific notification channel (email, dashboard alerts, etc.) where you're seeing these updates? That might help narrow down where to adjust the setting.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 2.75,
+    "event_counts": {
+      "token": 7,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "e80f0c6cf87046f4ab388ca62ff95b12",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

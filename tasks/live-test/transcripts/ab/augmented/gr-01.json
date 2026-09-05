@@ -1,0 +1,79 @@
+{
+  "probe": {
+    "id": "gr-01",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking a base for the C-N coupling of Cc1ccc(N)cc1 onto aryl halides and I have to justify the choice. Which base actually wins, and does that hold across the halides or only for some of them?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a single winning base stated flatly, with no split by aryl halide",
+      "a numeric mean yield per base given without saying how many records it came from",
+      "a claim that the screening data does not exist or was not found, when three plates of it are seeded"
+    ],
+    "direction": "Reaches the seeded Buchwald-Hartwig plates (P2Et, MTBD, BTMG — ~3,955 records, all coupling the same 4-methylaniline) and reports what they show. The defensible answer is an interaction, not a champion: base ranking depends on the halide and the ligand, and the mean-over-everything hides that. Naming the plates and roughly how many records back each statement is what makes it checkable. If it can only reach part of the corpus, saying which part is a good answer; a confident single base with no per-halide split is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-01",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking a base for the C-N coupling of Cc1ccc(N)cc1 onto aryl halides and I have to justify the choice. Which base actually wins, and does that hold across the halides or only for some of them?",
+    "profile": "",
+    "answer": "I'll search for evidence of C-N coupling runs with that aniline substrate to see which bases have been used and what the record shows about their relative performance.The knowledge graph is empty and the reaction fingerprint index has not been populated, so I cannot pull precedent from your internal corpus on this substrate.\n\nLet me work with what I can reach: I'll ask whether this substrate is something you have characterized (as a compound note), and whether you have recorded any C-N coupling runs as reactions or campaign notes that I should search by other terms.The system holds no indexed notes on C-N coupling runs yet. That means **the record is silent on which base has actually won on your substrate**, and I cannot ground a recommendation in your own data.\n\nHere is what I can offer instead:\n\n**What I need from you to complete this answer:**\n1. Do you have ELN runs of this C-N coupling — even as unstructured lab notes, even failed runs? If so, point me to a document or a project I can search.\n2. Do you have screening results, optimization notes, or reports comparing bases (Cs₂CO₃, K₂CO₃, K₃PO₄, Cs₂CO₃ on different halides)?\n3. Which halides (Cl, Br, I, F) and which bases are you currently choosing between?\n\n**In the meantime**, I can compute the thermodynamic driving force (ΔG) for your C-N coupling with different bases, which will show you the equilibrium bias — but that is *not* the same as which one gives the fastest reaction or the highest yield. I can also pull literature conditions from the precedent corpus if your deployment has it indexed.\n\nWhat data do you have that I should look at?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "similar_reactions",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0, 'reaction-fingerprint': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-re"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 12.16,
+    "event_counts": {
+      "token": 26,
+      "tool_call": 3,
+      "evidence_source": 2,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "322d1da27b2446ccaaac9703a67d481f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

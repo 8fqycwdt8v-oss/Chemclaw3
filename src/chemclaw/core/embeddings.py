@@ -334,10 +334,30 @@ def _openai_compatible_embeddings(texts: list[str]) -> list[list[float]]:
     vectors: list[list[float]] = []
     step = settings.embedding_batch_size
     for start in range(0, len(texts), step):
-        response = client.embeddings.create(
-            model=settings.embedding_model, input=texts[start : start + step]
-        )
-        vectors.extend(item.embedding for item in response.data)
+        chunk = texts[start : start + step]
+        response = client.embeddings.create(model=settings.embedding_model, input=chunk)
+        # **Paired by `index`, never by position.** The response carries a per-item `index`
+        # precisely because `data` order is not part of the contract, and the servers this endpoint
+        # is most likely to be — vLLM, TEI, a batching gateway — reorder. Read positionally, a
+        # reordered batch gives every text its neighbour's vector, and nothing downstream can see
+        # it: `embed_texts` pairs the results with `zip(..., strict=True)`, which catches a *count*
+        # mismatch and is blind to a *permutation*. The stored vectors are then all wrong,
+        # `embedding_key` still reads as current, and the only symptom is bad recall — what
+        # `embedding_config_key` calls corrupting every similarity, silently.
+        ordered = sorted(response.data, key=lambda item: item.index)
+        if [item.index for item in ordered] != list(range(len(chunk))):
+            # And the sort is only a fix while `index` means what it says. A provider that repeats
+            # a value, omits some, or numbers a chunk against the whole request leaves `sorted`
+            # stable — which is arrival order again, with nothing to distinguish it from a correct
+            # answer. Refused rather than trusted, because this corruption is unrecoverable once
+            # written and invisible from the index afterwards.
+            raise ValueError(
+                f"the embedding endpoint answered a batch of {len(chunk)} with index values "
+                f"{[item.index for item in ordered]}, which are not that batch's own positions; "
+                "the response cannot be paired with its inputs and every vector it carries would "
+                "be attributed to the wrong text"
+            )
+        vectors.extend(item.embedding for item in ordered)
     return vectors
 
 

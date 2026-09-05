@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "ms-11",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Settle this for me: for CC(=O)CC(C)=O in water, which form am I actually working with and how much of the other one is there? I need it before we compute anything else about this compound.",
+    "expects_tools": [
+      "run_tautomer_resolution",
+      "rank_species"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a mixture composition the calculation did not return",
+      "a tautomer that was never enumerated",
+      "a keto/enol ratio recalled from the literature and presented as this system's result"
+    ],
+    "direction": "A 1,3-dicarbonyl, so the tautomer question is real and the asker is right that it comes first: a pKa, a Fukui ranking, a dipole and a reaction free energy all describe whichever form was drawn. Either route is a good answer — the named protocol, or the enumeration followed by a ranking over it — and what is graded is that the ranking was over an enumerated set rather than over forms the model wrote out. The level matters here more than anywhere else on this surface and a good answer says which it used: ranked from one embedding per tautomer this case comes out overwhelmingly keto against roughly 80% enol in the gas phase, because the enol's stabilising intramolecular hydrogen bond exists in one planar conformer and in none of the others, so a ranking that never searches conformers inverts the answer while looking entirely reasonable. Report the mixture rather than picking the lower form.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-11",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Settle this for me: for CC(=O)CC(C)=O in water, which form am I actually working with and how much of the other one is there? I need it before we compute anything else about this compound.",
+    "profile": "no-tools",
+    "answer": "I need to know what conditions you're working under to answer this properly. Are you asking about:\n\n1. **pH of the water** (neutral, acidic, basic)?\n2. **Temperature** (room temperature, heated, cooled)?\n3. **Concentration** of the compound?\n\nThe compound you've drawn is **acetylacetone** (2,4-pentanedione, CH₃-CO-CH₂-CO-CH₃). In water, this exists in a **keto-enol equilibrium**:\n\n- **Keto form** (what you drew): CH₃CO-CH₂-COCH₃ — predominant in most conditions\n- **Enol form**: CH₃C(OH)=CH-COCH₃ (or the other enol tautomer)\n\n**General behavior:**\n- In **neutral aqueous solution at room temperature**, the keto form heavily dominates — typically **90–99%** keto, **1–10%** enol, depending on exact conditions.\n- The enol form is stabilized slightly by the α-dicarbonyl conjugation, making acetylacetone unusual among ketones (most simple ketones have even less enol content).\n- **pH changes** will shift this: acidic conditions favor keto; very basic conditions deprotonate the enol (forming the enolate ion).\n\n**The problem:** The exact enol percentage in neutral water is not a constant you can look up reliably without measuring it for your specific conditions, or computing it from the keto-enol equilibrium constant (which itself depends on temperature and solvent). Literature values for acetylacetone enol content in water range from ~3–8% at 25°C.\n\n**Before you compute anything else:**\n- Are you planning to use acetylacetone as a ligand (where the enol matters for coordination)?\n- Or do you need the properties of the dominant keto form?\n- What's your actual working pH and temperature?\n\nTell me those, and I can give you a more specific answer.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.92,
+    "event_counts": {
+      "token": 17,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "e9f12d76b4524d7ba8c95866a0d698e2",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

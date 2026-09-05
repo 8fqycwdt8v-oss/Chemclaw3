@@ -55,7 +55,7 @@ spec:
            `path: /metrics` written out rather than reusing `monitoring.path`: that value is *this*
            application's route and the SDK's exporter does not read it. Two things that happen to
            agree are not one thing. */}}
-    - port: temporal-metrics
+    - port: temporal-sdk
       path: /metrics
       interval: {{ .Values.monitoring.interval | quote }}
       scrapeTimeout: {{ .Values.monitoring.scrapeTimeout | quote }}

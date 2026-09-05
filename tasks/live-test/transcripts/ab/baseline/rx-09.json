@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "rx-09",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Give me the three or four things we have actually learned about palladium cross-couplings that I could put on a slide for the site review. I want lessons, not a reaction list.",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a claim to summarise years of programme history or a project portfolio",
+      "a count of experiments run that the retrieved record does not support",
+      "a lesson stated without the evidence it was distilled from"
+    ],
+    "direction": "The corpus holds exactly the artefact this question wants — distilled playbooks and recorded failure modes — so a good answer returns those rather than generic cross-coupling advice. Expect the ligand-before-temperature playbook, the aqueous protodeboronation failure (conversion up, isolated yield down, seen three times before it was recognised because the assay looked better each time), the degassing playbook, and the reporting rule that a yield must be quoted with the purification that produced it. Each lesson should carry what it was distilled from. The honesty test is scale: this is a small seed corpus plus published HTE data, not an institutional history, and the answer must not let a manager infer a programme-wide evidence base that does not exist.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-09",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Give me the three or four things we have actually learned about palladium cross-couplings that I could put on a slide for the site review. I want lessons, not a reaction list.",
+    "profile": "no-tools",
+    "answer": "I don't have access to your program's records, ELN, or graph database, so I can't retrieve what your team has actually learned about palladium cross-couplings from your own experiments.\n\nTo give you lessons worth putting on a slide for a site review, I'd need to see:\n\n- **Your reaction notes** from palladium coupling work (conditions tested, what varied, what changed the outcomes)\n- **Any campaign summaries or reports** you've already written\n- **Failed attempts or surprises** that shifted how you approach these reactions\n\nThis is exactly where the **optimization-campaign-synthesis** or **development-report** skills would help if you can point me to the relevant data. Those skills are designed to extract genuine lessons from what you've actually run—not generalizations, but specific insights tied to your evidence.\n\n**Do you have:**\n1. A set of reaction notes or a campaign summary I should read?\n2. A specific coupling transformation you've been optimizing (e.g., aryl halide + boronic acid; how did yields or selectivity change)?\n3. A note or document already uploaded that captures what you've tried?\n\nOnce you point me to those, I can pull out the 3–4 genuine lessons that came from *your* data, phrased as transferable insights.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.95,
+    "event_counts": {
+      "token": 14,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "7105dd0c04134d5eb209b1fb193d2970",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

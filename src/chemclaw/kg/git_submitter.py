@@ -343,38 +343,43 @@ class GitNoteSubmitter:
         self._base = base_branch if base_branch is not None else settings.note_base_branch
         self._remote = remote if remote is not None else settings.git_remote
 
-    async def _run(self, *args: str, cwd: str | None = None) -> tuple[int, str]:
-        """Run one git command in the repo (or in `cwd`); return (exit code, stderr) — no raise.
+    async def _exec(self, argv: tuple[str, ...], cwd: str | None = None) -> tuple[int, str, str]:
+        """Spawn one git child and collect it under a bound; return (exit code, stdout, stderr).
 
-        Bounded by `git_command_timeout_seconds`: a hung command (dead remote,
-        credential prompt) is killed and reported as a failure, so it can never
-        deadlock the process-wide submit lock or orphan a git child holding
-        `.git/index.lock`.
+        **The one place a git process is started, which is what makes the two guarantees below
+        properties of this class rather than of each call site.** `_run` and `_read` both come
+        through here: they differ only in which stream they want and in what a non-zero exit means,
+        which is not enough difference to justify a second `create_subprocess_exec` — and the
+        second one was written without the cancellation arm, so a submission cancelled while the
+        tip guard was reading left a `git rev-parse` running. `_run`'s docstring had already
+        asserted that could not happen.
 
-        `cwd` is how the write half of a submission runs inside its worktree. **Every** git
-        command goes through here, including the worktree ones: the timeout and the kill-on-cancel
-        are properties of this function, and `tests/test_knowledge.py` fakes
-        `create_subprocess_exec` to prove them, so a command issued any other way would be
-        unbounded and invisible at once.
+        Bounded by `git_command_timeout_seconds`: a hung command (dead remote, credential prompt)
+        is killed and reported as a failure, so it can never deadlock the process-wide submit lock
+        or orphan a git child holding `.git/index.lock`.
+
+        `cwd` is how the write half of a submission runs inside its worktree.
+        `tests/test_knowledge.py` fakes `create_subprocess_exec` to prove both bounds, so a command
+        issued any other way would be unbounded and invisible at once.
         """
         process = await asyncio.create_subprocess_exec(
             "git",
             "-C",
             cwd if cwd is not None else self._repo_dir,
-            *args,
+            *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_git_child_env(),
         )
         try:
-            _, stderr = await asyncio.wait_for(
+            stdout, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=settings.git_command_timeout_seconds
             )
         except TimeoutError as exc:
             process.kill()
             await process.wait()
             raise GitRemoteError(
-                f"git {' '.join(args)} timed out after {settings.git_command_timeout_seconds}s"
+                f"git {' '.join(argv)} timed out after {settings.git_command_timeout_seconds}s"
             ) from exc
         except asyncio.CancelledError:
             # Kill the child so cancellation (e.g. Temporal activity timeout) never
@@ -382,7 +387,15 @@ class GitNoteSubmitter:
             process.kill()
             await process.wait()
             raise
-        return process.returncode or 0, stderr.decode().strip()
+        return process.returncode or 0, stdout.decode().strip(), stderr.decode().strip()
+
+    async def _run(self, *args: str, cwd: str | None = None) -> tuple[int, str]:
+        """Run one git command in the repo (or in `cwd`); return (exit code, stderr) — no raise.
+
+        Stderr, because the write path only ever needs the error text. The bounds are `_exec`'s.
+        """
+        returncode, _stdout, stderr = await self._exec(args, cwd=cwd)
+        return returncode, stderr
 
     async def _git(self, *args: str, cwd: str | None = None, transient: bool = False) -> None:
         """Run one git command, raising on a non-zero exit — and log what git actually said.
@@ -441,30 +454,17 @@ class GitNoteSubmitter:
 
         `_run` returns stderr because the write path only ever needs the error text; the tip
         guard needs *answers* (a hash, a commit message), and reading them off stderr is how its
-        first draft compared two empty strings and concluded there was nothing to lose.
+        first draft compared two empty strings and concluded there was nothing to lose. That is the
+        whole of the difference, so the child itself is `_exec`'s — which is where the timeout and
+        the kill-on-cancel live, and this used to spawn its own without the second one.
         """
         # A single argument is a ref to resolve; a full argv is run verbatim.
         argv = args if len(args) > 1 else ("rev-parse", "--verify", "--quiet", args[0])
-        process = await asyncio.create_subprocess_exec(
-            "git",
-            "-C",
-            self._repo_dir,
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=_git_child_env(),
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(
-                process.communicate(), timeout=settings.git_command_timeout_seconds
-            )
-        except TimeoutError as exc:
-            process.kill()
-            await process.wait()
-            raise GitRemoteError(f"git {' '.join(argv)} timed out") from exc
-        if process.returncode != 0:
-            return None
-        return stdout.decode().strip()
+        returncode, stdout, _stderr = await self._exec(argv)
+        # A non-zero exit is an *answer* here — "no such ref" is how the tip guard learns a branch
+        # does not exist yet — so it is `None` rather than a raise, which is the other half of why
+        # this is not simply `_run`.
+        return None if returncode != 0 else stdout
 
     def _contained_note_path(self, relative: str, workdir: Path) -> Path:
         """Resolve the note path inside `workdir` and refuse anything escaping it.

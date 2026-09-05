@@ -20,6 +20,7 @@ property the seam was built to have.
 from datetime import timedelta
 
 from temporalio import workflow
+from temporalio.workflow import ParentClosePolicy
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.connectors.bo.activities import (
@@ -148,6 +149,24 @@ async def _measure(
             request.model_dump(mode="json"),
             id=f"{workflow.info().workflow_id}:await:{round_label}",
             task_queue=settings.background_task_queue,
+            # **Not the default**, and this is the longest-lived wait in the tree, so it is where
+            # the default costs most. `execute_child_workflow` defaults to
+            # `ParentClosePolicy.TERMINATE`, and a terminate never resumes workflow code — so a
+            # campaign that ended any way other than by completing (a cancel, an operator
+            # terminate) left this round's `pending_requests` row `waiting` with a `due_at` nothing
+            # would ever act on. That row is permanent: `open_requests` keeps it in every entitled
+            # person's inbox, the answer route signals a workflow that is gone and turns the
+            # failure into a 503 telling them to try again, and `retention._NOT_PRUNED` refuses to
+            # collect it. A fortnight of somebody being asked to run plates for a campaign that no
+            # longer exists.
+            #
+            # `REQUEST_CANCEL` rather than `ABANDON`, measured across all three policies in
+            # `tests/test_awaiting.py`: abandoning leaves the question live and answerable, so the
+            # ask outlives the campaign it was for; cancelling delivers the `asyncio.CancelledError`
+            # the wait was written to handle, and its detached settle takes the row out of the
+            # inbox. `tests/test_bo_campaign.py` drives that on this call site rather than on a
+            # stand-in, because a policy is a *start option* and only the starter can carry it.
+            parent_close_policy=ParentClosePolicy.REQUEST_CANCEL,
         )
     )
     if outcome.state != "answered":

@@ -10,10 +10,11 @@ import asyncio
 import json
 import logging
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln import adapter as eln_adapter
@@ -43,7 +44,7 @@ from chemclaw.ingest.eln.records import (
 )
 from chemclaw.ingest.eln.sync import IngestSummary, sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
-from chemclaw.kg.note import cited_ids, cited_links, note_id_for_reaction
+from chemclaw.kg.note import ProcessConditions, cited_ids, cited_links, note_id_for_reaction
 from chemclaw.science.fingerprints.molfp.search import find_similar_molecules
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from chemclaw.science.labels.store import InMemoryLabelIndex
@@ -795,6 +796,132 @@ def test_sync_rejects_non_slug_entry_id_without_aborting_batch() -> None:
     asyncio.run(_run())
 
 
+def test_a_nul_byte_in_free_text_is_one_rejection_not_a_half_written_batch() -> None:
+    """Free text the corpus cannot store is bad data per entry, refused before anything is written.
+
+    A NUL byte anywhere in an ELN's prose — a procedure, a hypothesis, an impurity name, an
+    unmapped attribute — reaches `reaction_records.body`, and Postgres refuses a NUL in a `text` or
+    `jsonb` value outright. `psycopg.DataError` is neither a `ChemclawError` nor a pydantic
+    `ValidationError`, so it used to escape the reject-and-continue loop at the *last* of
+    `ingest_reaction`'s five writes: the entry's fingerprint and label rows were already committed
+    while its record was not, no `ingest_rejections` row was written (the ledger write lives in
+    `durable/eln_sync.py`, after this function returns), and the activity failed identically on
+    every retry — so the cursor never advanced and every later entry of that source was starved.
+
+    Refusing the *input* is what makes it an ordinary rejection: it fails at record construction,
+    before the first store call, so nothing is written at all and the reason reaches the ledger
+    like any other bad-data refusal. Sanitising instead was the alternative and is the wrong one
+    here — see `ingest/rejections.py::_storable` for where the opposite trade is right, and why.
+    """
+
+    async def _run() -> None:
+        poisoned = RawEntry(
+            entry_id="EXP-2",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            payload={
+                "reactants": [{"smiles": "CCO"}, {"smiles": "CC(=O)O"}],
+                "products": [{"smiles": "CCOC(C)=O"}],
+                "procedure": "Quenched with brine\x00 and dried over MgSO4.",
+            },
+        )
+        good = _good_entry("EXP-3", datetime(2026, 2, 1, tzinfo=UTC))
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        summary = await sync_entries(
+            _ListAdapter([poisoned, good]),
+            rxn,
+            mol,
+            rec,
+            _EPOCH,
+            label_index=_labels(),
+            source="test-eln",
+        )
+
+        assert summary.ingested == ["EXP-3"], "the entry after the poisoned one must still ingest"
+        assert [r.entry_id for r in summary.rejected] == ["EXP-2"]
+        assert "NUL" in summary.rejected[0].reason
+        # Nothing of the refused entry reached any index: the refusal is at construction, so the
+        # dangling half-write — findable by structure, not expandable to a record — cannot happen.
+        assert [r.id for r in await rxn.all_records()] == ["EXP-3"]
+        assert await rec.read("EXP-2") is None
+
+    asyncio.run(_run())
+
+
+def test_a_lone_surrogate_in_free_text_is_refused_the_same_way() -> None:
+    r"""The other half of unstorable: a truncated `\\u` escape in a JSON export.
+
+    `json.loads('"\\ud800"')` returns a lone surrogate happily, so a source whose exporter cut an
+    escape puts a `str` in a field that no UTF-8 consumer can accept — psycopg refuses it when it
+    encodes the parameter, one step before Postgres would. `kg.note._reject_unencodable` states
+    this rule for a note; a transcription is written to the same kind of storage and needs it too.
+    """
+    with pytest.raises(ValidationError) as raised:
+        record_from_ord_reaction(
+            OrdReaction(
+                reaction_id="EXP-4",
+                inputs=[Component(smiles="CCO", role=Role.REACTANT)],
+                outcomes=[Component(smiles="CC=O", role=Role.PRODUCT)],
+                provenance="test",
+                procedure_text="dried \ud800 overnight",
+            )
+        )
+    assert "UTF-8" in str(raised.value)
+
+
+def test_a_nul_in_a_condition_the_body_never_renders_is_refused_too() -> None:
+    """The check is on the record, not on the body — `conditions` is a JSONB column of its own.
+
+    An impurity name reaches `ProcessConditions.major_impurity`, and `jsonb` refuses a NUL exactly
+    as `text` does. Checking only the rendered body would pass this record and fail the write, the
+    defect one field away from where it was found.
+    """
+    with pytest.raises(ValidationError) as raised:
+        ReactionRecord(
+            reaction_id="EXP-5",
+            body="a body with nothing wrong in it",
+            source="test-eln",
+            conditions=ProcessConditions(major_impurity="des-bromo\x00 adduct"),
+        )
+    assert "conditions.major_impurity" in str(raised.value)
+
+
+def test_the_next_field_added_to_a_record_cannot_forget_the_storable_check() -> None:
+    """The walk's own claim, driven by actually adding a field to the record.
+
+    `_walk_storable` handled `str` and `BaseModel` only, while its docstring named
+    `kg.note._walk_encodable` as "the same shape over the same problem" — and that one walks lists
+    of both. No field of `ReactionRecord` is a list today, which is exactly why nothing caught it:
+    the first `list[str]` or `list[Model]` added here would walk straight past the guard into the
+    `psycopg.DataError` at the last of `ingest_reaction`'s writes that the guard exists to prevent.
+
+    A subclass rather than a synthetic model, because the claim is about *this* record gaining a
+    field, and the validator it has to reach is the record's own.
+    """
+
+    class _RecordWithLists(ReactionRecord):
+        tags: list[str] = []
+        extras: list[ProcessConditions] = []
+
+    with pytest.raises(ValidationError) as in_a_list:
+        _RecordWithLists(
+            reaction_id="EXP-6", body="fine", source="test-eln", tags=["clean", "des-bromo\x00"]
+        )
+    assert "tags[1]" in str(in_a_list.value)
+
+    with pytest.raises(ValidationError) as in_a_nested_model:
+        _RecordWithLists(
+            reaction_id="EXP-7",
+            body="fine",
+            source="test-eln",
+            extras=[ProcessConditions(major_impurity="des-bromo\x00 adduct")],
+        )
+    assert "extras[0].major_impurity" in str(in_a_nested_model.value)
+
+
 def test_future_dated_entry_is_rejected_and_does_not_poison_cursor() -> None:
     """A typo'd future year is a visible rejection and never becomes the high-water cursor.
 
@@ -1144,6 +1271,82 @@ def test_a_single_product_reaction_note_says_which_compound_it_is_about() -> Non
     never reached the field.
     """
     assert record_from_ord_reaction(_ester()).compound_smiles == "CCOC(C)=O"
+
+
+def test_the_file_drop_adapters_stamp_a_date_they_read_off_the_entry_as_entry_dated() -> None:
+    """A date filled in from the entry's write time must say so, for both shipped ELN sources.
+
+    `date_source` exists to separate "the source stated when the run happened" from "the seam
+    filled it in when the record was written" (`D-2026-08-26-silence-is-not-a-successful-run`), and
+    both file-drop adapters were the case it was added for: neither shipped fixture carries an
+    experiment date at all — the JSON ELN's only date field is `timestamp`, the ORD record's is
+    `provenance.record_created.time` — so each mapped `raw.created_at.date()` onto the record and
+    left the stamp at its `"stated"` default. `memory/progression.py::Progression.entry_dated`
+    reads that stamp
+    to weaken the caveat, so for the two shipped sources it was always empty and the campaign note
+    asserted "Runs in the order they were performed" over an afternoon of transcription.
+
+    The date is unchanged; only the claim about where it came from is. `DatedIngest` supplies both
+    in one `model_copy`, and it is the one construction point every production reader resolves
+    through, so the two adapters have nothing left to do here.
+    """
+    written = datetime(2026, 3, 10, 9, tzinfo=UTC)
+    json_raw = RawEntry(
+        entry_id="eln-2026-001",
+        created_at=written,
+        payload={"reactants": [{"smiles": "CCO"}], "products": [{"smiles": "CC=O"}]},
+    )
+    assert JsonExportAdapter().map_to_ord(json_raw).performed_at is None, (
+        "the adapter alone has no experiment date to state: the entry does not carry one"
+    )
+    dated = DatedIngest(JsonExportAdapter()).map_to_ord(json_raw)
+    assert dated.performed_at == date(2026, 3, 10) and dated.date_source == "entry"
+
+    ord_raw = RawEntry(
+        entry_id="ord-2026-001",
+        created_at=written,
+        payload={
+            "inputs": {
+                "a": {"components": [{"identifiers": [{"type": "SMILES", "value": "CCO"}]}]}
+            },
+            "outcomes": [{"products": [{"identifiers": [{"type": "SMILES", "value": "CC=O"}]}]}],
+        },
+    )
+    assert OrdJsonAdapter().map_to_ord(ord_raw).performed_at is None
+    ord_dated = DatedIngest(OrdJsonAdapter()).map_to_ord(ord_raw)
+    assert ord_dated.performed_at == date(2026, 3, 10) and ord_dated.date_source == "entry"
+
+
+def test_a_run_whose_only_recorded_conditions_are_zero_keeps_them() -> None:
+    """Absent means "not recorded", never "zero" — and the emptiness test used to say otherwise.
+
+    `ProcessConditions`' own docstring states the rule and names what reads it: the distinction
+    `comparison.MISSING` renders and `drop_empty_columns` reads. A 0 °C ice bath is the commonest
+    cryo setpoint there is, a 0% yield is a complete failure — the case `OutcomeClass` exists to
+    preserve — and a truthiness test over the field values cannot tell either from silence. The
+    body still rendered the bullet, so the record said one thing in prose and another in the
+    column every numeric comparison actually reads.
+    """
+    ice_bath = OrdReaction(
+        reaction_id="EXP-cryo",
+        inputs=[Component(smiles="CCO", role=Role.REACTANT)],
+        outcomes=[Component(smiles="CC=O", role=Role.PRODUCT)],
+        provenance="test",
+        temperature_c=0.0,
+    )
+    conditions = record_from_ord_reaction(ice_bath).conditions
+    assert conditions is not None, "a recorded 0 °C is a recorded setpoint, not an absent one"
+    assert conditions.temperature_c == 0.0
+
+    failed = ice_bath.model_copy(update={"temperature_c": None, "yield_percent": 0.0})
+    failed_conditions = record_from_ord_reaction(failed).conditions
+    assert failed_conditions is not None and failed_conditions.yield_percent == 0.0
+
+    nothing = ice_bath.model_copy(update={"temperature_c": None})
+    assert record_from_ord_reaction(nothing).conditions is None, (
+        "a run that recorded none of them still gets no block: `conditions: {}` would claim the "
+        "question was asked and answered emptily"
+    )
 
 
 def test_a_multi_product_reaction_names_no_principal_compound() -> None:

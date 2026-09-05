@@ -167,6 +167,20 @@ async def migrate(dsn: str | None = None) -> list[str]:
     # must be a connection nobody else can be handed, because the advisory lock below is scoped to
     # it.
     sources = await asyncio.to_thread(_read_sql_files)
+    # **Before the connect, so a mis-set path fails as a configuration error rather than as a
+    # `KeyError` deep inside a transaction.** The ledger bootstrap below subscripts `sources`
+    # directly, and an empty or wrong `sql_migrations_dir` made that a bare
+    # `KeyError: '000_schema_migrations.sql'` in a `pre-install` hook Job's log — naming neither
+    # the directory searched nor the setting that points at it. `core/grants.py::apply_grants`
+    # already handles the identical misconfiguration by name ("An empty directory is an error, not
+    # a successful no-op"); this is the same rule for the same directory.
+    if _LEDGER_FILE not in sources:
+        raise MigrationError(
+            f"no {_LEDGER_FILE} in {settings.sql_migrations_dir!r} — that file "
+            f"bootstraps the ledger every migration is tracked against, and {len(sources)} other "
+            "file(s) were found beside it. Check sql_migrations_dir "
+            "(CHEMCLAW_SQL_MIGRATIONS_DIR) and that the migrations directory ships in this image."
+        )
     async with await connect(target) as conn:
         # Wait generously for a peer migrator, then tightly for every table lock after it. The
         # order matters: taking the advisory lock under the 5 s DDL budget would make an ordinary

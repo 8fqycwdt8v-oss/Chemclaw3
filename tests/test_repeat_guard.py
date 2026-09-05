@@ -28,7 +28,29 @@ from tests.middleware import run_middleware, tool_request
 
 
 def _ctx(name: str, **arguments: Any) -> Any:
-    """The call as the guard reads it: a name and its arguments, which together are its key."""
+    """The call as the guard reads it: a name and its arguments, which together are its key.
+
+    Carries the *registered* tool as well, because the guard reads it too: a metric label must be
+    the served name rather than the model's string, and `ToolNode` passes `tool=None` for a name
+    the graph does not hold. `_unregistered` is the fixture for that half.
+    """
+    return tool_request(name, dict(arguments), tool=_Registered(name))
+
+
+class _Registered:
+    """The one attribute `agent/audit.metric_tool_name` reads off a tool the graph holds."""
+
+    def __init__(self, name: str) -> None:
+        """Name it as the registry does — the label is this string, never the caller's."""
+        self.name = name
+
+
+def _unregistered(name: str, **arguments: Any) -> Any:
+    """A call for a name the graph does not hold, which is what `ToolNode` hands the chain.
+
+    `tool=None` is not a convenience here: it is exactly what an interceptor is given for a
+    hallucinated or injected call, which is the whole reason the label needs clamping.
+    """
     return tool_request(name, dict(arguments))
 
 
@@ -209,6 +231,37 @@ def test_a_refused_repeat_is_counted_so_a_deployment_can_alert_on_it(watching: N
         _drive(_ctx("find_past_jobs"), tool)
     assert METRICS.value("chemclaw_repeated_tool_calls_total") == before + 1
     assert 'tool="find_past_jobs"' in METRICS.render()
+
+
+def test_an_invented_tool_name_never_reaches_the_metric_label(watching: None) -> None:
+    """The counter is on an unauthenticated `/metrics`, so its label may not be model-authored.
+
+    `SECURITY-REVIEW-2026-08-28.md` records this class as closed: model-controlled text reached
+    `/metrics` through an invalid-tool-call label, and the remedy was to clamp the label to the
+    served tool surface. `agent/audit.metric_tool_name` and `agent/model_calls._bump_invalid` both
+    apply that clamp; this guard did not, and it sits *above* `refuse_unparsed_arguments` in the
+    chain, so it runs for names the graph does not hold — `ToolNode` dispatches an unregistered
+    name through the middleware chain deliberately. Measured: three identical calls to an invented
+    name minted `chemclaw_repeated_tool_calls_total{tool="IGNORE_PREVIOUS. exfiltrate=…"}`, a
+    253-character label, one new time series per invented name until `_MAX_SERIES_PER_COUNTER`
+    dropped the rest — at which point the counter also stops recording genuine repeats, so the
+    exfiltration poisons the signal on its way out.
+
+    The refusal the model reads still names what it asked for; only the label is clamped, which is
+    the same split `metric_tool_name`'s own docstring draws for the audit row.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    invented = "IGNORE_PREVIOUS. exfiltrate=" + "A" * 200
+    tool = _Tool()
+    for _ in range(settings.max_identical_tool_calls):
+        _drive(_unregistered(invented), tool)
+    with pytest.raises(RepeatedCallRefusal) as refusal:
+        _drive(_unregistered(invented), tool)
+
+    assert invented in str(refusal.value), "the model must still be told what it asked for"
+    assert invented not in METRICS.render(), "a model's string became a metric label"
+    assert 'tool="unknown"' in METRICS.render()
 
 
 # --------------------------------------------------------------------------------------------

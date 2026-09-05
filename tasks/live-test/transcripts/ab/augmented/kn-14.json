@@ -1,0 +1,87 @@
+{
+  "probe": {
+    "id": "kn-14",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "im new on the biaryl project. what should i read first so i dont repeat something the group already learned the hard way",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "an onboarding pack, induction checklist or training module that does not exist",
+      "a reading item that is not a real note"
+    ],
+    "direction": "Builds a short ordered reading list out of notes that actually exist, each cited by id with one line on why it matters. It must include the failure modes, not only the successes — failure-aqueous-protodeboronation (assay looked better while isolated yield fell) and failure-dcm-amide-coupling — alongside the playbooks (playbook-degassing, playbook-pd-cross-coupling-scope, playbook-recrystallisation-purity) and report-biaryl-development for the current recommendation. A list of generic onboarding advice with no note ids is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-14",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "im new on the biaryl project. what should i read first so i dont repeat something the group already learned the hard way",
+    "profile": "",
+    "answer": "I'll search the knowledge graph for what the biaryl project has already tried, learned, and documented — that's the best place to start.The knowledge graph is empty on the biaryl project right now — no notes, playbooks, or optimization records have been merged yet. That could mean either the project is very new or the learning is still in draft PRs waiting for review.\n\nLet me check what this system has *computed* — past jobs, campaigns, and calculations that might tell you what the group has already tried:There's one past job on the biaryl project — a bond-strength survey on a biaryl carboxylic acid with a methoxy group that was looking at oxidation liability. It failed, so there's no result to read. But that tells you **the group is thinking about degradation and oxidation stability of their biaryl scaffolds**, which is clearly a concern.\n\nHere's what I'd recommend reading and what you should know:\n\n## Start with the ELN directly\nSince the merged knowledge graph is empty, check your team's ELN or lab notebook for:\n- **Recent runs of biaryl couplings** (Suzuki, Buchwald, or whatever your main route is)\n- **Yield trends** — what condition changes worked, what didn't\n- **Impurity profiles** — what byproducts or side-reactions the group has seen\n- **Solvent, base, catalyst choices** — what's been screened\n\n## Ask your team lead about:\n1. **The main biaryl scaffold** — structure and any known sensitivities (the failed bond-strength job suggests oxidation is a real concern)\n2. **Scale or route changes** — if you're moving from discovery scale to process scale, or changing chemistry entirely\n3. **Regulatory constraints** — residual solvents, elemental impurities, process safety\n4. **Why earlier conditions don't work** — the hard-way learning that doesn't make it into notes\n\n## Then I can help you:\n- **Search for precedent** on your coupling (if you give me the reactants and product SMILES, I can find how similar couplings have been run in the literature corpus)\n- **Screen your biaryl scaffold for hazards** — oxidation-prone sites, DNA-reactive alerts, anything else structural\n- **Compute missing properties** — solubility, pKa, LogD, thermodynamics — that might inform solvent or pH choices\n- **Design the next experiment** — if the group has tried a series of conditions, I can suggest the next point or a screening plate\n\n**What structure(s) are you working with?** That's the first thing that will let me give you specific, evidence-backed guidance instead of generalities.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "find_past_jobs",
+      "review_commitments"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[JobRecordSummary(job_id='calc-survey_bond_strengths-aab42c1dc806ca89', connector='calc', job='survey_bond_strengths', rationale='<retrieved-note-00992008d52d9450 id=\"calc-survey_bond_strengths-aab42c"
+      },
+      {
+        "tool": "review_commitments",
+        "preview": "{\"mirrored_at\": null, \"linked_to_science\": 0, \"commitments\": []}"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "4"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 14.62,
+    "event_counts": {
+      "token": 30,
+      "tool_call": 4,
+      "evidence_source": 1,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c0de536635c545bf857906060fc5953f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -450,6 +450,78 @@ def test_an_oversized_body_leaves_a_log_line_as_well_as_a_count(
     assert any("512 byte limit" in record.getMessage() for record in caplog.records)
 
 
+def test_the_413_carries_the_browser_security_headers_like_every_other_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 413 is a client-facing response, so it carries what every other one carries.
+
+    `add_middleware` inserts at position 0, so installing observability → security headers → body
+    cap → CORS left the runtime stack outermost-first as CORS, `BodySizeLimit`, `_SecurityHeaders`,
+    `_RequestObservability`. `BodySizeLimit` answers its 413 *above* the header stamper and never
+    calls down, so a client-facing JSON error was served with no CSP, no `nosniff`, no
+    `X-Frame-Options` and no HSTS — while `_add_security_headers`' own docstring says it sets them
+    "on every response (including static files and errors)". The cap now sits *inside* the stamper
+    and outside the access log, which is where the argument for its position always put it.
+
+    **The correlation id is deliberately still absent**, and that is not the same defect: the 413
+    is refused before the body is read and is counted by `chemclaw_requests_too_large_total` and
+    logged where it is refused, which `_RequestObservability` argues for in as many words. Asserted
+    here so a later reading of "every response gets one" does not turn a decision into a bug.
+    """
+    monkeypatch.setattr(settings, "service_max_request_bytes", 512)
+    client = TestClient(_app(_FakeAgent()))
+
+    oversized = client.post(
+        "/sessions", content=b"x" * 4000, headers={"Content-Type": "application/json"}
+    )
+
+    assert oversized.status_code == 413
+    missing = [
+        header
+        for header in ("Content-Security-Policy", "X-Content-Type-Options", "X-Frame-Options")
+        if header not in oversized.headers
+    ]
+    assert not missing, f"the 413 is served to a browser carrying none of {missing}"
+    assert _HEADER not in oversized.headers, (
+        "the 413 grew a correlation id, which means it now passes through the access log and its "
+        "route/status series — a decision, not a side effect of moving the body cap"
+    )
+
+
+def test_a_cors_preflight_is_answered_above_every_middleware_that_stamps_a_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`CORSMiddleware` is outermost, so an `OPTIONS` reaches neither stamper — measured, not read.
+
+    `create_app`'s ordering comment claimed for a while that the preflight "now passes back through
+    the stamper on the way out", which is the opposite of what being outermost means: the preflight
+    is answered before anything below it runs. `_add_security_headers` states the true version and
+    argues it is harmless — nothing is rendered from a preflight — so what is pinned here is the
+    fact, in the one place a future reader can check it against a claim.
+    """
+    monkeypatch.setattr(settings, "service_cors_origins", "https://ui.example.com")
+    client = TestClient(_app(_FakeAgent()))
+
+    preflight = client.options(
+        "/sessions",
+        headers={
+            "Origin": "https://ui.example.com",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert preflight.headers.get("access-control-allow-origin") == "https://ui.example.com"
+    stamped = [
+        header
+        for header in ("Content-Security-Policy", "X-Content-Type-Options", _HEADER)
+        if header in preflight.headers
+    ]
+    assert not stamped, (
+        f"a preflight came back carrying {stamped}; CORS is no longer the outermost middleware, "
+        "which is what lets a 500 raised below it reach the browser at all"
+    )
+
+
 # --------------------------------------------------------------------------------------------
 # P8 — the stream gauges.
 # --------------------------------------------------------------------------------------------

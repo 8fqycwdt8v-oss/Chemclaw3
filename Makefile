@@ -222,12 +222,34 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# happens to the durable tables' history (`templates/config.yaml`). A validation render has
 	@# neither destinations nor windows to enumerate, so it takes both escape hatches explicitly —
 	@# the same sentences an operator has to write, which is why the flags are visible here.
-	helm template chemclaw deploy/helm/chemclaw \
-	  --set networkPolicy.allowAnyDestination=true \
-	  --set retention.unboundedGrowthAccepted=true \
-	  | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
-	      -schema-location default -schema-location \
-	      'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+	@#
+	@# Twice, and the second render is the point: every switch this chart ships **off** was
+	@# validated by nobody. `mcpFace.enabled` rendered a Deployment mounting a volume the pod did
+	@# not declare and `monitoring.temporalSdkMetrics.enabled` rendered a container port name one
+	@# character over the Kubernetes limit — both behind flags no gate had ever set, so the first
+	@# thing that saw either was an operator's `helm upgrade`. The union render rather than one per
+	@# flag: the flags are independent, so turning them all on covers each of them and costs one
+	@# kubeconform invocation instead of three. (Neither of those two defects is one kubeconform can
+	@# *see* — both are cross-field invariants no OpenAPI schema expresses. They are caught by
+	@# `tests/test_deploy_chart.py`'s rendered-chart assertions, which walk the same variant set.
+	@# What this arm adds is that a template behind an off-by-default flag is at least rendered and
+	@# schema-checked at all.)
+	@#
+	@# **This list is a literal and the claim above it is not self-maintaining**, which is why
+	@# `tests/test_deploy_chart.py::test_the_union_render_covers_every_switch_this_chart_ships_off`
+	@# derives the real set from `values.yaml` and fails on this line the day a switch is added. It
+	@# shipped covering three of six; `secrets.create` and `mcpFace.route.enabled` were rendered by
+	@# nothing in `tests/`, this file or `.github/`. The two `--set`s after `alertmanager.enabled`
+	@# are its prerequisites, not extra coverage: that template refuses to render with no receivers.
+	@set -e; \
+	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall"; do \
+	    helm template chemclaw deploy/helm/chemclaw \
+	      --set networkPolicy.allowAnyDestination=true \
+	      --set retention.unboundedGrowthAccepted=true $$flags \
+	    | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
+	        -schema-location default -schema-location \
+	        'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'; \
+	  done
 	@# The externally-hosted connector (D-2026-08-09-a-connector-we-do-not-run), rendered because
 	@# no shipped bundle sets `url` and so the default render above never takes that branch. Every
 	@# other check on it reads the template *text*, which cannot see a `{{- if }}` nesting mistake;
@@ -455,6 +477,15 @@ live-data:  ## Check the seeded corpus against the published factor tables, valu
 # There was a third, `live-routing`. It measured the specialist team's routing accuracy, and
 # D-2026-08-15 deleted the team, the challenge panel and that measurement together. The target
 # outlived its suite and failed at argparse — `invalid choice: 'routing'` — so it is gone too.
+
+# The one measurement that asks whether the tools are worth what they cost, by asking the same
+# questions twice. The control arm is a *profile*, so it is the front door that needs
+# `data/evals/profiles` on its profile path, not this client — `infra/live/processes.sh` puts it
+# there, and the suite checks the front door accepted the profile before it spends anything,
+# because a run whose control arm quietly fell back to the default agent would produce a report
+# comparing one agent with itself.
+live-ab:  ## Ask the probe corpus with and without tools and compare (needs ANTHROPIC_API_KEY).
+	uv run python -m chemclaw.cli.live_probes --suite ab $(ARGS)
 
 live-plan-gate:  ## M12: plan -> approve -> execute -> re-gate, live (needs harness_autonomy=plan_only).
 	uv run python -m chemclaw.cli.live_probes --suite plan-gate $(ARGS)

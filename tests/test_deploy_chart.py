@@ -201,6 +201,49 @@ def test_every_runtime_data_directory_actually_exists() -> None:
         )
 
 
+def test_the_ignore_file_sits_where_every_builder_that_ships_here_reads_it() -> None:
+    """`deploy/.dockerignore` was inert: nothing reads an ignore file from there.
+
+    Docker, buildah, podman and kaniko all read the ignore file from the **root of the build
+    context** — and every call site (`.github/workflows/image.yml`, `deploy/jenkins/lib/image.sh`)
+    passes the repository root as the context. BuildKit alone also honours
+    `<dockerfile-path>.dockerignore`, which is why `deploy/Containerfile.dockerignore` looks like
+    the tidy answer and is not: `IMAGE_BUILDER` offers four builders and three of them would go on
+    ignoring it.
+
+    Inert, the context is the whole tree — 6.9 GB of it, `.venv` and `.git` included, plus any root
+    `.env`, `*.pem` or `*.key` — sent to the daemon or, under `IMAGE_BUILDER=kaniko`, uploaded to a
+    shared builder. Nothing lands *in* the image (the `COPY` set is explicit), so what this costs is
+    exposure of the context and the transfer, not a contaminated image. The file's own header says
+    "keep the build context lean and secret-free", which is the claim being restored rather than
+    made.
+    """
+    root = DEPLOY.parent
+    ignore = root / ".dockerignore"
+    assert ignore.is_file(), (
+        "no .dockerignore at the repository root, which is the only placement all four supported "
+        "builders read; an ignore file anywhere else is a file nothing opens"
+    )
+    assert not (DEPLOY / ".dockerignore").exists(), (
+        "deploy/.dockerignore is back, and no builder reads an ignore file from there"
+    )
+    # The context every builder is given, read from the call sites rather than assumed: an ignore
+    # file at the root is only the right placement while the root is the context.
+    workflow = (root / ".github" / "workflows" / "image.yml").read_text()
+    assert re.search(
+        r"docker build -f deploy/Containerfile[^\n]*(\\\n[^\n]*)*\s\.\s*$", workflow, re.M
+    ), "the CI build no longer passes the repository root as its context"
+    entries = {
+        line.strip()
+        for line in ignore.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+    # The four that carry the cost or the secret. Everything else in the file is housekeeping.
+    assert {".git", ".venv", ".env", "*.pem"} <= entries, (
+        f"the ignore file no longer excludes the context's expensive or secret entries: {entries}"
+    )
+
+
 def _dnf_installed_packages() -> set[str]:
     """Every package the image installs with dnf, parsed rather than substring-matched.
 
@@ -1008,7 +1051,12 @@ def test_two_replicas_may_not_be_one_node_or_one_eviction() -> None:
     assert _values()["service"]["disruptionBudget"]["enabled"] is True
 
     workers = (CHART / "templates" / "deployment-workers.yaml").read_text()
-    assert "PodDisruptionBudget" not in workers and "-background-worker" not in budget, (
+    # Comments stripped first, for the same reason the `minAvailable` check above parses keys: this
+    # template's whole argument is *about* the background worker, and one of the ADRs it now cites
+    # has that name inside its own slug. A substring check over the prose reads the explanation as
+    # the thing it warns against — the trap this test already documents, met a third time.
+    rendered_body = re.sub(r"\{\{-?\s*/\*.*?\*/\s*-?\}\}", "", budget, flags=re.DOTALL)
+    assert "PodDisruptionBudget" not in workers and "-background-worker" not in rendered_body, (
         "a PDB over a replicas:1 worker either blocks every node drain in the cluster or permits "
         "exactly what no PDB permits — neither is worth rendering"
     )
@@ -1089,6 +1137,11 @@ def _pooled_processes(values: dict[str, Any]) -> int:
     autoscaling = values["service"]["autoscaling"]
     total = autoscaling["maxReplicas"] if autoscaling["enabled"] else values["service"]["replicas"]
     total += values["workers"]["background"]["replicas"]
+    # The face serves the same in-process read-only tools over MCP and opens the same pool. Off by
+    # default, so this term is zero for the shipped values and the point of it is the release that
+    # turns the switch on.
+    if values["mcpFace"]["enabled"]:
+        total += values["mcpFace"]["replicas"]
     for bundle in values["connectors"].values():
         if not bundle["enabled"]:
             continue
@@ -1196,6 +1249,39 @@ def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do(
         assert gauge in rendered, f"the alert compares against {gauge}, which the app never exposes"
 
 
+def test_the_singleton_worker_is_a_singleton_across_a_rollout_too() -> None:
+    """`replicas: 1` is not one process; it is one process *at steady state*.
+
+    No Deployment in this chart declared a `strategy`, so all of them take the Kubernetes default
+    `RollingUpdate` with `maxSurge: 25%` / `maxUnavailable: 25%` — which for a single replica rounds
+    to `maxSurge: 1, maxUnavailable: 0`: the new pod is started and becomes Ready *before* the old
+    one is told to stop, and the old one then has up to its `terminationGracePeriodSeconds` (150) to
+    finish. Two background workers poll `background-jobs` for that whole window.
+
+    That is exactly the interleaving `values.yaml` and
+    `D-2026-08-27-what-a-second-background-worker-would-race-on` pin the replica count to prevent.
+    `NoteReindexWorkflow` retires `note_index` rows for notes missing from *this pod's* knowledge
+    checkout — an `emptyDir` its own sidecar refreshes on an interval — so during the overlap the
+    new pod's clone is fresh and the old pod's is up to an interval stale, and a merge-webhook
+    reindex landing on the old one deletes the freshly merged notes' rows while logging that it
+    retired notes that exist. The ADR's "one pod's clone only ever moves forward" is true at steady
+    state and false during a rollout, which is the gap this closes.
+
+    `Recreate` rather than `maxSurge: 0`: a singleton worker has no availability to protect —
+    Temporal redelivers an activity whose worker vanished — so the honest statement is that the old
+    process is gone before the new one starts.
+    """
+    text = (CHART / "templates" / "deployment-workers.yaml").read_text()
+    assert _values()["workers"]["background"]["replicas"] == 1, (
+        "the background worker is no longer pinned to one replica; this test's premise is gone"
+    )
+    strategy = re.search(r"^  strategy:\n\s+type: (\w+)", text, flags=re.MULTILINE)
+    assert strategy and strategy.group(1) == "Recreate", (
+        "the background worker takes the default RollingUpdate, which starts the second pod before "
+        "stopping the first — two workers on `background-jobs` for a whole grace period"
+    )
+
+
 def test_the_migration_hook_cannot_hold_a_release_open_forever() -> None:
     """Helm waits for a `pre-upgrade` hook, so a Job with no deadline is an unbounded wait.
 
@@ -1217,6 +1303,225 @@ def test_the_migration_hook_cannot_hold_a_release_open_forever() -> None:
     assert settings_["activeDeadlineSeconds"] > settings_["backoffLimit"] * 60, (
         "the deadline leaves no room for the retries the same Job is configured to make"
     )
+
+
+def _jenkins_render_flags() -> list[str]:
+    """Every `--set` the release pipeline's render stage can emit, with all its postures stated.
+
+    Read out of the `Jenkinsfile` rather than restated here: the point of the test below is that
+    the *pipeline's own* flags are enough to render this chart, so a copy of them would be a second
+    answer to the question and would stay green while the pipeline broke. The interpolated pair
+    (`image.digest`/`image.repository`) is dropped — a validation render has no published digest,
+    and neither is a posture the chart refuses to render without.
+    """
+    # Split on the stage declarations at their own indentation, not on the bare string: a stage
+    # name quoted inside a comment in the body would otherwise truncate the block being read.
+    blocks = re.split(r"\n    stage\('", (DEPLOY.parent / "Jenkinsfile").read_text())
+    stage = next(block for block in blocks if block.startswith("Render the chart')"))
+    flags: list[str] = []
+    for match in re.finditer(r"--set ([A-Za-z0-9_.]+)=([A-Za-z0-9_.:/-]+)", stage):
+        if "$" in match.group(0) or match.group(1).startswith("image."):
+            continue
+        flags += ["--set", f"{match.group(1)}={match.group(2)}"]
+    return flags
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_release_pipeline_can_state_every_posture_the_chart_demands() -> None:
+    """The chart refuses to render until a release states a posture, and there were two of them.
+
+    `templates/networkpolicy.yaml` refuses without an egress posture and `templates/config.yaml`
+    refuses without a retention posture — both deliberate
+    (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`). The pipeline grew a parameter and an
+    `egress_flags()` helper for the first and **nothing at all** for the second, and
+    `deploy/jenkins/environments/` ships empty by design, so `fileExists(VALUES_FILE)` is false and
+    no `--values` supplies it either. Every `DEPLOY_TARGET=openshift` run therefore died in
+    `stage('Render the chart')`: the system could not be deployed by its own delivery pipeline.
+
+    Rendered with the pipeline's flags rather than asserted as strings, because "a parameter named
+    `ACCEPT_UNBOUNDED_GROWTH` exists" is not the claim — the claim is that what the pipeline can say
+    is enough for the chart to render, and only helm answers that. A third posture guard added to
+    the chart later fails this test with the message the operator would have got in the namespace.
+    """
+    flags = _jenkins_render_flags()
+    result = subprocess.run(
+        ["helm", "template", "chemclaw", str(CHART), *flags],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "the release pipeline cannot render this chart with every posture parameter turned on; "
+        f"it passes {flags} and helm says:\n{result.stderr}"
+    )
+
+    # And the deploy half must be able to say the same things, or the pipeline renders one release
+    # and applies another. `openshift.sh` builds its own flags because it runs from the descriptor,
+    # not from the render stage's shell.
+    script = (DEPLOY / "jenkins" / "targets" / "openshift.sh").read_text()
+    for index in range(0, len(flags), 2):
+        key = flags[index + 1].split("=", 1)[0]
+        assert key in script, (
+            f"the render stage states {key} and `openshift.sh` cannot, so `helm upgrade` applies a "
+            "release the pipeline never validated"
+        )
+
+
+def test_no_delivery_script_deploys_this_chart_atomically() -> None:
+    """`--atomic` turns the `post-upgrade` convert Job back into a release gate it was moved out of.
+
+    `chemclaw-convert` is a `post-upgrade` hook for one measured reason
+    (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step): it rewrites
+    `session_messages` rows into a shape the *previous* release's reader raises on, so a rollback
+    after it has run leaves a converted table behind a reader that cannot read it. Helm neither
+    undoes a data conversion nor re-runs the hook. `--atomic` rolls back on any failed hook, so a
+    backfill that merely hits its `activeDeadlineSeconds` takes a healthy release with it.
+
+    `migrate-job.yaml` says this at the point of the annotation — "so do not run this chart with
+    `--atomic`" — and the shipped delivery script did exactly that. A sentence in a template is not
+    a control over a script in another directory, which is what this test is.
+
+    The scanned set is every file that runs `helm` against this chart, not every `*.sh` under
+    `deploy/jenkins/`: the `Jenkinsfile` is the other file in another directory that invokes helm
+    (it only renders today, and "today" is what a control is for), and the `Makefile` runs the two
+    validation renders.
+    """
+    scripts = [
+        *sorted((DEPLOY / "jenkins").rglob("*.sh")),
+        DEPLOY.parent / "Jenkinsfile",
+        DEPLOY.parent / "Makefile",
+    ]
+    assert all(script.is_file() for script in scripts), "a scanned delivery file has moved"
+    offenders = [
+        f"{script.relative_to(DEPLOY.parent)}:{number}"
+        for script in scripts
+        for number, line in enumerate(script.read_text().splitlines(), start=1)
+        if "--atomic" in line and not line.lstrip().startswith("#")
+    ]
+    assert not offenders, (
+        f"a delivery script runs helm with --atomic, which the chart forbids: {offenders}"
+    )
+
+
+_OPENSHIFT_SH = DEPLOY / "jenkins" / "targets" / "openshift.sh"
+
+# Each case is (values-file body, does it state the egress posture, does it state the retention
+# posture). A *mentioned* key is not a stated posture, which is what the shipped greps could not
+# tell: `^\s*(windows|unboundedGrowthAccepted):` matched an operator writing down what they did not
+# want, suppressed the `--set`, and left the deploy to die inside `templates/config.yaml` with a
+# Go-template `fail` instead of the script's own sentence.
+_POSTURE_CASES: dict[str, tuple[str, bool, bool]] = {
+    "declined": (
+        "networkPolicy:\n  allowAnyDestination: false\nretention:\n"
+        "  unboundedGrowthAccepted: false\n",
+        False,
+        False,
+    ),
+    "accepted": (
+        "networkPolicy:\n  allowAnyDestination: true\nretention:\n"
+        "  unboundedGrowthAccepted: true\n",
+        True,
+        True,
+    ),
+    "listed": (
+        "networkPolicy:\n  egressDestinations:\n    - ipBlock: {cidr: 10.0.0.0/8}\n"
+        "retention:\n  windows:\n    CHEMCLAW_RETENTION_AUDIT_DAYS: 30\n",
+        True,
+        True,
+    ),
+    "empty-lists": (
+        "networkPolicy:\n  egressDestinations: []\nretention:\n  windows:\n",
+        False,
+        False,
+    ),
+    "only-in-a-comment": (
+        "# networkPolicy:\n#   allowAnyDestination: true\n# retention:\n"
+        "#   unboundedGrowthAccepted: true\nservice: {}\n",
+        False,
+        False,
+    ),
+    "the-chart-defaults": ((CHART / "values.yaml").read_text(), False, False),
+}
+
+
+def _posture_verdict(helper: str, values_file: Path) -> bool:
+    """Run one of `openshift.sh`'s posture helpers and report whether it read a stated posture.
+
+    Sourced rather than executed, which is what the file's `main` guard is for: the helpers are the
+    unit under test and a deploy is not. `set +e` afterwards because sourcing a `set -euo pipefail`
+    script arms the calling shell too, and a helper *refusing* is one of the two answers.
+    """
+    probe = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "{_OPENSHIFT_SH}"; set +e; {helper} "{values_file}" >/dev/null 2>&1; echo $?',
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return probe.stdout.strip() == "0"
+
+
+@pytest.mark.parametrize("case", _POSTURE_CASES, ids=_POSTURE_CASES)
+def test_the_deploy_script_reads_a_stated_posture_and_not_a_mentioned_key(
+    case: str, tmp_path: Path
+) -> None:
+    """`unboundedGrowthAccepted: false` is a posture declined, and it was read as one stated.
+
+    With neither opt-in environment variable set, a helper returns 0 only when the values file
+    already states the posture — so `false` returning 0 is the defect: no `--set`, no message, and
+    the operator gets the chart's `fail` instead of the sentence naming the two ways out. Driven
+    against the real functions rather than asserted about their source, because the difference
+    between "matches a key" and "reads a value" is only visible in an execution.
+
+    The chart's own `values.yaml` is the last case and states neither, which is exactly why every
+    caller of this chart passes both flags.
+    """
+    body, states_egress, states_retention = _POSTURE_CASES[case]
+    values_file = tmp_path / "values.yaml"
+    values_file.write_text(body)
+    assert _posture_verdict("egress_flags", values_file) is states_egress
+    assert _posture_verdict("retention_flags", values_file) is states_retention
+
+
+def test_the_release_path_adopts_the_two_objects_the_previous_chart_left_unowned() -> None:
+    """Every release installed before this chart is stuck at `helm upgrade` until two are adopted.
+
+    On the previous chart `chemclaw-config` and the runtime ServiceAccount were `pre-install,
+    pre-upgrade` hooks with `hook-delete-policy: before-hook-creation`, so they persist between
+    releases — and Helm creates hook resources with a plain `Create`, no metadata visitor, so they
+    carry no `meta.helm.sh/release-name`/`-namespace`. This chart claims the same two names as
+    tracked resources, and the ownership check refuses to import them: measured on k3s v1.29.9,
+    `helm upgrade` fails at prepare time with "exists and cannot be imported into the current
+    release", and `--dry-run` fails identically — so nothing is half-applied, and `DRY_RUN=true` is
+    this script's default.
+
+    A grep over a script is the weakest shape of assertion in this file, and it is what is available
+    here: the act is `oc annotate` against a live namespace, which no offline test performs. The
+    behaviour itself was measured — dry run reports and changes nothing, the real run adopts both,
+    a foreign ConfigMap in the same namespace is untouched, a second run is a no-op, and the upgrade
+    that failed then succeeds. What this pins is that the release path still carries the step at
+    all, and that the two documents an operator reads for the hand-run path still carry the
+    annotation keys.
+    """
+    script = _OPENSHIFT_SH.read_text()
+    assert "adopt_leftover_hook_objects" in script, (
+        "the release path no longer adopts the objects the previous chart created as hooks, so "
+        "every existing release is stuck at `helm upgrade` with no automated way out"
+    )
+    assert "meta.helm.sh/release-name" in script and "meta.helm.sh/release-namespace" in script
+    # Only an object provably created by *this release's own* previous chart may be taken over —
+    # adopting whatever happens to collide is a decision, not a mechanic.
+    assert "app.kubernetes.io/instance=" in script and "helm.sh/hook" in script
+
+    for document in (DEPLOY / "README.md", DEPLOY.parent / "docs" / "guides" / "runbook.md"):
+        text = document.read_text()
+        assert "meta.helm.sh/release-name" in text, (
+            f"{document.name} does not carry the adoption step, so an operator upgrading by hand "
+            "meets Helm's refusal with nothing saying whether it is safe to fix"
+        )
 
 
 def test_the_front_door_is_launched_with_transport_bounds() -> None:
@@ -2585,6 +2890,522 @@ def test_the_shipped_defaults_still_render() -> None:
     assert result.returncode == 0, result.stderr
     assert "terminationGracePeriodSeconds: 615" in result.stdout
     assert "terminationGracePeriodSeconds: 150" in result.stdout
+
+
+# What a switch needs *besides itself* to render the branch it gates. The only literal here, and it
+# is a statement about prerequisites rather than a list of switches: `monitoring.alertmanager`
+# refuses to render with no receivers (deliberately — `templates/alertmanagerconfig.yaml`), and
+# `mcpFace.route` renders nothing at all without the Deployment it publishes. A switch absent from
+# this map needs nothing.
+_SWITCH_PREREQUISITES: dict[str, tuple[str, ...]] = {
+    "monitoring.alertmanager.enabled": (
+        "--set-json",
+        'monitoring.alertmanager.receivers=[{"name":"chemclaw-oncall"}]',
+        "--set",
+        "monitoring.alertmanager.defaultReceiver=chemclaw-oncall",
+    ),
+    "mcpFace.route.enabled": ("--set", "mcpFace.enabled=true"),
+}
+
+
+def _off_by_default_switches() -> list[str]:
+    """Every `enabled`/`create` boolean `values.yaml` ships **false** that a template reads.
+
+    Derived, because the set this shares with the `Makefile` is exactly the set no gate has ever
+    rendered — `make helm-validate`, the CI `chart` job and every `_render()` above take the shipped
+    defaults, so a template behind one of these flags is validated by nobody until an operator turns
+    it on in their own cluster. Two of them rendered objects the API server rejects.
+
+    It shipped as a hand-written dict of three under a comment claiming "a flag added next year is
+    covered the day it is added rather than the day someone remembers to widen a test", which is the
+    one thing a literal cannot do: `secrets.create`, `mcpFace.route.enabled` and
+    `monitoring.alertmanager.enabled` were already missing from it, and the first two were rendered
+    by nothing anywhere in `tests/`, the `Makefile` or `.github/`.
+
+    A *switch* is a key named `enabled` or `create`, which is this chart's own convention and the
+    line that keeps the two posture flags (`allowAnyDestination`, `unboundedGrowthAccepted`) out —
+    those are not features, they are the statements `_render` already makes on every call.
+    """
+    templates = "\n".join(_template_text().values())
+    switches: list[str] = []
+
+    def walk(node: object, path: str) -> None:
+        if not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            here = f"{path}.{key}" if path else key
+            if key in ("enabled", "create") and value is False and f".Values.{here}" in templates:
+                switches.append(here)
+            walk(value, here)
+
+    walk(_values(), "")
+    assert switches, "no off-by-default switch found — the derivation is broken, not the chart"
+    return sorted(switches)
+
+
+def _off_by_default_renders() -> dict[str, tuple[str, ...]]:
+    """The shipped defaults, each off-by-default switch on its own, and all of them at once."""
+    renders: dict[str, tuple[str, ...]] = {"defaults": ()}
+    everything: list[str] = []
+    for switch in _off_by_default_switches():
+        flags = ("--set", f"{switch}=true", *_SWITCH_PREREQUISITES.get(switch, ()))
+        renders[switch] = flags
+        everything += list(flags)
+    renders["every-switch-on"] = tuple(everything)
+    return renders
+
+
+_OFF_BY_DEFAULT_RENDERS = _off_by_default_renders()
+
+
+def test_the_union_render_covers_every_switch_this_chart_ships_off() -> None:
+    """`make helm-validate`'s second arm claims "every switch this chart ships **off**"; check it.
+
+    That arm is the only place an off-by-default template is put through `kubeconform` at all, and
+    its flag list is a literal in a shell loop — so the claim above it goes stale the first time a
+    switch is added, exactly as it already had (three of six). Read out of the `Makefile` rather
+    than restated here, the same way `_jenkins_render_flags` reads the pipeline: a copy of the list
+    would be a second answer to the question and would stay green while the render narrowed.
+    """
+    makefile = (DEPLOY.parent / "Makefile").read_text()
+    arm = makefile.split("helm-validate:", 1)[1].split("\nupstream-check:", 1)[0]
+    missing = [switch for switch in _off_by_default_switches() if f"{switch}=true" not in arm]
+    assert not missing, (
+        f"`make helm-validate` never renders {missing}, so those templates reach kubeconform for "
+        "the first time in an operator's cluster. Add them to the union render's flag list."
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
+def test_every_waited_on_hook_job_carries_a_deadline(overrides: tuple[str, ...]) -> None:
+    """The same argument as the test above, applied to every hook rather than the one that made it.
+
+    Helm waits for each hook Job it creates, so *any* of them with no `activeDeadlineSeconds` can
+    hold the release in `pending-install`/`pending-upgrade` indefinitely — and `backoffLimit` does
+    not help, because it bounds failures and a hang is not a failure. `migrate` and `convert` each
+    carry one and argue for it; the Schedules Job carried neither a deadline nor a value to set one.
+
+    Its hang is a real shape rather than a theoretical one: `chemclaw.cli.schedules` connects to
+    Temporal and calls `list_schedules`/`create_schedule`, and temporalio's `DEFAULT_RPC_TIMEOUT`
+    is `None` — a frontend that completes the gRPC handshake and then stalls leaves the pod running
+    forever. (A *refused* frontend does terminate, which is why this went unnoticed.)
+
+    Over the **rendered** manifests rather than the templates matching `*job*.yaml`, because the
+    thing being asserted is a property of hook Jobs and the glob was a property of filenames: a hook
+    Job in `templates/backfill.yaml` is outside it, and so is one a `define` emits. Parametrised
+    over the off-by-default variants for the same reason — a hook Job behind a feature flag is a
+    hook Job Helm waits for.
+    """
+    for document in yaml.safe_load_all(_render(*overrides).stdout):
+        if not document or document.get("kind") != "Job":
+            continue
+        annotations = document["metadata"].get("annotations") or {}
+        if "helm.sh/hook" not in annotations:
+            continue
+        assert document["spec"].get("activeDeadlineSeconds"), (
+            f"the {document['metadata']['name']} hook Job has no deadline, so a hang — not a "
+            "failure, which `backoffLimit` covers — pins the release in `pending-upgrade` and "
+            "blocks every later `helm upgrade`"
+        )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
+def test_no_http_served_container_starts_without_a_head_start_or_a_drain(
+    overrides: tuple[str, ...],
+) -> None:
+    """The two guards `values.yaml`'s `probes:` block argues for, asserted where they can be seen.
+
+    `test_a_connector_server_is_not_sigkilled_before_it_finishes_starting` makes the case in full
+    and reads exactly one template, so the component that needed it most was outside it: `mcp-face`
+    declared `initialDelaySeconds`/`periodSeconds` and left `timeoutSeconds: 1` and
+    `failureThreshold: 3` to Kubernetes, with no startup probe at all — first liveness kill about
+    100 s after start — while importing strictly *more* than the connector server that probe was
+    written for (measured 2800 ms against 1646 ms; `agent.tool_modules` seeds the whole tool
+    registry). It also had no `terminationGracePeriodSeconds`, so it took the 30 s default where the
+    front door has 615 and a connector 3610.
+
+    Rendered rather than read, so a probe supplied by a helper (`chemclaw.workerProbes`) counts the
+    same as one written into a template, and every future component is covered without being named.
+    Containers whose only probe is an `exec` — the knowledge-sync sidecar — are out of scope: they
+    serve nothing, and a startup probe on a loop that has no first response is meaningless.
+    """
+    result = _render(*overrides)
+    assert result.returncode == 0, result.stderr
+    for name, spec in _pod_specs(result.stdout):
+        serves_http = False
+        for container in spec.get("containers") or []:
+            probes = {
+                kind: container[kind]
+                for kind in ("startupProbe", "readinessProbe", "livenessProbe")
+                if container.get(kind)
+            }
+            if not any("httpGet" in probe for probe in probes.values()):
+                continue
+            serves_http = True
+            assert "startupProbe" in probes, (
+                f"{name}/{container['name']} serves HTTP probes with no startup probe, so liveness "
+                "runs during the import that delays its first response"
+            )
+            for kind, probe in probes.items():
+                missing = {"periodSeconds", "timeoutSeconds", "failureThreshold"} - probe.keys()
+                # Only the startup probe's thresholds are asserted across the board: the workers'
+                # readiness and liveness leave `timeoutSeconds` to the default deliberately, and
+                # tightening them is a separate decision from giving a cold start room to finish.
+                if kind == "startupProbe":
+                    assert not missing, (
+                        f"{name}/{container['name']}: {kind} leaves {sorted(missing)} to a "
+                        "Kubernetes default"
+                    )
+        # A hook Job serves nothing and drains nothing — it is bounded by `activeDeadlineSeconds`
+        # instead — so the drain is asked of the pods that are behind a Service.
+        if serves_http:
+            assert spec.get("terminationGracePeriodSeconds"), (
+                f"{name} states no terminationGracePeriodSeconds, so it takes the 30 s default and "
+                "is SIGKILLed through whatever it was holding"
+            )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
+def test_every_pod_a_service_routes_to_stops_being_chosen_before_it_stops_accepting(
+    overrides: tuple[str, ...],
+) -> None:
+    """The other half of the drain, and `mcp-face` shipped with only the half that cannot do it.
+
+    Kubernetes removes a terminating pod's Endpoint and sends SIGTERM **concurrently**, so a router
+    keeps choosing a pod that has already stopped accepting. `terminationGracePeriodSeconds` bounds
+    how long the kubelet waits *after* SIGTERM and so touches none of that; the `preStop` sleep is
+    what closes it, which is what `deploy/README.md` states and what the front door and every
+    connector server render. `mcp-face` was given the front door's 615 s grace period under a
+    comment claiming the Endpoint race was the thing being fixed, and no sleep — so its rollouts,
+    node drains and scale-downs still reset connections to the calling agent.
+
+    Scoped to pods a **Service** selects, derived from the same render rather than named: an HTTP
+    probe is a kubelet asking, not traffic arriving, and the Temporal workers serve `/healthz` on
+    their metrics port with no Service in front of them. Nothing routes to them, so there is nothing
+    to stop routing.
+    """
+    rendered = _render(*overrides)
+    assert rendered.returncode == 0, rendered.stderr
+    documents = [document for document in yaml.safe_load_all(rendered.stdout) if document]
+    selectors = [
+        document["spec"]["selector"]
+        for document in documents
+        if document["kind"] == "Service" and document["spec"].get("selector")
+    ]
+    assert selectors, "the render declares no Service — the derivation is broken, not the chart"
+
+    for name, spec in _pod_specs(rendered.stdout):
+        labels = _pod_labels(documents, name)
+        if not any(labels.items() >= selector.items() for selector in selectors):
+            continue
+        for container in spec.get("containers") or []:
+            if not any(
+                "httpGet" in (container.get(kind) or {})
+                for kind in ("startupProbe", "readinessProbe", "livenessProbe")
+            ):
+                continue
+            assert (container.get("lifecycle") or {}).get("preStop"), (
+                f"{name}/{container['name']} is behind a Service and has no preStop drain, so "
+                "every rollout resets the requests the router sends between SIGTERM and the "
+                "Endpoint's removal"
+            )
+
+
+def _pod_labels(documents: list[dict[str, Any]], workload_name: str) -> dict[str, str]:
+    """The pod-template labels of the rendered workload named `workload_name`."""
+    for document in documents:
+        if document["kind"] in ("Deployment", "StatefulSet", "Job") and (
+            document["metadata"]["name"] == workload_name
+        ):
+            labels = document["spec"]["template"]["metadata"].get("labels") or {}
+            assert isinstance(labels, dict)
+            return labels
+    return {}
+
+
+def _render_manifest_only(*overrides: str) -> str:
+    """The render Helm actually *tracks* as the release: `--no-hooks`.
+
+    Helm keeps hook resources out of the release manifest entirely, so `--no-hooks` is exactly the
+    set that `helm rollback` restores and `helm uninstall` removes. That makes it the honest way to
+    ask "is this object part of the release" without a cluster.
+    """
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(CHART),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "retention.unboundedGrowthAccepted=true",
+            "--no-hooks",
+            *overrides,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_configuration_the_pods_read_is_part_of_the_release() -> None:
+    """`helm rollback` restored the pods and left the new release's configuration live.
+
+    The entire non-secret configuration was a `pre-install,pre-upgrade` hook. Helm does not record
+    hook resources in the release manifest, and `helm rollback` runs only `pre-rollback`/
+    `post-rollback` hooks — of which this chart declares none — so a rollback reverted every
+    Deployment (including its `checksum/config` annotation, restarting every pod) while the
+    ConfigMap those pods read still held the *new* release's values. Measured against a real API
+    server, rolling back a release that had set `connectors.bo.enabled=false` restored
+    `chemclaw-connector-bo`'s Deployment and Service while `CHEMCLAW_CONNECTORS_ENABLED` still
+    omitted `bo`: the pods run and the capability stays dark. `helm uninstall` left both objects
+    behind for the same reason.
+
+    The rename is half of the fix and this docstring shipped calling it the whole of it ("the fix is
+    not an annotation but a rename"): two objects cannot share a name across the hook/manifest
+    boundary, so the *hook* copies the pre-install migrate Job needs took new names and the names
+    the running pods reference became ordinary tracked resources — and that leaves the tracked pair
+    claiming two names every live release already holds. What the boundary costs in both directions,
+    and what pays it, is
+    `test_the_pair_the_previous_chart_hooked_is_not_deleted_by_a_rollback_across_the_boundary`
+    below.
+
+    Asserted through `--no-hooks`, which is precisely the set Helm tracks.
+    """
+    tracked = {
+        (doc["kind"], doc["metadata"]["name"])
+        for doc in yaml.safe_load_all(_render_manifest_only())
+        if doc
+    }
+    assert ("ConfigMap", "chemclaw-config") in tracked, (
+        "the ConfigMap every pod reads is a Helm hook, so `helm rollback` cannot restore it and "
+        "`helm uninstall` cannot remove it"
+    )
+    assert ("ServiceAccount", _values()["serviceAccount"]["name"]) in tracked, (
+        "the ServiceAccount every pod runs as is a Helm hook, so the release does not own it"
+    )
+    # And the hook copies the pre-install Job needs must not collide with them: Helm refuses to
+    # adopt an object that exists as a hook into the manifest, so a shared name is not a smaller
+    # version of this fix, it is a release that stops installing.
+    hooked = {
+        (doc["kind"], doc["metadata"]["name"])
+        for doc in yaml.safe_load_all(_render().stdout)
+        if doc and (doc["metadata"].get("annotations") or {}).get("helm.sh/hook")
+    }
+    assert not hooked & tracked, (
+        f"an object is both a hook and part of the manifest: {hooked & tracked}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_pair_the_previous_chart_hooked_is_not_deleted_by_a_rollback_across_the_boundary() -> (
+    None
+):
+    """Moving two objects into the manifest made `helm rollback` across that move an outage.
+
+    `helm rollback` deletes anything in the current manifest that the target revision's manifest
+    lacks — and a revision installed by the previous chart has no ConfigMap and no ServiceAccount in
+    its manifest at all, because both were hooks. So rolling back across the boundary deletes the
+    configuration and the identity that the very Deployments it is restoring name in a non-optional
+    `envFrom` and a `serviceAccountName`, and prints "Rollback was a success!".
+
+    Measured against a real API server (k3s v1.29.9), release installed from `d247224`'s chart and
+    upgraded to this one: after `helm rollback <rel> 1`, `configmaps "chemclaw-config" not found`
+    and `serviceaccounts "chemclaw" not found`. With the annotation this test pins, the same
+    sequence leaves both standing. **That is what actually proves it, and this assertion is not
+    that** — a render cannot execute a rollback. What a render *can* pin is the one input Helm reads
+    at deletion time, so the annotation cannot be dropped by someone who has not met the cluster.
+
+    The cost is stated in `templates/config.yaml` and in `deploy/README.md`: `helm uninstall` leaves
+    these two behind. `keep` skips deletion only, so a rollback inside this chart's own lineage
+    still restores the previous revision's `data:` — which is the whole point of having moved them.
+    """
+    tracked = {
+        (document["kind"], document["metadata"]["name"]): document["metadata"].get("annotations")
+        or {}
+        for document in yaml.safe_load_all(_render_manifest_only())
+        if document
+    }
+    for key in (
+        ("ConfigMap", "chemclaw-config"),
+        ("ServiceAccount", _values()["serviceAccount"]["name"]),
+    ):
+        assert tracked[key].get("helm.sh/resource-policy") == "keep", (
+            f"{key[0]}/{key[1]} is tracked without `helm.sh/resource-policy: keep`, so a rollback "
+            "to a revision installed before this chart deletes it while restoring Deployments that "
+            "cannot start without it — and Helm reports success"
+        )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_pre_install_hook_reads_a_configuration_that_exists_when_it_runs() -> None:
+    """The other half, and the reason the hook copies exist at all.
+
+    Helm runs `pre-install` hooks *before* any ordinary resource is applied, so a migrate Job that
+    referenced the now-tracked `chemclaw-config`/ServiceAccount would fail on a fresh install
+    against objects that do not exist yet — trading a rollback defect for an install defect. It
+    therefore reads hook-scoped copies, rendered from the same values in the same release. On an
+    *upgrade* that is also the more correct source: at `pre-upgrade` the tracked ConfigMap still
+    holds the previous release's values, and the hook copy holds this one's.
+
+    The `post-install`/`post-upgrade` Jobs read the tracked objects deliberately — by then the
+    manifest is applied, and `convert` runs as the runtime role against the release that is now
+    live, so the configuration it should see is the one the pods see.
+    """
+    hooks = {
+        doc["metadata"]["name"]: doc
+        for doc in yaml.safe_load_all(_render().stdout)
+        if doc and (doc["metadata"].get("annotations") or {}).get("helm.sh/hook")
+    }
+    for name, expected in (
+        ("chemclaw-migrate", "pre-install,pre-upgrade"),
+        ("chemclaw-convert", "post-install,post-upgrade"),
+        ("chemclaw-schedules", "post-install,post-upgrade"),
+    ):
+        assert hooks[name]["metadata"]["annotations"]["helm.sh/hook"] == expected
+
+    def sources(job: dict[str, Any]) -> tuple[str, str]:
+        spec = job["spec"]["template"]["spec"]
+        container = spec["containers"][0]
+        return spec["serviceAccountName"], container["envFrom"][0]["configMapRef"]["name"]
+
+    pre_sa, pre_config = sources(hooks["chemclaw-migrate"])
+    assert (pre_sa, pre_config) != (
+        _values()["serviceAccount"]["name"],
+        "chemclaw-config",
+    ), (
+        "the pre-install migrate Job reads objects the manifest creates after it runs, so a fresh "
+        "`helm install` has no ConfigMap or ServiceAccount for it"
+    )
+    for name in (pre_sa, pre_config):
+        assert name in hooks, f"the migrate Job reads {name!r}, which is neither a hook nor tracked"
+        assert hooks[name]["metadata"]["annotations"]["helm.sh/hook"] == "pre-install,pre-upgrade"
+        weight = int(hooks[name]["metadata"]["annotations"]["helm.sh/hook-weight"])
+        assert weight < int(
+            hooks["chemclaw-migrate"]["metadata"]["annotations"]["helm.sh/hook-weight"]
+        ), f"{name} is created at the same weight as the Job that needs it, so the order is luck"
+
+    for job in ("chemclaw-convert", "chemclaw-schedules"):
+        assert sources(hooks[job]) == (_values()["serviceAccount"]["name"], "chemclaw-config"), (
+            f"{job} runs after the manifest is applied and should read the release's own objects"
+        )
+
+
+def _declared_pooled_processes(*overrides: str) -> int:
+    """`CHEMCLAW_PG_FLEET_POOLED_PROCESSES` as this render puts it in the ConfigMap."""
+    result = _render(*overrides)
+    assert result.returncode == 0, result.stderr
+    return int(_rendered_config(result.stdout)["CHEMCLAW_PG_FLEET_POOLED_PROCESSES"])
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_turning_on_a_pooled_component_moves_the_declared_connection_budget() -> None:
+    """`mcp-face` opens a Postgres pool like every other pooled process and was counted by nobody.
+
+    It runs `connectors/server.py` over the in-process read-only tool set — knowledge search,
+    fingerprint search, precedent lookup — so it holds up to `CHEMCLAW_PG_POOL_MAX_SIZE`
+    connections per replica. `chemclaw.pooledProcesses` summed the front door (or its HPA maximum),
+    the background worker and each connector half, and never visited `.Values.mcpFace`. The startup
+    guard in `core/config` checks the *declared* number against `postgres.maxConnections`, so an
+    undercount cannot make it fire: at ten face replicas the fleet opens 192 connections against a
+    declared ceiling of 136 and every pod's `Settings` validation passes. The only thing left is the
+    runtime `ChemclawFleetAboveItsConnectionCeiling` alert — a failure found after the pods are up.
+
+    Asserted as the *difference* between two renders rather than against a modelled total: that
+    isolates the term this test is about, needs no second copy of the helper's arithmetic here, and
+    keeps saying the same thing when a replica default moves.
+    """
+    baseline = _declared_pooled_processes()
+    for replicas in (1, 10):
+        with_face = _declared_pooled_processes(
+            "--set", "mcpFace.enabled=true", "--set", f"mcpFace.replicas={replicas}"
+        )
+        assert with_face - baseline == replicas, (
+            f"enabling mcp-face at {replicas} replicas moved the declared pooled-process count by "
+            f"{with_face - baseline}; every one of those pods opens a pool, so the fleet's "
+            "connection ceiling is understated by the difference and the guard cannot fire"
+        )
+
+
+def _pod_specs(rendered: str) -> list[tuple[str, dict[str, Any]]]:
+    """Every pod spec in a render, named by its owner — Deployments and Jobs alike."""
+    specs: list[tuple[str, dict[str, Any]]] = []
+    for doc in yaml.safe_load_all(rendered):
+        if not doc or doc.get("kind") not in {"Deployment", "Job", "StatefulSet"}:
+            continue
+        specs.append((doc["metadata"]["name"], doc["spec"]["template"]["spec"]))
+    return specs
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
+def test_every_mounted_volume_is_a_volume_the_pod_declares(overrides: tuple[str, ...]) -> None:
+    """A `volumeMounts` entry naming no volume is rejected at apply, and by nothing before it.
+
+    `kubeconform` validates each object against its OpenAPI schema, and "this mount names a volume
+    in the same pod" is a cross-field invariant no schema expresses — so the whole render gate says
+    `Valid` and the API server says `spec.template.spec.containers[0].volumeMounts[1].name: Not
+    found: "note-repo"`. Under `--atomic` that failure rolls a whole release back.
+
+    That is what `mcpFace.enabled=true` shipped: the face includes `chemclaw.knowledgeMounts` (which
+    carries `chemclaw.noteRepoMount`) exactly as `deployment-service.yaml` and
+    `deployment-workers.yaml` do, and was the only one of the three that did not also include
+    `chemclaw.noteRepoVolume` beside `chemclaw.volumes`. Three containers — the server, the
+    knowledge-sync sidecar and its init container — mounted a volume the pod never declared.
+
+    Asserted over every pod spec rather than that one template, because the defect is a *pairing*
+    between two helpers and any future template can get the pairing wrong the same way.
+    """
+    result = _render(*overrides)
+    assert result.returncode == 0, result.stderr
+    for name, spec in _pod_specs(result.stdout):
+        declared = {volume["name"] for volume in spec.get("volumes") or []}
+        for container in (spec.get("containers") or []) + (spec.get("initContainers") or []):
+            for mount in container.get("volumeMounts") or []:
+                assert mount["name"] in declared, (
+                    f"{name}/{container['name']} mounts {mount['name']!r}, which the pod does not "
+                    f"declare (it declares {sorted(declared)}); the API server rejects this"
+                )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
+def test_every_container_port_name_is_one_kubernetes_accepts(overrides: tuple[str, ...]) -> None:
+    """A container port name is an `IANA_SVC_NAME`: at most 15 characters.
+
+    `kubeconform` agrees with any length, so nothing in the render gate sees it.
+
+    `monitoring.temporalSdkMetrics.enabled=true` named the port `temporal-metrics` — 16 characters
+    — in `chemclaw.workerProbes`, which every worker Deployment in the chart includes, so one
+    supported switch made all four invalid at apply time at once. The switch is fully built out
+    around that name (a PodMonitor endpoint, a NetworkPolicy port, the `ChemclawWorkerNotPolling`
+    alert), which is what made a render nobody ran the only thing between it and a cluster.
+
+    The length is the rule that bit; the character class is asserted with it because the same
+    validator enforces both and a name like `Temporal_SDK` fails for the other half.
+    """
+    result = _render(*overrides)
+    assert result.returncode == 0, result.stderr
+    for name, spec in _pod_specs(result.stdout):
+        for container in (spec.get("containers") or []) + (spec.get("initContainers") or []):
+            for port in container.get("ports") or []:
+                port_name = port.get("name")
+                if port_name is None:
+                    continue
+                assert len(port_name) <= 15, (
+                    f"{name}/{container['name']}: port name {port_name!r} is "
+                    f"{len(port_name)} characters; Kubernetes rejects anything over 15"
+                )
+                assert re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", port_name), (
+                    f"{name}/{container['name']}: port name {port_name!r} is not an IANA_SVC_NAME"
+                )
 
 
 def test_a_connector_server_is_not_sigkilled_before_it_finishes_starting() -> None:

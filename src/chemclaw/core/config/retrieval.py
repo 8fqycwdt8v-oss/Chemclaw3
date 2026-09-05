@@ -6,6 +6,7 @@ cross-section validators; fields, env names and defaults are exactly as they wer
 sections shared a single module (D-072 mixins, split per D-156).
 """
 
+import math
 from typing import Literal
 
 from pydantic import Field, field_validator
@@ -215,14 +216,36 @@ class RetrievalSettings(BaseSettings):
     @field_validator("retrieval_source_weights")
     @classmethod
     def _weights_are_positive(cls, value: dict[str, float]) -> dict[str, float]:
-        """Refuse a zero or negative tier factor, which the fusion cannot express.
+        """Refuse a zero, negative or non-finite tier factor, which the fusion cannot express.
 
         A weight divides the rank, so `0` is a division by zero and a negative one inverts the
         source's own ordering — a deployment would be asking for its worst hit first. Both were
         also meaningless under the multiplier this replaced (`0` silently deleted a source from
         every sweep, which is precisely the starvation the knob is meant to prevent), so this is
         the config saying out loud what the arithmetic always required.
+
+        **The finiteness check is a separate clause because `<= 0` is an ordering test and the
+        values it misses are the ones ordering does not reach.** Every comparison with NaN is
+        False, so `nan <= 0` was False and NaN passed the guard that refuses `-1`; downstream
+        `1.0 / (k + rank / nan)` is NaN, which propagates into the fused score of every note the
+        weighted source contributed, and `sorted` over keys that compare False against everything
+        returns a list in construction order rather than a ranking — the fusion still answers, with
+        the right notes, in an order that means nothing. `+inf` survives the same test and empties
+        the rank term instead: `rank / inf` is `0.0` at every rank, so a source's best and worst
+        hit both fuse at `1/k`, which is exactly the "names no ordering at all" the message below
+        already describes. Refused rather than clamped, the way `find_matches` refuses a NaN
+        Tanimoto threshold: a weight has no upper bound to clamp toward, and substituting the
+        uniform default would answer a question the deployment did not ask in a way it could not
+        tell from one it did.
         """
+        unordered = sorted(name for name, weight in value.items() if not math.isfinite(weight))
+        if unordered:
+            raise ValueError(
+                f"retrieval_source_weights must be finite; {unordered} are not. A weight divides "
+                "the rank, so NaN makes every fused score NaN — the ranking then degenerates to "
+                "the order the sources happened to arrive in — and an infinity flattens its "
+                "source's every rank onto one score"
+            )
         bad = sorted(name for name, weight in value.items() if weight <= 0)
         if bad:
             raise ValueError(
@@ -253,6 +276,24 @@ class RetrievalSettings(BaseSettings):
     note_reindex_enabled: bool | None = None
     note_reindex_schedule_minutes: float = Field(default=60.0, gt=0)
     note_reindex_timeout_seconds: float = Field(default=600.0, gt=0)
+
+    # The two bounds that stop **one** note from freezing the whole derived index.
+    #
+    # `reindex_notes` embedded every changed note's whole `search_text` in a single `embed_texts`
+    # call and upserted the lot afterwards, so a note the embedding endpoint refuses took the entire
+    # pass down with it — measured, one 989 kB campaign note against a provider enforcing OpenAI's
+    # 8,192-token limit left **zero** notes indexed, including the short ones beside it. Because the
+    # `tsvector` is written in the same `INSERT`, the *lexical* leg froze too, and the hourly job
+    # reported success every hour thereafter.
+    #
+    # 24,000 characters is ~6k tokens, comfortably inside an 8,192-token window and the same figure
+    # `protocol_digest_max_chars` above uses for one map unit. Truncation loses the tail of a very
+    # long note's dense vector rather than the note: its `tsvector` is built from the same bounded
+    # text, and every other leg still sees it whole.
+    note_embed_max_chars: int = Field(default=24_000, ge=1_000)
+    # How many notes go into one embed-and-upsert round. A failure now costs its own batch instead
+    # of the corpus, and the batches that already landed stay landed.
+    note_embed_batch_size: int = Field(default=64, ge=1)
 
 
 # The `vector(N)` width every embedding column in this schema was migrated with —

@@ -1,0 +1,83 @@
+{
+  "probe": {
+    "id": "rx-41",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We want to run Brc1ccccc1.NC1CCCCC1>>c1ccc(NC2CCCCC2)cc1. Has this transformation been done, and under what conditions?",
+    "expects_tools": [
+      "conditions_for_similar_reaction",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a set of conditions presented as recommended rather than as recorded precedent",
+      "a predicted yield for the proposed reaction",
+      "a precedent quoted without its citation",
+      "a claim of no precedent from an empty neighbour set, without saying the index may hold none"
+    ],
+    "direction": "The transformation question, not the product one: the query names the whole reaction, so DRFP neighbours are what precedent means here — a Suzuki making the same biaryl is a product neighbour and is not this reaction. `conditions_for_similar_reaction` is the single call; `conditions_for_similar_product` would answer a different question and `similar_reactions` searches this organisation's own ELN rather than the literature corpus, which is a different denominator and a different citation. The graded behaviours are the two the corpus tools share: recorded is not recommended, and an empty result is not a negative finding — the coverage sentence has to reach the reader. One caveat is specific to this tool and worth crediting: the index excludes the agent slot, so a query naming ligand or solvent scores below a real precedent, and an answer that widened the query that way should say so rather than report no hits.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-41",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We want to run Brc1ccccc1.NC1CCCCC1>>c1ccc(NC2CCCCC2)cc1. Has this transformation been done, and under what conditions?",
+    "profile": "no-tools",
+    "answer": "I'll help you search for this transformation in the system. Let me query the ELN/graph database for this reaction.Let me try searching for variations or related patterns—the SMILES string or parts of it:Based on my search through the available system records, **this transformation has not been found in the database**. The reaction\n- **Reactants**: Bromobenzene + Cyclohexylamine  \n- **Product**: N-cyclohexylaniline\n\ndoes not appear in any recorded experiments or notes that I can access.\n\nThis is a Buchwald-Hartwig coupling or similar C–N cross-coupling reaction. If you plan to run it, you would typically need:\n\n**Typical conditions for Buchwald-Hartwig amination** (for reference):\n- **Catalyst**: Pd(OAc)₂ or Pd₂(dba)₃ with a ligand (e.g., BINAP, XPhos, DPEPhos)\n- **Base**: K₂CO₃, K₃PO₄, Cs₂CO₃, or NaOtBu\n- **Solvent**: Toluene, dioxane, or DMF\n- **Temperature**: 60–120 °C\n- **Additives**: Often amine HCl salts or other ligands\n\nHowever, since this specific transformation hasn't been documented in your system, you would need to either:\n1. Develop conditions experimentally, or\n2. Transfer conditions from analogous couplings in your database (if any exist)\n\nWould you like me to search for related transformations or similar amination reactions in the system that might provide transferable conditions?",
+    "answered": true,
+    "tools_called": [
+      "grep",
+      "grep",
+      "grep",
+      "grep"
+    ],
+    "tool_results": [
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 8.95,
+    "event_counts": {
+      "token": 17,
+      "tool_call": 4,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "0c4c3ab27b8147a19528b96fe9c2257e",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

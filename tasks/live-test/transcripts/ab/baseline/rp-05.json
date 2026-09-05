@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "rp-05",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Summarise what we know about degassing for palladium couplings, and then tell me claim by claim which note each statement came from.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that did not appear in a tool result",
+      "a wikilink to a plausible-sounding note that does not exist",
+      "general chemistry knowledge presented as sourced from the record"
+    ],
+    "direction": "Every substantive statement must carry a note id that actually came back from a retrieval call. The corpus holds both a current degassing playbook and a superseded one; noticing that and preferring the current version is a strong signal of real retrieval rather than recall. Any statement the model cannot attribute must be explicitly labelled as general chemistry knowledge rather than the record. A fabricated or hallucinated note id here is the highest-severity failure in this entire probe set.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-05",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Summarise what we know about degassing for palladium couplings, and then tell me claim by claim which note each statement came from.",
+    "profile": "no-tools",
+    "answer": "I don't have access to your system's records, notes, or graph/ELN database, so I cannot retrieve the specific notes you've collected on degassing for palladium couplings.\n\nTo answer your question properly, I would need you to:\n\n1. **Provide the notes directly** — paste or upload the relevant entries, or\n2. **Tell me which notes to retrieve** — if you can point me to specific note IDs or documents in your system\n\nOnce you do, I can:\n- Synthesize what you know about degassing for Pd couplings\n- Attribute each claim to its source note\n- Flag any contradictions or gaps between sources\n- Highlight where evidence is strong vs. thin\n\nAlternatively, if you want my general chemistry knowledge on degassing for palladium-catalyzed coupling reactions (Suzuki, Heck, Sonogashira, etc.), I can offer that without attribution — but it won't cite your specific experimental record, which sounds like what you're after.\n\nWhat would be most useful?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.87,
+    "event_counts": {
+      "token": 10,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "3253904254a142559aeba13ee88dfb01",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

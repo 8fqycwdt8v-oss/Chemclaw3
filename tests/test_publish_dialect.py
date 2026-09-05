@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from chemclaw.core.chem import compound_id
 from chemclaw.publish import record as record_module
 from chemclaw.publish.dialect import (
     CONFLICT_KEYS,
@@ -280,3 +281,39 @@ def test_a_fact_with_no_reported_value_still_records_one() -> None:
     row = rows_for(record, tenant_id="t", writer_version="w")["property_value"][0]
 
     assert (row["value_canonical"], row["reported_value"]) == (-12.5, -12.5)
+
+
+def test_the_compound_row_carries_the_structure_its_own_id_was_derived_from() -> None:
+    """`compound_id` names a standardized structure, so `canonical_smiles` must name the same one.
+
+    The two columns of one row disagreed: the key is `core.chem.compound_id`, a hash over the
+    **standardized** SMILES, while the value was the member's own species SMILES. Every species of
+    one standardized compound therefore wrote the same key with a different value, and since the
+    upsert is `DO UPDATE`, the row read as whichever species was published last — an anion one day
+    and its neutral acid the next, under a key that names neither in particular.
+
+    The species' own SMILES is not lost by this: it is on `subject_member.smiles` and on
+    `calculation_candidate.smiles`, which is where a *species* belongs.
+    """
+    acid = _record().model_copy(
+        update={
+            "subject": Subject(
+                kind="molecule",
+                members=[
+                    SubjectMember(
+                        ordinal=0,
+                        role="subject",
+                        compound_id=compound_id("CC(=O)[O-]"),
+                        smiles="CC(=O)[O-]",
+                    )
+                ],
+                label="CC(=O)[O-]",
+            )
+        }
+    )
+    rows = rows_for(acid, tenant_id="t", writer_version="w")
+
+    assert [row["compound_id"] for row in rows["compound"]] == [compound_id("CC(=O)O")]
+    assert [row["canonical_smiles"] for row in rows["compound"]] == ["CC(=O)O"]
+    # The species itself is still recorded, one table over.
+    assert [row["smiles"] for row in rows["subject_member"]] == ["CC(=O)[O-]"]

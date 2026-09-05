@@ -138,6 +138,25 @@ def test_an_embedded_reference_interpolates_readable_text() -> None:
     assert resolve("Flags: ${steps.hits.result}", scope) == 'Flags: {"flags": ["azide"]}'
 
 
+def test_a_reference_with_trailing_text_is_not_a_whole_string_match() -> None:
+    """`${inputs.smiles} plus buffer` must interpolate, not silently drop " plus buffer".
+
+    `_WHOLE` anchors `_REFERENCE` with `^...$` precisely so a reference embedded in a longer string
+    falls through to `_REFERENCE.sub` instead of matching as a whole-string reference. Without the
+    trailing `$` anchor, `re.match` still succeeds at position 0 and stops there, so `resolve` would
+    return the referenced *value* alone (`"CCO"`) and drop everything typed after it — a step
+    argument silently losing the text around its reference.
+    """
+    scope = {"inputs.smiles": "CCO"}
+    assert resolve("${inputs.smiles} plus buffer", scope) == "CCO plus buffer"
+
+
+def test_a_reference_with_leading_text_is_not_a_whole_string_match() -> None:
+    """The mirror case: text before the reference must survive too."""
+    scope = {"inputs.smiles": "CCO"}
+    assert resolve("solvent: ${inputs.smiles}", scope) == "solvent: CCO"
+
+
 def test_an_unresolved_reference_raises_rather_than_yielding_empty() -> None:
     """Reaching this at run time means something is wrong beyond a typo — so it must be loud."""
     with pytest.raises(UnresolvedReference, match="steps.nope.result"):
@@ -978,3 +997,30 @@ def test_both_lanes_derive_the_same_arguments_from_the_same_tool() -> None:
             takes_any_key=False,
         )
     )
+
+
+def test_the_validator_reports_an_invalid_manifest_as_a_problem_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A manifest the registry cannot load must still be *reported*, not raised through `main`.
+
+    `main` resolves the tool surface before anything else, and `_available_tools` asks the agent for
+    its tool names, which asks this registry for the `run_*` launchers — so a template whose own
+    manifest is invalid (an unknown `${inputs.x}`, a forward `${steps.y.result}`) fails inside the
+    registry load rather than inside the step checker, and the operator got a pydantic traceback.
+    The exit code was already 1, so CI was never misled; `validate_kg.main` states the rest of the
+    rule — "it must still fail; it must not fail *looking like a crash*".
+    """
+    from chemclaw.cli.validate_templates import main
+
+    (tmp_path / "forward.yaml").write_text(
+        "summary: x\ninputs:\n  - {name: smiles, type: string, description: m}\n"
+        "steps:\n  - {id: one, kind: agent, prompt: 'about ${inputs.nosuch}'}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(tmp_path))
+
+    assert main([]) == 1
+    printed = capsys.readouterr().out
+    assert "template validation failed:" in printed
+    assert "unknown 'inputs.nosuch'" in printed

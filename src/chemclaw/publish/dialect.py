@@ -29,6 +29,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from chemclaw.core.chem import standard_smiles
 from chemclaw.core.ids import stable_hash
 from chemclaw.publish.properties import definition_for
 from chemclaw.publish.record import Publication, ResultRecord
@@ -75,7 +76,19 @@ def rows_for(
             compounds.append(
                 {
                     "compound_id": member.compound_id,
-                    "canonical_smiles": member.smiles,
+                    # **The structure the key was derived from, not the species that carried it.**
+                    # `compound_id` is a hash over the *standardized* SMILES, so every tautomer,
+                    # microstate and protonation state of one substance writes this same row —
+                    # and with the member's own SMILES in the value column, the upsert's
+                    # `DO UPDATE` left the row reading whichever species happened to publish last.
+                    # The two columns of one row named two different molecules.
+                    #
+                    # `standard_smiles` rather than the strict form: a record built outside
+                    # `project` (a backfill, a future producer) can carry a SMILES this cannot
+                    # parse, and losing a finished calculation to normalize a label would be the
+                    # wrong trade — the lenient helper returns the input unchanged, which is what
+                    # the row would have said anyway.
+                    "canonical_smiles": standard_smiles(member.smiles),
                     "first_seen_at": now,
                 }
             )

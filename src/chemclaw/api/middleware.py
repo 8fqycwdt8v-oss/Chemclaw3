@@ -262,7 +262,8 @@ class _RequestObservability:
 
     **Where it sits in the stack, and what that buys.** `create_app` installs this *first*, which
     under Starlette's `insert(0)` semantics makes it the innermost user middleware — inside the
-    security headers, inside the body cap, and outside `ExceptionMiddleware`. Inside the security
+    security headers, inside the body cap (which is now installed second, so it sits between the
+    two rather than above both), and outside `ExceptionMiddleware`. Inside the security
     headers is what fixes the 500: Starlette's own `ServerErrorMiddleware` sits above every user
     middleware, so a default 500 was served with none of the browser security headers on it, and
     with no correlation id for a chemist to quote. Answering the 500 here means it carries both.
@@ -711,7 +712,17 @@ def _add_security_headers(app: FastAPI) -> None:
 
     Off only when a deployment fronts its own header policy at the ingress/Route; on by default
     so the app is safe standalone. The headers are static, so one pure-ASGI middleware sets them
-    on every response (including static files and errors) without touching the route handlers.
+    on every response (including static files, errors and the body cap's 413) without touching the
+    route handlers.
+
+    **One response is outside it, and naming it is the point of this paragraph.** A CORS preflight
+    is answered by `CORSMiddleware`, which is installed last and is therefore outermost — the
+    correct place for it, because a 500 raised anywhere below has to come back out through CORS or
+    a browser cannot read it. So an `OPTIONS` preflight carries none of these, which is harmless
+    (nothing is rendered from a preflight) and is a consequence of that ordering rather than an
+    oversight. The 413 *was* outside this middleware for the same structural reason and was not
+    harmless — it is a client-facing JSON body — so `create_app` now installs the body cap before
+    this one; see the comment there.
     """
     if settings.service_security_headers:
         app.add_middleware(_SecurityHeaders)

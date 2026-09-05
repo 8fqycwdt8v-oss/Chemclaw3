@@ -413,6 +413,14 @@ ErrorCode = Literal[
     "llm_timeout",
     "turn_timeout",
     "budget_exhausted",
+    # The *process* had no admission permit within `service_turn_admission_timeout_seconds`, so
+    # this turn was shed. Its own member rather than `budget_exhausted`, because the two are the
+    # opposite instruction: this one says "we are busy, retry in a moment" (`retryable=True`) and
+    # that one says "your budget is spent, stop retrying until an operator raises the cap"
+    # (`retryable=False`). They shared a code, so a surface switching on it — the documented way to
+    # choose the next step — had to fall back to `retryable` or to matching the prose, and a retry
+    # loop keyed on the code either hammered a saturated pod or gave up on a transient one.
+    "at_capacity",
     "loop_cap_reached",
     # `loop_cap_reached`'s sibling in the other unit: the turn was inside its iteration ceiling and
     # reached its billed-token ceiling instead. Its own code rather than `budget_exhausted`,

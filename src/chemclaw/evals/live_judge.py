@@ -168,6 +168,18 @@ def _truncated(response: Any) -> bool:
     return any(metadata.get(key) in _TRUNCATED for key in ("finish_reason", "stop_reason"))
 
 
+def judge_model() -> str:
+    """The model the judge will actually run on, for a report that names it.
+
+    A reader of an A/B table has to know whether the grader was the model under test — an unset
+    `live-probe-judge` route makes the run self-grading, which `_judge_client` warns about — so the
+    report needs the *resolved* name rather than the route key. Derived here rather than in the
+    caller so the fallback is stated once: this used to be a `live_probe_judge_model` setting
+    carrying a vendor model id in this repository, which is what `model_routes` exists to avoid.
+    """
+    return settings.model_routes.get("live-probe-judge") or settings.llm_model
+
+
 @cache
 def _judge_client() -> Any:
     """The judge's chat model, from the one seam that builds one — built once per process.
@@ -211,6 +223,13 @@ async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
             probe_id=probe.id, verdict="unserved", reason="no answer event was produced"
         )
 
+    # **Through the seam, which is what makes the transport one decision rather than two.** This
+    # built its own client until 2026-09-04, and the cost was measured on `main` in the same week:
+    # it read `llm_base_url` and *not* `llm_tls_ca_bundle`, so a deployment pointing the judge at
+    # exactly the internal gateway that setting exists for could not verify the certificate, and
+    # every grading call failed at TLS. That fix reused `_tls_http_client` explicitly; going
+    # through `build_chat_model` makes it structural instead — the agent's client and the judge's
+    # cannot trust different stores, because there is only one place that builds either.
     client: Any = _judge_client()
     response = await client.ainvoke([SystemMessage(_SYSTEM), HumanMessage(_prompt(probe, outcome))])
     # `.text` rather than `.content`: an answer may arrive as a list of content blocks, and this is

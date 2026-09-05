@@ -34,9 +34,19 @@ from pydantic import BaseModel, ConfigDict, Field
 # writes `converged` as the float 1.0 is a registry violation rather than a plausible number.
 ValueKind = Literal["number", "integer", "boolean", "text"]
 
-# Where a property may attach. A registry-level statement, so a projection that writes a
-# per-atom quantity as a calculation-scope scalar is caught rather than stored.
-ScopeKind = Literal["calculation", "member", "site", "point", "conformer", "candidate"]
+# **Which table a property's values live in.** A registry-level statement, so a projection that
+# writes a per-atom quantity as a calculation-scope scalar is caught rather than stored —
+# `record.PropertyFact` enforces it, which is what makes this a control rather than a comment.
+#
+# `calculation` names the scalar table, `property_value`, and covers *both* of that table's row
+# scopes: a reaction's delta-G is a fact about the run and a species' absolute Gibbs energy is a
+# fact about one member, and `FactScope` on the row is what distinguishes them. This deliberately
+# does not repeat that distinction — a `member` value existed here and nothing ever declared one,
+# while seven properties legitimately written at member scope were declared `calculation`, so the
+# only reading under which the registry was true is the one that reads it as naming the table.
+# The other four values name the tables that are not `property_value`, which is the whole
+# cardinality argument `SiteFact` and `PointFact` are built on.
+ScopeKind = Literal["calculation", "site", "point", "conformer", "candidate"]
 
 
 class PropertyDefinition(BaseModel):
@@ -258,6 +268,15 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "kcal/mol",
         "Energy relative to the reference member of a set.",
         scope="conformer",
+    ),
+    _d(
+        "species_gap",
+        "energy_difference",
+        "kcal/mol",
+        "How far the runner-up sits above the most populated species of an enumerated set "
+        "(tautomers, microstates, stereoisomers). The discrimination the ranking rests on: "
+        "compare it against the method uncertainty before reading the winner as decided. Absent "
+        "when only one species was enumerated, which is not a gap of zero.",
     ),
     _d(
         "point_relative_energy",

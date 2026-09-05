@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "op-19",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nobody here has run this coupling before. I've got four solvents I can use and a temperature range of 40 to 120, and nothing else. Where do I start?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "ask_clarifying_question"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the model predicts",
+      "these are the optimal starting conditions",
+      "a prior run or historic yield that was not supplied"
+    ],
+    "direction": "Two things have to happen. First, the 120 C bound is challenged *before* the tool is called, against the solvents actually named — a bound past a solvent's reflux or decomposition point is not something to accept quietly and flag only once a candidate lands there. Asking which bound is meant, or proposing a defensible one with the reasoning, both count; proceeding silently does not. Second, the cold-start is named for what it is: with no observations the tool returns space-filling seed points, not model-informed proposals, so there is no prediction and no uncertainty attached to them — that absence is accurate, not missing data. It should say how many runs are needed before the surrogate has an opinion at all, and that feeding the first results back is what turns this into an optimization.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-19",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nobody here has run this coupling before. I've got four solvents I can use and a temperature range of 40 to 120, and nothing else. Where do I start?",
+    "profile": "",
+    "answer": "I need to understand what coupling you're working with before I can point you toward conditions. Can you tell me:\n\n1. **What is the transformation?** — the reactants and intended product (names, structures, or SMILES), or the reaction class (Suzuki, amide coupling, etc.)\n2. **What are the four solvents?** — by name or SMILES.\n\nOnce I have that, I can:\n- Search for structurally similar precedent in the literature corpus and your own runs (`conditions_for_similar_reaction`, `conditions_for_similar_product`)\n- Use forward-prediction models to identify the product and suggest working conditions (`predict_forward_reaction`, `predict_reaction_conditions`)\n- Compute solvent effects on the equilibrium if that matters for this coupling (`compare_solvents`)\n- Propose a screening design or the first point to try (`generate_screening_design` or `suggest_next_experiment`)\n\nThe answer changes sharply depending on whether this is a nucleophilic substitution, a C–C coupling, a condensation, or something else, so I need that detail first.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.32,
+    "event_counts": {
+      "token": 12,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "8680768eb8ef461593de32bb79654499",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

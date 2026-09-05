@@ -162,7 +162,21 @@ _RESTAMP_NEWEST = """
     )
 """
 
-_COUNT_CHECKPOINTS = "SELECT count(*) FROM checkpoints WHERE thread_id = %s"
+# **What makes a parent forkable, asked as one question rather than two.** A fork needs graph state
+# to branch from *and* a transcript row, and only the first was ever checked. The two tables are
+# written at very different moments — the checkpointer writes from the first graph node,
+# `api/runner.py::_record_transcript` writes only once the answer is assembled — so a fork taken any
+# time before the parent's **first** answer copied checkpoints and zero messages, and
+# `_OWNER_LIST`'s `JOIN LATERAL … ON m.updated_at IS NOT NULL` then dropped the child from
+# `GET /sessions` permanently. That is failure 2 of this module's own list arrived at from the other
+# side: the transcript copy exists, and there is nothing for it to copy.
+#
+# Both counts in one statement, because they are one question — *is there a session here yet* — and
+# two round trips would let the answer change between them.
+_COUNT_FORKABLE = (
+    "SELECT (SELECT count(*) FROM checkpoints WHERE thread_id = %s),"
+    "       (SELECT count(*) FROM session_messages WHERE session_id = %s)"
+)
 
 
 async def fork_session(parent_id: str, owner: str | None, profile: str | None) -> str:
@@ -183,18 +197,27 @@ async def fork_session(parent_id: str, owner: str | None, profile: str | None) -
         The new session id.
 
     Raises:
-        SessionForkError: The parent holds no checkpoint at all, so there is nothing to branch
-            from. Refused rather than silently producing an empty session, which would look like a
-            fork that worked and behave like a session that had never been used.
+        SessionForkError: The parent is not a session yet — it holds no checkpoint to branch from,
+            or no transcript row, and either way the copy would produce something that looks like a
+            fork and is not one. The second half is the less obvious refusal and the more damaging
+            omission: a child with checkpoints and no messages is *invisible* to `GET /sessions`
+            (see `_COUNT_FORKABLE`), so the only handle on it is the id in the fork response, and
+            losing that leaves its rows in the store with nothing able to reach them.
     """
     child_id = uuid.uuid4().hex
     async with _session_connection(_session_dsn()) as conn:
         async with conn.cursor() as cur:
-            await cur.execute(_COUNT_CHECKPOINTS, (parent_id,))
+            await cur.execute(_COUNT_FORKABLE, (parent_id, parent_id))
             row = await cur.fetchone()
-            if not row or not row[0]:
+            checkpoints, messages = (row[0], row[1]) if row else (0, 0)
+            if not checkpoints:
                 raise SessionForkError(
                     f"session {parent_id} has no saved state to fork — it has taken no turn yet"
+                )
+            if not messages:
+                raise SessionForkError(
+                    f"session {parent_id} has not answered a turn yet, so there is nothing to "
+                    "branch from that would be findable — ask it something and fork the answer"
                 )
             for index, table in enumerate(CHECKPOINT_TABLES):
                 # A temp name per table, and per statement rather than reused, because

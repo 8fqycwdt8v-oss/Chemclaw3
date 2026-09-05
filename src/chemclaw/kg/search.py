@@ -1,7 +1,8 @@
 """What a note's text *is* for a substring search, and how a query is split against it.
 
 One definition, in layer 4, because there were three. `agent.graph_tools.find_notes` searched
-`id + type + compound_smiles + tags + body`; `retrieval.vector_index.note_text` — which is what
+`id + type + compound_smiles + tags + body`; `retrieval.vector_index`'s own note-text
+builder, since consolidated into `search_text` below — which is what
 `GraphRetriever`, the dense embedding and the lexical tsvector all read — searched `id + tags +
 body`; `durable.digest` built a third by untyped `getattr` and matched the whole query as one
 phrase. Each of the three carried a docstring asserting it agreed with the others.
@@ -88,7 +89,12 @@ def query_terms(query: str) -> list[str]:
         return []
     terms = [
         term
-        for term in re.split(r"[^0-9a-z]+", query.lower())
+        # `\W` with `re.UNICODE`, not `[^0-9a-z]`, so a non-ASCII letter is part of a term rather
+        # than a separator. The ASCII form split `Lösungsmittel` into `l` and `sungsmittel` and
+        # dropped `超純水` entirely, and `core.fulltext.reference_tokens` — the other half of the
+        # same rule, one layer over — has always used the Unicode alphabet. Two halves of one rule
+        # disagreeing about what a word is, which is what that module exists to prevent.
+        for term in re.split(r"[\W_]+", query.lower(), flags=re.UNICODE)
         if len(term) >= _MIN_TERM_CHARS and term not in _STOPWORDS
     ]
     if terms:
@@ -104,5 +110,22 @@ def term_coverage(note: Note, terms: Sequence[str]) -> int:
     widens to partial hits when nothing matches completely. Computing it once here is what keeps
     "matched" meaning the same thing in all three.
     """
+    return sum(1 for count in term_frequencies(note, terms).values() if count)
+
+
+def term_frequencies(note: Note, terms: Sequence[str]) -> dict[str, int]:
+    """How *often* each of `terms` appears in `note`'s searchable text, omitting the absent ones.
+
+    The same one haystack `term_coverage` counts, read once and reported in more detail, because
+    "how many terms matched" cannot separate the notes that tie on it — and on a corpus where every
+    hit matches every term, that is all of them. `GraphRetriever` needs a within-note signal to rank
+    by; this is the cheapest honest one, and it costs the same scan the boolean already paid for.
+
+    Counting is `str.count`, so it is occurrences of the term as a *substring*, matching exactly
+    what `term_coverage` means by "appears" — `search_text` is a substring haystack and a token
+    count here would be a second, quietly different definition of a match, which is the defect this
+    module's docstring is entirely about.
+    """
     haystack = search_text(note).lower()
-    return sum(1 for term in terms if term in haystack)
+    counts = {term: haystack.count(term) for term in terms}
+    return {term: count for term, count in counts.items() if count}

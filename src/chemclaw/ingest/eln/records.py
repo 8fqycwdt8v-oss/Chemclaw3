@@ -36,7 +36,7 @@ from typing import Any, Protocol, runtime_checkable
 import psycopg
 from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -52,6 +52,72 @@ RECORD_TYPE = "reaction"
 
 class AmbiguousReactionRecord(ChemclawError):
     """A bare reaction id that more than one ingest source has transcribed."""
+
+
+def _reject_unstorable(value: str, field: str) -> str:
+    r"""Refuse a string the corpus cannot hold — a NUL byte, or a lone surrogate.
+
+    Both are ordinary ELN free text rather than adversarial input. A NUL reaches a record through
+    any prose field an export carries (a procedure, a hypothesis, an impurity name, an unmapped
+    attribute) and Postgres refuses one in a `text` or `jsonb` value outright; a lone surrogate
+    reaches it from a JSON export with a truncated `\u` escape — `json.loads('"\ud800"')` returns
+    one happily — and psycopg refuses that a step earlier, when it encodes the parameter.
+
+    **Why the record refuses rather than repairs.** A transcription is what the source said, and
+    `record._without_wikilinks` states the rule this follows: "deleting a chemist's characters to
+    make them safe is the same mistake as trusting them". Refusing here also puts the failure where
+    the sync can act on it — `ValidationError` is one of the two types `sync_entries` treats as
+    per-entry bad data, so the entry becomes one rejection with a reason in the ledger and the rest
+    of the batch ingests. Left to the write, it was a `psycopg.DataError` at the *last* of
+    `ingest_reaction`'s five writes: fingerprint and label rows committed, no record, no ledger row,
+    and an activity that failed the same way on every retry until the source stopped advancing.
+
+    The mirror of this decision is `ingest/rejections.py::_storable`, which sanitises the same two
+    values instead of refusing them, because a ledger row has nowhere left to refuse to.
+    """
+    if "\x00" in value:
+        raise ValueError(
+            f"{field} contains a NUL (0x00) byte at position {value.index(chr(0))}; a record is "
+            "stored in Postgres text and jsonb columns, neither of which can hold one"
+        )
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(
+            f"{field} contains a character UTF-8 cannot encode (a lone surrogate at position "
+            f"{exc.start}); a record is stored as UTF-8, so this value cannot be written"
+        ) from exc
+    return value
+
+
+def _walk_storable(model: BaseModel, prefix: str) -> None:
+    """Reject any unstorable string on `model`, recursing into the models and lists under it.
+
+    Field names are joined dotted (`conditions.major_impurity`) and indexed (`tags[1]`) so the
+    refusal reason — which is what the ingest ledger stores and a chemist eventually reads — names
+    the field a fix has to touch rather than the record it sits in. `kg.note._walk_encodable` is
+    the same shape over the same problem for notes; it is not shared, because that one asks a
+    different question of each value and the two answers must be able to diverge (see
+    `_reject_unstorable`).
+
+    The `list` arm is the one that made both of those claims true. It was missing while the
+    docstring said "the same shape" and the validator above said the next field added to the
+    record cannot forget the check: no field of `ReactionRecord` is a list, so the omission was
+    invisible until the first one — and a `list[str]` of ELN tags is an ordinary thing to add.
+    """
+    for name in type(model).model_fields:
+        value = getattr(model, name)
+        path = f"{prefix}{name}"
+        if isinstance(value, str):
+            _reject_unstorable(value, path)
+        elif isinstance(value, BaseModel):
+            _walk_storable(value, f"{path}.")
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                if isinstance(item, str):
+                    _reject_unstorable(item, f"{path}[{index}]")
+                elif isinstance(item, BaseModel):
+                    _walk_storable(item, f"{path}[{index}].")
 
 
 def _one_of(reaction_id: str, found: Sequence[tuple[str, "ReactionRecord"]]) -> "ReactionRecord":
@@ -141,6 +207,20 @@ class ReactionRecord(BaseModel):
         two spellings of "safe id" is how one of them drifts.
         """
         return require_note_slug(value)
+
+    @model_validator(mode="after")
+    def _text_is_storable(self) -> "ReactionRecord":
+        """Refuse a record carrying text no column of this tier can hold (`_reject_unstorable`).
+
+        Walked over the model rather than written at each field, the same argument
+        `record._without_wikilinks` makes about applying its substitution once to the assembled
+        body: the next field added to this record cannot forget it. The walk covers strings, nested
+        models and lists of either — `conditions` is the nested one today, and it matters, because
+        it is a `jsonb` column of its own that an impurity name reaches without passing through
+        `body` at all.
+        """
+        _walk_storable(self, "")
+        return self
 
     def is_current(self, as_of: date) -> bool:
         """Whether this is servable as *current* evidence on `as_of`.

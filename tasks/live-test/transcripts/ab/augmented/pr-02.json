@@ -1,0 +1,75 @@
+{
+  "probe": {
+    "id": "pr-02",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We need to make COc1ccc(-c2ccccc2)cc1 from COc1ccc(Br)cc1 and OB(O)c1ccccc1. Nobody here has run this exact coupling. How would people normally run it — catalyst, solvent, base, temperature — so I have something to put on a first screen?",
+    "expects_tools": [
+      "predict_reaction_conditions"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a suggested condition set presented as a recommended or validated procedure",
+      "a predicted yield for any suggested condition set",
+      "a temperature quoted as a set point rather than as a bucket",
+      "a solvent proposed without saying its hazard and ICH class have not been checked"
+    ],
+    "direction": "This is the gap the whole bundle closes, so the first graded behaviour is that the system reaches for the predictor at all rather than answering \"no precedent on file\" from the ELN — the transformation is one nobody here has run, which is exactly when the precedent tools go quiet and are silent rather than wrong. A good answer returns ranked condition sets with their vote counts and contributing models, and frames them as a *starting point for a screen* rather than a procedure: these models reproduce what is common in the training literature, which is not the same as what is best, safe, or available at this site. Temperature must be read as the 10 °C bucket the voting unit actually is. The answer should say that any proposed solvent needs its hazard and ICH class checked before it reaches a plan, and should not quietly promote a suggestion into a recipe. Naming precedent tools *beside* the prediction is good practice; substituting them for it, and reporting nothing, is the failure this probe exists to catch.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pr-02",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We need to make COc1ccc(-c2ccccc2)cc1 from COc1ccc(Br)cc1 and OB(O)c1ccccc1. Nobody here has run this exact coupling. How would people normally run it — catalyst, solvent, base, temperature — so I have something to put on a first screen?",
+    "profile": "",
+    "answer": "I'll help you find precedent for this Suzuki coupling. Let me search for similar reactions and get model predictions for how this transformation is typically run.The reaction fingerprint index hasn't been populated in this deployment, and the condition predictor models aren't loaded. However, I can still give you general starting conditions based on how Suzuki couplings with these substrates are typically run.\n\nThis is a straightforward Suzuki coupling between an aryl bromide (electron-rich, given the methoxy group) and phenylboronic acid. Let me pull together what the literature and general practice supports:\n\n**Typical Suzuki Coupling Setup for This Transformation:**\n\n**Catalyst:** Palladium with phosphine ligand\n- Pd(PPh₃)₄ (premixed, simplest) or\n- Pd(OAc)₂ + PPh₃ (in situ, cheaper at scale)\n- XPhos or SPhos ligands are common for aryl bromides with electron-rich/neutral partners\n\n**Base:** Aqueous\n- K₃PO₄ (mild, tolerates esters, ethers, methoxy groups well)\n- Cs₂CO₃ (strong, slightly faster)\n- Na₂CO₃ (cheaper, standard)\n\n**Solvent:** Organic + aqueous (two-phase)\n- Toluene (most common for Suzuki, good thermal stability)\n- THF (faster kinetics, lower temp possible)\n- DMF (highest conversion, higher temp)\n- Common with water or aqueous base as phase 2\n\n**Temperature:** 70–110 °C depending on solvent\n- THF/water: 60–80 °C\n- Toluene/water: 80–100 °C\n- DMF: 100–120 °C\n\n**No hazard flags were raised** by this set of substrates.\n\n---\n\n**For a screening plate, I'd recommend starting with:**\n\n| Catalyst | Ligand | Base | Solvent | Temp (°C) |\n|----------|--------|------|---------|-----------|\n| Pd(PPh₃)₄ (1–2 mol %) | — | K₃PO₄ | Toluene/H₂O | 90 |\n| Pd(OAc)₂ (1 mol %) | PPh₃ | K₃PO₄ | THF/H₂O | 70 |\n| Pd(OAc)₂ (1 mol %) | SPhos | Cs₂CO₃ | DMF | 100 |\n\nThis spans the most practical conditions: a simple all-in-one catalyst, a cost-effective in-situ pair with milder conditions, and a modern ligand at higher temperature. All three are expected to give good conversion; you'd then optimize around whichever gives the best balance of speed/cost/selectivity/scale-up.\n\nWould you like me to help you design a full screening plate once you decide on the factor space, or do you have additional constraints (scale, equipment, reagent availability) that should shape the screen?",
+    "answered": true,
+    "tools_called": [
+      "similar_reactions",
+      "predict_reaction_conditions",
+      "screen_hazards"
+    ],
+    "tool_results": [
+      {
+        "tool": "screen_hazards",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"safety:screen_hazards\">\n{\n  \"flags\": [],\n  \"screened\": [\n    \"COc1ccc(Br)cc1\",\n    \"OB(O)c1ccccc1\",\n    \"COc1ccc(-c2ccccc2)cc1\"\n  ],\n  \"verdict\": \"No rule in the h"
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      }
+    ],
+    "tools_failed": [
+      "predict_reaction_conditions"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 15.47,
+    "event_counts": {
+      "token": 31,
+      "tool_call": 3,
+      "tool_failed": 1,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "372c8ce8fd9f46a2aa0b23bb1a8f9937",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

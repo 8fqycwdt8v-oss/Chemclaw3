@@ -90,7 +90,16 @@ def loop_hit_cap() -> bool:
 # to nothing.
 @before_model(can_jump_to=["end"])
 def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] | None:
-    """Count this turn's model calls and end the run when it reaches the cap.
+    """Authorise this turn's next model call, or end the run because the cap is reached.
+
+    **The increment counts authorisations rather than completions**, and it cannot do otherwise
+    from here: `before_model` is the one hook no later middleware can skip, which is the whole
+    reason the counter is first-party (see below), and it necessarily runs before anything knows
+    whether the call happens. A later `before_model` hook that jumps — `spend_cap.enforce_spend_cap`
+    is one, ordered immediately after this — leaves the increment for a call that was never made.
+    `ChemclawState.model_calls` says so; moving the count to where the call is made would mean a
+    second hook writing the number this one enforces on, which is the property this module exists
+    to keep.
 
     **Why a counter here rather than `ModelCallLimitMiddleware`.** That middleware enforces exactly
     this, and delegating to it has now been tried twice. The first reason was observability: it

@@ -18,6 +18,7 @@ from pydantic import SecretStr
 
 from chemclaw.core.config import Settings, settings
 from chemclaw.core.logging import (
+    _SECRET_ENV_SETTINGS,
     _SECRET_SETTINGS,
     ContextFilter,
     JsonFormatter,
@@ -28,6 +29,7 @@ from chemclaw.core.logging import (
     configure_telemetry,
     redact_secrets,
     register_secret_env,
+    secret_env_names,
 )
 
 
@@ -1257,3 +1259,83 @@ def test_the_logger_sweep_survives_a_logger_created_during_the_sweep() -> None:
             registry.pop(name, None)
 
     assert created, "the trap was never inspected, so this test proved nothing about the sweep"
+
+
+def test_a_credential_redacted_from_the_logs_is_also_withheld_from_a_child_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two credential inventories answer one question and must not answer it differently.
+
+    `_SECRET_ENV_SETTINGS` — every `*_token_env` field, i.e. the settings that name the variable a
+    bearer lives in rather than holding it — was added for the log filter and `secret_env_names()`
+    went on deriving from `_SECRET_SETTINGS` alone. So the calculation backend's bearer, the
+    labelling server's and the MCP face's were scrubbed from every log line and handed, in the
+    clear, to every `git` child `kg/git_submitter.py` starts — where a credential helper, a `git`
+    hook or a remote configured on the notes checkout reads its environment. That is the exact class
+    `_git_child_env` exists to withhold, and both its docstring and `secret_env_names`' said the two
+    sets "cannot drift".
+
+    Asserted over `_SECRET_ENV_SETTINGS` rather than over the three names it holds today, so a
+    fourth `*_token_env` field is covered by the edit that adds it.
+    """
+    assert _SECRET_ENV_SETTINGS, "the inventory is derived from the field names; it cannot be empty"
+    for index, field in enumerate(_SECRET_ENV_SETTINGS):
+        variable = f"CHEMCLAW_TEST_BEARER_{index}"
+        monkeypatch.setattr(settings, field, variable)
+        monkeypatch.setenv(variable, f"bearer-value-{index}-not-a-published-default")
+
+    withheld = secret_env_names()
+    for field in _SECRET_ENV_SETTINGS:
+        variable = str(getattr(settings, field))
+        value = os.environ[variable]
+        # Both halves in one test, because the defect is the gap between them: the value really is
+        # scrubbed from a log line, and the variable holding it really was not withheld from a
+        # child.
+        assert redact_secrets(f"upstream said {value}") == "upstream said ***"
+        assert variable in withheld, (
+            f"{field} names {variable}, whose value is redacted from every log line and was still "
+            "handed to every git child"
+        )
+
+
+def test_the_one_security_alarm_in_this_module_can_actually_be_formatted(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`degraded[log_redaction]` is the marker to alert on, and it could not be printed.
+
+    `configure_logging` called `basicConfig(format=settings.log_format, force=True)` and *then*
+    constructed the two filters — but `SecretRedactingFilter.__init__` logs when the connector
+    registry raises, and the shipped `log_format` demands `%(correlation_id)s`, which only
+    `ContextFilter` puts on a record. With no `ContextFilter` on the handler yet,
+    `Formatter.format` raised `ValueError: Formatting field not found in record: 'correlation_id'`
+    and `handleError` dumped the record to stderr as a "--- Logging error ---" traceback, with the
+    raw `'degraded[%s]: …'` and `Arguments: ('log_redaction',)` on separate lines. So the one
+    *security* degradation in this file — the process runs with connector bearer tokens unredacted
+    for its whole life — is the one line a log-stack rule matching the marker cannot match.
+
+    Driven through the real `configure_logging` with the real shipped format and the documented
+    trigger (a connector registry that raises), because the defect is an ordering between two
+    statements: a test that formats a record by hand would pass against the code that fails.
+    """
+    monkeypatch.setattr(
+        settings,
+        "log_format",
+        "%(asctime)s %(levelname)s %(name)s [%(correlation_id)s/%(session_id)s]: %(message)s",
+    )
+    monkeypatch.setattr(settings, "log_json", False)
+
+    def _broken() -> tuple[str, ...]:
+        raise RuntimeError("a broken connector manifest")
+
+    monkeypatch.setattr(
+        "chemclaw.connectors.registry.bearer_token_env_names", _broken, raising=True
+    )
+    try:
+        configure_logging()
+        printed = capsys.readouterr().err
+    finally:
+        # Leave the root logger as the rest of the suite expects to find it.
+        configure_logging()
+
+    assert "degraded[log_redaction]" in printed, printed
+    assert "Logging error" not in printed, printed

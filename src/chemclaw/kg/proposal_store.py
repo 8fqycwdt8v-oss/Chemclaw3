@@ -9,9 +9,10 @@ Writes are an **upsert on `(note_id, content_hash)`**, so a re-proposal of a byt
 touches the existing row rather than appending — matching `GitNoteSubmitter`, which pushes nothing
 when there is no diff. A *changed* note is a new version and appends, leaving any decision already
 recorded against the earlier version standing: overwriting a rejection with a fresh `open` row
-would erase the one thing this table exists to keep. The single exception is a `failed` row, which
-is not a decision at all but a record that git was never reached — the retry that finally lands
-supersedes it (see `_UPSERT`).
+would erase the one thing this table exists to keep. The exceptions are the two states that are not
+decisions at all — `failed` (git was never reached) and `superseded` (a newer version took the
+queue slot) — either of which a re-proposal of the same bytes reopens, because in both cases the
+branch a reviewer would look at now really holds those bytes (see `_UPSERT`).
 """
 
 import json
@@ -35,15 +36,27 @@ _COLUMNS = (
 # the row should now name), and a bumped `submitted_at` so the review queue orders by the most
 # recent ask.
 #
-# `state` moves in exactly one direction, out of `failed`. A *decision* is never touched: a note
-# re-proposed unchanged after a rejection must not silently reopen itself, or the gate is
-# defeatable by re-asking. But `failed` is not a decision (see `ProposalState`) — it says the
-# submission never reached git — and the retry that finally lands pushes byte-identical content, so
-# it collapses onto the same row. Leaving that row `failed` made the record assert the opposite of
-# what happened: the branch sits awaiting review while `state='open'` queries skip it,
-# `POST /proposals/{id}/decision` answers 409, and the merge webhook's `mark_merged` moves nothing.
-# `reason` follows `state` so a superseded failure does not keep explaining itself with a git error
-# that no longer applies.
+# `state` moves in exactly one direction: out of the two states that are **not decisions**. A
+# decision is never touched — a note re-proposed unchanged after a rejection must not silently
+# reopen itself, or the gate is defeatable by re-asking.
+#
+# `failed` is not a decision (see `ProposalState`): it says the submission never reached git, and
+# the retry that finally lands pushes byte-identical content, so it collapses onto the same row.
+# Leaving that row `failed` made the record assert the opposite of what happened: the branch sits
+# awaiting review while `state='open'` queries skip it, `POST /proposals/{id}/decision` answers 409,
+# and the merge webhook's `mark_merged` moves nothing.
+#
+# `superseded` is not a decision either, by the same enum's own words — it says a newer version took
+# the queue slot, not that a human judged the old bytes — and it was left out of this arm, which
+# made the *identical* failure reachable by an ordinary path. An agent that regenerates an earlier
+# form (a miner re-running, a chemist re-asking) re-proposes v1 after v2: the row refreshes while
+# staying `superseded`, and `_SUPERSEDE_OTHER_OPEN` below then closes v2 because the incoming
+# state is `open`. Every row superseded, nothing in the review queue, and a branch really holding
+# v1's bytes that no merge can ever close. Reopening it is what makes the record match the branch,
+# and the newer version yielding its slot is the same one-open-row-per-note rule the other way.
+#
+# `reason` follows `state` so a reopened row does not keep explaining itself with a git error, or a
+# supersession, that no longer applies.
 #
 # Both `CASE`s read `note_proposals.*`, the row as it was *before* this statement — SET expressions
 # are evaluated against the old row — so the two stay consistent however they are ordered.
@@ -59,11 +72,11 @@ _UPSERT = """
         correlation_id = EXCLUDED.correlation_id,
         dependencies = EXCLUDED.dependencies,
         submitted_at = now(),
-        state = CASE WHEN note_proposals.state = 'failed'
+        state = CASE WHEN note_proposals.state IN ('failed', 'superseded')
                      THEN EXCLUDED.state ELSE note_proposals.state END,
-        reason = CASE WHEN note_proposals.state = 'failed'
+        reason = CASE WHEN note_proposals.state IN ('failed', 'superseded')
                       THEN EXCLUDED.reason ELSE note_proposals.reason END
-    RETURNING id
+    RETURNING id, state
 """
 
 # Both filters are self-disabling through the `%s = ''` arm, so "any state, any proposer" needs no
@@ -80,14 +93,27 @@ _SELECT_MANY = f"""
 """
 
 _SELECT_ONE = f"SELECT {_COLUMNS} FROM note_proposals WHERE id = %s"
+# The decision standing against one exact version, asked before a submission reaches git. Ordered
+# and limited because `(note_id, content_hash)` is not unique across decided rows in every history
+# this table can hold; newest wins, which is the decision that is actually standing.
+_SELECT_DECIDED_VERSION = f"""
+SELECT {_COLUMNS} FROM note_proposals
+WHERE note_id = %s AND content_hash = %s AND state IN ('merged', 'rejected')
+ORDER BY id DESC LIMIT 1
+"""
 
-# A freshly-upserted version closes the note's previous open versions (migration 058 says why).
+# A freshly-upserted version closes the note's *other* open versions (migration 058 says why).
 # Scoped by id rather than content hash so the statement is correct on the refresh path too — the
 # row the upsert just returned must never supersede itself.
-_SUPERSEDE_OLDER = """
+#
+# **"Another", not "a newer".** The rule is one open row per note, and since a re-proposal of an
+# older version's bytes may reopen a `superseded` row, the row this closes can be the newer of the
+# two: v1, v2, re-propose v1 leaves v2 superseded by v1. The reason is what a reviewer reads in the
+# compliance table, so it says what the statement does rather than what its first caller did.
+_SUPERSEDE_OTHER_OPEN = """
     UPDATE note_proposals
        SET state = 'superseded',
-           reason = 'superseded by a newer proposed version of this note'
+           reason = 'superseded by another proposed version of this note'
      WHERE note_id = %s AND state = 'open' AND id <> %s
 """
 
@@ -181,10 +207,19 @@ class PostgresProposalStore:
                 ),
             )
             row = await cursor.fetchone()
-            # Only a live open version closes its predecessors — a `failed` record must not push
-            # an older, genuinely reviewable version out of the queue.
-            if row is not None and proposal.state is ProposalState.OPEN:
-                await cursor.execute(_SUPERSEDE_OLDER, (proposal.note_id, int(row["id"])))
+            # Only a version this statement actually left **open** closes its predecessors — a
+            # `failed` record must not push an older, genuinely reviewable version out of the
+            # queue.
+            #
+            # The guard reads the *resulting* state rather than the requested one, and the
+            # difference is a measured defect: re-proposing the bytes of a *rejected* version
+            # arrives with `state='open'`, the `CASE` above correctly refuses to reopen it — and
+            # this then closed the note's live open version anyway, leaving the note with a
+            # rejected row, a superseded row and nothing awaiting review. `RETURNING state` is what
+            # makes the two halves agree about what just happened, and it is also what makes the
+            # reopened-`superseded` path sweep without a second condition to keep in step.
+            if row is not None and row["state"] == ProposalState.OPEN.value:
+                await cursor.execute(_SUPERSEDE_OTHER_OPEN, (proposal.note_id, int(row["id"])))
             await conn.commit()
         return int(row["id"]) if row is not None else 0
 
@@ -228,3 +263,11 @@ class PostgresProposalStore:
             moved = cursor.rowcount
             await conn.commit()
         return int(moved)
+
+    async def decided_version(self, note_id: str, content_hash: str) -> NoteProposal | None:
+        """The decision standing against these exact bytes, newest first, or None."""
+        async with _connect() as conn:
+            cursor = _rows(conn)
+            await cursor.execute(_SELECT_DECIDED_VERSION, (note_id, content_hash))
+            row = await cursor.fetchone()
+        return _proposal(row) if row is not None else None

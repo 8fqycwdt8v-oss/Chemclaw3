@@ -82,10 +82,44 @@ class Message(BaseModel):
         Applied by the registry immediately before a driver sees it, rather than by each driver:
         a redaction every driver has to remember is a redaction the next driver forgets, and the
         one that forgets is the one that sends outside the cluster.
+
+        **Every free-text field, `recipient` included.** It was skipped, and it is free text by
+        construction — resolving an address is the driver's job, so this model cannot constrain its
+        shape — while both shipped drivers put it exactly where the body goes: the file driver
+        writes it into the file, the webhook driver POSTs it. Today's only caller passes an actor
+        id, so nothing carries a credential there yet; the point of a seam-level scrub is that the
+        guarantee does not depend on who is calling it.
+
+        `_connector_secret_envs()` is resolved once rather than per field: it reaches
+        `connectors.registry`, and asking it three times per message would import and re-derive the
+        bundle set three times for an answer that cannot differ between two fields of one message.
+
+        **A rewritten `recipient` is logged, because scrubbing an address re-addresses a message.**
+        `redact_secrets` rewrites *structural* shapes as well as this deployment's own secret
+        values, and a routable address can be one: a Teams channel URN loses its token to the
+        `TOKEN=` pattern, a webhook URL with userinfo loses its password, a `xoxb-`-shaped address
+        is replaced whole. Keeping the scrub is right — a driver puts this field where it puts the
+        body, so the guarantee must not depend on the caller — but the failure it can cause is a
+        message delivered nowhere, and the driver reporting it can only name the address it was
+        given. `subject` and `body` are not logged on the same terms: a redaction there costs
+        words, not a destination.
+
+        The line carries the *scrubbed* address only. What tripped the pattern may be a real
+        credential, and this is the half of the redaction that leaves the cluster.
         """
+        extra = _connector_secret_envs()
+        recipient = redact_secrets(self.recipient, extra_secrets=extra)
+        if recipient != self.recipient:
+            logger.warning(
+                "the outbound redaction rewrote this message's recipient to %r; a driver will "
+                "resolve that address rather than the one it was given, and an address that no "
+                "longer routes is a message nobody receives",
+                recipient,
+            )
         return self.model_copy(
             update={
-                "subject": redact_secrets(self.subject, extra_secrets=_connector_secret_envs()),
-                "body": redact_secrets(self.body, extra_secrets=_connector_secret_envs()),
+                "recipient": recipient,
+                "subject": redact_secrets(self.subject, extra_secrets=extra),
+                "body": redact_secrets(self.body, extra_secrets=extra),
             }
         )

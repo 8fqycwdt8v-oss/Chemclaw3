@@ -413,13 +413,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     ).parse_args(argv)
     # One surface for both halves of the report: `validate_templates` would otherwise resolve it
     # and `unchecked_arguments` resolve the identical thing again, at ~5 s a time.
-    surface = _Surface.resolve()
-    problems = validate_templates(surface)
-    for name, tools in sorted(unchecked_arguments(surface).items()):
-        print(
-            f"note: template {name!r} names {tools}, whose bundle is declared but not run here — "
-            "name-checked, arguments unchecked"
-        )
+    #
+    # **Guarded, because this is where an invalid *manifest* surfaces.** Resolving the surface
+    # reaches `available_tool_names`, which asks the template registry for the `run_*` launchers and
+    # so loads every file — before the step checker below has run a single check. A template with an
+    # unknown `${inputs.x}` or a forward `${steps.y.result}` therefore raised straight through
+    # `main`, and the operator got a pydantic traceback where every sibling validator prints a
+    # problem line. The exit code was 1 either way, so CI was never misled: what was wrong is that
+    # the gate failed *looking like a crash*, which `validate_kg.main` argues against in as many
+    # words. Reported through the same block as every other problem, so there is one report shape.
+    try:
+        surface = _Surface.resolve()
+    except TemplateError as exc:
+        problems = [str(exc)]
+    else:
+        problems = validate_templates(surface)
+        for name, tools in sorted(unchecked_arguments(surface).items()):
+            print(
+                f"note: template {name!r} names {tools}, whose bundle is declared but not run "
+                "here — name-checked, arguments unchecked"
+            )
     if problems:
         print("template validation failed:")
         for problem in problems:

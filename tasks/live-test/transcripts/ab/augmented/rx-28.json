@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-28",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What does this coupling look like on green metrics at 2 kg, and where is the solvent burden coming from?",
+    "expects_tools": [
+      "green_metrics",
+      "stoichiometry_table",
+      "gather_evidence",
+      "screen_hazards",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an ICH Q3C class or residual-solvent limit quoted as looked up",
+      "a solvent recovery percentage or recycle rate",
+      "a cost, carbon-footprint or waste-disposal figure"
+    ],
+    "direction": "Should compute the metrics rather than describe them — PMI, E-factor, atom economy over the actual charge — and then read them, which mostly means pointing out that solvent dominates PMI and that at ten volumes the process mass is nearly all THF and water. The judgement layer is the solvent one: the thermodynamic view of a solvent is one input and rarely the deciding one, and the criteria that usually bind first are safety, regulatory class, solubility of substrates, product, base and salts, and everything downstream — crystallisation behaviour, phase separation, distillation and recovery. There is no residual-solvent table in this system, so solvent classes may be discussed from knowledge but must not be presented as looked up. Concrete reduction levers (volumes, aqueous fraction, catalyst loading, telescoping) are a good ending; invented recovery percentages are not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-28",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What does this coupling look like on green metrics at 2 kg, and where is the solvent burden coming from?",
+    "profile": "",
+    "answer": "I don't have enough detail yet to answer this. To compute green metrics (E-factor and PMI) and trace the solvent burden, I need:\n\n1. **The coupling reaction** — what is the transformation? (substrate, nucleophile/electrophile, product as SMILES)\n2. **The conditions** — solvent(s), catalyst, base, temperature, time, additives\n3. **The isolated yield** — what mass of product you actually got from the 2 kg basis\n\nOnce I have those, I can:\n- Build a charge table scaling everything to your 2 kg basis, expressing solvents in the process volumes they were actually specified in\n- Compute E-factor and PMI so you see both the waste and the total input mass\n- Show you where the solvent sits in that total — whether it's the major contributor or whether the reagents/catalyst/base are the burden\n\nDo you have an existing run of this coupling, or are you designing it? If you have a run, point me at it and I'll extract the conditions; if you're designing, give me the reaction (names or SMILES are fine) and what conditions you're considering.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.94,
+    "event_counts": {
+      "token": 135,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "949705d1187d48b3aabe5b19f3025e1a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

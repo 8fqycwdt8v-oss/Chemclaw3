@@ -32,7 +32,7 @@ from datetime import datetime
 from typing import Any
 
 from chemclaw.core.chem import canonical_smiles, compound_id
-from chemclaw.publish.properties import to_canonical
+from chemclaw.publish.properties import definition_for, to_canonical
 from chemclaw.publish.record import (
     CandidateFact,
     Conditions,
@@ -160,14 +160,27 @@ def _member_for(
 
     Handing each copy the next unclaimed member of that role restores the invariant the ordinals
     exist for: one member, one set of per-species facts, one id.
+
+    **The molecule is the member's own SMILES, and `compound_id` is not consulted at all.** It was,
+    and it was consulted *first*: `compound_id` hashes the **standardized** structure, so two
+    members that are tautomers of one another — or an acid and its conjugate base — are one value
+    to it, the exact-SMILES branch behind it was never reached, and matching degenerated back to
+    the list position this function exists to avoid. Measured on 2,4-pentanedione with its species
+    listed enol-first: each species' electronic energy was attached to the other member, both
+    plausible numbers in the same unit and nothing downstream able to notice.
+
+    Reordering the two would have left a branch that cannot run. `_species_members` is the only
+    producer of the members this is called with, and it fills both fields from a single `_identify`
+    call — which returns an id only when the SMILES parsed — so a member here carrying an id and no
+    SMILES cannot arise. A producer that breaks that invariant will see its species match nothing
+    and be told so by the caller's warning, which is the right failure: the coarse identifier is
+    what silently attached the wrong energies, and it must not be the fallback for its own defect.
     """
-    identifier, canonical = _identify(species.get("smiles"))
+    canonical = _identify(species.get("smiles"))[1]
     role = species.get("role")
     for member in members:
         if member.role != role or member.ordinal in claimed:
             continue
-        if member.compound_id and identifier and member.compound_id == identifier:
-            return member.ordinal
         if member.smiles and member.smiles == canonical:
             return member.ordinal
     return None
@@ -251,6 +264,37 @@ def _flag(name: str, value: bool | None, *, member: int | None = None) -> Proper
 def _kept(*facts: PropertyFact | None) -> list[PropertyFact]:
     """Drop the Nones — the one place absence is turned into an omitted row."""
     return [fact for fact in facts if fact is not None]
+
+
+def _facts_belong_in_the_scalar_table(facts: list[PropertyFact]) -> None:
+    """Refuse a projection that wrote a quantity the registry declares for another table.
+
+    This is the control `properties.ScopeKind` claims and did not have: nothing compared a fact's
+    property against `definition_for(name).scope_kind`, so a per-atom, per-point or per-conformer
+    quantity written as a scalar was stored rather than caught, and the placement a site's
+    `property_definition` table ships was a statement a consumer could not trust. Measured, one
+    shipped projection did exactly that — every species distribution published `relative_energy`,
+    a *per-conformer* quantity, as a calculation scalar.
+
+    **Here rather than on `PropertyFact`, because a registry mismatch is a projection bug and
+    cannot be caused by data — and only this side is a projection.** The model is also what
+    `durable/publish_results._drain_one` parses a queued document back through, so the same check as
+    a validator refused rows this system had already written and dead-lettered them; see the note on
+    `record.PropertyFact`. Raising is right where `_identify` degrades instead: the alternative to
+    failing a projection is a row nobody can find under a name that means something else.
+
+    `calculation` names the scalar table and covers *both* of that table's row scopes, so the
+    per-species facts a reaction publishes at `member` scope are not violations — `FactScope` on
+    the row is what distinguishes them.
+    """
+    for fact in facts:
+        declared = definition_for(fact.property).scope_kind
+        if declared != "calculation":
+            raise ProjectionError(
+                f"property {fact.property!r} is registered at {declared!r} scope, so its values "
+                f"belong in that table rather than in `property_value` — see "
+                "`publish.properties.ScopeKind`"
+            )
 
 
 def _warnings(messages: list[str]) -> list[FlagFact]:
@@ -841,9 +885,20 @@ def _species_distribution(
         _fact("species_enumerated", payload.get("enumerated"), ""),
         _text("distribution_kind", payload.get("kind")),
         _text("reaction_level", payload.get("level")),
+        # **The gap to the runner-up, not the winner's own relative energy.** This published
+        # `species[0]["relative_kcal"]`, which is 0.0 by construction: the composer computes each
+        # species' energy relative to the lowest and then sorts the ranking by it, so element 0 is
+        # always the minimum. Every distribution therefore carried one calculation-scope zero,
+        # wearing the method uncertainty as though a measurement had been made, and naming no
+        # species — so "every tautomer set with a gap above 2 kcal/mol", the question this fact
+        # exists for, matched nothing, ever.
+        #
+        # Element 1's relative energy is the discrimination the ranking actually rests on, and it
+        # is the number the uncertainty beside it makes a decision out of. Absent for a set of one:
+        # nothing was ranked, which is not a gap of zero.
         _fact(
-            "relative_energy",
-            species[0].get("relative_kcal"),
+            "species_gap",
+            species[1].get("relative_kcal") if len(species) > 1 else None,
             "kcal/mol",
             uncertainty=uncertainty,
             uncertainty_kind="reported" if uncertainty is not None else "",
@@ -1877,6 +1932,10 @@ def project(
     ran_on = structure_id or next(
         (member.structure_id for member in subject.members if member.structure_id), ""
     )
+    properties = list(extra.get("properties", []))
+    # Checked here, on the one funnel every projector and every multi-record emitter goes through,
+    # so a projector cannot avoid it by being written after this line.
+    _facts_belong_in_the_scalar_table(properties)
     return ResultRecord(
         calc_ref=calc_ref,
         calc_type=calc_type,
@@ -1887,7 +1946,7 @@ def project(
         conditions=conditions,
         level=level,
         structure_id=ran_on,
-        properties=extra.get("properties", []),
+        properties=properties,
         sites=extra.get("sites", []),
         points=extra.get("points", []),
         conformers=extra.get("conformers", []),

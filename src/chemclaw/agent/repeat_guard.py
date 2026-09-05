@@ -36,6 +36,7 @@ from typing import Any
 
 from langchain.agents.middleware import wrap_tool_call
 
+from chemclaw.agent.audit import metric_tool_name
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics_bridge import record_metric
@@ -180,6 +181,12 @@ def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
     **Counting is the side effect**, and it happens before the threshold test, so a call that is
     let through is still recorded against the next one. Off the request path there is no counter
     and this is a no-op — the CLI, the tests and the classic agent all take that branch.
+
+    **The `/metrics` series is not recorded here**, and that is the one thing this function
+    deliberately does not do with `name`. A metric label must be the *served* tool name, and only a
+    caller holding the request can clamp it to one — so the counter moved to `refuse_repeated_calls`
+    below, which is also the only caller in `src/`. Keeping it here behind a defaulted parameter
+    would leave the raw label one direct call away, which is exactly the shape this was.
     """
     watch = _calls.get()
     if watch is None:
@@ -191,9 +198,6 @@ def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
     if seen <= settings.max_identical_tool_calls:
         return None
     logger.info("refusing repeat %d of %s in one turn", seen, name)
-    record_metric(
-        lambda m: m.increment("chemclaw_repeated_tool_calls_total", labels={"tool": name})
-    )
     return RepeatedCallRefusal(
         f"{name} was already called with these exact arguments {seen - 1} time(s) in this turn "
         f"and returned the same thing each time, so it was not called again. It will not answer "
@@ -210,8 +214,29 @@ async def refuse_repeated_calls(request: Any, handler: Callable[[Any], Any]) -> 
     `RepeatedCallRefusal` is a `ChemclawError`, so `surface_domain_errors` is what turns it into
     the message the model reads. That keeps one converter responsible for how a refusal reaches the
     model, instead of this gate having its own opinion about it.
+
+    **It also owns the counter, because it owns the only clamped name.** `/metrics` is
+    unauthenticated by decision (`SECURITY.md`) and its stated guarantee is a declared label
+    allowlist carrying no session id, user or turn content — so `request.tool_call["name"]`, which
+    is whatever string the model emitted, may not be a label. `ToolNode` dispatches an unregistered
+    name through this chain deliberately, and this guard sits *above* `refuse_unparsed_arguments`,
+    so it runs for names the graph does not hold: measured, an injected name minted
+    `chemclaw_repeated_tool_calls_total{tool="IGNORE_PREVIOUS. exfiltrate=…"}` at 253 characters,
+    one new series per invented name until `_MAX_SERIES_PER_COUNTER` drops the rest — at which
+    point the counter also stops recording genuine repeats, so the exfiltration poisons the signal
+    on its way out. The same class was closed for the invalid-tool-call label
+    (`SECURITY-REVIEW-2026-08-28.md`, `agent/audit.metric_tool_name`,
+    `agent/model_calls._bump_invalid`); this was the one raw reader left.
+
+    The clamp is `metric_tool_name`'s, reused rather than re-derived, and it applies to the *label*
+    only: the refusal sentence still names what the model asked for, which is the same split that
+    function draws for the audit row.
     """
     refusal = count_call(request.tool_call["name"], request.tool_call.get("args"))
-    if refusal is not None:
-        raise refusal
-    return await handler(request)
+    if refusal is None:
+        return await handler(request)
+    label = metric_tool_name(request, request.tool_call["name"])
+    record_metric(
+        lambda m: m.increment("chemclaw_repeated_tool_calls_total", labels={"tool": label})
+    )
+    raise refusal

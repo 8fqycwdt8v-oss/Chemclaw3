@@ -55,7 +55,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.mcp_session import CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_GRACE_SECONDS
 from chemclaw.core.metrics_bridge import record_metric
-from chemclaw.core.tool_registry import CapabilityTool
+from chemclaw.core.tool_registry import CapabilityTool, registered_tools
 
 logger = logging.getLogger(__name__)
 
@@ -234,13 +234,24 @@ def server_tools_module(connector: str) -> ModuleType | None:
     behind, so the directory persists as a PEP 420 namespace package, the import gets one level
     further, and the error names the module after all. Locally it returned `None` and CI raised, off
     the same commit.
+
+    **The bundle package is in the set for the same reason, one level higher again.** `chem` is a
+    bundle whose *directory* still ships here; a bundle discovered on an operator's own
+    `connectors_dir` — the `PATH`-style override `_bundle_dirs` implements and `ARCHITECTURE.md`
+    advertises — has no `chemclaw.connectors.<name>` package at all, so the missing name is the
+    bundle rather than its `server` child. Without it, `make connector-validate` failed by
+    construction for every out-of-tree bundle, with a message describing a *broken* server module,
+    and the only way to get CI green was to stop validating that directory. Treated as `chem` is
+    instead: name-checked, and reported by `unverified_tool_surfaces()` as a surface this tree
+    cannot verify.
     """
-    package = f"chemclaw.connectors.{connector}.server"
+    bundle = f"chemclaw.connectors.{connector}"
+    package = f"{bundle}.server"
     target = f"{package}.tools"
     try:
         return importlib.import_module(target)
     except ModuleNotFoundError as exc:
-        if exc.name in {target, package}:
+        if exc.name in {target, package, bundle}:
             return None
         raise
 
@@ -423,9 +434,12 @@ def health_url(manifest: ConnectorManifest) -> str | None:
 def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorSpec:
     """Describe one connector endpoint for the LangGraph engine (M7).
 
-    The twin of `_mcp_tool`, dispatching on the same union for the same reason: the transports
-    differ only in how the server is *reached*, and everything bounding what the agent may do with
-    it is identical on both.
+    Dispatches on the `Endpoint` union for the reason `request_timeout_seconds` and
+    `_session_kwargs` do: the transports differ only in how the server is *reached*, and everything
+    bounding what the agent may do with it is identical on both. (This docstring called itself "the
+    twin of `_mcp_tool`" from the commit that wrote it — a function that has never been defined in
+    this repository, which made a reader look for a second dispatcher over the union and find one
+    function plus its client factory.)
 
     **The HTTP client is still ours, and that is what keeps four security properties alive.**
     `httpx_client_factory` is the seam `langchain-mcp-adapters` exposes, so `connector_http_client`
@@ -466,8 +480,9 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
                 f"{endpoint.command!r} in this process; it is disabled by default because a "
                 "manifest is data. Set CHEMCLAW_CONNECTOR_STDIO_ENABLED=true to allow it."
             )
-        # No identity headers, for the same reason as `_mcp_tool`: a subprocess of our own process,
-        # under our own identity, with no request to attach them to (`connectors.identity`).
+        # No identity headers, for the same reason the HTTP branch above attaches them: a subprocess
+        # of our own process runs under our own identity, with no outbound request to attach them to
+        # (`connectors.identity`).
         return ConnectorSpec(
             name=manifest.name,
             connection=StdioConnection(
@@ -607,6 +622,50 @@ def _bundle_content_dirs(kind: str, declares: Callable[[ConnectorManifest], bool
     return dirs
 
 
+def _bound_by_this_process() -> dict[str, str]:
+    """Every tool name core binds itself, mapped to the phrase naming what it binds it as.
+
+    The half `_declared_tool_names` could not see, and the reason it could not is that a manifest
+    walk only ever meets other manifests. Measured: a bundle declaring an endpoint tool
+    `find_notes` bound **two** tools of that name — `ToolNode` keys `tools_by_name` by name and
+    `build_langgraph_agent` appends the connector tools *after* the in-process ones, so the
+    connector won and the knowledge-graph read was never invoked. A *job* of that name failed the
+    other way and worse: the launcher was dropped in silence, while `state_changing_tool_names()`
+    kept reporting the name, so a pure graph read landed in `side_effecting_tools()` and
+    `expensive_actions()` — refused by the plan gate under an unapproved plan and subtracted from
+    every helper's tool set. `make connector-validate` passed for both.
+
+    **Importing the agent here is what makes the check exist in the validator too.** The registry
+    is populated by import side effect (`chemclaw.agent.tool_modules`), so a process that has not
+    imported it sees an empty registry and would get a check that silently tests nothing —
+    measured, `make connector-validate` holds **0** registered tools at the moment it calls
+    `job_tools()`. `chemclaw.cli.validate_templates` does the same import for the same reason and
+    says so; that this is the declared `connectors -> agent` edge rather than a new one is
+    `tests/test_layering.py`'s record. It is a function-scope import because
+    `chemclaw.agent.chemclaw_agent` imports this module back at module scope, and it costs nothing
+    in the chat pod, which has imported it before the first turn.
+
+    **A generated launcher is excluded, and that exclusion is what keeps a second build working.**
+    `build_langgraph_agent` runs once per profile and registers this registry's own job launchers
+    into the very registry read here — so reading them back would make every deployment with jobs
+    fail on its second build, on a name it declared itself. The launchers are recognised by the
+    module that generated them rather than by a marker, so there is nothing to remember to set.
+    Template launchers are deliberately *not* excluded: `run_<name>` is a different name space that
+    a bundle has no business claiming either.
+    """
+    from chemclaw.agent import chemclaw_agent
+
+    bound = {
+        fn.__name__: "an in-process tool"
+        for fn in registered_tools()
+        if fn.__module__ != build_job_tool.__module__
+    }
+    bound.update(dict.fromkeys(chemclaw_agent.skill_tool_names(), "a scratchpad file verb"))
+    bound.update(dict.fromkeys(chemclaw_agent.harness_tool_names(), "a plan-harness tool"))
+    bound.update(dict.fromkeys(chemclaw_agent.subagent_tool_names(), "the subagent spawner"))
+    return bound
+
+
 def _declared_tool_names() -> dict[str, tuple[str, str]]:
     """Every tool name the enabled bundles advertise, mapped to `(connector, kind)`.
 
@@ -624,12 +683,18 @@ def _declared_tool_names() -> dict[str, tuple[str, str]]:
     distinct. Nothing raised, because `connector_tool_names()` is a set union and
     `agent.chemclaw_agent._narrow` keys its lookup by name, so the loser vanished with no error.
 
+    **A first-party name is claimed too, and by whoever holds it** (`_bound_by_this_process`).
+    The rule was always stated in general terms — one name is one capability — and checked in one
+    direction only, which is how a bundle came to be able to take over `propose_knowledge_note`
+    with every gate still firing on the name and the note body going to the connector's server.
+
     Raises:
         ConnectorError: naming both claimants and what each declares the name as. Loud at build
             time is the whole point — the alternative is a capability that is simply absent from
             the agent's surface, which reads as a broken tool rather than a misconfiguration.
     """
     owner: dict[str, tuple[str, str]] = {}
+    bound = _bound_by_this_process()
     for manifest in enabled():
         served = () if manifest.endpoint is None else manifest.endpoint.tools
         declared = [(name, "tool") for name in served]
@@ -641,6 +706,14 @@ def _declared_tool_names() -> dict[str, tuple[str, str]]:
                 raise ConnectorError(
                     f"connector {manifest.name!r} declares {kind} {name!r}, which connector "
                     f"{connector!r} already provides as a {as_kind}"
+                )
+            held = bound.get(name)
+            if held is not None:
+                raise ConnectorError(
+                    f"connector {manifest.name!r} declares {kind} {name!r}, which this deployment "
+                    f"already binds as {held}; a connector cannot take a first-party capability's "
+                    "name, because the name is the authorization key and the model has only one "
+                    "of them to call"
                 )
             owner[name] = (manifest.name, kind)
     return owner

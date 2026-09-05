@@ -42,6 +42,12 @@ die() { printf '\033[31m[live] %s\033[0m\n' "$*" >&2; exit 1; }
 # chart ships, and LIVE-8's lesson is exactly that: a configuration only production sets is a
 # configuration nothing tests.
 export CHEMCLAW_SERVICE_HOST="${CHEMCLAW_SERVICE_HOST:-127.0.0.1}"
+# The eval profile directory beside the shipped one, because the tool-utility A/B's control arm is
+# a profile (`data/evals/profiles/no-tools.yaml`) and a profile has to be registered by the process
+# that builds the agent. It is not in `data/profiles/` on purpose — a toolless agent is a
+# measurement instrument, and every deployment that starts the front door advertises what is in
+# there. This lane is where measurements run, so this is where the two directories meet.
+export CHEMCLAW_PROFILES_DIR="${CHEMCLAW_PROFILES_DIR:-data/profiles:data/evals/profiles}"
 export CHEMCLAW_ENTRA_REQUIRED="${CHEMCLAW_ENTRA_REQUIRED:-false}"
 
 # ---------------------------------------------------------------------------- enforced identity
@@ -92,20 +98,16 @@ mint_probe_token() {
 }
 export CHEMCLAW_SESSION_STORE="${CHEMCLAW_SESSION_STORE:-postgres}"
 export CHEMCLAW_CONNECTORS_REQUIRED="${CHEMCLAW_CONNECTORS_REQUIRED:-true}"
-# **The bundles this lane serves, in one place, because two lists drift.** `start_fleet_bundles`
-# starts these and `CHEMCLAW_CONNECTORS_ENABLED` declares them, and with
-# `CHEMCLAW_CONNECTORS_REQUIRED=true` above, a bundle enabled but not started is a front door that
-# refuses to boot. That is exactly what happened when `rxnpredict` was wired in as a
-# declaration-only bundle: `registry.enabled()` is "discovery is enablement until you say
-# otherwise", so an eighth bundle appeared in every fresh checkout, this lane still started two,
-# and `make live-up` died with `ConnectorsUnavailable: rxnpredict (unreachable)`. Naming the set
-# here and iterating *it* is what stops the next bundle doing the same — this lane opts in per
-# server rather than inheriting the default surface, because a torch-backed predictor is a
-# deliberate thing to start, not something a checkout should acquire.
-LANE_BUNDLES="${LANE_BUNDLES:-chem safety}"
-# `os.pathsep`, not a comma — `connectors_enabled_list` splits on it, and a comma arrives as one
-# unknown connector name whose error message reads like a typo rather than a separator mistake.
-export CHEMCLAW_CONNECTORS_ENABLED="${CHEMCLAW_CONNECTORS_ENABLED:-$(printf '%s' "$LANE_BUNDLES" | tr ' ' ':')}"
+# **This lane's bundles are derived, never listed.** `start_fleet_bundles` iterates
+# `fleet_bundle_names`, the intersection of core's endpoint-declaring bundles and the manifests the
+# fleet actually ships, so a bundle added to either side is picked up without editing this file.
+# That matters because `CHEMCLAW_CONNECTORS_REQUIRED` is true below: with `connectors_enabled`
+# unset, discovery is enablement, so a bundle core enables and nothing starts is not a warning —
+# it is a front door that refuses to boot. `rxnpredict` did exactly that when it was wired in
+# against a hardcoded pair, and the fix is to start what is enabled rather than to narrow what is
+# enabled: the core-served bundles (`bo`, `calc`, `molfp`, `rxnfp`, `results`) come from the dev
+# connector process, so constraining `CHEMCLAW_CONNECTORS_ENABLED` here would take those off the
+# lane too.
 # Traces, when something is listening for them. `make phoenix-up` puts an OTLP receiver on 4317;
 # with nothing there the exporter retries in the background and the run is unaffected, which is why
 # this is a probe rather than a flag somebody has to remember. Content stays suppressed:
@@ -259,12 +261,39 @@ not the fix: it is the posture the chart ships and the one this lane exists to e
   fleet_python_bin || die "could not resolve an interpreter in $MCP_REPO"
 }
 
+# Which bundles this lane must take from the fleet, derived rather than listed.
+#
+# It *was* listed — `for name in chem safety` — and the list went stale the day a third endpoint
+# bundle was added here: `rxnpredict` was discovered, enabled and therefore required, no process
+# served it, and `make live-up` brought up eleven processes and then failed the front door on a
+# connector nobody had noticed was missing. A hardcoded list is a second declaration of a set that
+# already has two authorities, which is the failure this repository names in `manifests/`.
+#
+# So the set is the intersection of the two: a bundle whose manifest *here* declares an
+# `endpoint:` (so the front door will dial it) and which the fleet publishes a manifest for (so
+# this lane knows its port and its module). `bo`, `calc`, `molfp` and `rxnfp` declare an endpoint
+# too and are absent from the fleet's `manifests/`, which is exactly right — they are served by
+# this repository's own `connectors_dev` process, and the loop below rewrites their URLs.
+fleet_bundle_names() {
+  "$1" - "$REPO_ROOT" "$MCP_REPO" <<'PY'
+import pathlib, sys, yaml
+
+repo, fleet = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+for manifest in sorted((repo / "src/chemclaw/connectors").glob("*/connector.yaml")):
+    name = manifest.parent.name
+    if not (yaml.safe_load(manifest.read_text()) or {}).get("endpoint"):
+        continue
+    if (fleet / "manifests" / name / "connector.yaml").exists():
+        print(name)
+PY
+}
+
 start_fleet_bundles() {
   local python="$1" fleet_python="$2"
 
   local name port
-  # The one list, from the export above — never a second spelling of it.
-  for name in $LANE_BUNDLES; do
+  # Derived from the fleet, never a list here — see the note beside CONNECTORS_REQUIRED.
+  for name in $(fleet_bundle_names "$python"); do
     port="$(fleet_port "$python" "$name")" || die "no port in $MCP_REPO/manifests/$name/connector.yaml"
     # The same variable name on both sides, which is the manifest's `token_env` and the whole
     # reason a dev token works here: core reads it to send, the server reads it to verify.
@@ -277,8 +306,8 @@ start_fleet_bundles() {
     # address itself is what lets it name the cause instead of pointing at a log.
     if ! running "$name" && curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$port/healthz"; then
       die "$name: 127.0.0.1:$port is already served, and not by a process this lane started.
-This lane owns chem and safety; the four-repo lane reaches them by calling this script, so nothing
-should be starting them twice. Stop the other server, or run \`make live-e2e-full-stack\`."
+This lane owns every fleet bundle this repository declares an endpoint for; the four-repo lane
+reaches them by calling this script, so nothing should be starting them twice. Stop the other server, or run \`make live-e2e-full-stack\`."
     fi
     ( cd "$MCP_REPO" && start "$name" "$fleet_python" -m "uvicorn" "chemclaw_mcp_$name.app:app" \
         --host 127.0.0.1 --port "$port" )

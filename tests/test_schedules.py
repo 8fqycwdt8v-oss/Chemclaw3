@@ -193,6 +193,14 @@ def test_planned_ids_stay_inside_owned_namespace(monkeypatch: pytest.MonkeyPatch
     duly slipped through unregistered. `OWNED_SCHEDULE_IDS` is the only thing authorising `_prune`
     to delete a Schedule, so an unregistered planned id is a Schedule that survives every
     subsequent `helm upgrade` after the deployment turns its feature off, and keeps firing.
+
+    **It then held vacuously a second time, on the one registry this list forgot.** The floor was
+    `>= 11` and this test enabled eleven jobs, so `commitment-mirror` — planned from
+    `active_commitment_sources()`, never patched here — sat outside the namespace unnoticed for
+    exactly as long as `result-publish` had. The floor is now the *whole* plan rather than a
+    number chosen to pass: every job in this file is conditional, so `planned` and the count below
+    move together, and adding a job without enabling it here fails on the count before it can fail
+    silently in a deployment.
     """
     from chemclaw.durable import schedules as schedules_module
 
@@ -210,12 +218,15 @@ def test_planned_ids_stay_inside_owned_namespace(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(schedules_module, "corpus_sources", lambda: {"pistachio": object()})
     monkeypatch.setattr(schedules_module, "active_ingest_source_names", lambda: ["eln-json"])
     monkeypatch.setattr(schedules_module, "publishing_enabled", lambda: True)
+    monkeypatch.setattr(
+        schedules_module, "active_commitment_sources", lambda: {"portfolio": object()}
+    )
 
     planned = {p.schedule_id for p in planned_schedules()}
 
     # The guard is only worth anything if the plan is actually full — an empty plan is a subset of
-    # everything. Ten conditional jobs plus the two unconditional ones.
-    assert len(planned) >= 11, (
+    # everything. Every job in this file is conditional, and all twelve are enabled above.
+    assert len(planned) == 12, (
         f"the plan is not fully enabled, so the subset below is vacuous: {sorted(planned)}"
     )
     assert planned <= OWNED_SCHEDULE_IDS, (

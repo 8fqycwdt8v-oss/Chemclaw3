@@ -9,20 +9,25 @@ activity and the summary fold.
 """
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
-from temporalio.client import Client
+from temporalio import activity
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
 import chemclaw.durable.eln_sync as eln_sync
 from chemclaw.core.config import settings
 from chemclaw.durable.eln_sync import (
+    ElnSyncOutcome,
     ElnSyncState,
     ElnSyncWorkflow,
+    SyncChunk,
     _absorb,
     _BoundedIngest,
     load_sync_cursor,
@@ -30,14 +35,14 @@ from chemclaw.durable.eln_sync import (
     store_sync_cursor,
     sync_eln_entries,
 )
-from chemclaw.ingest.eln.adapter import RawEntry
+from chemclaw.ingest.eln.adapter import RawEntry, entry_window
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
 from chemclaw.ingest.eln.sync import IngestSummary, RejectedEntry, sync_entries
 from chemclaw.ingest.sources.registry import active_ingest_source_names
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from chemclaw.science.labels.store import InMemoryLabelIndex
-from tests.temporal_env import pydantic_client, start_env_or_skip
+from tests.temporal_env import pydantic_client, start_env_or_skip, start_local_env_or_skip
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
 
@@ -152,6 +157,66 @@ def test_bounded_ingest_keeps_overlap_and_truncates_new() -> None:
     assert roomy.truncated is False
 
 
+def test_the_bound_truncates_on_the_same_stamp_the_cursor_advances_on() -> None:
+    """Two orderings of one batch is silent data loss, and this is where they were different.
+
+    `sync_entries` advances the cursor on `entry_window(created_at, modified_at)` — the later of
+    the two, because the fetch filters on that and an amended entry counts as new. `_BoundedIngest`
+    sorted, split and truncated on `created_at` alone. So the chunk that was *kept* could contain
+    an entry whose window is later than the window of an entry that was *dropped*: the cursor
+    advances past the dropped one, the next fetch asks for entries after that cursor, and the
+    dropped entry is never seen again. Nothing reports it — there is no `ingest_rejections` row for
+    an entry that was fetched, silently discarded by the cap, and then filtered out by a cursor.
+
+    The corpus this builds is a scientific record, so an entry lost this way is a real experiment a
+    chemist ran that nobody can find. Driven with amendments ordered *against* creation, which is
+    the ordinary shape of the case — old entries corrected recently — rather than a contrived one.
+
+    Asserted as "the kept chunk's cursor does not overrun any dropped entry" rather than as a count,
+    because the count is a property of this fixture and the invariant is what has to hold for any.
+    """
+    since = datetime(2026, 6, 1, tzinfo=UTC)
+    total, limit = 150, 100
+    # Entry i was created at +i minutes and amended at +(total - i) minutes: the oldest entries
+    # carry the newest amendments, so the two orderings are inverted.
+    entries = [
+        RawEntry(
+            entry_id=f"e-{i:03d}",
+            created_at=since + timedelta(minutes=i + 1),
+            modified_at=since + timedelta(minutes=total - i),
+            payload={},
+        )
+        for i in range(total)
+    ]
+
+    class _AmendedAdapter:
+        async def fetch_new_entries(self, _since: datetime) -> list[RawEntry]:
+            return list(entries)
+
+        def map_to_ord(self, raw: RawEntry) -> OrdReaction:  # pragma: no cover - never reached
+            raise AssertionError("not used")
+
+    bounded = _BoundedIngest(_AmendedAdapter(), since, limit=limit)
+    kept = asyncio.run(bounded.fetch_new_entries(since))
+    assert bounded.truncated is True
+    assert len(kept) == limit
+
+    kept_ids = {entry.entry_id for entry in kept}
+    dropped = [entry for entry in entries if entry.entry_id not in kept_ids]
+    # What `sync_entries` will store as the next cursor, from the chunk it was handed.
+    cursor = max(entry_window(entry.created_at, entry.modified_at) for entry in kept)
+    lost = [
+        entry.entry_id
+        for entry in dropped
+        if entry_window(entry.created_at, entry.modified_at) <= cursor
+    ]
+    assert lost == [], (
+        f"{len(lost)} of {total} entries are unreachable after this chunk: the cap dropped them "
+        f"and the cursor advanced to {cursor.isoformat()}, past their own fetch window, so the "
+        f"next fetch filters them out. First few: {lost[:5]}"
+    )
+
+
 def test_absorb_folds_every_chunk_counter_and_takes_the_max_cursor() -> None:
     """`_absorb` counts every per-entry list across chunks and sources, and never regresses.
 
@@ -261,6 +326,167 @@ def test_eln_sync_workflow_cursors_each_source_independently(
         }
 
     asyncio.run(_run())
+
+
+def test_one_failing_source_does_not_take_the_rest_of_the_sync_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A drain over N sources must be N independent drains, not one that shares a fate.
+
+    `sync_eln_entries` is called per source with no handler around it, so a source that raises
+    after `BAD_DATA_RETRY` is exhausted — a warehouse that is down, a credential that expired, a
+    binding that no longer matches the site's schema — failed the whole workflow. Every source
+    *after* it in the plan was then never synced, and its cursor never advanced: a run that looked
+    like one broken source was silently a run where the healthy ones stopped ingesting too, for as
+    long as the broken one stayed broken.
+
+    Bad data was never the case at issue and still is not — that rejects and continues *inside*
+    `sync_entries`, and the retry policy exists to keep it there. What this covers is the source
+    itself being unreachable, which no amount of retrying inside one activity can fix.
+
+    Asserted on the healthy source's own outcome, because "the run did not raise" is much weaker
+    than what has to hold: the second source must actually have been synced and its cursor stored.
+    """
+    records, _ = _swap_stores(monkeypatch)
+    monkeypatch.setattr(settings, "data_sources", "eln-json,eln-ord")
+    cursors: dict[str, datetime] = {}
+
+    async def fake_load(source: str) -> datetime:
+        return cursors.get(source, _EPOCH)
+
+    async def fake_store(source: str, cursor: datetime) -> None:
+        cursors[source] = cursor
+
+    monkeypatch.setattr(eln_sync, "load_cursor", fake_load)
+    monkeypatch.setattr(eln_sync, "store_cursor", fake_store)
+
+    @activity.defn(name="sync_eln_entries")
+    async def failing_first_source(
+        source: str, since: datetime, apply_overlap: bool = True
+    ) -> SyncChunk:
+        """The first source in the plan is unreachable; the second is the real one."""
+        if source == "eln-json":
+            raise ApplicationError(f"{source} is unreachable", non_retryable=True)
+        return await sync_eln_entries(source, since, apply_overlap)
+
+    async def _run() -> ElnSyncOutcome:
+        async with await start_env_or_skip() as env:
+            client: Client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue="test-eln-one-source-down",
+                workflows=[ElnSyncWorkflow],
+                activities=[
+                    plan_eln_sync,
+                    failing_first_source,
+                    load_sync_cursor,
+                    store_sync_cursor,
+                ],
+            ):
+                return await client.execute_workflow(
+                    ElnSyncWorkflow.run,
+                    id="eln-sync-one-source-down",
+                    task_queue="test-eln-one-source-down",
+                )
+
+    outcome = asyncio.run(_run())
+
+    assert outcome.failed_sources == ["eln-json"], (
+        f"the run reports {outcome.failed_sources} as failed; a source that could not be reached "
+        "has to be named in the outcome, or the run reads as healthy while a source is dark"
+    )
+    assert "eln-ord" in cursors, (
+        "the source after the broken one never ran: one unreachable warehouse stopped every other "
+        "source from ingesting, and none of their cursors advanced"
+    )
+    assert {record.reaction_id for record in asyncio.run(records.all_records())}, (
+        "the healthy source ingested nothing"
+    )
+
+
+def test_cancelling_a_drain_stops_it_instead_of_skipping_the_source_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel must end the run, and the skip-one-source clause is exactly where that can be lost.
+
+    Temporal delivers a workflow cancellation to the awaiting `execute_activity` as an
+    `ActivityError` whose cause is `temporalio.exceptions.CancelledError` — the same type the
+    clause above catches to drop one unreachable source. Caught rather than re-raised, `cancel`
+    becomes "skip whichever source is in flight and carry on": the run finishes COMPLETED, the
+    remaining sources are synced, and the SDK's `uncancel` after the absorbed cancel means no
+    later activity is cancelled either. `cli.live_data.backfill` awaits `handle.result()`, so an
+    operator's cancel of a wrong-`since` backfill silently mutilated one source instead of
+    stopping the drain.
+
+    Driven on the **real-time** server for the reason `start_local_env_or_skip` records: this is a
+    test about a wall-clock event reaching a run that is still going, and time skipping would
+    fast-forward the in-flight activity instead of letting the cancel arrive during it.
+
+    Asserted on the run's *status* rather than on "it raised", because the failure being pinned is
+    a run that ends successfully, and on the second source's cursor, because the harm is the work
+    that happened after the cancel rather than the exception that did not.
+    """
+    _swap_stores(monkeypatch)
+    monkeypatch.setattr(settings, "data_sources", "eln-json,eln-ord")
+    cursors: dict[str, datetime] = {}
+
+    async def fake_load(source: str) -> datetime:
+        return cursors.get(source, _EPOCH)
+
+    async def fake_store(source: str, cursor: datetime) -> None:
+        cursors[source] = cursor
+
+    monkeypatch.setattr(eln_sync, "load_cursor", fake_load)
+    monkeypatch.setattr(eln_sync, "store_cursor", fake_store)
+    in_flight = asyncio.Event()
+
+    @activity.defn(name="sync_eln_entries")
+    async def hangs_on_the_first_source(
+        source: str, since: datetime, apply_overlap: bool = True
+    ) -> SyncChunk:
+        """First source heartbeats forever so the cancel reaches it; the second is the real one."""
+        if source == "eln-json":
+            in_flight.set()
+            while True:
+                activity.heartbeat()
+                await asyncio.sleep(0.05)
+        return await sync_eln_entries(source, since, apply_overlap)
+
+    async def _run() -> WorkflowExecutionStatus | None:
+        async with await start_local_env_or_skip() as env:
+            client: Client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue="test-eln-cancel",
+                workflows=[ElnSyncWorkflow],
+                activities=[
+                    plan_eln_sync,
+                    hangs_on_the_first_source,
+                    load_sync_cursor,
+                    store_sync_cursor,
+                ],
+            ):
+                handle = await client.start_workflow(
+                    ElnSyncWorkflow.run,
+                    id="eln-sync-cancelled",
+                    task_queue="test-eln-cancel",
+                )
+                await asyncio.wait_for(in_flight.wait(), timeout=60)
+                await handle.cancel()
+                with contextlib.suppress(WorkflowFailureError):
+                    await asyncio.wait_for(handle.result(), timeout=60)
+                return (await handle.describe()).status
+
+    status = asyncio.run(_run())
+
+    assert status == WorkflowExecutionStatus.CANCELED, (
+        f"the cancelled drain ended {status!r}; a cancel that is absorbed by the per-source skip "
+        "makes this run unstoppable — it drops the source in flight and syncs the rest"
+    )
+    assert "eln-ord" not in cursors, (
+        "the source after the cancelled one was synced anyway: the cancel skipped one source "
+        "instead of stopping the run"
+    )
 
 
 def test_eln_sync_workflow_drains_a_backlog_in_chunks(

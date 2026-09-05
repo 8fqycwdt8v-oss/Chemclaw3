@@ -14,6 +14,7 @@ land on the same subject, which is what a split looks like from the outside.
 
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -25,6 +26,13 @@ from chemclaw.publish.properties import (
     UnknownPropertyError,
     definition_for,
     to_canonical,
+)
+from chemclaw.publish.record import (
+    Conditions,
+    PropertyFact,
+    Subject,
+    SubjectMember,
+    TheoryLevel,
 )
 
 
@@ -267,3 +275,76 @@ def test_the_sink_gate_checks_every_discovered_sink_not_only_the_enabled_ones(
     finally:
         discovered.cache_clear()
     assert found and "NoSuchClassAtAll" in found[0], found
+
+
+def test_a_quantity_registered_for_another_table_cannot_be_projected_as_a_scalar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`scope_kind` is a control, not a comment — the claim its own definition makes.
+
+    Nothing compared a fact's property against its declaration: not the projectors, not the row
+    builder, not the SQL driver. So the `property_definition` rows a site ships — the table a
+    consumer joins to decide *where to look* for a quantity — asserted a placement nothing kept.
+    Measured, one shipped projection disagreed with it: every species distribution wrote
+    `relative_energy`, registered per-conformer, as a calculation-scope scalar.
+
+    `calculation` names the scalar table and covers both of its row scopes, which is why the seven
+    per-species facts a reaction publishes at `member` scope are not violations — a species' own
+    Gibbs energy is a `property_value` row, and `FactScope` on the row says which kind.
+
+    **Driven through `project`, because the check is the projection's and not the model's.** As a
+    `PropertyFact` validator it also ran on the parse of a document already queued — see
+    `tests/test_publish_outbox.py::test_a_document_this_system_already_queued_stays_readable` —
+    which turned a write-side control into a filter that retired stored rows. This test fails in
+    both directions: with the guard gone the fabricated projector's record is built, and with the
+    guard back on the model the fact cannot be constructed and the raise is the wrong type.
+    """
+    conformer_scoped = next(
+        name for name, definition in REGISTRY.items() if definition.scope_kind == "conformer"
+    )
+
+    def _misplacing(_payload: dict[str, Any]) -> tuple[Any, Any, Any, dict[str, Any]]:
+        """A projector that files a per-conformer quantity in the scalar table."""
+        return (
+            Subject(
+                kind="molecule",
+                members=[SubjectMember(ordinal=0, role="subject", smiles="CCO")],
+                label="CCO",
+            ),
+            Conditions(),
+            TheoryLevel(method="GFN2-xTB"),
+            {"properties": [PropertyFact(property=conformer_scoped, value=1.0, unit="kcal/mol")]},
+        )
+
+    monkeypatch.setitem(projection.PAYLOAD_PROJECTORS, "MisplacingResult", _misplacing)
+    with pytest.raises(projection.ProjectionError, match="belong in that table"):
+        projection.project(
+            calc_ref="misplaced@1:a:b",
+            calc_type="probe",
+            payload={},
+            payload_kind="MisplacingResult",
+        )
+
+
+def test_every_projected_scalar_is_registered_for_the_scalar_table() -> None:
+    """The same rule over every shape this system produces, not only the one that broke it.
+
+    The validator above cannot be reached by a projector that never runs in a unit test, so this
+    drives all of them — a new calculator writing a per-atom quantity into the scalar table fails
+    here the day it ships.
+    """
+    from tests.test_publish_projection import _cases
+
+    for kind, calc_type, _model, payload in _cases():
+        record = projection.project(
+            calc_ref=f"{calc_type}@v:a:b", calc_type=calc_type, payload=payload, payload_kind=kind
+        )
+        for fact in record.properties:
+            assert definition_for(fact.property).scope_kind == "calculation", (
+                f"{kind} publishes {fact.property!r} as a scalar, but the registry declares it at "
+                f"{definition_for(fact.property).scope_kind!r} scope"
+            )
+        for site in record.sites:
+            assert definition_for(site.property).scope_kind == "site"
+        for point in record.points:
+            assert definition_for(point.property).scope_kind == "point"

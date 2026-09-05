@@ -66,7 +66,7 @@ BEGIN
         'GRANT INSERT, UPDATE ON '
         'calculation_results, calculation_artifacts, job_records, '
         'bo_campaigns, measurements, predictions, note_proposals, observations, '
-        'pending_requests, commitments, effects, '
+        'pending_requests, effects, '
         'reaction_records, experiment_protocols, '
         'plan_approvals, sync_cursors, turn_costs, '
         'molecule_fingerprints, reaction_fingerprints, reaction_labels, corpus_molecules, '
@@ -111,6 +111,21 @@ BEGIN
     -- — SQL has no column-level "only while null" — which is the usual shape and the reason this
     -- group is still spelled out on its own line rather than folded into the full-DML list below.
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_owners TO %I', app_role);
+
+    -- `commitments` is a **mirror**, which is why it holds DELETE where the tables it used to sit
+    -- beside do not. Those withhold it so a retention refusal is enforced rather than intended; a
+    -- mirror's job is the opposite — to converge on a source this system does not own — and a
+    -- commitment the portfolio export no longer carries has been withdrawn. Leaving the row is
+    -- what loses information, because `outstanding()` then reports work nobody is doing with a
+    -- freshness stamp that reads current. Nothing is destroyed that the source still holds.
+    --
+    -- The DELETE is `commitment_sync.sweep_withdrawn`, mark-and-sweep against
+    -- `activity.info().started_time`, and it is guarded twice in code: an adapter must declare
+    -- `snapshot`, and an *empty* answer never sweeps, because an export returning nothing is
+    -- likelier broken than a programme with nothing committed. No shipped adapter declares it, so
+    -- this privilege is granted ahead of any code that exercises it — deliberately, because the
+    -- alternative is a site enabling the flag and meeting `InsufficientPrivilege` at the sweep.
+    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON commitments TO %I', app_role);
 
     -- The result outbox joins this group and exercises all three verbs: INSERT on enqueue, UPDATE
     -- to mark a row delivered or to count a failed attempt, and DELETE because retention prunes

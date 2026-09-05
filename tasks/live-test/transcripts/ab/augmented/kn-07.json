@@ -1,0 +1,73 @@
+{
+  "probe": {
+    "id": "kn-07",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Can I run the EDC coupling in 2-MeTHF instead of DMF? What's it cost me?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a yield number not present in the retrieved notes",
+      "a note id that was not retrieved",
+      "a regulatory or solvent-class designation the notes do not state"
+    ],
+    "direction": "Yes, at about 5 points, with the measured numbers from opt-amide-solvent and/or interaction-solvent-swap-question: 81% DMF, 79% MeCN, 76% 2-MeTHF on the same substrate. A strong answer adds the recorded process argument for making the swap anyway — 2-MeTHF is bio-derived, is not a reprotoxin, and separates from water, which removes the DMF work-up entirely. Cites at least one note id.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-07",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Can I run the EDC coupling in 2-MeTHF instead of DMF? What's it cost me?",
+    "profile": "",
+    "answer": "I need to search for evidence about EDC couplings in your record — both to see what your typical conditions are and whether anyone has already tried 2-MeTHF — then I can tell you what that swap costs you.Your knowledge graph and reaction index are empty, so I cannot tell you what your group has run before. But I can answer the general question — what 2-MeTHF costs you in an EDC coupling — by computing a direct comparison.\n\nThe question turns on two things: **(1) solubility** of your carboxylic acid, amine, and EDC/coupling activators in 2-MeTHF vs DMF, and **(2) thermodynamics** — where the equilibrium lies in each solvent. Let me compute both.\n\nFirst, what substrate are you working with? I need the SMILES (or names) of:\n- The carboxylic acid\n- The amine nucleophile  \n- Whether you add a base like DIPEA or a co-catalyst like HOBt\n\nIf you give me those, I can:\n1. **Predict solubility** of your acid and amine in both solvents\n2. **Compute the coupling reaction's ΔG** in each solvent to show you whether the equilibrium shifts\n3. **Look up safety and environmental hazards** of 2-MeTHF vs DMF (the latter is on the ICH Q3C list as a solvent with residual-solvent limits)\n\nThat will give you a concrete answer: does the coupling go as well? What's the practical cost in yield/selectivity?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "similar_reactions"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.38,
+    "event_counts": {
+      "token": 18,
+      "tool_call": 2,
+      "evidence_source": 1,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "ddf7cda3a806479b863d8ac9ff104acf",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

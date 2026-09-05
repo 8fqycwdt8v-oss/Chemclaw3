@@ -23,6 +23,7 @@ swap them for in-memory stores.
 from datetime import UTC, datetime, timedelta
 
 from temporalio import activity, workflow
+from temporalio.exceptions import ActivityError, is_cancelled_exception
 
 with workflow.unsafe.imports_passed_through():
     from pydantic import BaseModel
@@ -30,7 +31,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.errors import ChemclawError
     from chemclaw.durable.registry import durable_activity, durable_workflow
-    from chemclaw.ingest.eln.adapter import RawEntry, fetch_was_truncated
+    from chemclaw.ingest.eln.adapter import RawEntry, entry_window, fetch_was_truncated
     from chemclaw.ingest.eln.cursor import load_cursor, store_cursor
     from chemclaw.ingest.eln.ord import OrdReaction
     from chemclaw.ingest.eln.records import default_record_store
@@ -70,6 +71,10 @@ class ElnSyncOutcome(BaseModel):
     # Reported separately because a run that ingests thousands and rejects thousands is a broken
     # source reporting healthy progress, and one total cannot say so.
     rejected: int = 0
+    # Sources this run could not drain at all, named rather than counted. A count would say "one
+    # source is dark" without saying which, and the answer to that question is what an operator
+    # acts on. Bounded by the source list, like every other field carried across `continue_as_new`.
+    failed_sources: list[str] = []
     next_cursor: datetime
 
 
@@ -105,6 +110,9 @@ class ElnSyncState(BaseModel):
     ingested: int = 0
     skipped_existing: int = 0
     rejected: int = 0
+    # Sources abandoned mid-run because they could not be reached; carried so a continued run
+    # reports the whole chain's failures rather than only the last leg's.
+    failed_sources: list[str] = []
     next_cursor: datetime | None = None
 
 
@@ -171,13 +179,36 @@ class _BoundedIngest:
         self.truncated = False
 
     async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
-        """Fetch from the wrapped adapter: the overlap plus the oldest `limit` new entries."""
+        """Fetch from the wrapped adapter: the overlap plus the oldest `limit` new entries.
+
+        **Ordered, split and truncated on `entry_window`**, which is the one definition of "the
+        timestamp an entry is filtered on" — the later of creation and amendment, because an
+        amended entry counts as new. All three used to read `created_at`, and the cursor
+        `sync_entries` stores has always been the window, so the two disagreed about which entries
+        a chunk contained. The consequence was silent loss rather than duplication: the kept chunk
+        could hold an entry whose window is later than a *dropped* entry's, so the cursor advanced
+        past entries this cap had discarded and the next fetch filtered them out for good. Measured
+        on a batch whose amendments run against its creations — old entries corrected recently,
+        which is the ordinary shape — 50 of 150 became unreachable in one chunk, with no
+        `ingest_rejections` row, because an entry the cap drops was never rejected by anything.
+
+        `ingest/eln/warehouse/sql.py` already orders and limits on `COALESCE(modified, created)`,
+        so this also makes the in-process cap agree with the page boundary the source itself cut.
+        """
         entries = sorted(
             await self._inner.fetch_new_entries(since),
-            key=lambda entry: (entry.created_at, entry.entry_id),
+            key=lambda entry: (entry_window(entry.created_at, entry.modified_at), entry.entry_id),
         )
-        overlap = [entry for entry in entries if entry.created_at <= self._since]
-        new = [entry for entry in entries if entry.created_at > self._since]
+        overlap = [
+            entry
+            for entry in entries
+            if entry_window(entry.created_at, entry.modified_at) <= self._since
+        ]
+        new = [
+            entry
+            for entry in entries
+            if entry_window(entry.created_at, entry.modified_at) > self._since
+        ]
         self.truncated = len(new) > self._limit or fetch_was_truncated(self._inner)
         return overlap + new[: self._limit]
 
@@ -335,15 +366,58 @@ class ElnSyncWorkflow:
                     )
                 else:
                     state.source_since = state.since
-            chunk: SyncChunk = await workflow.execute_activity(
-                sync_eln_entries,
-                args=[source, state.source_since, state.apply_overlap],
-                start_to_close_timeout=activity_timeout,
-                schedule_to_start_timeout=queue_wait_timeout(),
-                heartbeat_timeout=timedelta(seconds=settings.eln_sync_heartbeat_timeout_seconds),
-                # Bad data must reject-and-continue inside the sync, never retry the batch.
-                retry_policy=BAD_DATA_RETRY,
-            )
+            try:
+                chunk: SyncChunk = await workflow.execute_activity(
+                    sync_eln_entries,
+                    args=[source, state.source_since, state.apply_overlap],
+                    start_to_close_timeout=activity_timeout,
+                    schedule_to_start_timeout=queue_wait_timeout(),
+                    heartbeat_timeout=timedelta(
+                        seconds=settings.eln_sync_heartbeat_timeout_seconds
+                    ),
+                    # Bad data must reject-and-continue inside the sync, never retry the batch.
+                    retry_policy=BAD_DATA_RETRY,
+                )
+            except ActivityError as exc:
+                # **One source's fate is not the run's.** A drain over N sources is N independent
+                # drains that happen to share a schedule: they have separate cursors (D-054),
+                # separate manifests and separate backends, and nothing about one being
+                # unreachable says anything about the others. Unhandled, the first raise ended the
+                # workflow, so every source *after* it in the plan was never synced and none of
+                # their cursors advanced — a warehouse that was down for a week silently stopped
+                # the file-drop sources ingesting too.
+                #
+                # **A cancel is not a source failure, and narrowing the catch does not separate
+                # them.** This clause used to say that catching `ActivityError` rather than
+                # `Exception` was itself what kept a cancellation out — it is not. Temporal
+                # delivers a workflow cancellation to the awaiting `execute_activity` as exactly
+                # this type, with a `temporalio.exceptions.CancelledError` cause, so the narrow
+                # catch swallowed it: measured, a cancelled drain dropped the source in flight,
+                # synced the rest and ended COMPLETED, and the SDK's `uncancel` after an absorbed
+                # cancel meant no later activity was cancelled either. `is_cancelled_exception` is
+                # the SDK's own predicate for this conditional and covers the `ActivityError`-with-
+                # `CancelledError`-cause shape, so nothing here restates a shape upstream owns; the
+                # re-raise is what makes the run end CANCELLED rather than successful. What the old
+                # comment was right about is the boundary: a `continue_as_new` and a defect in the
+                # workflow's own code below are about the run and are not raised inside this `try`
+                # at all, and bad data never reaches here — it rejects and continues inside
+                # `sync_entries`, which is what `BAD_DATA_RETRY` exists to keep true.
+                if is_cancelled_exception(exc):
+                    raise
+                # The source is dropped rather than retried in-loop: its cursor is untouched, so
+                # the next scheduled run resumes it from exactly where it stopped, and a source
+                # that is down stays down for one run rather than spinning this loop against it.
+                workflow.logger.warning("eln sync for %s failed; skipping it: %s", source, exc)
+                state.failed_sources.append(source)
+                state.remaining = state.remaining[1:]
+                state.source_since = None
+                state.apply_overlap = True
+                iterations += 1
+                # The same iteration bound the tail applies, repeated because `continue` below is
+                # what skips a tail that needs a `chunk` this branch does not have.
+                if state.remaining and iterations >= state.max_iterations:
+                    workflow.continue_as_new(args=[since, state])
+                continue
             # The overlap window is a per-drain re-check for late-landing files: only the first
             # chunk reaches behind the cursor; later chunks — including those in a continued run —
             # fetch from the advancing cursor, or every chunk would replay the window (quadratic).
@@ -384,5 +458,6 @@ class ElnSyncWorkflow:
             ingested=state.ingested,
             skipped_existing=state.skipped_existing,
             rejected=state.rejected,
+            failed_sources=state.failed_sources,
             next_cursor=state.next_cursor if state.next_cursor is not None else floor,
         )

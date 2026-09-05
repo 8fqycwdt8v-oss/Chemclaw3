@@ -29,6 +29,7 @@ from chemclaw.connectors.registry import (
     server_tools_module,
     skills_dirs,
 )
+from chemclaw.core.tool_registry import _REGISTRY
 from chemclaw.kg.note import KNOWN_NOTE_TYPES, known_note_types
 from chemclaw.kg.relations import KNOWN_RELATIONS, known_relations
 
@@ -346,6 +347,74 @@ def test_one_connector_cannot_declare_a_job_and_a_tool_with_one_name(
         job_tools()
 
 
+def test_a_connector_endpoint_tool_cannot_claim_an_in_process_tool_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The collision the bundle-versus-bundle check could not see: a bundle against *core*.
+
+    `ToolNode` keys by name and `build_langgraph_agent` appends the connector tools *after* the
+    in-process ones, so the connector won: measured, two tools named `find_notes` were bound and
+    every model call to that name was routed over MCP, while the knowledge-graph read was never
+    invoked.
+    """
+    _bundle(tmp_path, "alpha", _http_manifest("alpha", tools="find_notes"))
+    _use(monkeypatch, tmp_path)
+    with pytest.raises(ConnectorError, match="an in-process tool"):
+        job_tools()
+
+
+def test_a_connector_job_cannot_claim_an_in_process_tool_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The job half, whose consequence is worse: the name re-classifies the *core* tool.
+
+    A job named `find_notes` put a pure knowledge-graph read into `side_effecting_tools()` and
+    `expensive_actions()`, so the plan gate refused it under an unapproved plan and every helper's
+    tool set lost it — while the launcher itself was silently dropped from the agent's surface.
+    """
+    _bundle(
+        tmp_path,
+        "alpha",
+        "name: alpha\ndescription: durable only\n"
+        + _JOB_BLOCK.replace("name: run_thing", "name: find_notes"),
+    )
+    _use(monkeypatch, tmp_path)
+    with pytest.raises(ConnectorError, match="an in-process tool"):
+        job_tools()
+
+
+def test_a_connector_cannot_claim_an_ambient_tool_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Six of the seven scratchpad verbs are ordinary English words, so this is the likely landing.
+
+    `read_file` is a `FilesystemMiddleware` verb rather than a `@tool`, so it is in none of the
+    name spaces the manifest walk can see — and a bundle claiming it shadows this system's own
+    notepad.
+    """
+    _bundle(tmp_path, "alpha", _http_manifest("alpha", tools="read_file"))
+    _use(monkeypatch, tmp_path)
+    with pytest.raises(ConnectorError, match="a scratchpad file verb"):
+        job_tools()
+
+
+def test_a_generated_launcher_is_not_read_back_as_a_collision_on_a_second_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The trap in seeding from the live registry: the launchers register into it themselves.
+
+    `build_langgraph_agent` runs once per profile and once per test, and each run registers this
+    bundle's launcher under the very name the next run is about to declare. Reading that back as a
+    first-party claim would make the second build of any deployment with jobs fail.
+    """
+    _bundle(tmp_path, "alpha", f"name: alpha\ndescription: durable only\n{_JOB_BLOCK}")
+    _use(monkeypatch, tmp_path)
+    (launcher,) = job_tools()
+    # What the first build would have left behind, undone by `monkeypatch` when this test ends.
+    monkeypatch.setitem(_REGISTRY, launcher.__name__, launcher)
+    assert [tool.__name__ for tool in job_tools()] == ["run_thing"]
+
+
 def test_connector_tool_names_spans_endpoints_and_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -467,6 +536,19 @@ def test_a_bundle_with_no_server_package_has_no_server_module() -> None:
 def test_a_jobs_only_bundle_has_no_server_module() -> None:
     """The other `None`: `results` declares no endpoint and ships no server, and never has."""
     assert server_tools_module("results") is None
+
+
+def test_a_bundle_outside_the_installed_package_has_no_server_module() -> None:
+    """The documented `PATH` extension point, one level higher than the case above again.
+
+    `connectors_dir` is a `PATH`-style list and `ARCHITECTURE.md` advertises pointing a deployment
+    at an *additional* private bundle directory. Such a bundle has no `chemclaw.connectors.<name>`
+    package at all, so `exc.name` is the bundle package rather than its `server` child — and the
+    `ModuleNotFoundError` escaped and was reported as "its server module could not be imported",
+    which is the same sentence a genuinely broken bundle gets. The only way to make CI green was to
+    stop validating that directory.
+    """
+    assert server_tools_module("no-such-bundle-ships-here") is None
 
 
 def test_a_bundle_that_serves_tools_returns_its_module() -> None:

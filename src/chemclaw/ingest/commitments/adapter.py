@@ -33,11 +33,28 @@ class CommitmentAdapter(Protocol):
     sync that drives it is the same shape as the ELN sync and shares its cursor discipline.
     """
 
+    #: Whether `fetch_commitments` always returns the source's **whole** picture, ignoring `since`.
+    #:
+    #: It exists because the upsert can only converge *upward*. A snapshot says "this is no longer
+    #: committed" by not containing the row, and `(source, external_id)` gives the write no way to
+    #: hear that: a withdrawn milestone kept a live state and stayed in `outstanding()` for ever,
+    #: inside a list stamped with the refreshed rows' freshness. `durable/commitment_sync.py` sweeps
+    #: what the pass did not restate — but only where that absence *means* something, which is
+    #: exactly this claim.
+    #:
+    #: Default `False`, so a source that answers incrementally is never swept: for that source an
+    #: absent row means "unchanged", and sweeping would delete the whole mirror on the first
+    #: quiet pass. Opting in is the adapter asserting the stronger contract about itself.
+    snapshot: bool = False
+
     async def fetch_commitments(self, since: datetime | None) -> list[Commitment]:
         """Every commitment whose state changed since `since`, or all of them when `None`.
 
         A source that cannot answer incrementally returns everything and lets the upsert absorb it;
         the sync is keyed on `(source, external_id)`, so a full re-read is idempotent rather than
         duplicating. That is the right default for a portfolio export, which is usually a snapshot.
+
+        Returning everything is not the same as declaring `snapshot` — one is what this call did,
+        the other is a promise about every call, and only the promise makes a deletion safe.
         """
         ...

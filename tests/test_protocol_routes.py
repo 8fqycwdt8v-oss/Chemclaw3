@@ -576,6 +576,34 @@ def test_a_sign_off_against_a_status_somebody_else_moved_is_its_own_409(
     ]
 
 
+def test_the_body_the_shipped_ui_sends_is_accepted(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """The exact JSON `Chemclaw3_ui`'s sign-off panel sends, field for field.
+
+    `StatusIn` is `extra="forbid"` and the client has always sent `expected_status`, so before that
+    field existed here **every sign-off from the shipped panel was a 422** — measured 2026-09-04
+    against the client's `main`, where `src/api/client.ts::setProtocolStatus` posts `status`,
+    `expected_revision`, `expected_status` and `reason`. Nothing in this file failed, because every
+    test above writes the body the *server* expects, which is the one shape a server-side test
+    cannot check on its own.
+
+    Written as the client's literal body rather than as a parametrised case, so a field the panel
+    adds later fails here rather than in somebody's browser.
+    """
+    _seed(store, _design(), status="draft")
+    response = client.post(
+        f"/protocols/{_DESIGN_ID}/status",
+        json={
+            "status": "approved",
+            "expected_revision": 1,
+            "expected_status": "draft",
+            "reason": "looks right",
+        },
+    )
+    assert response.status_code == 204
+
+
 def test_a_sign_off_that_names_no_status_is_refused(
     client: TestClient, store: InMemoryDesignStore
 ) -> None:

@@ -9,6 +9,8 @@ end to end.
 import asyncio
 import warnings
 
+import pytest
+
 from chemclaw.science.bo.benchmarks.reizman_suzuki import (
     YieldSurrogate,
     build_problem,
@@ -40,8 +42,28 @@ def test_surrogate_learns_the_data() -> None:
     assert predicted > 0.7 * best_row["yld"]  # RF recovers the high-yield region
 
 
+@pytest.mark.timeout(600)
 def test_bo_campaign_finds_high_yield() -> None:
-    """A BoFire campaign over the surrogate beats the dataset's median yield."""
+    """A BoFire campaign over the surrogate beats the dataset's median yield.
+
+    **Slow, and measured to be slow rather than hung** — the distinction
+    `test_bo_knowledge.py::test_campaign_publishes_recommendation_to_graph` draws, where the same
+    reasoning was applied without measuring and kept `main` red over what turned out to be a real
+    hang. This one fits six rounds of a real BoTorch GP over the Reizman benchmark and burns CPU
+    the whole way: `pytest tests/test_reizman.py::test_bo_campaign_finds_high_yield --timeout=0`
+    measured **279 s** on an idle box and 213 s on a loaded one, against the 180 s global cap. So it
+    fails the gate on wall clock, and it did — this was the one red test in the full run that opened
+    this branch.
+
+    `pyproject.toml`'s comment justified that 180 s cap by naming *this* test as the slowest at
+    "~37s", which was stale by 7.5x; the marker is here and the claim is corrected there, because a
+    cap justified by a number nobody re-derives is the failure this repository keeps finding in its
+    own prose.
+
+    600 s rather than a tighter number: the scale factor `tests/conftest.py::timeout_scale` applies
+    to markers, so a slower CI runner is handled by scaling rather than by a value chosen with no
+    headroom, and the point of the cap is to name a *hang*, which this is not.
+    """
     problem, objective = load_benchmark()
     median_yield = float(load_dataset()["yld"].median())
 

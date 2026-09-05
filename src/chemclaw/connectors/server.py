@@ -144,6 +144,27 @@ def _ships_a_manifest(name: str) -> bool:
     return (Path(__file__).parent / name / MANIFEST_FILENAME).is_file()
 
 
+#: How much of a caller-authored path may reach a log record. Long enough for every route this
+#: transport serves (`/mcp`, `/healthz`, `/metrics`, and a dev-composite `/<bundle>` prefix),
+#: short enough that a caller cannot spend the logging lock on a redaction scan. The front door
+#: bounds its own echoed strings at the same order of magnitude and for the same measured reason
+#: (`api.middleware._MAX_LOGGED_CHARS`); the two are separate constants because a connector may
+#: not import `api`, and neither is a deployment's choice to make.
+_MAX_LOGGED_PATH_CHARS = 128
+
+
+def _clipped(value: str) -> str:
+    """`value` bounded for a log record, marked when it was actually cut.
+
+    The marker is part of it: a truncation that said nothing would leave an operator unable to tell
+    a clipped path from a short one, which is `api.middleware.clip_for_log`'s argument for the same
+    contract at the front door.
+    """
+    if len(value) <= _MAX_LOGGED_PATH_CHARS:
+        return value
+    return f"{value[:_MAX_LOGGED_PATH_CHARS]}…(+{len(value) - _MAX_LOGGED_PATH_CHARS})"
+
+
 def _app_relative_path(request: Request) -> str:
     """This request's path *within this app*, with any mount prefix removed.
 
@@ -233,7 +254,8 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         """Refuse anything but `/healthz` and `/metrics` without the configured bearer token."""
-        if _app_relative_path(request) in ("/healthz", "/metrics"):
+        path = _app_relative_path(request)
+        if path in ("/healthz", "/metrics"):
             return await call_next(request)
         token_env = self._declared()
         if token_env is None:
@@ -254,10 +276,18 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 expected.encode("utf-8", "surrogateescape"),
             )
         ):
+            # **Clipped, because this branch runs before any credential is checked**, so the
+            # path is an unauthenticated caller's own string. The front door fixed the identical
+            # line and measured what it cost: 6,054 characters straight into
+            # `SecretRedactingFilter`, whose scan is linear in the record's length, with the
+            # logging lock held — and this transport serves every bundle *and* the read-only MCP
+            # face. `api.middleware.route_template` is the front door's answer and is out of
+            # reach here (a connector may not import `api`, and `/mcp` is a mount rather than a
+            # route table), so what is bounded is the length.
             logger.warning(
                 "connector %s refused an unauthenticated MCP request to %s",
                 self._connector,
-                request.url.path,
+                _clipped(path),
             )
             return Response(status_code=401, content="unauthorized")
         return await call_next(request)
@@ -337,8 +367,18 @@ def _bind_caller_per_tool_call(server: FastMCP) -> None:
 
     Wrapped around `_sanitize_tool_errors`'s interception of the same method rather than merged
     into it: two concerns, two functions, one patch point each.
+
+    **Idempotent, marked on the manager rather than on the wrapper.** Both patches here used to
+    reassign unconditionally, so a process building two apps over one `FastMCP` stacked a second
+    pair — measured, one `connector_app` left `call_tool` two deep and two left it four, and the
+    growth is unbounded in the number of apps. The marker cannot live on the wrapper the way
+    `_publish_tool_results`'s does, because this one is installed *outside* the other and a
+    second build would read the wrong layer's attribute; the manager is the object whose method is
+    being replaced, so it is the object that knows whether it has been.
     """
     manager = server._tool_manager
+    if getattr(manager, "_chemclaw_binds_caller", False):
+        return
     wrapped_call_tool = manager.call_tool
 
     async def _call_tool(
@@ -374,6 +414,7 @@ def _bind_caller_per_tool_call(server: FastMCP) -> None:
             reset_caller(tokens)
 
     manager.call_tool = _call_tool  # type: ignore[method-assign,assignment]
+    manager._chemclaw_binds_caller = True  # type: ignore[attr-defined]
 
 
 def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
@@ -398,8 +439,14 @@ def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
     the interception point is the tool manager's own `call_tool` — the one place every tool call
     passes through before `Tool.run` composes the leaking message. Patched once here, the one
     shared choke point every connector's app is built through, rather than once per bundle.
+
+    Idempotent on the same terms as `_bind_caller_per_tool_call`, and for a reason of its own
+    besides the wrapper count: re-entering this sanitiser at every layer re-walks `exc.__cause__`
+    once per app the process has built.
     """
     manager = server._tool_manager
+    if getattr(manager, "_chemclaw_sanitizes_errors", False):
+        return
     original_call_tool = manager.call_tool
 
     async def _call_tool(
@@ -423,6 +470,7 @@ def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
             ) from exc.__cause__
 
     manager.call_tool = _call_tool  # type: ignore[method-assign,assignment]
+    manager._chemclaw_sanitizes_errors = True  # type: ignore[attr-defined]
 
 
 def _publish_tool_results(server: FastMCP, *, name: str) -> None:

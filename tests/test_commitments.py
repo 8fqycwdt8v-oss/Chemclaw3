@@ -10,11 +10,14 @@ infers a field the export did not state, and it has no write path back.
 """
 
 import asyncio
+import dataclasses
 import inspect
 import json
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
@@ -30,6 +33,15 @@ from tests.pg import migrated_db_or_skip
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 SOURCE = "commitments-test"
+
+
+async def _no_cursor(_key: str) -> datetime | None:
+    """Stands in for the cursor load: this file's passes always read the whole export."""
+    return None
+
+
+async def _record_cursor(_key: str, _cursor: datetime) -> None:
+    """Stands in for the cursor store, which needs no assertion here."""
 
 
 async def _clean() -> None:
@@ -65,6 +77,240 @@ def test_re_reading_a_snapshot_converges_rather_than_accumulating() -> None:
 
         rows, _freshness = await outstanding(source=SOURCE)
         assert [(row.external_id, row.state) for row in rows] == [("M-1", "blocked")]
+
+    asyncio.run(_run())
+
+
+def test_a_snapshot_source_converges_downward_when_a_commitment_is_withdrawn() -> None:
+    """Converging only *upward* is not converging, and this is the half the upsert cannot do.
+
+    A portfolio export is a snapshot, and the way a snapshot says "this is no longer committed" is
+    by not containing the row any more — a milestone descoped, a study cancelled, a deliverable
+    moved to another programme. The upsert is keyed on `(source, external_id)`, so it can add and
+    it can amend, and it has no way at all to remove: the withdrawn row kept a live state and
+    `outstanding()` kept returning it, for the life of the deployment.
+
+    Worse than merely stale, because the staleness is invisible in exactly the reading built to
+    reveal it. `outstanding()` reports `max(observed_at)` over the rows it returns, so the withdrawn
+    row travels in a list stamped with the *refreshed* rows' freshness — a manager reads a current
+    mirror that contains work nobody is doing, which is the one failure this table's whole
+    `observed_at` discipline exists to prevent.
+
+    Mark-and-sweep, marked by the activity's own start time: everything the snapshot restated is
+    newer than that, so what is older is what the source stopped saying. Guarded by the adapter
+    declaring itself a snapshot, because the sweep is only sound where the fetch is a whole picture.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clean()
+        await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
+        # The mark: everything the next pass writes lands strictly after this.
+        marked_at = datetime.now(UTC)
+        await asyncio.sleep(0.01)
+        # The next snapshot: MS-2 was withdrawn, so the source simply stops exporting it.
+        await record_commitments([_commitment("MS-1")])
+        swept = await commitment_sync.sweep_withdrawn(SOURCE, marked_at)
+
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert [row.external_id for row in rows] == ["MS-1"], (
+            "a withdrawn commitment is still outstanding, in a list whose reported freshness comes "
+            "from the rows that *were* refreshed — so it reads as current work nobody is doing"
+        )
+        assert swept == 1, f"the sweep reported {swept} rows removed"
+
+        # And a pass in which nothing was withdrawn removes nothing.
+        marked_at = datetime.now(UTC)
+        await asyncio.sleep(0.01)
+        await record_commitments([_commitment("MS-1")])
+        assert await commitment_sync.sweep_withdrawn(SOURCE, marked_at) == 0
+
+    asyncio.run(_run())
+
+
+class _Export:
+    """A portfolio export that answers with whatever it is holding."""
+
+    def __init__(self, rows: list[Commitment], *, snapshot: bool) -> None:
+        self._rows = rows
+        self.snapshot = snapshot
+
+    async def fetch_commitments(self, since: datetime | None) -> list[Commitment]:
+        return list(self._rows)
+
+
+async def _mirror_pass(
+    export: _Export, *, broker_clock: datetime | None = None
+) -> commitment_sync.CommitmentSyncResult:
+    """Run one `mirror_commitments_activity` over `export`, with the broker's clock as given.
+
+    `broker_clock` is what the *Temporal server* would report as this attempt's `started_time`.
+    It is a parameter rather than a fixed value because the mark must not be read from it: two
+    machines' clocks are what a deployment has, and a test that hands the activity one clock for
+    both halves cannot see a mark and a stamp drifting apart.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    with (
+        mock.patch.object(
+            commitment_sync, "make_data_source", lambda _name: SimpleNamespace(commitments=export)
+        ),
+        mock.patch.object(commitment_sync, "load_cursor", _no_cursor),
+        mock.patch.object(commitment_sync, "store_cursor", _record_cursor),
+    ):
+        env = ActivityEnvironment()
+        if broker_clock is not None:
+            env.info = dataclasses.replace(env.info, started_time=broker_clock)
+        result = await env.run(commitment_sync.mirror_commitments_activity, SOURCE)
+    return result
+
+
+# What a worker pod's view of "now" may differ from the mirror database's by. Deliberately far
+# larger than one pass takes, because the failure is a *comparison* between two clocks and the
+# smallest skew that triggers it is the length of a fetch — measured, a quarter of a second was
+# already enough to empty the mirror.
+_BROKER_CLOCK_SKEW = timedelta(minutes=5)
+
+
+def test_the_pass_marks_from_the_database_that_stamps_the_rows_not_from_the_broker() -> None:
+    """One clock decides both halves of the mark-and-sweep, or the sweep decides nothing.
+
+    `observed_at` is stamped by Postgres (`now()` in the upsert). The mark used to be
+    `activity.info().started_time`, which the **Temporal server** stamps — a different machine from
+    the database in every real deployment, and from the worker in most. The sweep deletes this
+    source's rows `observed_at < marked_at`, so the moment the broker's clock leads Postgres' by
+    more than a fetch takes, the pass deletes every row it has just mirrored: measured against real
+    Postgres at a 0.25 s skew, `mirrored=3, withdrawn=3` and an empty mirror, every pass, while
+    `CommitmentSyncResult` reported a healthy sync. These rows exist nowhere else this system can
+    reach.
+
+    Both directions are asserted because both are the same defect. A broker clock that *lags*
+    marks before the rows the previous pass wrote, so nothing is ever swept and the mirror silently
+    stops converging downward — the failure mark-and-sweep was added to fix.
+
+    A tolerance would not be a fix: it keeps two clocks and guesses the gap. What is asserted here
+    is therefore that the broker's clock does not reach the outcome at all, which is why the skew
+    is handed in rather than the two being forced equal.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+
+        # A pass whose export restates everything: nothing may be swept, however far ahead the
+        # broker's clock runs.
+        await _clean()
+        await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
+        ahead = await _mirror_pass(
+            _Export([_commitment("MS-1"), _commitment("MS-2")], snapshot=True),
+            broker_clock=datetime.now(UTC) + _BROKER_CLOCK_SKEW,
+        )
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert ahead.withdrawn == 0, (
+            f"the pass swept {ahead.withdrawn} of the rows it had just written: the mark came from "
+            "a clock that leads the one stamping `observed_at`"
+        )
+        assert {row.external_id for row in rows} == {"MS-1", "MS-2"}, (
+            "a mirror the pass had just restated in full came back as "
+            f"{sorted(row.external_id for row in rows)} — the sweep deleted this pass's own work"
+        )
+
+        # And a pass whose export drops MS-2 must still remove it, however far *behind* the
+        # broker's clock runs.
+        behind = await _mirror_pass(
+            _Export([_commitment("MS-1")], snapshot=True),
+            broker_clock=datetime.now(UTC) - _BROKER_CLOCK_SKEW,
+        )
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert behind.withdrawn == 1, (
+            f"the pass swept {behind.withdrawn} rows: a mark from a lagging clock is older than "
+            "every row already in the mirror, so a withdrawn commitment is never removed"
+        )
+        assert {row.external_id for row in rows} == {"MS-1"}
+
+    asyncio.run(_run())
+
+
+def test_an_export_that_answers_with_nothing_does_not_empty_the_mirror() -> None:
+    """The sweep's second guard, and it is the one that decides which mistake this feature makes.
+
+    A snapshot export returning zero rows is two things at once: a programme with nothing committed
+    left, and a broken export — a credential that expired, a share that unmounted, a query whose
+    filter now matches nothing. The two are indistinguishable from here and they do not cost the
+    same. Keeping a row too long is visible in the mirror and corrected by the next good pass;
+    deleting the mirror wholesale is unrecoverable, because these rows exist in this table and in a
+    source that has stopped mentioning them and nowhere else this system can reach.
+
+    So an empty answer sweeps nothing, and a source that genuinely empties converges on the pass
+    after it reports its first remaining row. Only the `snapshot` half of that condition was
+    asserted: measured, deleting `commitments and` from it took a snapshot source's whole mirror
+    (`withdrawn=2`, rows `[]`) with every commitment test still green.
+
+    Driven through the activity rather than through `sweep_withdrawn`, because the guard *is* the
+    call site — `sweep_withdrawn` asked nothing about the answer and still does not.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clean()
+        await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
+        empty = await _mirror_pass(_Export([], snapshot=True))
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert empty.withdrawn == 0, (
+            f"an export that returned nothing swept {empty.withdrawn} rows; a broken export and a "
+            "finished programme look identical from here, and only one of them is recoverable"
+        )
+        assert {row.external_id for row in rows} == {"MS-1", "MS-2"}, (
+            "a snapshot source's whole mirror was deleted by a pass that read nothing"
+        )
+        # And the source that genuinely empties still converges — one pass later, on its first
+        # remaining row. That is the price of the guard, stated rather than assumed.
+        remaining = await _mirror_pass(_Export([_commitment("MS-1")], snapshot=True))
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert remaining.withdrawn == 1
+        assert {row.external_id for row in rows} == {"MS-1"}
+
+    asyncio.run(_run())
+
+
+def test_the_pass_sweeps_only_where_the_adapter_promises_a_whole_picture() -> None:
+    """The sweep is wired to the claim, not to the shape of one answer.
+
+    Both adapters below return the same list. The difference is the promise: one declares
+    `snapshot`, so an absent row means withdrawn and the pass removes it; the other does not, so an
+    absent row means unchanged and the pass must remove nothing. Without that distinction this
+    would delete an incremental source's whole mirror on its first quiet pass — which is a worse
+    defect than the one being fixed, since these rows exist nowhere else this system can reach.
+
+    Driven through the activity rather than through `sweep_withdrawn`, because the property is the
+    wiring: a pass that never reached `sweep_withdrawn` and a pass that swept nothing look the same
+    from outside. The harness supplies no `started_time` here — the mark is the database's, and
+    `ActivityEnvironment`'s epoch default reaching the outcome is exactly what the test above
+    forbids.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+
+        async def _pass(*, snapshot: bool) -> commitment_sync.CommitmentSyncResult:
+            """One mirror pass over a source now exporting MS-1 alone."""
+            await _clean()
+            await record_commitments([_commitment("MS-1"), _commitment("MS-2")])
+            return await _mirror_pass(_Export([_commitment("MS-1")], snapshot=snapshot))
+
+        incremental = await _pass(snapshot=False)
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert incremental.withdrawn == 0
+        assert {row.external_id for row in rows} == {"MS-1", "MS-2"}, (
+            "an incremental source's unmentioned row was deleted; for that source an absent row "
+            "means unchanged, so this empties the mirror on the first quiet pass"
+        )
+
+        snapshotted = await _pass(snapshot=True)
+        rows, _freshness = await outstanding(source=SOURCE)
+        assert snapshotted.withdrawn == 1
+        assert {row.external_id for row in rows} == {"MS-1"}, (
+            "a snapshot source withdrew MS-2 and the mirror still carries it"
+        )
 
     asyncio.run(_run())
 

@@ -279,4 +279,153 @@ def test_without_a_durable_registry_the_inbox_is_empty_and_says_which_emptiness(
     with TestClient(app) as client:
         body = client.get("/plans/pending").json()
 
-    assert body == {"plans": [], "considered": 0, "gated": 0, "unread": 0}
+    # `truncated` is the fourth reading of an empty `plans` (see `PendingPlansOut`): there is no
+    # listing to walk here at all, so the walk did not stop short of one.
+    assert body == {
+        "plans": [],
+        "considered": 0,
+        "gated": 0,
+        "unread": 0,
+        "truncated": False,
+    }
+
+
+@pytest.mark.usefixtures("gated")
+def test_a_blocked_plan_below_the_listings_page_boundary_is_still_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The inbox reads the whole listing, not its newest page.
+
+    `service_max_listed_sessions` became a *page* when `X-Next-Cursor` was added to
+    `GET /sessions`; this reader was not moved with it, so `considered` was a page count presented
+    as a population and `unread` counted only what the *scan* budget skipped inside that page.
+
+    The failure that makes it a defect rather than an inaccuracy: an unanswered plan means no new
+    turns, so the blocking conversation's `updated_at` never moves and it never rises back above
+    the page boundary. Measured before this test existed, with the page standing at 2 and five
+    owned sessions: `{"plans": [], "considered": 2, "gated": 2, "unread": 0}` — "nothing is
+    waiting on you", indefinitely, with the field whose whole job is to say the answer is partial
+    reading 0.
+
+    Driven against the real `SessionOwnerStore` because a fake registry has no page boundary to
+    fall off; the whole finding is about the cap in `_OWNER_LIST`.
+    """
+    from langchain_core.messages import HumanMessage
+
+    from chemclaw.agent.session_store import PostgresHistoryProvider, SessionOwnerStore
+    from tests.pg import migrated_db_or_skip
+
+    asyncio.run(migrated_db_or_skip())
+    owners = SessionOwnerStore()
+    sessions = [f"sess-inbox-page-{index}" for index in range(5)]
+
+    async def _seed() -> None:
+        for session_id in sessions:
+            await owners.record(session_id, "alice", None)
+            await owners.set_title_if_absent(session_id, f"conversation {session_id}")
+            await PostgresHistoryProvider().save_messages(
+                session_id, [HumanMessage(content="a turn")]
+            )
+
+    asyncio.run(_seed())
+    # The oldest conversation is the blocked one, which is the shape that actually occurs: a plan
+    # nobody answered is a conversation that has taken no turn since.
+    blocked = sessions[0]
+    monkeypatch.setattr(settings, "service_max_listed_sessions", 2)
+
+    reads: list[str] = []
+
+    async def _todos(session_id: str, **_kwargs: Any) -> list[str] | None:
+        reads.append(session_id)
+        return ["screen the hazards"] if session_id == blocked else []
+
+    monkeypatch.setattr(plan_routes, "session_todos", _todos)
+    app = create_app(owner_store=owners, connector_factory=_no_connectors)
+    app.state.plan_approvals = InMemoryPlanApprovalStore()
+    app.dependency_overrides[require_principal] = lambda: _ALICE
+    body = TestClient(app).get("/plans/pending").json()
+
+    assert [row["session_id"] for row in body["plans"]] == [blocked], (
+        f"the blocked conversation sits below the page boundary and was never looked at: {body}"
+    )
+    assert body["considered"] == 5, (
+        f"`considered` reports {body['considered']}, which is a page rather than the caller's "
+        "sessions"
+    )
+    assert body["unread"] == 0, "everything gated was read, so the queue is genuinely complete"
+
+
+def test_the_listing_walk_is_bounded_when_nothing_the_caller_owns_is_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The paged walk must terminate on the *shipped* posture, where nothing is ever gated.
+
+    `_owned_sessions` exited only on a short page or on `len(gated) > budget`, and `gated` counts
+    plan-gated sessions — so with `harness_enabled` off (the code's own default, and the case
+    `_plan_gated`'s docstring names as the one this route is "free" in) the budget can never bind
+    and the loop pages through the caller's entire history on every request. Measured against the
+    real `_owned_sessions` at 5,000 sessions and the shipped page of 100: **51** keyset statements
+    where the route before paging issued exactly one, returning `plans: []` every time, repeatable
+    by the caller at will.
+
+    Driven against the real `SessionOwnerStore` for the reason the page-boundary test above gives —
+    a fake registry has no page boundary to fall off — with the page and the budget shrunk so the
+    walk is many pages long without seeding thousands of rows. The subclass only *counts*; every
+    statement is the store's own.
+    """
+    from langchain_core.messages import HumanMessage
+
+    from chemclaw.agent.session_store import PostgresHistoryProvider, SessionOwnerStore
+    from tests.pg import migrated_db_or_skip
+
+    asyncio.run(migrated_db_or_skip())
+
+    class _CountingOwners(SessionOwnerStore):
+        """The real registry, with one counter around the keyset query the walk repeats."""
+
+        def __init__(self) -> None:
+            """Bind the real store and start the page count at zero."""
+            super().__init__()
+            self.pages = 0
+
+        async def page_for_owner(
+            self, owner: str | None, *, after: str | None = None
+        ) -> list[tuple[str, Any, Any, str | None, str | None]]:
+            """Count this page, then answer it with the store's own SQL."""
+            self.pages += 1
+            return await super().page_for_owner(owner, after=after)
+
+    owners = _CountingOwners()
+    sessions = [f"sess-inbox-walk-{index}" for index in range(20)]
+
+    async def _seed() -> None:
+        for session_id in sessions:
+            await owners.record(session_id, "alice", None)
+            await owners.set_title_if_absent(session_id, f"conversation {session_id}")
+            await PostgresHistoryProvider().save_messages(
+                session_id, [HumanMessage(content="a turn")]
+            )
+
+    asyncio.run(_seed())
+    monkeypatch.setattr(settings, "service_max_listed_sessions", 2)
+    monkeypatch.setattr(settings, "service_max_plan_scans", 3)
+
+    async def _unreached(session_id: str, **_kwargs: Any) -> list[str] | None:
+        raise AssertionError(f"no session is gated here, so {session_id} must not be read")
+
+    monkeypatch.setattr(plan_routes, "session_todos", _unreached)
+    app = create_app(owner_store=owners, connector_factory=_no_connectors)
+    app.state.plan_approvals = InMemoryPlanApprovalStore()
+    app.dependency_overrides[require_principal] = lambda: _ALICE
+
+    body = TestClient(app).get("/plans/pending").json()
+
+    assert owners.pages <= settings.service_max_plan_scans, (
+        f"the inbox issued {owners.pages} keyset statements over {len(sessions)} sessions with "
+        "nothing gated; the walk is bounded by a budget that cannot bind in this posture"
+    )
+    assert body["plans"] == []
+    assert body["truncated"] is True, (
+        "the walk stopped early and the response does not say so — an inbox that silently returns "
+        "a partial answer is the confident emptiness this route's counts exist to prevent"
+    )

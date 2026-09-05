@@ -64,7 +64,18 @@ from chemclaw.publish.solvents import canonical_solvent
 # A consumer separating them without re-publishing can read `reported_unit`: `hartree/bohr` on a
 # `max_gradient` fact is the old, wrong population, `hartree/angstrom` the corrected one, because
 # `_fact` always records what the calculator actually said.
-CONTRACT_VERSION = 2
+#
+# **3 — `subject_id` identified a member by `compound_id`, which cannot tell two species apart.**
+# See `Subject.subject_id` for the measurement. The consequence for already-published rows is that
+# the *same* subject now hashes to a different id, so this is a change in the meaning of a
+# published field and needs the bump for the same reason version 2 did: nothing is deleted and no
+# foreign key dangles — old `calculation` rows still reach their old `subject` and its members —
+# but a subject published on either side of this change carries two ids, so `GROUP BY subject_id`
+# no longer joins them. Re-projecting the corpus is what repairs that (the `calculation` upsert
+# re-points each row at the new subject, leaving the old `subject` rows unreferenced), and at the
+# *same* version the outbox's `ON CONFLICT DO NOTHING` would have dropped every one of those
+# documents. At a new version it enqueues.
+CONTRACT_VERSION = 3
 
 # What a member is to the subject. Closed, because an unknown role is a projection bug rather than
 # a new kind of chemistry, and silently accepting one would put an unqueryable value in the column
@@ -152,11 +163,30 @@ class Subject(BaseModel):
 
         Excluding them is the point: it is what lets one reaction's runs across five solvents be
         found by grouping on a single column.
+
+        **A member is identified by its own SMILES first, and by `compound_id` only as a last
+        resort.** This read `compound_id` first, which looks like the obvious choice — it is the
+        join key every other subsystem uses — and is the one identifier that *cannot* serve here:
+        it hashes the **standardized** structure, so by design it collapses tautomers, an
+        imine/enamine pair, and a neutral acid onto its conjugate base. Those are exactly the
+        species a `SpeciesDistribution` enumerates, so every tautomer, microstate and stereoisomer
+        set of one substance hashed to a single `subject_id`. Measured on malonic acid: the
+        microstates at pH 4 (`{H2A, HA-}`) and at pH 9 (`{H2A, A2-}`) were one subject, and since
+        `subject_member`'s key is `(subject_id, ordinal)` the second publication silently
+        **overwrote** the first's members — after which `GROUP BY subject_id`, the column this
+        whole query model rests on, grouped two incomparable calculations.
+
+        Precedence, and why not simply hash all three: the SMILES is the most specific chemical
+        identity a member carries, `structure_id` identifies a geometry for a member that names no
+        molecule, and `compound_id` is the fallback for a member that arrived as a bare id. Hashing
+        every field instead would make a member that *gained* a `structure_id` on a later run a
+        different subject from the same chemistry run without one, which is the grouping this id
+        exists to provide.
         """
         parts = sorted(
             (
                 member.role,
-                member.compound_id or member.smiles or member.structure_id,
+                member.smiles or member.structure_id or member.compound_id,
                 member.stoichiometry,
             )
             for member in self.members
@@ -254,6 +284,18 @@ class PropertyFact(BaseModel):
 
     `in_domain=None` means no applicability domain was declared, which is **not** the same as
     `False` and must never be read as "yes".
+
+    **This model is also the parse model for a document already in the outbox, so a validator here
+    is a filter on stored bytes.** The registry-scope check lived on this class for one release and
+    that is what it did: `durable/publish_results._drain_one` re-validates every queued
+    `result_publications.document`, so every already-enqueued species distribution — each carrying
+    `relative_energy`, a per-conformer quantity, as a calculation scalar, which is the very defect
+    the check was written for — became unparseable, spent an attempt per pass and dead-lettered,
+    with the backfill CLI unable to help because the stored bytes do not change. The check is now
+    `project._facts_belong_in_the_scalar_table`, on the write path, where its own argument — *a
+    registry mismatch is a projection bug and cannot be caused by data* — is true. A rule about
+    what this system may **produce** belongs where production happens; only a rule about what a
+    document must **be** to be read at all belongs here.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

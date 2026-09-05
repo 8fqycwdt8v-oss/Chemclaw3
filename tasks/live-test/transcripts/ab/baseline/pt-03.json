@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "pt-03",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What experiment designs are still open on the pyrimidine project? I've lost track of what we've drafted and what's actually been run.",
+    "expects_tools": [
+      "find_experiment_protocols"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a design, its status or its arm count that a listing did not return",
+      "that a design has been executed when its stored status does not say so",
+      "there are no designs, without having listed"
+    ],
+    "direction": "A listing question, and the useful answer is the list: each design with its title, its mode, its status and how many arms it carries, newest first, narrowed to the project that was asked about. The distinction the technician is actually chasing is `draft` against `executed`, so an answer that groups by status is serving the question rather than dumping rows. Status comes from the store; inferring that something \"was probably run\" because it is old is exactly the guess the status column exists to prevent. An empty result is a fine answer when it is a real result — \"nothing is open under that project name, here is what is open elsewhere\" — and is not the same as not having looked.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pt-03",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What experiment designs are still open on the pyrimidine project? I've lost track of what we've drafted and what's actually been run.",
+    "profile": "no-tools",
+    "answer": "I don't have access to your ELN, project management system, or any records of experiments on your pyrimidine project. I can't retrieve what designs have been drafted or which have been run.\n\nTo answer this, you'd need to:\n\n1. **Check your ELN directly** – search for pyrimidine project entries, filter by status (drafted vs. executed), and review the experiment designs\n2. **Review your project plan or tracking spreadsheet** – if you maintain a separate list of proposed vs. completed experiments\n3. **Ask your team** – whoever is coordinating the project likely has a current overview\n\nIf you have specific experiment designs you'd like to discuss, troubleshoot, or refine, I'm happy to help with those. Or if you can share notes or data from the pyrimidine work, I can help interpret results or suggest next steps based on what you show me.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 3.28,
+    "event_counts": {
+      "token": 8,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "7d8ef4e24be94623a0eb16ad0a25185f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

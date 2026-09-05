@@ -16,10 +16,18 @@ keeps environment configuration and point the descriptor's `values` at that path
 belong in either place: the chart names Secrets and an `ExternalSecret`/`SealedSecret` fills them.
 
 Start from `deploy/helm/chemclaw/values.yaml`, which documents every key beside the argument for its
-default, and set only what differs. Two that every environment must state:
+default, and set only what differs. Three that every environment must state:
 
 - `networkPolicy.egressDestinations` (or `networkPolicy.allowAnyDestination: true`) — the chart
   refuses to render without one, because an empty list means *every* destination
   (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`).
+- `retention.windows` (or `retention.unboundedGrowthAccepted: true`) — the same guard on the other
+  half of that decision: every `CHEMCLAW_RETENTION_*` window defaults to disabled, so a release that
+  never states a posture runs with every durable table growing for the deployment's lifetime.
 - `config.CHEMCLAW_ENTRA_PRIVILEGED_ROLES` — empty means every expensive job is refused for
   everyone, and nothing about the deployment looks wrong (`deploy/README.md`).
+
+The pipeline has an escape hatch for each of the first two (`ALLOW_ANY_EGRESS_DESTINATION`,
+`ACCEPT_UNBOUNDED_GROWTH`), and they exist so a first run is possible at all rather than as the
+answer: both state a posture nobody chose, in a parameter that is not part of the release
+descriptor. A values file here is the version a later reader can audit.

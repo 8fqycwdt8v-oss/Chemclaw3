@@ -209,6 +209,18 @@ def _check_classification(
     dry-run gate's, so the manifest that declared the least got the most.
     """
     served = set(tools)
+    # **Checked before the partition, because the partition is where the evidence is lost.** Every
+    # comparison below works on sets, so `tools: [a, a]` validates here and fails one layer up in
+    # `registry._declared_tool_names`, which walks the raw list and reports the bundle colliding
+    # with itself — a true sentence naming one connector twice, and unactionable without reading
+    # the source. This is the last place the repetition is still visible, so it is the place that
+    # says what it is.
+    if len(tools) != len(served):
+        repeated = sorted({name for name in served if tools.count(name) > 1})
+        raise ValueError(
+            f"endpoint lists tool(s) {repeated} more than once; a tool is declared once and "
+            "classified once"
+        )
     if not served:
         raise ValueError(
             "endpoint declares no tools; an endpoint that serves nothing cannot be reached, and "
@@ -234,10 +246,10 @@ def _check_classification(
 
 
 # One connector endpoint, discriminated on `transport`. A new transport is one variant here plus
-# one branch in `connectors.registry._mcp_tool`. Both variants carry `tools` — the agent-facing
-# allow-list — because it is a property of *an endpoint's* surface: nesting it here rather than
-# at the manifest's top level makes "an allow-list with no endpoint to serve it" unrepresentable
-# instead of something a validator has to catch.
+# one branch in `connectors.registry._mcp_connection`. Both variants carry `tools` — the
+# agent-facing allow-list — because it is a property of *an endpoint's* surface: nesting it
+# here rather than at the manifest's top level makes "an allow-list with no endpoint to serve
+# it" unrepresentable instead of something a validator has to catch.
 #
 # `state_changing` names the subset of `tools` that spends real resources or writes data a person
 # would care about — the ones the harness's plan gate refuses under an unapproved plan (D-167).
@@ -458,6 +470,43 @@ class JobSpec(BaseModel):
     # exhausts the whole ceiling, the activity's retry policy becomes unreachable, and the run dies
     # as a bare `WorkflowExecutionTimedOut` naming no setting at all.
     timeout_seconds: float | None = Field(default=None, gt=0)
+    # **Whether this job suspends on a person, so its elapsed time is not a measure of its cost.**
+    # A job that opens a durable wait (`durable/awaiting.py`) spends wall clock doing nothing, and a
+    # workflow execution timeout cannot tell that apart from a wedged run — so
+    # `child_execution_timeout` hands such a job no ceiling at all, and every job that leaves this
+    # `false` keeps the deployment's five-hour one exactly as before.
+    #
+    # It exists because the ceiling and the wait were 67x apart and no manifest could close the gap:
+    # `BoCampaignWorkflow._measure` waits `bo_measurement_deadline_days` (a fortnight, the plate
+    # turnaround a screening campaign is *for*) under `connector_job_timeout_seconds` (five hours,
+    # sized off a CREST search), and `timeout_seconds` above may only lower. Raising the fleet-wide
+    # number instead would have given every xTB and CREST job a fortnight to be wedged in.
+    #
+    # This is a claim about the job's *shape*, not a number it may inflate, which is why it is safe
+    # to let a manifest declare it: the bundle knows whether its workflow suspends and core cannot
+    # see the code, exactly as with `expensive` and `publish_to_graph`. What a bundle still cannot
+    # do is buy itself compute — a job that declares this and then loops without waiting is a
+    # workflow whose activities are each still bounded by their own budgets.
+    awaits_answer: bool = False
+
+    @model_validator(mode="after")
+    def _a_job_that_waits_does_not_also_declare_what_it_costs(self) -> Self:
+        """Reject `awaits_answer` beside `timeout_seconds` — the two say opposite things.
+
+        `timeout_seconds` bounds the job's whole durable run; `awaits_answer` says that run has no
+        wall-clock bound worth stating, because most of it is a person not having answered yet.
+        Honouring both would re-create the exact defect this field was added for — a fortnight-long
+        wait under a ceiling sized for compute — and honouring one silently would make the other a
+        key that reads like a control and is not. An author who wrote both believed one of them,
+        and which one is not something a resolver should guess.
+        """
+        if self.awaits_answer and self.timeout_seconds is not None:
+            raise ValueError(
+                f"job {self.name!r} declares `awaits_answer: true` and "
+                f"`timeout_seconds: {self.timeout_seconds}`; a job that suspends on a durable "
+                "answer has no wall-clock ceiling to declare, so keep one or the other"
+            )
+        return self
 
     @model_validator(mode="after")
     def _effects_are_gated(self) -> Self:

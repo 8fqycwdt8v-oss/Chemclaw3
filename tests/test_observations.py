@@ -194,6 +194,31 @@ class TestTheCorpusMiner:
         assert "with 1 run inconclusive (no evidence either way)" in found.statement
         # All three are merged notes and all three back the reading; only the claim is narrowed.
         assert found.evidence_note_ids == ["reaction-r1", "reaction-r2", "reaction-r3"]
+        # ...and *where* is narrowed with it: gamma has not failed at this, it has not reported.
+        assert found.projects_seen == ["alpha", "beta"]
+        assert "across 2 projects (alpha, beta)" in found.statement
+
+    def test_recurrence_is_counted_over_the_projects_that_actually_failed(self) -> None:
+        """Cross-project recurrence is the premise of the tier, so it must count failures.
+
+        The project set was taken over the whole cluster, which by construction holds
+        `INCONCLUSIVE` members too — so one project's failure beside a second project's aborted or
+        never-assayed runs read as "failed in 1 run across 2 projects (alpha, beta)", cleared both
+        shipped promotion thresholds, and `durable.observation_jobs._promotion_summary` copied that
+        sentence verbatim into a playbook PR. The human at that gate then reads a recurrence claim
+        about a transformation that has failed in exactly one project, cited by runs that
+        `OutcomeClass` says carry no evidence about the chemistry either way.
+        """
+        assert (
+            mine_corpus(
+                [
+                    _reaction("r1", "alpha", OutcomeClass.FAILURE),
+                    _reaction("r2", "beta", OutcomeClass.INCONCLUSIVE),
+                    _reaction("r3", "beta", OutcomeClass.INCONCLUSIVE),
+                ]
+            )
+            == []
+        )
 
     def test_a_purely_inconclusive_cluster_states_nothing(self) -> None:
         """Runs that were never assayed are not a finding, in either direction.
@@ -261,10 +286,16 @@ class TestTheCorpusMiner:
         assert three.evidence_note_ids == ["reaction-r1", "reaction-r2", "reaction-r3"]
 
     def test_mining_is_deterministic(self) -> None:
-        """A workflow re-runs, and an unstable miner would mint a new row every night."""
+        """A workflow re-runs, and an unstable miner would mint a new row every night.
+
+        The corpus has to be one this miner actually emits something for, or the assertion below
+        holds over two empty lists and pins nothing: the failures alone must span two projects,
+        which is why the inconclusive run here is a third member rather than the second.
+        """
         corpus = [
             _reaction("r1", "alpha", OutcomeClass.FAILURE),
-            _reaction("r2", "beta", OutcomeClass.INCONCLUSIVE),
+            _reaction("r2", "beta", OutcomeClass.FAILURE),
+            _reaction("r3", "gamma", OutcomeClass.INCONCLUSIVE),
         ]
         first = [o.with_id().id for o in mine_corpus(corpus)]
         again = [o.with_id().id for o in mine_corpus(list(reversed(corpus)))]

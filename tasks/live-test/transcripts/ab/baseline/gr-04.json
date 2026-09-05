@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "gr-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me everything we know about that 1536-well 3-bromopyridine plate - not just the numbers, what the write-up actually says.",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "only headline yields, with no procedure or observational detail",
+      "experimental detail attributed to the plate that is not in the retrieved text"
+    ],
+    "direction": "Four wells off that plate are seeded as free-text records carrying the source paper's own general procedure prose, alongside 96-record screens of the same chemistry. The ask is explicitly for the prose, so reading only the yields is the shallow failure. Quoting the procedure and citing which record it came from is the answer.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me everything we know about that 1536-well 3-bromopyridine plate - not just the numbers, what the write-up actually says.",
+    "profile": "no-tools",
+    "answer": "I don't have access to a database or records of your experiments. I can't retrieve notes, plates, or write-ups without you pointing me to a specific file or data source.\n\nIf you have:\n- **A file path** to the ELN entry, lab notebook, or report\n- **A note ID** from your system\n- **An uploaded document** containing the plate data\n\n...then share that, and I'll read it and give you the full write-up, not just summary numbers.\n\nCan you provide the location or reference for that 1536-well 3-bromopyridine plate?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 2.57,
+    "event_counts": {
+      "token": 6,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "cd457f4aa23d4b32babd392f692115a9",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

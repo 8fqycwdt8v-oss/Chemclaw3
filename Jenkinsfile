@@ -41,6 +41,8 @@ pipeline {
                  description: 'Run `make ci` here too. Off because GitHub Actions is the gate; on for a Jenkins-only estate.')
     booleanParam(name: 'ALLOW_ANY_EGRESS_DESTINATION', defaultValue: false,
                  description: 'State that any-destination egress is intended. The chart refuses to render without a stated posture.')
+    booleanParam(name: 'ACCEPT_UNBOUNDED_GROWTH', defaultValue: false,
+                 description: 'State that the durable tables may grow forever. The sibling of the flag above: the chart refuses to render until a release states its retention posture too. Leave false and put `retention.windows` in the environment values file, which is the answer a real deployment wants.')
     string(name: 'REGISTRY_CREDENTIALS_ID', defaultValue: 'chemclaw-registry',
            description: 'Jenkins username/password credential for the registry.')
     string(name: 'CLUSTER_CREDENTIALS_ID', defaultValue: 'chemclaw-openshift',
@@ -186,7 +188,15 @@ dry run    ${params.DRY_RUN}"""
           // `image.digest` would exercise the tag path instead, which is not what gets deployed.
           def flags = env.IMAGE_DIGEST ? "--set image.digest=${env.IMAGE_DIGEST} --set image.repository=${params.IMAGE_REGISTRY}/${params.IMAGE_NAME}" : ''
           if (fileExists(env.VALUES_FILE)) { flags += " --values ${env.VALUES_FILE}" }
+          // The two postures the chart refuses to render without. Each is a parameter rather than a
+          // default because the chart's whole argument is that an unstated posture must not render:
+          // an empty egress list means *every* destination, and an unstated retention policy means
+          // tables that grow for the deployment's lifetime. An environment values file stating
+          // `networkPolicy.egressDestinations` / `retention.windows` is the better answer and needs
+          // neither flag; these exist so the escape hatch is reachable from the pipeline at all.
+          // Without the second one this stage failed on every openshift run, on shipped defaults.
           if (params.ALLOW_ANY_EGRESS_DESTINATION) { flags += ' --set networkPolicy.allowAnyDestination=true' }
+          if (params.ACCEPT_UNBOUNDED_GROWTH) { flags += ' --set retention.unboundedGrowthAccepted=true' }
           sh """
             set -euo pipefail
             helm template chemclaw deploy/helm/chemclaw ${flags} > rendered.yaml
@@ -228,6 +238,7 @@ dry run    ${params.DRY_RUN}"""
                 oc login --token="\${CLUSTER_TOKEN}" --server='${params.CLUSTER_API}' >/dev/null
                 NAMESPACE='${params.NAMESPACE}' DRY_RUN='${params.DRY_RUN}' \
                 ALLOW_ANY_EGRESS_DESTINATION='${params.ALLOW_ANY_EGRESS_DESTINATION}' \
+                ACCEPT_UNBOUNDED_GROWTH='${params.ACCEPT_UNBOUNDED_GROWTH}' \
                   deploy/jenkins/targets/openshift.sh release.json
               """
             }

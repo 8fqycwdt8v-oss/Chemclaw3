@@ -29,6 +29,7 @@ tail of every worker's `main()` is a single call.
 import asyncio
 import logging
 import signal
+from functools import partial
 
 from temporalio.worker import Interceptor, Worker
 
@@ -38,7 +39,11 @@ from chemclaw.core.executor import install_default_executor
 from chemclaw.core.logging import log_event
 from chemclaw.core.worker_http import worker_http
 from chemclaw.durable.interceptor import ChemclawWorkerInterceptor, activities_in_flight, draining
-from chemclaw.durable.job_metrics import bind_job_gauges, poll_open_jobs
+from chemclaw.durable.job_metrics import (
+    bind_job_gauges,
+    broker_seen_recently,
+    poll_open_jobs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +77,30 @@ def worker_interceptors() -> list[Interceptor]:
     it is measuring does.
     """
     return [ChemclawWorkerInterceptor()]
+
+
+def worker_ready(worker: Worker) -> bool:
+    """Whether this worker is both alive **and** still hearing from the broker.
+
+    **Readiness names the broker, not the lifecycle.** `worker.is_running` alone is true from the
+    moment `run()` is entered until shutdown, so it stays true through a total broker outage —
+    measured: every poll failing with `ConnectionRefused` while `/readyz` answered 200
+    `{"status":"ready"}`, which is the exact claim `core/worker_http.py` says the route exists to
+    falsify. The second half is the freshness of `poll_open_jobs`, which is already asking the
+    broker a question on a timer in every worker process.
+
+    Cold start is unaffected and was already correct: a worker that cannot reach the broker at
+    startup exits 1 and crash-loops. This is for the runtime severing — a broker restart, a
+    NetworkPolicy change, an mTLS rotation — where the pod stays up and lies.
+
+    **A module-level function rather than the closure it used to be**, because a predicate nothing
+    can reach is a predicate nothing can test. It lived inside `serve_worker`, so
+    `tests/test_worker_observability.py` asserted `broker_seen_recently()` on its own and claimed
+    in its docstring to fail "if either half is dropped" — measured, reverting this to
+    `worker.is_running` alone left the whole worker suite green and a severed worker answering
+    `/readyz` 200 again. One definition, and the test drives *it*.
+    """
+    return worker.is_running and broker_seen_recently()
 
 
 async def serve_worker(worker: Worker, *, component: str) -> None:
@@ -112,7 +141,12 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
         # Postgres handshake is loop time stolen from task polling and heartbeats. Pooled for the
         # worker's whole life and closed on shutdown — which is a promise only kept because the
         # signal handler above lets the `async with` actually unwind.
-        async with db.pooling(), worker_http(component=component, ready=lambda: worker.is_running):
+        # Readiness is `worker_ready`, which owns the argument for both halves. Bound here rather
+        # than restated: the route and the test have to be asking the same question.
+        async with (
+            db.pooling(),
+            worker_http(component=component, ready=partial(worker_ready, worker)),
+        ):
             running = asyncio.create_task(worker.run())
             waiting = asyncio.create_task(stop.wait())
             # The gauge's reading, refreshed against the broker rather than kept by a workflow

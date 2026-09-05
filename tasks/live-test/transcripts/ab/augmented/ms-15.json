@@ -1,0 +1,91 @@
+{
+  "probe": {
+    "id": "ms-15",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much of CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1 is actually in the folded, internally hydrogen-bonded form at room temperature? The population is the number I need, not a picture of the best geometry.",
+    "expects_tools": [
+      "run_ensemble_free_energy",
+      "refine_ensemble"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a population or conformational entropy the calculation did not return",
+      "a population presented without the share of the ensemble it was computed over",
+      "a folded fraction recalled rather than computed"
+    ],
+    "direction": "The asker has drawn the distinction the surface is built on: a population is the answer here, not a geometry, and that is what makes the free-energy refinement worth its cost rather than the far cheaper search that would have handed back a lowest structure. A good answer searches the conformers, re-weights them by free energy, and reports the folded population with the conformational entropy beside it. Two qualifiers must travel in the same sentence as the number: what share of the ensemble the refined members cover, and that a population is approximate twice over — the search is metadynamics rather than enumeration, and the energies ranking it carry several kcal/mol of error, so 60/40 and 55/45 are the same answer. A crisp percentage with no coverage figure is the failure, because it is the version that gets copied into a report.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-15",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much of CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1 is actually in the folded, internally hydrogen-bonded form at room temperature? The population is the number I need, not a picture of the best geometry.",
+    "profile": "",
+    "answer": "I need to find the population of the folded, internally hydrogen-bonded conformer of this molecule at room temperature. This is a question about conformational ensemble and free-energy weighting — exactly the case where `sample_conformers` followed by `refine_ensemble` gives a population, not just a single geometry.\n\nLet me start by searching for any prior work on this molecule, then run the conformer search and free-energy refinement.No prior work on this molecule. Now I'll run a conformer search to build the ensemble, then refine it with free-energy weighting to get the true Boltzmann-weighted populations.The conformer search failed. Let me try the built-in template that combines conformer search with free-energy refinement directly:Good — I've launched the free-energy-weighted ensemble search. Let me poll for the result:The job is still running. This is a CREST conformer search plus free-energy refinement — it takes minutes to hours. Let me return the job id and you can check back for the result:\n\n**Job in progress:** `template-ensemble-free-energy-ddec85e1fb3ff7db`\n\nThis run will:\n1. Search the conformer space of your molecule (CREST)\n2. Optimize and compute vibrational frequencies for the lowest members\n3. Re-weight the ensemble by **free energy** instead of electronic energy alone\n4. Report the population of each conformer, including the folded form if it exists\n\n**Why this matters for your molecule:** Your Boc-protected amino acid derivative has multiple sites that could form an intramolecular hydrogen bond — the amide N-H (both the Boc-protected and the benzyl-protected ones) could potentially hydrogen-bond back to the carbonyl oxygen. Electronic energy alone would overestimate a compact, hydrogen-bonded form because it has low enthalpy but also carries low entropy (rigid, stiff modes). Free-energy weighting brings in the entropic penalty, so the true Boltzmann distribution reflects which forms *actually* populate at room temperature.\n\nOnce the job completes, I'll return:\n- The relative free energies of the major conformers\n- The Boltzmann-weighted population of each\n- Specifically the fraction in the internally hydrogen-bonded folded state\n- What fraction of the ensemble those refined members cover (if <90%, the true population is less certain because the tail has not been fully characterized)\n\nCheck back by asking for the result, or give me the job id if you want me to poll it again in a follow-up turn.",
+    "answered": true,
+    "tools_called": [
+      "find_calculations",
+      "gather_evidence",
+      "sample_conformers",
+      "run_ensemble_free_energy",
+      "get_durable_job_status"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_calculations",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "run_ensemble_free_energy",
+        "preview": "template-ensemble-free-energy-ddec85e1fb3ff7db"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='template-ensemble-free-energy-ddec85e1fb3ff7db' status='running' summary=None result={} calc_refs=[] rationale=''"
+      }
+    ],
+    "tools_failed": [
+      "sample_conformers"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [
+      "template-ensemble-free-energy-ddec85e1fb3ff7db"
+    ],
+    "job_outcomes": {
+      "template-ensemble-free-energy-ddec85e1fb3ff7db": "RUNNING"
+    },
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 47.82,
+    "event_counts": {
+      "token": 78,
+      "tool_call": 5,
+      "evidence_source": 1,
+      "tool_result": 4,
+      "tool_failed": 1,
+      "job_started": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "66819082f3ea4ed38c5c50e0243c1d37",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

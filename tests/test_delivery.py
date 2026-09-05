@@ -11,6 +11,7 @@ one channel's failure is not everyone's, and nothing reads *from* a channel.
 """
 
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
@@ -215,6 +216,83 @@ def test_the_webhook_sends_the_recipients_view_and_not_the_join_key() -> None:
     payload = message.model_dump(include={"recipient", "subject", "body", "kind"})
     assert "correlation_id" not in payload
     assert set(payload) == {"recipient", "subject", "body", "kind"}
+
+
+def test_the_webhook_never_follows_an_ambient_proxy() -> None:
+    """A pod's `HTTP_PROXY` must not silently reroute a delivery — with its body and its bearer.
+
+    Every other client in this tree that reaches a real dependency sets `trust_env=False` and says
+    why (`connectors/registry.py`, `core/mcp_session.py`, `core/embeddings.py`,
+    `connectors/health.py`, `agent/llm_provider.py`, and the sibling seam
+    `publish/drivers/http.py`). The delivery channel — the one client whose payload is
+    human-readable message content *and* which attaches `Authorization: Bearer` — was the
+    exception. Measured against a recording listener installed as `HTTP_PROXY`: the proxy received
+    the full `POST`, the JSON body and `Authorization: Bearer s3cr3t-bearer-value`, and the
+    configured destination received nothing.
+
+    Driven through a real socket rather than by inspecting the client's attributes, because the
+    property under test is where the bytes go. A listener that accepts and answers `200` stands in
+    for the proxy; the configured host is unroutable, so *any* delivery that completes at all
+    completed through the proxy.
+    """
+    import os
+    import socket
+    import threading
+
+    from chemclaw.deliver.driver import WebhookDeliveryDriver
+
+    received: list[bytes] = []
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    def _accept() -> None:
+        """Record whatever a proxy-following client sends, then answer so it does not hang."""
+        try:
+            conn, _ = listener.accept()
+            conn.settimeout(2.0)
+            received.append(conn.recv(4096))
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            conn.close()
+        except OSError:  # closed by the main thread when nothing connected
+            pass
+
+    thread = threading.Thread(target=_accept, daemon=True)
+    thread.start()
+    old_proxy = os.environ.get("HTTP_PROXY")
+    os.environ["HTTP_PROXY"] = f"http://127.0.0.1:{port}"
+    os.environ["CHEMCLAW_TEST_DELIVERY_TOKEN"] = "s3cr3t-bearer-value"
+    try:
+        driver = WebhookDeliveryDriver(
+            name="probe",
+            # `.invalid` is reserved by RFC 2606 and never resolves, so a delivery that reaches
+            # anything at all reached the proxy.
+            url="http://hook.chemclaw.invalid/deliver",
+            token_env="CHEMCLAW_TEST_DELIVERY_TOKEN",
+            timeout_seconds=2.0,
+        )
+        message = Message(recipient="u-1", subject="s", body="CONFIDENTIAL BODY", kind="digest")
+        try:
+            asyncio.run(driver.deliver(message))
+        except Exception:
+            # Failing to reach an unroutable host is the pass path; the assertion below is
+            # about where the bytes went, not about whether the delivery succeeded.
+            pass
+    finally:
+        listener.close()
+        thread.join(timeout=3.0)
+        os.environ.pop("CHEMCLAW_TEST_DELIVERY_TOKEN", None)
+        if old_proxy is None:
+            os.environ.pop("HTTP_PROXY", None)
+        else:
+            os.environ["HTTP_PROXY"] = old_proxy
+
+    assert received == [], (
+        "an ambient HTTP_PROXY received the delivery — body and bearer included:\n"
+        + received[0].decode("utf-8", "replace")
+    )
 
 
 def test_a_plaintext_channel_is_refused_under_the_enforced_posture(
@@ -618,4 +696,61 @@ def test_a_channel_that_cannot_be_built_is_not_counted_as_a_destination_outage(
     assert METRICS.value(outage) == outage_before, (
         "an unbuildable channel was counted as a destination outage, which is the conflation "
         "that made a permanent misconfiguration read as a transient one"
+    )
+
+
+def test_a_secret_in_the_recipient_is_scrubbed_like_one_in_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seam's rule is "every message is redacted once, in the registry" — every free-text field.
+
+    `recipient` was the one it skipped. It is free text by construction — the address a driver
+    resolves, whose shape only the driver knows — and both shipped drivers put it where the body
+    goes: `FileDeliveryDriver` writes it into the file, `WebhookDeliveryDriver` POSTs it. Today's
+    only caller passes an actor id, so nothing carries a credential there yet; the guarantee is
+    supposed to be a property of the seam rather than of who happens to be calling it.
+    """
+    from chemclaw.deliver.message import Message
+
+    secret = "sk-connector-token-abc123"
+    monkeypatch.setenv("CHEMCLAW_CALC_MCP_TOKEN", secret)
+
+    scrubbed = Message(recipient=f"chemist@example.com {secret}", subject="s", body="b").redacted()
+
+    assert secret not in scrubbed.recipient
+    assert "***" in scrubbed.recipient
+
+
+def test_a_recipient_the_scrub_rewrote_is_reported_rather_than_silently_undeliverable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A rewritten address is an undelivered message, and nothing said so.
+
+    `redact_secrets` rewrites *structural* shapes as well as this deployment's own secret values,
+    and a routable address can be one: a Teams channel URN
+    (`urn:teams:channel:19:meeting_TOKEN=…@thread.v2`) loses its token to the `TOKEN=` pattern, a
+    webhook URL with userinfo loses its password, and a `xoxb-`-shaped address is replaced whole.
+    The scrub stays — `recipient` is free text that both shipped drivers put where the body goes,
+    and the seam's guarantee must not depend on who is calling it — but a substitution here does
+    not merely redact a message, it re-addresses one, and the driver that fails to deliver it can
+    only report the address it was given.
+
+    The original is deliberately absent from the log line: what tripped the pattern may be a real
+    credential, and this module is the half that leaves the cluster.
+    """
+    urn = "urn:teams:channel:19:meeting_TOKEN=abc12345678@thread.v2"
+    with caplog.at_level(logging.WARNING, logger="chemclaw.deliver.message"):
+        scrubbed = Message(recipient=urn, subject="s", body="b").redacted()
+
+    assert scrubbed.recipient != urn, "the scrub is the guarantee; it is not what is being relaxed"
+    assert len(caplog.records) == 1, f"a re-addressed message was silent: {caplog.text!r}"
+    assert scrubbed.recipient in caplog.text and urn not in caplog.text, (
+        "the line carries the address the driver will actually get, never the original"
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="chemclaw.deliver.message"):
+        intact = Message(recipient="chemist@example.com", subject="s", body="b").redacted()
+    assert intact.recipient == "chemist@example.com" and not caplog.records, (
+        "an ordinary address is untouched and unremarked"
     )

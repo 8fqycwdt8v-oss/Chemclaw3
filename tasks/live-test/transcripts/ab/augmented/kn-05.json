@@ -1,0 +1,73 @@
+{
+  "probe": {
+    "id": "kn-05",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "quick one — is 2 min of sparging enough before we drop the catalyst in? thats what the old sop said",
+    "expects_tools": [
+      "find_notes",
+      "expand_note",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that two-minute sparging is current practice",
+      "a note id that was not retrieved",
+      "a degassing procedure the playbook does not state"
+    ],
+    "direction": "Answers no, and cites playbook-degassing for the current procedure: three freeze-pump-thaw cycles or 20 minutes of sparging per 100 mL. Critically, it should recognise the two-minute rule as the *retired* playbook-degassing-old and say it was superseded in mid-2025 — treating the two as equally current, or quietly averaging them, is the failure this probe is for.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-05",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "quick one — is 2 min of sparging enough before we drop the catalyst in? thats what the old sop said",
+    "profile": "",
+    "answer": "I need to search the record first to see what you're running and what the existing procedure actually specifies.The record doesn't hold any notes on sparging procedures or timing yet. I don't have access to the old SOP you're referring to—that sounds like a document outside this system.\n\n**What I can actually say:** Whether 2 minutes is enough depends on how completely you need to displace air and moisture from the vessel before the catalyst goes in. That's a process detail, not something the knowledge graph or any of the calculators here can answer. It lives in your procedure, your equipment, your scale, and what the chemistry actually demands—did the old SOP say *why* 2 minutes, or was it just a time?\n\n**If you want to document what you're doing:** once you've validated the timing (or changed it), I can help you write it up as a procedure note so it's in the record for next time and for whoever scales or repeats it. But the judgment call on \"is this enough\" is yours—based on how the runs have gone, whether you've seen water or air contamination, and what your catalyst is sensitive to.\n\nIs there a specific coupling or reaction this is for? If I can see the actual procedure or precedent from the record, I might spot whether there's something else in the conditions that bears on this.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.39,
+    "event_counts": {
+      "token": 17,
+      "tool_call": 2,
+      "tool_result": 2,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "79ad495501124a06bf894531a63329ca",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -111,6 +111,20 @@ _OPEN = """
           )
 """
 
+# **Whose row is it now.** The upsert above is guarded, so "wrote nothing" is one of its ordinary
+# outcomes — and for the whole first life of this module the caller could not see it, because
+# `open_request` returned `None`. That is the difference between the two silent refusals it admits.
+# A *retry* of the opening activity carries the run that already owns the row, and it must be told
+# it still owns it however the row has since settled, or an at-least-once redelivery would fail
+# every time. A *re-ask* by a different run meeting an `answered` row owns nothing: the guard
+# deliberately refuses to blank somebody's attribution, and the workflow that was refused went on
+# to wait against a row nobody could see or answer, for the ninety days `awaiting_max_days` allows.
+#
+# Read rather than inferred from `rowcount`, because rowcount cannot tell those two apart: both
+# write zero rows. The read is in the same transaction as the write, so nothing can settle between
+# them.
+_CLAIMED_BY = "SELECT run_id FROM pending_requests WHERE request_id = %s"
+
 # `answered_at` only where somebody answered. It was stamped unconditionally, so an `expired` or
 # `cancelled` row carried a timestamp with an empty `answered_by` — a column saying "somebody
 # answered at some point" about a question nobody answered, surfaced to the agent and the front door
@@ -149,12 +163,17 @@ async def open_request(
     correlation_id: str,
     due_at: datetime,
     run_id: str = "",
-) -> None:
-    """Record a wait as open.
+) -> bool:
+    """Record a wait as open, and report whether this run holds the projection.
 
     Idempotent within one Temporal run, and **reopening across runs** — see `_OPEN` for why those
     are different cases and what it cost to treat them as one. `run_id` defaults to empty so a
     caller with no run to name (a test, a backfill) keeps the old within-run behaviour.
+
+    Returns:
+        Whether `run_id` owns the row afterwards. `False` means the guard refused this open — the
+        only case that reaches it is a re-ask meeting a cycle somebody answered — and the caller
+        must not go on to wait against a row it does not hold. See `_CLAIMED_BY`.
     """
     async with _connect() as conn:
         await conn.execute(
@@ -172,6 +191,10 @@ async def open_request(
                 run_id,
             ),
         )
+        async with conn.cursor() as cur:
+            await cur.execute(_CLAIMED_BY, (request_id,))
+            claimed = await cur.fetchone()
+    return claimed is not None and str(claimed[0]) == run_id
 
 
 async def settle_request(

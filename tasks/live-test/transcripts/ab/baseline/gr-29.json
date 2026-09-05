@@ -1,0 +1,72 @@
+{
+  "probe": {
+    "id": "gr-29",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Scale the biaryl coupling to 2 kg of COc1ccc(Br)cc1 and tell me what I'm charging.",
+    "expects_tools": [
+      "stoichiometry_table",
+      "resolve_compound",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a mass or volume produced without the equivalents basis it came from",
+      "a solvent volume invented where no density or volume basis was given",
+      "the seeded lab-scale charge rescaled silently, with no note that it was"
+    ],
+    "direction": "The lab-scale charge is in the corpus with real equivalents. A good answer builds the table from those equivalents, shows the arithmetic, and refuses rather than guesses where a volume basis is ambiguous. Naming what changes at 2 kg that a charge table cannot capture is a bonus.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-29",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Scale the biaryl coupling to 2 kg of COc1ccc(Br)cc1 and tell me what I'm charging.",
+    "profile": "no-tools",
+    "answer": "I need to find information about your biaryl coupling reaction to calculate the scale-up from the reference batch to 2 kg of the bromoanisole (COc1ccc(Br)cc1).\n\nLet me search for relevant reaction notes or procedures in your system.I cannot find any records of a biaryl coupling with 4-bromoanisole (COc1ccc(Br)cc1) in your system's data. Without access to:\n\n1. **A reference experimental procedure** showing the original batch size and stoichiometry\n2. **Reaction conditions** (what coupling partner, reagents, and ratios were used)\n3. **Molar mass confirmation** for this bromide (M = 187.04 g/mol)\n\nI cannot tell you what to charge for the scale-up to 2 kg.\n\n**To proceed, please provide:**\n- A link to or note ID of the original coupling reaction\n- Or the SMILES/structure of the coupling partner and the stoichiometry (1:1, 1:1.2, etc.)\n- Or a batch size and amounts from a prior run\n\nOnce you give me the reference conditions, I can calculate molar equivalents and scale to 2 kg of the bromoanisole for you.",
+    "answered": true,
+    "tools_called": [
+      "grep",
+      "grep"
+    ],
+    "tool_results": [
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 6.21,
+    "event_counts": {
+      "token": 14,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "82c60afbf6b9478c92677ce969241345",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

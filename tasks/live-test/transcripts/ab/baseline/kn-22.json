@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "kn-22",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "You just told me 2-MeTHF costs about five points. Where exactly did that come from? I need to be able to point at something in a meeting.",
+    "expects_tools": [
+      "expand_note",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "an external or literature source for the number",
+      "a measurement the cited note does not contain",
+      "a confidence or validation status the note does not carry"
+    ],
+    "direction": "Names the source by note id — opt-amide-solvent for the screen, and interaction-solvent-swap-question as the confirmed exchange that repeats it — and quotes what those notes actually say: 81% DMF, 79% MeCN, 76% 2-MeTHF on the same substrate, hence ~5 points. It should separate the retrieved fact from its own inference, and state the limit honestly: one internal solvent screen on one substrate, not a validated constant. Re-retrieving to check before answering is the right behaviour here, not a hedge.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-22",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "You just told me 2-MeTHF costs about five points. Where exactly did that come from? I need to be able to point at something in a meeting.",
+    "profile": "no-tools",
+    "answer": "I don't have any record of telling you that, and I don't have access to prior conversations or messages—each interaction with me starts fresh. I also don't have access to a pricing database, ELN records, or any programme data unless you've uploaded or retrieved it in this conversation.\n\nIf you need to cite a cost figure for 2-MeTHF (2-methyl tetrahydrofuran) in a meeting, here's what I'd suggest:\n\n1. **Check your conversation history** with whoever told you \"five points\"—ask them directly where that number came from.\n2. **If it was from this system**: Look for a retrieved note envelope `<retrieved-note-...>` in the conversation, or check the ELN/graph directly for sourced data.\n3. **If you need to establish a price yourself**: You'll need to either:\n   - Pull a recent quote from your supplier (Chemical Abstracts, Sigma-Aldrich, TCI, etc.)\n   - Reference an internal cost tracking system\n   - Link to a published market report\n\nI can't point you at something I didn't say or don't have access to. Do you have a note, quote, or earlier message you'd like me to help you trace or verify?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.21,
+    "event_counts": {
+      "token": 12,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "38ce3fbba7b948edab69ccc503291d7f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

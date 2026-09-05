@@ -480,8 +480,9 @@ class InMemoryDesignStore:
                 f"revision {expected_revision} is not the head ({head}); "
                 "re-read the design before signing off on it"
             )
-        require_unmoved(expected_status, self._meta[design_id]["status"])
-        require_movable(status, head_revision.kind)
+        current: DesignStatus = self._meta[design_id]["status"]
+        require_unmoved(expected_status, current)
+        require_movable(current, status, head_revision.kind)
         self._meta[design_id]["status"] = status
         self._meta[design_id]["updated_at"] = datetime.now(UTC)
         self._status_events.setdefault(design_id, []).append(
@@ -782,7 +783,9 @@ class PostgresDesignStore:
                 # naming a head revision whose row this read does not find fails *closed* rather
                 # than waving an `executed` through on a document nobody can see.
                 require_movable(
-                    status, "protocol" if kind_row and kind_row[0] == "protocol" else "request"
+                    head_row[1],
+                    status,
+                    "protocol" if kind_row and kind_row[0] == "protocol" else "request",
                 )
                 await cur.execute(_SET_STATUS, {"status": status, "design_id": design_id})
                 await cur.execute(
@@ -929,7 +932,28 @@ def revision_kind(design: ExperimentDesign) -> RevisionKind:
 _NEEDS_A_PROTOCOL: frozenset[DesignStatus] = frozenset({"approved", "executed"})
 
 
-def require_movable(status: DesignStatus, head_kind: RevisionKind) -> None:
+#: Which lifecycle move each status permits, as data rather than a chain of `if`s.
+#:
+#: Nothing enforced an order at all: measured on both backends, `abandoned -> executed`,
+#: `draft -> executed` (running without sign-off), `executed -> draft` and `executed -> approved`
+#: were all accepted. `advanced()`'s stated guarantee that only a person moves an `abandoned` design
+#: off `abandoned` was therefore true only by convention.
+#:
+#: Every `X -> X` is permitted on top of this table, and that is deliberate rather than incidental:
+#: `Chemclaw3_ui`'s sign-off panel retries idempotently, so forbidding `approved -> approved` would
+#: turn a harmless retry into a 422. `draft -> executed` is absent because it is running without
+#: sign-off, and `abandoned -> draft` is present because reviving a retired design is a thing a
+#: person does.
+_LEGAL_MOVES: dict[DesignStatus, frozenset[DesignStatus]] = {
+    "requested": frozenset({"draft", "abandoned"}),
+    "draft": frozenset({"approved", "abandoned"}),
+    "approved": frozenset({"executed", "draft", "abandoned"}),
+    "executed": frozenset({"abandoned"}),
+    "abandoned": frozenset({"draft"}),
+}
+
+
+def require_movable(current: DesignStatus, status: DesignStatus, head_kind: RevisionKind) -> None:
     """Refuse a lifecycle move the design cannot support, naming why.
 
     Nothing tied a status to the document it is a statement about, so `set_status("executed")` on a
@@ -941,11 +965,54 @@ def require_movable(status: DesignStatus, head_kind: RevisionKind) -> None:
     one fact rather than each deriving it, and Postgres does not have to load the document to
     answer.
 
+    **`requested` is the same rule read backwards, and it was missing.** It is the one status that
+    asserts the *absence* of a procedure — `DesignStatus` defines it as "holds only a structured
+    ask" — so a `protocol` head contradicts it exactly as a `request` head contradicts `executed`.
+    Nothing refused it: measured on both backends, an executed design moved to `requested` and
+    stayed there with a fully drafted protocol as head, so `GET /protocols?status=requested` listed
+    it among the intakes and `?status=executed` did not. Written as an `if` rather than as a second
+    frozenset beside `_NEEDS_A_PROTOCOL` because it has exactly one member and always will: the
+    other four statuses are claims about a document or about a decision, and only this one is a
+    claim that no document exists yet.
+
+    **The transition *order* is the third rule and it arrived last**, because it is the one that
+    cannot be derived from the document: it needs the design's *current* status, which this function
+    was not given. Nothing forbade `abandoned → executed` or `draft → executed`, measured accepted
+    on both backends — a design retired because the starting material decomposes, marked run; a
+    protocol nobody had signed off, marked run. `_LEGAL_MOVES` above is the decided table, and
+    each of its edges says there why it exists.
+
+    **Every self-transition is exempt from the *table***, which it does not spell out because it is
+    one rule about a repeat rather than five decisions about the lifecycle. It is not a blanket
+    permission, and this sentence used to say it was: the document rules below outrank the exemption
+    exactly as they outrank an edge, so three of the ten (status, head-kind) repeats are refused —
+    `requested -> requested` on a protocol head, and `approved`/`executed` on a request head. Those
+    states are unreachable in practice, because `advanced()` demotes the status on every revision
+    that changes the kind, which is why an absolute claim survived here. A sixth status would be
+    decided by that precedence and not by this paragraph. `Chemclaw3_ui`'s sign-off panel
+    renders a *Mark X* button for all five statuses regardless of where the design is, so
+    `approved → approved` is one click away by construction — and a move whose response is lost is
+    reported to the chemist as "The status was not recorded" when it may well have been, so pressing
+    again is the ordinary recovery and it arrives here as `X → X`. Refusing it would turn a button
+    the client itself offers into a 422 on the one screen where the honest answer is "it already
+    worked". This tree relies on it too: the test that proves both SQL `CHECK (status IN (...))`
+    constraints accept every member of the Literal drives `draft → draft` and `requested →
+    requested` to do it. The move is not swallowed — the caller still gets its 204 and
+    `experiment_protocol_status_events` still gains a row, because a repeat is somebody acting a
+    second time and that table is the record of who moved a design and why.
+
+    **The document rules run first, deliberately.** Where both refuse — `requested` on a protocol
+    head, say — the more actionable message wins: "there is no procedure to approve" tells a chemist
+    what to do next, and "you cannot go from here to there" does not.
+
+    The table is indexed on `current` unconditionally, so a sixth `DesignStatus` added without a row
+    here fails on the first move rather than being silently movable anywhere.
+
     The complementary guard — refusing a sign-off that would silently overwrite a *different*
-    person's sign-off at the same revision — is `require_unmoved`, one function below. It was not
-    here for a while, and this docstring said so; it is here now because "the evidence survives, but
-    nobody is told at the time" turned out to cost `advanced()`'s guarantee that only a person moves
-    an `abandoned` design off `abandoned`.
+    person's sign-off at the same revision — is `require_unmoved`, which runs before this
+    one. It is separate because the two answer different questions: this table says whether the move
+    is legal at all, and that one says whether the design is still where the person thought it was.
+    `expected_revision` covers neither, being a compare-and-set on the *document*.
 
     Raises:
         UnstorableDocument: the design cannot hold this status.
@@ -954,6 +1021,18 @@ def require_movable(status: DesignStatus, head_kind: RevisionKind) -> None:
         raise UnstorableDocument(
             f"this design holds only the structured ask, so it cannot be {status!r}: there is no "
             "procedure to approve or to have run. Draft the protocol first."
+        )
+    if status == "requested" and head_kind == "protocol":
+        raise UnstorableDocument(
+            "this design holds a procedure, so it cannot go back to 'requested', which means it "
+            "holds only the structured ask. Abandon it, or draft over it — a revision moves a "
+            "design's status by itself."
+        )
+    legal = _LEGAL_MOVES[current]
+    if status != current and status not in legal:
+        raise UnstorableDocument(
+            f"a design that is {current!r} cannot be moved to {status!r}: from {current!r} the "
+            f"moves are {sorted(legal | {current})}."
         )
 
 

@@ -1,0 +1,73 @@
+{
+  "probe": {
+    "id": "kn-09",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here's my reaction — COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(cc1)-c1ccccc1 — is there anything close to it in the HTE data we have indexed?",
+    "expects_tools": [
+      "similar_reactions",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a reaction id the search did not return",
+      "a similarity score the tool did not return",
+      "a literature citation",
+      "conditions attributed to a hit that the hit does not carry"
+    ],
+    "direction": "Runs the reaction-fingerprint search and reports what came back, with the returned similarity values and which dataset family the hits belong to (Doyle Buchwald–Hartwig amination, Perera Suzuki–Miyaura flow, Santanilla amidation/sulfonamidation, Nielsen deoxyfluorination). If the nearest neighbours are a different transformation, it must say so plainly instead of dressing them up as precedent for this coupling.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-09",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here's my reaction — COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(cc1)-c1ccccc1 — is there anything close to it in the HTE data we have indexed?",
+    "profile": "",
+    "answer": "I'll search for reactions similar to your Suzuki-type coupling to see what precedent is available in the indexed data.The reaction fingerprint index hasn't been built yet, so the search couldn't run — this is not a finding that nothing similar exists, only that the question wasn't answered from the indexed data.\n\nThat said, let me check what we *do* have on file about this type of coupling more directly, by searching the knowledge graph for Suzuki and related aryl-coupling work:The knowledge graph is also empty at the moment — no reaction notes have been merged yet.\n\n**Summary:** The system has no indexed HTE reaction data to search against, and no existing Suzuki or biaryl-coupling notes in the knowledge graph. This means:\n- **The reaction fingerprint index is not yet populated**, so I cannot show you similar precedents from stored runs\n- **No development notes or playbooks** on this type of coupling exist in the graph yet\n\nIf you have runs of this coupling (or structurally similar couplings) recorded in your ELN, ingesting those records into the system would build the index and let future searches find them. Once that happens, I'll be able to show you what conditions worked, yield patterns, and analogous substrates.\n\nIs this a reaction you're about to run, or do you have existing data from trials you'd like to set up as precedent?",
+    "answered": true,
+    "tools_called": [
+      "similar_reactions",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.57,
+    "event_counts": {
+      "token": 22,
+      "tool_call": 2,
+      "tool_result": 2,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c8f3f9f41ec9428f9e00c804b01904bc",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

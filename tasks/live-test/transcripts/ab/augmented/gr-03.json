@@ -1,0 +1,73 @@
+{
+  "probe": {
+    "id": "gr-03",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Have we ever coupled anything that looks like BrC1=CC=C(OC)C=C1 before?",
+    "expects_tools": [
+      "similar_reactions",
+      "substructure_matches",
+      "similar_molecules",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "'no prior work found' or equivalent, when 264 records on this exact halide are seeded",
+      "a count of matching records stated without any identifier a reader could check"
+    ],
+    "direction": "4-bromoanisole is one of fifteen aryl halides on the seeded Buchwald-Hartwig amination plates, with 264 records behind it and two sibling halides (the chloride and the iodide of the same anisole) on the same grid. A good answer finds them, says roughly how many and what varied, and points at something identifiable. A \"no\" here is a retrieval defect, not an honest absence.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-03",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Have we ever coupled anything that looks like BrC1=CC=C(OC)C=C1 before?",
+    "profile": "",
+    "answer": "I'll search for reactions using 4-bromoanisole (the structure you've named) to see what precedent exists.The record does not have indexed reaction precedent at all — the labelled corpus for substrate reactions appears to be empty, and the molecule fingerprint index has not been populated. This means the search was not answered, rather than having found no results.\n\nIn other words: **I cannot tell you whether we've coupled 4-bromoanisole before, because the structural indices that would hold that information are not yet built.** An operator would need to populate them from your ELN or reaction corpus.\n\nIs there a reaction you're actively planning with this substrate? If so, I can help you design conditions from first principles and from any general precedent in the literature (through forward predictors and condition predictors), even without your own historical runs indexed yet.",
+    "answered": true,
+    "tools_called": [
+      "substrate_precedent",
+      "similar_molecules"
+    ],
+    "tool_results": [
+      {
+        "tool": "substrate_precedent",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:substrate_precedent\">\n{\n  \"question\": \"reactions using BrC1=CC=C(OC)C=C1\",\n  \"hits\": [],\n  \"coverage\": {\n    \"labelled\": 0,\n    \"total\": 0,\n    \"sources\": []"
+      },
+      {
+        "tool": "similar_molecules",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"molfp:similar_molecules\">\n{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 8.13,
+    "event_counts": {
+      "token": 14,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "67867de54ef74beaa1b90ad03eb6f61a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

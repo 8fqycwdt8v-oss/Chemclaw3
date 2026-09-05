@@ -286,10 +286,18 @@ _NOT_PRUNED: dict[str, str] = {
     # finished one is what makes "what did we deliver last quarter" answerable. A clock
     # cutoff here would delete the delivered half of the very question this table was added
     # for. A source that stops exporting leaves stale rows, and `observed_at` is how a
-    # reading says so rather than how a sweep decides.
+    # reading says so rather than how a *clock* decides.
+    #
+    # Something does dispose of these rows, and this register is where a reader comes to find that
+    # out: `commitment_sync.sweep_withdrawn` deletes what a **snapshot** source stopped exporting,
+    # on the same pass that mirrored it. That is convergence rather than retention — it is decided
+    # by the source's own answer, not by an age — which is why the row still belongs on this side
+    # of the register, and why saying nothing about it left this entry reading as "nothing bounds
+    # this table".
     "commitments": (
         "refused: a mirror that converges rather than accumulating, bounded by the size of "
-        "the portfolio it reflects. Staleness is reported by `observed_at`, not pruned"
+        "the portfolio it reflects and swept down by `commitment_sync.sweep_withdrawn` where "
+        "the source is a snapshot. Staleness is reported by `observed_at`, not pruned on a clock"
     ),
     # Considered for pruning and refused, because the two registers disagreed and one of them
     # had to be wrong. A settled request names who asked somebody to run, review or deliver
@@ -1017,8 +1025,15 @@ async def _prune_checkpoints(
     **A malformed `ts` fails this pass loudly, and that is the answer rather than an oversight.**
     The thread query casts `checkpoint->>'ts'` to `timestamptz`, and Postgres has no `TRY_CAST` — a
     checkpoint payload whose `ts` is missing or unparseable raises, the activity fails, and Temporal
-    surfaces it. Two things make that the right failure. `checkpoints` is last in `_PRUNABLE` and
-    every earlier table commits in its own statement, so the pass keeps the disposal it already did.
+    surfaces it. Two things make that the right failure. Every table ahead of `checkpoints` in
+    `_PRUNABLE` commits in its own statement, so the pass keeps the disposal it already did — and
+    "ahead of" is the whole claim, because `checkpoints` is *not* last. `session_owners` is, on
+    purpose, and its own entry says so forty lines up: it is the only way back to a session's rows,
+    so it may go only once every table holding them has had its turn. This sentence used to say
+    `checkpoints` was last, which made two comments in one module disagree about the order the
+    module depends on, and left the next reader inserting a table taking a false invariant from
+    whichever of them read as the more detailed. What this argument actually needs is only that the
+    disposal already done has committed, which stays true however the list grows.
     And swallowing the error would turn a data-disposal job that *cannot run* into one that reports
     success while a table grows — the exact reading `sessions_deferred` and `threads_deferred` exist
     to prevent. No guard is written for it because none has been needed: `ts` is a field of

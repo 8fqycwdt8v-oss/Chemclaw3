@@ -28,6 +28,18 @@ about the run; a database that cannot take it must not also cost the corpus the 
 mapped cleanly, so `record_refusals` logs and returns rather than raising. The reader is the
 opposite half of the same rule — it reports that it could not be asked instead of returning an
 empty list, because an unreachable ledger and a clean corpus must not render alike.
+
+**And one row the database will not take costs only itself.** That rule is not implied by the one
+above and used to be contradicted by it: the whole batch was a single `executemany` in a single
+transaction wrapped in a single `except`, so one unstorable character discarded every refusal of
+the chunk and logged it as one warning. The values are sanitised before the write (`_storable`)
+and the write falls back to one row at a time, because these records are already gone from the
+corpus and the cursor has advanced past them — this row is the last answer there is.
+
+**The fallback is for a row, and only a row.** A batch failing because the database is not there
+looks identical at the `except` and is the one case retrying cannot improve: every row is refused
+again, each paying a full connect timeout. That distinction is `record_refusals`' first handler,
+and it is what keeps a ledger write from outlasting the sync activity that is making it.
 """
 
 import logging
@@ -135,30 +147,39 @@ async def record_refusals(source: str, refusals: Mapping[str, str]) -> None:
 
     Never raises. A refusal that cannot be recorded is logged with the reason it could not be, for
     the rule this module's docstring states: the ledger is a side record about the run, and losing
-    it must not also lose the entries that mapped cleanly.
+    it must not also lose the entries that mapped cleanly. A batch that fails on *data* is retried
+    row by row, so what is lost is the row the database refused rather than every row beside it.
+
+    **A batch that fails because there is no database is not retried at all.** The two arrive as
+    one exception from `_write` and they are not the same fault: a poison row will be refused
+    again by a server that is answering, while an absent server refuses *every* row, each at the
+    full `pg_connect_timeout_seconds`. Measured at the shipped defaults, three refusals cost
+    40.2 s that way — 10 s for the batch and 10 s per row — so at `eln_sync_batch_size = 100` the
+    ledger write alone was ~1,010 s inside an activity whose start-to-close is 300. The mechanism
+    written so that one bad row does not cost the batch was costing the whole sync.
     """
     if not refusals:
         return
+    rows = [
+        {"source": source, "entry_id": _storable(entry_id), "reason": _storable(_truncated(reason))}
+        for entry_id, reason in refusals.items()
+    ]
     try:
-        async with db.connection(
-            settings.postgres_dsn, operation="ingest_rejections.record"
-        ) as conn:
-            async with conn.cursor() as cur:
-                # `executemany`, not a loop of `execute`: psycopg pipelines the batch, where the
-                # loop paid one round trip per refused record. A source with a systematically
-                # broken field offers hundreds per chunk, and every one of them was a round trip
-                # inside the sync activity's own start-to-close window.
-                await cur.executemany(
-                    _UPSERT,
-                    [
-                        {"source": source, "entry_id": entry_id, "reason": _truncated(reason)}
-                        for entry_id, reason in refusals.items()
-                    ],
-                )
-                # Once per batch rather than once per row: the bound is on what the table holds,
-                # and every row of this batch is newer than everything it would evict.
-                await cur.execute(_EVICT, {"source": source, "cap": _MAX_ROWS_PER_SOURCE})
-            await conn.commit()
+        await _write(source, rows)
+        return
+    # `ConnectionError` is this system's published "there is no database" (`core.db`), so it is the
+    # one failure the row-by-row retry cannot improve on: the retry re-attempts the *connection*,
+    # not the row.
+    except ConnectionError as exc:
+        logger.warning(
+            "could not record %d ingest rejection(s) for source %r: the database is unreachable "
+            "(%s). Not retried one at a time — that dials an absent server once per row, at the "
+            "connect timeout each, inside the sync activity's own budget",
+            len(rows),
+            source,
+            exc,
+        )
+        return
     # `Exception`, not a list of database errors: the rule this module states is that *nothing*
     # here may cost the corpus an entry, and a list of types is a list somebody has to keep right.
     # `BaseException` stays uncaught, so a cancelled activity is still a cancelled activity.
@@ -166,8 +187,82 @@ async def record_refusals(source: str, refusals: Mapping[str, str]) -> None:
         # `%r` on the source, `%s` on the exception: the first is external text and repr escapes
         # the control characters that would otherwise let an export forge a log line.
         logger.warning(
-            "could not record %d ingest rejection(s) for source %r: %s",
-            len(refusals),
+            "could not record %d ingest rejection(s) for source %r in one batch (%s); retrying "
+            "them one at a time",
+            len(rows),
+            source,
+            exc,
+        )
+    await _write_one_at_a_time(source, rows)
+
+
+async def _write(source: str, rows: list[dict[str, str]]) -> None:
+    """Upsert these ledger rows and re-apply the source's growth bound, in one transaction.
+
+    Raises whatever the database raises — the swallowing rule belongs to `record_refusals`, which
+    reads the failure to decide whether retrying row by row can help at all.
+    """
+    async with db.connection(settings.postgres_dsn, operation="ingest_rejections.record") as conn:
+        async with conn.cursor() as cur:
+            # `executemany`, not a loop of `execute`: psycopg pipelines the batch, where the loop
+            # paid one round trip per refused record. A source with a systematically broken field
+            # offers hundreds per chunk, and every one of them was a round trip inside the sync
+            # activity's own start-to-close window.
+            await cur.executemany(_UPSERT, rows)
+            # Once per batch rather than once per row: the bound is on what the table holds,
+            # and every row of this batch is newer than everything it would evict.
+            await cur.execute(_EVICT, {"source": source, "cap": _MAX_ROWS_PER_SOURCE})
+        await conn.commit()
+
+
+async def _write_one_at_a_time(source: str, rows: list[dict[str, str]]) -> None:
+    """Upsert each row in its own transaction, over **one** connection, then bound the table once.
+
+    **One bad row may not cost the batch**, which is what a single `executemany` in a single
+    transaction made it do. `_storable` knows the two ways a value reaches here unwritable; the
+    database knows more — an entry id past the primary key's index-row limit is one, and no
+    rewriting of it would leave it the same id. So this is the isolation
+    `ingest/documents/sync.py::_reembed_individually` and `ingest/labels/enrich.py::_batch` already
+    use for the same reason, and it matters more here than in either: these records are already
+    gone from the corpus and the cursor has advanced past them, so this row is the last answer to
+    "why is there no such record".
+
+    **One connection, not one per row.** A borrowed connection per row made the cost of this path
+    a connect handshake per refusal — and, against a database that had just stopped answering, a
+    full connect timeout per refusal. The isolation the fallback needs is per *transaction*, which
+    is what the rollback below gives; the connection is shared because the rows have nothing to
+    isolate from each other. The eviction runs once at the end rather than per row, for the reason
+    `_write` runs it once: the bound is on what the table holds.
+
+    Never raises, on the same rule `record_refusals` follows — its own connection failing is the
+    same fact the batch's failure already was, and it is reported rather than re-thrown.
+    """
+    try:
+        async with db.connection(
+            settings.postgres_dsn, operation="ingest_rejections.record"
+        ) as conn:
+            for row in rows:
+                try:
+                    async with conn.cursor() as cur:
+                        await cur.execute(_UPSERT, row)
+                    await conn.commit()
+                except Exception as exc:
+                    # The failed statement aborted this transaction; without the rollback every
+                    # remaining row fails on it instead of on its own merits.
+                    await conn.rollback()
+                    logger.warning(
+                        "could not record the ingest rejection of entry %r for source %r: %s",
+                        row["entry_id"],
+                        source,
+                        exc,
+                    )
+            async with conn.cursor() as cur:
+                await cur.execute(_EVICT, {"source": source, "cap": _MAX_ROWS_PER_SOURCE})
+            await conn.commit()
+    except Exception as exc:
+        logger.warning(
+            "could not record %d ingest rejection(s) for source %r one at a time (%s)",
+            len(rows),
             source,
             exc,
         )
@@ -247,3 +342,27 @@ def _truncated(reason: str) -> str:
     if len(reason) <= _MAX_REASON_CHARS:
         return reason
     return reason[:_MAX_REASON_CHARS] + " … (message truncated)"
+
+
+def _storable(text: str) -> str:
+    r"""The text with the two things a UTF-8 database cannot hold taken out of it.
+
+    Both arrive here as ordinary external data rather than as edge cases. A NUL byte anywhere in an
+    ELN's free text reaches this module inside `str(exc)` — a `ValidationError` renders the
+    offending `input_value=` verbatim — and Postgres refuses a NUL in a `text` value outright. A
+    lone surrogate arrives the same way from a JSON export with a truncated `\\u` escape, and
+    psycopg refuses it one step earlier, when it encodes the parameter. `entry_id` is subject to
+    both: it is whatever the source keys its rows on, validated `min_length=1` and nothing more.
+
+    **This module sanitises where `ingest/eln/records.py` refuses, and the asymmetry is the point.**
+    A record carrying a byte the corpus cannot store is refused, because a transcription is what
+    the source said and quietly deleting a chemist's characters is the mistake
+    `record._without_wikilinks` names. A *rejection* is the record of that refusal, and it is the
+    last thing standing between a chemist and "I have no such record": it has nowhere left to
+    refuse to, so it keeps as much of the value as the database can hold and drops the rest. That
+    trade includes the key — a row filed under the closest spelling that can be stored answers the
+    question, and no row answers nothing.
+    """
+    # `errors="replace"` rather than `"ignore"`: a lone surrogate becomes a visible `?` in the
+    # stored reason, so a reader sees that something was there rather than a seamless gap.
+    return text.replace("\x00", "").encode("utf-8", "replace").decode("utf-8")

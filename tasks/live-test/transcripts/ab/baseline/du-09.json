@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "du-09",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The stability pull for lot 42 is due from QC in two weeks and I keep forgetting to chase it. Can you hold that open and tell me when it lands?",
+    "expects_tools": [
+      "request_external_input"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "that the system will email, message or notify anyone outside it",
+      "a result, timepoint or specification for the pull",
+      "that the request has been accepted, scheduled or acknowledged by QC"
+    ],
+    "direction": "A held-open question is exactly what this is for, and the answer should be precise about what it does and does not do. It raises a durable request routed to QC with the deadline the asker gave and the reason in their words, and that request survives the conversation ending — which is the property worth stating, because the whole complaint was about forgetting. What it must not imply is delivery: nothing here reaches a person outside this system, so the request appears in the inbox of whoever is entitled and is chased on a timer inside it. It also has no idea whether QC has seen it. An answer that says \"I have notified QC\" is wrong in a way that matters, because the asker will then stop chasing.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-09",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The stability pull for lot 42 is due from QC in two weeks and I keep forgetting to chase it. Can you hold that open and tell me when it lands?",
+    "profile": "no-tools",
+    "answer": "I appreciate you thinking of me, but I need to be direct: **I can't do this for me**. I have no ability to:\n\n- Store reminders or tasks between conversations\n- Monitor when data arrives in your system\n- Alert you at a future time\n- Access or track your QC submissions\n\nEach conversation I have starts fresh with no memory of previous ones. I'm also a chemistry knowledge assistant, not a project management or monitoring tool.\n\n**What you actually need:**\n\n1. **Set a calendar reminder** on your own system (Outlook, Google Calendar, etc.) for when the stability pull is due back\n2. **Use your lab's ELN/LIMS system** if it has notification features for incoming results\n3. **Ask your QC team directly** if they can flag lot 42 when the results are ready\n4. **Create a ticket in your project management tool** (Jira, Azure DevOps, etc.) if your organization uses one\n\nIf you want to share the stability data with me *after* it lands, I'm happy to help you interpret the results or discuss what they mean for your project.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 4.21,
+    "event_counts": {
+      "token": 11,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "017baad431c34d34922f8824da5ca6a9",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

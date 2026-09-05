@@ -143,9 +143,66 @@ def test_a_push_back_stream_whose_tailer_dies_ends_in_an_error_event(
     assert [event["type"] for event in events] == ["job_completed", "error"]
     assert events[-1]["code"] == "storage_unavailable"
     assert events[-1]["retryable"] is True, "a database outage is the retryable failure"
+    # The join key, on the one error a chemist sees when the push-back channel dies. The turn
+    # route's four events were swept onto `get_current_correlation_id()`; this one was missed, so
+    # a chemist asked to quote an id had nothing to quote while the response header carried one.
+    assert events[-1]["correlation_id"], (
+        "the push-back stream's error carries no correlation id a chemist could quote"
+    )
     assert METRICS.render() != before, "the outage was invisible to chemclaw_db_unavailable_total"
     # The stream's admission slot comes back, as it already did — this must not regress.
     assert app.state.event_streams == {}
+
+
+def test_each_push_back_tailer_polls_on_an_interval_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """200 idle tabs on one pod must not arrive at the pool as one synchronised burst.
+
+    `stream_new_events` sleeps a constant `session_event_poll_seconds`, and a pod holds up to
+    `service_max_event_streams_total` (200) tailers whose clients are restarted together by a pod
+    roll, a deploy, or a floor of chemists reconnecting. With no spread, two tailers that once
+    coincided stay coincident for the pod's life. Measured on the shipped numbers against a live
+    database with nothing else running, 200 streams over 10 s and each stream's *first* poll
+    excluded (200 tailers created in one tick synchronise by construction, where 200 separate HTTP
+    requests do not): peak **29** waiters on a pool of 8 and a worst poll of 14 ms, against **0**
+    waiters and 5 ms once each stream has its own interval. The wait is paid by whatever needed
+    the store in that window — a turn's `store_tool_result`, a session claim.
+
+    Asserted at the seam the route chooses the interval on, which names where the fix lives: if
+    the spread ever moves into the tailer itself, this test goes red and should move with it.
+    """
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.session_events import SessionEvent
+
+    intervals: list[float] = []
+
+    async def _record(session_id: str, **kwargs: Any) -> AsyncIterator[SessionEvent]:
+        """Record the interval this stream was given, then end it immediately."""
+        intervals.append(float(kwargs.get("poll_seconds", settings.session_event_poll_seconds)))
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(app_module, "stream_new_events", _record)
+
+    with TestClient(_app()) as client:
+        for _ in range(12):
+            session_id = client.post("/sessions").json()["session_id"]
+            _sse_events(client, "GET", f"/sessions/{session_id}/events")
+
+    assert len(intervals) == 12
+    assert len(set(intervals)) == len(intervals), (
+        f"tailers share a poll interval and therefore a phase: {intervals}"
+    )
+    base = settings.session_event_poll_seconds
+    assert max(intervals) - min(intervals) > base * 0.1, (
+        f"the intervals are spread over {max(intervals) - min(intervals):.4f}s of a {base}s "
+        "period — too narrow to pull a synchronised fleet apart"
+    )
+    assert all(base * 0.75 <= interval <= base * 1.25 for interval in intervals), (
+        f"a stream was given {min(intervals)}..{max(intervals)}s against a configured {base}s; the "
+        "spread must not become a second, unstated poll interval"
+    )
 
 
 # --- F5: the in-process turn lease ------------------------------------------------------------
@@ -486,3 +543,97 @@ def test_a_turn_torn_down_in_a_foreign_context_still_unstamps_every_ambient() ->
         await asyncio.create_task(stream.aclose())
 
     asyncio.run(_run())
+
+
+# --- F5: the route's own error events carry the same joins the runner's do ----------------------
+
+
+def test_the_routes_own_error_events_carry_the_correlation_id_the_header_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ErrorEvent.correlation_id` is the join key, and three of four events left it empty.
+
+    Every `ErrorEvent` built in `api/runner.py` passes `ledger.correlation_id`; the three built in
+    the route module passed none and defaulted to `""`. The id was never unavailable there — the
+    observability middleware minted it, stamped it as an ambient and put it on the response
+    header, and `run_turn` adopted the same id for the `turn_costs` row. So the field the contract
+    nominates as the thing to quote in a bug report was blank on exactly the failure a chemist
+    reports, while the row an operator needs sat under the id the header carried.
+
+    Asserted against the header rather than against "non-empty", because the whole value of the
+    field is that it is *the same* id.
+    """
+    monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.05)
+
+    stalling = create_app(
+        graph_factory=_StallingTurn().graph_factory, connector_factory=_no_connectors
+    )
+    with TestClient(stalling) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        with client.stream(
+            "POST", f"/sessions/{session_id}/messages", json={"message": "hi"}
+        ) as res:
+            assert res.status_code == 200
+            header = res.headers["X-Chemclaw-Correlation-Id"]
+            events = [
+                json.loads(line[len("data:") :].strip())
+                for line in res.iter_lines()
+                if line.startswith("data:")
+            ]
+
+    timeout = [event for event in events if event.get("code") == "turn_timeout"]
+    assert timeout, f"the turn did not time out: {events}"
+    assert timeout[0]["correlation_id"] == header, (
+        "the timeout event carries "
+        f"{timeout[0]['correlation_id']!r} while the header and `turn_costs` carry {header!r}"
+    )
+
+
+def test_a_shed_turn_and_a_spent_budget_do_not_share_one_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two populations with opposite remedies must not arrive under one `ErrorCode`.
+
+    `ErrorCode` is documented as closed and semantic — "each member is a *different thing for the
+    user to do*". The admission shed (*the process had no permit within
+    `service_turn_admission_timeout_seconds`*) emitted `budget_exhausted` with `retryable=True`,
+    and the spent budget emitted the same code with `retryable=False`. A surface switching on the
+    code — the documented way to choose the next step — could not tell "we are busy, retry in a
+    moment" from "your budget is gone, stop retrying", and a retry loop keyed on it either hammers
+    a saturated pod or gives up on a transient one.
+
+    `retryable` is unchanged on both, so a client keyed on that field alone sees exactly what it
+    saw before; what changes is that the code now names the same condition its own message does.
+    """
+    monkeypatch.setattr(settings, "service_max_concurrent_turns", 1)
+    monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.05)
+
+    async def _run() -> list[dict[str, Any]]:
+        app = create_app(
+            graph_factory=_StallingTurn().graph_factory, connector_factory=_no_connectors
+        )
+        async with asgi_client(app, timeout=10.0) as client:
+            first_id = (await client.post("/sessions")).json()["session_id"]
+            second_id = (await client.post("/sessions")).json()["session_id"]
+            holder = asyncio.create_task(
+                client.post(f"/sessions/{first_id}/messages", json={"message": "hold"})
+            )
+            await asyncio.sleep(0.2)  # the holder takes the one permit
+            shed = await client.post(f"/sessions/{second_id}/messages", json={"message": "shed"})
+            holder.cancel()
+            return [
+                json.loads(line[len("data:") :].strip())
+                for line in shed.text.splitlines()
+                if line.startswith("data:")
+            ]
+
+    monkeypatch.setattr(settings, "service_turn_timeout_seconds", 5.0)
+    events = asyncio.run(_run())
+
+    errors = [event for event in events if event.get("type") == "error"]
+    assert errors, f"the second turn was not shed: {events}"
+    assert errors[-1]["code"] == "at_capacity", (
+        f"an admission shed reached the client as {errors[-1]['code']!r}, the same code a spent "
+        "budget uses — with the opposite remedy"
+    )
+    assert errors[-1]["retryable"] is True

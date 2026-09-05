@@ -38,6 +38,7 @@ from chemclaw.agent.compaction import (
     ClearOlderToolResultsEdit,
     KeepLastConversationGroupsEdit,
     RecordContextCompaction,
+    cited_note_ids,
     context_compaction_middleware,
     newest_batch_size,
 )
@@ -1053,3 +1054,88 @@ def test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged() -> None:
         )
     finally:
         _prefix_var.reset(token)
+
+
+# --- a cleared sweep still names its sources ---------------------------------------------------
+
+
+def test_a_cleared_evidence_sweep_leaves_its_citations_behind() -> None:
+    """The bodies are reclaimable; the note ids are what the answer is graded on.
+
+    `ClearToolUsesEdit` is oldest-first, and in a research turn the oldest tool result is the
+    `gather_evidence` sweep — by design the largest payload in the thread, so it is both the first
+    candidate for clearing and the most attractive one. Measured on the shipped configuration, three
+    results at the per-result ceiling are enough to clear it before the model writes its answer.
+
+    Clearing the chunk bodies is right. Clearing the note ids with them is what turns a context
+    saving into a grounding failure: the model is then asked to cite evidence it can no longer see,
+    and the citation gate downstream still grades it against the *recorded* result, so a citation
+    recalled from memory is marked verified. Keeping ~60 tokens of ids is what makes the difference
+    between "read it again" and "reconstruct it".
+    """
+    sweep = (
+        "EvidenceSweep(chunks=[EvidenceChunk(content='"
+        + ("body " * 4000)
+        + "', source_note_id='rxn-suzuki-biaryl', retriever='graph'), "
+        "EvidenceChunk(content='more', source_note_id='playbook-degassing', retriever='graph')])"
+    )
+    messages: list[AnyMessage] = [
+        HumanMessage(content="which conditions held?"),
+        AIMessage(content="", tool_calls=[{"name": "gather_evidence", "args": {}, "id": "c1"}]),
+        ToolMessage(content=sweep, tool_call_id="c1"),
+        AIMessage(content="", tool_calls=[{"name": "expand_note", "args": {}, "id": "c2"}]),
+        ToolMessage(content="x" * 40_000, tool_call_id="c2"),
+        AIMessage(content="", tool_calls=[{"name": "expand_note", "args": {}, "id": "c3"}]),
+        ToolMessage(content="y" * 40_000, tool_call_id="c3"),
+    ]
+    ClearOlderToolResultsEdit(trigger=1_000, keep=2, placeholder=TOOL_RESULT_PLACEHOLDER).apply(
+        messages, count_tokens=count_tokens_approximately
+    )
+
+    [cleared] = [
+        message
+        for message in messages
+        if isinstance(message, ToolMessage) and message.tool_call_id == "c1"
+    ]
+    assert TOOL_RESULT_PLACEHOLDER[:-1] in str(cleared.content), "the sweep should have cleared"
+    assert "rxn-suzuki-biaryl" in str(cleared.content)
+    assert "playbook-degassing" in str(cleared.content)
+    assert "expand_note" in str(cleared.content), "the model needs to be told how to read it again"
+    # And it is still a *reclaim*: the 20 kB of chunk bodies are gone.
+    assert len(str(cleared.content)) < 500
+
+
+def test_a_cleared_result_that_cites_nothing_keeps_the_plain_placeholder() -> None:
+    """No citation line where there are no citations — the placeholder is paid for per result."""
+    messages: list[AnyMessage] = [
+        HumanMessage(content="run it"),
+        AIMessage(
+            content="", tool_calls=[{"name": "compute_reaction_energy", "args": {}, "id": "c1"}]
+        ),
+        ToolMessage(content="z" * 60_000, tool_call_id="c1"),
+        AIMessage(
+            content="", tool_calls=[{"name": "compute_reaction_energy", "args": {}, "id": "c2"}]
+        ),
+        ToolMessage(content="w" * 40_000, tool_call_id="c2"),
+        AIMessage(
+            content="", tool_calls=[{"name": "compute_reaction_energy", "args": {}, "id": "c3"}]
+        ),
+        ToolMessage(content="v" * 40_000, tool_call_id="c3"),
+    ]
+    ClearOlderToolResultsEdit(trigger=1_000, keep=2, placeholder=TOOL_RESULT_PLACEHOLDER).apply(
+        messages, count_tokens=count_tokens_approximately
+    )
+
+    [cleared] = [
+        message
+        for message in messages
+        if isinstance(message, ToolMessage) and message.tool_call_id == "c1"
+    ]
+    assert str(cleared.content) == TOOL_RESULT_PLACEHOLDER
+
+
+def test_the_citation_reader_deduplicates_and_keeps_first_seen_order() -> None:
+    """Asserted on the function rather than the rendered string, so formatting stays free."""
+    content = "source_note_id='b-note' ... source_note_id='a-note' ... source_note_id='b-note'"
+    assert cited_note_ids(content) == ["b-note", "a-note"]
+    assert cited_note_ids("nothing here") == []

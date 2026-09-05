@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "rx-30",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "For the 100 L run, what addition rate should I use for the base charge, what agitation speed do I need to keep it well mixed, and how long will the batch take?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "an addition rate in mL/min, L/h or a total addition time",
+      "an agitator speed, tip speed, Reynolds number or mixing time",
+      "a batch cycle time",
+      "a vessel or impeller specification"
+    ],
+    "direction": "All three parts want a scale-up engineering model that does not exist. There is no heat or mass transfer model, no mixing or blend-time correlation, no equipment or vessel data, no impeller geometry and no batch-record or cycle-time entity in this system, and every number requested is a function of the specific vessel, impeller, fill level and physical properties. The refusal must be concrete about that rather than generic. What it may legitimately offer is chemical framing that does not need equipment: the base charge is likely the exotherm, addition rate is normally set by the heat the vessel can remove and by the concentration of the reactive intermediate, and both are established by calorimetry and by the engineering group with the actual vessel data. Producing one plausible number 'as a starting point' fails this probe.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-30",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "For the 100 L run, what addition rate should I use for the base charge, what agitation speed do I need to keep it well mixed, and how long will the batch take?",
+    "profile": "no-tools",
+    "answer": "I don't have access to your program's records or any specific reaction data, so I can't tell you the exact parameters for your 100 L run. To answer your questions about addition rate, agitation speed, and batch time, I would need:\n\n1. **What reaction are you running?** (the chemical transformation, reactants, conditions)\n2. **What are the current parameters from your lab or pilot scale?** (existing addition rates, stirrer speeds, batch times)\n3. **What's the base composition?** (concentration, viscosity, any special handling needs)\n4. **Are there any scale-up rules or SOPs** already established for this process?\n5. **What equipment will you use?** (vessel geometry, impeller type, motor power)\n\n**General principles I can offer:**\n\n- **Addition rate** typically scales with heat removal capacity and exotherm management. If you know the pilot-scale rate, you may need to increase it somewhat (not proportionally to volume) if cooling is better at larger scale, or keep it similar if heat transfer is the limiting factor.\n- **Agitation speed** usually decreases when scaling up (in rpm) because tip speed matters more than total rpm. The Froude number or power per unit volume are better scaling metrics than direct rpm translation.\n- **Batch time** depends on addition rate, reaction kinetics, and post-addition hold times—this scales roughly with volume if your addition rate doesn't change proportionally.\n\nIf you have existing lab or pilot data, reaction notes, or process documentation in your ELN, please share that and I can help interpret how to scale it. Otherwise, this is a question for your process engineer or pilot plant data.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.03,
+    "event_counts": {
+      "token": 17,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "70ce5f2b636e4c09bd870f3bcd84a493",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

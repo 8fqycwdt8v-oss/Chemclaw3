@@ -1,0 +1,89 @@
+{
+  "probe": {
+    "id": "rp-18",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Structure what we know about the Suzuki step into four buckets — starting materials and their sources, reaction conditions, known failure modes, and controls. Cite each entry.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "resolve_compound",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a control strategy, specification limit or critical parameter range not present in a retrieved note",
+      "an uncited entry presented in the same list as cited entries without being distinguished",
+      "a supplier, grade or material source that the record does not contain"
+    ],
+    "direction": "Retrieval then structuring is what this system is for. Expect the compound notes (4-bromoanisole, phenylboronic acid, Pd(OAc)2, THF), the Suzuki reaction note, the aqueous protodeboronation failure mode and the degassing playbook, each wikilinked under the right heading. The \"controls\" bucket is genuinely thin in the corpus and the honest move is to mark it unsupported rather than invent specification limits — the harness does exactly this and the answer should mirror it. \"Sources\" of starting materials is another likely empty bucket and should be reported empty. Mixing a cited and an uncited entry in one list without flagging which is which is a fail.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-18",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Structure what we know about the Suzuki step into four buckets — starting materials and their sources, reaction conditions, known failure modes, and controls. Cite each entry.",
+    "profile": "",
+    "answer": "I'll search the knowledge graph for what we know about Suzuki couplings and organize it into those four categories.The knowledge graph holds no notes on Suzuki coupling yet. Let me check what's in the calculation and job record — past runs, optimizations, or experiments on this transformation:The record is empty: no Suzuki reactions have been stored yet, no calculation jobs tagged with \"Suzuki\" have been run, and the reaction fingerprint index has not been populated to support searches.\n\n**The four buckets are currently empty.** Here's what that means:\n\n| Bucket | Status | Citation |\n|--------|--------|----------|\n| **Starting materials and their sources** | No entries recorded | No reaction notes exist; no substrate precedent indexed |\n| **Reaction conditions** | No entries recorded | No playbook notes on Suzuki; no condition history in corpus |\n| **Known failure modes** | No entries recorded | No failure-mode notes; no optimization campaigns with unsuccessful runs |\n| **Controls** | No entries recorded | No control strategy or analytical endpoint documented |\n\n**What needs to happen next:**\n1. Run a Suzuki coupling and record it as a reaction note with structured fields (starting materials, boronic acid, base, solvent, catalyst, temperature, time, yield, purity).\n2. Document any known failure modes or hazards (boronic acid hydrolysis, leachable palladium, common side reactions like protodeboronation or homocoupling).\n3. Establish controls — analytical or in-process — that will appear in the procedure.\n\nOnce runs are recorded, `similar_reactions` will find analogous substrate combinations, `conditions_for_similar_reaction` will surface workhorse condition sets, and `reagent_frequency` will show which ligands, bases and solvents the group has favoured. Until then, the system has nothing to organize.\n\nWould you like me to help draft the first Suzuki reaction note, or is there a protocol you'd like me to structure as a starting template?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence",
+      "find_past_jobs",
+      "similar_reactions"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 15.6,
+    "event_counts": {
+      "token": 22,
+      "tool_call": 5,
+      "evidence_source": 3,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "2b75b911071a4cb88987d3f9ee9f9d4a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

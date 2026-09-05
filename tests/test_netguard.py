@@ -1,11 +1,13 @@
 """The in-process egress guard: it blocks a non-allowlisted host and permits the declared ones."""
 
+import re
 import socket
 from collections.abc import Iterator
 
 import pytest
 
 from chemclaw.core import netguard
+from chemclaw.core.config import Settings
 
 
 @pytest.fixture(autouse=True)
@@ -76,8 +78,10 @@ def test_the_allowlist_is_derived_from_the_dialled_destinations() -> None:
         llm_fallback_base_url = ""
         postgres_dsn = "postgresql://u:p@pg.internal:5432/db"
         postgres_migration_dsn = ""
+        session_store_dsn = ""
         temporal_address = "temporal.internal:7233"
         calc_server_url = "http://calc.internal:8860/mcp"
+        rxnlabel_server_url = "http://rxnlabel.internal:8865/mcp"
         connector_urls = {"calc": "http://calc-bundle.internal:8815/mcp"}
         entra_required = False
         entra_jwks_endpoint = ""
@@ -93,6 +97,7 @@ def test_the_allowlist_is_derived_from_the_dialled_destinations() -> None:
     assert "pg.internal" in hosts
     assert "temporal.internal" in hosts
     assert "calc.internal" in hosts
+    assert "rxnlabel.internal" in hosts
     assert "calc-bundle.internal" in hosts
     assert "mirror.internal" in hosts
     # **No vendor host is ever on this list, and it used to be** — `derive_allowed` added
@@ -109,9 +114,96 @@ def test_the_allowlist_is_derived_from_the_dialled_destinations() -> None:
         "pg.internal",
         "temporal.internal",
         "calc.internal",
+        "rxnlabel.internal",
         "calc-bundle.internal",
         "mirror.internal",
     }
+
+
+# Every destination-shaped `Settings` field this process is *not* expected to dial, with the
+# reason. A row here is a claim about which process holds the destination, so each names one — and
+# an empty exception list would be a stronger claim than this system can make, because the two
+# below are genuinely somebody else's socket.
+_NOT_DIALLED_BY_A_GUARDED_PROCESS = {
+    "live_probe_base_url": "the live lane dials the front door from `cli/live_probes.py`",
+    "phoenix_base_url": "`cli/phoenix_publish.py` uploads a dataset from an operator's shell",
+}
+
+# What a field naming a destination is called. Anchored on the suffix, because the *kind* of
+# address varies (a URL, a bare `host:port`, a libpq DSN) and only the suffix is common to all of
+# them.
+_DESTINATION_FIELD = re.compile(r"_(url|endpoint|address|dsn)$")
+
+
+def test_every_destination_shaped_setting_is_on_the_allowlist_it_derives() -> None:
+    """The derivation checks itself, rather than being kept in step by whoever reads it.
+
+    `derive_allowed` is a hand-maintained walk over named settings, and its module docstring claims
+    the allowlist "cannot drift from what a legitimate call needs" because it is read off the same
+    settings the process dials with. That is a property of the *list*, not of the mechanism, and it
+    had drifted twice by the time anyone measured it: `session_store_dsn` — the split session
+    database the chart provisions a secret key for — and `rxnlabel_server_url`, the sibling of the
+    `calc_server_url` line directly above it. Both failures are a control refusing a configured,
+    legitimate destination, and both surface as an `OSError` that says nothing about egress: the
+    session store as an outage, the labelling server as "the labelling server is not answering"
+    with a drain that retries forever.
+
+    So the assertion is over `Settings.model_fields` rather than over a list written here: every
+    field whose name ends in a destination word is given a distinct sentinel host, and each must
+    come back on the allowlist or be named above with the process that dials it instead. A setting
+    added next year lands in this test the day it is declared.
+    """
+    hosts = {name: f"{name.replace('_', '-')}.sentinel.example" for name in Settings.model_fields}
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        # The enforced posture, because three of the destinations below are only dialled in it —
+        # and it brings its own guards, which is why the DSNs state a verified sslmode and the
+        # broker names a CA.
+        entra_required=True,
+        entra_tenant_id="t",
+        entra_audience="api://x",
+        harness_enabled=True,
+        temporal_tls_ca="/ca.pem",
+        llm_model="m",
+        llm_base_url=f"https://{hosts['llm_base_url']}/v1",
+        llm_fallback_base_url=f"https://{hosts['llm_fallback_base_url']}/v1",
+        postgres_dsn=f"postgresql://u:p@{hosts['postgres_dsn']}/db?sslmode=verify-full",
+        postgres_migration_dsn=(
+            f"postgresql://u:p@{hosts['postgres_migration_dsn']}/db?sslmode=verify-full"
+        ),
+        session_store_dsn=f"postgresql://u:p@{hosts['session_store_dsn']}/db?sslmode=verify-full",
+        temporal_address=f"{hosts['temporal_address']}:7233",
+        calc_server_url=f"https://{hosts['calc_server_url']}/mcp",
+        rxnlabel_server_url=f"https://{hosts['rxnlabel_server_url']}/mcp",
+        entra_jwks_url=f"https://{hosts['entra_jwks_url']}/keys",
+        otel_enabled=True,
+        otel_endpoint=f"https://{hosts['otel_endpoint']}:4317",
+        vector_store_provider="qdrant",
+        vector_store_url=f"https://{hosts['vector_store_url']}:6333",
+    )
+
+    allowed = netguard.derive_allowed(settings)
+    missing = sorted(
+        name
+        for name in Settings.model_fields
+        if _DESTINATION_FIELD.search(name)
+        and name not in _NOT_DIALLED_BY_A_GUARDED_PROCESS
+        and hosts[name] not in allowed
+    )
+    assert missing == [], (
+        f"{missing} name a destination this process dials and the egress guard would refuse it. "
+        "Add it to `derive_allowed`, or to `_NOT_DIALLED_BY_A_GUARDED_PROCESS` with the process "
+        "that holds the socket."
+    )
+    # The other direction: a row whose field stopped being a destination, or started being dialled
+    # here after all, re-blesses an omission for the next reader.
+    stale = sorted(
+        name
+        for name, host in hosts.items()
+        if name in _NOT_DIALLED_BY_A_GUARDED_PROCESS
+        and (not _DESTINATION_FIELD.search(name) or host in allowed)
+    )
+    assert stale == [], f"{stale} no longer need an exception row"
 
 
 def test_a_connect_to_a_resolved_ip_is_permitted() -> None:

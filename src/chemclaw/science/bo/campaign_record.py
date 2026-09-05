@@ -28,6 +28,8 @@ a store it will not use.
 
 import json
 import logging
+from collections import Counter
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from functools import cache
 from typing import Any, Protocol, runtime_checkable
@@ -35,6 +37,7 @@ from typing import Any, Protocol, runtime_checkable
 import psycopg
 from pydantic import BaseModel, ConfigDict, Field
 
+from chemclaw.core.chem import InvalidSmilesError, require_canonical_smiles
 from chemclaw.core.config import settings
 from chemclaw.core.ids import canonical_text, stable_hash
 from chemclaw.science.bo.problem import (
@@ -70,18 +73,78 @@ _IDENTIFYING_EXCLUSIONS = {"descriptors"}
 _BOUND_DECIMALS = 6
 
 
+def _identity_labels(labels: list[str]) -> dict[str, str]:
+    """Every label of one categorical, mapped to the string the identity payload uses for it.
+
+    **A label list is chemistry when all of it is chemistry, and the decision is the space's.**
+    `canonical_text` folds case, and case is chemistry in a SMILES: `C1CCNCC1` is piperidine,
+    `c1ccncc1` is pyridine, and the two casefold to one string. That is not a corner of the
+    vocabulary, it is the one shipped decision space — `objectives.molecule_library_problem` makes
+    the canonical SMILES *itself* the category label. Measured before the RDKit rule existed: two
+    chemists screening those two libraries got one campaign id, the second was told their campaign
+    was not new, its space overwrote the first's, and `read_campaign_thread` handed whoever resumed
+    either one the other's observations.
+
+    Asking that question **per label** then re-opened the fork the fold exists to close, because a
+    great many lab codes are legal SMILES: `B`, `C`, `N`, `O`, `P`, `S`, `CO`, `CN`, `CS`. Measured,
+    a screen over gas atmospheres `["CO", "N2", "H2"]` and the same space re-emitted as
+    `["co", "n2", "h2"]` were two campaigns with two empty histories, and so were the opaque
+    catalyst codes `["A", "B", "C"]` — while `N2`, `H2` and `A` are not molecules to RDKit at all.
+    One label cannot see the space it is in; the space can, so the space decides, and a list
+    holding one non-structure is a list of names rather than a library.
+
+    **The strict parse, and deliberately not the lenient one `connectors.bo.knowledge._molecule_in`
+    uses on the same question.** That caller asks "should this level be printed as a structure" and
+    errs towards yes, because a wrong yes costs a pair of backticks. Here a wrong yes costs a *split
+    campaign*, so the errors are not interchangeable: a label RDKit reads only a prefix of — a level
+    a chemist named `CN=[N+]=[N-] (2 equiv)`, free-form labels being what they are — is prose
+    describing a molecule rather than a molecule, and must keep folding. Only a string RDKit reads
+    whole is a structure, which is what `require_molecule` means.
+
+    **A reduction that would merge two of the space's own labels is not applied to them.**
+    `structures` and `descriptors` are maps keyed by these labels, so a colliding reduction does not
+    merely lose a distinction: the dict comprehension building the payload **drops an entry**.
+    Measured, `{"L1": "CCO", "l1": "CCN"}` and `{"L1": "c1ccccc1", "l1": "CCN"}` hashed to one
+    campaign, one feature space silently standing in for the other. Only the colliding labels keep
+    their exact spelling, never the whole space: reverting a space wholesale would put the caller's
+    casing back into the identity of every *other* label in it, which is the fork the fold exists to
+    close — `["THF", "thf", "Toluene"]` must still reach the same id as `["thf", "THF", "toluene"]`.
+
+    A raise would be the louder answer and is the wrong one here. `record_suggestion` derives the id
+    outside its own failure handling, so raising would turn a computed suggestion into a failed tool
+    call over a space that is perfectly legal — `CategoricalParameter` asks only that the labels be
+    distinct, and these are.
+    """
+    reduced = _as_structures(labels) or {label: canonical_text(label) for label in labels}
+    collisions = {value for value, count in Counter(reduced.values()).items() if count > 1}
+    return {label: label if value in collisions else value for label, value in reduced.items()}
+
+
+def _as_structures(labels: list[str]) -> dict[str, str] | None:
+    """Every label as its canonical SMILES, or None when even one of them is not a structure."""
+    try:
+        return {label: require_canonical_smiles(label) for label in labels}
+    except InvalidSmilesError:
+        return None
+
+
 def _space_of(parameter: Parameter) -> dict[str, Any]:
     """One parameter as the identity sees it, canonicalised.
 
-    **Names and labels are folded** (`core.ids.canonical_text`), because the caller is a model
-    re-emitting a decision space it read back out of `resume_campaign` — the loop this tool
-    documents, "resume, append the chemist's new result, then ask again". Measured over the ways a
-    model perturbs a value it is copying: reordering parameters and reordering categories were
-    already handled and re-emitting `20` for `20.0` is harmless, but **re-casing a category, a
-    parameter name or an objective name, or a trailing space on any of them, minted a different
-    campaign** — a fresh row with no history, silently, because `record_suggestion` upserts and
-    nothing compares the two. That is strictly worse than the duplicate run the identical defect
-    caused in `_report_id`, which folded for exactly this reason.
+    **Names and labels are reduced**, because the caller is a model re-emitting a decision space it
+    read back out of `resume_campaign` — the loop this tool documents, "resume, append the chemist's
+    new result, then ask again". Measured over the ways a model perturbs a value it is copying:
+    reordering parameters and reordering categories were already handled and re-emitting `20` for
+    `20.0` is harmless, but **re-casing a category, a parameter name or an objective name, or a
+    trailing space on any of them, minted a different campaign** — a fresh row with no history,
+    silently, because `record_suggestion` upserts and nothing compares the two. That is strictly
+    worse than the duplicate run the identical defect caused in `_report_id`, which folded for
+    exactly this reason.
+
+    A name is free text and folds (`core.ids.canonical_text`); a *category label* may be a molecule
+    and is reduced by `_identity_label` instead, which is the same act on a data type where case
+    carries meaning. `_identity_labels` then decides the space as a whole, so a reduction that would
+    merge two of its own labels is not applied to them.
 
     Bounds are rounded to `_BOUND_DECIMALS` on the same argument: a model re-emitting `120.0` as
     `120.00000001` is not widening a search space, and the difference is far below any bound a
@@ -103,47 +166,66 @@ def _space_of(parameter: Parameter) -> dict[str, Any]:
         if dumped.get(bound) is not None:
             dumped[bound] = round(float(dumped[bound]), _BOUND_DECIMALS)
     if isinstance(parameter, CategoricalParameter):
+        labels = _identity_labels(parameter.categories)
         # The set of choices is the space; the order they were typed in is not. `["THF","toluene"]`
         # and `["toluene","THF"]` offer the same experiments and hashed to two campaigns. Sorted
         # here in the *identity* payload only — the problem the surrogate sees keeps the caller's
         # order, because a bare `CategoricalInput` is ordinally encoded and reordering it moves the
         # acquisition optimizer (measured: `equiv` 2.1018 vs 2.0691 on one fixed-seed round). That
         # jitter is far below experimental resolution; a split history is not.
-        dumped["categories"] = sorted(canonical_text(name) for name in parameter.categories)
-        # `structures` is a map *keyed by* those labels, so folding one and not the other would
-        # leave a space whose chemistry is addressed by keys the identity no longer contains.
+        dumped["categories"] = sorted(labels.values())
+        # `structures` and `descriptors` are maps *keyed by* those labels, so both are re-keyed
+        # through the one map rather than reduced a second time: a key the identity no longer
+        # contains addresses nothing, and two reductions of one label set can only ever disagree.
+        # The SMILES themselves are never touched — they are values, and a value that is a
+        # structure is the case `_identity_label` exists for.
         if parameter.structures is not None:
             dumped["structures"] = {
-                canonical_text(label): smiles for label, smiles in parameter.structures.items()
+                labels[label]: smiles for label, smiles in parameter.structures.items()
             }
-    if (
-        isinstance(parameter, CategoricalParameter)
-        and parameter.structures is None
-        and parameter.descriptors is not None
-    ):
-        # Added only when it carries information, by the rule the objectives and constraints keys
-        # already follow: a bare categorical must hash to the payload it hashed to before this
-        # existed, or every recorded campaign over one becomes unreachable.
-        dumped["descriptors"] = {
-            canonical_text(label): row
-            for label, row in parameter.model_dump(mode="json", include={"descriptors"})[
-                "descriptors"
-            ].items()
-        }
+        elif parameter.descriptors is not None:
+            # Added only when it carries information, by the rule the objectives and constraints
+            # keys already follow: a bare categorical must hash to the payload it hashed to before
+            # this existed, or every recorded campaign over one becomes unreachable.
+            dumped["descriptors"] = {
+                labels[label]: row
+                for label, row in parameter.model_dump(mode="json", include={"descriptors"})[
+                    "descriptors"
+                ].items()
+            }
     return dumped
 
 
-def _canonical(constraint: Constraint) -> dict[str, Any]:
+def _canonical(constraint: Constraint, labels: Mapping[str, Mapping[str, str]]) -> dict[str, Any]:
     """One constraint as the identity sees it, in a form the caller's ordering cannot change.
 
     `base + acid <= 3` and `acid + base <= 3` are the same polytope and must be the same campaign.
     Hashing the dump directly made them two, each with an empty history — the same silent fork the
     allowlist above exists to prevent, on the field that comment did not cover.
+
+    `labels` is each categorical parameter's own reduction, keyed by parameter name — see the
+    exclusion branch for why an exclusion cannot derive its own.
     """
     dumped = constraint.model_dump(mode="json")
     if isinstance(constraint, ExcludeConstraint):
+        # The options are category labels, so they carry the parameter's reduction — an exclusion
+        # naming piperidine and one naming pyridine are different campaigns, and over a library
+        # holding both the space alone cannot say so.
+        #
+        # **Re-keyed through the parameter's map, never reduced a second time.** `_identity_labels`
+        # decides per space, and an option list is a *subset* of one: over `["CO", "N2", "H2"]` the
+        # space folds as text while `["CO"]` is a library all by itself, so a second reduction
+        # brings back through the constraint exactly the fork the space no longer has. This is the
+        # rule `_space_of` already applies to `structures` and `descriptors`, for the reason it
+        # states there — two reductions of one label set can only ever disagree.
         dumped["pairs"] = sorted(
-            [canonical_text(name), sorted(canonical_text(option) for option in options)]
+            [
+                canonical_text(name),
+                # `.get(option, option)`: `OptimizationProblem._check_exclusion` refuses an option
+                # the parameter does not have, so the fallback is unreachable for a validated
+                # problem and is here only so a lookup cannot raise on the identity path.
+                sorted(labels.get(name, {}).get(option, option) for option in options),
+            ]
             for name, options in zip(constraint.parameters, constraint.options, strict=True)
         )
         del dumped["parameters"], dumped["options"]
@@ -180,12 +262,14 @@ def campaign_id_for(problem: OptimizationProblem) -> str:
     caller stated them** — see `_space_of`. Constraints are canonicalized so the order the caller
     happened to write a sum in cannot fork a campaign — see `_canonical`.
 
-    **Every model-authored name is folded and every bound rounded** (`_space_of`,
+    **Every model-authored name is reduced and every bound rounded** (`_space_of`,
     `_objective_identity`), because the caller re-types this whole structure from what
     `resume_campaign` handed back and a model re-cases freely. `docs/decisions/` records the
-    measurement; the short form is that `THF` and `thf` were two campaigns with two empty
-    histories. **Existing rows are re-keyed rather than orphaned** — `chemclaw.cli.rekey_campaigns`
-    recomputes the id from each row's stored `problem`, which is why this could change at all.
+    measurement; the short form is that `THF` and `thf` were two campaigns with two empty histories
+    — while `C1CCNCC1` and `c1ccncc1`, piperidine and pyridine, were one campaign with one, which
+    is why a category label is reduced as chemistry rather than as text (`_identity_label`).
+    **Existing rows are re-keyed rather than orphaned** — `chemclaw.cli.rekey_campaigns` recomputes
+    the id from each row's stored `problem`, which is why this could change at all.
 
     **The parameter list and each parameter's categories are canonicalized for the same reason**,
     which the constraint fix did not extend to them: a space is a set of axes, and the order a
@@ -213,8 +297,15 @@ def campaign_id_for(problem: OptimizationProblem) -> str:
     # A constraint narrows the space, so a constrained problem is a different campaign from the
     # unconstrained one over the same bounds — the runs mean different things.
     if problem.constraints:
+        # One reduction per categorical parameter, derived once here and handed to every constraint
+        # that names it, so a constraint cannot reduce a label set the space already reduced.
+        labels = {
+            parameter.name: _identity_labels(parameter.categories)
+            for parameter in problem.parameters
+            if isinstance(parameter, CategoricalParameter)
+        }
         identity["constraints"] = sorted(
-            (_canonical(constraint) for constraint in problem.constraints),
+            (_canonical(constraint, labels) for constraint in problem.constraints),
             key=lambda dumped: json.dumps(dumped, sort_keys=True),
         )
     return f"campaign-{stable_hash(identity)}"

@@ -174,6 +174,139 @@ def test_ord_workup_sequence_becomes_ordered_steps() -> None:
     assert [c.smiles for c in quench.components] == ["O"]  # workup reagent linked to its step
 
 
+def _ord_multiproduct(*products: dict[str, Any]) -> OrdReaction:
+    """One ORD reaction whose outcome carries the given products, mapped through the adapter."""
+    payload = {
+        "reaction_id": "ord-multi",
+        "inputs": {
+            "a": {
+                "components": [
+                    {
+                        "identifiers": [{"type": "SMILES", "value": "CCO"}],
+                        "reaction_role": "REACTANT",
+                    }
+                ]
+            }
+        },
+        "outcomes": [{"products": list(products)}],
+        "notes": {"procedure_details": "Stir."},
+    }
+    return OrdJsonAdapter().map_to_ord(
+        RawEntry(entry_id="ord-multi", created_at=_EPOCH, payload=payload)
+    )
+
+
+def _ord_product(
+    smiles: str,
+    *,
+    yield_percent: float | None = None,
+    purity_percent: float | None = None,
+    desired: bool | None = None,
+) -> dict[str, Any]:
+    """An ORD `ProductCompound` carrying the measurements and desired-product marking given."""
+    measurements: list[dict[str, Any]] = []
+    if yield_percent is not None:
+        measurements.append({"type": "YIELD", "percentage": {"value": yield_percent}})
+    if purity_percent is not None:
+        measurements.append({"type": "PURITY", "percentage": {"value": purity_percent}})
+    product: dict[str, Any] = {
+        "identifiers": [{"type": "SMILES", "value": smiles}],
+        "measurements": measurements,
+    }
+    if desired is not None:
+        product["is_desired_product"] = desired
+    return product
+
+
+def test_the_headline_yield_is_the_products_the_source_marked_desired() -> None:
+    """A by-product listed first must not become the reaction's yield (D-2026-09-04).
+
+    The defect measured: `_outcomes` took the *first* product that stated a YIELD and recorded it as
+    the reaction's, so an ORD record listing the des-ethyl by-product at 12% ahead of the desired
+    ester at 85% transcribed 12% — into `conditions.yield_percent`, the number every comparison
+    renders, and into the body's `- yield:` bullet. `record.py::_principal_product` already refuses
+    to *name* a compound in exactly this situation; the number had no such guard, so the record
+    named no product while confidently asserting one product's figure.
+
+    ORD marks the answer itself. `ProductCompound.is_desired_product` is the source's own
+    statement about which compound the run was for, and this adapter ignored the field entirely.
+    Reading it is a transcription; picking by array position is an inference, and a wrong one is
+    worse than none because it looks right.
+
+    The three fallbacks are asserted beside it because a rule with no honest default is a guess with
+    extra steps: unmarked with several yields is `None`, unmarked with exactly one yield keeps it,
+    and one product is unambiguous by construction.
+    """
+    by_product = _ord_product("CC=O", yield_percent=12.0, purity_percent=90.0, desired=False)
+    desired = _ord_product("CC(=O)OCC", yield_percent=85.0, purity_percent=99.0, desired=True)
+
+    marked = _ord_multiproduct(by_product, desired)
+    assert marked.yield_percent == 85.0, "the by-product listed first became the reaction's yield"
+    assert marked.purity_percent == 99.0, "purity must describe the same compound as the yield"
+    assert [c.smiles for c in marked.outcomes] == ["CC=O", "CC(=O)OCC"], (
+        "both products stay in the record; only the headline figures are chosen"
+    )
+
+    unmarked = _ord_multiproduct(
+        _ord_product("CC=O", yield_percent=12.0),
+        _ord_product("CC(=O)OCC", yield_percent=85.0),
+    )
+    assert unmarked.yield_percent is None, "with nothing marked, a positional guess is not a yield"
+
+    one_yield = _ord_multiproduct(
+        _ord_product("CC=O"),
+        _ord_product("CC(=O)OCC", yield_percent=85.0, purity_percent=99.0),
+    )
+    assert (one_yield.yield_percent, one_yield.purity_percent) == (85.0, 99.0)
+
+    single = _ord_multiproduct(_ord_product("CC(=O)OCC", yield_percent=85.0))
+    assert single.yield_percent == 85.0
+
+    # Several marked desired: the source contradicts itself, so it has stated nothing this can
+    # read, and falling through to the measurement count would put the positional pick back. This
+    # branch was the one nothing held — mutating it to `return marked[0]` survived every test in
+    # the covering files, and it is the branch that keeps a wrong number out of a chemist's
+    # precedent, because a contradicted marking still *looks* like the source having chosen.
+    contradicted = _ord_multiproduct(
+        _ord_product("CC=O", yield_percent=12.0, desired=True),
+        _ord_product("CC(=O)OCC", yield_percent=85.0, desired=True),
+    )
+    assert contradicted.yield_percent is None, (
+        "two products marked desired is the source contradicting itself, not a vote the first wins"
+    )
+
+
+def test_a_multi_product_record_the_source_measured_once_keeps_that_measurement() -> None:
+    """The screen is *being measured*, not being measured by YIELD.
+
+    `_headline_product`'s own rule is "exactly one product stating a measurement — the others are
+    by-products the source did not measure, so there is still only one candidate". Screening on
+    YIELD alone made that argument false for the record that states only a PURITY: two products,
+    one of them carrying 99.2% and no yield anywhere, and the transcription stored nothing at all —
+    `conditions.purity_percent` NULL and the body's `- purity:` bullet gone, for a number a chemist
+    had recorded.
+
+    The pair still describes one compound, which is the property the rule exists for: with two
+    products each measured a different way, no single product is the candidate and both figures
+    stay `None` rather than being assembled from two compounds.
+    """
+    one_measured = _ord_multiproduct(
+        _ord_product("CC=O"),
+        _ord_product("CC(=O)OCC", purity_percent=99.2),
+    )
+    assert (one_measured.yield_percent, one_measured.purity_percent) == (None, 99.2), (
+        "the one product the source measured is the candidate, whichever measurement it states"
+    )
+
+    two_measured = _ord_multiproduct(
+        _ord_product("CC=O", yield_percent=40.0),
+        _ord_product("CC(=O)OCC", purity_percent=99.2),
+    )
+    assert (two_measured.yield_percent, two_measured.purity_percent) == (None, None), (
+        "a yield from one compound and a purity from another is a headline pair describing two"
+    )
+
+
 def test_ord_adapter_tolerates_camelcase_field_names() -> None:
     """protobuf-exported ORD JSON (camelCase) maps identically to snake_case."""
     payload = {

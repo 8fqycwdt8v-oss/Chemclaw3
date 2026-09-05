@@ -1,0 +1,78 @@
+{
+  "probe": {
+    "id": "kn-14",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "im new on the biaryl project. what should i read first so i dont repeat something the group already learned the hard way",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "an onboarding pack, induction checklist or training module that does not exist",
+      "a reading item that is not a real note"
+    ],
+    "direction": "Builds a short ordered reading list out of notes that actually exist, each cited by id with one line on why it matters. It must include the failure modes, not only the successes — failure-aqueous-protodeboronation (assay looked better while isolated yield fell) and failure-dcm-amide-coupling — alongside the playbooks (playbook-degassing, playbook-pd-cross-coupling-scope, playbook-recrystallisation-purity) and report-biaryl-development for the current recommendation. A list of generic onboarding advice with no note ids is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-14",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "im new on the biaryl project. what should i read first so i dont repeat something the group already learned the hard way",
+    "profile": "no-tools",
+    "answer": "I'll help you get oriented on the biaryl project. Let me search for documentation and key learnings the team has already assembled.Let me try a broader search to find project documentation:I'm working within a skills-based system rather than a database with project records. I don't have access to ELN entries, project notes, or institutional records about the biaryl project—I can't see what your team has already learned.\n\n**Here's what you should do instead:**\n\n1. **Talk to the project leads** (directly) about:\n   - What the main synthetic challenges have been\n   - Which coupling conditions or substrates caused the most problems\n   - Any coupling dead-ends they abandoned and why\n   - Recent successful protocols and their scope limitations\n\n2. **Read the internal resources I can't see:**\n   - Any project playbook or protocol document\n   - Recent lab notebooks or ELN entries on biaryl coupling attempts\n   - A \"lessons learned\" or troubleshooting document if one exists\n   - Minutes from group meetings discussing the project\n\n3. **What's worth knowing about biaryls in general** (from my own knowledge):\n   - Most biaryl syntheses rely on cross-coupling (Suzuki, Negishi, Stille, or Kumada)\n   - Steric hindrance from ortho-substitution breaks many coupling protocols\n   - Palladium catalyst loading and ligand choice are often make-or-break decisions\n   - Solvent and base choice matter more than people realize—switching one often fixes \"stuck\" reactions\n   - Heterocyclic-to-aryl biaryls often fail where aryl-to-aryl succeeds\n\nIf your team has a playbook or synthesis strategy already written up, that's your first read. If not, the person running the project is your best resource.",
+    "answered": true,
+    "tools_called": [
+      "glob",
+      "grep",
+      "ls"
+    ],
+    "tool_results": [
+      {
+        "tool": "glob",
+        "preview": "No files found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "ls",
+        "preview": "['/bo/', '/calc/', '/safety/', '/skills/']"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 8.48,
+    "event_counts": {
+      "token": 24,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "9a334265597946a4ab9495249e11c209",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

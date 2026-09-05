@@ -36,24 +36,37 @@ import yaml
 from chemclaw.connectors.registry import job_names
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging
+from chemclaw.evals.ab import ABSummary, TaskScores
 from chemclaw.evals.live import (
     Finding,
     PlanGateRun,
     ProbeOutcome,
     degradation_findings,
     load_probes,
+    open_session,
     run_plan_gate_probe,
     run_probes,
     run_turn,
 )
-from chemclaw.evals.live_judge import Judgement, judge_outcome, judgement_from_transcript
+from chemclaw.evals.live_judge import (
+    Judgement,
+    judge_model,
+    judge_outcome,
+    judgement_from_transcript,
+)
 from chemclaw.evals.probe import Probe, ProbeSet
+from chemclaw.evals.tool_utility import by_bucket, paired_tasks
 
 logger = logging.getLogger(__name__)
 
 # The M12 suites, and the probe file each one runs. Declared as a map rather than derived from the
 # suite name so that a suite whose file is missing fails at the lookup with a name a reader can
 # search for, instead of raising `FileNotFoundError` on a path nobody wrote down.
+#: The profile the A/B's control arm talks to. A constant rather than a flag: it names a file this
+#: repository ships (`data/evals/profiles/no-tools.yaml`), and a run that could point the control
+#: arm at any profile would produce reports whose "baseline" means something different each time.
+_AB_BASELINE_PROFILE = "no-tools"
+
 _M12_SUITES: dict[str, str] = {
     "plan-gate": "plan_gate.yaml",
     "degradation": "degradation.yaml",
@@ -362,7 +375,150 @@ async def _run_degradation(args: argparse.Namespace) -> int:
     return 0 if findings and all(finding.ok for finding in findings) else 1
 
 
+def _ab_report(
+    probes: list[Probe],
+    summaries: dict[str, ABSummary],
+    dropped: list[str],
+    tasks: list[TaskScores],
+) -> str:
+    """The A/B's report: what was asked, what each bucket says, and every per-probe delta.
+
+    The per-probe table is not decoration. The aggregate answers "do tools pay on this corpus", and
+    the only thing anybody can *act* on is which questions they paid on — which is the whole reason
+    `compare_tool_utility` scores per task instead of returning a rate.
+    """
+    lines = [
+        "# Tool utility: the same questions with and without tools",
+        "",
+        f"- probes asked in both arms: **{len(probes)}**",
+        f"- pairs scored: **{len(tasks)}**"
+        + (f" ({len(dropped)} dropped ungraded: {', '.join(dropped)})" if dropped else ""),
+        f"- baseline arm: `{_AB_BASELINE_PROFILE}` (`tool_names: []`)",
+        f"- judge: `{judge_model()}`",
+        "",
+        "| set | n | helped | hurt | no effect | net delta |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for name, summary in summaries.items():
+        lines.append(
+            f"| {name} | {len(summary.utilities)} | {len(summary.helped)} | "
+            f"{len(summary.hurt)} | {len(summary.no_effect)} | {summary.net_delta:+.4g} |"
+        )
+    lines += [
+        "",
+        "## Per probe",
+        "",
+        "| probe | bucket | baseline | augmented | delta |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    bucket_of = {probe.id: probe.bucket for probe in probes}
+    for task in tasks:
+        delta = task.augmented - task.baseline
+        lines.append(
+            f"| {task.task_id} | {bucket_of[task.task_id]} | {task.baseline:+.1f} | "
+            f"{task.augmented:+.1f} | {delta:+.1f} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+async def _grade_all(probes: list[Probe], outcomes: list[ProbeOutcome]) -> dict[str, Judgement]:
+    """Grade one arm's outcomes, keyed by probe id — the shape `paired_tasks` pairs on."""
+    by_id = {probe.id: probe for probe in probes}
+    semaphore = asyncio.Semaphore(settings.live_probe_concurrency)
+
+    async def grade(outcome: ProbeOutcome) -> Judgement:
+        async with semaphore:
+            return await judge_outcome(by_id[outcome.probe_id], outcome)
+
+    graded = await asyncio.gather(*(grade(outcome) for outcome in outcomes))
+    return {judgement.probe_id: judgement for judgement in graded}
+
+
+async def _assert_baseline_profile(base_url: str | None) -> None:
+    """Refuse to start unless the front door actually knows the toolless profile.
+
+    Checked before a single model call, because the failure it prevents is the expensive one: a
+    front door started without `data/evals/profiles` on `CHEMCLAW_PROFILES_DIR` would either reject
+    every baseline turn — after the augmented arm had already been paid for — or, worse for a
+    reader, leave a run whose two arms are the same agent. `get_profile` raises on an unknown name,
+    so one session open is the whole probe.
+    """
+    async with _client(base_url) as client:
+        try:
+            await open_session(client, profile=_AB_BASELINE_PROFILE)
+        except httpx.HTTPStatusError as exc:
+            raise SystemExit(
+                f"the front door does not accept profile {_AB_BASELINE_PROFILE!r} ({exc}). "
+                "Start it with CHEMCLAW_PROFILES_DIR=data/profiles:data/evals/profiles — "
+                "the control arm is a profile, and without it the two arms would be one agent."
+            ) from exc
+
+
+async def _run_ab(args: argparse.Namespace) -> int:
+    """Ask each selected probe twice — default agent, then toolless — and compare the verdicts.
+
+    Two arms in sequence rather than interleaved: each is an ordinary `run_probes` over its own
+    transcript directory, so a stored A/B is two ordinary probe runs a reader can inspect with
+    every tool that already reads a transcript, plus one report that pairs them.
+    """
+    probes = [p for p in load_probes(args.probe_dir) if p.bucket in set(args.buckets.split(","))]
+    if args.only:
+        wanted = set(args.only.split(","))
+        probes = [p for p in probes if p.id in wanted or str(p.section) in wanted]
+    if args.limit:
+        probes = probes[: args.limit]
+    if args.sample and args.sample < len(probes):
+        # A systematic sample, not the first N. The corpus is loaded in file order, which is
+        # section order, so `[:N]` would ask N questions from one or two user stories and report
+        # them as a reading of the corpus. A stride spreads the draw across every section for the
+        # same money, and it is reproducible without a seed — two runs of the same `--sample` over
+        # the same corpus ask the same questions, which is what makes a second run a comparison.
+        stride = len(probes) // args.sample
+        probes = probes[::stride][: args.sample]
+    if not probes:
+        logger.error("--buckets/--only/--limit/--sample selected no probes")
+        return 2
+
+    await _assert_baseline_profile(args.base_url)
+    directory = _suite_dir(args.transcript_dir, "ab")
+    logger.info("A/B over %d probes: augmented arm first", len(probes))
+    augmented_outcomes = await run_probes(
+        probes, base_url=args.base_url, transcript_dir=str(directory / "augmented")
+    )
+    logger.info("A/B: baseline arm (%s)", _AB_BASELINE_PROFILE)
+    baseline_outcomes = await run_probes(
+        probes,
+        base_url=args.base_url,
+        transcript_dir=str(directory / "baseline"),
+        profile=_AB_BASELINE_PROFILE,
+    )
+
+    augmented = await _grade_all(probes, augmented_outcomes)
+    baseline = await _grade_all(probes, baseline_outcomes)
+    tasks, dropped = paired_tasks(probes, augmented, baseline)
+    if not tasks:
+        logger.error("every pair was ungraded — the judge failed, not the system under test")
+        return 2
+    summaries = by_bucket(probes, tasks)
+    report = _ab_report(probes, summaries, dropped, tasks)
+    print(report)
+    _write_suite(
+        directory,
+        report,
+        {
+            "tasks": [task.model_dump() for task in tasks],
+            "dropped_ungraded": dropped,
+            "summaries": {name: s.model_dump() for name, s in summaries.items()},
+            "augmented": [j.model_dump() for j in augmented.values()],
+            "baseline": [j.model_dump() for j in baseline.values()],
+        },
+    )
+    return 0
+
+
 async def _main(args: argparse.Namespace) -> int:
+    if args.suite == "ab":
+        return await _run_ab(args)
     if args.suite in _M12_SUITES:
         runner = {
             "plan-gate": _run_plan_gate,
@@ -472,8 +628,29 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--suite",
         default="corpus",
-        choices=["corpus", *sorted(_M12_SUITES)],
-        help="corpus (the 190-question run, default) or one M12 re-validation suite",
+        choices=["corpus", "ab", *sorted(_M12_SUITES)],
+        help=(
+            "corpus (the default single-arm run), ab (the same probes with and without tools), "
+            "or one M12 re-validation suite"
+        ),
+    )
+    parser.add_argument(
+        "--sample",
+        type=_positive,
+        default=0,
+        help=(
+            "--suite ab only: ask a systematic sample of N probes spread across the selected "
+            "buckets, rather than every one of them"
+        ),
+    )
+    parser.add_argument(
+        "--buckets",
+        default="A,C",
+        help=(
+            "--suite ab only: which buckets to compare. The default is the pair the comparison "
+            "is about — A is where tools should win, C is where they are an opportunity to "
+            "fabricate a capability that does not exist."
+        ),
     )
     parser.add_argument("--probe-dir", default=None, help="override the configured probe directory")
     parser.add_argument("--base-url", default=None, help="front door base URL")

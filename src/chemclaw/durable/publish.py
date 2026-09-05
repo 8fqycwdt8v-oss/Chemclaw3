@@ -158,7 +158,11 @@ _BAD_DATA_TYPES = [
     # `expected_status` is stale on every attempt, and retrying would resolve the race by
     # discarding the decision it did not see — which is exactly the sign-off the compare-and-set
     # was added to protect. A retried `abandoned` that silently overwrites somebody's `approved`
-    # is the defect, not the recovery.
+    # is the defect, not the recovery. It was briefly listed twice — once here and once in the
+    # ELN block above, each hunk arguing it alone, the earlier one calling itself "the one conflict
+    # in this list that a retry makes worse" four lines from the entry making the same case for
+    # `RevisionConflict`. Temporal matches by name and did not care; this list is also the register
+    # the suite walks, and a register that says a thing twice says it differently.
     "LayoutError",
     "RevisionConflict",
     "StatusConflict",

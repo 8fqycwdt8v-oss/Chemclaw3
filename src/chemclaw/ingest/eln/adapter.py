@@ -199,12 +199,19 @@ class DatedIngest:
     **Why this is a floor and not a duplicate.** `performed_at` is what makes a series a timeline:
     `memory.progression` orders on it, and `Progression.is_timeline()` refuses to narrate a
     trajectory without it, so a corpus that loses the date loses the whole "what was tried, in what
-    order" question — honestly, but completely. Both file-drop adapters already map
-    `raw.created_at.date()` onto the record and are unaffected by this wrapper. The warehouse
-    adapter maps `performed_at` from its own bound column and has no fallback, so a site whose ELN
-    keeps its conditions in prose — no experiment-date column to bind — produces an entire corpus of
-    undated records while `RawEntry.created_at` sits in every one of them, **required**, because the
-    sync watermark cannot advance without it.
+    order" question — honestly, but completely. The warehouse adapter maps `performed_at` from its
+    own bound column and has no fallback, so a site whose ELN keeps its conditions in prose — no
+    experiment-date column to bind — produces an entire corpus of undated records while
+    `RawEntry.created_at` sits in every one of them, **required**, because the sync watermark cannot
+    advance without it.
+
+    **Both file-drop adapters are served by this wrapper too**, where this docstring used to say
+    they "already map `raw.created_at.date()` onto the record and are unaffected" — treating as
+    fine the exact case the stamp below was added for. Neither shipped export carries an experiment
+    date (the JSON ELN's only date field is `timestamp`, the ORD record's is
+    `provenance.record_created.time`), so each was filling `performed_at` from the entry's write
+    time with `date_source` left at `"stated"`: the right value under a claim nothing could
+    distinguish from a chemist-entered date. They now map no date at all and this supplies both.
 
     So the rule belongs to the seam rather than to any adapter: an adapter *may* know better than
     the entry timestamp and its value always wins; when it does not, the entry's own time is a

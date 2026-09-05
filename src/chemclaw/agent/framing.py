@@ -165,4 +165,26 @@ def frame_untrusted(content: str, *, note_id: str) -> str:
     `framing_envelope_secret` is set. No caller may treat a matching delimiter as proof of
     provenance.
     """
-    return f'<{ENVELOPE_TAG} id="{safe_id(note_id)}">\n{_defang(content)}\n</{ENVELOPE_TAG}>'
+    opening, closing = envelope_delimiters(note_id)
+    return f"{opening}{_defang(content)}{closing}"
+
+
+def envelope_delimiters(note_id: str) -> tuple[str, str]:
+    """The opening and closing halves of the envelope for `note_id`, as a pair.
+
+    The envelope has exactly one spelling and this is it — `frame_untrusted` above is written in
+    terms of this function rather than beside it, because a second literal would be a second thing
+    to keep in step with `ENVELOPE_TAG` and with the agent instructions that name it.
+
+    The pair exists because a result is not always one string. `agent/tool_framing.py` frames a
+    connector result whose content is a *list* of blocks, and the honest statement about that
+    result is still one envelope: the opening delimiter rides on its first text span and the
+    closing one on its last. Only the caller that splits them needs them apart, which is why this
+    returns the halves and `frame_untrusted` returns the whole.
+
+    **Splitting the envelope does not split the neutralisation.** A caller putting these around a
+    span list must still `defang` every span in it, or a middle span could spell the closing
+    delimiter and end the envelope early — which is the forgery `_defang` exists to close and the
+    reason this function does not do the wrapping itself.
+    """
+    return f'<{ENVELOPE_TAG} id="{safe_id(note_id)}">\n', f"\n</{ENVELOPE_TAG}>"

@@ -738,7 +738,7 @@ def test_every_declared_suite_has_its_probe_file() -> None:
 
 
 def test_the_m12_directory_is_invisible_to_the_corpus_run() -> None:
-    """`load_probes` globs one level, and these probes must not join the 190-question corpus.
+    """`load_probes` globs one level, and these probes must not join the corpus run.
 
     A scripted conversation asked as a single question, and a routing key graded against a
     `direction`, would both change what `make live-probes` measures without changing a word of what

@@ -1,0 +1,84 @@
+{
+  "probe": {
+    "id": "kn-01",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We've got the 4-bromoanisole + PhB(OH)2 coupling on the plan for next week. Has anyone here run that before, and what conditions did they end up on?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a yield, catalyst loading or temperature not stated in the retrieved notes",
+      "a literature reference",
+      "a run or campaign that is not in the record"
+    ],
+    "direction": "Cites rxn-suzuki-biaryl by id (and plausibly opt-suzuki-conditions or report-biaryl-development) and gives the conditions actually on file: Pd(OAc)2 at 1.5 mol% Pd, K2CO3 2.0 equiv, THF/water 4:1, 80 °C, 12 h, degassed, 76% isolated. A good answer adds the recorded reason this substrate is awkward — an electron-rich aryl bromide makes oxidative addition the slow step, so it is unusually ligand- and temperature-sensitive. Every number must trace to a cited note.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-01",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We've got the 4-bromoanisole + PhB(OH)2 coupling on the plan for next week. Has anyone here run that before, and what conditions did they end up on?",
+    "profile": "",
+    "answer": "I'll search for precedent on that Suzuki coupling for you.The reaction fingerprint index hasn't been populated yet, so I can't search the internal precedent directly. However, let me gather broader evidence on Suzuki couplings with this substrate class:The knowledge graph and molecular indexes haven't been populated yet on this deployment, so I don't have access to the internal record of what this team has run. The system is currently empty — no reaction notes, no compound records, and no calculation history.\n\nThat said, the 4-bromoanisole + phenylboronic acid coupling is a textbook Suzuki reaction. Without your internal precedent to cite, I can tell you what the literature consensus would be: Pd(PPh₃)₄ or Pd(OAc)₂/PPh₃ in a polar solvent (DMF, THF, or aqueous/aqueous-organic mixtures) with an inorganic base (K₂CO₃ or Cs₂CO₃, typically) at 60–80 °C for 2–24 hours, depending on scale and which ligand/base pair you choose.\n\n**When your data is available**, the right move is:\n\n1. Search the internal runs first with similar_reactions (once the index is built) to see what *this team* actually did on the 4-bromoanisole + phenylboronic acid or closely related aryl bromide/boronic acid pairs\n2. Check the conditions they landed on — temperature, solvent, catalyst, base loading — and whether there are notes on yield, purity, or impurities\n3. From that, propose your conditions and ask whether the next week's run should repeat what worked or explore a variation\n\nRight now: **Do you have internal records on this coupling that I should be working from?** If the system is set up for your team, the indexes should be populated from your ELN or past runs, and I can pull the actual conditions you ended up on rather than giving you generic literature guidance.",
+    "answered": true,
+    "tools_called": [
+      "similar_reactions",
+      "conditions_for_similar_reaction",
+      "gather_evidence",
+      "substructure_matches"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      },
+      {
+        "tool": "conditions_for_similar_reaction",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:conditions_for_similar_reaction\">\n{\n  \"question\": \"conditions for reactions similar to Brc1ccc(OC)cc1.O=B(O)c1ccccc1>>COc1ccc(c2ccccc2)cc1\",\n  \"hits\": [],\n  "
+      },
+      {
+        "tool": "substructure_matches",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"molfp:substructure_matches\">\n{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SE"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 15.95,
+    "event_counts": {
+      "token": 25,
+      "tool_call": 4,
+      "tool_result": 4,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a98c4a2cfd194f59b470a87266eb671a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}
