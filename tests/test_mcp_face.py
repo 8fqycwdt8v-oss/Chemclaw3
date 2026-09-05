@@ -46,7 +46,7 @@ def test_no_state_changing_tool_can_reach_the_face() -> None:
     rather than over the intention.
     """
     assert not set(advertised_tools()) & set(STATE_CHANGING_TOOLS)
-    for name in ("propose_knowledge_note", "request_external_input", "request_development_report"):
+    for name in ("record_knowledge_note", "request_external_input", "request_development_report"):
         assert name not in advertised_tools()
 
 

@@ -56,7 +56,7 @@ def failure_note(
 
     Returns:
         An `agent`-authored note carrying a `contradicts` relation to `refutes`. It is *proposed*,
-        never written: the caller passes it to `chemclaw.kg.pr_gate.propose_note` like any other
+        never written: the caller passes it to `chemclaw.kg.record.record_note` like any other
         note, and a
         human decides whether the graph accepts the correction.
 

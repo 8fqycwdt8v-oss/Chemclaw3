@@ -17,7 +17,7 @@ tools:
   - compute_xtb_energy
   - predict_site_reactivity
   - screen_hazards
-  - propose_knowledge_note
+  - record_knowledge_note
 ---
 
 # Experiment progression
@@ -113,7 +113,7 @@ it exists.
 
 ## 6. Record it through the gate
 
-Write the proposal as an `experiment-proposal` note via `propose_knowledge_note`, so tomorrow's
+Write the proposal as an `experiment-proposal` note via `record_knowledge_note`, so tomorrow's
 session knows what was suggested and can compare it against what actually happened:
 
 - Link the run it responds to with `[[follows:reaction-<id>]]` — that edge is the line of enquiry,

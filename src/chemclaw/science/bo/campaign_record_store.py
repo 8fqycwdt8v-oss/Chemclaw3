@@ -1,7 +1,7 @@
 """Postgres backing for the BO campaign record (`infra/sql/031_bo_campaigns.sql`).
 
 Kept separate from `chemclaw.science.bo.campaign_record` for the reason
-`chemclaw.kg.proposal_store` is kept separate from `proposal`: the module the connector tool
+`chemclaw.kg.record` is kept separate from `proposal`: the module the connector tool
 imports carries no database dependency, so a process running without Postgres never pulls psycopg
 for a store it will not use.
 

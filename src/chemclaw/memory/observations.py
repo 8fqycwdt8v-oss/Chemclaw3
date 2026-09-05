@@ -15,8 +15,10 @@ Two rules make that safe, and both are enforced rather than documented:
 - **An observation's identity is its scope**, so a finding that grows normally updates one row
   instead of minting a near-duplicate every time the corpus does. "Normally" is load-bearing and
   `with_id` spells out the exception and what it costs.
-- **Support is `len(evidence_note_ids)`**, not a counter. A counter can be incremented by something
-  that is not a merged note; a derived count cannot. Migration `025` additionally forbids an
+- **Support is `len(evidence_note_ids)`**, not a counter. A counter can be incremented by anything;
+  a derived count can only hold what the miners put there, and they put only reaction records and
+  the chemist's own `interaction` note (`observation_mining`'s docstring restates why that, rather
+  than "merged", is the property doing the work). Migration `025` additionally forbids an
   observation id from ever appearing in that column, because the dangerous failure is the agent
   retrieving its own observation, counting it as corroboration, and inflating into a PR — a
   self-confirming loop that looks exactly like cross-project evidence from the outside.
@@ -163,7 +165,7 @@ class Observation(BaseModel):
     Not a note and never rendered as one. `evidence_note_ids` are the citations the miner
     counted: `reaction-<id>` references into the **ungated** transcription store for the corpus
     miner (an ELN row is data, not a claim — D-2026-08-25 removed the gate from transcriptions,
-    and the evidence moved with them), and merged `interaction` note ids for the interaction
+    and the evidence moved with them), and the `interaction` note id for the interaction
     miner. This field's docstring said "merged note ids, so an observation always points at
     knowledge a human already signed off" for months after that stopped being true of the larger
     half — which made every promotion PR's "supported by N merged notes" a false statement to the
@@ -195,14 +197,14 @@ class Observation(BaseModel):
         for value in values:
             if value.startswith("observation-"):
                 raise ValueError(
-                    f"{value!r} is an observation; support counts distinct *merged notes* only, or "
+                    f"{value!r} is an observation; support counts distinct *evidence* only, or "
                     "an observation can corroborate itself into a promotion (D-161)"
                 )
         return values
 
     @property
     def support(self) -> int:
-        """How many distinct merged notes back this. Derived — never a stored counter."""
+        """How many distinct pieces of evidence back this. Derived — never a stored counter."""
         return len(self.evidence_note_ids)
 
     def with_id(self) -> "Observation":
@@ -216,7 +218,7 @@ class Observation(BaseModel):
         same one — anchor on something that moves less often than the wording does.
 
         **Scope is a better anchor, not a stable one, and it is worth saying which.**
-        `interaction:<note id>` is genuinely stable: a merged note keeps its id.
+        `interaction:<note id>` is genuinely stable: a note keeps its id.
         `transformation:<smallest member id>` is not. It moves in two cases — a new reaction whose
         id sorts below the current anchor joins the cluster, and two clusters merge because a new
         reaction bridges them under single linkage (`memory.similarity`), after which the merged
@@ -333,7 +335,7 @@ async def record(observations: list[Observation], *, complete: bool) -> int:
 async def open_observations(limit: int | None = None) -> list[Observation]:
     """The best-supported open observations, for the retrieval bucket.
 
-    Ordered by support before recency: an observation backed by six merged notes is worth reading
+    Ordered by support before recency: an observation backed by six records is worth reading
     ahead of last night's single-note one, and the tool's page is small enough that the ordering
     decides what is seen at all.
     """

@@ -1,7 +1,7 @@
 # Chemclaw3
 
 AI agent for pharmaceutical/chemical process R&D: LangGraph conversation orchestration,
-Temporal durable jobs, Agent Skills, and a PR-gated Markdown knowledge graph.
+Temporal durable jobs, Agent Skills, and a Markdown knowledge graph.
 
 **`ARCHITECTURE.md` is the map** — the four layers and what every directory in this
 repository is for. Read it before going looking for something. The original design and
@@ -79,6 +79,6 @@ per-phase status live in `docs/archive/plans/implementation-tickets.md`.
 
 `SECURITY.md` describes the enforced posture (Entra OIDC at the front door, the
 `require_actor` reject-if-absent rule, the single `authorize_trigger` gate, role-scoped
-skills, the audit trail and PR-gate), the `entra_required` enforcement switch, and the
+skills, the audit trail and note provenance), the `entra_required` enforcement switch, and the
 live-infrastructure edges still open. Run shared/exposed deployments only with
 `entra_required=true`.

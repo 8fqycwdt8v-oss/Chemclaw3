@@ -10,16 +10,16 @@ import logging
 
 import pytest
 
-from chemclaw.kg.git_submitter import (
-    GitNoteSubmitter,
+from chemclaw.kg.git_writer import (
+    GitNoteWriter,
     GitRemoteError,
-    GitSubmitError,
+    GitWriteError,
     _for_log,
     _is_auth_failure,
 )
-from chemclaw.kg.submission import NoteFile, NoteSubmission
+from chemclaw.kg.record import NoteFile, NoteWrite
 
-# What each forge actually says when it refuses *this credential*. `GitSubmitError` is in
+# What each forge actually says when it refuses *this credential*. `GitWriteError` is in
 # `durable/publish.py`'s non-retryable list, so classifying one of these as transient retries a
 # push that will never succeed until a human changes a permission — and classifying a throttle as
 # one of these drops the note proposal outright.
@@ -95,7 +95,7 @@ def test_every_forge_in_the_family_has_its_denial_classified(stderr: str) -> Non
 def test_a_fault_that_clears_on_its_own_is_never_classified_as_a_credential(stderr: str) -> None:
     """The other direction, and the reason the list must be wrong in the safe direction.
 
-    A missed phrase costs a retry; a false positive raises `GitSubmitError`, which is non-retryable,
+    A missed phrase costs a retry; a false positive raises `GitWriteError`, which is non-retryable,
     so it *drops* the note proposal — the PR-gate stops proposing while every run reports success.
     Three of these carry a 403 and one carries a 429; none may be read as a credential fact.
     """
@@ -111,15 +111,15 @@ def test_git_stderr_reaches_the_log_bounded_and_the_exception_whole(
     unbounded field is an unbounded stall for every thread logging in the process. The exception
     keeps the whole text: it is raised, caught and read, never scanned under that lock.
     """
-    submitter = GitNoteSubmitter(repo_dir=".", base_branch="main", remote="origin")
+    submitter = GitNoteWriter(repo_dir=".", base_branch="main", remote="origin")
     shouting = "remote: " + ("x" * 200_000)
 
     async def loud(*args: str, cwd: str | None = None) -> tuple[int, str]:
         return 1, shouting
 
-    monkeypatch.setattr(GitNoteSubmitter, "_run", loud)
+    monkeypatch.setattr(GitNoteWriter, "_run", loud)
 
-    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_submitter"):
+    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_writer"):
         with pytest.raises(GitRemoteError) as caught:
             asyncio.run(submitter._git("push", "origin", "note/x", transient=True))
 
@@ -139,15 +139,15 @@ def test_a_long_branch_is_bounded_in_the_log_line_too(
     user's text" — an argument that says nothing about the argument list, and is wrong about the
     stderr as well (`remote:` lines are the remote server's).
     """
-    submitter = GitNoteSubmitter(repo_dir=".", base_branch="main", remote="origin")
+    submitter = GitNoteWriter(repo_dir=".", base_branch="main", remote="origin")
 
     async def failing(*args: str, cwd: str | None = None) -> tuple[int, str]:
         return 1, "fatal: no"
 
-    monkeypatch.setattr(GitNoteSubmitter, "_run", failing)
+    monkeypatch.setattr(GitNoteWriter, "_run", failing)
 
-    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_submitter"):
-        with pytest.raises(GitSubmitError):
+    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_writer"):
+        with pytest.raises(GitWriteError):
             asyncio.run(submitter._git("fetch", "origin", "refs/heads/note/" + "b" * 100_000))
 
     record = next(r for r in caplog.records if getattr(r, "event", "") == "git.failed")
@@ -163,46 +163,50 @@ def test_for_log_says_that_it_cut_rather_than_cutting_silently() -> None:
 
 
 @pytest.mark.parametrize(
-    "branch",
+    "message",
     [
         "",
-        "note/with a space",
-        "note/with\nnewline: forged log line",
-        "note/with\x00null",
-        "note/" + "b" * 300,
-        "note/..",
-        "note/a..b",
-        "/note/leading-slash",
-        "note/trailing.",
-        "note/a.lock",
+        "Add note: x\nforged: log line",
+        "Add note: \x00null",
+        "b" * 256,
     ],
 )
-def test_a_branch_that_is_not_a_ref_is_refused_at_the_model(branch: str) -> None:
+def test_a_commit_message_a_log_record_could_not_survive_is_refused_at_the_model(
+    message: str,
+) -> None:
     """Nothing bounded this field's charset or length before it reached a log record.
 
-    `pr_gate` builds `note/<id>` from a slug `Note.id` already validates — but `proposal_store`
-    rebuilds a `NoteSubmission` from a **database row**, and a submission can be constructed
-    directly. A newline in it forges a log line; an unbounded one stalls every thread behind the
-    redaction filter's regex scan.
+    Inherited verbatim from the branch-name rule this replaces
+    (`D-2026-09-05-the-gate-is-deleted-not-dormant` removed the branch): `git_writer._git`
+    interpolates the message into a log record, so a newline forges a log line and an unbounded one
+    stalls every thread behind the redaction filter's regex scan. `record._build_write` composes it
+    from a `Note.id` this repository validates, so on the shipped path the check is redundant — and
+    it is not redundant against a `NoteWrite` constructed directly, which is the only reason a
+    model-level constraint is the right place for it.
     """
-    with pytest.raises(ValueError, match="not a usable git ref"):
-        NoteSubmission(
-            branch=branch,
+    with pytest.raises(ValueError, match="not usable"):
+        NoteWrite(
             files=[NoteFile(path="knowledge/compound/x.md", content="body\n")],
-            title="t",
-            body="b",
+            message=message,
         )
 
 
 @pytest.mark.parametrize(
-    "branch", ["note/job-crash", "note/bo-reizman_suzuki-a1b2", "note/evil", "note/dash", "main"]
+    "message",
+    [
+        "Add job-result note: job-crash",
+        "Add campaign note: bo-reizman_suzuki-a1b2 with 2 supporting note(s)",
+        "Add compound note: benzene — 1,2-dichloroethane",
+    ],
 )
-def test_the_branches_this_repository_actually_mints_are_accepted(branch: str) -> None:
-    """The constraint is git's rule, not a naming convention — it may not narrow what works."""
-    submission = NoteSubmission(
-        branch=branch,
+def test_the_messages_this_repository_actually_mints_are_accepted(message: str) -> None:
+    """The constraint may not narrow what `_build_write` really composes.
+
+    It bounds control characters and length, and nothing else — the em dash and the parenthesised
+    supporting-note count are both in messages this repository mints today.
+    """
+    write = NoteWrite(
         files=[NoteFile(path="knowledge/compound/x.md", content="body\n")],
-        title="t",
-        body="b",
+        message=message,
     )
-    assert submission.branch == branch
+    assert write.message == message

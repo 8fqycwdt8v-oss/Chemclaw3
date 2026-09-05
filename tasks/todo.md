@@ -1,69 +1,102 @@
-# Task — the reviewer sees what was already decided about this note
+# Task — ungate knowledge, and delete the PR-gate
 
-Follows the WikiSkill review (PR #323) and the owner's two questions: how does an admin avoid
-drowning in a flood of near-identical proposals, and how do local and global stay convergent.
+Carries `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`, which decided the axis and
+explicitly did not claim the code shipped. Owner's call this session, put as a question because the
+ADR did not foresee it: **every `propose_note` caller is knowledge**, so ungating leaves the gate
+with no subject at all. Chosen: ungate everything and delete the gate rather than leave ~2,232
+lines unreachable (`D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`).
 
-## The honest scoping
+## Blast radius, measured
 
-Most of the ideated mechanisms — promotion thresholds on skills, cluster review, supersession of
-local variants, the divergence census — are downstream of a **distiller that does not exist** and
-is blocked on an empty corpus (`make trajectory-census`: 0 sessions, neither arm greenlit). Building
-them now is `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`, which this repository
-deleted 1,442 lines over. They stay recorded, not built.
+- **15 src files** import the gate; **~17 test files** exercise it.
+- 348 files mention it in prose; **11 of 11 eval probe files** grade the agent on gate behaviour.
 
-**One of them is real today**, because the review queue it concerns already exists and already
-carries proposals: `GET /proposals`, `GET /proposals/{id}`, `POST /proposals/{id}/decision`.
+## The write path
 
-**The gap.** A reviewer opening a proposal is shown the note's bytes and nothing about what has
-already been decided about that note. `rejected_version(note_id, content_hash)` refuses a re-proposal
-of *byte-identical* rejected content, so the exact-repeat case is closed — but a **changed**
-re-proposal of a note a colleague already rejected arrives with the prior rejection and its stated
-reason invisible. The reviewer re-derives the judgment, or merges what was already refused. That is
-the largest single ablation in the reviewed framework (+15.0pp for a proposer that sees rejection
-history), and this tree already *retains* the history — `note_proposals.reason`, and
-`durable/retention.py` refuses to prune the table — while nothing reads it back.
+`settings.notes_path` is `note_repo_dir / knowledge_dir` — one location for read and write, so a
+file written there is readable by `load_notes` *immediately*. That is what makes "global the moment
+it is learned" true without a new store.
 
-## Plan
+- [x] 1. `kg/record.py`: `record_note(note, writer, ...)` replaces `pr_gate.propose_note`. Renders
+      the subject note, its dependencies and its retirements; writes them; returns the reference.
+      **Dependencies are written before the subject**, so a note never appears in the graph before
+      what it cites — the invariant that replaces "one PR is one reviewable unit" (D-133).
+- [x] 2. `kg/submission.py` → the write vocabulary: `NoteFile` kept, `NoteSubmission` → `NoteWrite`
+      (no branch/title/body), `NoteSubmitter` → `NoteWriter`. The injection seam stays; tests need it.
+- [x] 3. `kg/git_submitter.py` → `GitNoteWriter`: keep the repo guard, the lock and the error
+      classification; drop the per-note branch, the worktree and the force-push. Commit on the
+      checkout's own branch and push.
+- [x] 4. The 9 call sites: `graph_tools` (x2), `memory_jobs` (x2), `observation_jobs`,
+      `report_workflow` (x2), `backfill_corpus`, `memory/interaction`.
 
-- [x] 1. `ProposalStore.history(note_id, scope)` on the protocol and both backends, oldest-first.
-      Scope is the same actor rule the visibility gate uses, applied to *other people's* versions.
-- [x] 2. `ProposalHistoryEntry` schema — the decision, never the content. `ProposalDetail` gains it.
-- [x] 3. Wire it in `get_note_proposal` under the same reviewer/owner rule as visibility.
-- [x] 4. Tests: oldest-first, the viewed version excluded, a non-reviewer sees only their own prior
-      versions, empty on a first proposal, and that a *changed* re-proposal surfaces the rejection.
-- [x] 5. ADR + ledger + BACKLOG; record the deferred mechanisms with their trigger.
-- [x] 6. `make lint type test` green, Postgres up so the DB-backed tests actually run.
+## The deletions
 
-## No migration
+- [x] 5. `kg/proposal.py`, `kg/proposal_store.py`, `api/routes/proposals.py`,
+      `cli/reconcile_proposals.py`, the `Proposal*` schemas, `_visible_proposal`/`VisibleProposal`,
+      the knowledge-merged webhook. **`_is_reviewer` stays** — `routes/jobs.py` uses it too.
+- [x] 6. Migrations 027/036/058 keep their files with `RETIRED` headers and the tables stay empty,
+      the forward-only rule `D-2026-08-14` already paid for with `audit_anchors`.
+      `durable/retention.py`'s `note_proposals` refusal goes with the reason it stated.
+- [x] 7. Metrics whose subject is gone (`chemclaw_notes_proposed_total` and the proposal-state
+      series), the `proposal_*` settings, and `make proposals-reconcile`.
 
-`note_proposals_note_idx ON note_proposals (note_id, submitted_at DESC)` (migration 027) is already
-exactly the index this query sorts by — checked rather than assumed
-(`D-2026-08-27-an-index-must-match-the-sort-it-serves`).
+## The one real correctness question
+
+- [x] 8. **D-161's support count was "distinct *merged* notes" and there is no merge any more.**
+      `mine_interactions` counts `interaction` notes as support; ungated, those are agent-written
+      with no human step, which is the self-confirming loop migration `025`'s CHECK exists to stop,
+      one level up. Decide and state it: either support counts only human-authored notes, or the
+      thresholds mean something new and `observations.py` says so. **Not a detail to discover
+      while editing** — it is the reason D-161 wrote a CHECK rather than a convention.
+
+## Then
+
+- [x] 9. Tests: delete `test_note_proposals*.py` and `test_pr_gate.py`; rewrite the gate assertions
+      in the other ~14; add the direct-write tests including the dependency-ordering invariant.
+- [x] 10. Probes: 11 files grade gate behaviour. Regrade against what the system now does.
+- [x] 11. Prose: `CLAUDE.md`, `ARCHITECTURE.md`, `SECURITY.md`, package READMEs, the skills that
+      teach the gate, the system prompt and `make prose-validate`.
+- [x] 12. ADR + ledger + BACKLOG; `make lint type test` green with Postgres up.
 
 ## Review
 
-**What shipped.** `ProposalStore.history(note_id, actor)` on the protocol and both backends, returned
-by `GET /proposals/{id}` as `history`. 6 new tests in `test_note_proposals.py` and 1 in
-`test_note_proposals_postgres.py` — the second because the ordering across separate transactions and
-the actor predicate are things only the database decides, and that predicate fails *open*.
+**The fork the deciding ADR had not foreseen, and how it was resolved.** All nine `propose_note`
+callers write knowledge, so ungating did not shrink the gate's subject — it removed it, leaving
+2,232 lines with no caller. That is not a call to make while editing: shipping them dormant is what
+`D-2026-08-15` deleted 1,442 lines over, and deleting throws away tested machinery including #323's
+reviewer history from hours earlier. Put to the owner; answer was delete.
 
-**Two things were reused rather than invented**, both after checking:
-`ProposalSummary` already carries exactly what a history entry is and carries no body, so a
-`ProposalHistoryEntry` would have been the same fields under a second name; and migration 027 already
-indexes `(note_id, submitted_at DESC)`, so there is no migration.
+**Three things the change turned over, each argued rather than assumed:**
 
-**One surprise worth keeping.** The first draft of the HTTP test sent
-`{"state": "rejected", ...}` to the decision route, which takes `{"approved": false, ...}` — the
-route returned 422, the rejection never happened, and the assertion then failed against a
-`superseded` row instead. That is the test catching a wrong assumption about a shape rather than a
-bug, which is the right way round, but it is a reminder that a route's payload is worth reading
-rather than guessing.
+1. **Write order replaces D-133.** A PR merged every file at once; a direct write can be read
+   mid-flight. Dependencies → subject → retirements, each citing the one before it, with the
+   accepted window (a note and its replacement both current) stated against the rejected one (a
+   dangling `superseded-by`).
+2. **The cache is now busted where the gate deliberately did not bust it.** Both correct for their
+   own design — the gate wrote where no reader scanned. The test that asserted "leave the cache
+   alone" now asserts the opposite and keeps both earlier readings in its docstring.
+3. **A regression the suite caught.** The gate's linked worktree had its own index, so staged
+   residue structurally could not reach a note's commit. One shared index removed that guarantee
+   and a plain `git commit` swept the stray in. Fixed in the *code* (path-limited commit and
+   path-limited idempotence check), not in the test.
 
-**The scoping decision is the one to re-check if this is ever extended.** History follows
-`_is_reviewer`, exactly as the listing does. A future "show me every note like this one" would cross
-that boundary by construction and needs the rule restated, not inherited.
+**D-161's anti-feedback rule was restated, not repaired.** `load_notes` now returns agent-written
+notes, so "support counts *merged* notes" would have become the description of a self-confirming
+loop. It is not one: `project_of` admits only reaction records, so support is real experiments plus
+the chemist's own confirmation. The property doing the work was never the merge — it was the kind of
+thing counted, and the merge was a second human step on top of a human act that had already
+happened.
 
-**Verification.** `make lint`, `make type` green. `test_note_proposals` 42 passed,
-`test_note_proposals_postgres` 8 passed (ran rather than skipped — Docker up, Postgres migrated),
-`test_decision_log` / `test_repo_map` / `test_deferred_register` green. Full `make test` reported in
-the commit.
+**What was found only because a validator exists.** `make prose-validate` caught seven stale
+references including one in a *merged* ADR, which must never be edited — the sanctioned remedy is
+`_RETIRED_METRIC_NAMES`, empty until now, and this is its first entry. `test_docstring_paths`
+caught 22 files with dangling module pointers. Neither would have been visible by reading.
+
+**Cost accepted and written down rather than smoothed over**: a wrong machine-written claim is now
+served until contradicted, and a write that dies between two files leaves the first on disk in the
+tree readers scan (bounded by the write order — the survivor is always a dependency).
+
+**Verification.** `make lint`, `make type` (448 files), `make prose-validate`, `make skill-validate`
+green. Full `make test` reported in the commit, with Docker and Postgres up so the DB-backed tests
+run rather than skip — the first run of this change reported 475 skips against a normal 63, which
+was Postgres being down and is exactly the trap `CLAUDE.md` warns about.

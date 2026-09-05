@@ -51,7 +51,7 @@ class TestTheAntiFeedbackRule:
 
     def test_an_observation_may_not_cite_an_observation(self) -> None:
         """Otherwise the agent corroborates itself into a promotion, and it reads as evidence."""
-        with pytest.raises(ValueError, match="merged notes"):
+        with pytest.raises(ValueError, match="distinct \\*evidence\\*"):
             Observation(
                 statement="Acids do badly here.",
                 scope="transformation:x",

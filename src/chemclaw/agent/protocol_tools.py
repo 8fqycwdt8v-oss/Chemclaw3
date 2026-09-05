@@ -197,8 +197,8 @@ async def condense_protocols(protocol_refs: list[str]) -> str:
     if missing and not protocols:
         raise ChemclawError(
             f"none of these references resolved to a protocol: {', '.join(sorted(missing))}. "
-            "A note id that resolves to nothing is often a citation to a note whose PR-gate "
-            "submission has not been merged yet."
+            "A note id that resolves to nothing is a citation to a note that does not exist — "
+            "check the id rather than assuming it is pending."
         )
 
     # The text budget, in the currency the count above cannot express: a count of protocols cannot

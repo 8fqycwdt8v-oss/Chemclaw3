@@ -491,7 +491,7 @@ def test_knowledge_volume_is_mounted_on_every_reading_component() -> None:
 
 
 def test_note_repo_clone_exists_wherever_notes_are_submitted() -> None:
-    """The front door and the background worker both call `propose_note`, so both need a clone."""
+    """The front door and the background worker both call `record_note`, so both need a clone."""
     for template in ("deployment-service.yaml", "deployment-workers.yaml"):
         text = (CHART / "templates" / template).read_text()
         assert 'include "chemclaw.noteRepoInit"' in text, template

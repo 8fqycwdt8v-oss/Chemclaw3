@@ -38,7 +38,7 @@ with workflow.unsafe.imports_passed_through():
 _DECLARED_RETRYABLE = frozenset(
     {
         # `kg.git_submitter.GitRemoteError`: a dead remote, a timed-out git command, a contended
-        # submit lock. The transient half `GitSubmitError` used to cover with one name — which
+        # submit lock. The transient half `GitWriteError` used to cover with one name — which
         # made `note_write_max_attempts` dead for exactly the failures it was configured for.
         "GitRemoteError",
     }
@@ -102,7 +102,7 @@ _BAD_DATA_TYPES = [
     # go unregistered unnoticed.
     "SkillsReadOnlyRefusal",
     "ConnectorJobError",
-    "GitSubmitError",
+    "GitWriteError",
     "CalculationDomainError",
     "ConnectorError",
     "DataSourceError",
@@ -244,7 +244,7 @@ def note_publish_retry() -> RetryPolicy:
     """Bounded retries for a PR-gate note write (config `note_write_max_attempts`).
 
     Shares the bad-data type list so a bad note (`NoteError`, `ValidationError`) or a structural
-    gate refusal (`GitSubmitError` — a mis-pointed checkout, a proposal branch a human pushed to)
+    gate refusal (`GitWriteError` — a mis-pointed checkout, a proposal branch a human pushed to)
     fails fast instead of burning the transient-retry budget. `GitRemoteError` — a dead remote, a
     timed-out command, a contended lock — is the retryable subclass: Temporal matches these names
     exactly, so the subclass's different name is what makes `note_write_max_attempts` real. This

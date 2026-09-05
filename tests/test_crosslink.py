@@ -20,9 +20,8 @@ from chemclaw.ingest.eln.compound import compound_dependencies, compound_note
 from chemclaw.kg.crosslink import calc_ref_index, cited_calculations, notes_for_calculation
 from chemclaw.kg.graph import invalidate_cache
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.record import NoteWrite, WriteOutcome, record_note
 from chemclaw.kg.render import render_note
-from chemclaw.kg.submission import NoteSubmission, SubmissionOutcome
 from chemclaw.kg.validate import validate
 
 _KEY = "xtb.hess@GFN2-xTB+tblite+0.4.0:ab12cd:34ef56"
@@ -30,16 +29,16 @@ _OTHER_KEY = "xtb.opt@GFN2-xTB+tblite+0.4.0:9988aa:112233"
 
 
 class _Capturing:
-    """A `NoteSubmitter` that keeps the submission instead of pushing it."""
+    """A `NoteWriter` that keeps the write instead of committing it."""
 
     def __init__(self) -> None:
         """Start with nothing captured."""
-        self.submission: NoteSubmission | None = None
+        self.captured: NoteWrite | None = None
 
-    async def submit(self, submission: NoteSubmission) -> SubmissionOutcome:
-        """Record the submission and return its branch."""
-        self.submission = submission
-        return SubmissionOutcome(reference=submission.branch)
+    async def write(self, write: NoteWrite) -> WriteOutcome:
+        """Record the write and return a stub commit reference."""
+        self.captured = write
+        return WriteOutcome(reference="commit://1")
 
 
 def test_a_note_may_cite_a_calculation_that_lives_outside_the_graph() -> None:
@@ -114,10 +113,10 @@ def test_the_reverse_lookup_reads_the_note_tree(tmp_path: Path) -> None:
     assert [note.id for note in notes_for_calculation(tmp_path / "knowledge", _KEY)] == ["a"]
 
 
-def test_a_note_and_the_compound_it_links_land_in_one_submission() -> None:
+def test_a_note_and_the_compound_it_links_land_in_one_write() -> None:
     """The actual unblocking change: a reviewable unit is a note *and what it needs*.
 
-    Before this a `NoteSubmission` was one path and one content, which is why a note could never
+    Before this a `NoteWrite` was one path and one content, which is why a note could never
     link a note that did not already exist on the base branch.
     """
 
@@ -131,15 +130,19 @@ def test_a_note_and_the_compound_it_links_land_in_one_submission() -> None:
             body=f"Computed for [[{compound_id(smiles)}]].",
         )
         submitter = _Capturing()
-        await propose_note(
+        await record_note(
             note, submitter, knowledge_dir="knowledge", dependencies=compound_dependencies(note)
         )
 
-        assert submitter.submission is not None
-        paths = [file.path for file in submitter.submission.files]
+        assert submitter.captured is not None
+        paths = [file.path for file in submitter.captured.files]
+        # The compound is written **before** the note that cites it: a reader scanning mid-write
+        # must never meet a note whose `[[wikilink]]` dangles
+        # (`D-2026-09-05-the-gate-is-deleted-not-dormant`). Under the PR-gate both files merged in
+        # one commit, so the order was free and the subject came first.
         assert paths == [
-            "knowledge/job-result/job-1.md",
             f"knowledge/compound/{compound_id(smiles)}.md",
+            "knowledge/job-result/job-1.md",
         ]
 
     asyncio.run(_run())
@@ -162,11 +165,11 @@ def test_that_submission_passes_kg_validate(tmp_path: Path) -> None:
             body=f"Computed for [[{compound_id(smiles)}]].",
         )
         submitter = _Capturing()
-        await propose_note(
+        await record_note(
             note, submitter, knowledge_dir="knowledge", dependencies=compound_dependencies(note)
         )
-        assert submitter.submission is not None
-        for file in submitter.submission.files:
+        assert submitter.captured is not None
+        for file in submitter.captured.files:
             path = tmp_path / file.path
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(file.content, encoding="utf-8")
@@ -204,14 +207,14 @@ def test_a_dependency_is_not_duplicated_however_many_times_it_is_named() -> None
         note = Note(id="n", type="job-result", created_by="agent", body="[[compound-x]]")
         duplicate = compound_note("CCO")
         submitter = _Capturing()
-        await propose_note(
+        await record_note(
             note,
             submitter,
             knowledge_dir="knowledge",
             dependencies=[duplicate, duplicate, note],
         )
-        assert submitter.submission is not None
-        paths = [file.path for file in submitter.submission.files]
+        assert submitter.captured is not None
+        paths = [file.path for file in submitter.captured.files]
         assert len(paths) == len(set(paths)) == 2  # the note, and one copy of the compound
 
     asyncio.run(_run())

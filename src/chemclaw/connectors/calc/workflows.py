@@ -62,7 +62,7 @@ def job_envelope(result: XtbJobResult) -> ConnectorJobResult:
       only), so the unwrapping cannot live on the far side.
     - **`calc_refs` rides on the envelope's own field**, not inside `data`: it is a cross-cutting
       provenance fact every connector job could carry rather than this bundle's domain result, and
-      `propose_knowledge_note` takes it as one list.
+      `record_knowledge_note` takes it as one list.
     - **`without_geometry` replaces each geometry with the address the next calculation accepts.**
       Measured on a 40-atom molecule, a conformer search's envelope was 29,086 characters — 2,400
       Cartesian coordinates no tool in this system accepts — reaching the turn three times over

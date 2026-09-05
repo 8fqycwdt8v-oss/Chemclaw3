@@ -1,3 +1,6 @@
+-- RETIRED with migration 027 (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). The
+-- column stays for the rows that already carry it; nothing writes one.
+
 -- The supporting files a proposal would write beside its subject note.
 --
 -- `note_proposals.content` holds the rendered subject note, and migration 027 justifies keeping it

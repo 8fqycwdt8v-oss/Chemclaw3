@@ -39,10 +39,6 @@ _EXPECTED_SUBSYSTEMS = {
     # an `application_name`) are dropped from the connection. Both are invisible from the connect's
     # own failure, and the second is invisible even on a connect that succeeds.
     "db_dsn",
-    # `kg/git_submitter._repair_parked_checkout`, whose `.git/HEAD` read is swallowed. The repair it
-    # skips is what a *later* submission depends on, so the degradation surfaces as git's "already
-    # used by worktree" on the next attempt — an error naming neither the file nor the repair.
-    "note_repo",
     # `connectors/calc/remote.py`, on the three paths that raise `CalcServerError` — the
     # calculation backend unreachable, answering with an internal error, or dropping mid-call. Its
     # sibling `CalcToolError` (a *refusal*: an unparameterised solvent, a bad atom index) is

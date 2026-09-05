@@ -244,14 +244,14 @@ def test_factory_stamps_correlation_id_actor_and_records_outcome() -> None:
     # Returned by the tool rather than pre-set on the context, which is the shape the trail
     # actually records: `wrap_tool_call` middleware sees what the *handler* produced, where MAF's
     # wrote its result onto the invocation context for the middleware to read afterwards.
-    ctx = _ctx("propose_knowledge_note", {"type": "insight"})
+    ctx = _ctx("record_knowledge_note", {"type": "insight"})
     _drive_mw(mw, ctx, _returns_ref)
 
     assert len(sink.events) == 1
     event = sink.events[0]
     assert event.correlation_id == "conv-1"
     assert event.actor == "alice@corp"
-    assert event.tool == "propose_knowledge_note"
+    assert event.tool == "record_knowledge_note"
     assert event.outcome == "ok"
     assert "pr://note/insight-1" in event.detail  # the effect is captured
 

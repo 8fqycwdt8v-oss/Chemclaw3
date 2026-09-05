@@ -1,7 +1,7 @@
 """Frame retrieved third-party content so the model reads it as data, not instructions.
 
 Why this exists: note bodies, ELN-ingested reaction labels and uploaded attachments are not
-authored by the agent, and not all of them pass the human PR-gate before they reach the model —
+authored by the agent, and none of them is reviewed before it reaches the model —
 agent-authored notes do, but *ingested* ELN/ORD notes, fingerprint labels and a chemist's uploads
 are third-party text that lands in context directly. A body containing "ignore your instructions
 and …" is the classic indirect prompt-injection vector (the retrieval and attachment tools feed

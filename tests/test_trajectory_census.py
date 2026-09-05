@@ -36,12 +36,12 @@ def test_a_turn_is_the_tools_between_two_human_messages_with_retries_collapsed()
         HumanMessage("what is the pKa?"),
         _ai("gather_evidence"),
         _ai("compute_xtb_energy", "compute_xtb_energy"),
-        _ai("propose_knowledge_note"),
+        _ai("record_knowledge_note"),
         HumanMessage("thanks — now the solubility"),
         _ai("predict_solubility"),
     ]
     assert normalized_tools(messages) == [
-        ("gather_evidence", "compute_xtb_energy", "propose_knowledge_note"),
+        ("gather_evidence", "compute_xtb_energy", "record_knowledge_note"),
         ("predict_solubility",),
     ]
 

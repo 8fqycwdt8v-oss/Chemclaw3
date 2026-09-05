@@ -26,9 +26,9 @@ from pathlib import Path
 from chemclaw.agent.attachments import AttachmentError, parse_attachment
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import configure_logging
-from chemclaw.kg.git_submitter import default_submitter
+from chemclaw.kg.git_writer import default_writer
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.record import record_note
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
     files (the reject-and-continue discipline the ELN sync uses).
     """
     proposed = skipped = 0
-    submitter = default_submitter()
+    submitter = default_writer()
     for path in sorted(p for p in directory.rglob("*") if p.is_file()):
         try:
             note = note_for_document(path, path.read_bytes(), tags)
@@ -70,7 +70,7 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
         if dry_run:
             logger.info("would propose %s from %s (%d chars)", note.id, path.name, len(note.body))
         else:
-            reference = await propose_note(note, submitter)
+            reference = await record_note(note, submitter)
             logger.info("proposed %s from %s -> %s", note.id, path.name, reference)
         proposed += 1
     return proposed, skipped

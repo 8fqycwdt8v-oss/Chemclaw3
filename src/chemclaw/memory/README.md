@@ -1,7 +1,7 @@
 # `chemclaw.memory` — what past work taught us
 
 **Responsibility:** the memory layers over completed work, built entirely from pieces that already
-existed — fingerprint-keyed structural identity, the canonical reaction schema, and the PR-gate. No
+existed — fingerprint-keyed structural identity, the canonical reaction schema, and the one note-write path. No
 new infrastructure, by design.
 
 - **Episodic** — `campaign.py` and `chains.py` chain experiments where one reaction's product is
@@ -27,7 +27,7 @@ may only be distilled from successes.
 The human gate does not disappear; it moves. An observation that crosses both promotion thresholds
 opens one ordinary playbook PR through the ordinary `kg.pr_gate`. Two rules keep that safe and both
 are enforced rather than documented: support counts distinct *cited runs* — `reaction-<id>`
-references into the ungated transcription store since D-2026-08-25, plus merged `interaction`
+references into the ungated transcription store since D-2026-08-25, plus the `interaction`
 notes — and an observation can never corroborate itself into a promotion (migration `025` makes
 the self-reference a CHECK). The promotion PR says which kind of evidence the count is, because
 the reviewer at that gate is the first human in the loop for the transcription half. And an

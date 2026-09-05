@@ -80,7 +80,7 @@ def test_a_note_type_the_graph_does_not_know_is_caught(monkeypatch: object) -> N
     monkeypatch.setattr(  # type: ignore[attr-defined]
         module,
         "_prose_sources",
-        lambda: {"fake/SKILL.md": "Record it with `propose_knowledge_note`, type `field-trial`."},
+        lambda: {"fake/SKILL.md": "Record it with `record_knowledge_note`, type `field-trial`."},
     )
     problems = check_prose_contract()
     assert len(problems) == 1
@@ -409,9 +409,17 @@ def test_a_retired_metric_a_merged_adr_quotes_has_a_legal_remedy(
     which CLAUDE.md forbids". Rule 9 reaches in anyway, and six merged ADRs carry selectors today:
     simulated by dropping `chemclaw_repeated_tool_calls_total` from the declared set, the gate went
     red on D-2026-08-06-a-tool-cannot-say-it-has-nothing-twice, with no edit anyone is allowed to
-    make. `_RETIRED_METRIC_NAMES` is the remedy, and it is empty until a retirement needs it.
+    make. `_RETIRED_METRIC_NAMES` is the remedy, and it was empty until a retirement needed it.
+
+    **It has exactly one entry, and this assertion is what makes adding a second a reviewed act.**
+    `chemclaw_note_proposals_total` is the PR-gate's by-state series, retired with the gate
+    (`D-2026-09-05-the-gate-is-deleted-not-dormant`) and quoted in selector form by
+    `D-2026-07-31-a-proposal-is-a-record-not-a-branch`, which is merged and therefore uneditable.
+    The set is asserted by *value* rather than by size so a future entry has to be argued here.
     """
-    assert prose._RETIRED_METRIC_NAMES == frozenset(), "an entry here is a reviewed retirement"
+    assert prose._RETIRED_METRIC_NAMES == frozenset({"chemclaw_note_proposals_total"}), (
+        "an entry here is a reviewed retirement"
+    )
     text = 'the alert was `chemclaw_retired_total{subsystem="x"}`'
     monkeypatch.setattr(prose, "_operator_sources", dict)
     monkeypatch.setattr(prose, "_selector_sources", lambda: {"docs/decisions/D-x.md": text})

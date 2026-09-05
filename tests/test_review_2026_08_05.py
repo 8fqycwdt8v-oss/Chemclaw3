@@ -32,8 +32,7 @@ from chemclaw.connectors import jobs as jobs_module
 from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import failure_reason
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import propose_note
-from chemclaw.kg.submission import SubmissionOutcome
+from chemclaw.kg.record import WriteOutcome, record_note
 from tests.fakes import fed
 from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
@@ -473,31 +472,36 @@ def test_the_result_number_cap_is_a_ceiling_not_an_exclusive_bound(
     assert not caplog.records, "a complete result was reported as truncated"
 
 
-def test_propose_note_deduplicates_dependencies_and_keeps_the_subject_first() -> None:
-    """The dependency loop's four survivors at once — dedup, order, and what lands in `files`.
+def test_record_note_deduplicates_dependencies_and_writes_them_before_the_subject() -> None:
+    """The dependency loop's survivors at once — dedup, and the order that is now an invariant.
 
     `seen`, the `in` test, the `continue` and both `append`s could each be broken with the suite
-    green, because no test proposed a note *with* dependencies. A caller may legitimately list one
+    green, because no test recorded a note *with* dependencies. A caller may legitimately list one
     twice (two computed properties of one compound), and writing a path twice in a commit is at
-    best noise; dropping the subject note from position 0 is worse, since `NoteProposal.content`
-    reads `files[0]`.
+    best noise.
+
+    **The order assertion is inverted from what this test used to hold, and that is the change.**
+    It required the subject at `files[0]`, because the PR-gate's `NoteProposal.content` read that
+    slot. There is no proposal record now, and a reader can see a half-written unit, so
+    `record._build_write` writes **dependencies first** — a note must never appear in the graph
+    before what it cites (`D-2026-09-05-the-gate-is-deleted-not-dormant`).
     """
     captured: list[Any] = []
 
     class _Capturing:
-        async def submit(self, submission: Any) -> SubmissionOutcome:
-            captured.append(submission)
-            return SubmissionOutcome(reference=str(submission.branch))
+        async def write(self, write: Any) -> WriteOutcome:
+            captured.append(write)
+            return WriteOutcome(reference=f"commit://{len(captured)}")
 
     subject = _agent_note("subject-note", "see [[dep-a]] and [[dep-b]]")
     dep_a = _agent_note("dep-a", "the first dependency")
     dep_b = _agent_note("dep-b", "the second dependency")
     # `dep_b` comes *after* the duplicate on purpose: with `break` in place of `continue` the
     # duplicate would end the loop and silently drop it, which is the mutation this pins.
-    asyncio.run(propose_note(subject, _Capturing(), dependencies=[dep_a, dep_a, dep_b, subject]))
+    asyncio.run(record_note(subject, _Capturing(), dependencies=[dep_a, dep_a, dep_b, subject]))
 
     paths = [file.path for file in captured[0].files]
-    assert paths[0].endswith("subject-note.md"), "the subject note must stay at files[0]"
+    assert paths[-1].endswith("subject-note.md"), "the subject is written after what it cites"
     assert len(paths) == 3, f"a dependency was dropped or duplicated: {paths}"
     assert any(path.endswith("dep-a.md") for path in paths)
     assert any(path.endswith("dep-b.md") for path in paths), (
@@ -505,7 +509,7 @@ def test_propose_note_deduplicates_dependencies_and_keeps_the_subject_first() ->
     )
 
 
-def test_propose_note_honours_an_explicit_knowledge_directory() -> None:
+def test_record_note_honours_an_explicit_knowledge_directory() -> None:
     """`knowledge_dir if knowledge_dir is not None else settings.knowledge_dir`, inverted, survived.
 
     Nothing passed the argument, so the default and the override were indistinguishable — and the
@@ -515,11 +519,11 @@ def test_propose_note_honours_an_explicit_knowledge_directory() -> None:
     captured: list[Any] = []
 
     class _Capturing:
-        async def submit(self, submission: Any) -> SubmissionOutcome:
-            captured.append(submission)
-            return SubmissionOutcome(reference=str(submission.branch))
+        async def write(self, write: Any) -> WriteOutcome:
+            captured.append(write)
+            return WriteOutcome(reference=f"commit://{len(captured)}")
 
     asyncio.run(
-        propose_note(_agent_note("scoped-note", "body"), _Capturing(), knowledge_dir="elsewhere")
+        record_note(_agent_note("scoped-note", "body"), _Capturing(), knowledge_dir="elsewhere")
     )
     assert captured[0].files[0].path.startswith("elsewhere/")

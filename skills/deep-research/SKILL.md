@@ -5,7 +5,7 @@ description: >-
   impurities), any process detail or observation, or general protocol guidance — by
   composing every data source and tool, and how to draft new conditions/protocols grounded
   in that evidence. Cite everything, separate evidence from analogy, and route anything new
-  through the PR-gate.
+  into the knowledge graph.
 tools:
   - gather_evidence
   - find_notes
@@ -18,7 +18,7 @@ tools:
   - predict_pka
   - predict_solubility
   - suggest_next_experiment
-  - propose_knowledge_note
+  - record_knowledge_note
 ---
 
 # Deep research
@@ -120,7 +120,7 @@ untried substrate):
 
 - Build it from retrieved evidence and state the reasoning: which past runs and which
   transferable playbook it rests on, and where you are extrapolating.
-- Draft it as an agent note through `propose_knowledge_note` — type `experiment-proposal`, the
+- Draft it as an agent note through `record_knowledge_note` — type `experiment-proposal`, the
   kind for anything you are suggesting be *run* rather than reporting as done. It opens a **PR
   for a human chemist to approve** — a proposal, never asserted as established fact until merged
   (D-005). Cite the evidence notes with `[[wikilinks]]`.

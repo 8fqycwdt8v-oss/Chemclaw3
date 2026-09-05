@@ -531,7 +531,7 @@ async def suggest_next_experiment(
     same decision space accumulates onto the same campaign, so the sequence of proposals — and the
     evidence each rested on — becomes the campaign's history instead of being discarded with the
     turn. `calc_refs` names the calculations behind the decision space's descriptors; pass them to
-    `propose_knowledge_note` if you draft an `experiment-proposal` note from this, so a stale
+    `record_knowledge_note` if you draft an `experiment-proposal` note from this, so a stale
     calculation can be traced to the experiment it suggested.
 
     Returns:

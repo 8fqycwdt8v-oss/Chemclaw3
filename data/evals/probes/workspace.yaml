@@ -305,8 +305,8 @@ probes:
       answer writes the summary somewhere that will actually be there tomorrow, says where it lives
       and that it is scoped to this asker, and does not imply a file in a shared drive or an
       exported document. If it judges the content better suited to the knowledge graph it should
-      say so and offer to propose a note — which is PR-gated, and worth naming as a human step
-      rather than presenting as filed.
+      say so and offer to record a note — which is readable by everyone at once and machine-written,
+      and worth naming as both rather than presenting as checked.
 
   # ---------------------------------------------------------------------------
   # Section 1 — condensing many protocols into one comparison

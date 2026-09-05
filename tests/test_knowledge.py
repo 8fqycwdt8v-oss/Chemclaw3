@@ -15,9 +15,9 @@ from pathlib import Path
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.kg.git_submitter import GitNoteSubmitter, GitSubmitError
+from chemclaw.kg.git_writer import GitNoteWriter, GitWriteError
 from chemclaw.kg.note import Note
-from chemclaw.kg.submission import NoteFile, NoteSubmission
+from chemclaw.kg.record import NoteFile, NoteWrite
 
 
 def _clone(remote: Path, dest: Path) -> Path:
@@ -38,16 +38,21 @@ def _make_remote_and_clone(tmp_path: Path) -> tuple[Path, Path]:
     subprocess.run(["git", "-C", str(work), "commit", "-q", "-m", "init"], check=True)
     subprocess.run(["git", "-C", str(work), "branch", "-M", "main"], check=True)
     subprocess.run(["git", "-C", str(work), "push", "-q", "-u", "origin", "main"], check=True)
+    # Point the bare remote's HEAD at `main`, so a fresh clone checks out the base branch rather
+    # than an unborn `master`. That is what a real notes remote looks like, and the writer now
+    # *requires* it: it commits on the base branch rather than creating one per note, so a clone
+    # parked elsewhere is refused rather than quietly writing to the wrong branch.
+    subprocess.run(
+        ["git", "-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"], check=True
+    )
     return remote, work
 
 
-def _note_submission(note_id: str, content: str = "body\n") -> NoteSubmission:
-    """A minimal job-result submission for `note_id` with the standard layout."""
-    return NoteSubmission(
-        branch=f"note/{note_id}",
+def _note_write(note_id: str, content: str = "body\n") -> NoteWrite:
+    """A minimal job-result write for `note_id` with the standard layout."""
+    return NoteWrite(
         files=[NoteFile(path=f"knowledge/job-result/{note_id}.md", content=content)],
-        title=f"Add job-result note: {note_id}",
-        body="review please",
+        message=f"Add job-result note: {note_id}",
     )
 
 
@@ -61,58 +66,56 @@ def _current_branch(work: Path) -> str:
     ).stdout.strip()
 
 
-def test_git_submitter_pushes_branch(tmp_path: Path) -> None:
-    """GitNoteSubmitter branches off the base and pushes the note (local-git only)."""
+def test_a_write_commits_the_note_on_the_base_branch_and_pushes(tmp_path: Path) -> None:
+    """The whole of the new write path: the file lands in the tree, is committed, and is pushed.
+
+    The reference is the *commit*, not a branch. That is the shape change
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` made: there is nothing to review and
+    nothing to merge, so what a caller can be handed is what landed.
+    """
     _, work = _make_remote_and_clone(tmp_path)
 
     note = Note(id="job-abc", type="job-result", created_by="agent", body="[[compound-x]]")
-    submission = _note_submission(
+    submission = _note_write(
         "job-abc", content="---\nid: job-abc\ntype: job-result\ncreated_by: agent\n---\nbody\n"
     )
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    outcome = asyncio.run(submitter.submit(submission))
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    outcome = asyncio.run(writer.write(submission))
 
-    assert outcome.reference == "note/job-abc" and outcome.pushed is True
-    remote_refs = subprocess.run(
-        ["git", "-C", str(work), "ls-remote", "origin", "note/job-abc"],
+    assert outcome.written is True
+    assert len(outcome.reference) == 40, "the reference is the commit the note landed in"
+    # Readable *here*, which is the point: this checkout is what `settings.notes_path` resolves to.
+    assert (work / "knowledge" / "job-result" / "job-abc.md").exists()
+    remote_main = subprocess.run(
+        ["git", "-C", str(work), "ls-remote", "origin", "main"],
         capture_output=True,
         text=True,
         check=True,
     )
-    assert "note/job-abc" in remote_refs.stdout
+    assert outcome.reference in remote_main.stdout, "the commit reached the remote base branch"
     assert note.type == "job-result"  # sanity on the model used above
 
-    # Simulate the PR being merged, then re-submit the identical note: the base now
-    # contains it, so submit is an idempotent no-op (nothing to commit), not an error.
-    for cmd in (
-        ["checkout", "-q", "main"],
-        ["merge", "-q", "note/job-abc"],
-        ["push", "-q", "origin", "main"],
-    ):
-        subprocess.run(["git", "-C", str(work), *cmd], check=True)
-    again = asyncio.run(submitter.submit(submission))
-    # The idempotent no-op now *says* it pushed nothing, so the caller can skip the record.
-    assert again.reference == "note/job-abc" and again.pushed is False
+    # Re-recording the identical note stages nothing, so it is an idempotent no-op rather than an
+    # empty commit — and it says so, which is how the caller knows not to count it.
+    again = asyncio.run(writer.write(submission))
+    assert again.written is False
 
 
-def test_submit_leaves_the_shared_checkout_on_base(tmp_path: Path) -> None:
-    """After a submission, `note_repo_dir` is on `base` — because it was never taken off it.
+def test_a_write_stays_on_base_and_the_note_is_readable_there(tmp_path: Path) -> None:
+    """The checkout stays on `base`, and the note is in it — which is the inversion.
 
-    `note_repo_dir` is also where readers (`chemclaw.kg.graph.load_notes` et al.) resolve
-    `settings.knowledge_path`, so a checkout on `note/<id>` makes every reader see one proposed
-    note's isolated content instead of the merged knowledge base. This used to be a statement
-    about *restoring* the tree; since D-2026-08-05 the submission happens in its own worktree and
-    the tree is never switched, which `tests/test_pr_gate_read_window.py` states directly. Kept
-    here as the end-to-end form of it, from the other side of the submitter.
+    This test used to assert the opposite of its second half: under the PR-gate the note lived on
+    `note/<id>` and a reader pointed at this checkout saw *nothing*, which was the isolation the
+    gate depended on. `settings.notes_path` resolves to exactly this tree, so the note being here
+    is what "global the moment it is learned" means
+    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`).
     """
     _, work = _make_remote_and_clone(tmp_path)
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    asyncio.run(submitter.submit(_note_submission("job-abc")))
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    asyncio.run(writer.write(_note_write("job-abc")))
 
     assert _current_branch(work) == "main"
-    # The note this submission wrote is not on `main`'s working tree — only merging the PR
-    # puts it there — so a reader pointed at this checkout right now sees no proposed notes.
-    assert not (work / "knowledge" / "job-result" / "job-abc.md").exists()
+    assert (work / "knowledge" / "job-result" / "job-abc.md").exists()
 
 
 def test_a_rejected_push_still_leaves_the_checkout_on_base(tmp_path: Path) -> None:
@@ -131,57 +134,68 @@ def test_a_rejected_push_still_leaves_the_checkout_on_base(tmp_path: Path) -> No
     hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     hook.chmod(0o755)
 
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    with pytest.raises(GitSubmitError, match="push"):
-        asyncio.run(submitter.submit(_note_submission("job-unreviewed")))
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitWriteError, match="push"):
+        asyncio.run(writer.write(_note_write("job-unreviewed")))
 
     assert _current_branch(work) == "main"
-    assert not (work / "knowledge" / "job-result" / "job-unreviewed.md").exists()
-    assert not list((work / ".git" / "chemclaw-worktrees").iterdir())
+    # **The note is on disk and committed locally**, which is a real behaviour change and is
+    # asserted rather than glossed: the write happens in the tree readers scan, so a push that
+    # fails leaves the note *readable here* and absent from the remote. The next successful write
+    # fast-forwards and carries it. What must not have happened is a silent success.
+    assert (work / "knowledge" / "job-result" / "job-unreviewed.md").exists()
 
 
 def test_a_failure_before_the_commit_leaves_no_note_in_the_tree(tmp_path: Path) -> None:
-    """A note written but never staged reaches no reader either.
+    """A write that dies between two files leaves the first one on disk, and that is now visible.
 
-    A submission carries a note *and its dependencies*, so it can die between two `write_text`
-    calls — here on the containment check of the second file. The first file is already on disk
-    and untracked. It used to be discarded by the restoring `reset --hard` + `clean -fd`; it is
-    now simply somewhere no reader looks, and goes with the worktree.
+    A write carries a note *and its dependencies*, so it can die between two `write_text` calls —
+    here on the containment check of the second. Under the PR-gate the half-written pair lived in a
+    worktree no reader scanned; it now lives in the tree they do scan.
+
+    **This is the cost of the write order, and it is bounded by that order rather than removed.**
+    `record._build_write` puts dependencies first, so the file that survives a mid-write failure is
+    one the subject note would have cited — never a subject citing something absent. Nothing is
+    committed, so the next successful write of the same note supersedes it.
     """
     _, work = _make_remote_and_clone(tmp_path)
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    pair = NoteSubmission(
-        branch="note/job-pair",
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    pair = NoteWrite(
         files=[
             NoteFile(path="knowledge/job-result/job-pair.md", content="the note\n"),
             NoteFile(path="../escape.md", content="the dependency\n"),
         ],
-        title="Add job-result note: job-pair",
-        body="review please",
+        message="Add job-result note: job-pair",
     )
 
-    with pytest.raises(GitSubmitError, match="escapes"):
-        asyncio.run(submitter.submit(pair))
+    with pytest.raises(GitWriteError, match="escapes"):
+        asyncio.run(writer.write(pair))
 
     assert _current_branch(work) == "main"
-    assert not (work / "knowledge" / "job-result" / "job-pair.md").exists()
-    assert not list((work / ".git" / "chemclaw-worktrees").iterdir())
+    assert (work / "knowledge" / "job-result" / "job-pair.md").exists()
+    # Nothing was committed: the failure is before `git add`, so the tree is dirty, not recorded.
+    status = subprocess.run(
+        ["git", "-C", str(work), "status", "--porcelain", "--untracked-files=all"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "?? knowledge/job-result/job-pair.md" in status
 
 
-def test_submit_leaves_a_readers_cache_alone_because_it_never_touches_their_tree(
+def test_a_write_busts_a_readers_cache_because_it_does_touch_their_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The inverse of what this test asserted, and the clearest single statement of the fix.
+    """The inverse of what this test asserted, twice over, and the clearest statement of the change.
 
-    It used to assert that a submission cleared every cached graph, because a submission rewrote
-    the shared working tree twice — into `note/<id>` and back — and a graph cached across that
-    would describe a tree that no longer existed for up to `graph_cache_ttl_seconds`.
+    It first asserted that a submission *cleared* every cached graph (the shared tree was rewritten
+    into `note/<id>` and back), then — once the gate moved into a worktree under `.git/` — that it
+    left the cache **alone**, because busting would advertise a tree change that had not happened.
 
-    The submission now happens in a worktree under `.git/` that no reader scans, so there is
-    nothing to invalidate: busting would advertise a tree change that did not happen and pay an
-    O(notes) rescan for it. "The cache survived" is only the right outcome if the cache is also
-    still *correct*, so that is asserted too rather than assumed — the cached notes must equal what
-    a cold scan of the same directory returns.
+    Both were right about their own design and both are wrong about this one. The write lands in
+    the tree readers scan, so a surviving cache is a reader serving a graph that is missing the
+    note just recorded — for up to `graph_cache_ttl_seconds`. "Global the moment it is learned"
+    is exactly this assertion.
     """
     from chemclaw.kg import graph as kg_graph
 
@@ -191,49 +205,59 @@ def test_submit_leaves_a_readers_cache_alone_because_it_never_touches_their_tree
     monkeypatch.setattr(settings, "graph_cache_enabled", True)
     monkeypatch.setattr(settings, "graph_cache_ttl_seconds", 60.0)
     kg_graph.invalidate_cache()
-    cached_before = [note.id for note in kg_graph.load_notes(notes_dir)]
+    before = [note.id for note in kg_graph.load_notes(notes_dir)]
     assert str(notes_dir) in kg_graph._LAST_SCAN
 
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    asyncio.run(submitter.submit(_note_submission("job-xyz")))
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    asyncio.run(
+        writer.write(
+            NoteWrite(
+                files=[
+                    NoteFile(
+                        path="knowledge/job-result/job-xyz.md",
+                        content=(
+                            "---\nid: job-xyz\ntype: job-result\ncreated_by: agent\n---\nbody\n"
+                        ),
+                    )
+                ],
+                message="Add job-result note: job-xyz",
+            )
+        )
+    )
 
-    # The reader's window is untouched: no rescan was forced, because nothing it reads moved.
-    assert str(notes_dir) in kg_graph._LAST_SCAN
-    assert [note.id for note in kg_graph.load_notes(notes_dir)] == cached_before
-    # And what it holds is what is really there — not-busting is correct, not merely observed.
-    kg_graph.invalidate_cache()
-    assert [note.id for note in kg_graph.load_notes(notes_dir)] == cached_before
+    # The cache was dropped, so the next read rescans rather than serving the pre-write graph.
+    assert str(notes_dir) not in kg_graph._LAST_SCAN
+    after = [note.id for note in kg_graph.load_notes(notes_dir)]
+    assert "job-xyz" in after and "job-xyz" not in before
 
 
-def test_concurrent_submits_do_not_corrupt_branches(tmp_path: Path) -> None:
-    """Two concurrent submits serialize: each remote branch holds exactly its own note.
+def test_concurrent_writes_serialize_and_both_notes_land(tmp_path: Path) -> None:
+    """Two concurrent writes serialize, and the base branch ends up holding both notes.
 
-    Without the submit lock the two would contend for `.git/worktrees/` and for the `note/<id>`
-    refs — and, before the worktrees, for the one working tree, where the failure mode was not an
-    error but one note's file committed onto the other note's branch.
+    The lock matters *more* without branches, not less: both writes now target one branch and one
+    working tree, so unserialized they would stage each other's files and race the same push. The
+    failure this pins is not an error — it is one note's commit silently carrying the other's file,
+    or one of the two never reaching the remote at all.
     """
     remote, work = _make_remote_and_clone(tmp_path)
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    sub_a = _note_submission("job-a", content="note a\n")
-    sub_b = _note_submission("job-b", content="note b\n")
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    sub_a = _note_write("job-a", content="note a\n")
+    sub_b = _note_write("job-b", content="note b\n")
 
     async def _both() -> tuple[str, str]:
-        ref_a, ref_b = await asyncio.gather(submitter.submit(sub_a), submitter.submit(sub_b))
+        ref_a, ref_b = await asyncio.gather(writer.write(sub_a), writer.write(sub_b))
         return ref_a.reference, ref_b.reference
 
-    assert asyncio.run(_both()) == ("note/job-a", "note/job-b")
-    for branch, own, other in (
-        ("note/job-a", "job-a.md", "job-b.md"),
-        ("note/job-b", "job-b.md", "job-a.md"),
-    ):
-        files = subprocess.run(
-            ["git", "-C", str(remote), "ls-tree", "-r", "--name-only", branch],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-        assert f"knowledge/job-result/{own}" in files
-        assert other not in files
+    ref_a, ref_b = asyncio.run(_both())
+    assert ref_a != ref_b, "two writes are two commits"
+    files = subprocess.run(
+        ["git", "-C", str(remote), "ls-tree", "-r", "--name-only", "main"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "knowledge/job-result/job-a.md" in files
+    assert "knowledge/job-result/job-b.md" in files
 
 
 def test_second_process_holding_the_checkout_is_rejected(tmp_path: Path) -> None:
@@ -241,11 +265,11 @@ def test_second_process_holding_the_checkout_is_rejected(tmp_path: Path) -> None
 
     Cross-process ownership of `note_repo_dir` is enforced with an exclusive
     `flock` on `.git/chemclaw-submit.lock`. A real child process takes the lock;
-    the submit must raise `GitSubmitError` instead of interleaving checkouts, and
+    the submit must raise `GitWriteError` instead of interleaving checkouts, and
     must succeed once the child releases it.
     """
     _, work = _make_remote_and_clone(tmp_path)
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
     lock_path = work / ".git" / "chemclaw-submit.lock"
 
     holder = subprocess.Popen(
@@ -264,51 +288,53 @@ def test_second_process_holding_the_checkout_is_rejected(tmp_path: Path) -> None
     )
     try:
         assert holder.stdout is not None and holder.stdout.readline().strip() == "locked"
-        with pytest.raises(GitSubmitError, match="in use by another process"):
-            asyncio.run(submitter.submit(_note_submission("job-locked")))
+        with pytest.raises(GitWriteError, match="in use by another process"):
+            asyncio.run(writer.write(_note_write("job-locked")))
     finally:
         assert holder.stdin is not None
         holder.stdin.close()
         holder.wait(timeout=30)
 
-    assert (
-        asyncio.run(submitter.submit(_note_submission("job-locked"))).reference == "note/job-locked"
-    )
+    assert asyncio.run(writer.write(_note_write("job-locked"))).written is True
 
 
-def test_lock_is_released_after_a_failed_submission(tmp_path: Path) -> None:
-    """The flock does not outlive a submission that errored (no wedged checkout).
+def test_lock_is_released_after_a_failed_write(tmp_path: Path) -> None:
+    """The flock does not outlive a write that errored (no wedged checkout).
 
-    A failed git command must not leave the checkout permanently 'in use': the
-    next submit acquires the lock and runs normally.
+    A failed write must not leave the checkout permanently 'in use': the next one acquires the
+    lock and runs normally. The failure is forced by naming a base branch this checkout is not on,
+    which is the guard `_write_locked` runs first — it fails *inside* the lock, which is what makes
+    this a test of the release rather than of the guard.
     """
     _, work = _make_remote_and_clone(tmp_path)
-    bad = GitNoteSubmitter(repo_dir=str(work), base_branch="no-such-base", remote="origin")
-    with pytest.raises(GitSubmitError, match="fetch"):
-        asyncio.run(bad.submit(_note_submission("job-x")))
+    bad = GitNoteWriter(repo_dir=str(work), base_branch="no-such-base", remote="origin")
+    with pytest.raises(GitWriteError, match="not the base branch"):
+        asyncio.run(bad.write(_note_write("job-x")))
 
-    good = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    assert asyncio.run(good.submit(_note_submission("job-x"))).reference == "note/job-x"
+    good = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    assert asyncio.run(good.write(_note_write("job-x"))).written is True
 
 
-def test_repropose_updated_note_from_fresh_clone(tmp_path: Path) -> None:
-    """Re-proposing an updated note from a clone that never fetched the branch works.
+def test_rewriting_a_note_from_a_second_clone_lands_on_the_shared_base(tmp_path: Path) -> None:
+    """A second clone recording a newer version of the same note replaces it on the base branch.
 
-    `--force-with-lease` without a remote-tracking ref is a "stale info" rejection;
-    the submitter must refresh the ref before pushing (tolerating a missing branch).
+    Under the PR-gate this exercised `--force-with-lease` against a `note/<id>` ref the fresh clone
+    had never fetched. There is no such ref now, and the equivalent hazard moved: two clones write
+    the *same* branch, so the second must fast-forward onto what the first pushed before committing
+    — otherwise its push is rejected or, worse, it commits on a base that has silently gone stale.
     """
     remote, work_a = _make_remote_and_clone(tmp_path)
-    v1 = _note_submission("job-x", content="v1\n")
-    submitter_a = GitNoteSubmitter(repo_dir=str(work_a), base_branch="main", remote="origin")
-    asyncio.run(submitter_a.submit(v1))
+    v1 = _note_write("job-x", content="v1\n")
+    submitter_a = GitNoteWriter(repo_dir=str(work_a), base_branch="main", remote="origin")
+    asyncio.run(submitter_a.write(v1))
 
-    work_b = _clone(remote, tmp_path / "fresh")  # fresh clone: no origin/note/job-x ref
+    work_b = _clone(remote, tmp_path / "fresh")  # a second clone of the same notes repo
     v2 = v1.model_copy(update={"files": [NoteFile(path=v1.files[0].path, content="v2\n")]})
-    submitter_b = GitNoteSubmitter(repo_dir=str(work_b), base_branch="main", remote="origin")
-    assert asyncio.run(submitter_b.submit(v2)).reference == "note/job-x"
+    submitter_b = GitNoteWriter(repo_dir=str(work_b), base_branch="main", remote="origin")
+    assert asyncio.run(submitter_b.write(v2)).written is True
 
     shown = subprocess.run(
-        ["git", "-C", str(remote), "show", "note/job-x:knowledge/job-result/job-x.md"],
+        ["git", "-C", str(remote), "show", "main:knowledge/job-result/job-x.md"],
         capture_output=True,
         text=True,
         check=True,
@@ -319,15 +345,13 @@ def test_repropose_updated_note_from_fresh_clone(tmp_path: Path) -> None:
 def test_submitter_refuses_path_escaping_the_checkout(tmp_path: Path) -> None:
     """Defense in depth: a submission path resolving outside repo_dir is rejected."""
     _, work = _make_remote_and_clone(tmp_path)
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    evil = NoteSubmission(
-        branch="note/evil",
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    evil = NoteWrite(
         files=[NoteFile(path="../evil.md", content="x\n")],
-        title="evil",
-        body="b",
+        message="evil",
     )
-    with pytest.raises(GitSubmitError, match="escapes"):
-        asyncio.run(submitter.submit(evil))
+    with pytest.raises(GitWriteError, match="escapes"):
+        asyncio.run(writer.write(evil))
     assert not (tmp_path / "evil.md").exists()
 
 
@@ -345,26 +369,24 @@ def test_leading_dash_note_path_reaches_git_add_as_a_pathspec_not_an_option(
     pushed, then discarded unseen with the submission's worktree.
     """
     _, work = _make_remote_and_clone(tmp_path)
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    submission = NoteSubmission(
-        branch="note/dash",
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    submission = NoteWrite(
         files=[NoteFile(path="-u", content="body\n")],
-        title="dash path",
-        body="review please",
+        message="dash path",
     )
 
-    ref = asyncio.run(submitter.submit(submission))
-    assert ref.reference == "note/dash"
+    ref = asyncio.run(writer.write(submission))
+    assert ref.written is True
 
     remote_refs = subprocess.run(
-        ["git", "-C", str(work), "ls-remote", "origin", "note/dash"],
+        ["git", "-C", str(work), "ls-remote", "origin", "main"],
         capture_output=True,
         text=True,
         check=True,
     )
-    assert "note/dash" in remote_refs.stdout  # actually pushed, not silently dropped
+    assert ref.reference in remote_refs.stdout  # actually pushed, not silently dropped
     shown = subprocess.run(
-        ["git", "-C", str(work), "show", "note/dash:-u"],
+        ["git", "-C", str(work), "show", "main:-u"],
         capture_output=True,
         text=True,
         check=True,
@@ -393,17 +415,17 @@ def test_submit_refuses_the_checkout_the_process_runs_from(
 
     monkeypatch.chdir(work)
     for repo_dir in (".", str(work)):
-        submitter = GitNoteSubmitter(repo_dir=repo_dir, base_branch="main", remote="origin")
-        with pytest.raises(GitSubmitError, match="CHEMCLAW_NOTE_REPO_DIR"):
-            asyncio.run(submitter.submit(_note_submission("job-own")))
+        writer = GitNoteWriter(repo_dir=repo_dir, base_branch="main", remote="origin")
+        with pytest.raises(GitWriteError, match="CHEMCLAW_NOTE_REPO_DIR"):
+            asyncio.run(writer.write(_note_write("job-own")))
 
     # Running from a subdirectory of the same checkout is refused too (repo-root match).
     subdir = work / "sub"
     subdir.mkdir()
     monkeypatch.chdir(subdir)
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    with pytest.raises(GitSubmitError, match="CHEMCLAW_NOTE_REPO_DIR"):
-        asyncio.run(submitter.submit(_note_submission("job-own")))
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitWriteError, match="CHEMCLAW_NOTE_REPO_DIR"):
+        asyncio.run(writer.write(_note_write("job-own")))
 
     # Nothing ran: no branch was created here, and no worktree. (The untracked file surviving is
     # no longer evidence of anything — the submitter could not destroy it even without the guard.)
@@ -418,17 +440,18 @@ def test_submit_refuses_the_checkout_the_process_runs_from(
     assert not (work / ".git" / "chemclaw-worktrees").exists()
 
 
-def test_poisoned_index_does_not_leak_into_next_submission(tmp_path: Path) -> None:
-    """Residue staged in the shared checkout is not committed into the next note's branch.
+def test_poisoned_index_does_not_leak_into_the_next_write(tmp_path: Path) -> None:
+    """Residue staged in the shared checkout is not committed into the next note's commit.
 
-    A submission that died between `git add` and `git commit` used to leave its note staged in the
-    shared index, and `checkout -B` preserves staged changes, so the next submission silently
-    committed the stray into its own PR. A linked worktree has its own index, so the two cannot
-    meet at all — the defence is structural rather than a scrub each time.
+    **This test found a real regression and is why the commit is path-limited.** The gate this
+    replaced committed inside a linked worktree with its own index, so a stray staged in the shared
+    checkout structurally could not reach a note's commit. Writing directly, there is only one
+    index — and a plain `git commit` would have swept the stray into a commit named after the note.
+    `_write_and_commit` therefore passes `-- <written paths>`, and the idempotence check is scoped
+    the same way for the same reason.
 
-    Which means the stray is now *also* still staged afterwards, and that is asserted here: the
-    mirror image of dropping `reset --hard`, and the clearest statement that the shared tree is no
-    longer the submitter's to scrub.
+    The stray stays staged afterwards, which is asserted here too: it is not this writer's to
+    discard, and dropping it silently would be the mirror of the defect above.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     stray = work / "knowledge" / "job-result" / "job-stray.md"
@@ -436,11 +459,11 @@ def test_poisoned_index_does_not_leak_into_next_submission(tmp_path: Path) -> No
     stray.write_text("half-written residue\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(work), "add", str(stray)], check=True)
 
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    asyncio.run(submitter.submit(_note_submission("job-b", content="note b\n")))
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    asyncio.run(writer.write(_note_write("job-b", content="note b\n")))
 
     files = subprocess.run(
-        ["git", "-C", str(remote), "ls-tree", "-r", "--name-only", "note/job-b"],
+        ["git", "-C", str(remote), "ls-tree", "-r", "--name-only", "main"],
         capture_output=True,
         text=True,
         check=True,
@@ -462,20 +485,23 @@ def test_symlinked_directory_on_base_is_refused(tmp_path: Path) -> None:
     Containment must hold against the tree as it exists *after* the base branch is materialized:
     a symlink merged onto base would otherwise resolve as a real directory beforehand, pass the
     check, then be followed by the write. This is also the test that forbids creating the
-    submission worktree with `--no-checkout` — with nothing on disk there is no symlink to
-    resolve, the check passes vacuously, and this inverts.
+    write against an unmaterialized tree: with nothing on disk there is no symlink to resolve, the
+    check passes vacuously, and this inverts.
     """
     remote, work = _make_remote_and_clone(tmp_path)
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
     # An unrelated prior submission — its own fetch+checkout below ignores whatever branch
     # `work` is left on (it now returns to `base`, but even the old stuck-on-`note/job-a`
     # behavior made no difference here either way).
-    asyncio.run(submitter.submit(_note_submission("job-a", content="note a\n")))
+    asyncio.run(writer.write(_note_write("job-a", content="note a\n")))
 
     outside = tmp_path / "outside"
     outside.mkdir()
     attacker = _clone(remote, tmp_path / "attacker")
     subprocess.run(["git", "-C", str(attacker), "checkout", "-q", "main"], check=True)
+    # The base now really holds `knowledge/` (the write above landed there rather than on a note
+    # branch), so the attack is to *replace* the directory with a symlink rather than to add one.
+    subprocess.run(["git", "-C", str(attacker), "rm", "-r", "-q", "knowledge"], check=True)
     (attacker / "knowledge").symlink_to(outside, target_is_directory=True)
     for cmd in (
         ["add", "knowledge"],
@@ -484,15 +510,15 @@ def test_symlinked_directory_on_base_is_refused(tmp_path: Path) -> None:
     ):
         subprocess.run(["git", "-C", str(attacker), *cmd], check=True)
 
-    with pytest.raises(GitSubmitError, match="escapes"):
-        asyncio.run(submitter.submit(_note_submission("job-b", content="note b\n")))
+    with pytest.raises(GitWriteError, match="escapes"):
+        asyncio.run(writer.write(_note_write("job-b", content="note b\n")))
     assert list(outside.rglob("*")) == []  # nothing was written outside the checkout
 
 
 def test_git_command_timeout_kills_the_child_and_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A hung git command is killed after the timeout and reported as GitSubmitError.
+    """A hung git command is killed after the timeout and reported as GitWriteError.
 
     Without the bound, `communicate()` would await forever under the process-wide submit
     lock, deadlocking every other submission and orphaning the git child.
@@ -516,12 +542,12 @@ def test_git_command_timeout_kills_the_child_and_raises(
     async def _fake_exec(*_args: object, **_kwargs: object) -> _HangingProcess:
         return _HangingProcess()
 
-    monkeypatch.setattr("chemclaw.kg.git_submitter.asyncio.create_subprocess_exec", _fake_exec)
+    monkeypatch.setattr("chemclaw.kg.git_writer.asyncio.create_subprocess_exec", _fake_exec)
     (tmp_path / ".git").mkdir()  # submit() flocks a file under .git/ before running git
-    submitter = GitNoteSubmitter(repo_dir=str(tmp_path), base_branch="main", remote="origin")
+    writer = GitNoteWriter(repo_dir=str(tmp_path), base_branch="main", remote="origin")
 
-    with pytest.raises(GitSubmitError, match="timed out"):
-        asyncio.run(submitter.submit(_note_submission("job-hang")))
+    with pytest.raises(GitWriteError, match="timed out"):
+        asyncio.run(writer.write(_note_write("job-hang")))
     assert killed["value"] is True
 
 
@@ -559,11 +585,11 @@ def test_a_cancelled_git_read_kills_its_child_like_every_other_git_command(
     async def _fake_exec(*_args: object, **_kwargs: object) -> _HangingProcess:
         return _HangingProcess()
 
-    monkeypatch.setattr("chemclaw.kg.git_submitter.asyncio.create_subprocess_exec", _fake_exec)
-    submitter = GitNoteSubmitter(repo_dir=str(tmp_path), base_branch="main", remote="origin")
+    monkeypatch.setattr("chemclaw.kg.git_writer.asyncio.create_subprocess_exec", _fake_exec)
+    writer = GitNoteWriter(repo_dir=str(tmp_path), base_branch="main", remote="origin")
 
     async def _run() -> None:
-        reading = asyncio.create_task(submitter._read("refs/remotes/origin/note/x"))
+        reading = asyncio.create_task(writer._read("refs/remotes/origin/note/x"))
         await asyncio.sleep(0.05)
         reading.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -579,7 +605,7 @@ def test_a_cancelled_git_read_kills_its_child_like_every_other_git_command(
 def test_no_connector_bundle_can_reach_the_pr_gate_itself() -> None:
     """The review asymmetry, structurally rather than by convention.
 
-    A bundle used to own a `write_knowledge_node` activity calling `propose_note` directly, which
+    A bundle used to own a `write_knowledge_node` activity calling `record_note` directly, which
     made "the agent proposes, a human decides" something the bundle chose to honour rather than a
     boundary it could not cross. Core publishes the envelope's note now, so a connector reaching
     the graph would first have to import the PR-gate.
@@ -604,7 +630,7 @@ def test_no_connector_bundle_can_reach_the_pr_gate_itself() -> None:
                 isinstance(node, ast.Import)
                 and any(alias.name.endswith("kg.pr_gate") for alias in node.names)
             )
-            named = isinstance(node, ast.Name) and node.id == "propose_note"
+            named = isinstance(node, ast.Name) and node.id == "record_note"
             if reached or named:
                 offenders.append(str(path.relative_to("src")))
                 break
@@ -612,44 +638,6 @@ def test_no_connector_bundle_can_reach_the_pr_gate_itself() -> None:
         f"{offenders} reach the PR-gate from inside a connector: a bundle returns its note in the "
         "job envelope and core decides whether it is proposed"
     )
-
-
-def test_a_branch_a_human_pushed_to_is_never_replaced(tmp_path: Path) -> None:
-    """The property `--force-with-lease` could not carry: a reviewer's commit survives.
-
-    The lease is refreshed by the fetch every submission starts with, so it only guards the
-    fetch-to-push window — the reviewer's commit that was already on the branch matched the fresh
-    lease and was silently discarded. The tip guard reads the gate's own commit trailer instead:
-    a tip the gate did not mint refuses the submission, non-retryably, with instructions.
-    """
-    remote, work = _make_remote_and_clone(tmp_path)
-    v1 = _note_submission("job-x", content="v1\n")
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    asyncio.run(submitter.submit(v1))
-
-    # A reviewer clones, commits a fixup onto the proposal branch, and pushes it.
-    reviewer = _clone(remote, tmp_path / "reviewer")
-    subprocess.run(["git", "-C", str(reviewer), "checkout", "-q", "note/job-x"], check=True)
-    fixup = reviewer / "knowledge" / "job-result" / "job-x.md"
-    fixup.write_text("v1, with the reviewer's correction\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(reviewer), "commit", "-aqm", "reviewer fixup"], check=True)
-    subprocess.run(["git", "-C", str(reviewer), "push", "-q", "origin", "note/job-x"], check=True)
-
-    v2 = v1.model_copy(update={"files": [NoteFile(path=v1.files[0].path, content="v2\n")]})
-    with pytest.raises(GitSubmitError, match="did not author"):
-        asyncio.run(submitter.submit(v2))
-
-    # And the reviewer's commit is still the remote tip.
-    tip = subprocess.run(
-        ["git", "-C", str(reviewer), "ls-remote", "origin", "note/job-x"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.split()[0]
-    local = subprocess.run(
-        ["git", "-C", str(reviewer), "rev-parse", "HEAD"], capture_output=True, text=True
-    ).stdout.strip()
-    assert tip == local
 
 
 def test_a_dependency_never_overwrites_a_human_edited_file(tmp_path: Path) -> None:
@@ -668,8 +656,7 @@ def test_a_dependency_never_overwrites_a_human_edited_file(tmp_path: Path) -> No
     subprocess.run(["git", "-C", str(work), "commit", "-qm", "human edit"], check=True)
     subprocess.run(["git", "-C", str(work), "push", "-q", "origin", "main"], check=True)
 
-    submission = NoteSubmission(
-        branch="note/job-dep",
+    submission = NoteWrite(
         files=[
             NoteFile(path="knowledge/job-result/job-dep.md", content="the subject note\n"),
             NoteFile(
@@ -678,20 +665,19 @@ def test_a_dependency_never_overwrites_a_human_edited_file(tmp_path: Path) -> No
                 overwrite=False,
             ),
         ],
-        title="Add job-result note: job-dep",
-        body="review please",
+        message="Add job-result note: job-dep",
     )
-    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    outcome = asyncio.run(submitter.submit(submission))
-    assert outcome.pushed is True
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    outcome = asyncio.run(writer.write(submission))
+    assert outcome.written is True
 
-    on_branch = subprocess.run(
-        ["git", "-C", str(work), "show", "note/job-dep:knowledge/compound/compound-x.md"],
+    recorded = subprocess.run(
+        ["git", "-C", str(work), "show", "main:knowledge/compound/compound-x.md"],
         capture_output=True,
         text=True,
         check=True,
     ).stdout
-    assert "chemist's hazard note" in on_branch, "the human's edit must survive the proposal"
+    assert "chemist's hazard note" in recorded, "the human's edit must survive the write"
 
 
 def test_git_child_env_scrubs_app_secrets_but_keeps_git_credential(
@@ -703,7 +689,7 @@ def test_git_child_env_scrubs_app_secrets_but_keeps_git_credential(
     framing HMAC in its environment. The notes-remote token and PATH are not secrets git can do
     without, so they survive — that survival is what keeps `push` working.
     """
-    from chemclaw.kg.git_submitter import _git_child_env
+    from chemclaw.kg.git_writer import _git_child_env
 
     monkeypatch.setenv("CHEMCLAW_LLM_API_KEY", "llm-secret-value")
     monkeypatch.setenv("CHEMCLAW_POSTGRES_DSN", "postgresql://u:pw@db/x")
@@ -743,10 +729,10 @@ def test_git_subprocess_receives_the_scrubbed_env(
         captured.update(kwargs)
         return _FakeProcess()
 
-    monkeypatch.setattr("chemclaw.kg.git_submitter.asyncio.create_subprocess_exec", _fake_exec)
-    submitter = GitNoteSubmitter(repo_dir=str(tmp_path), base_branch="main", remote="origin")
+    monkeypatch.setattr("chemclaw.kg.git_writer.asyncio.create_subprocess_exec", _fake_exec)
+    writer = GitNoteWriter(repo_dir=str(tmp_path), base_branch="main", remote="origin")
 
-    result = asyncio.run(submitter._read("HEAD"))
+    result = asyncio.run(writer._read("HEAD"))
 
     assert result == "deadbeef"
     env = captured["env"]

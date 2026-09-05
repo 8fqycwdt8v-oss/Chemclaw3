@@ -87,7 +87,7 @@ def test_the_job_envelope_carries_addresses_and_not_coordinates() -> None:
 
 
 def test_the_envelope_carries_the_calculations_a_note_would_cite() -> None:
-    """`propose_knowledge_note` has said "get them from a job's result envelope" since D-133.
+    """`record_knowledge_note` has said "get them from a job's result envelope" since D-133.
 
     No envelope carried any, so a note drafted from a calculation the agent had just run could not
     cite it. `calc_refs` rides on the envelope's own field rather than inside `data`, because it is

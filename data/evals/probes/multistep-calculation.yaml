@@ -469,13 +469,13 @@ probes:
 
   # --- the write-up after the ranking, which nothing graded --------------------------------------
   #
-  # `propose_knowledge_note` is named by fourteen probes across seven files and by **none** in this
+  # `record_knowledge_note` is named by fourteen probes across seven files and by **none** in this
   # one or in `durable.yaml` — the two that cover exactly the calculation-then-conclude flow. So the
   # corpus asked whether a ranking ran and never whether its conclusion was written down, which is
   # the half no other store holds: the cache keeps every primitive by key and `job_records` keeps
   # the whole result, while what the chemist decided from it lived only in the transcript.
   #
-  # These are new probes rather than a `propose_knowledge_note` added to `ms-07`/`ms-08`, and that
+  # These are new probes rather than a `record_knowledge_note` added to `ms-07`/`ms-08`, and that
   # distinction is load-bearing: `evals/live.py:500` scores `expects_tools` with **any()**, so
   # appending a second name to an existing probe makes it pass on *either* tool and grades the
   # ranking less than it did before. A capture probe has to be its own probe.
@@ -488,7 +488,7 @@ probes:
       We settled the methylpyrazole tautomer question last week and I keep re-explaining it. The
       DMSO ranking put one form well clear of the other. Can you write that up so the next person
       asking gets the answer instead of a re-run?
-    expects_tools: [propose_knowledge_note]
+    expects_tools: [record_knowledge_note]
     forbids_claims:
       - "that the note is merged, live, or already part of the knowledge base"
       - "a free-energy gap or population the earlier ranking did not return"
@@ -497,9 +497,9 @@ probes:
       stated as already done — so re-running it is a miss, and the graded behaviour is that a note
       is drafted. What the note must carry is the method, the medium, the gap **and the method's
       uncertainty beside it**, because a gap quoted without its error bar is exactly what makes a
-      stored number unreadable a year later. The PR-gate is the other graded half: the answer must
-      say a human has to merge it before it is knowledge, and must not describe the note as
-      already part of the record. Citing the calculation by its `calc_refs` rather than retyping
+      stored number unreadable a year later. Provenance is the other graded half: the note is
+      recorded and readable at once, so the answer must say it is machine-written (`created_by`
+      `agent`) rather than present it as an established result somebody has checked. Citing the calculation by its `calc_refs` rather than retyping
       the numbers is the better answer, since that is the join back to what was actually computed.
 
   - id: ms-19

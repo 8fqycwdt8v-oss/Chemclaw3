@@ -148,7 +148,7 @@ def note_relative_path(note_type: str, note_id: str) -> str:
     """Where a note lives inside the knowledge directory: `<type>/<id>.md`.
 
     The one filename shape the whole system depends on, and until this it was an f-string in the
-    PR-gate (`chemclaw.kg.pr_gate`) that three other places re-derived by hand — including
+    PR-gate (`chemclaw.kg.record`) that three other places re-derived by hand — including
     `chemclaw.kg.graph.note_file_fingerprints`, which reads a note's id back out of `path.stem`,
     and the warehouse retriever, which spelled the layout *and* the literal type `"reaction"` into
     a `stat` call. A layout that lives in four places is a layout one of them will get wrong.
@@ -361,7 +361,7 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         # bundle removed (`D-2026-08-26-semiempirical-is-the-whole-tier`) no bundle mints one, and
         # the rule that put it there says where it goes instead. A type a bundle *mints* belongs to
         # that bundle; this one is now written only through core's own PR-gate
-        # (`propose_knowledge_note`), about results the corpus in `knowledge/job-result/` already
+        # (`record_knowledge_note`), about results the corpus in `knowledge/job-result/` already
         # holds — so it is core's vocabulary again. `bo-candidate` stays in `connectors/bo/`,
         # because `bo` still mints it.
         "job-result",

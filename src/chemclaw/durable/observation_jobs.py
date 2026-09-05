@@ -23,10 +23,10 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.ingest.eln.compound import compound_dependencies
-    from chemclaw.kg.git_submitter import default_submitter
+    from chemclaw.kg.git_writer import default_writer
     from chemclaw.kg.graph import load_notes
     from chemclaw.kg.note import Note
-    from chemclaw.kg.pr_gate import propose_note
+    from chemclaw.kg.record import record_note
     from chemclaw.memory.observation_mining import mine_corpus, mine_interactions
     from chemclaw.memory.observations import (
         Observation,
@@ -119,15 +119,19 @@ async def retire_stale_observations_activity() -> int:
 @durable_activity("background")
 @activity.defn
 async def promote_observations_activity() -> list[str]:
-    """Open one PR per observation that has crossed both thresholds; return the references.
+    """Record one `playbook` note per observation that has crossed both thresholds.
 
-    The human gate, moved. It does not disappear — a promoted observation becomes an ordinary
-    agent-authored `playbook` note through the ordinary `propose_note`, reviewed by an ordinary
-    human. There is deliberately no second write path into the graph (D-019/D-078): the tier's
-    entire contribution is deciding *which* candidates are worth a reviewer's time.
+    **What the thresholds now decide.** D-161 wrote them to choose which candidates were worth a
+    *reviewer's* time; there is no reviewer
+    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so they now decide what is worth
+    asserting at all — which is a stricter job, not a lighter one, because nothing downstream will
+    catch a promotion that should not have happened. They are unchanged: evidence count says the
+    finding is not a coincidence, project count says it is not one team's local habit.
 
-    The note's body states the reading and cites the merged reactions behind it, so a reviewer
-    judges the same evidence the threshold counted rather than taking the count on trust.
+    There is deliberately no second write path into the graph (D-019/D-078): a promoted observation
+    becomes an ordinary agent-authored `playbook` note through the ordinary `record_note`. The
+    note's body states the reading and cites the reactions behind it, so a chemist meeting it as
+    evidence can check the same record the threshold counted rather than taking the count on trust.
     """
     references: list[str] = []
     # The guard reads the *store*, not a pass-local list: a subset promoted last week must be as
@@ -170,9 +174,9 @@ async def promote_observations_activity() -> list[str]:
             observation.evidence_note_ids,
         )
         references.append(
-            await propose_note(
+            await record_note(
                 note,
-                default_submitter(),
+                default_writer(),
                 dependencies=compound_dependencies(note),
                 superseded=superseded,
             )

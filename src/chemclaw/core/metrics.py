@@ -241,7 +241,7 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_job_runtime_seconds_total": (
         "Wall-clock seconds accumulated by finished durable jobs, by connector."
     ),
-    "chemclaw_notes_proposed_total": "Notes opened on a branch through the PR-gate.",
+    "chemclaw_notes_recorded_total": "Notes written into the knowledge graph.",
     # A note the indexer cannot parse is dropped from the graph so one bad file cannot block every
     # query — which is right, and was silent. `kg-validate` reports these in CI, over the
     # repository; nothing reported them over the tree a pod is actually serving, where a partial
@@ -268,7 +268,7 @@ _COUNTERS: dict[str, str] = {
     # outage reads as "zero proposals", which is exactly what an idle system reads as. Two counters
     # make the difference visible and give the alert a ratio to fire on.
     "chemclaw_notes_publish_failures_total": (
-        "Knowledge notes that could not be opened on a branch; the knowledge was lost."
+        "Knowledge notes that could not be written into the graph; the knowledge was lost."
     ),
     # A fan-out child that exhausted its retries and was dropped (`durable/orchestrator.py`).
     # Isolate-and-drop is the right policy — one poison input must not restart its siblings — but
@@ -277,23 +277,15 @@ _COUNTERS: dict[str, str] = {
     # healthy. Measured: a live fan-out returned two results from four inputs with nothing but log
     # lines to show for it.
     #
-    # The failure this makes visible: the PR-gate's git credential expires, every
+    # The failure this makes visible: the notes repo's git credential expires, every
     # `PublishNoteWorkflow` child fails, and all three memory-synthesis jobs complete green
     # returning `[]` every night — `/schedules` showing `runs_total` climbing and no failures — for
-    # as long as it takes someone to notice that nothing has been proposed in months.
+    # as long as it takes someone to notice that nothing has been recorded in months.
     # `chemclaw_notes_publish_failures_total` above does not cover it: that one is incremented by
     # `publish_note_best_effort`, which the memory fan-out does not use.
     "chemclaw_fan_out_children_dropped_total": (
         "Fan-out children that failed their retries and were dropped; their work is missing from "
         "an otherwise successful parent."
-    ),
-    # The gate's outcomes, which the two counters above cannot express: they count submissions,
-    # and the question an operator actually has is whether anything is being *reviewed*. A rising
-    # `open` against a flat `merged` is a review queue nobody is working; `rejected` is the series
-    # that had no record at all before, because a rejection is a deleted branch.
-    "chemclaw_note_proposals_total": (
-        "Note proposals by state — open on submission, merged/rejected on a human decision, "
-        "failed when the submission never reached git."
     ),
     # A turn whose connectors did not come up still answers — from whatever tools remained. That is
     # the right behaviour and the reason it needs a number: a degraded answer is indistinguishable
@@ -831,9 +823,6 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_output_tokens_total": ("profile",),
     "chemclaw_cache_read_tokens_total": ("profile",),
     "chemclaw_cache_write_tokens_total": ("profile",),
-    # Four values, fixed by a CHECK constraint in `infra/sql/027_note_proposals.sql` — the only
-    # label in this registry whose cardinality is bounded by the database rather than by trust.
-    "chemclaw_note_proposals_total": ("state",),
     # Bounded by `CHEMCLAW_DELIVERY_CHANNELS` — a deployment's own list of channel folder names,
     # never a caller's string. Same rule as every label here.
     "chemclaw_deliveries_total": ("channel",),
