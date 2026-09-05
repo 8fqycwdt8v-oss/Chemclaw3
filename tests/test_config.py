@@ -858,15 +858,28 @@ def test_a_fleet_that_would_exhaust_the_server_is_refused_by_pools_not_by_pods()
 
     Written against the single-process case deliberately: it is the smallest fleet that fails, so
     the assertion is about the arithmetic and not about any chart's replica counts.
+
+    **One front door is 33 connections, not 48, and the difference is the point of the second
+    correction.** Its three pools are not three `pg_pool_max_size`: the `/readyz` one asks for a
+    single connection, because the probe is single-flighted and was measured at a peak of one
+    simultaneous checkout under a thousand concurrent requests. So the ceiling that refuses this
+    fleet is 32, not 47 — and a ceiling of 40, which the old arithmetic refused, is one this
+    deployment genuinely fits inside. Charging every pool the full width is how a legal
+    `maxReplicas: 9` came to CrashLoop the fleet it was scaling.
     """
     with pytest.raises(ValueError) as excinfo:
         Settings(  # type: ignore[call-arg]
             _env_file=None,
             pg_fleet_pools=3,  # one front door
             pg_pool_max_size=16,
-            pg_fleet_max_connections=40,
+            pg_fleet_max_connections=30,
         )
-    assert "48 Postgres connections" in str(excinfo.value)
+    assert "33 Postgres connections" in str(excinfo.value)
+    # The half a product cannot express: the same fleet against the ceiling the old arithmetic
+    # refused it at. Asserting only the refusal above would pass on `pools × max_size` too.
+    Settings(  # type: ignore[call-arg]
+        _env_file=None, pg_fleet_pools=3, pg_pool_max_size=16, pg_fleet_max_connections=40
+    )
 
 
 def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> None:
@@ -878,6 +891,11 @@ def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> Non
     operator seeing this needs both numbers and both levers, not the name of one setting — and,
     since the count moved from pods to pools, the sentence that says a process is not a pool: a
     reader who reaches this message while looking at 14 pods needs to know why the number is 26.
+
+    The left-hand side is 257 rather than 272 because one of those seventeen pools is a front
+    door's `/readyz` pool and one connection wide. The message therefore has to name *how many*
+    are narrow as well as how wide the rest are, or the reader cannot reproduce the number it is
+    being refused over.
     """
     with pytest.raises(ValueError) as excinfo:
         Settings(  # type: ignore[call-arg]
@@ -887,8 +905,8 @@ def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> Non
             pg_fleet_max_connections=136,
         )
     message = str(excinfo.value)
-    assert "272" in message and "136" in message
-    assert "17 pool(s)" in message and "16 per pool" in message
+    assert "257" in message and "136" in message
+    assert "17 pool(s)" in message and "1 of them one connection wide" in message
     assert "pg_fleet_max_connections" in message and "pg_pool_max_size" in message
     assert "the front door holds three" in message
 
@@ -1499,3 +1517,186 @@ def test_the_warning_reaches_stderr_with_no_logging_configured(tmp_path: Path) -
     assert done.returncode == 0, done.stderr
     assert "CHEMCLAW_FRAMING_ENVELOPE_SECRET is unset" in done.stderr
     assert done.stdout == ""
+
+
+def _shipped(session_store_dsn: str = "") -> Settings:
+    """The chart's rendered fleet numbers, with the session layer wherever the caller says.
+
+    Module level because two tests below stand on the same rendered topology: one asserting how a
+    real split is charged, one pinning what a *spelling* of one server costs.
+    """
+    return Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        pg_fleet_pools=26,
+        pg_pool_max_size=8,
+        service_fleet_replicas=6,
+        postgres_dsn="postgresql://u:p@primary:5432/chemclaw",
+        session_store_dsn=session_store_dsn,
+    )
+
+
+def test_a_split_session_store_charges_each_server_its_own_pools() -> None:
+    """One `pg_fleet_max_connections` describes one server, and a split makes two.
+
+    Measured on the real composition roots (`tests/test_fleet_pools.py`), pointing the session
+    layer at a second database gives every pooled process one more `core/db` pool: the front door's
+    `/readyz` and checkpointer pools move there and the stores' session pool is new. On the shipped
+    chart's numbers that is 278 connections against a declared 256 — and the check passed, because
+    it multiplied a pool count the chart derives on the one-DSN assumption from a Secret it cannot
+    read.
+
+    Split correctly it is 112 on `postgres_dsn`'s server and 166 on the session store's, so neither
+    is over on its own: summing them into the single ceiling would refuse a deployment that is
+    fine. That is why this is two numbers rather than one, and why the second is declared rather
+    than derived — the pool count is decidable here, what a second server will serve is not.
+    """
+    assert _shipped().fleet_connections_per_server() == (166, 0)
+    assert _shipped("postgresql://u:p@sessions:5432/sessions").fleet_connections_per_server() == (
+        112,
+        166,
+    )
+
+    # Two DSNs, one endpoint: a site that split *databases* rather than servers has one server and
+    # one ceiling, so the pools are summed onto it rather than checked against a ceiling that does
+    # not exist. libpq's own view of the *dialled* address, so `hostaddr` beats `host` — but it is
+    # a string comparison, so it is one endpoint only when both DSNs spell it the same way. See
+    # `test_one_server_spelled_two_ways_is_charged_as_two` for what that costs.
+    assert _shipped("postgresql://u:p@primary:5432/sessions").fleet_connections_per_server() == (
+        278,
+        0,
+    )
+    assert _shipped(
+        "postgresql://u:p@primary:5432/sessions?hostaddr=10.0.0.5"
+    ).fleet_connections_per_server() == (112, 166)
+
+
+def test_one_server_spelled_two_ways_is_charged_as_two() -> None:
+    """`pg_endpoint` compares strings, so a spelling decides how many ceilings exist.
+
+    Pinned rather than fixed, and pinned with the number so it is a known property instead of an
+    accident. The two DSNs below are one physical server. Spelled identically it is refused — 278
+    against a declared 256, which is the assertion above. Spelled differently the primary is
+    charged 112, the remaining 166 is charged to a server that does not exist, and the deployment
+    starts: the direction is exhaustion, of exactly the 22 connections the identical spelling
+    refuses.
+
+    Not normalised, because the loopback aliases are two of nine measured spellings of one endpoint
+    and none of the three a Kubernetes deployment produces (short name against FQDN, omitted port,
+    case) — and resolving them means reimplementing libpq's precedence, which `require_pg_tls`
+    already refused to do for the same reason. Not measured either: `Settings()` is constructed at
+    module import with no loop and no pool, so nothing here can ask a server who it is. What
+    carries the risk instead is the warning this configuration raises, which now says to check the
+    spelling *before* declaring a second ceiling — because declaring one is what silences the
+    runtime alert as well.
+    """
+    same_box = {
+        "one_spelling": "postgresql://u:p@primary:5432/sessions",
+        "short_vs_fqdn": "postgresql://u:p@primary.ns.svc.cluster.local:5432/sessions",
+        "omitted_port": "postgresql://u:p@primary/sessions",
+        "uppercase_host": "postgresql://u:p@PRIMARY:5432/sessions",
+        "trailing_dot_fqdn": "postgresql://u:p@primary.:5432/sessions",
+    }
+    assert _shipped(same_box["one_spelling"]).fleet_connections_per_server() == (278, 0)
+    for name, dsn in list(same_box.items())[1:]:
+        primary, elsewhere = _shipped(dsn).fleet_connections_per_server()
+        assert (primary, elsewhere) == (112, 166), (
+            f"{name}: one server spelled two ways is charged ({primary}, {elsewhere}); the "
+            "identical deployment spelled once is charged (278, 0) and refused against 256"
+        )
+
+
+def test_a_hand_set_pool_count_that_cannot_hold_its_readiness_pools_is_charged_in_full() -> None:
+    """The narrow pools are subtracted only when the declared topology can contain them.
+
+    A front door holds three pools, so fewer than `3 × service_fleet_replicas` means the pair was
+    set by hand and does not describe a fleet this chart rendered. Subtracting a readiness pool
+    that is not there is an *under*-declaration, which is the direction that exhausts a server
+    rather than starving one: at the code defaults it would declare a single connection for a
+    process holding `pg_pool_max_size`.
+    """
+    defaults = Settings(_env_file=None, pg_fleet_pools=1, pg_pool_max_size=16)  # type: ignore[call-arg]
+    assert defaults.fleet_connections_per_server() == (16, 0)
+
+    impossible = Settings(  # type: ignore[call-arg]
+        _env_file=None, pg_fleet_pools=2, pg_pool_max_size=16, service_fleet_replicas=3
+    )
+    assert impossible.fleet_connections_per_server() == (32, 0)
+
+
+def test_a_split_session_store_with_no_ceiling_for_its_server_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Warned, not refused — and the reason is not the one its sibling guard has.
+
+    The shipped chart is *not* this configuration, so no existing release reaches the line. What
+    would break is an existing split deployment on the `helm upgrade` that introduces the setting:
+    `Settings()` would fail to construct over a variable its operator has never seen, which is an
+    outage caused by a chart bump. The primary server's half still raises.
+    """
+    with caplog.at_level(logging.WARNING):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            pg_fleet_pools=26,
+            pg_pool_max_size=8,
+            service_fleet_replicas=6,
+            postgres_dsn="postgresql://u:p@primary:5432/chemclaw",
+            session_store_dsn="postgresql://u:p@sessions:5432/sessions",
+        )
+    assert "CHEMCLAW_PG_SESSION_FLEET_MAX_CONNECTIONS" in caplog.text
+    assert "166 connection(s) are charged there" in caplog.text
+    assert "postgres.sessionStoreMaxConnections" in caplog.text
+    # The half that removes the risk rather than naming it. `pg_endpoint` compares strings, so this
+    # warning also fires for one server spelled two ways — and declaring the second ceiling *there*
+    # moves the deployment from the cell where the runtime alert fires into the one where nothing
+    # checks it at all. Telling the operator to declare it unconditionally is what this used to do.
+    assert "check that these really are two servers" in caplog.text
+
+    # And silent when the second server is declared, so the warning stays a signal.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            pg_fleet_pools=26,
+            pg_pool_max_size=8,
+            service_fleet_replicas=6,
+            postgres_dsn="postgresql://u:p@primary:5432/chemclaw",
+            session_store_dsn="postgresql://u:p@sessions:5432/sessions",
+            pg_session_fleet_max_connections=256,
+        )
+    assert "CHEMCLAW_PG_SESSION_FLEET_MAX_CONNECTIONS" not in caplog.text
+
+
+def test_the_session_stores_ceiling_is_refused_when_it_is_exceeded_and_when_there_is_no_split() -> (
+    None
+):
+    """Both directions of a ceiling that only means something beside a second server.
+
+    Exceeded, it refuses like its primary sibling and names which server. Declared with no split it
+    refuses too, and that branch is the one this setting could afford: it is new, so nothing has it
+    set and no upgrade can trip on it. Left inert it would be a ceiling for a server that does not
+    exist — which `ChemclawFleetAboveItsConnectionCeiling` *adds* to the real one, so a fleet could
+    sit above its actual limit with nothing firing.
+    """
+    with pytest.raises(ValueError) as exceeded:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            pg_fleet_pools=26,
+            pg_pool_max_size=8,
+            service_fleet_replicas=6,
+            pg_fleet_max_connections=256,
+            postgres_dsn="postgresql://u:p@primary:5432/chemclaw",
+            session_store_dsn="postgresql://u:p@sessions:5432/sessions",
+            pg_session_fleet_max_connections=100,
+        )
+    assert "166 Postgres connections on the session store's own server" in str(exceeded.value)
+
+    with pytest.raises(ValueError) as unsplit:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            pg_fleet_pools=26,
+            pg_pool_max_size=8,
+            service_fleet_replicas=6,
+            pg_fleet_max_connections=256,
+            pg_session_fleet_max_connections=256,
+        )
+    assert "declares a ceiling for a split session store and there is none" in str(unsplit.value)

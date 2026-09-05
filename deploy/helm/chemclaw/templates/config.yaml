@@ -89,14 +89,24 @@
          `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` exists to catch. Derived, it is the same
          number the HPA obeys. When the HPA is off, the fixed replica count is that number. */}}
   CHEMCLAW_SERVICE_FLEET_REPLICAS: {{ if .Values.service.autoscaling.enabled }}{{ .Values.service.autoscaling.maxReplicas | quote }}{{ else }}{{ .Values.service.replicas | quote }}{{ end }}
-  {{- /* The connection budget's two inputs, derived for the same reason as the line above: what
-         the database sees is `pg_pool_max_size × pools`, and a hand-written count is a second copy
-         of the topology. `chemclaw.fleetPools` counts POOLS rather than pods — a front-door
-         process holds three (the stores', `/readyz`'s own statement-timeout key, and the
-         checkpointer's) and every other role holds one. Counting pods declared 136 against a
-         measured floor of 208. */}}
+  {{- /* The connection budget's inputs, derived for the same reason as the line above: a
+         hand-written count is a second copy of the topology. `chemclaw.fleetPools` counts POOLS
+         rather than pods — a front-door process holds three (the stores', `/readyz`'s own
+         statement-timeout key, and the checkpointer's) and every other role holds one. Counting
+         pods declared 136 against a measured floor of 208.
+
+         What the database sees is NOT `pg_pool_max_size × pools`: `/readyz`'s pool asks for one
+         connection, so `Settings.fleet_connections_per_server` charges one per front-door replica
+         and the full width for the rest, which is why CHEMCLAW_SERVICE_FLEET_REPLICAS above is a
+         second input to this budget and not only to the turn ceiling. Multiplying declared 208 for
+         a fleet that opens 166 — and refused a legal `maxReplicas: 9`.
+
+         The session store's ceiling is not derived and is not derivable: whether these pods open
+         one pool each or two is decided by a Secret value, so only the *count* can be corrected
+         in-process. */}}
   CHEMCLAW_PG_FLEET_POOLS: {{ include "chemclaw.fleetPools" . | quote }}
   CHEMCLAW_PG_FLEET_MAX_CONNECTIONS: {{ .Values.postgres.maxConnections | quote }}
+  CHEMCLAW_PG_SESSION_FLEET_MAX_CONNECTIONS: {{ .Values.postgres.sessionStoreMaxConnections | quote }}
   {{- /* The third budget of the same shape, and the same reason it is derived: the calculation
          backend is one shared pod, `worker_max_concurrent_activities` bounds one worker *process*,
          and so what `servers/calc` is offered is that cap times however many `calc` worker pods
