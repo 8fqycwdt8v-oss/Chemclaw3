@@ -88,7 +88,10 @@ async def find_similar_molecules(
     Returns a `FingerprintSearch`, not a bare list, so "we have no analog on file" and "nothing
     has been indexed" cannot arrive as the same empty list — see that model's docstring. For the
     same reason a full page carries `hits_truncated` when more molecules cleared the threshold than
-    `top_k` could hold: the page is a floor, and it read as a total.
+    `top_k` could hold: the page is a floor, and it read as a total. `approximate` is the third
+    member of that family and comes straight off the store: a deployment may search the index
+    approximately (`fingerprint_search_exactness`), and under that trade an empty result is no
+    longer evidence that we have no analog on file.
     """
     matches, truncated = await find_matches(store, ecfp_bitstring(smiles), top_k, threshold)
     return FingerprintSearch[MoleculeHit](
@@ -96,6 +99,7 @@ async def find_similar_molecules(
         hits=[MoleculeHit.for_molecule(match.label, match.similarity) for match in matches],
         index_empty=await index_is_empty(store, matches),
         hits_truncated=truncated,
+        approximate=store.approximate,
     )
 
 

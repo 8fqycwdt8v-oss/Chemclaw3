@@ -51,6 +51,7 @@ from chemclaw.agent.context_budget import (
 from chemclaw.agent.context_budget import _prefix as _prefix_var
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.message_pairing import calls_without_adjacent_results
+from chemclaw.agent.profiles import get_profile
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 
@@ -1052,21 +1053,35 @@ def test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged() -> None:
     past what this setting can absorb, this fails and names the trade instead of the behaviour
     changing quietly. The second assertion then adds what a ceiling cannot say — that *today's*
     deployment, at today's measured prefix, actually has the band.
-    """
-    from tests.test_context_floor import CEILINGS
 
-    ceiling = CEILINGS["__default__"]
-    prefix = _graph_prefix()
+    **And for eleven weeks all of that was asserted against a prefix no deployment sends.** Both
+    numbers this test read — `_graph_prefix()` and the ratchet ceiling — came from a graph compiled
+    with no `connectors=` argument, so it reported the shipped trigger clearing its prefix by tens
+    of thousands of tokens while the shipped trigger was floored at 1 on every real turn. A test
+    written against a bound is only as good as the bound, and this one was measuring the same short
+    read the setting was derived from — the two could not disagree.
+
+    Both arms are now honest about a different thing, deliberately. The bound arm reads
+    `PREFIX_BOUND`, which is the ratchet ceiling *plus* the allowance for the three bundles served
+    from `Chemclaw3-mcp` — the half no test here can measure and the half that made the original
+    number wrong. The measured arm binds the connector surface this repository serves, so it fails
+    on a real turn's arithmetic rather than on a fixture's.
+    """
+    from tests.test_context_floor import PREFIX_BOUND, _connector_tools
+
+    prefix = _graph_prefix() + estimate_tool_schemas(_connector_tools(get_profile("default")))
     trigger = settings.agent_tool_result_clear_trigger
     reset_calibration()
 
-    assert trigger - ceiling >= CLEAR_TRIGGER_THREAD_ALLOWANCE, (
-        f"agent_tool_result_clear_trigger is {trigger} against a ratchet ceiling of {ceiling}, so "
-        f"a surface grown to its permitted bound would leave the thread {trigger - ceiling} "
-        f"estimated tokens where the derivation claims {CLEAR_TRIGGER_THREAD_ALLOWANCE}. The "
-        "default is the ceiling plus that allowance: move both together, or say in the pull "
-        "request which one is now wrong."
+    assert trigger - PREFIX_BOUND >= CLEAR_TRIGGER_THREAD_ALLOWANCE, (
+        f"agent_tool_result_clear_trigger is {trigger} against a prefix bound of {PREFIX_BOUND}, "
+        f"so a surface grown to its permitted bound would leave the thread "
+        f"{trigger - PREFIX_BOUND} estimated tokens where the derivation claims "
+        f"{CLEAR_TRIGGER_THREAD_ALLOWANCE}. The default is that bound plus the allowance: move "
+        "them together, or say in the pull request which one is now wrong."
     )
+    # And then at *today's* measurement, which is what a ceiling cannot say: the assertion above
+    # holds at the permitted bound, this one holds for the deployment that actually ships.
     token = _prefix_var.set(prefix)
     try:
         allowance = effective_trigger(trigger)

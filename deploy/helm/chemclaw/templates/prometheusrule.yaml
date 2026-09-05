@@ -325,6 +325,14 @@ spec:
               connector's own server pods. Either scale back or raise
               CHEMCLAW_CALC_BACKEND_MAX_CONCURRENT_REQUESTS to what that server actually admits.
 
+        {{- /* **A shed is an HTTP 200.** The turn route streams, so the status line is written
+               before a permit is asked for and the refusal arrives as an SSE frame
+               `{"type":"error","code":"at_capacity","retryable":true}` — measured at 400 and 800
+               offered turns as 743 of them, every one counted as a success by every 5xx-based
+               alarm and by any uptime probe. `core/config/service.py` documented "shed with 503"
+               for as long as the guard existed, which is why nobody looked for this. This counter
+               is the only signal there is, and until now the only rule on it fired at `> 0`, which
+               says "we are shedding" and not "we are shedding most of the load". */}}
         - alert: ChemclawTurnsShed
           expr: sum(rate(chemclaw_turns_shed_total[10m])) > 0
           for: 10m
@@ -334,8 +342,93 @@ spec:
             runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnsshed
             summary: Turns are being rejected for lack of admission capacity
             description: >-
-              The admission guard is shedding load (503). Either the deployment is undersized or
-              `service_max_concurrent_turns` is set below what the LLM endpoint can serve.
+              The admission guard is shedding load. It answers HTTP 200 and then an SSE
+              `at_capacity` error frame, so availability monitoring cannot see it. Either the fleet
+              is undersized (check that the HPA is actually scaling — see
+              ChemclawFrontDoorAtItsPermitCeiling) or `service_max_concurrent_turns` is below what
+              the LLM endpoint can serve.
+
+        {{- /* The share, which is the number that decides whether this is a busy afternoon or an
+               outage. Measured in the load lane: at offered concurrency 32, **33 of 48 turns were
+               shed while CPU sat at 35.0% of one core** — two thirds of the chemists refused, on a
+               platform reporting 100% availability. Same floor discipline as
+               `ChemclawTurnsFailing`, with one difference that decides the whole rule:
+               **`chemclaw_turns_started_total` is incremented after the permit is acquired**
+               (`api/routes/turns.py`), so a shed turn is not in it. `shed / started` would
+               therefore be "refusals per turn served" rather than a share of offered load, and —
+               the part that matters — a pod shedding *everything* has `started` at zero, so a
+               floor on `started` alone would silence this alert at exactly its worst moment. Both
+               the denominator and the floor are `shed + started`, which is offered load and is
+               what the threshold is a fraction of.
+
+               A ladder on one series rather than a replacement: `> 0` says "the guard is
+               engaging", which is worth looking at today, and `> 0.2` says "we are turning most
+               people away", which is worth a page. Nothing here inhibits the quieter one, and
+               that is the ordinary shape of a two-threshold rule. */}}
+        - alert: ChemclawTurnsShedHeavily
+          expr: >-
+            sum(rate(chemclaw_turns_shed_total[10m]))
+            / (sum(rate(chemclaw_turns_shed_total[10m]))
+            + sum(rate(chemclaw_turns_started_total[10m]))) > 0.2
+            and sum(rate(chemclaw_turns_shed_total[10m]))
+            + sum(rate(chemclaw_turns_started_total[10m]))
+            > {{ .Values.monitoring.alerts.turnsFloorPerSecond }}
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnsshedheavily
+            summary: More than a fifth of offered turns are being refused for capacity
+            description: >-
+              Chemists are being turned away in bulk and every refusal is an HTTP 200, so this is
+              invisible to availability monitoring and to CPU (a turn is 93% waiting on the model,
+              so a completely full pod draws about 44% of the HPA's CPU target). Check
+              `chemclaw_turns_in_flight` against `chemclaw_turn_capacity` per pod and whether the
+              HPA is scaling: if the custom-metrics API is not serving
+              `chemclaw_turns_in_flight`, the autoscaler is back on CPU and cannot see this.
+
+        {{- /* The leading indicator, and the one the HPA is supposed to act on. This is the pair
+               `chemclaw_turns_in_flight` / `chemclaw_turn_capacity` was exported for and that
+               nothing read for a year (gap DEP-4). It fires *before* the shed alerts, which is the
+               whole point: at the ceiling the next turn is refused, and the fleet's only remedy is
+               more replicas. Self-disabling in a deployment with no capacity gauge, because an
+               absent series makes every arm an empty vector. */}}
+        - alert: ChemclawCalculationBackendRefusingForCapacity
+          expr: >-
+            sum(rate(chemclaw_calc_backend_at_capacity_total[15m])) > 0.05
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawcalculationbackendrefusingforcapacity
+            summary: The calculation backend is turning work away because every slot is busy
+            description: >-
+              A single refusal is the admission gate working — the backend sheds promptly rather
+              than queueing a calculation nobody will still be waiting for, and the caller now
+              retries with backoff. A *sustained* rate is the calculation tier asking for more
+              capacity, and it is the only thing that asks: one CREST conformer search is charged
+              every slot on its pod, so a deployment can be refusing most of its chemists while
+              every pod looks healthy and CPU looks unremarkable. Add replicas before raising the
+              per-pod ceiling; a slot is a core, and over-admitting turns prompt refusals into slow
+              ones. This is deliberately not on `chemclaw_degraded_total`, so it never fires the
+              backend-is-dark alert.
+
+        - alert: ChemclawFrontDoorAtItsPermitCeiling
+          expr: >-
+            sum(chemclaw_turns_in_flight) / sum(chemclaw_turn_capacity) > 0.9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawfrontdooratitspermitceiling
+            summary: The front-door fleet is holding nearly every admission permit it has
+            description: >-
+              Occupancy, not CPU, is what this service runs out of: a turn holds its permit for the
+              whole ~8 s it waits on the model and spends under a second of CPU doing it. Sustained
+              at this level the next turn is shed with an HTTP 200 nobody can alert on. If replica
+              count is not rising, the HPA's `chemclaw_turns_in_flight` metric is not being served
+              by the custom-metrics API — `kubectl describe hpa` shows `FailedGetPodsMetric` — and
+              it has silently fallen back to a CPU signal that cannot reach its threshold.
 
         {{- /* A degraded turn still answers, from whatever tools came up — which is the right
                behaviour and exactly why it needs an alert: the transcript of a degraded answer is

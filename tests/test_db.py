@@ -72,21 +72,50 @@ def test_dsn_options_survive_alongside_a_statement_timeout() -> None:
     assert merged.index("statement_timeout") > merged.index("search_path")
 
 
-def test_no_statement_timeout_leaves_dsn_options_untouched() -> None:
-    """With no timeout to add we contribute nothing, so the DSN's `options` passes through."""
+def test_no_statement_timeout_still_carries_the_plan_mode_and_the_dsn_options() -> None:
+    """With no timeout to add we still contribute the plan mode, and the DSN's own survives.
+
+    This used to assert `None` — "nothing of ours to add". The plan mode is now always ours to
+    add, on every connection, for the reason `_FORCE_CUSTOM_PLAN` states.
+    """
     dsn = "postgresql://h/db?options=-c%20search_path%3Dchemclaw_test,public"
-    assert db._merged_options(dsn, None) is None
-    assert db._merged_options(dsn, 0) is None
+    for merged in (db._merged_options(dsn, None), db._merged_options(dsn, 0)):
+        assert "search_path=chemclaw_test,public" in merged  # the operator's setting survives
+        assert "plan_cache_mode=force_custom_plan" in merged
+        assert "statement_timeout" not in merged  # none was asked for
 
 
 def test_statement_timeout_applies_when_the_dsn_has_no_options() -> None:
     """The ordinary case: no DSN options, so ours is the whole string."""
-    assert db._merged_options("postgresql://h/db", 1.5) == "-c statement_timeout=1500"
+    assert db._merged_options("postgresql://h/db", 1.5) == (
+        "-c plan_cache_mode=force_custom_plan -c statement_timeout=1500"
+    )
 
 
 def test_unparseable_dsn_still_gets_our_timeout() -> None:
-    """A DSN libpq cannot parse still carries our option; the connect reports the real error."""
-    assert db._merged_options("::garbage==", 2.0) == "-c statement_timeout=2000"
+    """A DSN libpq cannot parse still carries our options; the connect reports the real error."""
+    assert db._merged_options("::garbage==", 2.0) == (
+        "-c plan_cache_mode=force_custom_plan -c statement_timeout=2000"
+    )
+
+
+def test_every_pooled_connection_refuses_generic_plans() -> None:
+    """The plan mode is on every connection this module hands out, whatever else it carries.
+
+    Pinned because the defect it prevents is invisible from the application: psycopg auto-prepares
+    on the fifth execution, Postgres may then switch that statement to a generic plan, and for a
+    parameterised `ORDER BY embedding <=> $1` the generic plan is a sequential scan — measured at
+    9 ms -> 1,280 ms on 100k chunks, permanent for that connection. Nothing in the suite runs one
+    statement eleven times on one pooled connection, so only this assertion stands between the
+    setting and its silent removal.
+    """
+    for dsn, timeout in (
+        ("postgresql://h/db", None),
+        ("postgresql://h/db", 30.0),
+        ("postgresql://h/db?options=-c%20work_mem%3D64MB", 5.0),
+        ("::garbage==", 1.0),
+    ):
+        assert "plan_cache_mode=force_custom_plan" in db._merged_options(dsn, timeout)
 
 
 def test_connect_wraps_unreachable_db_without_leaking_the_password(
@@ -178,7 +207,8 @@ def test_connection_defaults_the_statement_timeout_onto_the_connect(
             pass
 
     asyncio.run(_run())
-    assert seen == ["-c statement_timeout=12000", "-c statement_timeout=2000", None]
+    plan = "-c plan_cache_mode=force_custom_plan"
+    assert seen == [f"{plan} -c statement_timeout=12000", f"{plan} -c statement_timeout=2000", plan]
 
 
 _UNBOUNDED_BY_DESIGN = {"chemclaw/core/migrate.py", "chemclaw/core/grants.py"}

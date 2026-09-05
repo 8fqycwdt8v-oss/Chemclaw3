@@ -605,6 +605,17 @@ _COUNTERS: dict[str, str] = {
         "Calculation-cache lookups, by outcome (hit / shared / miss) — `shared` is a concurrent "
         "miss on one key that `cached_compute` single-flighted onto another caller's computation."
     ),
+    # The backend refusing for *capacity* rather than for bad data — the third category
+    # `durable/publish.py` gained when a pod-full refusal stopped being classified as a permanent
+    # error. It is counted separately from `chemclaw_degraded_total` deliberately: a busy backend is
+    # ordinary operation, and folding it into the degradation signal would fire an outage alert on
+    # a working system. It is the saturation signal for the calculation tier — one pod, four slots,
+    # and a CREST search charged all four — so a rising rate here is the fleet asking for more calc
+    # capacity, and it is the only place that asks.
+    "chemclaw_calc_backend_at_capacity_total": (
+        "Calculation-backend calls refused because every slot was busy, by tool. Retried with "
+        "backoff rather than failed; a sustained rate means the backend is under-provisioned."
+    ),
     # --- ingest and retrieval ------------------------------------------------------------------
     "chemclaw_ingest_records_total": (
         "Records seen by an ingest pass, by source and outcome (ingested / rejected / skipped)."
@@ -698,10 +709,13 @@ _TOOL_BUCKETS: tuple[float, ...] = (
 # p95 pinned at exactly 900 s precisely as jobs got expensive — on the series whose own HELP text
 # says it exists "so a p95 exists for the most expensive work in the system".
 #
-# Bracketed on both sides of the ceiling (14400 below, 21600 above) so a deployment saturating its
-# own job timeout is visible as mass moving into the 18000 bucket rather than as a quantile that
+# Bracketed on both sides of the ceiling (21600 below, 28800 above) so a deployment saturating its
+# own job timeout is visible as mass moving into the 25200 bucket rather than as a quantile that
 # stops moving. The low end stays fine-grained because a re-run that hits the D-011 cache returns
-# in seconds and belongs in a bucket of its own rather than pooled with a CREST search.
+# in seconds and belongs in a bucket of its own rather than pooled with a CREST search. The top
+# three boundaries moved with the ceiling when it went to 25,200 s to fund a bundle's queue wait
+# out of its own headroom; `tests/test_durable_observability.py` asserts the bracket against the
+# setting rather than against these literals, which is what made that a caught knock-on.
 _JOB_BUCKETS: tuple[float, ...] = (
     1.0,
     5.0,
@@ -716,8 +730,9 @@ _JOB_BUCKETS: tuple[float, ...] = (
     3600.0,
     7200.0,
     14400.0,
-    18000.0,
     21600.0,
+    25200.0,
+    28800.0,
 )
 # A generic set for the histograms added since, whose range is "a network call": an embedding
 # batch, a database statement, one delivery to a result sink, one model call.
@@ -904,6 +919,7 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_jobs_finished_total": ("connector", "outcome"),
     "chemclaw_activity_failures_total": ("activity",),
     "chemclaw_calc_cache_total": ("outcome",),
+    "chemclaw_calc_backend_at_capacity_total": ("tool",),
     "chemclaw_ingest_records_total": ("source", "outcome"),
     "chemclaw_evidence_source_kept_total": ("source",),
     "chemclaw_embedding_calls_total": ("outcome",),

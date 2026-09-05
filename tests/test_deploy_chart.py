@@ -1100,10 +1100,93 @@ def test_the_shipped_fleet_ceiling_matches_the_fleet_the_chart_renders() -> None
     )
     config_template = (CHART / "templates" / "config.yaml").read_text()
     assert re.search(
-        r"^\s*CHEMCLAW_SERVICE_FLEET_REPLICAS:.*\.Values\.service\.autoscaling\.maxReplicas",
+        r"^\s*CHEMCLAW_SERVICE_FLEET_REPLICAS:.*chemclaw\.frontDoorProcesses",
         config_template,
         flags=re.MULTILINE,
     ), "CHEMCLAW_SERVICE_FLEET_REPLICAS does not come from the number the HPA obeys"
+    # And that helper is where "the number the HPA obeys" is actually decided, for all three of its
+    # callers at once (this ceiling, the Postgres front-door count, the pooled-process total).
+    helpers = (CHART / "templates" / "_helpers.tpl").read_text()
+    _, _, front_door = helpers.partition('define "chemclaw.frontDoorProcesses"')
+    assert ".Values.service.autoscaling.maxReplicas" in front_door.split("{{- end -}}")[0]
+
+
+def test_the_autoscaler_scales_on_the_quantity_that_actually_runs_out() -> None:
+    """CPU cannot see this service saturate, so an HPA that only watches CPU never scales it.
+
+    Measured with the admission semaphore 100% full — every permit held plus 150 idle SSE streams —
+    the pod drew 218 millicores against a 350 mC target: 44% of the scale-up threshold while
+    completely full. The load lane reached the same place from the other side, shedding 33 of 48
+    offered turns at 35.0% of one core. The cause is structural rather than tunable: a turn is
+    8.32 s of wall clock and 0.581 s of CPU, so occupancy runs ~14x CPU and no CPU threshold tracks
+    it. `values.yaml` named this as gap DEP-4 for a year with both gauges already exported.
+
+    Four things, each of which was individually enough to leave the fleet at `minReplicas`:
+    the occupancy metric exists, its target is *derived* from the permit count the pods enforce
+    (a literal here goes stale the first time the cap moves, which is the drift the whole chart
+    fights), it fires before the ceiling rather than at it, and the CPU metric stays as the
+    fallback for a cluster whose custom-metrics API cannot serve the series.
+    """
+    values = _values()
+    hpa = (CHART / "templates" / "service-route.yaml").read_text()
+    occupancy = values["service"]["autoscaling"]["occupancy"]
+
+    assert "type: Pods" in hpa and occupancy["metricName"] == "chemclaw_turns_in_flight", (
+        "the HPA does not scale on permits held, the one quantity this service runs out of"
+    )
+    assert ".Values.service.autoscaling.occupancy.metricName" in hpa
+    assert "CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS" in hpa, (
+        "the occupancy target is not derived from the permit count the pods enforce, so the "
+        "autoscaler's idea of full and the admission guard's can drift apart"
+    )
+    # The fallback, and the reason the CPU metric is not simply replaced: an HPA metric the
+    # custom-metrics API cannot serve blocks scale-*down* only, so a second metric it can read keeps
+    # the autoscaler working (degraded, and visible as FailedGetPodsMetric) instead of frozen.
+    assert "name: cpu" in hpa
+
+    permits = int(values["config"]["CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS"])
+    target = max(1, permits * int(occupancy["targetPercent"]) // 100)
+    assert 0 < target < permits, (
+        f"the occupancy target renders {target} against {permits} permits; at or above the cap the "
+        "HPA only reacts once turns are already being shed, which is the failure it exists to "
+        "prevent"
+    )
+    # And the honesty this chart owes an operator: a Pods metric needs something in the cluster that
+    # this chart does not install, and a chart that silently no-ops is worse than the CPU one.
+    prose = (CHART / "values.yaml").read_text()
+    assert "prometheus-adapter" in prose and "FailedGetPodsMetric" in prose, (
+        "values.yaml does not say that the occupancy metric needs a custom-metrics API, nor what "
+        "happens when there is none"
+    )
+
+
+def test_the_capacity_refusal_is_alertable_even_though_it_answers_200() -> None:
+    """A platform refusing two thirds of its chemists reports 100% availability.
+
+    Measured at 400 and 800 offered turns, the wire shape of a shed is `HTTP 200` followed by an SSE
+    `{"type":"error","code":"at_capacity","retryable":true}` frame — 743 of them, invisible to every
+    5xx-based alarm and to any uptime probe. `chemclaw_turns_shed_total` is the only signal, and the
+    one rule on it fired at `> 0`, which cannot distinguish a busy afternoon from an outage.
+
+    So: a *share* alert at `critical` beside the existing any-shedding one, and the leading
+    indicator over the pair of gauges the HPA now scales on, which fires before anything is refused.
+    """
+    rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    severity = dict(re.findall(r"- alert: (\w+)(?:.|\n)*?severity: (\w+)", rules))
+    assert severity.get("ChemclawTurnsShedHeavily") == "critical", (
+        "the bulk-refusal alert is missing or is not louder than the any-shedding one"
+    )
+    assert severity.get("ChemclawTurnsShed") == "warning"
+    assert severity.get("ChemclawFrontDoorAtItsPermitCeiling") == "warning"
+    assert "chemclaw_turns_in_flight) / sum(chemclaw_turn_capacity)" in rules, (
+        "the occupancy alert does not read the ratio the autoscaler scales on"
+    )
+    # The stale claim that started this: three shipped documents said the shed was a 503, so nobody
+    # looked for a success-shaped refusal. Wherever the runbook and the rules describe it now, they
+    # must not say 503 again.
+    shed_block = rules.split("- alert: ChemclawTurnsShed")[1].split("- alert:")[0]
+    assert "503" not in shed_block, "the shed alert still describes a 503; it is an HTTP 200"
+    assert "HTTP 200" in shed_block
 
 
 def test_the_fleet_ceiling_has_a_runtime_check_config_validation_cannot_do() -> None:
@@ -1245,8 +1328,11 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
     _, _, definition = helpers.partition('define "chemclaw.fleetPools"')
     assert definition, "_helpers.tpl defines no chemclaw.fleetPools"
     # The front door counts at its HPA ceiling, not its floor: a budget that only holds at
-    # minReplicas is a budget the fleet breaks by scaling up, which is what it is for.
-    assert ".Values.service.autoscaling.maxReplicas" in definition
+    # minReplicas is a budget the fleet breaks by scaling up, which is what it is for. Through the
+    # one helper that decides it, so this count and CHEMCLAW_SERVICE_FLEET_REPLICAS cannot disagree.
+    assert 'include "chemclaw.frontDoorProcesses"' in definition
+    _, _, front_door = helpers.partition('define "chemclaw.frontDoorProcesses"')
+    assert ".Values.service.autoscaling.maxReplicas" in front_door.split("{{- end -}}")[0]
     # And it counts POOLS: the front-door term is multiplied by what one such process holds. This
     # is the line whose absence declared 136 for a fleet that opens 208.
     assert f"mul $frontDoor {POOLS_PER_FRONT_DOOR}" in definition, (

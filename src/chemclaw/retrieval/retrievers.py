@@ -106,18 +106,36 @@ async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str,
     leg at 10⁴ notes — and a cache over it would need the corpus fingerprint, the filter dict
     *and* the current date in its key (`is_current(today)` makes the answer date-sensitive).
     Three cheap loops beat one cache with a three-part invalidation story.
+
+    **The filter runs in the worker thread with the load, and that is the whole of this
+    function.** It used to be a `for` loop over the offloaded result, i.e. on the event loop that
+    serves every other concurrent turn on the pod — "a few milliseconds per leg" is true of a
+    small corpus and false of the one this is sized for, and the loop it stalls is shared by every
+    user the pod is serving. `_eligible_sync` says what that measured.
+    """
+    return await asyncio.to_thread(_eligible_sync, directory, filters, date.today())
+
+
+def _eligible_sync(directory: Path, filters: dict[str, Any], today: date) -> dict[str, Note]:
+    """The synchronous body of `_eligible_notes`: load, then filter, in one worker thread.
+
+    Split out rather than inlined into a lambda so `GraphRetriever` can reuse it *inside its own
+    single thread hop* — its scoring loop needs the same notes, and two hops would put the
+    hand-back between them on the event loop again.
+
+    `today` is passed in rather than read here so that every note in one sweep is judged current
+    against the same date, and so a test can drive the currency rule without moving the clock.
     """
     want_type = filters.get("type")
     want_tag = filters.get("tag")
     since = filters.get("since")
     until = filters.get("until")
-    today = date.today()
     notes: dict[str, Note] = {}
     # The directory check goes into the worker thread with the load, rather than being a `stat` on
     # the event loop before it. It is a small syscall, but this runs per retriever per query on the
     # loop that serves every other concurrent turn, and the reason the load below is offloaded
     # applies to it unchanged.
-    for note in await asyncio.to_thread(_load_if_present, directory):
+    for note in _load_if_present(directory):
         if not note.is_current(today):
             continue
         if want_type is not None and note.type != want_type:
@@ -128,6 +146,67 @@ async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str,
             continue
         notes[note.id] = note
     return notes
+
+
+def _rank_by_terms(
+    directory: Path, filters: dict[str, Any], terms: Sequence[str], today: date
+) -> list[tuple[int, float, float, Note]]:
+    """`GraphRetriever`'s whole search, synchronously: eligible notes, scored, ranked and cut.
+
+    One function rather than three awaits, because each hand-back between them lands on the event
+    loop — see `GraphRetriever.retrieve` for the measurement, and `_eligible_sync` for why the
+    filter half moved first. The scoring loop is here rather than in the coroutine for the same
+    reason it was written: `term_frequencies` rebuilds each note's searchable text and lowercases
+    its body, which is O(corpus) pure Python and belongs in the worker thread with the load.
+
+    Returns:
+        `(coverage, relevance, confidence, note)` for the best `retrieval_top_k` matches, best
+        first.
+    """
+    frequencies: list[tuple[dict[str, int], Note]] = []
+    for note in _eligible_sync(directory, filters, today).values():
+        counts = term_frequencies(note, terms)
+        if counts:
+            frequencies.append((counts, note))
+    # Document frequency over the *matched* population, which is the same number as over the
+    # eligible one: a term's df counts the notes containing it, and a note containing it
+    # matched. So the rarer term in a two-term query earns the larger weight without a second
+    # pass over the corpus.
+    population = len(frequencies)
+    document_frequency: dict[str, int] = {}
+    for counts, _ in frequencies:
+        for term in counts:
+            document_frequency[term] = document_frequency.get(term, 0) + 1
+    scored: list[tuple[int, float, float, Note]] = []
+    for counts, note in frequencies:
+        # Confidence is a *trust* signal (KM-5), so it decides which of two equally relevant
+        # notes survives truncation — never relevance itself; see `_relevance`. A note with no
+        # confidence takes the configured neutral default.
+        confidence = (
+            note.confidence
+            if note.confidence is not None
+            else settings.retrieval_default_confidence
+        )
+        scored.append(
+            (len(counts), _relevance(counts, document_frequency, population), confidence, note)
+        )
+    complete = [entry for entry in scored if entry[0] == len(terms)]
+    # RRF reads each source's list as ranked best-first, so the list must be ordered by this
+    # retriever's own relevance signal — disk order is not a ranking. Coverage leads only on
+    # the widened search (on the complete one it is the same for every hit, so this reduces
+    # to confidence exactly as before). Note id breaks ties deterministically.
+    #
+    # Ranked *then* cut *then* materialized, bounded by the `retrieval_top_k` every sibling
+    # leg honours. This was the one unbounded retriever: a broad query on a large corpus
+    # built an `EvidenceChunk` (an excerpt scan plus a conflicts lookup each) for every
+    # scored note before the merge budget threw all but a handful away — and the graph leg
+    # then arrived at the round-robin with thousands of entries against every other leg's k,
+    # which is the crowding-out asymmetry D-2026-08-01 was written about, relocated from the
+    # cut to the input.
+    return sorted(
+        complete or scored,
+        key=lambda entry: (-entry[0], -entry[1], -entry[2], entry[3].id),
+    )[: settings.retrieval_top_k]
 
 
 def _load_if_present(directory: Path) -> list[Note]:
@@ -217,48 +296,15 @@ class GraphRetriever:
         only guarantees the note exists, not that it answers the question.
         """
         terms = query_terms(query)
-        scored: list[tuple[int, float, float, Note]] = []
-        frequencies: list[tuple[dict[str, int], Note]] = []
-        for note in (await _eligible_notes(self._dir, filters)).values():
-            counts = term_frequencies(note, terms)
-            if counts:
-                frequencies.append((counts, note))
-        # Document frequency over the *matched* population, which is the same number as over the
-        # eligible one: a term's df counts the notes containing it, and a note containing it
-        # matched. So the rarer term in a two-term query earns the larger weight without a second
-        # pass over the corpus.
-        population = len(frequencies)
-        document_frequency: dict[str, int] = {}
-        for counts, _ in frequencies:
-            for term in counts:
-                document_frequency[term] = document_frequency.get(term, 0) + 1
-        for counts, note in frequencies:
-            confidence = (
-                note.confidence
-                if note.confidence is not None
-                else settings.retrieval_default_confidence
-            )
-            scored.append(
-                (len(counts), _relevance(counts, document_frequency, population), confidence, note)
-            )
-        complete = [entry for entry in scored if entry[0] == len(terms)]
-        # RRF reads each source's list as ranked best-first, so the list must be ordered by this
-        # retriever's own relevance signal — disk order is not a ranking. Coverage leads only on
-        # the widened search (on the complete one it is the same for every hit, so this reduces
-        # to confidence exactly as before). Note id breaks ties deterministically.
-        #
-        # Ranked *then* cut *then* materialized, bounded by the `retrieval_top_k` every sibling
-        # leg honours. This was the one unbounded retriever: a broad query on a large corpus
-        # built an `EvidenceChunk` (an excerpt scan plus a conflicts lookup each) for every
-        # scored note before the merge budget threw all but a handful away — and the graph leg
-        # then arrived at the round-robin with thousands of entries against every other leg's k,
-        # which is the crowding-out asymmetry D-2026-08-01 was written about, relocated from the
-        # cut to the input.
-        ranked = sorted(
-            complete or scored,
-            key=lambda entry: (-entry[0], -entry[1], -entry[2], entry[3].id),
-        )
-        chosen = ranked[: settings.retrieval_top_k]
+        # Load, filter, score, rank and cut in **one** worker thread. Every one of those steps is
+        # O(corpus) pure Python — `term_frequencies` alone rebuilds each note's searchable text and
+        # lowercases its body — and every one of them used to run on the event loop that serves
+        # every concurrent turn, SSE stream and probe on the pod. Measured on the sibling path
+        # (`agent/graph_tools.py::find_notes`, the same scan over the same corpus) with a 5 ms
+        # heartbeat over 10 000 notes: p50 loop lag 418 ms at eight concurrent calls, against
+        # 26 ms once the scan moved. It buys latency and jitter, not throughput — the scan holds
+        # the GIL either way.
+        chosen = await asyncio.to_thread(_rank_by_terms, self._dir, filters, terms, date.today())
         conflicts = await _conflict_index(self._dir)
         return [
             _chunk_for(note, self.name, confidence, conflicts.get(note.id), terms)

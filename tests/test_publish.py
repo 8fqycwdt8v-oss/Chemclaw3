@@ -11,12 +11,15 @@ import importlib
 import logging
 import pkgutil
 import types
+from datetime import timedelta
 from typing import Any
 
 import pytest
+from temporalio import workflow
 from temporalio.api.failure.v1 import Failure
 from temporalio.converter import DefaultFailureConverter, DefaultPayloadConverter
 from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 import chemclaw.durable.publish as publish_module
 from chemclaw.agent.authz import AuthorizationError
@@ -27,12 +30,16 @@ from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
     agent_step_retry,
+    calculation_retry,
+    connector_queue_wait_timeout,
     note_publish_retry,
     publish_note_best_effort,
+    queue_wait_timeout,
 )
 from chemclaw.ingest.sources.registry import DataSourceError
 from chemclaw.templates.registry import TemplateError
 from chemclaw.templates.resolve import UnresolvedReference
+from tests.temporal_env import pydantic_client, start_local_env_or_skip
 
 
 def _import_first_party_tree() -> None:
@@ -214,6 +221,142 @@ def test_the_agent_step_bound_is_narrower_than_the_shared_one() -> None:
     assert policy.maximum_attempts == settings.agent_step_max_attempts
     assert (policy.maximum_attempts or 0) < (BAD_DATA_RETRY.maximum_attempts or 0)
     assert policy.non_retryable_error_types == BAD_DATA_RETRY.non_retryable_error_types
+
+
+def test_the_calculation_retry_waits_out_a_full_backend_without_spinning_at_it() -> None:
+    """A backend refusing "every slot is taken" is worth asking again about — later, not sooner.
+
+    `CalcBusyError` made that failure retryable, and Temporal's default spacing would have made the
+    fix cosmetic: one second doubling means five attempts inside fifteen seconds, against a hold
+    that is a whole calculation long (a measured CREST search is ~19 minutes, and the server's own
+    ceiling is four hours). So the schedule is asserted rather than the policy's existence.
+
+    Both ends are derived from configured values, which is what stops this from being four magic
+    numbers: the cap is one `calc_server_timeout_seconds` because that is the longest single
+    calculation this client waits for, and the first interval is that cap divided by the doublings
+    the attempt budget allows, so the *last* retry waits exactly one calculation.
+
+    The type list is asserted identical to `BAD_DATA_RETRY`'s for `agent_step_retry`'s reason: the
+    two policies may differ in how long they wait, never in which failures count as transient.
+    """
+    # Called outside a workflow, so the schedule is the nominal one — the jitter is per-run and
+    # has no run here. `test_two_runs_refused_together_do_not_come_back_together` drives that half.
+    policy = calculation_retry()
+
+    assert policy.maximum_attempts == settings.activity_max_attempts
+    assert policy.non_retryable_error_types == BAD_DATA_RETRY.non_retryable_error_types
+    assert policy.backoff_coefficient == 2.0
+
+    cap = timedelta(seconds=settings.calc_server_timeout_seconds)
+    assert policy.maximum_interval == cap
+    # The whole schedule, rebuilt the way Temporal computes it, so the assertion is about elapsed
+    # patience rather than about one field. At the shipped defaults: 112.5 s, 225 s, 450 s, 900 s.
+    waits = []
+    interval = policy.initial_interval or timedelta()
+    for _ in range((policy.maximum_attempts or 1) - 1):
+        waits.append(min(interval, cap))
+        interval *= policy.backoff_coefficient
+    assert waits[-1] == cap, "the last retry must wait a whole calculation, not a fraction of one"
+    # Nineteen minutes is the measured CREST search this has to outlast.
+    total = sum(waits, timedelta())
+    assert total > timedelta(minutes=19)
+    # **And the slack it has to fit in is the composite, not the ceiling minus the work.** This
+    # read `connector_job_timeout_seconds - xtb_job_timeout_seconds` and so measured the room left
+    # over one *attempt*, ignoring the queue wait that precedes it — which is the same
+    # bound-versus-composite error `connector_queue_wait_timeout` was rederived to end
+    # (`D-2026-09-05-a-refusal-for-capacity-is-not-a-refusal-of-the-question` §3). What the parent
+    # ceiling must actually contain on the path these retries exist for is a job that waits for a
+    # slot, is refused at capacity, backs off, and then runs: p95 backpressure on `connector-calc`
+    # is ~1.98 h measured, and one full attempt is `xtb_job_timeout_seconds`.
+    longest, _ = settings.longest_bundle_activity
+    composite = timedelta(hours=1.98) + total + timedelta(seconds=longest)
+    assert composite < timedelta(seconds=settings.connector_job_timeout_seconds), (
+        "a job that queues, is refused for capacity, backs off and then runs must still finish "
+        "inside the ceiling its parent gives it"
+    )
+
+
+@workflow.defn
+class _RetrySpacingWorkflow:
+    """Report the first retry interval this run would use, from inside a real workflow context."""
+
+    @workflow.run
+    async def run(self) -> float:
+        """The jittered first interval, in seconds — the only thing that differs per run."""
+        interval = calculation_retry().initial_interval
+        return interval.total_seconds() if interval else 0.0
+
+
+def test_two_runs_refused_together_do_not_come_back_together() -> None:
+    """The jitter, driven where it exists: inside a workflow, across two runs.
+
+    Temporal applies none of its own — measured on 2026-09-05 against the real broker, an activity
+    with initial 1 s and coefficient 2 was retried at 1.016 / 2.013 / 4.015 / 8.021 s, i.e. exactly
+    nominal. The arrival pattern this platform is sized against is a burst, so without a spread a
+    slate of jobs refused in the same instant returns in the same instant, four are admitted and the
+    rest are refused again in lockstep, with the pod idle between pulses.
+
+    Two runs, because one run says nothing about desynchronisation. The bound is asserted as well as
+    the difference: jitter that could push the interval *up* would be swallowed by
+    `maximum_interval` at exactly the attempt that waits longest.
+    """
+    nominal = settings.calc_server_timeout_seconds / 2 ** max(settings.activity_max_attempts - 2, 0)
+
+    async def _run() -> list[float]:
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue="retry-spacing",
+                workflows=[_RetrySpacingWorkflow],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ):
+                return [
+                    await client.execute_workflow(
+                        _RetrySpacingWorkflow.run, id=f"spacing-{n}", task_queue="retry-spacing"
+                    )
+                    for n in range(2)
+                ]
+
+    first, second = asyncio.run(_run())
+
+    assert first != second, "two runs drew the same interval; the spread is not per-run"
+    for drawn in (first, second):
+        assert nominal * 0.75 <= drawn <= nominal
+
+
+def test_a_bundle_queue_wait_is_bounded_generously_rather_than_by_cores_hour() -> None:
+    """The two queue bounds mean different things, and using one for both breaks the other.
+
+    `D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait` bounded core's queue at an hour
+    and excluded the bundles, correctly: a bundle wait *is* backpressure. Measured on the real
+    broker at target load, `connector-calc`'s wait is p50 ~1.04 h and p95 ~1.98 h, so core's hour
+    applied there would fail more than half of a healthy peak. Leaving it unbounded was the other
+    error — the only ceiling left was the parent's execution timeout, which reaches no workflow
+    code and names neither the queue nor the reason.
+
+    So this asserts the ordering that makes both true at once, in terms of the settings rather than
+    in seconds, because the numbers are a deployment's to change.
+    """
+    bundle = connector_queue_wait_timeout()
+    core = queue_wait_timeout()
+    longest, _ = settings.longest_bundle_activity
+    ceiling = timedelta(seconds=settings.connector_job_timeout_seconds)
+
+    assert bundle > timedelta(hours=1.98), "measured p95 backpressure would fail this bound"
+    # **The composite, because the wait precedes the work and the ceiling has to hold both.**
+    # `bundle < ceiling` is true of the bound alone and was false of the pair it is spent with:
+    # at the fraction this replaced, 9,000 s of wait plus a 15,000 s CREST search was 24,000
+    # against an 18,000 s ceiling, so a job inside both of its own bounds died as a bare
+    # `WorkflowExecutionTimedOut` — the failure the bound was added to remove. Asserted against
+    # `longest_bundle_activity` rather than against `xtb_job_timeout_seconds` so a bundle whose
+    # longest activity overtakes the CREST search is covered by the same line.
+    assert bundle + timedelta(seconds=longest) < ceiling, (
+        "the queue wait plus the longest activity it precedes must fit inside the child's own "
+        "execution ceiling, or a job that waits and then runs dies as a workflow execution "
+        "timeout delivered to no workflow code"
+    )
+    assert bundle > core, "core's hour is the bound this one exists not to be"
 
 
 def test_no_provider_transient_name_is_listed_non_retryable() -> None:

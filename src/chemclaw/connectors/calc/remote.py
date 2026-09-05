@@ -43,6 +43,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.mcp_session import (
+    McpAtCapacity,
     McpConnectFailed,
     McpCredentialRefused,
     McpRequestRefused,
@@ -51,7 +52,7 @@ from chemclaw.core.mcp_session import (
     open_session,
 )
 from chemclaw.core.metrics import METRICS
-from chemclaw.core.metrics_bridge import degraded
+from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.science.calc.store import (
     CALCULATION_EPOCH,
     CalculationKey,
@@ -109,6 +110,36 @@ class CalcToolError(ChemclawError):
     identically on the next attempt, so it is registered non-retryable in
     `durable/publish.py::_BAD_DATA_TYPES` and a durable job fails fast instead of paying for the
     same refusal three more times.
+
+    **A full pod is not this**, and it used to be. `CalcBusyError` below is that third case; the
+    premise this class is registered on — "the identical call fails identically" — is precisely
+    what a saturation refusal violates.
+    """
+
+
+class CalcBusyError(SubsystemUnavailableError):
+    """The calculation server was reached, ran nothing, and refused because every slot was busy.
+
+    **The taxonomy above has two buckets and saturation is a third one it did not have.** A
+    `ValueError` from `servers/calc`'s admission gate arrived here indistinguishable from an
+    unparameterised solvent — `McpRequestRefused` -> `CalcToolError` -> `_BAD_DATA_TYPES` -> the
+    durable job marked non-retryable and failed on attempt 1, carrying the serving side's own
+    sentence "Retry once one finishes" to the chemist. That composition of two locally correct
+    decisions only bites under load, which is exactly when a shared calculation backend is full:
+    one CREST search costs the whole pod, so at target load essentially every cache *miss* failed
+    permanently while warm molecules kept working.
+
+    `SubsystemUnavailableError` rather than `ChemclawError`, and that single choice is the fix:
+    that hierarchy is asserted *absent* from `_BAD_DATA_TYPES` (`tests/test_publish.py`), so this
+    is retryable by construction and cannot be made non-retryable by a later edit without failing
+    a test that explains why. The backoff that keeps a retry from becoming a storm is the activity's
+    (`durable/publish.py::calculation_retry`), because that is the layer that can wait minutes
+    without holding a worker slot.
+
+    The message is written for the chemist, who is told their molecule is fine and what actually
+    happens next — and it names both paths, because this class is raised on the durable one, where
+    the retry is automatic, and on the in-process tool surface, where it is not
+    (`agent/tool_authz.py` returns it to the model as an ordinary domain error).
     """
 
 
@@ -223,14 +254,45 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
 async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) -> Any:
     """Invoke one tool and return its decoded payload, in this service's error vocabulary.
 
-    `core.mcp_session.invoke` does the calling and draws the one distinction that matters — the
-    server refused you, versus the server broke — and this maps the two onto the classes a durable
-    activity's retry policy reads. A refusal carries the server's own message, because that message
-    is the whole content of the refusal (which solvent is unparameterised, which atom index is out
-    of range).
+    `core.mcp_session.invoke` draws three distinctions — the server refused you, the server is
+    full, the server broke — and this maps them onto the classes a durable activity's retry policy
+    reads. A *domain* refusal carries the server's own message, because that message is the whole
+    content of the refusal (which solvent is unparameterised, which atom index is out of range). A
+    saturation refusal does not: the server's sentence names its own admission knob and reads as an
+    error about the molecule, so it is replaced with one that says what is actually happening and
+    kept on `__cause__` for the log.
     """
     try:
         return await invoke(session, tool, arguments)
+    except McpAtCapacity as exc:
+        # Before `McpRequestRefused`, of which this is a subclass: order is the whole behaviour.
+        #
+        # Logged at WARNING rather than through `degraded`, deliberately. A full pod is the gate
+        # working — the backend refusing promptly instead of queueing a calculation nobody will
+        # still be waiting for — so putting it on `chemclaw_degraded_total{subsystem=calc_server}`
+        # would fire the outage alert on ordinary busy-ness and make the one series an operator
+        # trusts for "the backend is dark" mean two different things. It gets a counter of its own
+        # instead: `chemclaw_calc_backend_at_capacity_total` is the calculation tier's saturation
+        # signal, and the only thing in the system that asks for more calc capacity.
+        record_metric(
+            lambda m: m.increment("chemclaw_calc_backend_at_capacity_total", labels={"tool": tool})
+        )
+        logger.warning(
+            "the calculation server refused %s because it is full; the job will be retried", tool
+        )
+        # **Worded so it is true on both paths, which is what it was not.** It promised "the
+        # system will wait and ask again" — true of a durable job, whose `calculation_retry`
+        # backoff does exactly that, and false of the in-process tool surface, where
+        # `agent/tool_authz.py`'s domain-error converter hands this sentence to the model as an
+        # ordinary refusal and nothing retries anything. The model then had a promise instead of
+        # the actionable advice the server's own refusal used to carry ("Retry once one
+        # finishes"). One sentence naming both paths costs nothing and cannot be false on either.
+        raise CalcBusyError(
+            f"the calculation service is busy: every calculation slot was taken when {tool} was "
+            "asked for, so it was turned away before any work started. Nothing is wrong with what "
+            "was asked, and the same request succeeds once a calculation finishes: a durable job "
+            "waits and asks again on its own, and a direct call has to be made again."
+        ) from exc
     except McpRequestRefused as exc:
         raise CalcToolError(str(exc)) from exc
     except McpServerFault as exc:

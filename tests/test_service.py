@@ -8,6 +8,8 @@ per turn via a spy tool.
 
 import asyncio
 import json
+import socket
+import threading
 import time
 from collections.abc import AsyncIterator, Callable, MutableMapping
 from contextlib import asynccontextmanager
@@ -15,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+import uvicorn
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -1910,3 +1913,104 @@ def test_the_thread_pool_covers_the_tool_calls_one_admitted_turn_can_fan_out(
         f"can occupy {caps} of it, leaving nothing of the "
         f"{settings.service_thread_pool_headroom} threads reserved for token validation"
     )
+
+
+def _held_keepalive_sockets(port: int, count: int) -> list[socket.socket]:
+    """Open `count` connections, complete one request on each, and leave them idle and open.
+
+    Idle keep-alives, not in-flight requests: the whole point is that uvicorn's connection limit
+    counts a socket nobody is using, which is exactly what an open browser tab leaves behind.
+    """
+    held: list[socket.socket] = []
+    for _ in range(count):
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+        assert b"200" in client.recv(256)
+        held.append(client)
+    return held
+
+
+def test_the_connection_limit_refuses_the_liveness_probe_above_the_app() -> None:
+    """The premise `service_max_connections`'s cross-check rests on, driven rather than believed.
+
+    uvicorn's `--limit-concurrency` (`deploy/entrypoint.sh`) is answered in `h11_impl`, *above* the
+    ASGI app, and it counts open sockets including idle keep-alives — so at the limit `/healthz` is
+    refused with everything else and the kubelet SIGKILLs a pod that is merely busy, killing every
+    turn in flight on it. Nothing in this suite could see that, because a `TestClient` request never
+    reaches a real transport.
+
+    Driven on a bare ASGI app rather than on `create_app`, deliberately: the claim under test is a
+    property of the *transport*, and mixing the front door's own startup into it would leave a
+    failure here ambiguous between the two. What makes it matter to this repository is the second
+    half — `Settings` refuses a configuration whose own stream and turn caps could reach this bound,
+    so the shipped front door cannot arrive here by doing what it is configured to do. If uvicorn
+    ever exempts a path from the limit, this test fails and that cross-check can be relaxed.
+    """
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        assert scope["type"] == "http"
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    limit = 4
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=port, limit_concurrency=limit, log_level="error")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert server.started, "uvicorn did not come up"
+
+    held: list[socket.socket] = []
+    try:
+        # `limit - 1`, because the refusal is `len(connections) >= limit` and the *arriving*
+        # connection is already in that set — so the usable socket capacity is one below the number
+        # an operator writes down. `service_connection_headroom` absorbs that off-by-one many times
+        # over, which is the point of having a headroom term at all rather than an exact equality.
+        held = _held_keepalive_sockets(port, limit - 1)
+        fresh = socket.create_connection(("127.0.0.1", port), timeout=5)
+        held.append(fresh)
+        fresh.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+        assert b"503" in fresh.recv(256), (
+            "uvicorn served /healthz above its connection limit; the cross-check in "
+            "core/config/__init__.py is guarding against something that no longer happens"
+        )
+    finally:
+        for client in held:
+            client.close()
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def test_the_socket_budget_cannot_be_reached_by_the_caps_it_is_meant_to_cover() -> None:
+    """The other half: the shipped configuration cannot walk into the 503 above.
+
+    `service_max_event_streams_total` was 200 against a `service_max_connections` of 256 — 78% of
+    the transport bound consumed by one documented, supported state — and *nothing cross-checked
+    them*, in a validator that carefully cross-checks fleet turns, fleet Postgres connections and
+    fleet calc requests. One pod lost, the survivor takes all 200 streams, `/readyz` drains at ~30 s
+    and `/healthz` SIGKILLs at ~60 s: a cascade rather than a queue.
+    """
+    from chemclaw.core.config import Settings
+
+    assert (
+        settings.service_max_connections
+        >= settings.service_max_event_streams_total
+        + settings.service_max_concurrent_turns
+        + settings.service_connection_headroom
+    )
+    with pytest.raises(ValueError) as excinfo:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            service_max_connections=256,
+            service_max_event_streams_total=200,
+            service_max_concurrent_turns=8,
+        )
+    message = str(excinfo.value)
+    assert "service_max_connections" in message and "service_max_event_streams_total" in message
+    assert "/healthz" in message

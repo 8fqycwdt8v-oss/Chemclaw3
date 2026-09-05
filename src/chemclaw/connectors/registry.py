@@ -53,6 +53,7 @@ from chemclaw.connectors.manifest import (
 from chemclaw.connectors.transport import ConnectorSpec, HeldConnectorSession
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.http import default_ssl_context
 from chemclaw.core.mcp_session import CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_GRACE_SECONDS
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.tool_registry import CapabilityTool, registered_tools
@@ -364,6 +365,10 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
     return httpx.AsyncClient(
         auth=auth_for(endpoint.auth, connector),
         follow_redirects=False,
+        # The process's one trust store rather than a fresh parse of the CA bundle per client.
+        # A turn opens one of these per connector; `core.http.default_ssl_context` measures what
+        # that cost on the event loop before this argument was here (156.1 ms -> 0.4 ms per turn).
+        verify=default_ssl_context(),
         # Never inherit an ambient proxy: a connector endpoint is an in-cluster Service, and an
         # HTTPS_PROXY on the pod must not silently reroute a tool call (and its bearer) elsewhere.
         trust_env=False,

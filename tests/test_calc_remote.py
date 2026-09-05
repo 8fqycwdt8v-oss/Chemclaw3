@@ -34,6 +34,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, ErrorDat
 from chemclaw.connectors import registry
 from chemclaw.connectors.calc import remote
 from chemclaw.connectors.calc.remote import (
+    CalcBusyError,
     CalcServerError,
     CalcToolError,
     cached_remote,
@@ -45,6 +46,7 @@ from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.mcp_session import McpConnectFailed
 from chemclaw.core.metrics import METRICS
+from chemclaw.durable.publish import _BAD_DATA_TYPES
 from chemclaw.science.calc.store import CALCULATION_EPOCH, InMemoryStore
 
 # A version carrying *both* key delimiters, which is not a contrived string: `esol-delaney@2004`
@@ -72,13 +74,21 @@ class _FakeSession:
 
 
 class _Result:
-    """The `CallToolResult` shape the client reads: `isError` plus text content."""
+    """The `CallToolResult` shape the client reads: `isError` plus text content.
 
-    def __init__(self, payload: dict[str, Any], is_error: bool = False) -> None:
+    A *failed* call carries plain text rather than JSON, which is what the wire actually looks
+    like: `Tool.run` raises `ToolError(f"Error executing tool {name}: {e}")` and
+    `_make_error_result` puts `str(e)` in one text block untouched. The fake used to JSON-wrap
+    every answer, error included — harmless while the client matched its markers anywhere in the
+    text, and load-bearing now that it matches them at the head, since a wrapped marker is exactly
+    the *echoed* shape `server_marked` exists to reject.
+    """
+
+    def __init__(self, payload: dict[str, Any] | str, is_error: bool = False) -> None:
         import json
 
         self.isError = is_error
-        self.content = [_Text(json.dumps(payload))]
+        self.content = [_Text(payload if isinstance(payload, str) else json.dumps(payload))]
 
 
 class _Text:
@@ -231,7 +241,9 @@ def test_a_refused_call_and_an_unreachable_server_are_different_failures(
 
     class _Failing(_FakeSession):
         async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-            return _Result({"detail": "unparameterised solvent"}, is_error=True)
+            return _Result(
+                "Error executing tool predict_pka: unparameterised solvent", is_error=True
+            )
 
     _session(monkeypatch, _Failing(_KEY, {}))
 
@@ -269,7 +281,10 @@ def test_the_servers_internal_error_is_an_outage_not_bad_data(
 
     class _Broken(_FakeSession):
         async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-            return _Result({"detail": "an internal error occurred"}, is_error=True)
+            return _Result(
+                "Error executing tool predict_pka: an internal error occurred (error id 4a7f21c9)",
+                is_error=True,
+            )
 
     _session(monkeypatch, _Broken(_KEY, {}))
 
@@ -279,6 +294,167 @@ def test_the_servers_internal_error_is_an_outage_not_bad_data(
         assert "may work on a retry" in str(outage.value)
 
     asyncio.run(_run())
+
+
+def test_a_full_pod_is_backpressure_not_bad_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The third state, and the one the taxonomy above did not have.
+
+    `servers/calc` refuses when every calculation slot is taken, and that refusal arrived here
+    indistinguishable from an unparameterised solvent: `isError=True`, a `ValueError`'s text, so
+    `McpRequestRefused` -> `CalcToolError` -> `_BAD_DATA_TYPES` -> the durable job marked
+    **non-retryable and failed on attempt 1**, carrying the serving side's own sentence "Retry once
+    one finishes" to the chemist. It only bites under load, which is exactly when a shared
+    calculation backend is full — one CREST search costs the whole pod — so at target load every
+    cache *miss* failed permanently while warm molecules kept working.
+
+    The refusal text is transcribed as the literal the server sends rather than built from this
+    repository's constant, for the reason the sibling fleet's own identity-contract test
+    gives about header spellings: a test that imports the constant agrees with itself and says
+    nothing about what the other side writes. The two repositories share no package, so this pair
+    of literals is the whole contract.
+    """
+
+    class _Full(_FakeSession):
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            if name == "calculation_key":
+                return _Result({"key": _KEY})
+            return _Result(
+                "Error executing tool predict_pka: [calc-at-capacity] this server has 0 "
+                "of its 4 calculation slots free and predict_pka needs 1, so it was "
+                "refused rather than queued. Retry once one finishes",
+                is_error=True,
+            )
+
+    _session(monkeypatch, _Full(_KEY, {}))
+
+    async def _run() -> None:
+        with pytest.raises(CalcBusyError) as busy:
+            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        # What the chemist reads must not sound like a problem with their molecule, and must not
+        # repeat the server's advice to retry as if a person had to act on it.
+        assert "the calculation service is busy" in str(busy.value)
+        assert "Nothing is wrong with what was asked" in str(busy.value)
+        assert "CHEMCLAW_CALC_MAX_CONCURRENT_REQUESTS" not in str(busy.value)
+
+    asyncio.run(_run())
+
+    # The classification, which is the whole fix: `SubsystemUnavailableError` is the hierarchy
+    # `tests/test_publish.py` asserts is *absent* from `_BAD_DATA_TYPES`, so this is retryable by
+    # construction and cannot be made non-retryable without failing a test that says why.
+    assert issubclass(CalcBusyError, SubsystemUnavailableError)
+    assert not issubclass(CalcBusyError, ChemclawError)
+    assert not issubclass(CalcBusyError, CalcToolError)
+    assert CalcBusyError.__name__ not in _BAD_DATA_TYPES
+    assert "CalcToolError" in _BAD_DATA_TYPES
+
+
+def test_a_domain_refusal_is_still_bad_data_when_the_marker_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other direction, which is what stops the fix above from being a blanket loosening.
+
+    A marker matched too loosely would reclassify an unparameterised solvent as backpressure and
+    retry it to exhaustion — the mirror image of the defect, and the more expensive one, since a
+    bad molecule is bad on every attempt. The token is bracketed precisely so no sentence anybody
+    writes contains it by accident; this drives a refusal that talks about capacity in English and
+    asserts it is *still* classified as bad data.
+
+    **The absent case is the easy half and it was the only half tested.** A caller cannot write the
+    token by accident; it can write it *on purpose*, which is what the sibling test below drives.
+    """
+
+    class _Wordy(_FakeSession):
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            if name == "calculation_key":
+                return _Result({"key": _KEY})
+            return _Result(
+                "Error executing tool predict_pka: this molecule has more capacity for hydrogen "
+                "bonding than the model",
+                is_error=True,
+            )
+
+    _session(monkeypatch, _Wordy(_KEY, {}))
+
+    async def _run() -> None:
+        with pytest.raises(CalcToolError) as refused:
+            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        assert not isinstance(refused.value, CalcBusyError)
+
+    asyncio.run(_run())
+
+
+def test_the_marker_cannot_be_forged_from_a_tool_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reachable half of the case above: a refusal that quotes the token back at us.
+
+    `servers/calc` interpolates the caller's own strings into its domain refusals — the solvent
+    check raises "…has no parameters for {name!r}…", the xTB wrapper does the same with
+    {method!r} — and `solvent` is a free-form argument on that tool surface. So while the client
+    matched `SERVER_AT_CAPACITY` anywhere in the message, `solvent="[calc-at-capacity]"` was a
+    permanently bad input classified as backpressure: reproduced end to end, it raised
+    `CalcBusyError`, bought ~28 minutes of `calculation_retry` backoff on an input no retry can
+    fix, **and** incremented `chemclaw_calc_backend_at_capacity_total`, which the shipped alert
+    rule pages "scale the calculation tier" on. A caller could manufacture that page from a tool
+    argument.
+
+    The refusal text is the one `servers/calc/engine/solvents.py` actually produces for an
+    unsupported solvent name, transcribed rather than built from this repository's constant, for
+    the reason the test above gives: the two repositories share no package, so a literal is the
+    whole contract.
+
+    The counter is asserted as well as the class, because the alert is the half that reaches a
+    person at 3 a.m. and it moves on the *classification*, not on the exception the chemist sees.
+    """
+
+    class _Echo(_FakeSession):
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            if name == "calculation_key":
+                return _Result({"key": _KEY})
+            return _Result(
+                "Error executing tool predict_pka: GFN2-xTB's ALPB solvation model has no "
+                "parameters for '[calc-at-capacity]'. It is an implicit model with a fixed set "
+                "of parameterized solvents, so an unlisted one cannot be approximated.",
+                is_error=True,
+            )
+
+    _session(monkeypatch, _Echo(_KEY, {}))
+    before = METRICS.value("chemclaw_calc_backend_at_capacity_total")
+
+    async def _run() -> None:
+        with pytest.raises(CalcToolError) as refused:
+            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        assert not isinstance(refused.value, CalcBusyError), (
+            "a marker echoed back inside a domain refusal is not the server saying it is full"
+        )
+
+    asyncio.run(_run())
+
+    assert METRICS.value("chemclaw_calc_backend_at_capacity_total") == before, (
+        "a tool argument moved the saturation series the capacity alert pages on"
+    )
+
+
+def test_the_marker_is_read_at_the_head_where_the_server_writes_it() -> None:
+    """The unit under the two tests above: what `server_marked` accepts and what it refuses.
+
+    Driven directly because the classification tests can only show the two ends. The transport's
+    own prefix must pass (`Tool.run` raises `ToolError(f"Error executing tool {name}: {e}")`,
+    which `_make_error_result` sends verbatim), a bare marker must pass — the server writes it at
+    the head and `mcp_server_kit` may re-wrap after redaction — and a marker anywhere else must
+    not, because everywhere else is where a quoted argument lands.
+    """
+    marker = mcp_session.SERVER_AT_CAPACITY
+
+    assert mcp_session.server_marked(f"{marker} 0 of 4 slots free", marker)
+    assert mcp_session.server_marked(
+        f"Error executing tool relax_structure: {marker} 0 free", marker
+    )
+    assert not mcp_session.server_marked(f"no parameters for {marker!r}", marker)
+    assert not mcp_session.server_marked(
+        f"Error executing tool relax_structure: no parameters for {marker!r}", marker
+    )
+    assert not mcp_session.server_marked("Unknown tool: " + marker, marker)
 
 
 def test_a_black_holed_server_fails_to_connect_in_seconds_not_quarter_hours() -> None:

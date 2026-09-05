@@ -311,6 +311,34 @@ class Settings(
             return self.note_reindex_enabled
         return bool(NOTE_INDEX_SOURCES & set(self.data_source_list))
 
+    @property
+    def longest_bundle_activity(self) -> tuple[float, str]:
+        """The longest activity budget a connector bundle's child can spend, and its setting name.
+
+        **One definition, because two readers need the same number and they bound each other.**
+        `_the_job_ceiling_covers_the_activity_it_bounds` needs it to check that the ceiling covers
+        one attempt, and `durable/publish.py::connector_queue_wait_timeout` needs it to derive the
+        *headroom* a queued job may spend waiting — ceiling minus this minus one activity's
+        overhead. Written twice, the two could disagree, and the disagreement would be exactly the
+        composite that ends a healthy job as a bare `WorkflowExecutionTimedOut`.
+
+        A property on the composed class rather than a constant in either module, because the max
+        spans two sections (`CalculatorSettings` and `PublishSettings`) and neither can see the
+        other — the same reason the validators that read it live here. A bundle that adds a longer
+        activity is covered by being added to the tuple below; `durable/publish.py` then narrows
+        its own wait bound for free, because the headroom is computed rather than configured.
+
+        Returns:
+            The largest activity budget in seconds and the name of the setting that carries it.
+        """
+        longest: tuple[float, str] = max(
+            (
+                (self.xtb_job_timeout_seconds, "xtb_job_timeout_seconds"),
+                (self.result_republish_timeout_seconds, "result_republish_timeout_seconds"),
+            )
+        )
+        return longest
+
     @model_validator(mode="after")
     def _guards_that_the_comments_already_demand(self) -> Self:
         """The combinations whose prose already forbids them, now enforced at startup.
@@ -467,6 +495,37 @@ class Settings(
                     "service_max_concurrent_turns or the replica ceiling, or raise "
                     "service_fleet_max_concurrent_turns if the LLM endpoint can serve it."
                 )
+        # The socket backstop against what this process's own caps can occupy — the cross-check
+        # that was missing beside the three fleet ones below it.
+        #
+        # `--limit-concurrency` (`deploy/entrypoint.sh`) counts open sockets including idle
+        # keep-alives and answers 503 *above* the ASGI app, so it is the liveness probe's bound as
+        # well as a request's: proven with 20 idle keep-alive sockets at a limit of 20, where a
+        # fresh `GET /healthz` got 503, and with 255 SSE streams held at 256, where both probes and
+        # every route answered 503 together. The shipped numbers made that reachable from the app's
+        # own supported state — `service_max_event_streams_total` was 78% of
+        # `service_max_connections` on its own — and the kubelet's response to a busy pod is to
+        # SIGKILL it, which kills every in-flight turn on the pod that is still serving.
+        #
+        # Refused rather than warned because both sides are this deployment's own numbers and the
+        # failure is silent until it is an outage. Turns and streams are added rather than maxed:
+        # they are different sockets and a chemist mid-turn with a push-back stream open holds one
+        # of each.
+        occupied = self.service_max_event_streams_total + self.service_max_concurrent_turns
+        if self.service_max_connections < occupied + self.service_connection_headroom:
+            raise ValueError(
+                f"service_max_connections ({self.service_max_connections}) is below what this "
+                f"process's own caps can occupy plus its headroom: "
+                f"{self.service_max_event_streams_total} push-back streams "
+                f"(service_max_event_streams_total) + {self.service_max_concurrent_turns} turns "
+                f"(service_max_concurrent_turns) + {self.service_connection_headroom} reserved "
+                f"(service_connection_headroom) = "
+                f"{occupied + self.service_connection_headroom}. uvicorn's --limit-concurrency "
+                "counts sockets (idle keep-alives included) and answers 503 above the ASGI app, so "
+                "at the limit /healthz answers 503 too and the kubelet restarts a pod that is "
+                "merely busy — killing every turn in flight on it. Raise "
+                "service_max_connections, or lower the stream/turn caps it has to cover."
+            )
         if self.pg_fleet_max_connections:
             # **Pools, not processes.** `pg_pool_max_size` bounds one pool and a process holds one
             # per distinct `(dsn, libpq options)` key plus any foreign pool it registers, so a
@@ -727,13 +786,11 @@ class Settings(
         # this rule was first written against. Naming `xtb_job_timeout_seconds` alone is how the
         # `results` bundle's republish walk got past it: that walk scans two never-pruned tables
         # and was handed `connector_job_timeout_seconds` itself, which the ceiling equals rather
-        # than exceeds. A new long activity gets covered by being added here.
-        longest, budget = max(
-            (
-                (self.xtb_job_timeout_seconds, "xtb_job_timeout_seconds"),
-                (self.result_republish_timeout_seconds, "result_republish_timeout_seconds"),
-            )
-        )
+        # than exceeds. It is `longest_bundle_activity` above rather than a `max` written here,
+        # because `durable/publish.py` derives the queue wait from the *same* number: what is left
+        # of this ceiling once the longest attempt is paid for is exactly the headroom a queued job
+        # may spend waiting, and two spellings of one max is how that composite came apart.
+        longest, budget = self.longest_bundle_activity
         needed = longest + self.activity_timeout_seconds
         if self.connector_job_timeout_seconds <= needed:
             raise ValueError(

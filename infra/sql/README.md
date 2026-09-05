@@ -48,7 +48,7 @@ the pair applies in filename order and neither shadows the other.
 | --- | --- | --- | --- |
 | `schema_migrations` | 000 | `core/migrate.py` | never — the ledger is the record of its own work, and the runtime role cannot write it at all |
 | `calculation_results` | 001 (+019 `compute_seconds`, 024 indexes, 048 `structure_id`) | `science/calc/postgres_store.py` | **refused**: evicting a cached result silently converts a hit into a recomputation, potentially an hours-long CREST search (D-011). Bounded by cost policy, not by a clock |
-| `molecule_fingerprints` | 002 (+004, 046 index) | `science/fingerprints/store.py` | — |
+| `molecule_fingerprints` | 002 (+004, 046 index, 082 scan-order index) | `science/fingerprints/store.py` | — |
 | `reaction_fingerprints` | 003 (+004, 046 index, 063 `source` + `(source, id)` key) | `science/fingerprints/store.py` | — |
 | `reaction_labels` | 051 | `science/labels/store.py` | derived and rebuildable: drop it and re-run the corpus drain plus the label backfill |
 | `reaction_species` | 051 | `science/labels/store.py` | derived and rebuildable; a species the source amended away is deleted with its reaction's record phase |
@@ -68,7 +68,7 @@ the pair applies in filename order and neither shadows the other.
 | `artifact_blobs` | 019 | `science/calc/postgres_artifacts.py` | `durable/artifact_eviction.py`, by idle window and size budget (both off by default) |
 | `calculation_artifacts` | 019 | `science/calc/postgres_artifacts.py` | cascades from `artifact_blobs` |
 | `plan_approvals` | 020 (+034) | `agent/plan_approval_store.py` | refused: kept through erasure (consumed rows are marked, not removed) |
-| `job_records` | 023 (+033, 049, 055, 057, 061) | `durable/job_record_store.py` | **refused**: the table exists because a durable run's result used to expire with Temporal's history and take a campaign's evaluation record with it (D-157) |
+| `job_records` | 023 (+033, 049, 055, 057, 061, 083 search trigrams) | `durable/job_record_store.py` | **refused**: the table exists because a durable run's result used to expire with Temporal's history and take a campaign's evaluation record with it (D-157) |
 | `pending_requests` | 076, 079 | `durable/pending_store.py` | **refused**: the attribution for an answer that released a durable workflow, retained for the reason `plan_approvals` is — a settled row names who asked somebody to run, review or deliver something and who answered. Bounded by how often a *person* is asked something, which is human-paced and orders below the session tables; this is not `session_events`, where one turn writes many rows |
 | `commitments` | 074 | `ingest/commitments/store.py` | **refused**: a mirror that converges rather than accumulating (upserted on `(source, external_id)`), bounded by the size of the portfolio it reflects. A clock cutoff would delete the delivered rows that make "what did we ship last quarter" answerable; staleness is reported by `observed_at`, not pruned |
 | `effects` | 075, 078 | `durable/effect_ledger.py` | **refused**: what this system changed in a system it does *not* own, and who approved it when the change could not be undone. The change is still standing on the far side and outlives any window this could be pruned on. Bounded by how often this system acts outside itself — which no job in this repository does at all |

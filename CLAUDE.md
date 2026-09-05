@@ -223,9 +223,10 @@ is sent. So the ratchet measured 43,063 where the request carried 43,521, and th
 the re-derivation cannot reach: the wrapper deepagents puts *around* the listing. `_observed_prefix`
 now invokes the graph against a capturing model and takes the `SystemMessage` off the wire, so the
 total is observed and the three prompt lines merely *split* it; lengthening upstream's own skills
-prompt moves the floor and can fail the ratchet, which it could not before. The ceiling is **44,500**
-and `agent_tool_result_clear_trigger` **74,500**, still ceiling-plus-30,000, and the raise is a real
-behavioural change: every deployment's lossless edit now fires 1,000 tokens later. That test's own
+prompt moves the floor and can fail the ratchet, which it could not before. The ceiling went to **44,500**
+and `agent_tool_result_clear_trigger` to **74,500**, still ceiling-plus-30,000 — both superseded
+within the day by the paragraph below, which found the ceiling was measuring a graph with no
+connector bound. That test's own
 docstring already said it — *"a basis that is re-derived rather than observed will agree with itself
 forever"* — and it was true of one half and the defect in the other, which is the same sentence
 being right about somebody else and blind about itself.
@@ -269,8 +270,21 @@ later it was 42,549 — drifted by a merge that touched a tool-schema module, wi
 paragraph's subject rewritten. Twice now a session has re-transcribed these numbers to correct them
 and been stale again within a merge, which is the same argument this file already makes about
 counting `make` targets and skipped tests: **the live number is whatever `tests/test_context_floor.py`
-measures, and the ceiling it ratchets against is the only figure worth reading here — 44,500.**
+measures, and the ceiling it ratchets against is the only figure worth reading here — 65,000.**
 The deferral itself stands.
+
+**That ceiling then moved again, by 20,500 in one commit, and nothing was added**
+(`D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system`). The ratchet called
+`build_langgraph_agent` without the `connectors=` argument that function accepts, so it measured 61
+tools where a shipped turn binds 113 — its docstring's claim that reading the `ToolNode` is why it
+cannot drift was true of the *method* and false of the *fixture*, which is the paragraph above
+happening a third time. Measured both ways in one commit: 43,179 with the argument omitted, 64,099
+with it passed. **The real shipped prefix is ~73,600 tokens**, of which 9,538 come from bundles
+served out of `Chemclaw3-mcp` and are unratchetable here by construction — `SERVED_ELSEWHERE`
+names them and a test fails when that drifts. Its first consequence is that the compaction defaults
+were derived against the smaller prefix, so `agent_tool_result_clear_trigger` was floored at 1 while
+two places asserted it was not; they are re-derived to 106,000 and 133,000 against
+`PREFIX_BOUND`, and the assertion now measures the prefix with connectors bound.
 
 M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is
 green with it uninstalled, which is how that was verified. Taking it out is also what exposed

@@ -725,17 +725,29 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end -}}
 {{- end -}}
 
-{{- define "chemclaw.fleetPools" -}}
-{{- $frontDoor := .Values.service.replicas | int -}}
+{{- /* How many *front-door* processes this release may run. Its own definition rather than the
+       expression inlined three times: it is the same number CHEMCLAW_SERVICE_FLEET_REPLICAS
+       renders, the number `chemclaw.fleetPools` starts from, and the number the HPA's occupancy
+       target is denominated against — and three copies of "the HPA ceiling, or the fixed replica
+       count when the HPA is off" is three places for the fourth reader to get it wrong. */ -}}
+{{- define "chemclaw.frontDoorProcesses" -}}
 {{- if .Values.service.autoscaling.enabled -}}
-{{- $frontDoor = .Values.service.autoscaling.maxReplicas | int -}}
+{{- .Values.service.autoscaling.maxReplicas | int -}}
+{{- else -}}
+{{- .Values.service.replicas | int -}}
 {{- end -}}
-{{- /* Three each, and the only role for which the number is not one — see the header. Written as
-       a literal here and re-derived in `tests/test_deploy_chart.py::_fleet_pools`, which is the
-       existing pattern for this helper: a test that read the template's own answer back would
-       assert nothing. What pins the 3 to reality is neither of those two but
-       `tests/test_fleet_pools.py`, which drives the real front-door composition root and counts
-       the pools it actually opens. */ -}}
+{{- end -}}
+
+{{- define "chemclaw.fleetPools" -}}
+{{- $frontDoor := include "chemclaw.frontDoorProcesses" . | int -}}
+{{- /* Three each, and the only role for which the number is not one — see the header. A pool is
+       keyed on `(loop, dsn, options)`, so a turn-serving process holds the stores' pool,
+       `/readyz`'s own at its own statement timeout, and the LangGraph checkpointer's, where a
+       worker, a connector server and the MCP face hold one. Written as a literal here and
+       re-derived in `tests/test_deploy_chart.py::_fleet_pools`, which is the existing pattern for
+       this helper: a test that read the template's own answer back would assert nothing. What
+       pins the 3 to reality is neither of those two but `tests/test_fleet_pools.py`, which drives
+       the real front-door composition root and counts the pools it actually opens. */ -}}
 {{- $total := mul $frontDoor 3 -}}
 {{- $total = add $total (.Values.workers.background.replicas | int) -}}
 {{- /* The face too, when it is enabled. It runs `connectors/server.py` over the in-process

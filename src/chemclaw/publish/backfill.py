@@ -17,6 +17,7 @@ that aborted on the first one would never reach the rest.
 """
 
 import logging
+from datetime import UTC, datetime
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -26,35 +27,51 @@ from chemclaw.publish.record import Publication
 
 logger = logging.getLogger(__name__)
 
+# The keyset cursor before the first row: earlier than any stored timestamp, and the empty string
+# sorts before every key and job id. A sentinel rather than a second "first page" statement,
+# because two statements for one walk is where the projection and the ordering drift apart.
+_WALK_START = (datetime.min.replace(tzinfo=UTC), "")
+
 
 # Oldest first, so a run that is interrupted has made contiguous progress rather than a scatter.
 #
 # `key` breaks ties on `created_at`, which is not unique: microsecond resolution lets concurrent
 # calculator workers share a value, and `_UPSERT` stamps `created_at = now()` on every row of a
-# bulk import in one transaction, giving each of them the identical instant. Postgres does not
-# guarantee LIMIT/OFFSET's relative order for tied rows is stable across the separate queries that
-# fetch consecutive pages, so a tied row could land on a page boundary and never be fetched by
-# either page — silently never queued, with no error and no `skipped` increment. `key` is this
-# table's primary key, so `(created_at, key)` is a total order and every row is fetched once.
+# bulk import in one transaction, giving each of them the identical instant. `key` is this table's
+# primary key, so `(created_at, key)` is a total order and every row is fetched exactly once.
+#
+# **Keyset, not `OFFSET`.** `OFFSET n` makes the server produce and discard the first `n` rows on
+# every page, so the walk is O(n²/batch): measured on 500 000 rows, `LIMIT 1000 OFFSET 0` is
+# 1.4 ms and `LIMIT 1000 OFFSET 400000` is **388.7 ms** — 500k rows in 1 000-row pages is ~90 s of
+# pure skipping, and `docs/planning/BACKLOG.md` asks an operator to run exactly this against a
+# populated deployment. The row comparison below is the same total order expressed as a *predicate*
+# — `calc_results_created_at_idx` already exists — so every page costs what page 1 costs.
+#
+# The tuple comparison is one predicate rather than the three-way `a > x OR (a = x AND b > y)`
+# expansion because Postgres can drive a composite index scan from a row constructor directly, and
+# because a hand-expanded version is where an off-by-one silently drops or repeats a row.
 _CACHED = """
     SELECT key, calc_type, calc_version, input_hash, params_hash, result, structure_id,
            compute_seconds, created_at
     FROM calculation_results
+    WHERE (created_at, key) > (%s, %s)
     ORDER BY created_at, key
-    LIMIT %s OFFSET %s
+    LIMIT %s
 """
 
 # The composites. `job_records.result` is the envelope's own data - the shape that has no cache row
 # and therefore reaches a results store through no other path.
 #
-# `job_id` breaks ties on `completed_at` for the same reason `key` does above — see `_CACHED`.
+# `job_id` breaks ties on `completed_at`, and the walk is keyset-paginated, both for the reasons
+# `_CACHED` states — the 388.7 ms page-400 measurement above is this table's.
 _JOBS = """
     SELECT job_id, connector, job, result, calc_refs, requested_by, session_id, correlation_id,
            rationale, completed_at, payload_kind
     FROM job_records
     WHERE result <> '{}'::jsonb
+      AND (completed_at, job_id) > (%s, %s)
     ORDER BY completed_at, job_id
-    LIMIT %s OFFSET %s
+    LIMIT %s
 """
 
 _REQUEUE = """
@@ -67,13 +84,17 @@ _REQUEUE = """
 async def backfill_cached(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
     """Walk the calculation cache. Returns `(seen, queued, skipped)`."""
     seen = queued = skipped = 0
-    offset = 0
+    cursor_key: tuple[datetime, str] = _WALK_START
     while True:
         async with db.connection(settings.postgres_dsn) as conn:
-            cursor = await conn.execute(_CACHED, (batch, offset))
+            cursor = await conn.execute(_CACHED, (*cursor_key, batch))
             rows = list(await cursor.fetchall())
         if not rows:
             return seen, queued, skipped
+        # Advance before the page is worked: the cursor is the *last row read*, so an exception
+        # mid-page re-reads that page on the next run rather than skipping it, and `enqueue_payload`
+        # is an upsert on the calc ref, so re-reading costs nothing.
+        cursor_key = (rows[-1][8], rows[-1][0])
         for row in rows:
             seen += 1
             key, calc_type, calc_version, input_hash, params_hash = (
@@ -101,19 +122,20 @@ async def backfill_cached(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
                 compute_seconds=compute_seconds,
                 computed_at=created_at,
             )
-        offset += batch
 
 
 async def backfill_jobs(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
     """Walk the durable job record. Returns `(seen, queued, skipped)`."""
     seen = queued = skipped = 0
-    offset = 0
+    cursor_key: tuple[datetime, str] = _WALK_START
     while True:
         async with db.connection(settings.postgres_dsn) as conn:
-            cursor = await conn.execute(_JOBS, (batch, offset))
+            cursor = await conn.execute(_JOBS, (*cursor_key, batch))
             rows = list(await cursor.fetchall())
         if not rows:
             return seen, queued, skipped
+        # See `backfill_cached` for why the cursor advances before the page is worked.
+        cursor_key = (rows[-1][9], rows[-1][0])
         for row in rows:
             seen += 1
             job_id, connector, job, result, calc_refs = row[0], row[1], row[2], row[3], row[4]
@@ -146,7 +168,6 @@ async def backfill_jobs(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
                     rationale=rationale,
                 ),
             )
-        offset += batch
 
 
 async def requeue_failed() -> int:

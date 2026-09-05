@@ -157,7 +157,10 @@ removed so the deletion is itself auditable in the job's own result.
 """
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
+from time import monotonic
 
 from pydantic import BaseModel
 from temporalio import activity, workflow
@@ -700,6 +703,61 @@ class RetentionOutcome(BaseModel):
     sessions_deferred: int = 0
     threads_deferred: int = 0
     owners_deferred: int = 0
+    # The same probe for the age-cutoff tables (`session_events`, `tool_result_blobs`,
+    # `result_publications`): `1` means a batch came back full, so there is very likely more.
+    rows_deferred: int = 0
+
+    def has_tail(self) -> bool:
+        """Whether a branch stopped at its cap with work left — what makes the pass sweep again."""
+        return bool(
+            self.sessions_deferred
+            or self.threads_deferred
+            or self.owners_deferred
+            or self.rows_deferred
+        )
+
+
+class _Budget:
+    """The pass's wall-clock allowance, and whether it can afford one more unit of work.
+
+    `retention_timeout_seconds` is the activity's start-to-close timeout, so a pass that simply ran
+    until the deadline would be *killed* by Temporal at the moment it finished — the attempt lost,
+    the schedule's next fire the only recovery. This stops one whole unit short of it.
+
+    **Measured, not guessed.** The obvious form is a fraction of the budget ("stop at 80%"), which
+    is a number nobody can derive: the right margin is however long the next unit takes, and that
+    is a property of the deployment's backlog rather than of this module. So the margin is the
+    slowest unit *this pass has already run* — a figure that exists by the time it is needed and
+    that adapts to a first pass over a year of history as readily as to a steady state.
+
+    **Two sizes of unit share it, deliberately.** A whole sweep is timed by `_prune_expired_rows`
+    and one `DELETE` batch by `_prune_by_age`, so once a sweep has been measured the batch loop
+    reserves a sweep's worth of margin rather than a batch's. That errs toward stopping early,
+    which is the safe direction: every batch and every branch commits its own work, so a pass that
+    stops with budget to spare has still kept everything it counted, while one that overruns loses
+    its attempt.
+
+    The first unit is always allowed: `_worst` starts at zero, so a pass never returns having done
+    nothing, which is the one outcome a scheduled cleanup must not have.
+    """
+
+    def __init__(self) -> None:
+        """Start the clock at the activity's own budget."""
+        self._deadline = monotonic() + settings.retention_timeout_seconds
+        self._worst = 0.0
+
+    @contextmanager
+    def measuring(self) -> Iterator[None]:
+        """Time the block and remember it if it is the slowest unit of work so far."""
+        started = monotonic()
+        try:
+            yield
+        finally:
+            self._worst = max(self._worst, monotonic() - started)
+
+    def affords_more(self) -> bool:
+        """Whether another unit as slow as the slowest seen would still land inside the budget."""
+        return monotonic() + self._worst <= self._deadline
 
 
 def _window_days(table: str) -> int:
@@ -746,6 +804,48 @@ async def prune_expired_rows() -> RetentionOutcome:
 
 
 async def _prune_expired_rows() -> RetentionOutcome:
+    """Sweep until the backlog is drained or the pass budget is spent, and report the total.
+
+    **The sweep used to be capped where it needed to be bounded, and those are different things.**
+    Each branch stops at `retention_max_sessions_per_pass` and says so through its `*_deferred`
+    flag; until this function existed that flag was also the end of the pass, so one pass disposed
+    of at most one cap's worth of conversations, checkpoint threads and ownership rows. At the load
+    this system is sized for that cap sits *below the arrival rate* — 200 chemists create on the
+    order of 400–1 000 sessions a day against a daily schedule, against a shipped cap of 500 — so
+    the backlog did not drain slowly, it **grew**, and every pass reported success while it did.
+
+    A cap and a convergence are answered separately. The cap is unchanged, because it is what
+    bounds one transaction, one batch of round trips and one set of row locks; a bigger number
+    would not fix this, since any fixed number is below *some* arrival rate. What changed is that
+    the pass no longer *ends* at it: it sweeps again while a branch says a tail remains and the
+    budget can still hold another sweep. So the cap bounds a batch and the clock bounds the pass,
+    which is the pairing every other bounded loop in this module already has.
+
+    **The budget is the activity's own `retention_timeout_seconds`, spent conservatively.** A pass
+    that ran until the deadline would be killed by Temporal exactly as it finished; `_Budget` stops
+    one whole sweep short of it, measured against the slowest sweep this pass has actually seen
+    rather than against a guessed fraction. Every branch commits its own work, so a pass that stops
+    early has still disposed of everything it counted.
+    """
+    budget = _Budget()
+    total = RetentionOutcome(deleted={}, skipped=[])
+    while True:
+        with budget.measuring():
+            outcome = await _sweep_once(budget)
+        for table, count in outcome.deleted.items():
+            total.deleted[table] = total.deleted.get(table, 0) + count
+        # The skips are a property of the configuration, not of the sweep, so the last pass's list
+        # is the whole truth and repeating it per iteration would just multiply it.
+        total.skipped = outcome.skipped
+        total.sessions_deferred = outcome.sessions_deferred
+        total.threads_deferred = outcome.threads_deferred
+        total.owners_deferred = outcome.owners_deferred
+        total.rows_deferred = outcome.rows_deferred
+        if not outcome.has_tail() or not budget.affords_more():
+            return total
+
+
+async def _sweep_once(budget: _Budget) -> RetentionOutcome:
     """Delete rows past their table's retention window; return the per-table counts.
 
     Each table is pruned **and committed** in its own statement, so one failure cannot roll back
@@ -786,6 +886,10 @@ async def _prune_expired_rows() -> RetentionOutcome:
     outcome = RetentionOutcome(deleted={}, skipped=[])
     first_error: BaseException | None = None
     async with connection(settings.postgres_dsn) as conn:
+        # No budget check here, deliberately: a sweep that has started finishes its tables. Every
+        # branch below is already capped, the budget's job is to decide whether to sweep *again*,
+        # and a third place asking it is what made a pass with a tiny budget do nothing at all —
+        # the one outcome a scheduled cleanup must not have.
         for table, (column, disposable) in _PRUNABLE.items():
             days = _window_days(table)
             if days <= 0:
@@ -820,17 +924,10 @@ async def _prune_expired_rows() -> RetentionOutcome:
                     outcome.skipped.extend(skipped)
                     outcome.threads_deferred = deferred
                     continue
-                async with conn.cursor() as cur:
-                    # Table and column come from the closed `_PRUNABLE` map above, never from a
-                    # caller, so the interpolation cannot carry untrusted input; the *value* is
-                    # bound.
-                    await cur.execute(
-                        f"DELETE FROM {table} "
-                        f"WHERE {disposable} AND {column} < now() - make_interval(days => %s)",
-                        (days,),
-                    )
-                    outcome.deleted[table] = cur.rowcount
-                await conn.commit()
+                deleted, more = await _prune_by_age(conn, table, column, disposable, days, budget)
+                outcome.deleted[table] = deleted
+                if more:
+                    outcome.rows_deferred = 1
             except Exception as exc:  # isolated per table; re-raised once every table is tried
                 await conn.rollback()
                 logger.exception(
@@ -842,6 +939,83 @@ async def _prune_expired_rows() -> RetentionOutcome:
     if first_error is not None:
         raise first_error
     return outcome
+
+
+async def _prune_by_age(
+    conn: AsyncConnection[TupleRow],
+    table: str,
+    column: str,
+    disposable: str,
+    days: int,
+    budget: _Budget,
+) -> tuple[int, bool]:
+    """Delete `table`'s expired rows in committed batches. Returns `(deleted, more may remain)`.
+
+    **This was one unbounded `DELETE`, and the argument against that is already in this module** —
+    `_prune_session_messages` makes it in full: an activity must not attempt unbounded work, because
+    a pass that exceeds its `statement_timeout` is retried by Temporal, times out again, and
+    exhausts `activity_max_attempts` **having deleted nothing**. That reasoning was applied to the
+    session branches and not to this one, which is the branch the first pass after a long unbounded
+    period actually lands in: at 200 chemists × 8 tool calls × 20 turns a 30-day window is ~1M
+    `tool_result_blobs` rows, and those rows are `STORAGE EXTERNAL` (`infra/sql/042`).
+
+    Measured on 300 000 such rows (2.4 GB), PostgreSQL 16.15: the unbounded `DELETE` takes 11.5 s,
+    and under a 5 s `statement_timeout` it is cancelled having removed **0** rows — five times over.
+    The batched form below removes all 300 000 in 11.0 s across 31 committed batches, worst batch
+    1 385 ms, under the same 5 s timeout. Same total work; the difference is that it makes progress
+    and keeps it.
+
+    **`ctid = ANY(ARRAY(SELECT … LIMIT))`, not `DELETE … LIMIT`**, because Postgres has no `LIMIT`
+    on `DELETE`. The inner select is served by the same index the predicate always used
+    (`session_events_consumed_idx`, `tool_result_blobs_created_idx`), so a batch costs one indexed
+    scan of its own size rather than a scan of the table.
+
+    **The batch size is `retention_delete_batch_rows`**, read once per call so a pass cannot change
+    size half way through. It was a module constant on the argument that it is a mechanical trade
+    with one right answer for a given row size — which is true, and is exactly why it is a setting:
+    the row size is the deployment's, not this module's. The shipped 10 000 is sized against *this*
+    schema's worst row (`tool_result_blobs`, `STORAGE EXTERNAL`), and a site whose blobs are larger
+    needs a smaller batch to stay inside the same `pg_statement_timeout_seconds` — with a constant
+    its only route to that is a fork. That setting's docstring states the trade in both directions.
+
+    Args:
+        conn: The sweep's connection; each batch commits on it before the next is issued.
+        table: A key of `_PRUNABLE` — never a caller's string, which is what makes the
+            interpolation below safe. The bound value is the window.
+        column: That table's dating column or expression, from the same map.
+        disposable: The extra predicate deciding whether a row of this table may go at all.
+        days: The retention window; rows older than it are candidates.
+        budget: The pass's clock. Batches stop when another one as slow as the slowest so far
+            would not land inside it.
+
+    Returns:
+        `(rows deleted, whether a full batch came back)`. The second is the same 0/1 probe the
+        other branches report: a full batch means "very likely more", not a remainder.
+    """
+    # Read once, not per batch: a `.env` reload mid-pass would otherwise change what "a full batch"
+    # means between the `LIMIT` and the comparison below, and a shrunk limit would read as drained.
+    batch_size = settings.retention_delete_batch_rows
+    deleted = 0
+    while True:
+        async with conn.cursor() as cur:
+            # Table and column come from the closed `_PRUNABLE` map above, never from a
+            # caller, so the interpolation cannot carry untrusted input; the *value* is
+            # bound.
+            with budget.measuring():
+                await cur.execute(
+                    f"DELETE FROM {table} WHERE ctid = ANY(ARRAY("
+                    f"SELECT ctid FROM {table} "
+                    f"WHERE {disposable} AND {column} < now() - make_interval(days => %s) "
+                    f"LIMIT %s))",
+                    (days, batch_size),
+                )
+                await conn.commit()
+            batch = cur.rowcount
+        deleted += batch
+        if batch < batch_size:
+            return deleted, False
+        if not budget.affords_more():
+            return deleted, True
 
 
 async def _prune_session_messages(conn: AsyncConnection[TupleRow], days: int) -> tuple[int, int]:

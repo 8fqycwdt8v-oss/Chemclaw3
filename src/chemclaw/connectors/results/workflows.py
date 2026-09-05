@@ -22,7 +22,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.publish.backfill import backfill_cached, backfill_jobs, requeue_failed
 
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, connector_queue_wait_timeout
 
 _QUEUE = bundle_queue("results")
 
@@ -95,6 +95,12 @@ class RepublishResultsWorkflow:
             heartbeat_timeout=timedelta(
                 seconds=settings.result_republish_heartbeat_timeout_seconds
             ),
+            # The budget above starts when a worker picks the task up, so it bounds none of the
+            # wait for one; without this, a `connector-results` queue served by no pod was
+            # indistinguishable from a busy one until the parent job's execution ceiling fired.
+            # Stated once in `durable/publish.py`, which also says why a bundle's bound is not
+            # core's.
+            schedule_to_start_timeout=connector_queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,
         )
         queued = counts["calculations_queued"] + counts["jobs_queued"]

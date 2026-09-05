@@ -841,9 +841,9 @@ def test_a_fleet_exactly_at_its_connection_ceiling_is_allowed() -> None:
         _env_file=None,
         pg_fleet_pools=17,
         pg_pool_max_size=8,
-        pg_fleet_max_connections=136,
+        pg_fleet_max_connections=232,
     )
-    assert settings.pg_fleet_max_connections == 136
+    assert settings.pg_fleet_max_connections == 232
 
 
 def test_a_fleet_that_would_exhaust_the_server_is_refused_by_pools_not_by_pods() -> None:

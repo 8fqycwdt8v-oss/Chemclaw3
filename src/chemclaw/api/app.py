@@ -84,7 +84,7 @@ from chemclaw.connectors.health import check_connectors_at_startup, probe_connec
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
-from chemclaw.core.executor import install_default_executor
+from chemclaw.core.executor import front_door_reserved, install_default_executor
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.job_record import search_job_records
@@ -178,25 +178,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # same number as `service_max_concurrent_turns`, so the admission cap could fill it on its own
     # and authentication queued behind chemistry. See `core/executor.py` for the measurement.
     #
-    # **An admitted turn is not one unit of demand, and this argument charged it as one.** A turn's
-    # tool batch runs under LangGraph's `max_concurrency` = `agent_max_parallel_tool_calls`
-    # (`agent/state.turn_config`), and every tool body offloads — so the caps allow
-    # `service_max_concurrent_turns * agent_max_parallel_tool_calls` concurrent threads, 64 rather
-    # than 8 on the shipped numbers. Measured on the real app with a model emitting 8 parallel
-    # calls across 8 concurrent turns: the whole 18-thread pool saturated, headroom included. Timed
-    # directly at that demand, one short offload — what `require_principal` does for every bearer
-    # token — waited **854.1 ms** against a pool of 18 and **0.6 ms** against the pool this
-    # arithmetic asks for. That is the exact regression `install_default_executor` exists to close,
-    # reopened one factor up. `max(1, ...)` because 0
-    # means *no* bound on the fan-out, and no finite pool covers that; the honest floor is then one
-    # thread per admitted turn and the headroom is best-effort, which is what 0 asks for.
-    install_default_executor(
-        component="front-door",
-        reserved=(
-            settings.service_max_concurrent_turns * max(1, settings.agent_max_parallel_tool_calls)
-            + settings.attachment_max_concurrent_parses
-        ),
-    )
+    # The width is `front_door_reserved()` rather than the sum written here before, because the sum
+    # was not the ceiling: an admitted turn may fan out to `agent_max_parallel_tool_calls`
+    # concurrent tool calls and each may hold a thread, so the caps permit 98 simultaneous offloads
+    # where this asked for 14. Measured, one short call behind 96 offloads waited 762.7 ms at the
+    # old width and 123.2 ms at this one.
+    install_default_executor(component="front-door", reserved=front_door_reserved())
 
     # Before serving, for the reason `connectors_required` raises here: a judge endpoint that
     # cannot enforce structured output degrades *every* verified answer silently, and refusing to

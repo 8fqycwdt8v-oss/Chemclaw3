@@ -14,14 +14,17 @@ bare `/tool-results/{ref}` would have needed a new authorization story invented 
 that doubles as a bearer token is the story it would have ended up with.
 """
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import resolve_session
+from chemclaw.api.routes.caching import revalidatable
 from chemclaw.api.tool_results import StoredToolResult
 
 
-async def get_tool_result(session_id: str, ref: str) -> StoredToolResult:
+async def get_tool_result(
+    session_id: str, ref: str, request: Request, response: Response
+) -> StoredToolResult | Response:
     """The full text of one tool result this session produced.
 
     404 for a ref this session never produced, a ref retention has swept, and a ref belonging to
@@ -39,11 +42,19 @@ async def get_tool_result(session_id: str, ref: str) -> StoredToolResult:
     The ownership gate is attached at registration (`dependencies=[Depends(resolve_session)]`)
     rather than taken as a parameter, the same way the event stream does it: nothing in the answer
     depends on the live session object, only on the caller being entitled to this conversation.
+
+    **Revalidated, not `immutable`, and `private` rather than `public`.** The ref addresses the
+    *bytes*, so `text` cannot change — but `tool` and `correlation_id` collapse to `''` the moment a
+    second call in this session returns the same text (`api/tool_results.py::_UPSERT_LINK`), so the
+    body is not immutable and a year-long promise would pin a withdrawn label in the client.
+    `api/routes/caching.py` carries the whole argument, including why `public` on a per-owner
+    resource behind `resolve_session` is a hazard rather than a preference.
     """
     stored = await front_door.load_tool_result(session_id, ref)
     if stored is None:
         raise HTTPException(status_code=404, detail="no such tool result")
-    return stored
+    not_modified = revalidatable(request, response, stored)
+    return not_modified if not_modified is not None else stored
 
 
 def register(app: FastAPI) -> None:
@@ -55,7 +66,12 @@ def register(app: FastAPI) -> None:
     (`tests/test_route_auth_coverage.py`, the session-scope inventory in
     `tests/test_service.py`) — and a standalone router's routes carry no
     `dependency_overrides_provider`, which silently disables `app.dependency_overrides`.
+
+    `response_model` is stated rather than inferred because the handler may return a bare 304
+    `Response`, which makes its annotation a union FastAPI must not build a schema from.
     """
-    app.get("/sessions/{session_id}/tool-results/{ref}", dependencies=[Depends(resolve_session)])(
-        get_tool_result
-    )
+    app.get(
+        "/sessions/{session_id}/tool-results/{ref}",
+        dependencies=[Depends(resolve_session)],
+        response_model=StoredToolResult,
+    )(get_tool_result)

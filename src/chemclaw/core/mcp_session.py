@@ -17,8 +17,12 @@ server, four things that are easy to get wrong and invisible when you do:
   that `streamablehttp_client`'s task group raises, so the tree has to be walked; and it must not be
   classified as an outage, because a 401 never comes back on its own and a durable job would spend
   its whole retry budget being told the same thing;
-* `isError=True` covers both "the tool refused you" and "the server fell over", and only the second
-  is worth a retry — the sibling repo's `mcp_server_kit` distinguishes them by a fixed string;
+* `isError=True` covers three different answers — "the tool refused you", "the server fell over"
+  and "the server is full" — and the first is the only one no retry can fix. The wire carries no
+  error code and no structured content on that path, so each of the other two is told apart by a
+  fixed string the serving side puts at the **head** of the message (`SERVER_INTERNAL_ERROR`,
+  `SERVER_AT_CAPACITY`) — matched at that position by `server_marked`, because a domain refusal
+  quotes the caller's own arguments back and an unanchored match is therefore forgeable from one;
 * a call that hits the read bound gives up **locally only** — the SDK raises and sends the server
   nothing — so the server runs the tool to completion and throws the answer away
   (`cancel_on_timeout`).
@@ -36,6 +40,7 @@ one that knows which of its two error classes a given failure belongs in.
 import json
 import logging
 import os
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -57,6 +62,8 @@ from mcp.types import (
     EmptyResult,
     PingRequest,
 )
+
+from chemclaw.core.http import default_ssl_context
 
 # An `httpx` request hook: one coroutine taking the outbound request, called on every hop of a
 # redirect chain. Named here so both this module's two seams and their callers spell one type, and
@@ -94,6 +101,68 @@ logger = logging.getLogger(__name__)
 # this stops matching and the behaviour degrades to a misclassification rather than a new failure.
 SERVER_INTERNAL_ERROR = "an internal error occurred"
 
+# What `Chemclaw3-mcp`'s `servers/calc` says when it turned a call away because the pod was full
+# rather than because the request was wrong (`engine/admission.AT_CAPACITY_MARKER`).
+#
+# **The wire has no other channel, and that is measured rather than assumed.** `mcp.server.lowlevel`
+# builds a refused call's answer with `_make_error_result`, which is a `CallToolResult` carrying one
+# text block, `isError=True`, and *no* `structuredContent` and no error code; FastMCP's `Tool.run`
+# has already flattened every exception type into one `ToolError` before that. Driven against the
+# running server on 2026-09-05, a saturation refusal arrives as `isError=True`,
+# `structuredContent=None`, and text beginning `Error executing tool <name>: [calc-at-capacity] …`.
+# So a fixed token in the message is the only thing that can carry this, exactly as
+# `SERVER_INTERNAL_ERROR` above already does for "the server broke".
+#
+# **What it is worth is the difference between backpressure and a dead job.** Without it a full pod
+# is indistinguishable from an unparameterised solvent: `McpRequestRefused` -> `CalcToolError` ->
+# `_BAD_DATA_TYPES` -> non-retryable, so a durable calculation failed on its first attempt carrying
+# the serving side's own advice to retry. Under load "full" is the normal state, which is what makes
+# a third class necessary rather than tidy.
+#
+# The literal is transcribed rather than imported: the two repositories share no package, so
+# nothing detects a reword automatically — each side pins the spelling it expects in a test of its
+# own (`tests/test_calc_remote.py` here, `servers/calc/tests/test_admission.py` there), which
+# fails whoever changes one side, not whoever changes the other.
+SERVER_AT_CAPACITY = "[calc-at-capacity]"
+
+# The one wrapper the transport puts in front of a tool's own message: `Tool.run` raises
+# `ToolError(f"Error executing tool {self.name}: {e}")` and `_make_error_result` puts `str(e)` on
+# the wire unchanged, so a marker the server wrote at the head of its message arrives either bare
+# or behind exactly this. Non-greedy to the first `": "`, which is the server's own separator — a
+# served tool name carries no colon, and the *unserved* name path (`Unknown tool: …`, the one place
+# a caller's string opens the message) does not match this at all.
+_TOOL_ERROR_PREFIX = re.compile(r"^Error executing tool .*?: ")
+
+
+def server_marked(message: str, marker: str) -> bool:
+    """Whether the *server* opened this refusal with `marker`, rather than quoting it back.
+
+    **`marker in message` is forgeable from a tool argument, and both markers were matched that
+    way.** These servers word their domain refusals with the caller's own strings interpolated —
+    `servers/calc`'s solvent check raises "…has no parameters for {name!r}…" and its xTB wrapper
+    does the same with `method` — and `solvent` is a free-form argument on the tool surface. So
+    `solvent="[calc-at-capacity]"` came back as a refusal *containing* the token, was classified
+    `McpAtCapacity`, and turned a permanently bad input into ~28 minutes of backoff plus an
+    increment of `chemclaw_calc_backend_at_capacity_total` — the series the shipped alert rule pages
+    "scale the calculation tier" on. A caller could manufacture that page from an argument.
+    Reproduced end to end before this function existed.
+
+    Both sides' prose already claimed the position was what made this safe: `AT_CAPACITY_MARKER` is
+    documented as placed "at the *head* of the message so it survives every wrapping the transport
+    applies". Only the wrapping the *server* applies survives to the head; an echoed argument lands
+    in the middle. This is that claim made true, and it is used for `SERVER_INTERNAL_ERROR` as well,
+    which is the same forgery with a worse consequence — that one raises `McpServerFault(internal=
+    True)`, which callers count on `chemclaw_degraded_total` and read as "the backend is dark".
+
+    Args:
+        message: The text of a `CallToolResult` carrying `isError=True`.
+        marker: The fixed token the serving side writes at the head of that message.
+
+    Returns:
+        True when the message begins with `marker`, allowing for the transport's own prefix.
+    """
+    return _TOOL_ERROR_PREFIX.sub("", message.lstrip(), count=1).startswith(marker)
+
 
 class McpConnectFailed(Exception):
     """The server could not be reached, so nothing ran. The caller decides what to call it."""
@@ -109,7 +178,28 @@ class McpCredentialRefused(Exception):
 
 
 class McpRequestRefused(Exception):
-    """The server answered and said no. Bad data: the identical call is refused identically."""
+    """The server answered and said no.
+
+    Bad data unless a subclass says otherwise: the identical call is refused identically. The one
+    subclass that says otherwise is `McpAtCapacity`, which is a refusal about the *server's* state
+    rather than about the request — kept inside this hierarchy so that every existing handler keeps
+    treating it as the refusal it is, and only a caller that has something better to do with
+    backpressure has to know it exists.
+    """
+
+
+class McpAtCapacity(McpRequestRefused):
+    """The server was reached, ran nothing, and refused because it is full.
+
+    The third state the two classes around this one did not have. `McpRequestRefused` means the
+    request was wrong and `McpServerFault` means the server broke; a busy pod is neither, and it is
+    the only one of the three where waiting and asking again is the correct response.
+
+    A subclass rather than a sibling, deliberately: `invoke` has exactly two callers today
+    (`connectors/calc/remote.py` and `ingest/labels/labeller.py`) and only the first has any use for
+    the distinction, so a sibling would have silently escaped the second's `except` clauses. Under
+    this hierarchy a caller that does nothing keeps the behaviour it had.
+    """
 
 
 class McpServerFault(Exception):
@@ -308,6 +398,9 @@ def short_connect_client(
             headers=headers,
             auth=auth,
             follow_redirects=True,
+            # One process-wide trust store; see `core.http.default_ssl_context` for what building
+            # one per client cost the event loop (156.1 ms per turn across the connector fleet).
+            verify=default_ssl_context(),
             # the calc backend is a loopback/in-cluster Service; ignore ambient proxies
             trust_env=False,
             event_hooks={"request": [request_hook]} if request_hook is not None else {},
@@ -413,6 +506,8 @@ async def invoke(session: ClientSession, tool: str, arguments: dict[str, Any]) -
 
     `McpRequestRefused` carries the server's own message, because that message is the whole content
     of the refusal. `McpServerFault` means nobody answered, or the server answered that it broke.
+    `McpAtCapacity` — a subclass of the first — means the server answered that it is full, which is
+    the one refusal that is worth asking again about.
 
     This is the only place that can classify a failure of the *call*, because it is the only place
     that knows a call was in flight — `open_session`'s guard deliberately stops at the connection.
@@ -427,8 +522,12 @@ async def invoke(session: ClientSession, tool: str, arguments: dict[str, Any]) -
         raise McpServerFault(tool) from exc
     if result.isError:
         message = text_of(result.content)
-        if SERVER_INTERNAL_ERROR in message:
+        # `server_marked` rather than `marker in message`: a domain refusal quotes the caller's own
+        # arguments back, so an unanchored match let a tool argument mint either classification.
+        if server_marked(message, SERVER_INTERNAL_ERROR):
             raise McpServerFault(tool, internal=True)
+        if server_marked(message, SERVER_AT_CAPACITY):
+            raise McpAtCapacity(f"{tool} was refused: {message}")
         raise McpRequestRefused(f"{tool} failed: {message}")
     text = text_of(result.content)
     try:

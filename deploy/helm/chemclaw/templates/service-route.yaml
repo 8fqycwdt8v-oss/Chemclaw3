@@ -80,6 +80,33 @@ spec:
   minReplicas: {{ .Values.service.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.service.autoscaling.maxReplicas }}
   metrics:
+    {{- if .Values.service.autoscaling.occupancy.enabled }}
+    {{- /* The saturation signal, first because it is the one that binds. A turn holds its permit
+           for the whole 8.32 s it waits on the model and spends 0.581 s of CPU doing it, so the
+           pod is full at 44% of the CPU target below and no CPU threshold can reach it — measured
+           with the semaphore 100% full at 218 millicores, and again in the load lane as 33 of 48
+           turns shed at 35.0% of one core.
+
+           `AverageValue`, not `Utilization`: the quantity is "permits held per pod", and the HPA's
+           own arithmetic (desired = ceil(replicas × current / target)) is then exactly the queue
+           the admission semaphore is. The target is derived from the permit count the pods
+           actually enforce rather than written out, so the two cannot drift; `max 1` because a
+           target of 0 makes the HPA divide by zero and scale to its ceiling.
+
+           This metric needs a custom-metrics API (prometheus-adapter, KEDA, or the cluster's own)
+           publishing the series for these pods. There is nothing this chart can do to make that
+           true, so what it does instead is fail *visibly*: an unfetchable metric shows as
+           `FailedGetPodsMetric` on the HPA, and Kubernetes will still scale UP on the CPU metric
+           beside it while refusing to scale DOWN on a partial reading. That is why the CPU metric
+           stays rather than being replaced. */}}
+    - type: Pods
+      pods:
+        metric:
+          name: {{ .Values.service.autoscaling.occupancy.metricName }}
+        target:
+          type: AverageValue
+          averageValue: {{ max 1 (div (mul (int (required "config.CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS must be set: the HPA's occupancy target is a fraction of the permit count the pods enforce" .Values.config.CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS)) (int .Values.service.autoscaling.occupancy.targetPercent)) 100) | quote }}
+    {{- end }}
     - type: Resource
       resource:
         name: cpu

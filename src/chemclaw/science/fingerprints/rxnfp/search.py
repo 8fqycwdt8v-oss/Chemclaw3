@@ -42,7 +42,9 @@ async def find_similar_reactions(
     run something like this?", and an unindexed corpus must not answer it with "no" (see that
     model's docstring for the live run that did exactly that). `hits_truncated` answers the other
     half of the same question — a page of `top_k` out of more that qualified is a floor, not the
-    number of precedents on file.
+    number of precedents on file. `approximate` answers the third: a deployment may search the
+    index approximately (`fingerprint_search_exactness`), and then even a complete-looking page is
+    the best the index proposed rather than the best on file.
     """
     matches, truncated = await find_matches(
         store, drfp_bitstring(reaction_smiles), top_k, threshold
@@ -52,4 +54,5 @@ async def find_similar_reactions(
         hits=matches,
         index_empty=await index_is_empty(store, matches),
         hits_truncated=truncated,
+        approximate=store.approximate,
     )

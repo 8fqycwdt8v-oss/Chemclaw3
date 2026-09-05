@@ -88,9 +88,9 @@
          front door — which is exactly the silent multiplication
          `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` exists to catch. Derived, it is the same
          number the HPA obeys. When the HPA is off, the fixed replica count is that number. */}}
-  CHEMCLAW_SERVICE_FLEET_REPLICAS: {{ if .Values.service.autoscaling.enabled }}{{ .Values.service.autoscaling.maxReplicas | quote }}{{ else }}{{ .Values.service.replicas | quote }}{{ end }}
-  {{- /* The connection budget's two inputs, derived for the same reason as the line above: what
-         the database sees is `pg_pool_max_size × pools`, and a hand-written count is a second copy
+  CHEMCLAW_SERVICE_FLEET_REPLICAS: {{ include "chemclaw.frontDoorProcesses" . | quote }}
+  {{- /* The connection budget's input, derived for the same reason as the line above: what the
+         database sees is `pg_pool_max_size × pools`, and a hand-written count is a second copy
          of the topology. `chemclaw.fleetPools` counts POOLS rather than pods — a front-door
          process holds three (the stores', `/readyz`'s own statement-timeout key, and the
          checkpointer's) and every other role holds one. Counting pods declared 136 against a

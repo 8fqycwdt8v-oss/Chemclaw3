@@ -33,6 +33,8 @@ from chemclaw.durable.retention import (
     _PRUNABLE,
     _SESSION_SCOPED_ROWS,
     RetentionOutcome,
+    _Budget,
+    _sweep_once,
     _window_days,
     prune_expired_rows,
     unwindowed_ownership_dependencies,
@@ -742,16 +744,20 @@ def test_a_failed_table_does_not_starve_the_tables_after_it() -> None:
     )
 
 
-def test_one_pass_works_a_bounded_batch_and_reports_the_rest() -> None:
-    """An unbounded first pass spends an attempt and commits only what it reached.
+def test_one_sweep_works_a_bounded_batch_and_reports_the_rest() -> None:
+    """An unbounded sweep spends an attempt and commits only what it reached.
 
     The conversation prune costs three round trips per session and cannot be one `DELETE` (D-145),
     so a deployment enabling retention over a long backlog faces every session it has ever had
-    inside one activity's `retention_timeout_seconds`. Capped, each pass makes bounded progress —
+    inside one activity's `retention_timeout_seconds`. Capped, each sweep makes bounded progress —
     and says *that* it left something, because a cap that is not reported reads as "there was
     nothing more" and a growing table would look bounded in every result this job returns. The
     figure is a probe rather than a remainder — one row is selected over the cap and no more, so it
     is 0 or 1 — because a true count is a second whole-table aggregate (`RetentionOutcome`).
+
+    Driven on `_sweep_once` rather than on the activity, because the cap bounds a **sweep** and the
+    activity now runs as many of them as its budget affords: what is under test here is the batch,
+    and `test_the_pass_keeps_sweeping_until_the_backlog_is_drained` is what tests the pass.
     """
 
     async def _run() -> tuple[RetentionOutcome, int]:
@@ -762,17 +768,238 @@ def test_one_pass_works_a_bounded_batch_and_reports_the_rest() -> None:
         monkeypatch.setattr(settings, "retention_session_events_days", 0)
         monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
         try:
-            first = await prune_expired_rows()
+            first = await _sweep_once(_Budget())
             return first, await _remaining(like)
         finally:
             monkeypatch.undo()
 
     outcome, remaining = asyncio.run(_run())
     assert outcome.deleted["session_messages"] == 2
-    assert remaining == 3, "the pass worked more sessions than its cap allowed"
+    assert remaining == 3, "the sweep worked more sessions than its cap allowed"
     assert outcome.sessions_deferred > 0, (
-        "the pass stopped at its cap and reported nothing left, which reads as a bounded table"
+        "the sweep stopped at its cap and reported nothing left, which reads as a bounded table"
     )
+
+
+def test_an_age_cutoff_delete_is_batched_until_the_table_is_drained() -> None:
+    """The age-cutoff branch removes rows in committed batches, not in one unbounded `DELETE`.
+
+    The argument is the one `_prune_session_messages` makes, applied only to the session branches:
+    an activity must not attempt unbounded work, because a pass that exceeds its `statement_timeout`
+    is retried, times out again, and exhausts `activity_max_attempts` **having deleted nothing**.
+    Measured on 300 000 `tool_result_blobs`-shaped rows (2.4 GB, `STORAGE EXTERNAL`): the unbounded
+    form takes 11.5 s and, under a 5 s `statement_timeout`, is cancelled having removed 0; the
+    batched form removes all 300 000 in 11.0 s across 31 committed batches, worst batch 1 385 ms.
+
+    This is the drain half — five expired rows against a batch of two, so a single-statement
+    rewrite and a loop that stopped after one batch both fail here. The batch *size* and its commit
+    are the sibling test's, and the two together are what a final row count alone cannot show.
+    """
+
+    async def _run() -> tuple[int, int, int]:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute("DELETE FROM session_events WHERE session_id LIKE 'batched-%'")
+            async with conn.cursor() as cur:
+                for index in range(5):
+                    await cur.execute(
+                        "INSERT INTO session_events "
+                        "(session_id, kind, payload, created_at, consumed_at) VALUES "
+                        "(%s, 'job_completed', %s, now() - make_interval(days => 90), now())",
+                        (f"batched-{index}", Jsonb({"job_id": f"j-{index}"})),
+                    )
+            await conn.commit()
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_delete_batch_rows", 2)
+        monkeypatch.setattr(settings, "retention_session_events_days", 7)
+        for name in (
+            "retention_session_messages_days",
+            "retention_tool_results_days",
+            "retention_result_publications_days",
+            "retention_checkpoints_days",
+        ):
+            monkeypatch.setattr(settings, name, 0)
+        try:
+            outcome = await _sweep_once(_Budget())
+        finally:
+            monkeypatch.undo()
+
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM session_events WHERE session_id LIKE 'batched-%'"
+            )
+            row = await cur.fetchone()
+        return outcome.deleted["session_events"], int(row[0]) if row else -1, outcome.rows_deferred
+
+    deleted, left, deferred = asyncio.run(_run())
+    assert deleted >= 5, f"the branch deleted {deleted} of the 5 seeded rows"
+    assert left == 0, "a batched delete left rows behind, so the loop stopped before the tail"
+    assert deferred == 0, "the branch reported a tail it had drained"
+
+
+def test_a_batched_delete_stops_at_the_pass_budget_and_reports_the_tail() -> None:
+    """A batch loop with no clock is the unbounded `DELETE` again, one round trip at a time.
+
+    With the budget already spent, exactly one batch runs — the one every unit of work is always
+    allowed — and the branch says a tail remains, which is what makes the next scheduled pass pick
+    the rest up instead of an operator reading a drained table.
+    """
+
+    async def _run() -> tuple[int, bool, int]:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute("DELETE FROM session_events WHERE session_id LIKE 'budgeted-%'")
+            async with conn.cursor() as cur:
+                for index in range(6):
+                    await cur.execute(
+                        "INSERT INTO session_events "
+                        "(session_id, kind, payload, created_at, consumed_at) VALUES "
+                        "(%s, 'job_completed', %s, now() - make_interval(days => 90), now())",
+                        (f"budgeted-{index}", Jsonb({"job_id": f"j-{index}"})),
+                    )
+            await conn.commit()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_delete_batch_rows", 2)
+        monkeypatch.setattr(settings, "retention_timeout_seconds", 0.001)
+        try:
+            budget = _Budget()
+            async with db.connection(settings.postgres_dsn) as conn:
+                deleted, more = await retention._prune_by_age(
+                    conn, "session_events", "created_at", "consumed_at IS NOT NULL", 7, budget
+                )
+        finally:
+            monkeypatch.undo()
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM session_events WHERE session_id LIKE 'budgeted-%'"
+            )
+            row = await cur.fetchone()
+        return deleted, more, int(row[0]) if row else -1
+
+    deleted, more, left = asyncio.run(_run())
+    assert deleted == 2, f"a spent budget ran {deleted // 2} batches, not the one always allowed"
+    assert more, "the branch stopped on its budget and reported nothing left"
+    assert left == 4, "the batch that ran was not committed, or more than one ran"
+
+
+def test_the_delete_batch_size_is_the_setting_and_is_read_on_every_call() -> None:
+    """`retention_delete_batch_rows` reaches the `LIMIT`, and a module constant would not.
+
+    Promoting a constant to a setting fails in one specific way: the field ships, `.env.example`
+    documents it, an operator sets it, and the reader still holds the old literal — a knob that
+    renders nothing. This drives the same seeded table twice in one process with two different
+    values and asserts the batch the pass actually committed, so the value has to travel from the
+    settings object into the emitted SQL for both to pass.
+
+    The budget is spent on purpose. `_prune_by_age` always runs one batch, so with no clock left
+    the rows removed *are* the batch size, which no drained-table count could show.
+
+    Reading it once per call rather than once per batch is what the second half checks: two calls,
+    two sizes. A value captured at import gives one number twice.
+    """
+
+    async def _run(batch_size: int, tag: str) -> int:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute(f"DELETE FROM session_events WHERE session_id LIKE '{tag}-%'")
+            async with conn.cursor() as cur:
+                for index in range(6):
+                    await cur.execute(
+                        "INSERT INTO session_events "
+                        "(session_id, kind, payload, created_at, consumed_at) VALUES "
+                        "(%s, 'job_completed', %s, now() - make_interval(days => 90), now())",
+                        (f"{tag}-{index}", Jsonb({"job_id": f"j-{index}"})),
+                    )
+            await conn.commit()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_delete_batch_rows", batch_size)
+        monkeypatch.setattr(settings, "retention_timeout_seconds", 0.001)
+        try:
+            async with db.connection(settings.postgres_dsn) as conn:
+                deleted, _more = await retention._prune_by_age(
+                    conn, "session_events", "created_at", "consumed_at IS NOT NULL", 7, _Budget()
+                )
+        finally:
+            monkeypatch.undo()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute(f"DELETE FROM session_events WHERE session_id LIKE '{tag}-%'")
+            await conn.commit()
+        return deleted
+
+    async def _both() -> tuple[int, int]:
+        return await _run(2, "sized-a"), await _run(5, "sized-b")
+
+    two, five = asyncio.run(_both())
+    assert (two, five) == (2, 5), (
+        f"one batch removed {two} rows at a batch size of 2 and {five} at 5; the setting does not "
+        "reach the LIMIT, or it is read once at import rather than on every call"
+    )
+
+
+def test_the_pass_keeps_sweeping_until_the_backlog_is_drained() -> None:
+    """A cap below the arrival rate never converges, so the cap must bound a batch, not the pass.
+
+    `retention_max_sessions_per_pass` defaults to 500 against a **daily** schedule, and 200 chemists
+    create on the order of 400-1 000 sessions a day: a pass that stops at its cap therefore removes
+    less than arrives, reports success, and the backlog grows forever with nothing in the job's
+    result saying so. The fix is not a bigger number — any fixed number is below *some* arrival
+    rate — it is that the pass sweeps again while a tail remains and the budget can hold another
+    sweep.
+
+    Five expired sessions against a cap of two: three sweeps, one pass, nothing left over.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, int]:
+        await migrated_db_or_skip()
+        like = await _seed_expired_sessions(5, "sweep-converge-")
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
+        try:
+            return await prune_expired_rows(), await _remaining(like)
+        finally:
+            monkeypatch.undo()
+
+    outcome, remaining = asyncio.run(_run())
+    assert remaining == 0, "the pass stopped at its cap instead of draining the backlog"
+    assert outcome.deleted["session_messages"] == 5, (
+        f"the pass reported {outcome.deleted} rather than the whole backlog it removed"
+    )
+    assert outcome.sessions_deferred == 0, "the pass reported a tail it had actually drained"
+
+
+def test_the_pass_stops_when_its_budget_is_spent_and_says_so() -> None:
+    """Convergence is bounded by the clock, and a pass that stops early still reports its tail.
+
+    The opposite failure to the one above: a pass that sweeps "while work remains" with no budget
+    runs past `retention_timeout_seconds`, is killed by Temporal at the moment it finishes, and the
+    attempt is lost. With the budget spent, the pass returns what it removed *and* the tail probe,
+    so the next scheduled fire picks the backlog up rather than an operator reading a bounded table.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, int]:
+        await migrated_db_or_skip()
+        like = await _seed_expired_sessions(5, "sweep-budget-")
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
+        # Small enough that the first sweep's own duration exhausts it: the first sweep always
+        # runs (`_Budget` starts with no measurement), and the second is refused.
+        monkeypatch.setattr(settings, "retention_timeout_seconds", 0.001)
+        try:
+            return await prune_expired_rows(), await _remaining(like)
+        finally:
+            monkeypatch.undo()
+
+    outcome, remaining = asyncio.run(_run())
+    assert outcome.deleted["session_messages"] == 2, (
+        "a pass out of budget did not commit the one sweep it is always allowed"
+    )
+    assert remaining == 3, "the pass swept past a budget it could no longer afford"
+    assert outcome.sessions_deferred == 1, "the pass stopped early and reported a drained backlog"
 
 
 # --- The LangGraph checkpoint tables: pruned by thread, skipped when absent --------------------
@@ -876,8 +1103,8 @@ def test_an_expired_thread_leaves_none_of_its_three_tables_behind() -> None:
     )
 
 
-def test_the_checkpoint_pass_says_that_it_left_threads_behind() -> None:
-    """A capped checkpoint pass reports its tail, for the reason the conversation pass does.
+def test_the_checkpoint_sweep_says_that_it_left_threads_behind() -> None:
+    """A capped checkpoint sweep reports its tail, for the reason the conversation sweep does.
 
     Without it, a first pass against a deployment with a large backlog returns exactly the cap as
     its deleted count and an empty `skipped` — indistinguishable from a pass that drained the table,
@@ -899,7 +1126,10 @@ def test_the_checkpoint_pass_says_that_it_left_threads_behind() -> None:
         try:
             for index in range(5):
                 await _seed_thread(f"retention-capped-{index}", age_days=90)
-            outcome = await prune_expired_rows()
+            # One sweep, not the whole pass: the cap bounds a batch and the pass now runs as many
+            # batches as its budget affords (`test_the_pass_keeps_sweeping_until_the_backlog_is
+            # _drained`), so driving the activity here would assert the convergence instead.
+            outcome = await _sweep_once(_Budget())
             surviving = 0
             for index in range(5):
                 surviving += (await _thread_row_counts(f"retention-capped-{index}"))["checkpoints"]
@@ -910,11 +1140,11 @@ def test_the_checkpoint_pass_says_that_it_left_threads_behind() -> None:
     outcome, surviving = asyncio.run(_run())
 
     assert outcome.deleted["checkpoints"] == 2, (
-        f"the pass worked more threads than its cap allowed: {outcome.deleted}"
+        f"the sweep worked more threads than its cap allowed: {outcome.deleted}"
     )
     assert surviving == 3, f"{surviving} of 5 seeded threads survive, expected 3"
     assert outcome.threads_deferred > 0, (
-        "the pass stopped at its cap and reported nothing left, which reads as a bounded table"
+        "the sweep stopped at its cap and reported nothing left, which reads as a bounded table"
     )
 
 
@@ -1237,7 +1467,9 @@ def test_the_sweep_gives_the_planner_the_statistics_no_migration_can() -> None:
                 _SCAN_THREADS, _SCAN_CHECKPOINTS_PER_THREAD, _SCAN_DENSE_LIVE_EVERY
             )
             before = _plan_nodes(await _plan_of(_EXPIRED_THREADS, (30, _SCAN_CAP + 1)))
-            await prune_expired_rows()
+            # One sweep: `ANALYZE` runs once per sweep, and driving the whole activity here would
+            # drain a deliberately large seeded backlog two threads at a time.
+            await _sweep_once(_Budget())
             after = _plan_nodes(await _plan_of(_EXPIRED_THREADS, (30, _SCAN_CAP + 1)))
             return (
                 [node["Node Type"] for node in before],
@@ -1703,13 +1935,17 @@ def test_graph_state_left_behind_keeps_the_ownership_row_that_finds_it() -> None
     assert after == set(), "once the thread is gone the session is a shell and may be forgotten"
 
 
-def test_the_ownership_pass_works_a_bounded_batch_and_reports_the_rest() -> None:
-    """The cap and its probe, for the reason the other two passes carry them.
+def test_the_ownership_sweep_works_a_bounded_batch_and_reports_the_rest() -> None:
+    """The cap and its probe, for the reason the other two sweeps carry them.
 
     A first pass against a deployment that has never pruned faces every abandoned draft it has ever
-    created. Capped, each pass commits a bounded amount; reported, an operator can tell a drained
-    backlog from a pass that stopped at its limit — a cap that is not reported makes a still-growing
-    table look bounded in every result this job returns.
+    created. Capped, each sweep commits a bounded amount; reported, an operator can tell a drained
+    backlog from a sweep that stopped at its limit — a cap that is not reported makes a
+    still-growing table look bounded in every result this job returns.
+
+    One sweep rather than the activity, for the reason the conversation and checkpoint batch tests
+    give: the cap bounds a batch, and the pass repeats batches until the backlog or the budget runs
+    out.
     """
 
     async def _run() -> tuple[RetentionOutcome, set[str]]:
@@ -1719,15 +1955,23 @@ def test_the_ownership_pass_works_a_bounded_batch_and_reports_the_rest() -> None
             await _seed_owner(f"capped-{index}", age_days=400)
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        for name in (
+            "retention_session_events_days",
+            "retention_tool_results_days",
+            "retention_result_publications_days",
+            "retention_checkpoints_days",
+        ):
+            monkeypatch.setattr(settings, name, 0)
         try:
-            outcome = await _sweep(retention_session_messages_days=365)
+            outcome = await _sweep_once(_Budget())
         finally:
             monkeypatch.undo()
         return outcome, await _rows_left("session_owners")
 
     outcome, owners = asyncio.run(_run())
-    assert outcome.deleted["session_owners"] == 2, "the pass worked more rows than its cap allowed"
+    assert outcome.deleted["session_owners"] == 2, "the sweep worked more rows than its cap allowed"
     assert len(owners) == 1
     assert outcome.owners_deferred == 1, (
-        "the pass stopped at its cap and reported nothing left, which reads as a bounded table"
+        "the sweep stopped at its cap and reported nothing left, which reads as a bounded table"
     )

@@ -53,20 +53,29 @@ class ContinuousParameter(BaseModel):
 
 
 class CategoricalParameter(BaseModel):
-    """A categorical decision variable — one of a fixed set of labels (e.g. a catalyst).
+    """One of a fixed set of labels — a catalyst, a base, a solvent.
 
-    Optionally *featurized*: a bare categorical is opaque to the surrogate, which can only
-    learn each label independently and therefore cannot say anything about an option that
-    has never been run. Giving each category a numeric descriptor vector turns the choice
-    into a continuous space the model can interpolate across, so evidence about one ligand
-    informs its neighbours (U1). `chemclaw.science.bo.featurize` fills `descriptors` from
-    `structures`.
-
-    Both halves are carried so a campaign is auditable and reproducible: `structures` records
-    what was featurized, `descriptors` the values the surrogate actually saw. The values live
-    in the spec rather than being recomputed per round, so a campaign that crosses the
-    Temporal boundary cannot silently change its own featurization mid-run.
+    Give `structures` (label -> SMILES) when the options are molecules: each option is then
+    described by computed descriptors instead of as an opaque label, so the surrogate can say
+    something about an option nobody has run. `descriptors` is computed from it — leave it unset.
     """
+
+    # **The two-sentence docstring above is the model-facing description, and the rationale below
+    # is deliberately not in it.** Pydantic publishes a class docstring as the JSON-schema
+    # `description` and `convert_to_openai_tool` inlines it once per *use*, so this one shipped in
+    # five tool schemas on every turn (the four `bo` endpoint tools, plus
+    # `start_optimization_campaign` via `CampaignSpec`). Written out, it cost 220 tokens x 5.
+    #
+    # Why featurization exists: a bare categorical is opaque to the surrogate, which can only learn
+    # each label independently and therefore cannot say anything about an option that has never been
+    # run. A numeric descriptor vector per category turns the choice into a continuous space the
+    # model can interpolate across, so evidence about one ligand informs its neighbours (U1).
+    # `chemclaw.science.bo.featurize` fills `descriptors` from `structures`.
+    #
+    # Both halves are carried so a campaign is auditable and reproducible: `structures` records what
+    # was featurized, `descriptors` the values the surrogate actually saw. The values live in the
+    # spec rather than being recomputed per round, so a campaign that crosses the Temporal boundary
+    # cannot silently change its own featurization mid-run.
 
     kind: Literal["categorical"] = "categorical"
     name: str = Field(min_length=1)
@@ -133,24 +142,27 @@ class Objective(BaseModel):
 
 
 class LinearConstraint(BaseModel):
-    """A limit the chemist states across *several* parameters at once (W4).
+    """A limit coupling *several* continuous parameters, with one coefficient each.
 
-    A limit on one parameter is its bound and belongs there. This type exists for the couplings a
-    bound cannot express — "base plus acid must not exceed 3 equivalents", "water is at most 5% of
-    the solvent", "these three fractions sum to 1" (which is the mixture/formulation case, and comes
-    free as `relation: "=="`).
-
-    **One kind, covering all three relations.** A discriminated union of five constraint types would
-    be the single biggest comprehensibility regression available to an LLM-facing schema, and the
-    linear family is the only one any continuous story asks for. `kind` discriminates it from the
-    one genuinely different shape (`ExcludeConstraint`), so widening later stays additive and never
-    changes a linear one's wire shape.
-
-    **Continuous parameters only.** The acquisition optimizer applies constraints to the continuous
-    subspace and enumerates the categorical one, and BoFire itself refuses a constraint naming a
-    categorical feature (measured) — so the validator here exists to turn a pydantic error into a
-    sentence naming the parameter, not to be the safety.
+    "Base plus acid at most 3 equivalents", "water at most 5% of the solvent", "these fractions
+    sum to 1" (`relation: "=="`). A limit on one parameter is that parameter's bound, not a
+    constraint. Continuous parameters only.
     """
+
+    # Rationale in a comment rather than in the docstring: pydantic publishes the docstring as this
+    # model's JSON-schema `description`, inlined once per tool that takes an `OptimizationProblem` —
+    # five of them on every turn. See `CategoricalParameter` for the same argument at length.
+    #
+    # **One kind, covering all three relations.** A discriminated union of five constraint types
+    # would be the single biggest comprehensibility regression available to an LLM-facing schema,
+    # and the linear family is the only one any continuous story asks for. `kind` discriminates it
+    # from the one genuinely different shape (`ExcludeConstraint`), so widening later stays additive
+    # and never changes a linear one's wire shape.
+    #
+    # **Continuous parameters only.** The acquisition optimizer applies constraints to the
+    # continuous subspace and enumerates the categorical one, and BoFire itself refuses a constraint
+    # naming a categorical feature (measured) — so the validator here exists to turn a pydantic
+    # error into a sentence naming the parameter, not to be the safety.
 
     kind: Literal["linear"] = "linear"
     parameters: list[str] = Field(min_length=1)
@@ -180,23 +192,27 @@ class LinearConstraint(BaseModel):
 
 
 class ExcludeConstraint(BaseModel):
-    """Two categorical options that must never be combined — "no Pd(OAc)₂ in DMSO" (W4).
+    """A pairing of categorical options that must never be combined — "no Pd(OAc)₂ in DMSO".
 
-    A forbidden *option* is one left out of a category list. This type is for the case a category
-    list cannot express: each option is fine on its own and only the *pairing* is forbidden, which
-    is how incompatibility usually arrives from a chemist.
-
-    **Exactly two parameters, both categorical**, mirroring `LinearConstraint`'s
-    parameter-and-its-value pairing so the two constraint shapes read the same way. BoFire's
-    equivalent takes exactly two features, and the `options` lists are ANDed: every pairing in the
-    cross product of the two lists is excluded.
-
-    **Only on an all-categorical problem.** Measured: BoFire refuses this constraint on a domain
-    that also holds a continuous parameter ("can only be used for pure categorical/discrete search
-    spaces"), and it refuses it for a factorial screen outright. Both refusals are re-stated here in
-    the caller's own vocabulary, because a pydantic error naming a BoFire class is not something a
-    caller can repair from.
+    Exactly two parameters, both categorical, with an option list each; every pairing in the cross
+    product of the two lists is excluded. An option that is bad on its own is simply left out of
+    that parameter's category list. Usable only on an all-categorical problem.
     """
+
+    # Rationale in a comment rather than in the docstring, for the reason `CategoricalParameter`
+    # gives: this description is inlined once per tool that takes an `OptimizationProblem`.
+    #
+    # This type exists for the case a category list cannot express: each option is fine on its own
+    # and only the *pairing* is forbidden, which is how incompatibility usually arrives from a
+    # chemist. The two-parameter shape mirrors `LinearConstraint`'s parameter-and-its-value pairing
+    # so the two constraint shapes read the same way, and BoFire's equivalent takes exactly two
+    # features.
+    #
+    # **Only on an all-categorical problem.** Measured: BoFire refuses this constraint on a domain
+    # that also holds a continuous parameter ("can only be used for pure categorical/discrete search
+    # spaces"), and it refuses it for a factorial screen outright. Both refusals are re-stated in
+    # the caller's own vocabulary by the validators that raise them, because a pydantic error naming
+    # a BoFire class is not something a caller can repair from.
 
     kind: Literal["exclude"] = "exclude"
     parameters: list[str] = Field(min_length=2, max_length=2)
@@ -241,12 +257,14 @@ Constraint = Annotated[LinearConstraint | ExcludeConstraint, Field(discriminator
 
 
 class OptimizationProblem(BaseModel):
-    """A full problem: the decision variables, the objective(s), and any cross-parameter limits.
+    """The decision variables, the objective(s), and any cross-parameter limits."""
 
-    One `objectives` field rather than a lead objective plus a sidecar list (W3). The sidecar shape
-    guarantees that a lone objective sometimes lands in the wrong one, and it bakes a "primary"
-    fiction into a Pareto front where every axis is symmetric.
-    """
+    # One `objectives` field rather than a lead objective plus a sidecar list (W3). The sidecar
+    # shape guarantees that a lone objective sometimes lands in the wrong one, and it bakes a
+    # "primary" fiction into a Pareto front where every axis is symmetric.
+    #
+    # The docstring above is one line for the reason `CategoricalParameter`'s comment gives: it is
+    # this model's JSON-schema `description`, and five tool schemas carry a copy of it every turn.
 
     parameters: list[Parameter] = Field(min_length=1)
     objectives: list[Objective] = Field(min_length=1)
@@ -385,14 +403,20 @@ class OptimizationProblem(BaseModel):
 
 
 class Observation(BaseModel):
-    """One evaluated point: parameter values and the resulting objective value.
+    """One evaluated point: the parameter values and the objective value they produced.
 
-    `provenance` distinguishes a real measurement from a model prediction, so a
-    campaign fed by predicted values stays honest about its evidence (D-011).
-    `value` must be finite: NaN compares false in both directions, so it would
-    silently win `best_of`, and BoFire drops the row mid-campaign — reject it at
-    the boundary instead (gate G4).
+    With several objectives give every one in `values`. Set `provenance` to `predicted` when the
+    number came from a model rather than from the lab.
     """
+
+    # Rationale in a comment rather than in the docstring, for the reason `CategoricalParameter`
+    # gives: this description is inlined once per tool that takes a list of observations — three of
+    # them on every turn.
+    #
+    # `provenance` keeps a campaign fed by predicted values honest about its evidence (D-011).
+    # `value` must be finite: NaN compares false in both directions, so it would silently win
+    # `best_of`, and BoFire drops the row mid-campaign — reject it at the boundary instead (gate
+    # G4).
 
     params: dict[str, ParamValue]
     # The **lead** objective's value. Unchanged and still required: it is the field every persisted
@@ -670,20 +694,24 @@ class ScreeningDesign(BaseModel):
 
 
 class CampaignSpec(BaseModel):
-    """A durable BO campaign's configuration (plan step 1d.4).
+    """A durable BO campaign's configuration: the problem, the objective, and the budget.
 
-    `objective_name` names the objective a worker resolves via `chemclaw.science.bo.objectives`; a
-    Temporal workflow cannot carry a Python callable across its boundary, so the
-    objective is referenced by name and looked up in the evaluate activity.
-
-    **There is no `publish_to_graph` here** (D-157). There used to be, and it was the model-facing
-    half of a decision declared twice: the manifest's `publish_to_graph` said the deployment wants
-    campaign recommendations reviewed, while this field — default `False`, filled in by the LLM —
-    could silently suppress the only permanent artifact a campaign produced. A campaign launched
-    without it left no trace at all once Temporal's history expired. Whether a job's knowledge
-    reaches the graph is the deployment's call, so it is declared once, in `connector.yaml`, where
-    the deployment can see it.
+    `objective_name` names the objective a worker resolves via `chemclaw.science.bo.objectives`.
     """
+
+    # Rationale in a comment rather than in the docstring, for the reason `CategoricalParameter`
+    # gives: this is `start_optimization_campaign`'s top-level schema description.
+    #
+    # A Temporal workflow cannot carry a Python callable across its boundary, so the objective is
+    # referenced by name and looked up in the evaluate activity.
+    #
+    # **There is no `publish_to_graph` here** (D-157). There used to be, and it was the model-facing
+    # half of a decision declared twice: the manifest's `publish_to_graph` said the deployment wants
+    # campaign recommendations reviewed, while this field — default `False`, filled in by the LLM —
+    # could silently suppress the only permanent artifact a campaign produced. A campaign launched
+    # without it left no trace at all once Temporal's history expired. Whether a job's knowledge
+    # reaches the graph is the deployment's call, so it is declared once, in `connector.yaml`, where
+    # the deployment can see it.
 
     problem: OptimizationProblem
     objective_name: str = Field(min_length=1)

@@ -580,6 +580,219 @@ def test_an_unmerged_note_is_a_404_carrying_its_reason(
     assert "note-not-yet-merged" in res.json()["detail"]
 
 
+# --- the caching policy on the two read routes ---------------------------------------------------
+
+
+def test_a_fetched_result_is_revalidatable_and_never_publicly_cacheable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The header the frontend asked for was `public, max-age=31536000, immutable`; both are wrong.
+
+    `public` is the hazard half. This resource belongs to one session and one owner, the URL encodes
+    no principal, and `resolve_session` is the only thing between it and anybody who can reach the
+    service — so a shared cache holding one owner's result and serving it on that URL is the
+    ownership gate removed by a response header. The route must never emit it.
+
+    `immutable` is the wrong half. The ref addresses the *bytes*, so `text` cannot change; `tool`
+    and `correlation_id` can, and the test two above this one
+    (`test_a_result_two_calls_produced_names_neither_of_them`) is what proves they do.
+    """
+    session_id = client.post("/sessions").json()["session_id"]
+
+    async def _load(_sid: str, ref: str) -> StoredToolResult | None:
+        return StoredToolResult(
+            ref=ref, tool="screen_hazards", correlation_id="corr-1", byte_size=12, text=_SCREEN
+        )
+
+    monkeypatch.setattr("chemclaw.api.app.load_tool_result", _load)
+    res = client.get(f"/sessions/{session_id}/tool-results/{content_address(_SCREEN)}")
+
+    assert res.status_code == 200
+    assert res.headers["cache-control"] == "private, no-cache"
+    assert "immutable" not in res.headers["cache-control"]
+    assert res.headers["etag"].startswith('"')
+
+
+def test_the_validator_covers_the_labels_the_ref_does_not_address(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one change that happens under a stable tool-result URL must change the ETag.
+
+    `_UPSERT_LINK` collapses a disagreeing `tool` or `correlation_id` to `''` when a second call in
+    one session returns the same text, so a client's cached copy names a call the store has since
+    withdrawn. A validator derived from the ref — the obvious cheap one, since the ref is already in
+    the URL — would say "unchanged" across exactly that. This drives the route before and after the
+    collapse on identical bytes and requires two different validators.
+    """
+    session_id = client.post("/sessions").json()["session_id"]
+    ref = content_address(_SCREEN)
+    labelled = StoredToolResult(
+        ref=ref, tool="screen_hazards", correlation_id="corr-1", byte_size=12, text=_SCREEN
+    )
+    collapsed = labelled.model_copy(update={"tool": "", "correlation_id": ""})
+
+    stored = [labelled]
+
+    async def _load(_sid: str, _ref: str) -> StoredToolResult | None:
+        return stored[0]
+
+    monkeypatch.setattr("chemclaw.api.app.load_tool_result", _load)
+    before = client.get(f"/sessions/{session_id}/tool-results/{ref}")
+    stored[0] = collapsed
+    after = client.get(f"/sessions/{session_id}/tool-results/{ref}")
+
+    assert before.json()["text"] == after.json()["text"], "the bytes were supposed to be identical"
+    assert before.headers["etag"] != after.headers["etag"], (
+        "the validator did not move when the labels collapsed, so a cached copy would keep naming "
+        "a call the store has withdrawn"
+    )
+    # And the caller that offers the stale validator is told to take the new body, not a 304.
+    assert (
+        client.get(
+            f"/sessions/{session_id}/tool-results/{ref}",
+            headers={"If-None-Match": before.headers["etag"]},
+        ).status_code
+        == 200
+    )
+
+
+def test_a_caller_holding_the_current_result_gets_a_bodyless_304(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the revalidation actually buys: no second copy of a result over the wire.
+
+    A stored result runs to `stream_max_result_bytes`, and re-sending it on every render was the
+    cost the frontend's caching was trying to avoid. `no-cache` keeps the client's copy and turns
+    the repeat into a conditional request; this is the half that has to answer 304 for that to be
+    worth anything.
+    """
+    session_id = client.post("/sessions").json()["session_id"]
+    ref = content_address(_SCREEN)
+
+    async def _load(_sid: str, _ref: str) -> StoredToolResult | None:
+        return StoredToolResult(
+            ref=ref, tool="screen_hazards", correlation_id="corr-1", byte_size=12, text=_SCREEN
+        )
+
+    monkeypatch.setattr("chemclaw.api.app.load_tool_result", _load)
+    first = client.get(f"/sessions/{session_id}/tool-results/{ref}")
+    again = client.get(
+        f"/sessions/{session_id}/tool-results/{ref}",
+        headers={"If-None-Match": first.headers["etag"]},
+    )
+
+    assert again.status_code == 304
+    assert again.content == b"", "a 304 carried a body"
+    assert again.headers["etag"] == first.headers["etag"]
+    assert again.headers["cache-control"] == "private, no-cache"
+    assert len(first.content) > 100, "the 200 was supposed to be the thing worth not re-sending"
+
+
+def test_a_note_is_revalidatable_and_its_validator_follows_an_edit(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A note id is stable across edits, so `immutable` here would pin a superseded body forever.
+
+    The knowledge graph is Markdown in Git and a PR-gate merge rewrites a note's body under the same
+    id; the neighbourhood is other notes' business entirely; and `Note.is_current` is evaluated
+    against `date.today()`, so a neighbour leaves the view on the day its `valid_to` passes with
+    nothing written at all. Nothing about this URL is content-addressed — which is the premise the
+    caching request rested on — so the route revalidates.
+
+    `private` even though the note has no owner: the route is `CurrentUser`-gated, and a shared
+    cache serving a stored copy would answer callers who presented no credential and sit in nobody's
+    rate budget.
+    """
+    bodies = [
+        "<retrieved-note>mp 12 C</retrieved-note>",
+        "<retrieved-note>mp 14 C</retrieved-note>",
+    ]
+
+    async def _expand(note_id: str, _hops: int = 1) -> NoteView:
+        return NoteView(
+            note=NoteRef(id=note_id, type="compound"),
+            body=bodies[0],
+            neighbors=[NeighborRef(id="reaction-suzuki-1", type="reaction")],
+        )
+
+    monkeypatch.setattr("chemclaw.api.app.expand_note", _expand)
+    before = client.get("/notes/compound-4-bromoanisole")
+
+    assert before.headers["cache-control"] == "private, no-cache"
+    assert "public" not in before.headers["cache-control"]
+    assert (
+        client.get(
+            "/notes/compound-4-bromoanisole",
+            headers={"If-None-Match": before.headers["etag"]},
+        ).status_code
+        == 304
+    )
+
+    bodies.pop(0)  # the PR-gate merged an edit under the same id
+    after = client.get(
+        "/notes/compound-4-bromoanisole", headers={"If-None-Match": before.headers["etag"]}
+    )
+
+    assert after.status_code == 200, "an edited note answered 304 to a validator for its old body"
+    assert after.json()["body"] == "<retrieved-note>mp 14 C</retrieved-note>"
+
+
+def test_the_hops_argument_still_selects_the_view_it_names(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A conditional GET must not collapse two different views onto one validator.
+
+    `hops` widens the neighbourhood and is a query parameter, so `/notes/x` and `/notes/x?hops=2`
+    are different cache entries in a client that keys on the whole URL — but a server that stamped
+    one validator on both would 304 a two-hop request holding a one-hop validator, and the caller
+    would render the narrow view believing it was the wide one.
+    """
+
+    async def _expand(note_id: str, hops: int = 1) -> NoteView:
+        return NoteView(
+            note=NoteRef(id=note_id, type="compound"),
+            body="<retrieved-note>mp 12 C</retrieved-note>",
+            neighbors=[
+                NeighborRef(id=f"reaction-{step}", type="reaction") for step in range(hops + 1)
+            ],
+        )
+
+    monkeypatch.setattr("chemclaw.api.app.expand_note", _expand)
+    one = client.get("/notes/compound-4-bromoanisole")
+    two = client.get("/notes/compound-4-bromoanisole?hops=2")
+
+    assert one.headers["etag"] != two.headers["etag"]
+    assert (
+        client.get(
+            "/notes/compound-4-bromoanisole?hops=2",
+            headers={"If-None-Match": one.headers["etag"]},
+        ).status_code
+        == 200
+    )
+
+
+def test_a_note_that_does_not_resolve_is_not_given_a_caching_policy(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commonest 404 here is a citation to a note still awaiting its PR-gate review.
+
+    That note does not exist *yet*, which is the whole point. Stamping the shared policy on that
+    answer would be harmless under `no-cache` and a live hazard the day somebody adds a freshness
+    lifetime: the miss would outlive the merge that fixes it. A caching policy belongs to a
+    representation, and a 404 is not one.
+    """
+
+    async def _expand(_note_id: str, _hops: int = 1) -> NoteView:
+        raise ChemclawError("unknown note id: note-not-yet-merged")
+
+    monkeypatch.setattr("chemclaw.api.app.expand_note", _expand)
+    res = client.get("/notes/note-not-yet-merged")
+
+    assert res.status_code == 404
+    assert "etag" not in res.headers
+    assert "cache-control" not in res.headers
+
+
 # --- the transcript ----------------------------------------------------------------------------
 
 

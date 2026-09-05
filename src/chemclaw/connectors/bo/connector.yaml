@@ -84,14 +84,14 @@ jobs:
     # whole point of the durable wait, and it is why this is the only job in the tree that declares
     # this. Its elapsed time is therefore a plate turnaround rather than a cost, so
     # `child_execution_timeout` gives it no wall-clock ceiling: `bo_measurement_deadline_days` is a
-    # fortnight and `connector_job_timeout_seconds` is five hours, and a manifest may only lower.
+    # fortnight and `connector_job_timeout_seconds` is hours, and a manifest may only lower.
     #
     # Declared on the job rather than decided per run because the execution timeout is fixed when
     # the child starts, and whether this campaign waits is `is_measured(objective_name)` — read
     # inside the workflow, after the bound is already set. A computed campaign under this job
     # therefore also loses the ceiling, which costs nothing it had: at the configured
-    # `bo_max_rounds` its own activity budgets already sum to 3.5 days, so five hours was silently
-    # killing that case too.
+    # `bo_max_rounds` its own activity budgets already sum to 3.5 days, so the fleet ceiling was
+    # silently killing that case too.
     awaits_answer: true
 
 skills:

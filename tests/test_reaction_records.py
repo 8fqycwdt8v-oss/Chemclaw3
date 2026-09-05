@@ -28,6 +28,7 @@ from chemclaw.agent.condense import Protocol
 from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.protocol_tools import _from_record
 from chemclaw.cli.validate_kg import main as _validate_kg_main
+from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.adapter import RawEntry
@@ -36,6 +37,8 @@ from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.ingest.eln.record import record_from_ord_reaction
 from chemclaw.ingest.eln.records import (
+    _SELECT_BODIES,
+    _SELECT_ONE,
     InMemoryReactionRecordStore,
     PostgresReactionRecordStore,
     ReactionRecord,
@@ -459,6 +462,97 @@ def test_the_postgres_store_and_the_in_memory_one_answer_alike() -> None:
         assert await durable.known(["pg-alpha"]) == {"pg-alpha"}
 
     asyncio.run(_run())
+
+
+async def _index_behind(statement: str, params: tuple[object, ...]) -> str:
+    """The index the planner uses for `statement`, with sequential scans taken away.
+
+    Sequential scans are disabled for the same reason a plan assertion is used at all: a fixture
+    table holds a handful of rows in one page, so the planner is right to scan it and the choice
+    says nothing about which indexes exist. With that option removed, the index it names is the
+    best one the schema offers for the predicate — which is exactly the question here.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute("SET LOCAL enable_seqscan = off")
+        cursor = await conn.execute(f"EXPLAIN (FORMAT JSON) {statement}", params)
+        row = await cursor.fetchone()
+    plan = row[0][0]["Plan"] if row else {}
+    nodes = [plan]
+    while nodes:
+        node = nodes.pop()
+        if "Index Name" in node:
+            return str(node["Index Name"])
+        nodes.extend(node.get("Plans", []))
+    return ""
+
+
+async def _leading_columns() -> set[str]:
+    """The first indexed column of every index on `reaction_records`, from the live catalog."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        cursor = await conn.execute(
+            "SELECT i.relname, a.attname FROM pg_index x "
+            "JOIN pg_class i ON i.oid = x.indexrelid "
+            "JOIN pg_class t ON t.oid = x.indrelid "
+            "JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = x.indkey[0] "
+            "WHERE t.relname = 'reaction_records' "
+            "AND t.relnamespace = current_schema()::regnamespace"
+        )
+        return {str(row[1]) for row in await cursor.fetchall()}
+
+
+def test_a_record_lookup_by_id_is_served_by_an_index_leading_with_that_id() -> None:
+    """`read()` and `known()` filter on the bare `reaction_id`; an index must lead with it.
+
+    For most of this table's life none did. The primary key is `(ingest_source, reaction_id)`
+    (`056`), `reaction_records_filter_idx` is `(project, performed_at)` (`052`) and the retraction
+    index is partial — so `_SELECT_ONE` reached the pkey with its `Index Cond` on the *non-leading*
+    column, and `_SELECT_KNOWN` did not reach an index at all. Measured on 500 000 records
+    (240 MB): 24.1 ms / 2 467 buffers for one id, and a Parallel Seq Scan of 27 778 buffers
+    (217 MB) at 152.3 ms for a page of 50 — against 0.045 ms and 0.80 ms once `081` adds the
+    index. Both are on live paths: `expand_note` resolves a `reaction-<id>` citation through
+    `read()`, and `kg-validate` and the warehouse retriever ask `known()`.
+
+    **A timing assertion could not have caught this**, which is why there is not one: every fixture
+    in this file holds single-digit rows, where a sequential scan is genuinely the right plan and
+    200x is 0.1 ms either way. So the two halves are asked separately, because only one of them is
+    scale-free:
+
+    * The **plan** for `_SELECT_ONE`, with sequential scans taken away — it names the new index,
+      and named the primary key (`Index Cond` on the non-leading column, the 24 ms plan) before it
+      existed.
+    * The **catalog**, for the batch read. Its plan is not scale-free: at fixture size the planner
+      takes an index-only scan of the whole primary key, which is correct on one page and is the
+      152 ms Parallel Seq Scan at 500 000 rows. What holds at every size is that the schema offers
+      an index leading with the column these statements filter by, so that is what is asserted.
+
+    `_SELECT_BODIES` is checked beside them because it filters on the pair and must keep using the
+    primary key: the index added for the other two must not quietly become the plan for the
+    statement that was already right.
+    """
+
+    async def _run() -> tuple[str, str, set[str]]:
+        await migrated_db_or_skip()
+        await PostgresReactionRecordStore().record(
+            [ReactionRecord(reaction_id="idx-probe", body="body", source="eln:test")], "pg-eln"
+        )
+        ids = [f"idx-probe-{index}" for index in range(50)]
+        return (
+            await _index_behind(_SELECT_ONE, ("idx-probe",)),
+            await _index_behind(_SELECT_BODIES, ("pg-eln", ids)),
+            await _leading_columns(),
+        )
+
+    one, bodies, leading = asyncio.run(_run())
+    assert one == "reaction_records_id_idx", (
+        f"a single-record read plans through {one!r}, which does not lead with reaction_id"
+    )
+    assert "reaction_id" in leading, (
+        "no index on reaction_records leads with reaction_id, so `known()` scans the whole table; "
+        f"the leading columns present are {sorted(leading)}"
+    )
+    assert bodies == "reaction_records_pkey", (
+        f"the source-scoped body read moved off the primary key onto {bodies!r}"
+    )
 
 
 def test_the_default_store_is_the_durable_one() -> None:

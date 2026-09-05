@@ -1166,10 +1166,54 @@ HPA edited in the cluster, or a rollout that left both generations up. Scale bac
 `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` to a number the endpoint can actually serve.
 
 #### ChemclawTurnsShed
-`warning`. The admission guard is declining load. Either the deployment is undersized or
-`service_max_concurrent_turns` is below what the endpoint serves. Check
-`ChemclawTurnLatencyHigh` first: slow turns hold permits, so latency usually precedes shedding
+`warning`. The admission guard is declining load. **A shed is an HTTP 200**, not a 503 — the turn
+route streams, so the status line is written before a permit is asked for and the refusal arrives as
+an SSE `{"type":"error","code":"at_capacity","retryable":true}` frame. Availability monitoring and
+any uptime probe read it as a success, which is why this counter is the only signal there is. Either
+the deployment is undersized or `service_max_concurrent_turns` is below what the endpoint serves.
+Check `ChemclawTurnLatencyHigh` first: slow turns hold permits, so latency usually precedes shedding
 rather than following it.
+
+#### ChemclawTurnsShedHeavily
+`critical`. More than a fifth of offered turns are being refused. Measured shape at 200 users:
+33 of 48 turns shed while the pod sat at 35% of one core, because a turn is ~93% waiting on the
+model and occupancy runs about 14× CPU. So do **not** read a low CPU graph as headroom here. Two
+questions, in order: (1) is the fleet scaling — `kubectl describe hpa chemclaw-service`; if it
+reports `FailedGetPodsMetric` for `chemclaw_turns_in_flight`, the custom-metrics API (prometheus
+-adapter or equivalent) is not publishing that series and the HPA has fallen back to a CPU signal
+that cannot reach its threshold, so it will sit at `minReplicas` forever. (2) if it *is* at
+`maxReplicas`, the fleet is genuinely at its ceiling: raise
+`service.autoscaling.maxReplicas` and `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` together, and
+only to a number the shared LLM endpoint's throughput budget supports.
+
+#### ChemclawCalculationBackendRefusingForCapacity
+`warning`. `servers/calc` has been refusing more than one call every twenty seconds for half an
+hour. One refusal is the gate working — the backend sheds promptly instead of queueing a
+calculation the caller will have abandoned, and since
+`D-2026-09-05-a-refusal-for-capacity-is-not-a-refusal-of-the-question` the caller retries it with
+backoff rather than failing the job outright. A sustained rate is different: it is the calculation
+tier asking for capacity, and it is the **only** signal that asks.
+
+1. **Check what is holding the slots.** A CREST conformer search is charged every slot on its pod
+   (a slot is a core, and the search is given four threads), so one search occupies a whole pod for
+   as long as it runs — hours, legitimately. `chemclaw_calc_backend_at_capacity_total` split by
+   `tool` says whether the refusals are behind searches or behind ordinary optimisations.
+2. **Add replicas, do not raise the per-pod ceiling.** Over-admitting turns prompt refusals into
+   slow ones: the pod cannot run more calculations than it has cores, so a higher ceiling only
+   converts a clear refusal into a queue nobody bounded.
+3. **If the rate is near-constant rather than bursty**, the tier is simply under-provisioned for
+   the user count. The review that produced this alert measured the shipped single replica
+   saturating at roughly 15–20 concurrent chemists.
+
+This alert is deliberately **not** on `chemclaw_degraded_total`. A busy backend and a dark backend
+need different responses, and folding them into one series is how the signal an operator trusts for
+"the backend is down" stops meaning that.
+
+#### ChemclawFrontDoorAtItsPermitCeiling
+`warning`, and the leading indicator for both of the above. `sum(chemclaw_turns_in_flight) /
+sum(chemclaw_turn_capacity)` has been over 0.9 for fifteen minutes: the next turn is about to be
+shed. If the replica count is not rising, go to question (1) under `ChemclawTurnsShedHeavily` —
+this alert existing and the fleet not growing is exactly the autoscaler-blind case.
 
 #### ChemclawCalcBackendOverCommitted
 `warning`. More calculation-backend sessions are held across the fleet than
