@@ -252,13 +252,23 @@ async def session_events(
                 # campaign opened, chased daily and expired a month ago: **16 frames on a single
                 # poll**, fifteen of them `waiting` for a question that is closed.
                 #
-                # So the state per request is collapsed to its newest frame. A `waiting` push and
-                # its fourteen reminders carry the same fact — this request is open — and the
-                # client's own contract is idempotent on `request_id`; what a surface needs is the
-                # *current* state, not the log. A state that actually changes (`waiting` →
+                # So the state per request is collapsed to **one frame per state**. A `waiting`
+                # push and its fourteen reminders carry the same fact — this request is open — and
+                # the client's own contract is idempotent on `request_id`; what a surface needs is
+                # the *current* state, not the log. A state that actually changes (`waiting` →
                 # `expired`) is always sent, because that is the transition the whole feature is
-                # for. Per connection rather than per batch: the rows arrive oldest-first, so
-                # suppressing a repeat of the state already reported leaves exactly the newest.
+                # for. Per connection rather than per batch.
+                #
+                # **The frame that survives is the oldest of each run, not the newest**, and this
+                # comment said the opposite. The rows arrive oldest-first and the first of a state
+                # is what gets through, so the measured backlog — one open, fourteen chases, an
+                # expiry — emits `waiting reminders=0` and then `expired`, never the `waiting
+                # reminders=14` that was true when the client connected. The collapse is still
+                # right: fifteen frames saying "open" is the defect it was written for. What is
+                # lost is only the chase *count* on this channel, which a surface renders beside
+                # the deadline and which `GET /pending` still answers correctly. Emitting the
+                # newest instead needs a batch boundary the tailer does not expose — it yields row
+                # by row — so it is a `BACKLOG.md` row rather than a wider change made in passing.
                 if pushed.kind == AWAITING_KIND:
                     frame = _awaiting_event(pushed.payload)
                     request_id = str(pushed.payload.get("request_id", ""))
