@@ -352,9 +352,15 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     so there is no second call to make.
 
     It answers for **finished** jobs indefinitely, not only while Temporal remembers them: a
-    completed connector job's result is also stored durably (D-157), so an id from months ago —
-    found with `find_past_jobs`, or quoted from an old conversation — still returns its result
-    after the workflow history has been retained away.
+    finished run's result is also stored durably (D-157), so an id from months ago — found with
+    `find_past_jobs`, or quoted from an old conversation — still returns its result after the
+    workflow history has been retained away.
+
+    That was true of connector jobs alone and this sentence claimed it of everything. A template
+    run (`run_*`) wrote no `job_records` row at all, because `record_job` had one caller in the
+    tree, so its id answered only until Temporal retained the history away and then answered
+    `null` — for the nine shipped procedures, one of whose whole product is a written brief.
+    `durable/template_job.py` records one now, on the success path and the failure path both.
 
     Args:
         job_id: The id returned by any durable launcher.
@@ -530,11 +536,13 @@ def _framed_free_text(text: str, job_id: str) -> str:
 async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordSummary]:
     """Find durable jobs this system has already run, and why each of them was run.
 
-    The retrospective view over every campaign, calculation and report job that has ended —
-    **runs that failed as well as runs that succeeded**, including ones from other people's
-    conversations and from long before this one. Each hit carries the **reason the run was
-    started**, so "have we optimized this coupling before, and what were we trying to find out?"
-    is answerable without the original chat.
+    The retrospective view over every campaign, calculation, report and template run that has
+    ended — **runs that failed as well as runs that succeeded**, including ones from other people's
+    conversations and from long before this one. A connector job's hit carries the **reason the run
+    was started**, so "have we optimized this coupling before, and what were we trying to find
+    out?" is answerable without the original chat; a template run's `rationale` is empty by design,
+    because its `job` names a declared procedure whose purpose the template itself states. Filter
+    `connector="template"` for procedures alone.
 
     Read `state` before reading `summary`: a failed run has an empty summary, because a summary is
     what a run *produced* and a failed one produced nothing. Take its `job_id` to
