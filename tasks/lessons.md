@@ -1830,3 +1830,48 @@ believing the row is what kept the defect alive. A fixer found it by checking th
 them dangerously (`ABANDON` as a parent-close policy is worse than the default it replaces, not
 better). **Rule: a finding's diagnosis and its proposed remedy are two separate claims and the
 second is usually the less tested one.**
+
+## 2026-09-05 — arithmetic about a codebase is a claim about the codebase
+
+From the eight-territory fix pass over the tool-integration/storage review
+(`D-2026-09-05-eight-territories-over-one-review`).
+
+**I multiplied where the code divides, and shipped it as a HIGH.** My H7 said
+`agent_max_parallel_tool_calls` (8) × `agent_max_tool_result_chars` (60,000) puts 120,040 tokens in
+a batch compaction cannot clear. `agent/tool_result_size.py:283` is
+`max(ceiling // batch_width(request), 1)` — the ceiling is *shared* across a batch, not paid per
+call, so the real figure was 15,040 and the floor sat inside the budget. Worse: the reviewer's own
+report had written "60,000 divided by `batch_width`" and I read it, quoted it in the finding two
+paragraphs away, and did not apply it to my own product. **Rule for myself: when I compute a number
+from two settings, open the code that combines them and read the operator. A setting's name tells
+me what it bounds and never how it composes.**
+
+**A conclusion surviving does not mean the mechanism was right.** The floor genuinely was over
+budget at `HEAD` — by the defang expansion one layer out, not by the product. Two findings I filed
+separately were one finding, and I had named the wrong cause of it. That is
+`D-2026-08-01-a-cap-that-starves-a-source` happening to me: when two explanations compete, the
+articulate one is uncorrelated with the true one. **Rule: when a fix is proposed for finding A and
+the symptom is also explained by finding B, revert each independently before claiming either. I now
+do this as a matter of course for any finding with more than one candidate cause — it is one command
+per arm and it is how the provenance fix was shown to need both halves.**
+
+**A finding can understate as well as overstate, and "who is missing" is a set question.** H9 said a
+*second* chemist's provenance was dropped. Checking the hook to fix it, it passed no `Publication`
+at all: **no** chemist had ever been recorded for any primitive. **Rule: before fixing "X is lost",
+assert what is present in the empty case. A count of one and a count of zero look identical in a
+sentence and never in a query.**
+
+**Isolation failures are the test being right.** A test I added to prove a guard works on a
+process's first agent build failed in the full suite on its own precondition assertion, while
+passing alone. That was the assertion doing its job — refusing to be evidence about ordering when
+something upstream had already registered the launcher. The cause was a fourth process-global that
+`tests/conftest.py` did not restore, in a file whose docstring argues at length that exactly this
+must be an invariant nothing can forget. **Rule: when a new test passes alone and fails in the
+suite, suspect shared state before suspecting the test — and check whether the fixture that should
+cover it already argues for covering it.**
+
+**Give concurrent agents a no-destructive-git rule up front.** One fixer ran `git stash` on a tree
+seven others were editing. It restored cleanly and could have swallowed everything uncommitted.
+**Rule: any brief that puts more than one writer in one working tree names the forbidden commands
+(`stash`, `checkout <path>`, `restore`, `clean`) and gives the safe alternative
+(`git show HEAD:<path> > /tmp/...`) in the same sentence as the territory list.**
