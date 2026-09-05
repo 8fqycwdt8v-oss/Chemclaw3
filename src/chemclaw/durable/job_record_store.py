@@ -110,7 +110,8 @@ _SELECT_ONE = f"SELECT {_COLUMNS}, completed_at FROM job_records WHERE job_id = 
 # unindexable by a btree, so the scan the sentence called milliseconds is the **whole table** —
 # measured at 500 000 rows, 1 036 ms and 19 920 buffers for a term that matches nothing, holding
 # one of `pg_pool_max_size` connections for the duration, from a tool the *model* calls
-# (`agent/durable_tools.py::search_job_records`). A term that matches is fast for a reason that
+# (`search_job_records` in `src/chemclaw/agent/durable_tools.py`). A term that matches is fast
+# for a reason that
 # hides this: the `completed_at` index lets the scan stop at the first page of hits, so every test,
 # demo and eyeball sees 0.2 ms. A miss is what an agent searching for a phrase it invented
 # produces.

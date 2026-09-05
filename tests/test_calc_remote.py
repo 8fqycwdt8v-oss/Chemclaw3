@@ -295,7 +295,7 @@ def test_a_full_pod_is_backpressure_not_bad_data(monkeypatch: pytest.MonkeyPatch
     cache *miss* failed permanently while warm molecules kept working.
 
     The refusal text is transcribed as the literal the server sends rather than built from this
-    repository's constant, for the reason `Chemclaw3-mcp`'s `tests/test_identity_contract.py`
+    repository's constant, for the reason the sibling fleet's own identity-contract test
     gives about header spellings: a test that imports the constant agrees with itself and says
     nothing about what the other side writes. The two repositories share no package, so this pair
     of literals is the whole contract.

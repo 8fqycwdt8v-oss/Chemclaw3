@@ -418,7 +418,7 @@ class PostgresFingerprintStore:
     against approximate-and-flat, which is a decision about what a structural search may silently
     fail to find — the same failure `find_matches` refuses NaN to prevent, a chemist told there is
     no precedent for the structure they are holding — and a decision needs an ADR rather than a
-    refactor. `tests/test_fingerprint_store.py` pins the exactness so that whoever takes it has to
+    refactor. `tests/test_molfp_postgres.py` pins the exactness so that whoever takes it has to
     take it deliberately.
 
     `source_keyed` says whether the table carries the `source` half of the key

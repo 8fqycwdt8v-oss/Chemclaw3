@@ -1169,6 +1169,29 @@ that cannot reach its threshold, so it will sit at `minReplicas` forever. (2) if
 `service.autoscaling.maxReplicas` and `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` together, and
 only to a number the shared LLM endpoint's throughput budget supports.
 
+#### ChemclawCalculationBackendRefusingForCapacity
+`warning`. `servers/calc` has been refusing more than one call every twenty seconds for half an
+hour. One refusal is the gate working — the backend sheds promptly instead of queueing a
+calculation the caller will have abandoned, and since
+`D-2026-09-05-a-refusal-for-capacity-is-not-a-refusal-of-the-question` the caller retries it with
+backoff rather than failing the job outright. A sustained rate is different: it is the calculation
+tier asking for capacity, and it is the **only** signal that asks.
+
+1. **Check what is holding the slots.** A CREST conformer search is charged every slot on its pod
+   (a slot is a core, and the search is given four threads), so one search occupies a whole pod for
+   as long as it runs — hours, legitimately. `chemclaw_calc_backend_at_capacity_total` split by
+   `tool` says whether the refusals are behind searches or behind ordinary optimisations.
+2. **Add replicas, do not raise the per-pod ceiling.** Over-admitting turns prompt refusals into
+   slow ones: the pod cannot run more calculations than it has cores, so a higher ceiling only
+   converts a clear refusal into a queue nobody bounded.
+3. **If the rate is near-constant rather than bursty**, the tier is simply under-provisioned for
+   the user count. The review that produced this alert measured the shipped single replica
+   saturating at roughly 15–20 concurrent chemists.
+
+This alert is deliberately **not** on `chemclaw_degraded_total`. A busy backend and a dark backend
+need different responses, and folding them into one series is how the signal an operator trusts for
+"the backend is down" stops meaning that.
+
 #### ChemclawFrontDoorAtItsPermitCeiling
 `warning`, and the leading indicator for both of the above. `sum(chemclaw_turns_in_flight) /
 sum(chemclaw_turn_capacity)` has been over 0.9 for fifteen minutes: the next turn is about to be

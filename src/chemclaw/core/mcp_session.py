@@ -118,7 +118,7 @@ SERVER_INTERNAL_ERROR = "an internal error occurred"
 #
 # The literal is transcribed rather than imported: the two repositories share no package, so the
 # only thing keeping the pair honest is that each side pins the spelling it expects
-# (`tests/test_mcp_session.py` here, `servers/calc/tests/` there).
+# (`tests/test_calc_remote.py` here, `servers/calc/tests/` there).
 SERVER_AT_CAPACITY = "[calc-at-capacity]"
 
 

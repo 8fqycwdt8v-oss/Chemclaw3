@@ -393,6 +393,26 @@ spec:
                whole point: at the ceiling the next turn is refused, and the fleet's only remedy is
                more replicas. Self-disabling in a deployment with no capacity gauge, because an
                absent series makes every arm an empty vector. */}}
+        - alert: ChemclawCalculationBackendRefusingForCapacity
+          expr: >-
+            sum(rate(chemclaw_calc_backend_at_capacity_total[15m])) > 0.05
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawcalculationbackendrefusingforcapacity
+            summary: The calculation backend is turning work away because every slot is busy
+            description: >-
+              A single refusal is the admission gate working — the backend sheds promptly rather
+              than queueing a calculation nobody will still be waiting for, and the caller now
+              retries with backoff. A *sustained* rate is the calculation tier asking for more
+              capacity, and it is the only thing that asks: one CREST conformer search is charged
+              every slot on its pod, so a deployment can be refusing most of its chemists while
+              every pod looks healthy and CPU looks unremarkable. Add replicas before raising the
+              per-pod ceiling; a slot is a core, and over-admitting turns prompt refusals into slow
+              ones. This is deliberately not on `chemclaw_degraded_total`, so it never fires the
+              backend-is-dark alert.
+
         - alert: ChemclawFrontDoorAtItsPermitCeiling
           expr: >-
             sum(chemclaw_turns_in_flight) / sum(chemclaw_turn_capacity) > 0.9
