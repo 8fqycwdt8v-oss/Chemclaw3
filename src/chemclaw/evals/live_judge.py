@@ -227,7 +227,7 @@ async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
     # built its own client until 2026-09-04, and the cost was measured on `main` in the same week:
     # it read `llm_base_url` and *not* `llm_tls_ca_bundle`, so a deployment pointing the judge at
     # exactly the internal gateway that setting exists for could not verify the certificate, and
-    # every grading call failed at TLS. That fix reused `_tls_http_client` explicitly; going
+    # every grading call failed at TLS. That fix reused `_tls_http_clients` explicitly; going
     # through `build_chat_model` makes it structural instead — the agent's client and the judge's
     # cannot trust different stores, because there is only one place that builds either.
     client: Any = _judge_client()

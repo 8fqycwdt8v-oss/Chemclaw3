@@ -74,7 +74,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate proposals-reconcile synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-template-args live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate proposals-reconcile synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-template-args live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is

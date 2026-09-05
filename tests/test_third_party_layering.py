@@ -311,7 +311,7 @@ _ALLOWED_LAZY_STACKS: dict[Edge, str] = {
         "the `langgraph` row does not also license building a model client"
     ),
     ("chemclaw.agent", "httpx"): (
-        "agent/llm_provider builds the CA-pinned client inside `_tls_http_client`, so only a "
+        "agent/llm_provider builds the CA-pinned client inside `_tls_http_clients`, so only a "
         "private-CA internal endpoint pays for it. This row used to be module-scope and to say "
         "'the workload-identity and OBO token exchanges are HTTP'; both exchanges were deleted "
         "unused, and what is left of agent's HTTP is one lazy client factory"

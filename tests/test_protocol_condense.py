@@ -189,7 +189,7 @@ def test_a_model_that_cannot_be_built_degrades_the_columns_and_not_the_call(
     """A transport this deployment cannot construct costs the prose columns, never the comparison.
 
     **The production cause, driven rather than described.** `build_chat_model` ->
-    `_tls_http_client` -> `core.http.private_ca_transport` -> `ssl.create_default_context(
+    `_tls_http_clients` -> `core.http.gateway_client_kwargs` -> `ssl.create_default_context(
     cafile=...)` raises `FileNotFoundError` when `CHEMCLAW_LLM_TLS_CA_BUNDLE` names a file that is
     not on the pod — a mistyped path or an unmounted secret, before any socket is opened. Measured
     on `aed402c`, that took the whole call: `condense_protocols` raised, and a chemist comparing
@@ -200,14 +200,14 @@ def test_a_model_that_cannot_be_built_degrades_the_columns_and_not_the_call(
     is the worse of the two failures and is what #313 was right to delete. What this pins is the
     third answer: the rows are `unreadable`, `complete` is False, and the recorded half compares.
 
-    The cache clear is load-bearing: `_tls_http_client` is `@cache`d, so an earlier test in this
-    process that built a client with no bundle configured would otherwise hand this one its cached
-    `None` and the raise would never happen.
+    The cache clear is load-bearing: `_tls_http_clients` is `@cache`d, so an earlier test in this
+    process that built clients with no bundle configured would otherwise hand this one its cached
+    pair and the raise would never happen.
     """
-    from chemclaw.agent.llm_provider import _tls_http_client
+    from tests.test_llm_provider import _reset_gateway_clients
 
     monkeypatch.setattr(settings, "llm_tls_ca_bundle", str(tmp_path / "absent-ca-bundle.crt"))
-    _tls_http_client.cache_clear()
+    _reset_gateway_clients()
     try:
         result = _run(
             [
@@ -217,7 +217,7 @@ def test_a_model_that_cannot_be_built_degrades_the_columns_and_not_the_call(
             None,
         )
     finally:
-        _tls_http_client.cache_clear()
+        _reset_gateway_clients()
 
     assert all(row.digest_source == "unreadable" for row in result.rows)
     assert result.complete is False, "nothing read these protocols, so this is not complete"

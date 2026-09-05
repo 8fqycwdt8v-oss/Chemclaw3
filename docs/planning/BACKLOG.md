@@ -63,62 +63,64 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **The LLM gateway inherits an ambient proxy unless a private CA bundle is configured** — [S],
-  found while collapsing the provider seam (`D-2026-09-04-a-gateway-is-the-only-provider`).
-  `agent/llm_provider._tls_http_client` returns `None` when `llm_tls_ca_bundle` is empty, which
-  leaves `ChatOpenAI` to build its own `httpx` client — and that client reads `HTTPS_PROXY` /
-  `ALL_PROXY` from the environment. So on a publicly-trusted gateway (no bundle), an env var set on
-  the pod redirects every prompt, completion and `Authorization` bearer to a host of the setter's
-  choosing. `core/http.private_ca_transport` states `trust_env=False` and both LLM seams take it,
-  but only on the bundle branch; `evals/live_judge.py` used to pass `trust_env=False`
-  unconditionally for its own client and lost that when it moved onto the seam, which is how this
-  surfaced. The fix is one line — hand a `trust_env=False` client in on the no-bundle branch too —
-  and it is **not** free: `trust_env=False` also stops httpx reading `SSL_CERT_FILE` /
-  `SSL_CERT_DIR`, so a deployment relying on an env-supplied trust store would break. That is a
-  behavioural change for every deployment behind a corporate proxy and wants its own ADR rather
-  than riding along with the collapse.
-  **`core/netguard` is a partial mitigation rather than a bystander, and a first telling of this
-  row said otherwise.** Measured, with the guard armed on `{127.0.0.1, localhost,
-  gateway.internal}`: `evil-proxy.example` and `corp-proxy.internal` are both refused at
-  `getaddrinfo`, and a bare `203.0.113.9:3128` at `connect` — so an `HTTPS_PROXY` naming a host
-  outside the derived allowlist does not get out. What the guard cannot see is a proxy the
-  deployment has *legitimately* allowlisted (`CHEMCLAW_EGRESS_ALLOW`, or a corporate proxy sharing
-  a host with declared infrastructure), where nothing distinguishes the operator's intent from an
-  env var somebody else set. That residual case, plus the guard being disableable
-  (`CHEMCLAW_EGRESS_GUARD_ENABLED=false`), is what keeps this row open.
+- [ ] **A connector can claim a step-template launcher name, and the registry says it cannot** —
+  [S], found 2026-09-05 reviewing the ambient-name guard. `_bound_by_this_process` refuses a bundle
+  that claims an in-process tool, a scratchpad verb, `write_todos` or `task`. Its docstring adds
+  that `run_<name>` template launchers are "a different name space that a bundle has no business
+  claiming either" — and measured, a bundle declaring `run_bond_strength_survey` is **accepted**:
 
-- [ ] **A loopback proxy is outside the egress guard by construction, and a service mesh is exactly
-  that shape** — [M], opened 2026-09-05 by the pass that unified the two loopback predicates onto
-  `core/http.is_loopback_host`. The row above measured that a *named* proxy is refused and
-  concluded the guard is "a partial mitigation"; the half it did not measure is that a proxy on
-  **loopback needs no allowlisting at all**, because `netguard._check` exempts loopback by
-  construction — and must keep exempting it, since the process dials Postgres, Temporal and the
-  calc backend there. Measured with the allowlist deliberately empty, one local HTTP proxy and
-  `httpx` (`_refused` read off the module after each arm):
+  ```
+  NOT REFUSED: a connector may claim the template launcher 'run_bond_strength_survey'
+  ```
 
-  | arm | outcome | `netguard._refused` |
-  | --- | --- | --- |
-  | `proxy=http://proxy.corp:3128` → `http://exfil.example/steal` | refused at `getaddrinfo` | 1 |
-  | `proxy=http://127.0.0.1:<port>` → `http://exfil.example/steal` | **HTTP 200, body returned** | **0** |
-  | no proxy → `http://exfil.example/steal` (the control) | refused at `getaddrinfo` | 1 |
+  The cause is ordering rather than an oversight in the union. `chemclaw_agent
+  ._register_generated_tools` is `[*job_tools(), *template_tools()]`, so `job_tools()` runs the
+  collision check while `registered_tools()` still holds no launcher — measured empty at that
+  moment. The consequence is the one the whole check exists to prevent, one name space out: the
+  bundle's tool wins `tools_by_name` and a chemist asking for a template gets the connector's tool
+  under the launcher's name, with no error.
+  **Not a one-liner, which is why it is a row.** Closing it means either reading
+  `chemclaw.templates.registry` from `connectors/registry` — a new import edge
+  `tests/test_layering.py` would have to be told about, in the direction that module has so far
+  avoided — or moving the collision check to after both registrations, which changes when a
+  misconfiguration is reported. Which registry owns that name space is the decision.
+  The false sentence is corrected in this commit; the gap is not. Anchors:
+  `connectors/registry.py::_bound_by_this_process`, `agent/chemclaw_agent.py::_register_generated_tools`.
 
-  The middle arm is the finding: the request reached its external destination end to end, and the
-  counter never moved — so nothing logs at ERROR, nothing alerts, and `chemclaw_egress_refused_total`
-  reads as a clean pod. This is the *shipped* topology rather than an attacker-only one: an
-  OpenShift service mesh or egress sidecar is a loopback proxy by design, so
-  `HTTPS_PROXY=http://127.0.0.1:15001` on the pod re-terminates TLS for every prompt, completion
-  and `Authorization` bearer and forwards them wherever the sidecar is configured to.
-  `core/http.private_ca_transport` sets `trust_env=False` and closes it for the two LLM seams that
-  take it — on the CA-bundle branch only (the row above), and for no other `httpx`/`requests`
-  client in the tree.
+- [ ] **The JWKS fetch follows an ambient proxy and has no seam to stop it** — [M], opened
+  2026-09-05 by the review of `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
+  `api/auth.py:85` builds a `PyJWKClient`, whose `fetch_data` calls `urllib.request.urlopen` —
+  which resolves proxies from the process-global default opener and has no `trust_env`. Measured
+  with a recorder standing in as the proxy: it received
+  `GET http://login.microsoftonline.com/tenant/discovery/v2.0/keys`. **This is the anchor every
+  bearer token is validated against**, so a proxy that could answer it could serve a key set of its
+  own choosing. Two things bound the severity and neither closes it: a real tenant endpoint is
+  `https`, where a proxy sees a CONNECT tunnel it can only open with a CA the pod already trusts
+  (which is exactly what a TLS-terminating corporate proxy arranges); and the boot refusal added by
+  that ADR stops any deployment that has *not* declared a proxy, which is every shipped one. The
+  residual is a site that has declared one — there the LLM seam refuses it and this one does not,
+  which is an asymmetry that reads as a control and is not.
+  **Not a one-liner, which is why it is a row.** `PyJWKClient` takes `ssl_context` and no opener,
+  so the only in-process fix is
+  `urllib.request.install_opener(build_opener(ProxyHandler({})))` at import — a process-wide side
+  effect on every library that reaches for `urlopen`, which wants its own decision rather than
+  riding along. The alternative is vendoring `fetch_data`, which couples this module to a surface
+  it does not otherwise use (`_match_kid` is already written the long way for that reason).
+  Anchors: `api/auth.py::_client_for`, `core/netguard.py::refuse_proxied_egress`.
 
-  **Not fixable by widening the loopback answer**, which is why this is a row and not a patch: the
-  guard's model is "which *host* may this process dial", and a proxy moves the destination out of
-  the address entirely. Closing it means treating proxy configuration as a destination — reading
-  `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` at arm time and refusing, or requiring the proxy to be
-  named in `CHEMCLAW_EGRESS_ALLOW` even when it is loopback — which changes behaviour for every
-  deployment behind a legitimate mesh and wants the same ADR the `trust_env=False` half of the row
-  above is already deferred to.
+- [ ] **An external vector store's client builds its own httpx and is outside the proxy fix** —
+  [S], opened 2026-09-05 by `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
+  `retrieval/vectors/qdrant.py:118` constructs `AsyncQdrantClient`, which builds its own httpx
+  client internally and takes only `verify` from this repository — so `trust_env` stays at its
+  default and a configured proxy would carry that traffic. It is **not** the LLM seam, so no prompt
+  or bearer is on it; what is on it is embedded note text and the query vectors. Recorded rather
+  than blind-patched for one reason: `qdrant_client` is not in this closure (`pgvector` is the
+  shipped provider), so the claim "passing a client works" would be untested prose, which is the
+  shape this repository keeps deleting. **The boot refusal covers it** in any deployment that has
+  not declared a proxy, which is every shipped one — this is the residual for a site that has
+  declared one *and* runs the non-default vector store. Closing it needs the extra installed, then
+  one measurement of whether the SDK accepts a caller-supplied client. Anchors:
+  `retrieval/vectors/qdrant.py`, `core/http.py::gateway_client_kwargs`.
 
 - [ ] **The gateway boot guard reaches one process, and the worker is the other one** — [M],
   opened by `D-2026-09-04-a-gateway-is-the-only-provider`. `_refuse_unconfigured_llm_gateway` and
@@ -169,25 +171,6 @@ topic).
       resumed campaign cannot tell a marked actor from a verified one. Both columns keep the value
       for the audit trail, where that question can be answered. What stays open is unchanged: the
       string is still the caller's to choose.
-
-- [ ] **One third of the ambient-name refusal is guarded by nothing** — [S], found reviewing
-      `D-2026-09-04-a-helpers-file-crosses-back-and-stays`. `connectors/registry._bound_by_this_process`
-      unions three sets so a connector cannot claim a name this deployment already binds:
-      `skill_tool_names()` (the six scratchpad file verbs), `subagent_tool_names()` (`task`) and
-      `harness_tool_names()` (`write_todos`). Each set is stamped with its own reason string, and a
-      grep for the three over `src/` and `tests/` is the whole evidence: `"a scratchpad file verb"`
-      is asserted once, by
-      `tests/test_connector_registry.py::test_a_connector_cannot_claim_an_ambient_tool_name`, which
-      drives a bundle declaring `read_file`; `"the subagent spawner"` is now reached by
-      `tests/test_tool_framing.py`'s derived guard; `"a plan-harness tool"` appears **only** at its
-      own definition, `registry.py:664`. Confirmed by deleting each line in turn: the first two turn
-      a test red and the third turns **nothing** red anywhere. So a
-      refactor may silently re-open `write_todos` to a connector, and a connector that claimed it
-      would win `tools_by_name` over the plan harness the gate (`agent/plan_gate.py`) reads. The
-      guard was not added with the other two on purpose: `agent/tool_framing.py` does not sort by
-      that name, so asserting it there would be a control in the wrong file — it belongs beside the
-      registry's own refusal test. Anchors: `connectors/registry.py::_bound_by_this_process`,
-      `tests/test_connector_registry.py`, `agent/plan_gate.py`.
 
 - [ ] **`build_langgraph_agent(connectors=...)` accepts a tool that shadows a first-party name** —
       [S], the residual `D-2026-09-04-a-name-is-one-capability-across-every-namespace` names and
