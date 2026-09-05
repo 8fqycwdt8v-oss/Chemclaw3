@@ -17,28 +17,16 @@
 -- records that they are not written to `session_messages` either. This is the first store to keep
 -- them.
 --
--- Additive and **nullable** throughout, per `infra/sql/README.md`: every existing row keeps its
--- meaning and the previous image can still write, because nothing here is NOT NULL. Nullable
--- rather than defaulted is a second decision on top of that one, argued at each column below —
--- a default would give a row written before the measurement existed a value that reads as a
--- measurement.
+-- Additive and defaulted throughout, per `infra/sql/README.md`: every existing row keeps its
+-- meaning and the previous image can still write, because nothing here is NOT NULL without a
+-- default.
 
--- Tool calls this turn made against the knowledge record (`authz.knowledge_read_tools()`) and
--- against the knowledge write surface (`authz.KNOWLEDGE_WRITE_TOOLS`). Zero is a real, common and
--- interesting value on both: a turn that answered without looking, and a turn that learned
--- something and kept it to itself.
---
--- **Which is exactly why they are nullable and undefaulted**, and the first draft of this file got
--- it wrong in the two directions its own next paragraph argues against. `NOT NULL DEFAULT 0`
--- backfills every row `turn_costs` has ever held with the most interesting value these columns can
--- take: a query for "turns that answered without consulting the record" would return the entire
--- history of this table, none of which was measured. A turn written by the image that added these
--- columns always supplies a real number (`TurnCost` defaults them to 0 in Python, and
--- `turn_cost_store._COLUMNS` writes all five), so NULL means precisely one thing — the row predates
--- the measurement — and it is the reading `D-2026-08-03-a-metric-must-declare-what-it-can-see`
--- requires: a column that cannot see something must say so rather than report a zero.
-ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS retrieval_calls INTEGER;
-ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS capture_calls   INTEGER;
+-- Tool calls this turn made against the knowledge record (`authz.KNOWLEDGE_READ_TOOLS`) and against
+-- the write surface (`authz.side_effecting_tools()`). Zero is a real, common and interesting value
+-- on both: a turn that answered without looking, and a turn that learned something and kept it to
+-- itself.
+ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS retrieval_calls INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS capture_calls   INTEGER NOT NULL DEFAULT 0;
 
 -- The verifier's aggregate citation-faithfulness score in [0, 1], or NULL when it did not run.
 --
@@ -48,13 +36,9 @@ ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS capture_calls   INTEGER;
 -- that was never graded — the ambiguous zero `D-2026-08-03-a-metric-must-declare-what-it-can-see`
 -- is about, in a column.
 ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS answer_confidence DOUBLE PRECISION;
-
--- Nullable for the same reason, one type over: `FALSE` is "this answer needed no review", which is
--- a finding, and defaulting it would assert that finding about every turn taken before anything
--- recorded it.
-ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS review_required BOOLEAN;
+ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS review_required BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- How many `[[note ids]]` the answer cited. The join from "we retrieved" to "we used it": a turn
 -- with `retrieval_calls > 0` and `notes_cited = 0` searched the record and then answered from
 -- somewhere else, which is a different failure from never having looked.
-ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS notes_cited INTEGER;
+ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS notes_cited INTEGER NOT NULL DEFAULT 0;

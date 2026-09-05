@@ -61,6 +61,16 @@ for "turns that answered blind" returns rows nobody measured. The file's own par
 nullable now; a row written by the image that has the columns always supplies a value, so NULL means
 one thing.
 
+**As migration 083 rather than an edit to 082, and CI is what insisted.** `core/migrate.py` keys on
+a checksum of a migration's *statements*, so editing an applied file breaks `make db-migrate` on
+every database holding it — including the dev database this branch's own author had already
+migrated. `tests/test_migrations_are_additive.py` asks git the same question, is skipped on the
+sandbox's truncated clone and ran on CI's `fetch-depth: 0`. "It is unmerged, so nobody has applied
+it" is not the test's question and must not be: who has applied a file is unknowable from inside the
+repository, which is exactly why the rule is mechanical. 083 also nulls the rows 082's backfill
+wrote a measurement onto, with a predicate that cannot be exact — the file states the residual case
+rather than denying it.
+
 ## The compaction citation index read from any tool result, and named ids nothing can resolve
 
 `ClearOlderToolResultsEdit` reads `source_note_id='…'` out of a result's repr before upstream deletes
@@ -128,7 +138,8 @@ measured, the shipped configuration runs **one** note leg and delivers at most `
 
 - A bundle that searches the record declares it. Two do today; a third costs one manifest key.
 - `capture_calls` and `retrieval_calls` change meaning for anyone who has already queried them.
-  Nothing has: 082 is unmerged, so no deployment holds a row.
+  Nothing has: 082 has never been on `main` without 083 beside it, so no deployment holds a row
+  written under the old meaning.
 - Every deployment re-embeds its note corpus on the next reindex, which is the `ntv3` bump working.
 - The `graph` mode's evidence list reports rank rather than the finder's number. A reader wanting a
   note's confidence reads `EvidenceChunk.confidence`, where it has always been.

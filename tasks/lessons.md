@@ -1935,3 +1935,12 @@ nothing recording why) was still true. Deleting it with the rejection would have
 the design needs an inspectability invariant. **Rule: when a decision reverses, re-file the losing
 argument as a stated cost or as a requirement it generates — never delete it as though it had been
 wrong.**
+
+**"Nobody has applied it yet" is not a fact the repository can hold.** I edited migration 082 in
+place because it was unmerged, and `tests/test_migrations_are_additive.py` — skipped on this
+sandbox's truncated clone, run on CI's `fetch-depth: 0` — caught it against the commit that
+introduced the file. The rule is mechanical on purpose: who has applied a migration is unknowable
+from inside the tree, and my own dev database had already applied it. **Rule: a migration is
+immutable from the commit that introduces it, not from the merge that ships it; a correction is a
+new file. And when a guard is skipped locally for an environmental reason, treat its subject as
+unchecked rather than as fine — the skip line says which.**
