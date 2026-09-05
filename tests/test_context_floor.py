@@ -39,6 +39,23 @@ called it "the payload rather than an approximation of it". `_bound_tools` reads
 graph's `ToolNode`, so the ratchet gates what a deployment pays. The lesson is the file's own: a
 ratchet is only as honest as its basis, and a basis that is re-derived rather than observed will
 agree with itself forever.
+
+**And the prose half went on being re-derived for another week, which is that sentence happening
+inside the file that wrote it.** The tool half was read off the compiled graph; the prompt half was
+`instructions_for(profile)` plus `_skills_listing(...)` — this repository's own two contributions to
+a system message the deepagents middlewares also write into. Measured 2026-09-05 against the
+`SystemMessage` a model is actually handed: **7,006 derived against 7,484 sent, short by 458
+tokens**. Every one of those 458 is upstream's `SKILLS_SYSTEM_PROMPT` — the wrapper deepagents puts
+*around* the listing this file did measure, explaining progressive disclosure and how to read a
+`SKILL.md`. That is what a middleware section costs today; what matters is that a bump lengthening
+it, or any other middleware adding one, grows what every deployment pays on every turn with
+nothing here going red — and the ceiling had already been passed, silently: at this change's base
+commit the real prefix measured **43,521** against a ceiling of 43,500, with every test here green.
+
+`_observed_prefix` fixes it the same way `_bound_tools` fixed the other half: one model call against
+a capturing fake model, and the system message taken off the wire. The two derived halves stay in
+the breakdown as a *split* of that observed number rather than as the basis for it, so `_report`
+still says which half grew, and what neither half explains is a named line rather than a silence.
 """
 
 from __future__ import annotations
@@ -48,7 +65,7 @@ from typing import Any
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.chemclaw_agent import _capability_tools, instructions_for
@@ -253,7 +270,27 @@ load_profiles()
 #: holds with less headroom than one `propose_knowledge_note` costs, which is the property every
 #: raise above was chosen for, and `_report` prints the day's figure so nobody has to trust this
 #: comment for it.
-CEILINGS: dict[str, int] = {"__default__": 43_500}
+#: **44,500 as of 2026-09-05, and nothing was added — the measurement got honest again.** The
+#: paragraph above is about the tool half; the prompt half was still re-derived, and re-derived it
+#: is 458 tokens short of the `SystemMessage` a model is handed (see the module docstring). On the
+#: observed basis `default` measures **43,701**, and it measured **43,521** at the commit this
+#: change branched from — over the 43,500 ceiling that was supposed to bound it, by 21 tokens, with
+#: every test in this file green. So this raise buys nothing and hides nothing: it is the same
+#: surface, counted where it is paid.
+#:
+#: The headroom is 799 tokens, which is the property every raise above was chosen for — under what
+#: one `propose_knowledge_note` costs (1,126, re-derived the same day), so the ceiling cannot absorb
+#: another tool of that size unnoticed. It is deliberately *not* the ~980 the branch point would
+#: have given: this tree already carries a sibling branch's docstring edit worth 160 tokens, and a
+#: ceiling set to today's measurement plus a fixed headroom is set against whatever else is in
+#: flight. The figure to judge a raise by is the headroom, not the ceiling.
+#:
+#: **`agent_tool_result_clear_trigger` moves with it, by derivation rather than by retuning**
+#: (`core/config/agent.py`): its default is this ceiling plus the 30,000 of thread the setting has
+#: always meant, so raising the ceiling raises the trigger to 74,500 and every deployment's lossless
+#: edit fires slightly later than it did. That coupling is the reason to keep this number a
+#: *ceiling* rather than a measurement — see the config comment, which says why.
+CEILINGS: dict[str, int] = {"__default__": 44_500}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
@@ -341,12 +378,17 @@ KNOWN_OVERSIZED: dict[str, int] = {
 OVERSIZED_TOLERANCE = 0.05
 
 
-def _count(text: str) -> int:
-    """Tokens, by the same counter `agent/compaction.py` budgets the thread with."""
-    from langchain_core.messages import HumanMessage
+def _count(text: str | BaseMessage) -> int:
+    """Tokens, by the same counter `agent/compaction.py` budgets the thread with.
+
+    A message counts as itself rather than as its text: `count_tokens_approximately` charges a
+    per-message overhead, and the system message this file now measures is counted by production
+    (`context_budget.MeasureRequestPrefix`) exactly this way.
+    """
     from langchain_core.messages.utils import count_tokens_approximately
 
-    return int(count_tokens_approximately([HumanMessage(text)]))
+    message = text if isinstance(text, BaseMessage) else HumanMessage(text)
+    return int(count_tokens_approximately([message]))
 
 
 def _tool_name(tool: Any) -> str:
@@ -373,8 +415,8 @@ def _tool_schema(tool: Any) -> str:
     return json.dumps(convert_to_openai_tool(tool))
 
 
-def _bound_tools(profile: Any) -> list[Any]:
-    """The tools this profile's compiled graph actually binds — every one, as the object it binds.
+def _bound_tools(graph: Any) -> list[Any]:
+    """The tools a compiled graph actually binds — every one, as the object it binds.
 
     **Read off the graph rather than re-derived, because re-deriving is the defect.** For eleven
     weeks this file measured `convert_to_openai_tool` over `_capability_tools(profile)`, and its own
@@ -394,8 +436,15 @@ def _bound_tools(profile: Any) -> list[Any]:
     Reading the `ToolNode` is deliberate and is why this cannot drift again: any future tool source
     — a middleware, a connector, upstream — lands here the moment it is bound, without this file
     being taught about it. The backlog row that asked for this proposed spying on `bind_tools`
-    instead; the node holds the same 61 tools and needs no model call to say so, so the graph is
-    built and never invoked.
+    instead, and `_observed_prefix` now does that too — for the system message, which no node holds.
+    **The node is still what this ratchet charges, and the difference is measured rather than
+    assumed**: on 2026-09-05 the two lists held the same 61 names and differed by **20 tokens on
+    `grep` alone**, whose description `FilesystemMiddleware` trims before binding because this
+    deployment withholds `execute`. The node's copy is the larger one, so charging it over-counts by
+    20 — the safe direction for a ratchet, and the direction
+    `test_the_ratchet_charges_at_least_what_the_model_is_sent` pins so that a flip is red rather
+    than quiet. Reading `_tools_by_name` also keeps the three upstream shapes below with a subject:
+    `tests/test_upstream_surface.py` names this function in all three failure messages.
 
     **Three upstream shapes are read below, and all three are pinned in
     `tests/test_upstream_surface.py`**: the node key `"tools"`, `PregelNode.bound`, and the private
@@ -403,12 +452,70 @@ def _bound_tools(profile: Any) -> list[Any]:
     two thirds of the read able to break on a bump with nothing in the upstream-surface file going
     red — loudly rather than silently, but in the wrong file.
     """
+    return list(graph.nodes["tools"].bound._tools_by_name.values())
+
+
+#: What the last `_CapturingModel` was sent, and what was bound to it. Module level rather than
+#: instance state because a `BaseChatModel` is a pydantic model, so an annotated class attribute
+#: would become a *field* with a mutable default rather than a place to keep a measurement. Same
+#: shape, and for the same reason, as `tests/test_compaction.py`'s capturing model.
+_RECEIVED: list[Any] = []
+_BOUND: list[Any] = []
+
+
+class _CapturingModel(GenericFakeChatModel):
+    """A fake model that keeps what it was actually sent, so the prompt comes off the wire.
+
+    `GenericFakeChatModel` alone cannot be used for this: `BaseChatModel.bind_tools` raises
+    `NotImplementedError`, which a turn hits *after* the request is assembled — enough for a
+    middleware to have measured the prefix, not enough for the model to receive it.
+    """
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        """Record the surface and stay unbound — this model has no tool-calling path."""
+        _BOUND[:] = list(tools)
+        return self
+
+    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any) -> Any:
+        """Record the request, then answer as the fake model would."""
+        _RECEIVED[:] = list(messages)
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kw)
+
+
+def _observed_prefix(profile: Any) -> tuple[SystemMessage, list[Any], list[Any]]:
+    """One real model call: the system message as sent, the tools as bound, the node's own list.
+
+    **Driven rather than derived, which is this file's whole rule applied to its other half.** The
+    prompt a turn pays for is not `instructions_for(profile)` plus a skills listing: the deepagents
+    middlewares write into the same system message, and on 2026-09-05 their sections were 458 of the
+    7,484 tokens — all of it upstream's `SKILLS_SYSTEM_PROMPT`, the wrapper around the listing this
+    file already measured. That is invisible to any assertion built from this repository's own two
+    pieces, which is how the real prefix passed the ceiling by 21 tokens with this file green.
+
+    The turn is a real one: a compiled graph, invoked, answering with an empty message so the loop
+    ends after one model call. Nothing is stubbed between the profile and the wire, which is the
+    point — a capture taken anywhere earlier is a claim about what the request *would* become.
+
+    Returns:
+        The `SystemMessage` the model received, the tools bound to it, and the tools its `ToolNode`
+        holds. The last two are the same surface seen from two places, and
+        `test_the_ratchet_charges_at_least_what_the_model_is_sent` is what keeps them honest.
+    """
     graph = build_langgraph_agent(
-        model=GenericFakeChatModel(messages=iter([AIMessage(content="")])),
+        model=_CapturingModel(messages=iter([AIMessage(content="")])),
         profile=profile,
         audit_sink=NullAuditSink(),
     )
-    return list(graph.nodes["tools"].bound._tools_by_name.values())
+    bound = _bound_tools(graph)
+    _RECEIVED.clear()
+    _BOUND.clear()
+    graph.invoke({"messages": [HumanMessage("what does this turn cost?")]})
+    system = [message for message in _RECEIVED if isinstance(message, SystemMessage)]
+    assert system, (
+        "the model was called with no system message, so there is no observed prompt to charge — "
+        "check that `build_langgraph_agent` still passes its instructions as `system_message`"
+    )
+    return system[0], list(_BOUND), bound
 
 
 def _skills_listing(profile: Any, tools: list[Any]) -> str:
@@ -428,18 +535,29 @@ def _skills_listing(profile: Any, tools: list[Any]) -> str:
 def _floor(profile_name: str) -> tuple[int, dict[str, int]]:
     """The static prefix for one profile: its total, and the per-part breakdown behind it.
 
-    The two prose parts are measured from the *capability* tools deliberately, and only the tool
-    schemas come from `_bound_tools`. `build_langgraph_agent:228` hands `skills_backend` the raw
-    callables, so narrowing the skills listing by the bound list instead would measure a backend
-    production never builds — a second implementation of upstream's narrowing, which is the
-    mistake one layer over.
+    **The total is observed and the breakdown is derived, and the distinction is load-bearing.**
+    What is charged is the `SystemMessage` the model was handed plus every schema the graph's
+    `ToolNode` holds — two measurements, neither re-derived from what this repository believes it
+    writes. The three prompt lines below *split* that observed number: two are this repository's own
+    contributions, measured the way `build_langgraph_agent` builds them, and the third is the
+    remainder — every deepagents middleware's prompt section, named rather than uncounted.
+
+    The two derived halves stay measured from the *capability* tools deliberately.
+    `build_langgraph_agent` hands `skills_backend` the raw callables, so narrowing the skills
+    listing by the bound list would measure a backend production never builds. A negative remainder
+    would mean those two halves are no longer what production puts in the prompt — the split has
+    gone wrong, not the total, which is still what the model was sent.
     """
     profile = get_profile(profile_name)
+    system, _sent, bound = _observed_prefix(profile)
+    instructions = _count(instructions_for(profile))
+    listing = _count(_skills_listing(profile, _capability_tools(profile)))
     parts = {
-        "instructions": _count(instructions_for(profile)),
-        "skills-listing": _count(_skills_listing(profile, _capability_tools(profile))),
+        "instructions": instructions,
+        "skills-listing": listing,
+        "prompt:middleware-sections": _count(system) - instructions - listing,
     }
-    for tool in _bound_tools(profile):
+    for tool in bound:
         parts[f"tool:{_tool_name(tool)}"] = _count(_tool_schema(tool))
     return sum(parts.values()), parts
 
@@ -466,6 +584,45 @@ def test_the_static_prefix_stays_under_its_ceiling(profile_name: str) -> None:
     total, parts = _floor(profile_name)
     ceiling = CEILINGS.get(profile_name, CEILINGS["__default__"])
     assert total <= ceiling, _report(total, parts, ceiling)
+
+
+def test_the_ratchet_charges_at_least_what_the_model_is_sent() -> None:
+    """The basis may over-count what a turn costs; it may never under-count it.
+
+    A ceiling is only a bound on spend while the number under it is at least the bill. This file has
+    been on the wrong side of that twice — 8,126 tokens of tool schema in 2026-08-29, 458 tokens of
+    middleware prompt until 2026-09-05 — and both times every assertion here was green, because the
+    basis and the assertion were derived from the same belief.
+
+    So the two surfaces are compared where they can disagree. `_bound_tools` reads the `ToolNode`,
+    which is what a graph *runs*; `bind_tools` receives what the model is *told about*, and they are
+    not the same objects: measured 2026-09-05, the same 61 names differ by 20 tokens on `grep`,
+    trimmed by `FilesystemMiddleware` on its way to the model. The node's copy is larger, so the
+    ratchet over-charges by 20 tokens — harmless, and asserted rather than assumed, because the day
+    the sign flips this file starts under-counting a bill somebody pays.
+    """
+    system, sent, bound = _observed_prefix(get_profile("default"))
+    charged = {_tool_name(tool): _count(_tool_schema(tool)) for tool in bound}
+    on_the_wire = {_tool_name(tool): _count(_tool_schema(tool)) for tool in sent}
+
+    uncharged = sorted(set(on_the_wire) - set(charged))
+    assert not uncharged, (
+        f"{uncharged} are bound to the model and are not in the surface this file charges, so the "
+        "ratchet does not bound what a turn costs. `_bound_tools` reads the graph's ToolNode; "
+        "whatever now puts a tool on the wire without putting it there has to be counted too."
+    )
+    prompt = _count(system)
+    total_charged = prompt + sum(charged.values())
+    total_sent = prompt + sum(on_the_wire.values())
+    differing = {
+        name: (charged[name], size) for name, size in on_the_wire.items() if charged[name] != size
+    }
+    assert total_charged >= total_sent, (
+        f"the ratchet charges {total_charged} tokens against {total_sent} the model is actually "
+        f"sent, so it under-counts by {total_sent - total_charged}. The tools the two bases "
+        f"disagree about, as (charged, sent): {differing}. Charge the surface `bind_tools` "
+        "receives instead, and move the upstream-surface pins that name `_bound_tools` with it."
+    )
 
 
 def test_no_single_tool_schema_dominates_the_floor() -> None:

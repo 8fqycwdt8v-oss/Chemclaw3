@@ -52,16 +52,28 @@ two verbs this deployment withholds — `execute` and `delete` — never enter t
 `scratchpad_tools()` is where they are withheld.
 
 **The stamp is asked first, and a name is asked only of what the stamp did not claim.** The order
-is load-bearing rather than stylistic, because the two sets overlap on names a *connector* may
-plausibly declare. `_declared_tool_names` refuses one bundle's name colliding with another's; it
-does not compare against the ambient names, so a connector declaring `read_file` — which a code
-execution or document server would reasonably do — is not refused. Measured against a live
-streamable-HTTP server declaring one: it wins `ToolNode.tools_by_name` **and** carries the
-`SERVED_BY` stamp. Asking the name first would therefore defang a genuinely third-party payload
-instead of framing it, stripping the envelope and the `probe:read_file` provenance from content
-that crossed a process boundary — exactly backwards, and a regression introduced by widening the
-name set from one to seven. A stamped tool ran outside this process whatever it is called, so the
-stamp decides and the names only sort what is left.
+is load-bearing rather than stylistic, because the two name-keyed sets overlap on names a
+*connector* may plausibly declare — `read_file` is what a code-execution or document server would
+call its own verb.
+
+This paragraph used to justify the order by saying nothing refuses such a bundle, and that went
+stale under it: `connectors/registry._bound_by_this_process` folds the ambient names into
+`_declared_tool_names`, so a manifest declaring one is refused at build time, naming what this
+deployment already binds it as. Measured, every name this middleware sorts by is refused that way.
+The order stands, on a reason that does not borrow from it. A refusal at discovery is a control
+over what a deployment may *enable*; this middleware runs on what a session actually *bound*, and
+those are two questions. Asking the name first would make this module's correctness ride on
+another module's guard staying complete — a coupling nothing here can see break, which is why
+`tests/test_tool_framing.py::test_the_registry_refuses_every_name_this_middleware_sorts_by` now
+fails if that union loses a member. That guard is belt-and-braces rather than the reason. The
+reason is that a stamped tool ran outside this process whatever it is called, so the stamp is the
+fact and a name is only a proxy for it: asked name-first, a genuinely third-party payload named
+`read_file` would be defanged instead of framed — stripped of the envelope and of the
+`probe:read_file` provenance a citation needs, which is exactly backwards.
+`test_a_connector_tool_named_like_a_local_verb_is_framed_not_defanged` drives that shape against a
+live streamable-HTTP server, opening the spec directly rather than through discovery, so it reaches
+`ToolNode.tools_by_name` with the `SERVED_BY` stamp on it whether or not a deployment could enable
+it.
 
 **Position: outside the audit trail, inside the two converters** (see
 `langgraph_agent.tool_call_middleware`). Outside `audit` so `audit_events.detail` records what the

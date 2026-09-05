@@ -127,8 +127,15 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
 ## Talk to the agent from a terminal (testing)
 
 The production ingress is Teams/Copilot with Entra-ID SSO (architektur.md §7). For local
-testing there is a CLI: `make chat` (or `uv run chemclaw --admin`). It needs `ANTHROPIC_API_KEY`
-in the environment — the chat client preflights it and fails with a clear message otherwise.
+testing there is a CLI: `make chat` (or `uv run chemclaw --admin`). It needs a model gateway
+answering at `CHEMCLAW_LLM_BASE_URL` — the default is `chemclaw.cli.mock_llm` on loopback, so a
+fresh checkout starts with no credential at all; point it at a real OpenAI-compatible gateway and
+put that gateway's credential on `CHEMCLAW_LLM_API_KEY`. **There is no credential preflight**
+(`D-2026-09-04-a-gateway-is-the-only-provider`): an empty key is a legitimate configuration,
+because many internal gateways ignore the bearer, so a gateway that does want one answers 401 on
+the first turn rather than at construction. What still fails at construction is a *blanked*
+`CHEMCLAW_LLM_BASE_URL`, which is a misconfiguration and is reported as one sentence and an exit
+code.
 
 - **Admin mode is required.** Entra auth is enforced at the *front door* (F4), and this CLI has no
   browser OIDC token to validate, so it runs only with `--admin`: it bypasses auth, advertises every skill, and stamps the audit trail with
@@ -161,7 +168,7 @@ make live-up        # connectors (:8810), the four Temporal workers, the front d
                     # backend (:8860) that every durable calculation job dials
 make live-status    # what is running
 make live-jobs      # STAGE A: a real durable job, no model needed
-make live-probes    # STAGE B: the probe corpus through the front door (needs ANTHROPIC_API_KEY)
+make live-probes    # STAGE B: the probe corpus through the front door (needs a real gateway)
 make live-down && make live-infra-down
 ```
 
@@ -798,7 +805,7 @@ all described it, and nothing could have told you.
 | the line is absent from `/metrics` | You are not scraping this process | Not a compaction signal at all: `core/metrics.py` pre-seeds every declared counter, so both names render at `0` from the first scrape of a process that has served nothing. An absent line means the worker's `/metrics` port is unscraped (`CHEMCLAW_WORKER_METRICS_PORT`), not that the policy is unwired. |
 | rising steadily, `reclaimed` large per compaction | Long sessions are routinely over budget | Expected on a deployment with real chemists. Read it against `chemclaw_turn_duration_seconds`: reduction is cheap (sub-millisecond to ~6 ms per call), so a slow turn is not this. |
 | rising on almost every call | The budget is below this deployment's normal turn | Raise `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET` toward the model's real context window. Compacting a thread that would have fit spends estimator passes and drops context for nothing. |
-| rising on **every** call, from the first one | A configured trigger is below this request's own prefix, so it floors at 1 — "reduce on every model call" | Grep the process for `context.trigger_floored`, a WARNING naming the setting, its value and the measured prefix. Both context settings are budgets on the whole *request*: the system message, the skills listing and every bound tool schema come off them before the thread gets anything, and that prefix measured 43,175 estimated tokens on `default` on 2026-09-04. The shipped `CHEMCLAW_AGENT_TOOL_RESULT_CLEAR_TRIGGER` is 73,500, above that prefix, so a shipped deployment is **not** in this state and this row means someone lowered it; raise it back above the prefix (and keep it at or below the budget, which startup enforces). |
+| rising on **every** call, from the first one | A configured trigger is below this request's own prefix, so it floors at 1 — "reduce on every model call" | Grep the process for `context.trigger_floored`, a WARNING naming the setting, its value and the measured prefix. Both context settings are budgets on the whole *request*: the system message, the skills listing and every bound tool schema come off them before the thread gets anything, and that prefix measured 43,681 estimated tokens on `default` on 2026-09-05. The shipped `CHEMCLAW_AGENT_TOOL_RESULT_CLEAR_TRIGGER` is 74,500, above that prefix, so a shipped deployment is **not** in this state and this row means someone lowered it; raise it back above the prefix (and keep it at or below the budget, which startup enforces). |
 
 Per-model attribution for the same spend **is not on this surface, and is no longer missing**. The
 old framework emitted `gen_ai.client.token.usage` labelled by request model, response model,
