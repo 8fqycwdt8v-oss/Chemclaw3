@@ -138,8 +138,11 @@ class AgentSettings(BaseSettings):
     #
     # **A value at or below the prefix is not a budget.** `effective_trigger` floors at 1, which
     # means "reduce on every model call", and it says so once at WARNING rather than returning it
-    # silently (`context_budget._note_floored_trigger`). The clear trigger below is in that state at
-    # its shipped default; see the paragraph there.
+    # silently (`context_budget._note_floored_trigger`). The clear trigger below was in that state
+    # for one commit and is not now — it is derived to clear the prefix, and the paragraph there
+    # says how. This sentence went on claiming the floored state after the same commit fixed it,
+    # eighteen lines from the paragraph that contradicts it, which is why the derivation lives in
+    # one place and this one points at it.
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=0, ge=0)
@@ -171,11 +174,26 @@ class AgentSettings(BaseSettings):
     # it.
     #
     # The replacement is derived, not invented: `tests/test_context_floor.py`'s ratchet **ceiling**
-    # (43,500 — the bound, deliberately, rather than today's measurement, so this number does not
-    # move every time a tool schema does) plus the 30,000 of thread the old default intended.
-    # Anything above the prefix restores the band; this one restores it to the same *thread*
-    # allowance the setting has always had, which is why it is a translation rather than a new
-    # decision about how much evidence the model keeps.
+    # (the bound, deliberately, rather than today's measurement, so this number does not move every
+    # time a tool schema does) plus the 30,000 of thread the old default intended. Anything above
+    # the prefix restores the band; this one restores it to the same *thread* allowance the setting
+    # has always had, which is why it is a translation rather than a new decision about how much
+    # evidence the model keeps.
+    #
+    # **74,500 as of 2026-09-05, raised from 73,500 because the ceiling it is derived from moved —
+    # and nothing was added.** `tests/test_context_floor.py` was measuring the prompt half of the
+    # prefix as `instructions_for` plus the skills listing, which is this repository's own two
+    # contributions to a system message the deepagents middlewares also write into: re-measured
+    # against the `SystemMessage` a model is handed, that basis was **458 tokens short**, and the
+    # real prefix (43,521) had already passed the 43,500 ceiling that was supposed to bound it. The
+    # ceiling is now 44,500 over an honest 43,701, so this default follows it to 44,500 + 30,000.
+    # **The surface did not grow; the measurement got honest** — the same sentence the ratchet
+    # comment wrote about its tool half a week earlier.
+    #
+    # **What it costs is a real behavioural change and is stated rather than discovered**: every
+    # deployment's lossless edit now fires 1,000 estimated tokens later than it did, so a thread
+    # carries slightly more reclaimable tool result before the clear runs. The 30,000-token band
+    # between this and the window is unchanged, which is the quantity the derivation is about.
     #
     # The floor it used to hit is still reachable — a deployment that lowers this below its own
     # prefix gets it — so it stays loud rather than silent: one WARNING per process
@@ -183,7 +201,7 @@ class AgentSettings(BaseSettings):
     # and a rate would carry nothing a line does not. `tests/test_compaction.py` asserts both the
     # floor and this default's clearance above the ratchet ceiling, so the day a tool surface grows
     # past it, that test says so instead of the behaviour changing quietly.
-    agent_tool_result_clear_trigger: int = Field(default=73_500, ge=1)
+    agent_tool_result_clear_trigger: int = Field(default=74_500, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Measured against a real BPE tokenizer on this repository's own

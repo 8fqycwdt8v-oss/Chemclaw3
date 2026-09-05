@@ -127,6 +127,16 @@ FROM reaction_labels WHERE source = '<source>';
 
 SELECT count(*) FROM reaction_species  WHERE source = '<source>';  -- species split out of the SMILES
 SELECT count(*) FROM corpus_molecules;                             -- ECFP4 + pattern bits, by structure
+
+-- recorded reactions carrying no DRFP row: they answer every facet query and never surface in
+-- reaction *similarity*. `corpus_reactions` is keyed `(source, id)` on the same id
+-- `reaction_labels` carries as `reaction_id`, so this is an exact anti-join, not an estimate.
+-- Nothing else exposes this population: `CorpusReport.unfingerprintable` is per pass, is never
+-- persisted and is deliberately not a metric outcome, so this query is the only cumulative view.
+SELECT count(*) AS unfingerprintable
+FROM reaction_labels l
+LEFT JOIN corpus_reactions r ON r.source = l.source AND r.id = l.reaction_id
+WHERE l.source = '<source>' AND r.id IS NULL;
 ```
 
 (`corpus_molecules` is keyed on the standardised SMILES and shared across corpora — it is
@@ -145,11 +155,29 @@ The drain books two outcomes, and the missing third is deliberate: `ingested` fo
 became a `reaction_labels` row (with its `reaction_species`), `rejected` for one dropped for want
 of a usable reaction SMILES, key or citation. Note which table that is — `corpus_reactions` is the
 DRFP index, and a recorded row that yields no fingerprint is counted `ingested` and never reaches
-it, which is the whole of the `unfingerprintable` distinction the SQL block above measures. There is no `skipped` series, because in this system's ingest vocabulary `skipped` means
+it. That is the `unfingerprintable` distinction, and the last query in the SQL block above is what
+measures it: no counter does, because the pass-local `unfingerprintable` field is deliberately not
+an outcome — those rows *are* recorded, so booking them would put one row in two series.
+There is no `skipped` series, because in this system's ingest vocabulary `skipped` means
 *deliberately passed over* — unchanged, oversized, an unsupported extension — and the corpus drain
 has no such population. A permanently-zero series would assert one exists. So
 `ingested + rejected` is the whole of what the pass read, and `rejected` climbing is the number
 that says a feeder regressed.
+
+**`ingested` is throughput, not progress, and in release mode it does not accumulate toward
+anything.** A source whose binding is not `append_only` stores no keyset position
+(`ingest/labels/cursor.py`: a release is a versioned load, so re-walking an unchanged one is a
+no-op and a new one has to be walked from the top anyway) — so every fire re-reads it from the
+first page and re-upserts every row, and every re-upsert books `ingested` again. Measured, three
+identical drains of one unchanged four-row release book `ingested=9` over three rows that exist.
+Read it as "rows this pass wrote"; take "how much of the corpus is in" from the `reaction_labels`
+count above, which is a population rather than a rate.
+
+**And the word does not mean the same thing across the ingest passes**, so a dashboard that puts
+them on one panel is comparing different things: a re-read ELN entry lands in `skipped_existing`
+and a re-read document in `skipped`, while a re-read corpus row lands in `ingested`. That is not an
+inconsistency to fix — the drain genuinely re-records rather than passing over — but it does mean
+`ingested` is the only one of the three that counts work already done in an earlier pass.
 
 An idle source books **zeros** rather than nothing, so a silent series means the drain did not run
 — which is a different fault from a drain that ran and found nothing, and the two are worth telling
