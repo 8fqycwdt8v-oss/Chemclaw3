@@ -912,6 +912,26 @@ only holds defects can only ever restore the system to what it already intended 
       direct write path that actually ungates agent-asserted notes, which owes D-161 migration
       `025`'s self-confirmation guard.
 
+      **Review scaling and convergence, ideated 2026-09-05 and mostly not built.** The owner asked
+      how an admin avoids drowning in near-identical proposals, and how local and global skills stay
+      convergent. `D-2026-09-05-a-rejection-nobody-reads-is-a-decision-taken-twice` built the one
+      part that is real today — the reviewer now sees every earlier version of the note in front of
+      them, so a rejection is not re-derived or accidentally overturned. The rest waits on the
+      distiller and is recorded there rather than here in full: promotion thresholds on skills
+      (used N times **and** by ≥ 2 distinct chemists — D-161's two-threshold shape, and the single
+      most effective flood control available); duplicate suppression in the **generator** rather
+      than the queue (propose an edit to the nearest existing skill unless none is close — a
+      queue-side deduplicator is a bandage on a generator that should not have produced them);
+      cluster review over `cluster_by_similarity`; benefit-ranked triage over `evals/ab.py`, with
+      the machine ordering and the human still deciding, which is why it does not re-open
+      `D-2026-08-16`; and the convergence half — global-wins-on-conflict with the conflict
+      surfaced, promotion retiring the local variants that fed it via `memory/supersede.py`, expiry
+      on disuse read as a signal about the *distiller* rather than about review capacity, and
+      `skill-validate` run on local skills at write time so form converges even where content does
+      not. One constraint binds all of it: `D-2026-08-25` ends with **no Temporal Schedule opens a
+      pull request**, so a reconciliation job may cluster, measure and report, and a human opens the
+      proposal.
+
       **Two findings from the reviewed framework (WikiSkill, arXiv 2608.27454) are recorded because
       they contradict the obvious design and cost nothing to carry**: giving the *executing* agent
       the accumulated experience measured **worse** than not (63.7% → 60.9%), while giving it to the

@@ -804,3 +804,81 @@ def test_a_revision_of_a_rejected_note_is_still_proposable(
     revised = _note("probe-revise", body="Coupling in 2-MeTHF, 88% yield, solvent stated.")
     _run(propose_note(revised, submitter))
     assert len(_run(store.listing(ProposalState.OPEN, "", 10, None))) == 1
+
+
+# --- what was already decided about this note ----------------------------------------------
+
+
+def test_history_is_every_other_version_of_the_note_oldest_first() -> None:
+    """The read the reviewer needed: this note has been here before, and here is what happened."""
+    store = InMemoryProposalStore()
+    first = _run(store.upsert(_proposal(content="v1")))
+    _run(store.decide(first, ProposalState.REJECTED, "reviewer", "no evidence for the claim"))
+    second = _run(store.upsert(_proposal(content="v2")))
+
+    versions = _run(store.history("reaction-1", ""))
+    assert [version.id for version in versions] == [first, second]
+    assert versions[0].state is ProposalState.REJECTED
+    assert versions[0].reason == "no evidence for the claim"
+
+
+def test_history_of_another_note_is_not_this_notes_history() -> None:
+    """Keyed by note, so a busy queue does not make every history the whole table."""
+    store = InMemoryProposalStore()
+    mine = _run(store.upsert(_proposal(note_id="reaction-1")))
+    _run(store.upsert(_proposal(note_id="reaction-2", branch="note/reaction-2")))
+
+    assert [version.id for version in _run(store.history("reaction-1", ""))] == [mine]
+
+
+def test_history_scoped_to_a_proposer_hides_everybody_elses_versions() -> None:
+    """The visibility rule, in the store: a non-reviewer's history discloses only their own."""
+    store = InMemoryProposalStore()
+    theirs = _run(store.upsert(_proposal(content="v1", actor="chemist-a")))
+    ours = _run(store.upsert(_proposal(content="v2", actor="chemist-b")))
+
+    assert [v.id for v in _run(store.history("reaction-1", "chemist-b"))] == [ours]
+    assert [v.id for v in _run(store.history("reaction-1", ""))] == [theirs, ours]
+
+
+def test_a_first_proposal_has_an_empty_history_rather_than_an_error() -> None:
+    """A note nobody has proposed before is the common case and is not an exception."""
+    store = InMemoryProposalStore()
+    _run(store.upsert(_proposal()))
+    assert _run(store.history("reaction-9", "")) == []
+
+
+def test_a_reviewer_opening_a_changed_reproposal_sees_the_earlier_rejection(
+    client: TestClient, store: InMemoryProposalStore
+) -> None:
+    """The whole point, over HTTP.
+
+    The gate refuses byte-identical rejected content before it reaches git, so this case — a
+    *changed* re-proposal of a rejected note — is the one that legitimately reaches a reviewer, and
+    it used to arrive with the earlier decision nowhere on the page.
+    """
+    _run(propose_note(_note(body="a bold claim"), FakeSubmitter()))
+    first = client.get("/proposals").json()[0]["id"]
+    client.post(f"/proposals/{first}/decision", json={"approved": False, "reason": "unsupported"})
+
+    _run(propose_note(_note(body="a bold claim, hedged"), FakeSubmitter()))
+    second = next(item["id"] for item in client.get("/proposals").json() if item["id"] != first)
+
+    detail = client.get(f"/proposals/{second}").json()
+    assert [(v["id"], v["state"], v["reason"]) for v in detail["history"]] == [
+        (first, "rejected", "unsupported")
+    ]
+    # The version being reviewed is the rest of the response, not an entry in its own history.
+    assert second not in [version["id"] for version in detail["history"]]
+
+
+def test_a_non_reviewer_is_not_told_that_somebody_else_proposed_this_note(
+    plain_user_client: TestClient, store: InMemoryProposalStore
+) -> None:
+    """History follows the visibility gate — leaking it here is a disclosure, not a courtesy."""
+    theirs = _run(store.upsert(_proposal(content="v1", actor="another-chemist")))
+    mine = _run(store.upsert(_proposal(content="v2", actor=_DEV_OID)))
+    _run(store.decide(theirs, ProposalState.REJECTED, "reviewer", "a colleague's reason"))
+
+    detail = plain_user_client.get(f"/proposals/{mine}").json()
+    assert detail["history"] == []

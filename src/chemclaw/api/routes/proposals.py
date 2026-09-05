@@ -35,6 +35,7 @@ from chemclaw.kg.proposal import (
     close_merged_notes,
     decide_proposal,
     list_proposals,
+    proposal_history,
 )
 
 # Where *this* endpoint expects the body signature, in the `sha256=<hex>` shape GitHub's own
@@ -105,14 +106,31 @@ async def list_note_proposals(
 
 async def get_note_proposal(
     proposal: VisibleProposal,
+    principal: CurrentUser,
 ) -> ProposalDetail:
-    """One proposal with everything it would write, exactly as it would land in the tree."""
+    """One proposal with everything it would write, and what was already decided about this note.
+
+    **The history is what a reviewer could not previously get.** The gate refuses a re-proposal of
+    byte-identical rejected content before it reaches git (`rejected_version`), so the exact repeat
+    never appears here — but a *changed* re-proposal of a note somebody already rejected is a
+    different version and arrives legitimately, and it arrived with the earlier decision and its
+    stated reason nowhere on the page. The reviewer then re-derived the judgement, or merged what a
+    colleague had refused, and the record to prevent both was already in the table.
+
+    **Scoped by the same rule that decided visibility, not by a looser one.** A reviewer sees every
+    version; anybody else sees only their own, so assembling a history must not disclose that
+    another chemist proposed this note. The currently-viewed version is dropped because its
+    decision is the rest of this response.
+    """
+    scope = "" if _is_reviewer(principal) else principal.oid
+    versions = await proposal_history(proposal.note_id, scope)
     return ProposalDetail(
         **_proposal_summary(proposal).model_dump(),
         content=proposal.content,
         dependencies=[ProposalFile(**file.model_dump()) for file in proposal.dependencies],
         session_id=proposal.session_id,
         correlation_id=proposal.correlation_id,
+        history=[_proposal_summary(version) for version in versions if version.id != proposal.id],
     )
 
 
