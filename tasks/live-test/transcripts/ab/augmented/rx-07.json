@@ -1,0 +1,83 @@
+{
+  "probe": {
+    "id": "rx-07",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which base should I try first for the amination, and is there evidence one is better than another or is it just what people happen to use?",
+    "expects_tools": [
+      "similar_reactions",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted yield per base",
+      "a computed base strength or pKa for an aliphatic amidine or phosphazene base"
+    ],
+    "direction": "The corpus contains real Buchwald-Hartwig HTE data run as three separate base plates, so 'what does the data say about base' has an evidence-grounded answer rather than a folkloric one. A good answer retrieves the records, names the bases that actually appear, says how the data is structured (screening plates, not a head-to-head process comparison) and is explicit about what that design can and cannot support. It should also name the seed note's own choice (NaOtBu in toluene) and flag base compatibility with the substrate — base-sensitive functionality, ester or nitrile survival — as a constraint no dataset lookup covers.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-07",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which base should I try first for the amination, and is there evidence one is better than another or is it just what people happen to use?",
+    "profile": "",
+    "answer": "I need to search the record for amination reactions to see what bases have been used and whether there's evidence comparing them. Let me gather that information.The knowledge graph is empty, so I don't have any record of past amination runs with base comparisons. Let me check what reagent frequencies are available more broadly and also look at what's in the literature via the reaction predictors.I'm working with a system that doesn't have:\n1. **Any past amination runs in the knowledge graph** — so no record of what your team has tried\n2. **Any reaction-prediction models loaded** — so I cannot query the literature consensus\n3. **Any indexed amination reactions** — the corpus labeling hasn't captured this reaction class yet\n\nWhat I *can* tell you from general chemistry knowledge:\n\n**Common bases for amination reactions** (C-N coupling or nucleophilic aromatic amination typically):\n\n- **Cs₂CO₃** — very frequently used, robust, mild, insoluble base minimizes side-reactivity\n- **K₂CO₃** — similar profile, cheaper, slightly less reliable across substrates\n- **KOtBu** — stronger base, used when nucleophilicity of amine needs enhancement\n- **Et₃N** — mild, used in some couplings especially with electron-poor arenes, generates salts in solution\n- **DIPEA** — similar to Et₃N but bulkier, sometimes better for steric control\n\n**What actually distinguishes them** (substrate and coupling class dependent):\n- Amine nucleophilicity (do you need to activate it?)\n- Arene reactivity (electron-poor arenes need weaker bases; electron-rich ones tolerate stronger)\n- Solubility and reaction medium (Cs₂CO₃ insoluble → heterogeneous, Et₃N soluble → homogeneous)\n- Byproduct handling (carbonate gives CO₂; phosphine byproducts vary)\n\n**Without your specific amination type, I cannot tell you which will be better** — and I cannot search what your lab has actually found effective because there is no record yet.\n\nTo move forward, I need you to clarify: **What is the amination?** Give me the substrate SMILES (or name) and the amine SMILES (or name), so I can:\n1. Search for similar precedent if any exists\n2. Look at electronic properties of your specific arene (is it activated, deactivated?)\n3. Propose a base on the actual substrate, not a generic list\n\nWhat are you coupling?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "reagent_frequency",
+      "list_available_models"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "list_available_models",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnpredict:list_available_models\">\n{\n  \"forward\": [\n    {\n      \"name\": \"reaction_t5_v2\",\n      \"kind\": \"forward\",\n      \"available\": false,\n      \"description\": \""
+      },
+      {
+        "tool": "reagent_frequency",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:reagent_frequency\">\n{\n  \"agents\": [],\n  \"reactions_in_scope\": 0,\n  \"coverage\": {\n    \"labelled\": 0,\n    \"total\": 0,\n    \"sources\": [],\n    \"verdict\": \"NO ROW"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 14.9,
+    "event_counts": {
+      "token": 53,
+      "tool_call": 4,
+      "evidence_source": 2,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "94bf0ee096114edfb13dbbeeea4e40e9",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

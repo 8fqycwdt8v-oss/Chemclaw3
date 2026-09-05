@@ -144,6 +144,20 @@ value was used to decide, so the next reader can judge whether it still applies.
 record routine exploratory calculations; the calculation cache already keeps them, and a
 graph full of unremarkable numbers makes the remarkable ones harder to find.
 
+**"Matters beyond the conversation" has a moment, and this is it.** A comparison that
+*settles* something — a solvent screen, a species ranking, a bond survey, a relative-energy
+ordering — whose margin clears the method's stated uncertainty is a conclusion, and the
+conclusion is the part no other store holds. The calculation itself is already kept twice
+over: the cache holds every primitive by key, and a finished job's record holds its whole
+result. What neither holds is *what you decided from it*, and that is what a later reader
+comes looking for. So when a ranking clears its error bar and you have acted on it, propose
+the note before the turn ends — the numbers survive without you, the reading does not.
+
+Where the margin does *not* clear the error bar, the ceiling section below applies instead:
+that is a real finding and it belongs in the answer, but a note whose content is "this
+calculation could not distinguish them" is the unremarkable-number case above, and a graph
+of them is worse than none.
+
 ## The ceiling
 
 **Every method here is semiempirical, and there is nothing above it.** There is no DFT tier and

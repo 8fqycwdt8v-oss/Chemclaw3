@@ -351,6 +351,7 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.durable", "chemclaw.retrieval"),
     ("chemclaw.durable", "chemclaw.science"),
     ("chemclaw.durable", "chemclaw.templates"),
+    ("chemclaw.evals", "chemclaw.agent"),
     ("chemclaw.evals", "chemclaw.api"),
     ("chemclaw.evals", "chemclaw.core"),
     ("chemclaw.evals", "chemclaw.kg"),
@@ -456,6 +457,15 @@ _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
         "reading the tool registry and getting a different answer on build #1 than on build #2. "
         "Lazy because `templates -> agent -> connectors` already exists at module scope, so a "
         "module-scope import here would be a real import cycle rather than a permitted one"
+    ),
+    ("chemclaw.evals", "chemclaw.agent"): (
+        "the live judge builds its Anthropic client through the same `_tls_http_client` the agent "
+        "does, so a private CA configured for one is not silently absent from the other - it was: "
+        "`live_judge` read `llm_base_url` and ignored `llm_tls_ca_bundle`, so grading against "
+        "exactly the internal gateway that setting exists for died at TLS. Lazy because it sits "
+        "beside the `anthropic`/`httpx` imports in the same function, which are lazy so that "
+        "importing the eval package costs neither the SDK nor a connection pool - and because a "
+        "graded run is the only thing in `evals` that needs the agent's provider seam at all"
     ),
     ("chemclaw.kg", "chemclaw.connectors"): (
         "known_note_types/known_relations union core's closed vocabulary with what the enabled "

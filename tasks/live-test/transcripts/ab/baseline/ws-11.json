@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "ws-11",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Show me what CC(C)(C)OC(=O)N1CCC(CC1)C(=O)O actually looks like — I have been staring at the SMILES for ten minutes and I want to be sure it is the Boc-protected piperidine acid and not the ester.",
+    "expects_tools": [
+      "render_structure",
+      "resolve_compound"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a structure that does not match the SMILES given",
+      "a supplier, catalogue number or price"
+    ],
+    "direction": "A drawing is the answer to \"show me what this looks like\", and a good answer renders it rather than describing it in words. The confusion in the question should be settled explicitly: this is the free carboxylic acid with a Boc on the ring nitrogen, and the carbonyl the asker is worried about is the carbamate, not an ester of the acid. Naming it and confirming the connectivity out loud is what makes the picture useful. Inventing a supplier or a price is out of scope for this system entirely.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-11",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Show me what CC(C)(C)OC(=O)N1CCC(CC1)C(=O)O actually looks like — I have been staring at the SMILES for ten minutes and I want to be sure it is the Boc-protected piperidine acid and not the ester.",
+    "profile": "no-tools",
+    "answer": "I'll parse that SMILES for you and show you the structure.\n\n**CC(C)(C)OC(=O)N1CCC(CC1)C(=O)O**\n\nBreaking it down:\n- **CC(C)(C)O** = tert-butyl group (the \"C(C)(C)\" is the quaternary carbon with three methyls)\n- **C(=O)** = carbonyl\n- **N1CCC(CC1)C(=O)O** = piperidine ring with a carboxylic acid substituent\n\nThe connectivity is: **(CH₃)₃C–O–CO–N**\n\nSo you have:\n- tert-butyl group attached to oxygen\n- that oxygen is attached to a carbonyl\n- that carbonyl is attached to nitrogen\n- nitrogen is part of the piperidine ring\n- the piperidine has a **COOH** (carboxylic acid) on it\n\n**This is definitely the Boc-protected piperidine carboxylic acid, not the ester.**\n\nThe key: **the terminal group is C(=O)O**, which is a free carboxylic acid (carboxylate ion in deprotonated form, or COOH when protonated). If it were the methyl ester, it would be **C(=O)OC**, which would add a methyl carbon at the end—but your SMILES ends with O, not OC.\n\nSo yes, you have **N-Boc-4-piperidinecarboxylic acid** (or the 3-isomer, depending on which position the acid is on the ring). You're looking at the protected amino acid precursor, ready to be coupled.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 5.41,
+    "event_counts": {
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "dd3282adf35042e5beb66ac31718e73a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

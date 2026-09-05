@@ -1,0 +1,72 @@
+{
+  "probe": {
+    "id": "ms-06",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is a conformer search worth running on CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1, or is this thing rigid enough that I would be paying for nothing? Also, does it have a tautomer problem I should settle first?",
+    "expects_tools": [
+      "describe_topology"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a conformer population or a number of conformers found, which needs a search",
+      "a computed energy of any kind",
+      "a recommendation presented as though the counts decided it"
+    ],
+    "direction": "The question is literally what the free structural summary answers, and reaching for it before spending anything is the behaviour worth measuring — the commonest waste on this surface is buying a conformer search to discover the molecule was rigid. A good answer gives the counts and then reads them: rotatable bonds well above zero means a search will find real alternatives and this molecule has plenty; a tautomer count of one means there is no form to settle first and a count above one means settle it before computing anything else, because every downstream number describes whichever form was assumed. The counts are stable and what to do about them is judgement, so an answer that presents its recommendation as the counts' own conclusion has overstated a free graph read. Running the search here rather than answering the question is the other failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-06",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is a conformer search worth running on CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1, or is this thing rigid enough that I would be paying for nothing? Also, does it have a tautomer problem I should settle first?",
+    "profile": "",
+    "answer": "I'll check the topology of this molecule to see if a conformer search is worth running and whether tautomerism is an issue.Good news and a heads-up:\n\n**Conformer search: worth running.**  \nYou have **6 rotatable bonds** — the isopropyl side chain, the linker to the chiral center, the carbamate N-H, the amide link, and the benzyl C-N — so this is a flexible molecule. A conformer search will find genuine shape variation, not just noise. Don't bother with a huge effort (quick is fine to start), but this is not a rigidity waste.\n\n**Tautomer problem: yes, and you need to settle it first.**  \nThe molecule has **6 enumerated tautomers** — not a small set. The issue is the amide N-H next to the carbamate: it can rearrange into multiple N=C/O forms, and some of those are chemically quite different from the one you drew. The carbamate itself is also tautomeric (O=C vs. O↔C).\n\nThis is the reason to resolve tautomerism *before* running any other calculation. Every property — reactivity, energy, conformation — describes whichever tautomeric form you happen to have assumed, and if you compute on the minor form, everything downstream reads as if it were studying the actual compound. \n\n**Next step:** Call `run_tautomer_resolution` on this SMILES with your working solvent (or gas phase if you don't have a preference yet). It will rank the six forms by free energy and tell you which one dominates. Then run your conformer search on the major tautomer's SMILES.\n\nThe good news is that the dominant form will almost certainly be the one you drew — the fully protonated amide and carbamate are usually lowest — but you need the calculation to confirm it, not a guess, before you spend time on conformers or any downstream number.",
+    "answered": true,
+    "tools_called": [
+      "describe_topology",
+      "enumerate_tautomers"
+    ],
+    "tool_results": [
+      {
+        "tool": "describe_topology",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"chem:describe_topology\">\n{\n  \"smiles\": \"CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1\",\n  \"atom_count\": 51,\n  \"heavy_atom_count\": 23,\n  \"rotatable_bonds\": 6,\n  \"rings\": "
+      },
+      {
+        "tool": "enumerate_tautomers",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"chem:enumerate_tautomers\">\n{\n  \"smiles\": [\n    \"CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1\",\n    \"CC(C)CC(N=C(O)OC(C)(C)C)=C(O)NCc1ccccc1\",\n    \"CC(C)CC(N=C(O)OC(C)(C"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "6"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.74,
+    "event_counts": {
+      "token": 23,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a5462eebf2734fa19cee12e1ac8adc9a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -23,7 +23,24 @@
        So the objects the *pods* read are ordinary tracked resources now, and the pre-install
        migrate Job — which Helm runs before any ordinary resource exists — gets its own hook-scoped
        copies. Two objects cannot share a name across that boundary (Helm refuses to adopt a hook
-       into the manifest), so the rename is the load-bearing part rather than the annotation.
+       into the manifest), so a rename is necessary. **It is not sufficient, and this comment
+       shipped saying it was** ("the rename is the load-bearing part rather than the annotation"):
+       renaming the *hook* copies leaves the tracked ones claiming the two names every live release
+       already holds, and both directions across that boundary then break. Measured against a real
+       API server (k3s v1.29.9), on a release installed from the previous chart:
+
+         * `helm upgrade` fails at prepare time, before a hook runs — the live objects were created
+           by `execHook`, which does a plain `Create` with no metadata visitor, so they carry no
+           `meta.helm.sh/release-name`/`-namespace` and Helm refuses to import them. `--dry-run`
+           refuses identically, which is what keeps this from being silent: `openshift.sh` defaults
+           to `DRY_RUN=true`, so nothing is half-applied. The one-time adoption an operator runs is
+           in `deploy/README.md` § "Upgrading a release installed before this chart" and in
+           `docs/guides/runbook.md`; `openshift.sh` performs it for the release path.
+         * `helm rollback` to a pre-change revision *deletes* both objects — they are in the current
+           manifest and not in that one — while restoring Deployments that name `chemclaw-config` in
+           a non-optional `envFrom` and run as ServiceAccount `chemclaw`. Helm prints "Rollback was
+           a success!" and every pod is then unstartable. That is why the two carry
+           `chemclaw.rollbackKeepPolicy` below.
 
        The hook copies are rendered from the same values in the same release, so they cannot
        disagree with the tracked ones; on an *upgrade* they are also the more correct source, since
@@ -72,11 +89,13 @@
          `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` exists to catch. Derived, it is the same
          number the HPA obeys. When the HPA is off, the fixed replica count is that number. */}}
   CHEMCLAW_SERVICE_FLEET_REPLICAS: {{ if .Values.service.autoscaling.enabled }}{{ .Values.service.autoscaling.maxReplicas | quote }}{{ else }}{{ .Values.service.replicas | quote }}{{ end }}
-  {{- /* The connection budget's two inputs, derived for the same reason as the line above: a pool
-         is opened per process, so what the database sees is `pg_pool_max_size × processes`, and a
-         hand-written process count is a second copy of the topology. `chemclaw.pooledProcesses`
-         counts the pods this chart renders that call `chemclaw.core.db.pooling`. */}}
-  CHEMCLAW_PG_FLEET_POOLED_PROCESSES: {{ include "chemclaw.pooledProcesses" . | quote }}
+  {{- /* The connection budget's two inputs, derived for the same reason as the line above: what
+         the database sees is `pg_pool_max_size × pools`, and a hand-written count is a second copy
+         of the topology. `chemclaw.fleetPools` counts POOLS rather than pods — a front-door
+         process holds three (the stores', `/readyz`'s own statement-timeout key, and the
+         checkpointer's) and every other role holds one. Counting pods declared 136 against a
+         measured floor of 208. */}}
+  CHEMCLAW_PG_FLEET_POOLS: {{ include "chemclaw.fleetPools" . | quote }}
   CHEMCLAW_PG_FLEET_MAX_CONNECTIONS: {{ .Values.postgres.maxConnections | quote }}
   {{- /* The third budget of the same shape, and the same reason it is derived: the calculation
          backend is one shared pod, `worker_max_concurrent_activities` bounds one worker *process*,
@@ -87,6 +106,36 @@
          runs no calc worker, because then it dispatches no durable calculation at all. */}}
   CHEMCLAW_CALC_FLEET_WORKER_PROCESSES: {{ include "chemclaw.calcWorkerProcesses" . | quote }}
 {{- end -}}
+{{- /* The one thing that makes the hook→tracked move survivable in the *backward* direction.
+
+       `helm rollback` restores a revision's manifest, and anything in the current manifest that is
+       absent from that one is deleted. A revision installed by the previous chart has no ConfigMap
+       and no ServiceAccount in its manifest at all — they were hooks — so rolling back across that
+       boundary deletes the configuration and the identity that the very Deployments it is
+       restoring cannot start without, and reports success. Measured on k3s v1.29.9: after
+       `helm rollback <rel> 1`, `configmaps "chemclaw-config" not found` and
+       `serviceaccounts "chemclaw" not found`, with `chemclaw-service` still carrying
+       `envFrom: [{configMapRef: {name: chemclaw-config}}]` and `serviceAccountName: chemclaw`.
+
+       `helm.sh/resource-policy: keep` is read off the *live* object at deletion time, so rendering
+       it here is what protects a rollback taken later. Measured on the same cluster: with it, the
+       same rollback leaves both objects standing and the pods start.
+
+       **What it costs, stated because it is a real behavioural change.** `helm uninstall` now
+       leaves these two behind — which is what the previous chart did, and half of what moving them
+       into the manifest bought. Everything else the move bought is untouched: `keep` skips
+       *deletion* only, so a rollback inside this chart's own lineage still restores the previous
+       revision's `data:` (measured: `CHEMCLAW_LLM_MODEL` went `gpt-oss` → `changed-model` →
+       `gpt-oss` across upgrade and rollback). A total outage from the operation whose purpose is
+       to end one is the larger harm, and this is the only mechanism a chart has against it —
+       `helm rollback` runs no hook this chart could declare.
+
+       Removable, with a stated trigger: when no release's retained history reaches a revision
+       installed before this chart (`helm history <rel>`), the boundary is behind that deployment
+       and this annotation is a line to delete. */ -}}
+{{- define "chemclaw.rollbackKeepPolicy" -}}
+"helm.sh/resource-policy": keep
+{{- end -}}
 {{- /* The configuration the running pods read: an ordinary resource, so the release owns it. */ -}}
 apiVersion: v1
 kind: ConfigMap
@@ -94,6 +143,8 @@ metadata:
   name: {{ include "chemclaw.configMapName" . }}
   labels:
     {{- include "chemclaw.labels" . | nindent 4 }}
+  annotations:
+    {{- include "chemclaw.rollbackKeepPolicy" . | nindent 4 }}
 data:
 {{- include "chemclaw.configData" . }}
 ---
@@ -118,10 +169,11 @@ metadata:
   name: {{ .Values.serviceAccount.name }}
   labels:
     {{- include "chemclaw.labels" . | nindent 4 }}
-  {{- with .Values.serviceAccount.annotations }}
   annotations:
+    {{- include "chemclaw.rollbackKeepPolicy" . | nindent 4 }}
+    {{- with .Values.serviceAccount.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 {{- /* No component calls the Kubernetes API, so the projected API token is not mounted into any pod
        using this account. Explicit `false` rather than an omission: the cluster default is to mount
        it, so leaving this out is the insecure posture. */}}
@@ -131,7 +183,15 @@ automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountT
        a fresh install the account above does not exist yet, and a Job pod naming an absent
        ServiceAccount is never admitted — it would sit unscheduled until `activeDeadlineSeconds`.
        Same annotations and the same refusal of the API token: this is the runtime account's twin
-       for the seconds a release takes, not a wider one. */ -}}
+       for the seconds a release takes, not a wider one. It carries no `resource-policy` — a hook
+       Helm never tracked is not a hook a rollback can delete.
+
+       The `with` guard is not decoration: `.Values.serviceAccount.annotations` is one placeholder
+       this chart ships as inert scaffolding and documents as "removed the day nobody wants that"
+       (`deploy/README.md`), and an environment values file that writes `serviceAccount:
+       annotations:` coalesces it to nil — which a bare `toYaml` emits as a lone `null` under a
+       populated `annotations:` mapping, failing the render of the *whole chart*, not one object.
+       The tracked twin above gained this guard and this copy shipped without it. */ -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -142,7 +202,9 @@ metadata:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-10"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
-    {{- toYaml .Values.serviceAccount.annotations | nindent 4 }}
+    {{- with .Values.serviceAccount.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
 {{- if .Values.secrets.create }}
 ---

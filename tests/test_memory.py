@@ -468,6 +468,36 @@ def test_interaction_note_captures_confirmed_answer() -> None:
     assert note.outgoing_links() == ["reaction-eln-2026-002"]
 
 
+def test_a_correction_is_recorded_as_a_correction_not_as_agreement() -> None:
+    """The one case where the system was demonstrably wrong must not be stored as it agreeing.
+
+    The body was rendered `A (confirmed):` unconditionally, while this module's docstring, the
+    tool's docstring and the system prompt all said "confirmed **or corrected**". So a chemist
+    correcting an answer — the highest-value thing they ever hand this system, and the only place
+    that fact exists — went into the record as a confirmation, and a later reader could not tell
+    the two apart.
+    """
+    note = note_from_confirmed_answer(
+        "q-43",
+        "What base did we use on the biaryl?",
+        "Potassium carbonate, not caesium.",
+        None,
+        corrected_from="Caesium carbonate, per the earlier screen.",
+    )
+    body = note.body.lower()
+    assert "corrected" in body
+    assert "confirmed" not in body, "a correction still reads as a confirmation"
+    # And *what* was wrong, not merely that something was: the superseded answer is the signal.
+    assert "Caesium carbonate, per the earlier screen." in note.body
+
+
+def test_a_confirmation_is_unchanged_by_the_correction_path() -> None:
+    """Empty `corrected_from` means the chemist confirmed — the default stays exactly as it was."""
+    note = note_from_confirmed_answer("q-44", "Did the degas step help?", "Yes, markedly.")
+    assert "(confirmed)" in note.body
+    assert "corrected" not in note.body.lower()
+
+
 def test_record_confirmed_answer_tool_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The agent tool routes a confirmed answer through the (fake) PR-gate (5.5 wiring)."""
     from chemclaw.agent import memory_tools

@@ -8,9 +8,10 @@ person who asked?*
 
 Two deliberate choices.
 
-**The judge is a different, stronger model than the agent under test** (`live_probe_judge_model`).
-Grading is one call per probe against the agent's many, so the quality is nearly free; and a judge
-sharing the agent's blind spots would ratify them.
+**The judge is a different, stronger model than the agent under test**
+(`model_routes["live-probe-judge"]`). Grading is one call per probe against the agent's many, so the
+quality is nearly free; and a judge sharing the agent's blind spots would ratify them — which is why
+an unset route is a WARNING rather than a silent fallback to the agent's own model.
 
 **A bucket-C probe is graded on refusal, not on content.** The system genuinely cannot schedule an
 instrument or classify a mutagenic impurity. An answer that says so plainly is the correct answer,
@@ -24,8 +25,11 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Literal
+from collections.abc import Mapping
+from functools import cache
+from typing import Any, Literal
 
+from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
@@ -142,6 +146,76 @@ def _prompt(probe: Probe, outcome: ProbeOutcome) -> str:
     )
 
 
+# What an endpoint calls a reply that stopped because it ran out of budget. Two spellings, for the
+# reason `agent/llm_provider._CONTEXT_LENGTH_MARKERS` keeps two: an OpenAI-compatible gateway says
+# `length`, and one that relays a vendor's own field verbatim can say `max_tokens`. LangChain does
+# not normalise this — it forwards whatever `finish_reason`/`stop_reason` the response carried — so
+# recognising both is cheaper than being wrong about which gateway a site runs.
+#
+# **Missing it does not fabricate a verdict, and that is deliberate belt-and-braces.** A truncated
+# reply has no closing brace, so the JSON parse below fails and the probe is already `ungraded`
+# rather than `unserved`; this exists to say *why* in the reason, and to catch the case where a
+# reply is cut after a syntactically complete object. Conflating the two mislabelled 65 of 190
+# probes once, which is the whole reason `ungraded` is a verdict.
+_TRUNCATED = frozenset({"length", "max_tokens"})
+
+
+def _truncated(response: Any) -> bool:
+    """Whether the judge's reply was cut off by its own token ceiling."""
+    metadata = getattr(response, "response_metadata", None)
+    if not isinstance(metadata, Mapping):
+        return False
+    return any(metadata.get(key) in _TRUNCATED for key in ("finish_reason", "stop_reason"))
+
+
+def judge_model() -> str:
+    """The model the judge will actually run on, for a report that names it.
+
+    A reader of an A/B table has to know whether the grader was the model under test — an unset
+    `live-probe-judge` route makes the run self-grading, which `_judge_client` warns about — so the
+    report needs the *resolved* name rather than the route key. Derived here rather than in the
+    caller so the fallback is stated once: this used to be a `live_probe_judge_model` setting
+    carrying a vendor model id in this repository, which is what `model_routes` exists to avoid.
+    """
+    return settings.model_routes.get("live-probe-judge") or settings.llm_model
+
+
+@cache
+def _judge_client() -> Any:
+    """The judge's chat model, from the one seam that builds one — built once per process.
+
+    `@cache`d for the reason `agent/verifier._default_client` is: construction is pure config, a
+    run grades ~190 probes, and rebuilding the client per probe would redo TLS and transport setup
+    on every one. It also fixes the frequency of the warning below — a property of the *run*, said
+    once, rather than 190 identical lines.
+
+    Routed rather than named: `build_chat_model` resolves `model_routes["live-probe-judge"]`
+    against the gateway, so this module names no model and imports no provider client
+    (`D-2026-09-04-a-gateway-is-the-only-provider` — it was the last first-party importer of the
+    `anthropic` SDK, posting that vendor's protocol to `<gateway>/v1/messages`, which against an
+    OpenAI-compatible gateway is a doubled path and a 404 degraded to `ungraded` on every probe).
+
+    An unset route falls back to `llm_model` — the model under test — which quietly turns the run
+    into self-grading. That is the one property of this judge worth a log line, so it gets one.
+
+    `max_tokens` is bound rather than configured, because the seam's ceiling is the *agent's*
+    answer allowance and this call needs its own: at 1024 the judge ran out of budget mid-JSON on
+    long answers, the closing brace was never emitted, and the parse failure was recorded as a
+    verdict of `unserved` on 65 of 190 probes.
+    """
+    from chemclaw.agent.llm_provider import build_chat_model
+
+    if not settings.model_routes.get("live-probe-judge"):
+        logger.warning(
+            "model_routes has no 'live-probe-judge' entry, so the judge runs on %r — the same "
+            "model as the agent under test. A judge sharing the agent's blind spots ratifies them.",
+            settings.llm_model,
+        )
+    return build_chat_model("live-probe-judge").bind(
+        max_tokens=settings.live_probe_judge_max_tokens
+    )
+
+
 async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
     """Grade one answer. An unanswered turn is `unserved` without spending a judge call."""
     if not outcome.answered:
@@ -149,27 +223,19 @@ async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
             probe_id=probe.id, verdict="unserved", reason="no answer event was produced"
         )
 
-    import httpx
-    from anthropic import AsyncAnthropic
-
-    # Honour the deployment's LLM destination rather than defaulting to the public Anthropic API,
-    # and never inherit an ambient proxy (trust_env=False): the judge prompt embeds the probe
-    # answer and its verified tool outputs — real chemistry — so where that goes is a configured
-    # decision, not the SDK's hardcoded api.anthropic.com. base_url falls back to the SDK default
-    # only when no gateway is configured (a developer's own key on the loopback dev lane).
-    base_url = settings.llm_base_url or None
-    client = AsyncAnthropic(base_url=base_url, http_client=httpx.AsyncClient(trust_env=False))
-    response = await client.messages.create(
-        model=settings.live_probe_judge_model,
-        # Generous on purpose. At 1024 the judge ran out of budget mid-JSON on long answers, the
-        # closing brace was never emitted, and the parse failure below was recorded as a verdict
-        # of `unserved` — a grading crash reported as a system failure, on 65 of 190 probes.
-        max_tokens=settings.live_probe_judge_max_tokens,
-        system=_SYSTEM,
-        messages=[{"role": "user", "content": _prompt(probe, outcome)}],
-    )
-    text = "".join(block.text for block in response.content if block.type == "text").strip()
-    if response.stop_reason == "max_tokens":
+    # **Through the seam, which is what makes the transport one decision rather than two.** This
+    # built its own client until 2026-09-04, and the cost was measured on `main` in the same week:
+    # it read `llm_base_url` and *not* `llm_tls_ca_bundle`, so a deployment pointing the judge at
+    # exactly the internal gateway that setting exists for could not verify the certificate, and
+    # every grading call failed at TLS. That fix reused `_tls_http_client` explicitly; going
+    # through `build_chat_model` makes it structural instead — the agent's client and the judge's
+    # cannot trust different stores, because there is only one place that builds either.
+    client: Any = _judge_client()
+    response = await client.ainvoke([SystemMessage(_SYSTEM), HumanMessage(_prompt(probe, outcome))])
+    # `.text` rather than `.content`: an answer may arrive as a list of content blocks, and this is
+    # the accessor that flattens it — the same read `_prompt` would otherwise have to do by hand.
+    text = str(response.text).strip()
+    if _truncated(response):
         logger.warning("judge hit the token ceiling on %s", probe.id)
         return Judgement(
             probe_id=probe.id, verdict="ungraded", reason="judge reply hit the token ceiling"

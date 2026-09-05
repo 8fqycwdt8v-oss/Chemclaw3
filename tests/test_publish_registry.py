@@ -14,9 +14,9 @@ land on the same subject, which is what a split looks like from the outside.
 
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.publish import project as projection
@@ -27,7 +27,13 @@ from chemclaw.publish.properties import (
     definition_for,
     to_canonical,
 )
-from chemclaw.publish.record import PropertyFact
+from chemclaw.publish.record import (
+    Conditions,
+    PropertyFact,
+    Subject,
+    SubjectMember,
+    TheoryLevel,
+)
 
 
 def test_every_canonical_unit_is_reachable_within_its_dimension() -> None:
@@ -287,7 +293,9 @@ def test_the_sink_gate_checks_every_discovered_sink_not_only_the_enabled_ones(
     assert found and "NoSuchClassAtAll" in found[0], found
 
 
-def test_a_quantity_registered_for_another_table_cannot_be_written_as_a_scalar() -> None:
+def test_a_quantity_registered_for_another_table_cannot_be_projected_as_a_scalar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`scope_kind` is a control, not a comment — the claim its own definition makes.
 
     Nothing compared a fact's property against its declaration: not the projectors, not the row
@@ -299,13 +307,39 @@ def test_a_quantity_registered_for_another_table_cannot_be_written_as_a_scalar()
     `calculation` names the scalar table and covers both of its row scopes, which is why the seven
     per-species facts a reaction publishes at `member` scope are not violations — a species' own
     Gibbs energy is a `property_value` row, and `FactScope` on the row says which kind.
+
+    **Driven through `project`, because the check is the projection's and not the model's.** As a
+    `PropertyFact` validator it also ran on the parse of a document already queued — see
+    `tests/test_publish_outbox.py::test_a_document_this_system_already_queued_stays_readable` —
+    which turned a write-side control into a filter that retired stored rows. This test fails in
+    both directions: with the guard gone the fabricated projector's record is built, and with the
+    guard back on the model the fact cannot be constructed and the raise is the wrong type.
     """
     conformer_scoped = next(
         name for name, definition in REGISTRY.items() if definition.scope_kind == "conformer"
     )
 
-    with pytest.raises(ValidationError, match="belong in that table"):
-        PropertyFact(property=conformer_scoped, value=1.0, unit="kcal/mol")
+    def _misplacing(_payload: dict[str, Any]) -> tuple[Any, Any, Any, dict[str, Any]]:
+        """A projector that files a per-conformer quantity in the scalar table."""
+        return (
+            Subject(
+                kind="molecule",
+                members=[SubjectMember(ordinal=0, role="subject", smiles="CCO")],
+                label="CCO",
+            ),
+            Conditions(),
+            TheoryLevel(method="GFN2-xTB"),
+            {"properties": [PropertyFact(property=conformer_scoped, value=1.0, unit="kcal/mol")]},
+        )
+
+    monkeypatch.setitem(projection.PAYLOAD_PROJECTORS, "MisplacingResult", _misplacing)
+    with pytest.raises(projection.ProjectionError, match="belong in that table"):
+        projection.project(
+            calc_ref="misplaced@1:a:b",
+            calc_type="probe",
+            payload={},
+            payload_kind="MisplacingResult",
+        )
 
 
 def test_every_projected_scalar_is_registered_for_the_scalar_table() -> None:

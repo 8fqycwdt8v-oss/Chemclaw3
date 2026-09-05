@@ -1249,8 +1249,9 @@ async def _require_mock_lane() -> None:
         raise RuntimeError(
             f"the mock model is not answering at {MOCK_STATS}, so this storm would drive a real "
             "model at load — cost, rate limits, and none of the malformed shapes it exists to "
-            "test. Bring the lane up pointed at the mock: "
-            "CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1 make live-up. "
+            "test. Bring the lane up pointed at the mock: `make live-up` with no gateway "
+            "configured does exactly that — it starts the mock whenever the resolved "
+            "`llm_base_url` is the address the mock serves. "
             "Note that `make live-e2e-full-stack` deliberately runs a real model and is a "
             "different lane from this one."
         )
@@ -1341,7 +1342,13 @@ def main(argv: list[str] | None = None) -> int:
     notes = {
         "families planned / ran": f"{len(planned)} / {len(ran & set(planned))}",
         "mock requests served": served,
-        "ANTHROPIC_API_KEY set": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        # **The gateway this run actually drove**, not whether a vendor key happens to be in the
+        # environment. That is what this line asked until 2026-09-04, and after
+        # `D-2026-09-04-a-gateway-is-the-only-provider` nothing in `src/` reads that variable — so
+        # a real-gateway run reported `False` and a mock run in an environment carrying a stray
+        # vendor key reported `True`. `soak.sh` writes this report every round, and a note about
+        # the environment where a note about the run belongs is worse than no note.
+        "model gateway": settings.llm_base_url,
         "wall clock": f"{time.monotonic() - started:.0f} s",
         "disk free": f"{shutil.disk_usage('.').free // 1_000_000_000} GB",
     }

@@ -1,0 +1,66 @@
+{
+  "probe": {
+    "id": "ws-04",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What do you already know about how I like things done? I want to see it before I ask you to plan anything.",
+    "expects_tools": [
+      "recall_preferences",
+      "read_file",
+      "ls"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a preference that was never recorded",
+      "another person's preferences"
+    ],
+    "direction": "A read of the durable memory this asker owns, reported as it stands. If nothing is on file the answer must say so plainly — an empty memory is a real answer and inventing a plausible preference is the worst failure available here. If there are entries it should show them with enough context to be recognised and offer to change or drop any of them, because the point of asking is usually to correct one.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-04",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What do you already know about how I like things done? I want to see it before I ask you to plan anything.",
+    "profile": "",
+    "answer": "I'll check what preferences you've set up in the system.You have one stored preference:\n\n**`solvent_exclusion_DMF`**: Project decision to exclude DMF from all future protocol and condition recommendations. This is a deliberate constraint accepting a yield penalty rather than dealing with REACH authorisation complexity — so whenever I'm proposing conditions or generating a protocol, I'm not to suggest DMF as a solvent option.\n\nThat's all the system has recorded about how you like things done. If you have other standing preferences — a current project, preferred base or reagent system, units you think in, consistency constraints, equipment or safety limits — this is the place to record them so they travel with you across conversations and sessions. They won't be chemistry knowledge (that goes in the graph where humans review it), but working method that shapes how I answer.\n\nDo you want to add any others before you ask me to plan something?",
+    "answered": true,
+    "tools_called": [
+      "recall_preferences"
+    ],
+    "tool_results": [
+      {
+        "tool": "recall_preferences",
+        "preview": "[Preference(key='solvent_exclusion_DMF', value='Project decision: do not use DMF. REACH authorisation complexity is considered a greater burden than accepting a yield penalty. This constraint applies "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.13,
+    "event_counts": {
+      "token": 12,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "af56ea91f5de46d295e3ec06db3dff5b",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

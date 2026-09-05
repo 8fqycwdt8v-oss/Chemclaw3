@@ -1,0 +1,70 @@
+{
+  "probe": {
+    "id": "ms-07",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I already know the two forms of my methylpyrazole: Cc1cc[nH]n1 and Cc1ccn[nH]1. I do not need them enumerated, I need to know which one I actually have in DMSO at room temperature and by how much.",
+    "expects_tools": [
+      "rank_species"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a population or free-energy gap the job did not return",
+      "a form that was not in the two the asker supplied",
+      "a rate, a barrier or an interconversion time"
+    ],
+    "direction": "The species set arrives with the question, which is precisely the case the ranking job exists for, and the answer should take the asker at their word rather than re-enumerating. Grade three things. That a ranking actually ran, rather than the well-known answer being recited. That the numbers reported are the job's. And the reading: the two forms are ranked by free energy in the requested medium, a gap above roughly 3 kcal/mol settles it and everything downstream should use that form, while a small gap is also an answer and a more important one — both are populated, and any property that differs between them is not a single number. Naming the ranking level and what it bought is a plus; presenting a population to two decimal places is a miss, because a population is approximate twice over, once through the sampling and once through several kcal/mol of method error.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-07",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I already know the two forms of my methylpyrazole: Cc1cc[nH]n1 and Cc1ccn[nH]1. I do not need them enumerated, I need to know which one I actually have in DMSO at room temperature and by how much.",
+    "profile": "",
+    "answer": "I'll rank these two tautomers in DMSO at room temperature to tell you which dominates and by how much.**At room temperature in DMSO, you have N2-H (Cc1ccn[nH]1) as the dominant form at ~78%, with N1-H (Cc1cc[nH]n1) making up ~22%.**\n\nThe energy gap is 0.76 kcal/mol, which is small enough that both forms are genuinely present — you are not looking at a complete population shift, but a real 4:1 mixture favoring the N2-protonated isomer.\n\nOne caveat: the calculation assumes both tautomers have rotational symmetry number 1 (no symmetry). If one of these forms has internal rotation symmetry that the calculator missed, the entropy could be off by ±0.4 kcal/mol, which could shift the population by a few percentage points. For methylpyrazole neither form has an obvious rotational axis, so 1 is the right choice; but if you had measured this by NMR integration and found a different split, that would be the evidence to trust.",
+    "answered": true,
+    "tools_called": [
+      "rank_species"
+    ],
+    "tool_results": [
+      {
+        "tool": "rank_species",
+        "preview": "summary='tautomers of 2: N2-H dominates at 78%' data={'kind': 'tautomers', 'method': 'GFN2-xTB', 'solvent': 'DMSO', 'temperature_k': 298.15, 'level': 'standard', 'species': [{'smiles': 'Cc1ccn[nH]1', "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "78",
+      "0.76",
+      "0.4"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 18.69,
+    "event_counts": {
+      "token": 13,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "bd484fe63604450686c0d754cd118fe7",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

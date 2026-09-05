@@ -36,12 +36,22 @@ from chemclaw.core.migrate import (
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-# The two prefixes that were already duplicated when this guard was written, and the reason it is a
+# The two collisions that were already applied when this guard was written, and the reason it is a
 # ratchet rather than a flat rule. Both are applied everywhere this schema runs, and
 # `schema_migrations` keys on the **filename**: renaming one would re-apply it on every existing
-# database and fail on the objects it already created. So they are frozen here by name, and every
-# future prefix has to be unique.
-_APPLIED_DUPLICATE_PREFIXES = frozenset({"037", "043"})
+# database and fail on the objects it already created. So they are frozen here, and every future
+# prefix has to be unique.
+#
+# **The exemption is the four filenames, not the two prefixes**, and it shipped as the prefixes —
+# which exempted exactly the case the test below exists for. `037` and `043` are the only already-
+# used low prefixes in the tree, so "a third file numbered into an already-used low prefix" could
+# only ever be a third `037` or a third `043`, and a prefix-keyed exemption waves both through. The
+# symmetric staleness check had the same hole: `< 2` fires when a grandfathered pair loses a member
+# and never when it gains one.
+_APPLIED_DUPLICATES: dict[str, frozenset[str]] = {
+    "037": frozenset({"037_bo_suggestion_provenance.sql", "037_document_index.sql"}),
+    "043": frozenset({"043_session_listing.sql", "043_session_message_shape.sql"}),
+}
 
 
 def test_no_two_migrations_share_a_number() -> None:
@@ -64,18 +74,23 @@ def test_no_two_migrations_share_a_number() -> None:
         prefixes.setdefault(path.name.split("_", 1)[0], []).append(path.name)
 
     collisions = {
-        prefix: names
+        prefix: sorted(set(names) - _APPLIED_DUPLICATES.get(prefix, frozenset()))
         for prefix, names in prefixes.items()
-        if len(names) > 1 and prefix not in _APPLIED_DUPLICATE_PREFIXES
+        if len(names) > 1 and set(names) != _APPLIED_DUPLICATES.get(prefix, frozenset())
     }
     assert not collisions, (
         f"two migrations share a number: {collisions}. Give the new one the next free prefix — "
         "never renumber an applied file, whose name is its key in `schema_migrations`"
     )
-    # The other direction, so the exemption cannot outlive its subject: a grandfathered prefix that
-    # is no longer duplicated is a line to delete, not a permanent licence.
-    stale = {prefix for prefix in _APPLIED_DUPLICATE_PREFIXES if len(prefixes.get(prefix, [])) < 2}
-    assert not stale, f"_APPLIED_DUPLICATE_PREFIXES exempts {stale}, which is no longer duplicated"
+    # The other direction, so the exemption cannot outlive its subject: a grandfathered pair that
+    # is no longer exactly those two files is a line to delete, not a permanent licence. Compared as
+    # a set of names rather than a count, so both a removal and an addition fail here.
+    stale = {
+        prefix: sorted(names)
+        for prefix, names in _APPLIED_DUPLICATES.items()
+        if set(prefixes.get(prefix, [])) != names
+    }
+    assert not stale, f"_APPLIED_DUPLICATES exempts {stale}, which is not what is in `infra/sql`"
 
 
 def test_the_configured_directory_exists_and_holds_the_migrations() -> None:

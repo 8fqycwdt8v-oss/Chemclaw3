@@ -1,0 +1,64 @@
+{
+  "probe": {
+    "id": "pt-01",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I need to get the SNAr on our 2,4-dichloropyrimidine working with N-methylpiperazine — selectivity at the 4-position, 2 g of the pyrimidine, and we've banned DMF on this project. Write me a procedure I can actually run Thursday.",
+    "expects_tools": [
+      "structure_experiment_request",
+      "draft_experiment_protocol",
+      "substrate_precedent",
+      "conditions_for_similar_reaction",
+      "reagent_frequency",
+      "workup_precedent",
+      "condense_protocols",
+      "resolve_compound"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a yield, conversion or selectivity ratio presented as something the record measured when no cited run reports it",
+      "a condition set drawn from general knowledge while the in-house record was not consulted",
+      "that the protocol has been reviewed, approved or scheduled by anyone",
+      "that DMF is acceptable here, or a solvent substitution made without saying it was substituted"
+    ],
+    "direction": "The sentence contains four things — a transformation, a regiochemical objective, a scale and an exclusion — and a good answer structures that reading first and shows it, marking the 2 g and the DMF ban as the chemist's own words and anything it supplied (the vessel, the equivalents, the base) as its own inference. Named species are resolved rather than hand-written as SMILES. It then argues the conditions from what the record actually ran: whether this pyrimidine has been through an SNAr before, what base and solvent comparable displacements used and how often, and how the reagent was quenched — work-up is where a generated procedure is thinnest and where the technician notices first. What the record does not settle it computes or says it did not. The stored design comes back with an id and its checks, and the answer reports the warnings rather than suppressing them: a warning is a judgment for the chemist to make. Choosing a non-DMF solvent is required, and saying *which* constraint forced the swap is what makes it arguable. An answer that produces a plausible procedure with no citation behind any number is the failure here even when the chemistry is textbook-correct — the same reflex on a substrate with no textbook entry writes conditions out of nowhere.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pt-01",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I need to get the SNAr on our 2,4-dichloropyrimidine working with N-methylpiperazine — selectivity at the 4-position, 2 g of the pyrimidine, and we've banned DMF on this project. Write me a procedure I can actually run Thursday.",
+    "profile": "no-tools",
+    "answer": "I need to be direct: I can't write you a procedure without knowing what you've already tried and what worked (or didn't) on this specific project. SNAr selectivity on dichloropyrimidines is real chemistry, but the devil is entirely in the solvent choice and conditions, and you've already ruled out the obvious one.\n\nHere's what I know and what I don't:\n\n**What I can tell you:**\n- 2,4-dichloropyrimidine: the 4-position is activated *less* than the 2-position (C-4 is meta to two nitrogens; C-2 is ortho to two). So thermodynamically you'd expect the 2-position to react faster.\n- For *inverted* selectivity (4 > 2), you typically need:\n  - **Sterically hindered nucleophiles** (N-methylpiperazine qualifies — the N-methyl helps)\n  - **Polar aprotic solvent** (you've banned DMF, the classic choice)\n  - **Moderate base and temperature** to control kinetics rather than thermodynamics\n\n**What I cannot tell you without your project history:**\n1. **Have you already run this?** If yes: which solvent, base, temp, and ratio gave you any 4-selectivity? Even a failed attempt tells me where to steer you.\n2. **Alternative solvents you've tested or considered?** DMSO, NMP, or even mixed aqueous systems (if moisture-stable) are common DMF substitutes, but they behave differently.\n3. **Is this a scalability constraint or a regulatory/process ban?** That changes whether I'd suggest an exotic solvent.\n4. **Do you have selectivity data on the monosubstituted intermediate?** (If you make 2-substituted first, the second arylation might be easier to control.)\n\n**What I'd actually suggest for Thursday:**\n\nPull your ELN or project notes—show me:\n- What solvent/base/temp combos you've already run\n- What selectivity you achieved (or what side product you made)\n- Whether you have any relevant precedent from analogous arenes\n\nThen I can write you a real procedure that builds on what you know.\n\nIf you genuinely have *no* prior data and need to start from scratch by Thursday, that's a different problem—you'd be running a risky one-shot, and we should talk about de-risking it (test run, or picking conditions from literature if it exists).",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.88,
+    "event_counts": {
+      "token": 24,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "789da00c303d44d3992fc5b511e959c9",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

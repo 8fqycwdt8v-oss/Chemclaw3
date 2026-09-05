@@ -25,6 +25,7 @@ from chemclaw.connectors.manifest import (
     NoAuth,
     StdioEndpoint,
 )
+from chemclaw.core.config import settings
 
 # Every endpoint must classify each tool it serves (D-167), so the shared fixture does too.
 _HTTP = {
@@ -337,6 +338,38 @@ def test_a_job_cannot_both_wait_on_a_person_and_declare_what_it_costs() -> None:
     assert JobSpec.model_validate({**_JOB, "awaits_answer": True}).awaits_answer is True
     with pytest.raises(ValidationError, match="no wall-clock ceiling to declare"):
         JobSpec.model_validate({**_JOB, "awaits_answer": True, "timeout_seconds": 900})
+
+
+def test_a_manifest_cannot_take_the_operators_ceiling_off_its_own_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`awaits_answer` was the one field a manifest could use to fund its own runtime.
+
+    `child_execution_timeout`'s argument is right and is not what this changes: a job that suspends
+    on a person has no correct finite ceiling, because a measured campaign is `(n_rounds + 1)`
+    waits and the shipped spec alone spans 154 days. That argument is about the *shape* of such a
+    job. It says nothing about who may claim the shape, and nothing checked the claim — measured, a
+    bundle from a directory on `connectors_dir` turned an 18,000 s fleet ceiling into `None` with
+    no setting changed, in a tree that refuses `transport: stdio` by default on the stated grounds
+    that a manifest is data.
+
+    Asserted through `build_job_tool` rather than through the model, because that is the one
+    function both `registry.job_tools` and `make connector-validate` go through: an ungated
+    declaration has to be a red validator rather than a workflow that has already started.
+    """
+    from chemclaw.connectors.jobs import ConnectorJobError, build_job_tool
+
+    job = JobSpec.model_validate({**_JOB, "awaits_answer": True})
+    with pytest.raises(ConnectorJobError, match="because a manifest is data"):
+        build_job_tool("acme", job)
+
+    # The shipped bundle keeps the shape, which is what makes this a gate and not a removal.
+    monkeypatch.setattr(settings, "connector_jobs_awaiting_answer", f"acme.{job.name}")
+    assert build_job_tool("acme", job) is not None
+
+    # And an ordinary job is untouched by the gate whatever it is set to.
+    monkeypatch.setattr(settings, "connector_jobs_awaiting_answer", "")
+    assert build_job_tool("acme", JobSpec.model_validate(_JOB)) is not None
 
 
 def test_a_bad_ceiling_in_a_real_manifest_names_the_file_it_is_in(tmp_path: Path) -> None:

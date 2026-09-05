@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-16",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Design me the forced degradation study for this molecule. Which conditions, and which sites should analytics be looking for?",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "predict_pka",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted degradation rate or extent",
+      "a stability, shelf-life or storage-condition conclusion",
+      "a claim that the calculation replaces the study"
+    ],
+    "direction": "Should treat calculation as a prior on *where* the molecule is vulnerable and say so explicitly. Oxidation: rank the electron-rich sites, and note that for abstraction chemistry the relevant ranking is C-H homolysis rather than electrophilic attack, because a weak C-H and an electron-rich site are different liabilities. Hydrolysis: a functional-group checklist, not a Fukui question — esters, amides, carbamates, lactones, lactams, imines, nitriles, epoxides — with ionisation noted where it changes rate or mechanism. Photolysis and thermal degradation are largely outside the tools and should be handed to the study rather than guessed. Precedent in the record for the compound class outranks any descriptor. Must state the hard limits: this is not a stability prediction, formulation effects (excipients, trace metals, peroxide impurities, moisture) are invisible, and the solid state is invisible.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-16",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Design me the forced degradation study for this molecule. Which conditions, and which sites should analytics be looking for?",
+    "profile": "no-tools",
+    "answer": "I don't see a molecule attached or referenced. To design a forced degradation study, I need:\n\n1. **The structure** – either a chemical name, SMILES string, or image of the molecule\n2. **The dosage form** – tablet, capsule, solution, suspension, etc. (affects which stressors matter)\n3. **Intended use** – pharmaceutical, food additive, cosmetic, etc.\n4. **Known sensitivities** – any chemistry you already know suggests the molecule is labile to heat, light, oxidation, etc.\n\nOnce you provide the molecule, I can advise on:\n\n- **Stress conditions**: thermal, hydrolytic (acidic, neutral, basic), oxidative (H₂O₂), photolytic (ICH Q1B guidelines)\n- **Likely degradation sites**: based on functional groups (esters, amides, acetals, phenols, amines, etc.)\n- **Analytical detection strategy**: HPLC method development, mass spec for structure elucidation of major degradants, impurity thresholds\n\nShare the structure and I'll give you a concrete study design.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 4.58,
+    "event_counts": {
+      "token": 11,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "3b9b82ad7bc74442becf5fc861e78ec5",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

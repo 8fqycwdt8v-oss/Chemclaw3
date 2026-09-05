@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "gr-24",
+    "section": 10,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Can Cl[Al](Cl)Cl and CC(Cl)=O go into the same vessel, or am I asking for trouble?",
+    "expects_tools": [
+      "screen_hazards",
+      "run_hazard_briefing"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an answer derived only from each substance separately, with no pairwise check",
+      "an incompatibility asserted with no rule or citation"
+    ],
+    "direction": "This is a reaction-level question, not two molecule-level ones: the interesting hazards live between the components. Both are in the corpus as a real Friedel-Crafts charge, so the answer can also say what was actually run and at what temperature.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-24",
+    "section": 10,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Can Cl[Al](Cl)Cl and CC(Cl)=O go into the same vessel, or am I asking for trouble?",
+    "profile": "no-tools",
+    "answer": "I'm being asked whether aluminum trichloride (AlCl₃) and acetyl chloride (CH₃COCl) can be mixed safely.\n\n**Short answer: Yes, you're asking for trouble.**\n\nHere's why:\n\n1. **AlCl₃ is a strong Lewis acid** – it's a notorious catalyst and electrophile that readily accepts electron pairs. It will coordinate with the carbonyl oxygen of acetyl chloride.\n\n2. **Acetyl chloride is an acyl halide** – the C=O is already polarized and vulnerable to nucleophilic attack. The chlorine is an excellent leaving group.\n\n3. **Friedel-Crafts acylation catalyst** – this mixture is *exactly* what you use to catalyze Friedel-Crafts acylation reactions. AlCl₃ activates acetyl chloride toward nucleophilic attack by forming a complex that makes the carbonyl carbon much more electrophilic.\n\n4. **Uncontrolled reactivity** – without a substrate (aromatic ring) present, the acetyl chloride will become highly activated and prone to:\n   - Polymerization\n   - Condensation reactions with trace moisture or impurities\n   - Heat generation\n   - Possible violent reaction\n\n5. **Corrosive and pyrophoric concerns** – Both are moisture-sensitive and corrosive. AlCl₃ is hygroscopic and can react violently with water. Acetyl chloride is volatile and hydrolyzes readily.\n\n**Practical advice:**\n- Keep them **separate** under inert atmosphere\n- If you must mix them, do so **slowly, under inert gas, in an appropriate solvent** with a substrate present (if you're doing an actual acylation)\n- Control temperature carefully\n- Use appropriate glassware and safety precautions\n\nUnless you're deliberately running a Friedel-Crafts acylation, storing or mixing these in the same vessel is a recipe for an exothermic, potentially violent reaction.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 5.94,
+    "event_counts": {
+      "token": 17,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "9776ae21c00f4d5f9c37ad03b4229b94",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

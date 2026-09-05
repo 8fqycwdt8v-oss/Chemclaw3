@@ -218,13 +218,14 @@ def test_a_turn_that_metered_no_tokens_books_none(
 
 
 def test_graph_usage_does_not_count_a_cached_token_twice() -> None:
-    """A cached token is one token, however the provider chose to report it.
+    """A cached token is one token, however the gateway chose to report it.
 
-    Anthropic's own API excludes cache reads from `input_tokens`, while the LangChain adapter
-    *includes* them and then breaks them out again under `input_token_details`. Reading both
-    without adjusting would bill every cached token as both a cheap read and a fresh input —
+    `langchain_openai` sets `input_tokens = prompt_tokens` — which OpenAI defines as *including*
+    the cached share — and then breaks that share out again under `input_token_details`. Reading
+    both without adjusting would bill every cached token as both a cheap read and a fresh input,
     overstating the priced input of exactly the deployments that cache best, which is the
-    population the split exists to measure (REV-10).
+    population the split exists to measure (REV-10). The key names are pinned in
+    `tests/test_upstream_surface.py`.
 
     So `input` here is the *residual*: what was neither read from nor written to the cache.
     """
@@ -242,6 +243,23 @@ def test_graph_usage_does_not_count_a_cached_token_twice() -> None:
     assert usage.total == 1200
     # The priced dimensions still account for every input token exactly once.
     assert usage.input + usage.cache_read + usage.cache_write == 1000
+
+
+def test_a_usage_block_with_no_cache_details_meters_full_input() -> None:
+    """The ordinary uncached reply: no `input_token_details`, so nothing is subtracted.
+
+    The axis this holds against the test above is absent-vs-present, which is the one that broke a
+    reader before: `cache` defaults to `{}` rather than to the mapping, so a `.get` on a missing
+    block must not fail the turn or silently zero the input.
+    """
+    usage = graph_usage_tokens(
+        SimpleNamespace(
+            usage_metadata={"input_tokens": 500, "output_tokens": 20, "total_tokens": 520}
+        )
+    )
+    assert (usage.cache_read, usage.cache_write) == (0, 0)
+    assert usage.input == 500
+    assert usage.unreadable == 0
 
 
 def test_a_chunk_with_no_usage_meters_nothing_and_is_not_called_unreadable() -> None:

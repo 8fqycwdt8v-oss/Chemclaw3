@@ -1,0 +1,88 @@
+{
+  "probe": {
+    "id": "op-01",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking the 4-bromoanisole Suzuki back up for a new analogue series. Before I write the study plan — what do we already know about this coupling in-house? Conditions, yields, what went wrong. I want the plan grounded in our own runs, not a textbook.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a run, yield or condition set that is not in a cited note",
+      "a literature or patent reference as the source",
+      "we have no records on this coupling"
+    ],
+    "direction": "Reconstructs what the record actually holds for this transformation and cites each note it used: the Suzuki biaryl run (its base, solvent system, temperature, degassing and isolated yield), the aqueous-protodeboronation failure mode, and the degassing / Pd cross-coupling scope playbooks. Every number traces to a note; anything the notes do not record is said to be not recorded rather than filled in. It then turns that into the shape of a study plan — what is already settled and therefore not worth re-running, and what is genuinely open. An answer that asks the chemist to supply the history it could have retrieved is a miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-01",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking the 4-bromoanisole Suzuki back up for a new analogue series. Before I write the study plan — what do we already know about this coupling in-house? Conditions, yields, what went wrong. I want the plan grounded in our own runs, not a textbook.",
+    "profile": "no-tools",
+    "answer": "I'll search the system for your in-house data on 4-bromoanisole Suzuki couplings.Let me try broader searches for bromoanisole and Suzuki coupling records:I'm not finding any records in the system for your 4-bromoanisole Suzuki couplings. The grep search across available files isn't returning matches, which suggests either:\n\n1. **The data isn't indexed in the searchable system** — reaction notes or ELN entries might exist but aren't being picked up by my search\n2. **No prior runs are recorded** — this may be a coupling you're restarting with fresh documentation\n\n**What I can't do:** I don't have direct database access to pull reaction records, optimization tables, or project histories. I can search indexed content, but if the data exists in a format or location that's not being found, I'll need you to point me toward it.\n\n**What you should check:**\n- Do you have old reaction notebooks or project folders with 4-bromoanisole Suzuki runs?\n- Is there an ELN project or campaign entry for this work?\n- Are there lab notes or a previous study plan document you can share?\n\nIf you can upload or point me to the relevant files, I can extract:\n- Conditions used (catalyst, ligand, base, solvent, temperature, time)\n- Yields and selectivity\n- Coupling partners tested\n- Failures or side reactions observed\n- Isolation/purification notes\n\nThis way your new study plan will be genuinely grounded in what you've learned, not guesswork.",
+    "answered": true,
+    "tools_called": [
+      "grep",
+      "grep",
+      "grep",
+      "grep",
+      "grep"
+    ],
+    "tool_results": [
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 8.14,
+    "event_counts": {
+      "token": 18,
+      "tool_call": 5,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d781969e6cfb49ac885a90bc3e98180d",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

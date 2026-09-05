@@ -1,0 +1,74 @@
+{
+  "probe": {
+    "id": "du-06",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We've just finished loading two years of ELN backlog. Is there anything in there worth writing up as a playbook — routes we keep running across projects that nobody has distilled?",
+    "expects_tools": [
+      "synthesize_memory",
+      "get_durable_job_status",
+      "recall_observations"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a playbook, a route or a recurring pattern the job has not returned",
+      "a count of playbooks found, before the job has finished",
+      "a note id or PR link for a playbook that was not proposed",
+      "that the distilled knowledge is now in the graph",
+      "that this runs automatically on a schedule"
+    ],
+    "direction": "The ask is exactly what the playbook miner is for, and the launch is the right first move. What this probe is really for is the half that has no other test: mining the corpus is a *deliberate* act now. D-2026-08-25 took the miners' Schedules away — each one opens pull requests, and knowledge arriving on a timer is knowledge nobody asked for — so an answer claiming this happens nightly, or that it already has, is asserting a mechanism that was removed. Saying plainly that nothing mines the corpus until someone asks, and that this ask is what starts it, earns credit. Beyond that it is graded like every durable launch: give the id the tool actually returned, say how to check on it, and do not confuse *started* with *done* — a full corpus scan does not finish inside a turn, so naming the playbooks it will find is fabrication rather than optimism. The right ending names what happens next, and it is a human one: what the job produces are *proposals*, opened as pull requests for a chemist to review, not knowledge that has already landed. An answer that also mentions the ungated observations tier — findings already accumulated that nobody has promoted — is reading the system correctly, since that is where a candidate playbook sits before anyone asks for one.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-06",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We've just finished loading two years of ELN backlog. Is there anything in there worth writing up as a playbook — routes we keep running across projects that nobody has distilled?",
+    "profile": "no-tools",
+    "answer": "I'll help you find patterns worth distilling into a playbook. Let me first understand what's in your ELN and then apply the playbook-distillation skill to identify recurring routes across projects.\n\nLet me start by exploring your data structure:Let me check what's available in the programme's data:I need to understand your question better. You mention \"two years of ELN backlog\" has been loaded, but I don't have direct access to your ELN database or reaction records from your programme's system. \n\nTo properly apply the **playbook-distillation** skill, I would need to:\n\n1. **Access your reaction data** — either by examining the system's stored reactions, or you providing me with a summary of what projects and transformations you've run across those two years\n2. **Identify patterns** — transformations or routes that appear ≥2 times across different projects\n3. **Cite supporting experiments** — pull the specific reaction notes where each pattern occurs\n4. **Distill generalizable insights** — write up what actually works and under what conditions\n\n**Can you help me in one of these ways?**\n\n- **Option A**: If your ELN is integrated into this system and I should have query access, let me know and I can search for reactions directly\n- **Option B**: Upload or paste a summary of your recent projects (targets, routes attempted, which ones succeeded), and I can identify patterns in what you've shared\n- **Option C**: Tell me specific areas where you suspect patterns (e.g., \"we've done indole synthesis three ways,\" \"we keep running ring-opening reactions\") and I can help structure a playbook if you provide the project details\n\nWhich approach works best for you?",
+    "answered": true,
+    "tools_called": [
+      "ls",
+      "ls"
+    ],
+    "tool_results": [
+      {
+        "tool": "ls",
+        "preview": "['/bo/', '/calc/', '/safety/', '/skills/']"
+      },
+      {
+        "tool": "ls",
+        "preview": "No files found"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 6.96,
+    "event_counts": {
+      "token": 36,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "1f7ca34368a34e4c9e367a469db9e2d5",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

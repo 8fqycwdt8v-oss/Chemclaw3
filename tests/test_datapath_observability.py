@@ -377,6 +377,12 @@ class _Retriever:
 
 def _chunk(source: str, note_id: str = "note-1") -> EvidenceChunk:
     """One chunk attributed to `source`, citing `note_id` — the unit the kept counter matches on."""
+    """One chunk attributed to `source`, citing `note_id`.
+
+    The id is a parameter because the kept counter is keyed on `(source_note_id, content)` — the
+    same key both merge paths dedup on — so two chunks sharing an id are *one note two legs found*,
+    which is a different situation from two legs finding different notes.
+    """
     return EvidenceChunk(content="x", source_note_id=note_id, retriever=source)
 
 
@@ -391,36 +397,34 @@ def test_a_starved_source_reads_as_zero_rather_than_as_absent() -> None:
     `lexical` here is genuinely starved: it found a note the merged result does not contain. That
     is the state the alert exists for, and the test below is its counterpart.
     """
-    record_kept_chunks(
-        [_chunk("graph")],
-        found=[("graph", [_chunk("graph")]), ("lexical", [_chunk("lexical", "note-2")])],
-    )
+    offered = _chunk("graph")
+    record_kept_chunks([offered], {"graph": [offered], "lexical": [_chunk("lexical", "note-2")]})
 
     assert _series("chemclaw_evidence_source_kept_total", source="graph") >= 1.0
     assert _series("chemclaw_evidence_source_kept_total", source="lexical") == 0.0
 
 
-def test_a_leg_whose_finds_the_merge_credited_to_another_leg_is_not_starved() -> None:
-    """The false alarm this counter used to raise on every healthy hybrid deployment.
+def test_a_note_two_legs_agreed_on_counts_for_both_of_them() -> None:
+    """Agreement is the healthy case and must not read as starvation.
 
-    Both merges keep one chunk per note, attributed to the *first* list that found it, so a leg
-    whose notes an earlier leg also found survives with somebody else's `retriever` label on every
-    surviving chunk. Counting by that label, the lexical leg below reads zero — the same reading
-    the genuinely starved leg above produces, from a leg that contributed to the answer in full.
-    Measured over 20 queries on the committed corpus: **0.18** kept/found for a healthy lexical leg
-    in hybrid mode, zero on 6 of the 15 queries it answered.
+    Both merge paths keep the *first* occurrence of a note, so `chunk.retriever` names only the leg
+    that found it first. Attributing the kept count by that field credited every shared note to
+    whichever source `_sources()` happened to list first — measured on a healthy three-leg corpus,
+    `graph 16, lexical 0, vector 0`, which is exactly what a starved leg looks like. The one metric
+    built to detect `D-2026-08-01-a-cap-that-starves-a-source` was therefore pinned at zero for
+    every index-backed leg in every hybrid deployment.
+
+    Measured a second way on the committed 38-note corpus over 20 queries, which is the reading an
+    operator would have alerted on: **0.18** kept/found for a healthy lexical leg in hybrid mode,
+    and a flat zero on **6 of the 15 queries it answered at all** — indistinguishable from the
+    genuinely starved leg two tests above, which is why the alert would have been switched off long
+    before the defect it exists for recurred.
     """
-    both_found = _chunk("graph")  # the merge kept graph's copy of a note lexical also found
-    before = _series("chemclaw_evidence_source_kept_total", source="lexical")
+    shared = _chunk("graph")
+    before_lexical = _series("chemclaw_evidence_source_kept_total", source="lexical")
+    record_kept_chunks([shared], {"graph": [shared], "lexical": [shared]})
 
-    record_kept_chunks(
-        [both_found],
-        found=[("graph", [both_found]), ("lexical", [_chunk("lexical")])],
-    )
-
-    assert _series("chemclaw_evidence_source_kept_total", source="lexical") > before, (
-        "a leg whose find reached the answer under another leg's label read as starved"
-    )
+    assert _series("chemclaw_evidence_source_kept_total", source="lexical") == before_lexical + 1.0
 
 
 @pytest.mark.anyio

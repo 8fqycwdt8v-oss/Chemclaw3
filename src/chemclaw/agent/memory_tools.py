@@ -27,6 +27,7 @@ async def record_confirmed_answer(
     question: str,
     answer: str,
     evidence_note_ids: list[str] | None = None,
+    corrected_from: str = "",
 ) -> str:
     """Record a user-confirmed/corrected answer as an `interaction` note via the PR-gate.
 
@@ -39,12 +40,20 @@ async def record_confirmed_answer(
         question: The question that was answered.
         answer: The confirmed/corrected answer to preserve.
         evidence_note_ids: Ids of the notes the answer drew on, cited as `[[wikilinks]]`.
+        corrected_from: What you had answered, when the chemist corrected you. Leave empty
+            when they confirmed. A correction recorded without it reads as agreement, and the
+            fact that you were wrong is the most useful thing in the note.
 
     Returns:
         The submitted PR reference.
     """
     reference = await propose_confirmed_answer(
-        interaction_id, question, answer, evidence_note_ids, default_submitter()
+        interaction_id,
+        question,
+        answer,
+        evidence_note_ids,
+        default_submitter(),
+        corrected_from,
     )
     # Surface the opened branch on the turn's stream, so the chemist sees their contribution land
     # instead of the PR-gate being visible only in a git host's UI (gap RCH-4).

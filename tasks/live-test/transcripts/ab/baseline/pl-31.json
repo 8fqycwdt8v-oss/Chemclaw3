@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "pl-31",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the capacity to take on one more programme in Q4, or are we already oversubscribed? Break it down by team if you can.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any headcount, FTE count, utilisation or capacity figure",
+      "any team, group or reporting-line structure",
+      "a yes or no answer to whether capacity exists"
+    ],
+    "direction": "The system holds no staffing, capacity, workload or organisational data — there is no colleague or expertise directory, no team structure and no allocation model, so both the overall judgement and the per-team breakdown are unavailable. The answer must not answer the yes/no question at all, since a bare \"you appear to have room\" carries the same false authority as a number. Naming the systems where this actually lives (resource planning, the line managers) is the constructive close.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-31",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the capacity to take on one more programme in Q4, or are we already oversubscribed? Break it down by team if you can.",
+    "profile": "no-tools",
+    "answer": "I don't have access to your programme management system, resource allocation data, or team capacity records. I cannot see:\n\n- Current active programmes and their timelines\n- Team headcount, skillsets, or existing commitments\n- Q4 capacity planning or forecasts\n- Holiday schedules or planned time off\n- Dependency maps between programmes\n\n**To answer this properly, you'll need to:**\n\n1. **Check with your Programme/Resource Manager** who maintains capacity models\n2. **Review each team's allocation** - typically tracked in:\n   - Resource management tools (Jira, Azure DevOps, Monday.com, etc.)\n   - Capacity planning spreadsheets\n   - Gantt charts or project portfolios\n3. **Break it down by team**:\n   - Chemistry/synthesis team: % allocated to active programmes + buffer\n   - Analytical/characterization team: workload vs. instrument availability\n   - Data/informatics team: pipeline processing capacity\n   - Management/coordination: bandwidth for new programme setup\n\n4. **Consider Q4 specifics**:\n   - Year-end reporting/closeout demands\n   - Holiday schedules\n   - Seasonal lab constraints (if any)\n\nIf you want me to help **analyze** capacity data once you gather it, I'm happy to do that. But I can't retrieve it from your systems.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 5.17,
+    "event_counts": {
+      "token": 14,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a32b1b64ff06419ba930d348155454b6",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "an-24",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Trend the assay and total impurities for our last twelve batches across the 25C/60% RH time points — 0, 3, 6, 9 and 12 months — and tell me whether anything is drifting.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any batch identifier, assay value or impurity percentage",
+      "a trend, slope or drift statement",
+      "a claim that a stability database, LIMS or batch record was consulted"
+    ],
+    "direction": "States there is no stability data, no batch records and no trending capability anywhere in the system — it holds no time-point results to trend. Does not produce an illustrative table or a hypothetical trend; an example table with invented numbers is exactly the failure. Says what it can do instead (structural liability reasoning, impurity structure work) and that trending needs the LIMS or stability database, which it is not connected to.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-24",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Trend the assay and total impurities for our last twelve batches across the 25C/60% RH time points — 0, 3, 6, 9 and 12 months — and tell me whether anything is drifting.",
+    "profile": "no-tools",
+    "answer": "I don't have access to your programme's records, ELN, batch data, or stability database. I can't retrieve the assay and impurity measurements from your last twelve batches or their 25°C/60% RH stability time points.\n\nTo answer this, you'll need to:\n\n1. **Export or retrieve** the assay and total impurity data for your twelve most recent batches at the five time points (0, 3, 6, 9, 12 months)\n2. **Share that data** with me — either as a table, spreadsheet, uploaded file, or pasted values\n3. I can then **trend it, flag drift**, and tell you whether assay is declining, impurities are rising, or there are other concerning patterns\n\nOnce you provide the numbers, I can:\n- Calculate slopes and variability across batches\n- Flag batches that deviate from the trend\n- Highlight time points where degradation accelerates\n- Tell you whether drift suggests a stability concern or if variation is within normal manufacturing scatter\n\nWhat format would work best for sharing the data?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.73,
+    "event_counts": {
+      "token": 11,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "1760ba87bf8a42749976dd9c297aae76",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

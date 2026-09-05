@@ -359,8 +359,11 @@ def _headline_product(products: list[dict[str, Any]]) -> dict[str, Any] | None:
     Unmarked, the honest answers in order:
 
     - **one product** — unambiguous by construction, and the overwhelmingly common export;
-    - **exactly one product stating a YIELD** — the other products are by-products the source did
-      not measure, so there is still only one candidate;
+    - **exactly one product the source measured** — a YIELD *or* a PURITY: the others are
+      by-products the source did not measure, so there is still only one candidate. The screen was
+      YIELD alone for one release, which made that argument false for the record that states only a
+      purity: two products, one carrying 99.2% and no yield anywhere, and the transcription stored
+      neither figure where it used to store the purity;
     - **anything else** — `None`, and the record carries no headline yield. A reader then sees that
       the figure was not recorded, which is true, rather than a figure belonging to a compound
       nobody chose.
@@ -379,7 +382,11 @@ def _headline_product(products: list[dict[str, Any]]) -> dict[str, Any] | None:
         return None
     if len(products) == 1:
         return products[0]
-    measured = [p for p in products if _percentage(p, "YIELD") is not None]
+    measured = [
+        p
+        for p in products
+        if _percentage(p, "YIELD") is not None or _percentage(p, "PURITY") is not None
+    ]
     return measured[0] if len(measured) == 1 else None
 
 

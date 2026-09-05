@@ -297,10 +297,18 @@ _NOT_PRUNED: dict[str, str] = {
     # finished one is what makes "what did we deliver last quarter" answerable. A clock
     # cutoff here would delete the delivered half of the very question this table was added
     # for. A source that stops exporting leaves stale rows, and `observed_at` is how a
-    # reading says so rather than how a sweep decides.
+    # reading says so rather than how a *clock* decides.
+    #
+    # Something does dispose of these rows, and this register is where a reader comes to find that
+    # out: `commitment_sync.sweep_withdrawn` deletes what a **snapshot** source stopped exporting,
+    # on the same pass that mirrored it. That is convergence rather than retention — it is decided
+    # by the source's own answer, not by an age — which is why the row still belongs on this side
+    # of the register, and why saying nothing about it left this entry reading as "nothing bounds
+    # this table".
     "commitments": (
         "refused: a mirror that converges rather than accumulating, bounded by the size of "
-        "the portfolio it reflects. Staleness is reported by `observed_at`, not pruned"
+        "the portfolio it reflects and swept down by `commitment_sync.sweep_withdrawn` where "
+        "the source is a snapshot. Staleness is reported by `observed_at`, not pruned on a clock"
     ),
     # Considered for pruning and refused, because the two registers disagreed and one of them
     # had to be wrong. A settled request names who asked somebody to run, review or deliver

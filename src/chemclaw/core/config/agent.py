@@ -50,13 +50,13 @@ class AgentSettings(BaseSettings):
     # tag is derived from, and anyone who learns it can close the envelope from inside.
     framing_envelope_secret: SecretStr = SecretStr("")
 
-    # The agent (plan step 1.5). `agent_model` is the orchestration model name
-    # (ENV-overridable); the provider's API key is read by the chat model from its own env var
-    # (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is where the agent discovers
+    # The agent (plan step 1.5). The orchestration model name is `llm_model` — there is no second
+    # model setting here, because `agent_model` was one: a vendor model id in git, read only by the
+    # deleted Anthropic branch and by an `or` tail behind `llm_model`, which is always set
+    # (`D-2026-09-04-a-gateway-is-the-only-provider`). `skills_dir` is where the agent discovers
     # SKILL.md files — one or more directories, delimited by the OS path separator (like PATH),
     # so an admin can add a second (e.g. team-private) skills directory without code changes.
     # Read it through the `skills_dirs` property, never raw.
-    agent_model: str = "claude-sonnet-5"
     skills_dir: str = "skills"
     # Which discovered skills are actually advertised — discovery is not enablement. Empty (the
     # default) means every skill found under `skills_dir` is active, i.e. today's behavior. A
@@ -398,8 +398,11 @@ class AgentSettings(BaseSettings):
     # tool bodies, 40 audit rows and up to 40 plan-gate reads concurrently — against a Postgres
     # pool of 16. Applied as LangGraph's `max_concurrency` in `agent.state.turn_config`, so it
     # bounds a superstep's parallel work (subagent fan-outs included) rather than only tools.
-    # 8 matches the front door's own admission width (`service_max_concurrent_turns`) and the
-    # worker's activity slots, which are both sized to that pool; 0 removes the bound.
+    # 8 matches the worker's activity slots. It is *not* the front door's admission width: a turn
+    # admitted there may fan out to this many calls, so the front door's thread reservation
+    # multiplies the two rather than adding them (`core/executor.py`). This comment said the two
+    # "match", which read as though one turn cost one unit, and that reading was in the reservation
+    # itself. 0 removes the bound.
     agent_max_parallel_tool_calls: int = Field(default=8, ge=0)
 
     # How many of one reply's unparseable tool calls are promoted onto `tool_calls` and refused

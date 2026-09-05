@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "rx-15",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We have a new peak at 0.9% in the aspirin stream (CC(=O)Oc1ccccc1C(=O)O), mass is parent plus 16, and it grows on the stability shelf. What could it be and how do I find out?",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "gather_evidence",
+      "find_notes",
+      "similar_molecules"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an identification of the peak",
+      "a predicted retention time or an HPLC/GC method",
+      "a predicted NMR or mass spectrum",
+      "a shelf-life or stability projection"
+    ],
+    "direction": "The judgement being tested is hypothesis-generation without over-claiming. Should enumerate the candidates a +16 admits — hydroxylation on the ring, N- or S-oxidation where applicable, an epoxide, or a mass coincidence with a different formula — and should notice that in this specific stream the obvious competitor is hydrolysis to salicylic acid, which is a different mass and can be ruled in or out immediately by co-injection with an authentic standard. May use electrophilic site reactivity to rank which ring positions are exposed, and must then say that the descriptor cannot distinguish isomeric hydroxylation products with confidence, so several positions stay on the list. Must present everything as hypotheses to test analytically and name what settles it — authentic standards, LC-MS/MS fragmentation, isolation and NMR — since the system has no spectral prediction or chromatography model.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-15",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We have a new peak at 0.9% in the aspirin stream (CC(=O)Oc1ccccc1C(=O)O), mass is parent plus 16, and it grows on the stability shelf. What could it be and how do I find out?",
+    "profile": "no-tools",
+    "answer": "I'll think through this systematically.\n\n**What it likely is:**\n\nGiven that you have:\n- A peak at 0.9% in the aspirin stream\n- Mass = M+16 (parent + 16)\n- Growing on stability shelf (oxidative conditions over time)\n\nThe most probable identity is **aspirin hydroperoxide** or more likely **salicylic acid analog with hydroxyl** or **aspirin oxide/diol form**. However, the M+16 strongly suggests:\n\n1. **Aspirin N-oxide** — if there were a nitrogen (there isn't)\n2. **Aspirin hydroperoxide** (ROOH) — most likely for oxidative degradation\n3. **Aspirin with one OH added** (diol or hemiacetal from moisture/oxidation)\n4. **2,2'-Dihydroxydiphenyl** or similar dimer via oxidative coupling\n\nThe growth over time on a stability shelf is the key diagnostic: this is **oxidative degradation**, not hydrolysis (which would give salicylic acid, M−42, and acetic acid, or aspirin hydrate which would be M+18).\n\n**How to find out:**\n\n1. **High-resolution MS** — exact mass will rule in/out specific formulas. M+16.0000 vs M+15.9991 tells you O vs other combinations.\n\n2. **MS/MS fragmentation** — the parent at M+16 will fragment differently than aspirin:\n   - Aspirin fragments to m/z 120 (salicylium cation, C₇H₅O₂⁺)\n   - An oxide/hydroperoxide will lose H₂O₂ or O cleanly\n   - Fragment patterns will differentiate\n\n3. **NMR** (¹H and ¹³C) — oxidized aspirin will show:\n   - Different aromatic proton pattern if the ring is oxidized\n   - New OH resonances (broad, exchangeable with D₂O)\n   - Shifted carbonyl carbons if the acetyl group is affected\n\n4. **IR spectroscopy** — look for:\n   - O-H stretch around 3300–3500 cm⁻¹ (if hydroperoxide or diol)\n   - Peroxide O-O stretch around 800–900 cm⁻¹ (if ROOH)\n\n5. **HPLC-UV** — comparison of retention time and UV absorption profile with authentic standards (aspirin hydroperoxide, salicylic acid dimer, etc.)\n\n6. **Stability testing with antioxidants** — if you reformulate aspirin with added antioxidant (vitamin E, BHT, ascorbate), does the M+16 peak slow its growth? This is diagnostic for oxidative pathway.\n\n7. **Chemical test** — if it's a hydroperoxide, it will give a positive **peroxide test** (starch-KI → blue, or titanium(IV) reagent → yellow complex). This is fast and specific.\n\n**My best guess:** Start with **peroxide testing** (fastest) and **MS/MS fragmentation** (most informative). If both point to a hydroperoxide, confirm with IR and NMR. If it's a dimer or hydroxylated product, high-resolution MS and NMR will be more decisive.\n\nWhere are you uncertain? — the exact structure depends on which part of aspirin is oxidized (aromatic ring, acetyl group, or carboxylic acid). The M+16 mass alone doesn't distinguish these without fragmentation or chemical tests.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 10.68,
+    "event_counts": {
+      "token": 32,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b74805a751de45018bc0c04ccb005f88",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

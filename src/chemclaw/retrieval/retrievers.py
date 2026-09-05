@@ -9,6 +9,7 @@ emit carries the id of the note it came from, so the harness can cite it (5b.2).
 
 import asyncio
 import logging
+import math
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
@@ -19,7 +20,7 @@ from chemclaw.core.embeddings import embed_texts
 from chemclaw.kg.conflicts import NoteConflicts, conflict_index
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import Note, note_id_for_reaction, strip_links
-from chemclaw.kg.search import query_terms, term_coverage
+from chemclaw.kg.search import query_terms, term_frequencies
 from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip
 from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
@@ -216,20 +217,30 @@ class GraphRetriever:
         only guarantees the note exists, not that it answers the question.
         """
         terms = query_terms(query)
-        scored: list[tuple[int, float, Note]] = []
+        scored: list[tuple[int, float, float, Note]] = []
+        frequencies: list[tuple[dict[str, int], Note]] = []
         for note in (await _eligible_notes(self._dir, filters)).values():
-            coverage = term_coverage(note, terms)
-            if not coverage:
-                continue
-            # Score a matched note by its own confidence (KM-5): among candidates the
-            # more-trusted note survives truncation first. A note with no confidence takes the
-            # configured neutral default.
-            score = (
+            counts = term_frequencies(note, terms)
+            if counts:
+                frequencies.append((counts, note))
+        # Document frequency over the *matched* population, which is the same number as over the
+        # eligible one: a term's df counts the notes containing it, and a note containing it
+        # matched. So the rarer term in a two-term query earns the larger weight without a second
+        # pass over the corpus.
+        population = len(frequencies)
+        document_frequency: dict[str, int] = {}
+        for counts, _ in frequencies:
+            for term in counts:
+                document_frequency[term] = document_frequency.get(term, 0) + 1
+        for counts, note in frequencies:
+            confidence = (
                 note.confidence
                 if note.confidence is not None
                 else settings.retrieval_default_confidence
             )
-            scored.append((coverage, score, note))
+            scored.append(
+                (len(counts), _relevance(counts, document_frequency, population), confidence, note)
+            )
         complete = [entry for entry in scored if entry[0] == len(terms)]
         # RRF reads each source's list as ranked best-first, so the list must be ordered by this
         # retriever's own relevance signal — disk order is not a ranking. Coverage leads only on
@@ -243,15 +254,52 @@ class GraphRetriever:
         # then arrived at the round-robin with thousands of entries against every other leg's k,
         # which is the crowding-out asymmetry D-2026-08-01 was written about, relocated from the
         # cut to the input.
-        chosen = sorted(
+        ranked = sorted(
             complete or scored,
-            key=lambda entry: (-entry[0], -entry[1], entry[2].id),
-        )[: settings.retrieval_top_k]
+            key=lambda entry: (-entry[0], -entry[1], -entry[2], entry[3].id),
+        )
+        chosen = ranked[: settings.retrieval_top_k]
         conflicts = await _conflict_index(self._dir)
         return [
-            _chunk_for(note, self.name, score, conflicts.get(note.id), terms)
-            for _, score, note in chosen
+            _chunk_for(note, self.name, confidence, conflicts.get(note.id), terms)
+            for _, _, confidence, note in chosen
         ]
+
+
+# BM25's saturation constant, in its usual range. Named rather than inlined because it is the one
+# number deciding how much a repeated term is worth: at 1.2 a term occurring twice scores 0.63 of a
+# term occurring endlessly, and a note that merely *mentions* the query cannot out-rank one about it
+# by repetition alone.
+_TERM_SATURATION = 1.2
+
+
+def _relevance(
+    counts: dict[str, int], document_frequency: dict[str, int], population: int
+) -> float:
+    """A matched note's within-corpus relevance: saturating term frequency, weighted by rarity.
+
+    **Why this exists at all.** The graph leg used to rank its hits by `confidence` and break ties
+    on the note id, and confidence is a *trust* signal rather than a relevance one — so a
+    well-trusted note that mentions the query once outranked a note about it, and any tie fell
+    through to alphabetical order. Measured on 5,000 notes that all matched every term, the leg
+    returned `reaction-00000`, `-00001`, `-00002`: the first eight ids in the corpus, which is not
+    a ranking. On the shipped 38-note corpus confidence takes only ten distinct values and 18 notes
+    share one of two, so the alphabetical fall-through is the common case rather than the edge.
+
+    Trust has not been discarded, it has been demoted to what it can honestly decide: among notes
+    of *equal relevance*, the more-trusted one still survives the cut first (KM-5's intent), rather
+    than deciding relevance itself.
+
+    This is BM25 without the document-length normalisation — deliberately, because `search_text` is
+    a note's whole metadata-plus-body haystack and its length tracks how much a note *records*
+    rather than how padded it is; penalising a thorough campaign note for being thorough is the
+    wrong correction here. The saturation term is what bounds repetition instead.
+    """
+    return sum(
+        math.log(1 + population / (1 + document_frequency[term]))
+        * (count / (count + _TERM_SATURATION))
+        for term, count in counts.items()
+    )
 
 
 # The filter keys `_eligible_notes` understands. Named here so "did the caller ask to narrow this?"

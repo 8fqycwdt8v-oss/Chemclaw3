@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "pr-04",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "For the amidation of CC(=O)O with NCc1ccccc1, I want one predictor's raw condition suggestions rather than the blended answer — take rxn_insight alone and show me what it proposes, so I can see how much of the consensus is coming from it.",
+    "expects_tools": [
+      "predict_conditions_single_model"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "one predictor's condition set presented as the ensemble's consensus",
+      "a predicted yield for the suggested conditions",
+      "a claim about how much of the consensus this model contributed, computed from this call alone"
+    ],
+    "direction": "The condition-side counterpart of pr-03 and the same judgement: this is interrogating a model, not answering a chemistry question. The answer must return that one predictor's ranked condition sets, in Celsius, and say so explicitly. The trap worth grading is the second half of the ask — \"how much of the consensus is coming from it\" cannot be answered by a single-model call, which returns no vote weights and no other model's output; answering it requires the ensemble call beside this one, and inventing a contribution share from one predictor's ranking is a fabrication. Saying what the call can and cannot settle, and offering the ensemble call as the way to settle the rest, is the right shape.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pr-04",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "For the amidation of CC(=O)O with NCc1ccccc1, I want one predictor's raw condition suggestions rather than the blended answer — take rxn_insight alone and show me what it proposes, so I can see how much of the consensus is coming from it.",
+    "profile": "no-tools",
+    "answer": "I don't have access to a predictor tool or system called `rxn_insight`, nor can I retrieve condition suggestions from a reaction prediction database. I can't run predictors, query ELN systems, or access external APIs.\n\nWhat I can do: If you have output from `rxn_insight` already (e.g., a results file, JSON, or logged data), you can share it and I'll help you parse it, compare it to other predictors, or analyze what conditions it suggests for this amidation (acetic acid + benzyl amine → N-benzylacetamide).\n\nAlternatively, if there's a tool or script in this codebase that wraps `rxn_insight`, I can help you locate and run it — but I'd need to know:\n- Where the predictor lives (file path, module name, API endpoint)\n- How to invoke it programmatically\n- What format it returns\n\nCan you point me to where `rxn_insight` output or config lives, or describe how it's typically called in your workflow?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.86,
+    "event_counts": {
+      "token": 11,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "412b7545bae64464bb7f3bcc9f921000",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

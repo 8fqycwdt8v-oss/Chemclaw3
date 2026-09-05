@@ -149,10 +149,22 @@ def test_a_failed_extraction_costs_one_row_and_not_the_turn() -> None:
     assert next(r for r in result.rows if r.ref == "reaction-A").solvent == "2-MeTHF"
 
 
-def test_the_comparison_renders_with_no_model_at_all() -> None:
-    """No reachable route is a deployment state, not an outage.
+def test_the_comparison_still_renders_when_no_model_answers() -> None:
+    """An unreachable endpoint costs the prose column and nothing else.
 
-    The record's own figures still compare, which is what lets the tool ship on with no credential.
+    That is what lets this tool ship with no enable flag and no credential: the figures come from
+    each protocol's `conditions` frontmatter, so the comparison a chemist reads is intact.
+
+    **This used to assert `digest_source == "recorded"` and `complete is True`, and both were
+    wrong** — reached through a `try/except` around client *construction* that only ever fired
+    because the seam's second arm preflighted a vendor credential. One gateway constructs from
+    config and never raises, so that branch could not fire at all
+    (`D-2026-09-04-a-gateway-is-the-only-provider`); and had it fired it would have reported every
+    protocol read when none was. Reachability is discovered per protocol now, which is the true
+    statement and the one the row's own refusal text already made.
+
+    Driven with `client=None` against the shipped default endpoint, so it is the production path
+    with nothing answering on it — not an injected failure.
     """
     result = _run(
         [
@@ -161,9 +173,13 @@ def test_the_comparison_renders_with_no_model_at_all() -> None:
         ],
         None,
     )
-    assert all(row.digest_source == "recorded" for row in result.rows)
+    assert all(row.digest_source == "unreadable" for row in result.rows)
+    assert result.complete is False, "nothing was read, so the comparison is not complete"
+    assert sorted(result.degraded) == ["reaction-A", "reaction-B"]
+    # The half that needed no model is untouched, which is the property that matters.
     assert "61" in result.table and "74" in result.table
     assert "temperature 90 °C → 70 °C" in result.table
+    assert all("recorded figures are unaffected" in (row.refusal or "") for row in result.rows)
 
 
 def test_every_row_carries_the_citation_it_came_from() -> None:

@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-26",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are taking the biaryl coupling from 5 g to kilo lab. Have we run anything like this at scale before, and what went wrong when we did?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "similar_reactions",
+      "expand_note",
+      "find_past_jobs"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a scale, batch size or campaign history the record does not contain",
+      "a predicted yield at the larger scale",
+      "an equipment or facility reference"
+    ],
+    "direction": "Precedent retrieval is the capability being tested and it should be exercised properly: the seed record for this coupling (4-bromoanisole and phenylboronic acid, Pd(OAc)2 1.5 mol%, K2CO3, THF/water 4:1, 80 °C, 12 h, degassed, 76% isolated), the two failure modes and the ligand-before-temperature playbook. The scale-relevant reading of the protodeboronation failure is the one to draw out: it was found because assay conversion improved while isolated yield fell, which is exactly the way a scale-up gets misread. Must be honest that the record carries laboratory-scale runs with little or no scale metadata, so 'have we run this at scale' is answered by 'here is what we have, and it is not at scale'. Should name the degassing playbook, since oxygen control is the thing that genuinely changes character on scale-up.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-26",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are taking the biaryl coupling from 5 g to kilo lab. Have we run anything like this at scale before, and what went wrong when we did?",
+    "profile": "no-tools",
+    "answer": "I don't have access to your laboratory records, ELN, or reaction database. I can't search your past experiments or scaling history.\n\nTo answer your question, you would need to:\n\n1. **Search your ELN or project management system** for previous biaryl coupling runs, filtered by scale (particularly anything in the multi-gram to kilo range)\n2. **Check your lab notebooks or batch records** for notes on what failed or needed optimization during scale-up\n3. **Ask your team members** who may have worked on similar couplings before\n\n**What I can help with instead:**\n\n- Once you find your past data, I can help interpret what went wrong (e.g., heat transfer issues, reagent mixing, side reactions that appeared at scale)\n- I can advise on **common pitfalls** in biaryl coupling scale-up (e.g., Suzuki, Negishi, or Ullmann couplings have different failure modes):\n  - **Suzuki**: precipitation of organoboron reagent, biphasic mixing challenges\n  - **Negishi**: hydrolysis of organozinc intermediate if water ingress occurs\n  - **Ullmann**: heat distribution, long reaction times, copper salt recovery\n  - **Buchwald–Hartwig**: ligand/base compatibility at scale, phosphine oxidation\n  \n- I can help you design checkpoints for your scale-up to catch problems early\n\nIf you have access to ELN records or past experiment notes on this reaction, share them and I'll help you extract the critical failure modes and design fixes.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 5.74,
+    "event_counts": {
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "fcf7fe67a92c40569170cac360f4b348",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

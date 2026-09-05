@@ -135,6 +135,12 @@ class ProbeOutcome(BaseModel):
     persona: str
     bucket: str
     question: str
+    # Which agent profile answered this turn. Empty means the front door's default agent, which is
+    # what every suite but the A/B one asks for. It is on the outcome rather than only in the
+    # transcript directory's name because the two arms of a comparison are otherwise
+    # indistinguishable once a file is moved, and a paired measurement whose halves cannot be told
+    # apart is not a measurement.
+    profile: str = ""
     answer: str = ""
     answered: bool = False
     tools_called: list[str] = Field(default_factory=list)
@@ -318,19 +324,27 @@ def _asked_in_prose(outcome: ProbeOutcome) -> bool:
     return "?" in outcome.answer
 
 
-async def open_session(client: httpx.AsyncClient) -> str:
+async def open_session(client: httpx.AsyncClient, *, profile: str | None = None) -> str:
     """Open one front-door session and return its id.
 
     Its own function because a scripted probe opens a session once and then keeps it for every
     later turn *and* for the plan routes — the session is the unit the plan gate binds an approval
     to, so a second session would be a different plan and the probe would prove nothing.
+
+    `profile` names the configured agent the session talks to, which is the whole mechanism behind
+    the tool-utility A/B: the control arm is the same question asked of a profile that advertises
+    no tools. Omitted, the route's own default applies — `POST /sessions` takes `profile` as an
+    optional field, so `{}` and a missing profile are the same request the corpus suite has always
+    sent.
     """
-    created = await client.post("/sessions", json={})
+    created = await client.post("/sessions", json={} if profile is None else {"profile": profile})
     created.raise_for_status()
     return str(created.json()["session_id"])
 
 
-async def run_probe(client: httpx.AsyncClient, probe: Probe) -> ProbeOutcome:
+async def run_probe(
+    client: httpx.AsyncClient, probe: Probe, *, profile: str | None = None
+) -> ProbeOutcome:
     """Ask one single-question probe over the front door and fold its stream into an outcome.
 
     A transport failure is recorded on the outcome instead of raised: a run of 150 probes must
@@ -349,7 +363,7 @@ async def run_probe(client: httpx.AsyncClient, probe: Probe) -> ProbeOutcome:
             f"probe {probe.id!r} is scripted ({len(probe.follow_ups)} follow-up turn(s)); "
             "run_probe would ask only its first question. Use run_plan_gate_probe."
         )
-    return await run_turn(client, probe, message=probe.question)
+    return await run_turn(client, probe, message=probe.question, profile=profile)
 
 
 async def run_turn(
@@ -358,6 +372,7 @@ async def run_turn(
     *,
     message: str,
     session_id: str | None = None,
+    profile: str | None = None,
 ) -> ProbeOutcome:
     """Ask one turn and fold its event stream into an outcome.
 
@@ -376,6 +391,7 @@ async def run_turn(
         persona=probe.persona,
         bucket=probe.bucket,
         question=message,
+        profile=profile or "",
         session_id=session_id or "",
     )
     counts: dict[str, int] = {}
@@ -394,7 +410,7 @@ async def run_turn(
 
     try:
         if session_id is None:
-            session_id = await open_session(client)
+            session_id = await open_session(client, profile=profile)
             outcome.session_id = session_id
 
         async with client.stream(
@@ -520,6 +536,7 @@ async def run_probes(
     *,
     base_url: str | None = None,
     transcript_dir: str | None = None,
+    profile: str | None = None,
 ) -> list[ProbeOutcome]:
     """Run every probe with bounded concurrency, writing one transcript per probe as it lands.
 
@@ -539,7 +556,7 @@ async def run_probes(
 
         async def one(probe: Probe) -> ProbeOutcome:
             async with semaphore:
-                outcome = await run_probe(client, probe)
+                outcome = await run_probe(client, probe, profile=profile)
             (out_dir / f"{probe.id}.json").write_text(
                 json.dumps(
                     {"probe": probe.model_dump(), "outcome": outcome.model_dump()},

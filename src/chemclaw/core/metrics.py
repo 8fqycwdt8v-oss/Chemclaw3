@@ -395,10 +395,12 @@ _COUNTERS: dict[str, str] = {
         "so this is the number that shows caching working."
     ),
     "chemclaw_cache_write_tokens_total": (
-        "Prompt tokens written to the provider's cache — priced above a fresh input token, so a "
-        "cache that is written and never read is a net loss this makes visible. Structurally 0 on "
-        "the openai_compatible provider, which reports cache reads but has no cache-write concept: "
-        "an honest zero here is not a fault (REV-9)."
+        "Prompt tokens written to the gateway's cache — priced above a fresh input token, so a "
+        "cache that is written and never read is a net loss this makes visible. **Expect a flat "
+        "zero**: an OpenAI-compatible endpoint caches implicitly and reports reads, and only some "
+        "report a write count at all, so a zero here is the normal reading rather than a fault "
+        "(REV-9). Kept because the column and the counter are what would show a gateway that does "
+        "report one."
     ),
     # Whether the context policy is running, and what it is buying. Two counters because they
     # answer two operator questions and neither answers the other: the first says the mechanism
@@ -536,12 +538,14 @@ _COUNTERS: dict[str, str] = {
     # counter distinct from the front door's own limiter, and `RunnableWithFallbacks` absorbing
     # 100% of traffic onto the fallback endpoint produced no log line and no metric.
     "chemclaw_model_calls_total": (
-        "Model calls, by provider and outcome (ok / rate_limited / context_length / timeout / "
-        "transport / error)."
+        "Model calls, by outcome (ok / rate_limited / context_length / timeout / transport / "
+        "error). There is no `provider` label: every call goes to one gateway "
+        "(D-2026-09-04-a-gateway-is-the-only-provider), and a label with one value is cardinality "
+        "that answers nothing."
     ),
     "chemclaw_model_fallbacks_total": (
-        "Model calls served by the fallback endpoint after the primary raised, by provider — the "
-        "signal that makes provider failover something an operator knows about rather than infers."
+        "Model calls served by the fallback endpoint after the primary raised — the signal that "
+        "makes endpoint failover something an operator knows about rather than infers."
     ),
     # --- the tool chain ------------------------------------------------------------------------
     # A refusal and a crash were one `outcome='error'` and one identically-worded log line, so
@@ -748,7 +752,7 @@ _HISTOGRAMS: dict[str, str] = {
     "chemclaw_http_request_duration_seconds": (
         "Wall-clock duration of one HTTP request, by route template."
     ),
-    "chemclaw_model_call_duration_seconds": "Wall-clock duration of one model call, by provider.",
+    "chemclaw_model_call_duration_seconds": "Wall-clock duration of one model call.",
     "chemclaw_evidence_source_seconds": (
         "Wall-clock duration of one retrieval leg within an evidence sweep, by source."
     ),
@@ -799,7 +803,6 @@ _HISTOGRAM_BUCKETS: dict[str, tuple[float, ...]] = {
 _HISTOGRAM_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_tool_duration_seconds": ("tool",),
     "chemclaw_http_request_duration_seconds": ("route",),
-    "chemclaw_model_call_duration_seconds": ("provider",),
     "chemclaw_evidence_source_seconds": ("source",),
     "chemclaw_db_query_duration_seconds": ("operation",),
     "chemclaw_job_duration_seconds": ("connector",),
@@ -897,11 +900,11 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Four literals in `api/deps.py`, four in `api/auth.py` — source-fixed, like `subsystem`.
     "chemclaw_authz_refusals_total": ("resource",),
     "chemclaw_auth_failures_total": ("reason",),
-    # The provider name from the configured seam (`openai_compatible`, `anthropic`), not a model
-    # id: per-model *spend* is `turn_costs`' question and stays there (D-2026-08-01), while
-    # per-provider *health* is this one, and they are not the same question.
-    "chemclaw_model_calls_total": ("provider", "outcome"),
-    "chemclaw_model_fallbacks_total": ("provider",),
+    # Outcome only. This carried a `provider` label until the collapse to one gateway
+    # (`D-2026-09-04-a-gateway-is-the-only-provider`) left it with one possible value. Per-model
+    # *spend* was never this series' question and stays in `turn_costs` (D-2026-08-01); endpoint
+    # *health* is, and the endpoint is now singular.
+    "chemclaw_model_calls_total": ("outcome",),
     "chemclaw_tool_calls_total": ("tool", "outcome"),
     "chemclaw_tool_refusals_total": ("reason",),
     "chemclaw_invalid_tool_calls_total": ("tool",),

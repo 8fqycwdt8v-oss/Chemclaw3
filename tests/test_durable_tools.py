@@ -242,6 +242,45 @@ def test_the_record_path_frames_the_same_two_fields_the_search_path_frames(
     assert status.summary == expected, "the aged-out summary reached the model unframed"
 
 
+def test_the_shared_reader_leaves_the_stored_text_alone_for_the_front_door(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`job_status` is also the whole body of `GET /jobs/{id}`, so the envelope may not live there.
+
+    The framing above belongs at the model's edge, and it was briefly put one level down in the
+    shared reader — which put `<retrieved-note-…>` markup into an HTTP response while `GET /jobs`
+    returned the same two columns of the same row raw, breaking the property `api/routes/jobs.py`
+    states in its own docstring: a chemist polling in chat and one refreshing a page cannot
+    disagree about a run. The nonce is per process unless `framing_envelope_secret` is set, so two
+    replicas would not even have agreed with each other.
+
+    Asserted on `job_status` rather than on the route, because the route is
+    `return await front_door.job_status(job_id)` with no projection — this function *is* the
+    response body, and a test that went through the app would pass just as well against a route
+    that stripped the envelope back off, which is not the property wanted.
+    """
+    from chemclaw.agent.durable_tools import job_status
+    from chemclaw.durable.job_record import JobRecord
+
+    async def _lookup(job_id: str) -> JobRecord:
+        return JobRecord(
+            job_id=job_id,
+            connector="bo",
+            job="start_optimization_campaign",
+            rationale="screening the Suzuki coupling for programme PX-9",
+            requested_by="oid-42",
+            summary="12 conformers within 3 kcal/mol",
+        )
+
+    _expired(monkeypatch)
+    monkeypatch.setattr(durable_tools, "lookup_job_record", _lookup)
+
+    status = asyncio.run(job_status("bo-start_optimization_campaign-abc"))
+    assert status.rationale == "screening the Suzuki coupling for programme PX-9"
+    assert status.summary == "12 conformers within 3 kcal/mol"
+    assert "retrieved-note" not in (status.rationale + (status.summary or ""))
+
+
 def test_a_record_with_no_free_text_is_not_given_an_empty_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,0 +1,75 @@
+{
+  "probe": {
+    "id": "pt-05",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I ran your SNAr procedure and the quench is wrong — you have me adding water to the reaction hot, and on this scale that's a foam-over. It needs to cool to below 30 first. Fix the design so the next person doesn't hit it.",
+    "expects_tools": [
+      "read_experiment_protocol",
+      "draft_experiment_protocol",
+      "workup_precedent",
+      "find_experiment_protocols"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that the correction was stored without a revision actually being written",
+      "that the original procedure was correct, or that the chemist's objection was mistaken",
+      "a revision number the store did not return",
+      "changes to parts of the design the chemist did not raise, described as part of their correction"
+    ],
+    "direction": "This is the most informative event the system can observe about its own output — an expert correcting a generated protocol with the context to know why — and the answer is graded on whether the correction was *captured* rather than merely accepted. A good answer reopens the stored design so the revision is derived from the current head rather than from memory of it, changes the quench step and only the quench step, and stores the result with a change note saying what changed and why, in the chemist's terms: cool below 30 before the aqueous quench, because a hot quench at this scale foams over. It reports the new revision number back. It does not argue with the technician — they have the vessel and the scale in front of them — and it does not quietly rewrite three other steps while it is in there, because a revision that bundles unrequested edits is one nobody can read later. Naming what the change does not fix, if the same hazard appears elsewhere in the procedure, is the extra that makes it useful.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pt-05",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I ran your SNAr procedure and the quench is wrong — you have me adding water to the reaction hot, and on this scale that's a foam-over. It needs to cool to below 30 first. Fix the design so the next person doesn't hit it.",
+    "profile": "",
+    "answer": "I need to find the SNAr procedure you ran so I can see what it currently says and fix the cooling step. Let me search for it.The search didn't find a stored SNAr procedure or playbook in the system yet. Can you give me either:\n\n1. **The design id** of the protocol you just ran (it would be `design-...`), so I can pull it up and edit it directly, or\n2. **The reaction details** — the substrate, nucleophile, and approximate scale — so I can find the right procedure and propose the fix?\n\nOnce I have that, I'll revise the quench step to require cooling to <30 °C before water addition and store the corrected version so the next run doesn't hit the same foam-over.",
+    "answered": true,
+    "tools_called": [
+      "find_experiment_protocols",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_experiment_protocols",
+        "preview": "{\"designs\":[]}"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.0,
+    "event_counts": {
+      "token": 81,
+      "tool_call": 2,
+      "evidence_source": 1,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "22ec089abe54449e90f3053538053793",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -64,13 +64,15 @@ class BudgetTracker:
 
     `check` refuses (pre-turn) a turn that would breach a cap; `record` books a completed turn's
     turn-count and token usage. A lock guards the counters because the ASGI server runs turns for
-    different sessions concurrently. `check` and `record` are separate calls, so up to
-    `service_max_concurrent_turns` in-flight turns may pass `check` before any of them `record` — a
-    bounded overshoot acceptable for a best-effort guard, not an exact accountant. **That bound is
-    a property of where `check` is called, not of this class**, and it was false until the front
-    door re-checked *after* taking an admission permit: checking only at request entry made the
-    overshoot the number of concurrent requests instead (measured: 40 turns against a 1-turn cap
-    with 8 permits). See `chemclaw.api.routes.turns.post_message`. Both counter maps
+    different sessions concurrently. `check` and `record` are separate calls, so a bounded number
+    of in-flight turns may pass `check` before any of them `record` — an overshoot acceptable for a
+    best-effort guard, not an exact accountant. **That bound is a property of where `check` is
+    called, not of this class**, and it was false until the front door re-checked *after* taking an
+    admission permit: checking only at request entry made the overshoot the number of concurrent
+    requests instead (measured: 40 turns against a 1-turn cap with 8 permits). It is
+    `service_max_concurrent_turns` plus however many turns are running *detached*, which give their
+    permit back at the disconnect and keep spending — not the flat `service_max_concurrent_turns`
+    this paragraph used to name. See `chemclaw.api.routes.turns.post_message`. Both counter maps
     are LRU-bounded (sessions by `service_max_live_sessions` — a budget counter lives as long as the
     live session it meters can — users by `budget_max_tracked_users`), so the tracker never grows
     unbounded in the long-lived front door.

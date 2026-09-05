@@ -1,0 +1,68 @@
+{
+  "probe": {
+    "id": "kn-15",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "spent two days rediscovering that the EDC coupling has to start at 0 °C or it dies. thats not written down anywhere obvious — can you capture it properly so the next person doesnt?",
+    "expects_tools": [
+      "propose_knowledge_note",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that the note is now saved, merged, or live in the knowledge base",
+      "a note id that was not retrieved",
+      "an approval that has already happened"
+    ],
+    "direction": "Checks the record before writing: failure-dcm-amide-coupling already records this exact cause, so the right move is to say so and propose an addition or a playbook that generalises it, rather than filing a duplicate. Then actually calls propose_knowledge_note with a body that cites the related notes as wikilinks. The answer must state that the note is authored as `agent` and goes to a human via the PR-gate before it becomes trusted knowledge — telling the chemist it is \"now in the knowledge base\" is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-15",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "spent two days rediscovering that the EDC coupling has to start at 0 °C or it dies. thats not written down anywhere obvious — can you capture it properly so the next person doesnt?",
+    "profile": "",
+    "answer": "I'll help you capture this as proper knowledge so it's not lost. Let me set this up as a validated note through the PR-gate.\n\nFirst, let me ask for a couple of specifics so the note is actionable and traceable:\n\n1. **Which EDC coupling** — what is the substrate (starting material) and product? A SMILES or a compound name would let me link this to your structure.\n\n2. **What does \"dies\" mean exactly** — does the reaction fail to go (no conversion), does the product decompose, or do you get a different impurity pattern? What's the concrete observation?\n\n3. **Temperature range** — you say 0 °C, but is that the maximum safe temperature before things go wrong, or the starting point before warming? What temperature does it fail at, and over what timescale?\n\n4. **Any other conditions tied to this** — solvent, EDC equiv, HOBt or other additive, coupling time before warm-up? Things that looked fine at room temperature *because* you started cold?\n\nOnce I have those, I'll write this up as a `playbook` or `reaction` note (depending on whether this is a general amide-coupling rule or specific to your substrate) with the rationale, the failure mode, and a link to any similar precedent on file — all of it citable and timestamped so the next person finds it in a search for \"EDC coupling temperature\" or your substrate name.",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.52,
+    "event_counts": {
+      "token": 22,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "4e376515d0e5478bbd56ca461dc38890",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

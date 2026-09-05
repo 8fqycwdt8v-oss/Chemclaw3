@@ -16,6 +16,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from chemclaw.core.config import settings
 from chemclaw.publish import outbox
@@ -836,5 +837,54 @@ def test_a_publication_merged_mid_delivery_is_not_marked_delivered_unsent(
         actors = {row["actor"] for row in again[0][2]["publications"]}
         assert actors == {"alice", "bob"}
         assert await outbox.mark_delivered([row_id for row_id, _, _ in again]) == 1
+
+    asyncio.run(_run())
+
+
+def test_a_document_this_system_already_queued_stays_readable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued row is data, not a claim: the release that reads it may not refuse it.
+
+    `_drain_one` re-validates every stored `document` with `ResultRecord.model_validate` before
+    delivering it, so any check added to the *write* model becomes a filter on the *read* path —
+    over bytes that were written before it existed and cannot be rewritten. The scope check is the
+    one that showed it: `relative_energy` is registered per conformer, every species distribution
+    published it as a calculation scalar, and a validator on `PropertyFact` therefore made those
+    already-enqueued rows unparseable. Each then spends an attempt per pass until it dead-letters,
+    and the backfill CLI cannot help — the stored bytes are still the same bytes.
+
+    The document below is exactly what this system wrote at contract version 2. A projection bug is
+    caught where the projection happens (`project`), which is the only place it can be caused.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect("test_fixture") as conn:
+            await _reset(conn)
+            document = _record("species_ranking@1:abc:def").model_dump(mode="json")
+            document["contract_version"] = 2
+            document["properties"] = [
+                {
+                    "property": "relative_energy",
+                    "value": 0.0,
+                    "unit": "kcal/mol",
+                    "reported_value": 0.0,
+                    "scope": "calculation",
+                }
+            ]
+            await conn.execute(
+                "INSERT INTO result_publications (sink, calc_ref, document, schema_version) "
+                "VALUES (%s, %s, %s, %s)",
+                ("alpha", document["calc_ref"], Jsonb(document), 2),
+            )
+            await conn.commit()
+
+        claimed = await outbox.claim("alpha", 10)
+        assert len(claimed) == 1
+        stored = claimed[0][2]
+        record = ResultRecord.model_validate(stored)
+        assert [fact.property for fact in record.properties] == ["relative_energy"]
 
     asyncio.run(_run())

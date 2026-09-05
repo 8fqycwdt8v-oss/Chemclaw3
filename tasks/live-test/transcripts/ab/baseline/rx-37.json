@@ -1,0 +1,97 @@
+{
+  "probe": {
+    "id": "rx-37",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are making N-cyclohexylaniline (c1ccc(NC2CCCCC2)cc1). What conditions have worked for products like it?",
+    "expects_tools": [
+      "conditions_for_similar_product",
+      "similar_molecules",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted yield for the proposed conditions",
+      "a set of conditions presented as recommended rather than as recorded precedent",
+      "a precedent quoted without its citation"
+    ],
+    "direction": "Two passes, and the answer should show both: structural neighbours of the product, then what was actually charged to make them — ligand, base, solvent, temperature, time, yield — each with the note or patent to follow. The distinction that matters is recorded versus recommended: these are conditions that were run, on a similar product, by someone else. Similarity is not causation, and a close neighbour is a candidate precedent to confirm against the record, never an outcome asserted on structure alone.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-37",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are making N-cyclohexylaniline (c1ccc(NC2CCCCC2)cc1). What conditions have worked for products like it?",
+    "profile": "no-tools",
+    "answer": "I'll search for information about synthesis of N-cyclohexylaniline and related aniline derivatives in your system's records.I don't have records of N-cyclohexylaniline synthesis in your system. Let me search more broadly for related secondary aniline synthesis and amination conditions:I have no records in your system of N-cyclohexylaniline or closely related secondary anilines. **I'm answering from general chemistry knowledge only.**\n\n## Common approaches for N-alkylaniline synthesis:\n\n**1. Reductive amination** (most common for secondary amines)\n- Aniline + cyclohexanone → imine → reduction with NaBH₄, NaBH(OAc)₃, or H₂/Pd\n- Conditions: typically mild, room temperature to 60°C, in EtOH or acetic acid solvent\n- This is likely the straightforward path\n\n**2. N-arylation of cyclohexylamine** (Buchwald-Hartwig type)\n- Cyclohexylamine + aryl halide/triflate with Pd catalyst + ligand + base\n- Requires a coupling catalyst system; more complex\n- Products are typically clean but requires stoichiometric phosphine ligands\n\n**3. Direct N-alkylation of aniline**\n- Aniline + cyclohexyl halide or tosylate + base (K₂CO₃, Cs₂CO₃, etc.)\n- Less common due to multiple alkylation and requires activated halide\n- Typically needs heating\n\n**4. Catalytic hydroamination** (if a double bond is available)\n- Direct addition to cyclohexene + aniline with metal catalyst\n- Not straightforward for saturated cyclohexyl group\n\n---\n\n**The most reliable starting point** would be **reductive amination of aniline with cyclohexanone**, using:\n- NaBH(OAc)₃ in AcOH (mild, one-pot)\n- Or aniline/cyclohexanone → imine intermediate, then NaBH₄ reduction\n- Expected pH around neutral, room temperature to 60°C\n\nDo you have experimental data or conditions from your lab that worked previously? If you upload an ELN entry, I can extract and help organize the details.",
+    "answered": true,
+    "tools_called": [
+      "grep",
+      "grep",
+      "grep",
+      "grep",
+      "grep",
+      "grep",
+      "grep"
+    ],
+    "tool_results": [
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      },
+      {
+        "tool": "grep",
+        "preview": "No matches found"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.15,
+    "event_counts": {
+      "token": 30,
+      "tool_call": 7,
+      "tool_result": 7,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "8731939b84ee46318e17b2b761ae6c1e",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

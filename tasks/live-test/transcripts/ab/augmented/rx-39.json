@@ -1,0 +1,78 @@
+{
+  "probe": {
+    "id": "rx-39",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What are the workhorse conditions for a Buchwald-Hartwig where the product carries a secondary amine — what do people actually use?",
+    "expects_tools": [
+      "reagent_frequency",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a single recommended condition set presented as the answer",
+      "counts drawn from a functional-group filter the answer does not name",
+      "a claim of completeness over a partly-labelled corpus"
+    ],
+    "direction": "One call, not two: `reagent_frequency` with both a named reaction and a product functional group, and no role filter — 'conditions' means every role, so ligand, base, solvent and catalyst all come back ranked. The answer should present them as what the field does, per role, with counts and medians, and should say what it filtered on so a chemist can tell whether the denominator is the one they meant. A single 'recommended' recipe synthesised from the top of each column is precisely the over-claim to avoid: those reagents were not necessarily used together.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-39",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What are the workhorse conditions for a Buchwald-Hartwig where the product carries a secondary amine — what do people actually use?",
+    "profile": "",
+    "answer": "I'll search the corpus for Buchwald-Hartwig coupling conditions where the product has a secondary amine.The corpus has no labelled Buchwald-Hartwig reactions indexed by functional-group outcome. That is not evidence that no such reactions have been run — it means the reaction-label index either has not been populated with Buchwald-Hartwig data or does not have secondary-amine products tagged. **Report this as a gap in what is indexed, not as absence of knowledge.**\n\nLet me search more broadly for Buchwald-Hartwig reactions to see what precedent is on file:The labelled reaction corpus appears empty or unindexed. Let me try gathering evidence more broadly on Buchwald-Hartwig conditions:The knowledge graph holds no reaction notes yet. **The system cannot answer this question from your own record because nothing has been indexed into it.** \n\nHere is what the system cannot reach:\n- **Labelled reactions** from your ELN or lab notebook (the reaction index appears not to be populated)\n- **Workhorse-condition frequency** rolled up from your own runs (the reagent/condition tables are built from labelled reactions, which are absent)\n\nWhat the system *does* hold, in principle, is:\n- **Buchwald-Hartwig protocols** you have written and stored as playbook notes\n- **Individual experimental runs** you have recorded as campaign or run notes\n- **Computed precedent** from any uploaded literature corpus\n\n**To get this question answered from your own practice**, you would need:\n1. Reactions labelled in your ELN with catalyst, solvent, base, temperature, and outcome\n2. Those reactions imported into the knowledge graph\n3. Products tagged by functional group (secondary amine, aromatic ring, etc.)\n\nFor now: **general chemistry** (not your recorded evidence) tells you that Buchwald-Hartwig for secondary amines classically uses Pd(II) sources (Pd(OAc)₂, Pd₂dba₃) with biaryl phosphine ligands (dppf, SPhos), bases like Cs₂CO₃ or K₃PO₄, and solvent around toluene or dioxane at 80–110 °C; modern runs often favour Pd(I) precursors and NHC ligands. But **this is textbook knowledge, not your record**, and what you actually use may be different. Do you have experimental conditions recorded that you'd like me to help you analyze, or would you like to design a protocol from scratch?",
+    "answered": true,
+    "tools_called": [
+      "reagent_frequency",
+      "conditions_for_similar_reaction",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "reagent_frequency",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:reagent_frequency\">\n{\n  \"agents\": [],\n  \"reactions_in_scope\": 0,\n  \"coverage\": {\n    \"labelled\": 0,\n    \"total\": 0,\n    \"sources\": [],\n    \"verdict\": \"NO ROW"
+      },
+      {
+        "tool": "conditions_for_similar_reaction",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:conditions_for_similar_reaction\">\n{\n  \"question\": \"conditions for reactions similar to Br.NC>>Nc1ccccc1\",\n  \"hits\": [],\n  \"coverage\": {\n    \"labelled\": 0,\n  "
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 20.36,
+    "event_counts": {
+      "token": 30,
+      "tool_call": 3,
+      "tool_result": 3,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b20c6729956b497ebc8e44bf631babdd",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

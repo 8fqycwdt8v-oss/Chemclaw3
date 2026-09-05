@@ -36,6 +36,7 @@ with workflow.unsafe.imports_passed_through():
         failure_reason,
         wrapper_execution_timeout,
     )
+    from chemclaw.durable.job_record import JobRecord, record_job
     from chemclaw.durable.notify import notify_session_best_effort
     from chemclaw.durable.template_activities import (
         AgentStepInput,
@@ -95,6 +96,83 @@ class TemplateRunResult(BaseModel):
 # matters at an *activity* boundary — which errors are worth retrying — is already made by
 # `BAD_DATA_RETRY`; what this decides is only whether the workflow is allowed to fail at all, and
 # the answer is always yes.
+# The namespace a template run occupies in `job_records.connector`. Templates are not connectors and
+# the column is not being repurposed: it is the *family* a row belongs to, which is what
+# `find_past_jobs(connector=...)` filters on and what a reader needs to tell a `calc` run from a
+# procedure. A literal rather than a setting, because it is an identifier inside stored rows —
+# changing it would orphan every row already written.
+TEMPLATE_JOB_FAMILY = "template"
+
+
+def template_job_record(
+    job_id: str, run: "TemplateRunInput", results: dict[str, Any], summary: str
+) -> JobRecord:
+    """The durable record of one finished template run.
+
+    **Templates wrote no record at all**, and the gap was invisible because everything around it
+    looked complete: a run pushed a completion event to its session, returned every step's result,
+    and ended. But `record_job` had exactly one caller in the tree — `connector_job.py` — so a
+    template run left no `job_records` row. It was therefore never findable by `find_past_jobs`,
+    and `get_durable_job_status` answered for its id only until Temporal retained the history away.
+    Nine shipped `run_*` procedures, one of them (`hazard-briefing`) whose entire product is a
+    chemist-facing brief, and that brief was unrecoverable once the conversation closed.
+
+    Pure and module-level for the same reason `job_record_for` is: everything around it needs a
+    live broker, and this way "a template run records what it ran and what every step produced" is
+    a property the offline suite can hold rather than one only CI ever checks.
+
+    `rationale` is deliberately empty — see `JobRecord.rationale`. This row's `job` column names a
+    reviewed `data/templates/<name>.yaml` whose own `summary` states what the procedure is for, so
+    copying that here would restate another store's fact in a field documented as the requester's
+    own words.
+    """
+    return JobRecord(
+        job_id=job_id,
+        connector=TEMPLATE_JOB_FAMILY,
+        job=run.template.name,
+        requested_by=run.requested_by,
+        session_id=run.session_id,
+        # The run *is* the correlation — the same identity `StepIdentity` binds for every step, so
+        # the record and the audit rows of the steps inside it join without a second identifier.
+        correlation_id=job_id,
+        payload=dict(run.inputs),
+        summary=summary,
+        # Every step, not only the last. A fixed procedure's value is being able to show what each
+        # stage produced, which is why `TemplateRunResult` keeps them; reconstructing them from
+        # Temporal history afterwards is not something a chemist can do.
+        result={"steps": results},
+        payload_kind="template",
+    )
+
+
+def failed_template_record(
+    job_id: str, run: "TemplateRunInput", step_id: str, reason: str, completed: dict[str, Any]
+) -> JobRecord:
+    """The record of a template run that ended badly — what was asked, where it stopped, and why.
+
+    The counterpart `connector_job.failed_job_record` already argues for: a run that fails is
+    exactly the run somebody goes looking for months later, and it was the one leaving nothing.
+    `summary` stays empty because a summary is what a run *produced*; the reason goes in
+    `failure_reason`, so a listing can tell a result from a failure without opening either.
+
+    The steps that *did* complete are kept. A five-step procedure that died at step four ran four
+    real steps, and discarding them would lose the work while recording only the failure.
+    """
+    return JobRecord(
+        job_id=job_id,
+        connector=TEMPLATE_JOB_FAMILY,
+        job=run.template.name,
+        requested_by=run.requested_by,
+        session_id=run.session_id,
+        correlation_id=job_id,
+        payload=dict(run.inputs),
+        result={"steps": completed},
+        payload_kind="template",
+        state="failed",
+        failure_reason=f"step {step_id!r}: {reason}",
+    )
+
+
 @durable_workflow("background")
 @workflow.defn(failure_exception_types=[Exception])
 class TemplateWorkflow:
@@ -147,11 +225,31 @@ class TemplateWorkflow:
                 # already failing, and a push-back that failed on top would replace one lost
                 # message with two. Which step, because "the template failed" is unactionable when
                 # a procedure has five of them.
+                # The record comes first for the same reason it does on the success path, and
+                # matters more here: a run that failed is the one somebody goes looking for, and
+                # until now it left nothing anywhere but Temporal's expiring history.
+                await self._record_run(
+                    failed_template_record(
+                        workflow.info().workflow_id,
+                        run,
+                        step.id,
+                        failure_reason(exc),
+                        dict(results),
+                    )
+                )
                 await self._notify_failure(run, step, exc)
                 raise
             results[step.id] = result
             scope[f"steps.{step.id}.result"] = result
 
+        summary = f"template {run.template.name!r} completed {len(run.template.steps)} step(s)"
+        # Recorded before the push-back, so the id a chemist is handed is one `find_past_jobs` and
+        # `get_durable_job_status` can already answer for. Best-effort in the same sense the
+        # connector wrapper means it: a finished run is finished, and losing its row must not undo
+        # the work or fail the workflow.
+        await self._record_run(
+            template_job_record(workflow.info().workflow_id, run, results, summary)
+        )
         if run.session_id:
             await notify_session_best_effort(
                 run.session_id,
@@ -159,14 +257,56 @@ class TemplateWorkflow:
                 {
                     "job_id": workflow.info().workflow_id,
                     "template": run.template.name,
-                    "summary": f"template {run.template.name!r} completed "
-                    f"{len(run.template.steps)} step(s)",
+                    "summary": summary,
                 },
             )
         # The last step's result is the run's answer: a procedure ends with the thing it was for,
         # and a caller that wants an earlier stage has every one of them in `steps`.
         last = run.template.steps[-1].id
         return TemplateRunResult(template=run.template.name, steps=results, result=results[last])
+
+    async def _record_run(self, record: JobRecord) -> None:
+        """Persist the run's durable record, logging rather than failing the run if it cannot be.
+
+        A method rather than an inline block so "never fail a finished run for the sake of its
+        record" has one place to be read and one to change — the same shape, and the same
+        reasoning, as `connector_job.ConnectorJobWorkflow._record_run`.
+
+        The queue is named explicitly although this workflow already runs there: `record_job` is
+        registered on the background queue alone, so were the template wrapper ever moved, the
+        default would route the write to a queue nothing serves — a silent loss, discovered when an
+        id expires months later.
+        """
+        try:
+            await workflow.execute_activity(
+                record_job,
+                record,
+                task_queue=settings.background_task_queue,
+                start_to_close_timeout=timedelta(seconds=settings.job_record_timeout_seconds),
+                # **`start_to_close` alone is not a bound on this call.** It starts counting when a
+                # worker picks the task up, so an unserved background queue — a fleet scaled to
+                # zero, a rolling update, a queue named in config and served by no pod — is a
+                # template run that never ends. `tests/test_activity_queue_bound.py` holds that
+                # rule over every call site in `durable/` and caught this one: without the bound
+                # below, the first version of this method hung the whole suite rather than failing
+                # it, which is the same wedge in miniature.
+                #
+                # The stricter `schedule_to_close` rather than `queue_wait_timeout()`, matching
+                # `connector_job._record_run` exactly and for its reason: this write is best-effort
+                # by construction — the `except` below swallows it and the run carries on — so it
+                # wants the bound that caps every attempt together, and pays for it with a shorter
+                # retry budget on a row nothing downstream reads synchronously.
+                schedule_to_close_timeout=timedelta(
+                    seconds=settings.job_record_timeout_seconds * 2
+                ),
+                retry_policy=BAD_DATA_RETRY,
+            )
+        except Exception:
+            workflow.logger.warning(
+                "could not record template run %s (%s); the run itself is unaffected",
+                record.job_id,
+                record.job,
+            )
 
     async def _notify_failure(self, run: TemplateRunInput, step: Any, exc: BaseException) -> None:
         """Tell the session which step failed, before the failure propagates and closes this run.
@@ -322,6 +462,15 @@ class TemplateWorkflow:
                     # exactly as the same job launched from a chat turn is — a field this path
                     # drops is a field that quietly means something else here.
                     timeout_seconds=resolved.timeout_seconds,
+                    # Its sibling, and the third field this literal has silently defaulted. A job
+                    # declaring `awaits_answer` gets no child ceiling (`child_execution_timeout`)
+                    # because it spends wall clock waiting on a plate rather than computing;
+                    # dropped here it read False, so the shipped campaign job was handed the
+                    # five-hour fleet ceiling on this path and killed 67x short of the fourteen-day
+                    # deadline its own wait opens. What still bounds it here is the *wrapper's*
+                    # `execution_timeout` below, which is a step-level bound and a different
+                    # question — see `wrapper_execution_timeout`.
+                    awaits_answer=resolved.awaits_answer,
                     publish_to_graph=resolved.publish_to_graph,
                 ),
                 # Named from the run's *execution*, not just its id — `TemplateWorkflow` is also

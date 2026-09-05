@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "gr-21",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much do you trust your own solubility numbers on molecules like these?",
+    "expects_tools": [
+      "calculator_trust",
+      "calculator_outliers",
+      "find_calculations"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a confidence statement with no reference to recorded calculations or measurements",
+      "a validation study, benchmark or error statistic that was not retrieved"
+    ],
+    "direction": "Introspects over what has actually been computed and measured rather than describing the method's reputation. \"There are no measurements to compare against\" is a strong answer if it is true; a confident accuracy claim with nothing behind it is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-21",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much do you trust your own solubility numbers on molecules like these?",
+    "profile": "no-tools",
+    "answer": "I appreciate the question, but I need to see what molecules you're referring to. You've asked about \"molecules like these\" but haven't provided any structures, names, or data yet.\n\nCould you share:\n- The specific molecules you're asking about (structures, SMILES, or names)?\n- Any solubility data you're looking at (values, solvents, conditions)?\n- The context—are you comparing my estimates to measured data, or asking whether I should be trusted as a source for solubility predictions?\n\nOnce I see the specifics, I can give you an honest assessment of:\n- How confident I'd be in any solubility estimates I'd offer\n- What factors would make those estimates less reliable\n- Whether the molecules fall into categories where solubility is predictable vs. genuinely hard to estimate\n- What would need to be measured vs. what might be reasonable to infer\n\nSolubility is notoriously context-dependent and molecule-specific, so my answer will depend heavily on what we're actually discussing.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 3.85,
+    "event_counts": {
+      "token": 11,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "0a96e6c626e44f7db8fe6f8d8258b5b2",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "probe": {
+    "id": "an-10",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before analytical development starts on COc1ccc(-c2ccccc2C(=O)O)cc1, give me the basic physicochemical picture — molecular weight, lipophilicity, polar surface area — so we know what kind of molecule we are handing them.",
+    "expects_tools": [
+      "predict_developability_profile",
+      "predict_logd",
+      "predict_pka",
+      "resolve_compound"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a column, gradient or analytical technique recommendation dressed up as following from the profile",
+      "a solubility or stability claim not produced by a tool",
+      "presenting computed descriptors as measured values"
+    ],
+    "direction": "Returns the profile (MW, LogP, TPSA and whatever else the tool computes), reads it in chemical language, and is clear these are computed descriptors. Where it goes on to say what this means for analysis, it stays at the level the descriptors support (ionisable, moderately lipophilic, UV-active aromatic) and explicitly does not name a method.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-10",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before analytical development starts on COc1ccc(-c2ccccc2C(=O)O)cc1, give me the basic physicochemical picture — molecular weight, lipophilicity, polar surface area — so we know what kind of molecule we are handing them.",
+    "profile": "",
+    "answer": "I'll get the developability profile for that molecule.Here's the physicochemical profile for the 4-methoxybiphenyl-2-carboxylic acid:\n\n**Core Descriptors**\n- **Molecular weight**: 228.2 g/mol — well-behaved, typical for a pharma intermediate or lead\n- **LogP (lipophilicity)**: 3.06 — moderately lipophilic; good cell permeability risk, worth checking solubility in both polar and non-polar media\n- **TPSA (polar surface area)**: 46.5 Ų — driven entirely by the carboxylic acid (two H-bond acceptors, one donor); this is the region where passive membrane permeability transitions, so dissolution and GI uptake will be pH-dependent\n\n**H-Bond Profile**\n- 1 H-bond donor (the carboxylic acid proton)\n- 2 H-bond acceptors (carboxyl oxygens)\n- This is a classic ionizable motif; expect significant pH effects on solubility and logD\n\n**Structure**\n- 3 rotatable bonds (the biaryl C-C and the methoxy C-O side chain rotations)\n- 2 aromatic rings; 7% sp³ — very aromatic, low conformational complexity\n- The molecule is essentially rigid\n\n**Rule-of-Five Assessment**\n- No Lipinski violations\n- Passes Veber's rule (≤10 rotatable bonds, TPSA ≤140)\n- QED score 0.88 — high; drug-like properties\n\n**What this means for analytical development:**\n\nThe molecule is *cleanly* in the developable range — no red flags from the descriptors alone. The key things analytical will need to watch:\n\n1. **Solubility**: The LogP of 3.06 and the ionizable carboxylic acid mean solubility will swing sharply with pH. Expect good solubility at elevated pH (fully deprotonated form), much poorer in neutral or acidic water. Organic-solvent solubility and DMSO tolerance matter for formulation and handling.\n\n2. **pKa**: The carboxylic acid pKa will be the critical parameter for any aqueous work. The methoxy and biaryl don't change the typical range much; expect something in the 3–4 range. If you want a prediction, I can compute it.\n\n3. **Ionization state**: At physiological pH (7.4), this will be fully deprotonated and carries a negative charge, which affects permeability, partition, and any salt/counterion strategy.\n\n4. **Structural stability**: The biaryl C-C is the main lability risk if oxidative or photolytic degradation comes up; the methoxy is a known oxidation site. A quick forced-degradation triage can flag the likely degradants if you want to know what to look for in impurity screens.\n\nHand this to analytical with the LogP, TPSA and rotatable-bond counts; they'll design method polarity and pH accordingly. Let me know if you want a pKa prediction or a degradation-liability scan before they start.",
+    "answered": true,
+    "tools_called": [
+      "predict_developability_profile"
+    ],
+    "tool_results": [
+      {
+        "tool": "predict_developability_profile",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"calc:predict_developability_profile\">\n{\n  \"smiles\": \"COc1ccc(-c2ccccc2C(=O)O)cc1\",\n  \"molecular_weight\": 228.24699999999999,\n  \"clogp\": 3.0604000000000013,\n  \"tpsa"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "228.2",
+      "3.06",
+      "46.5",
+      "1",
+      "2",
+      "3",
+      "0.88"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 14.39,
+    "event_counts": {
+      "token": 34,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c4ddcc7de7df4cbea13dc43b8bf44aea",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -53,10 +53,15 @@ from tests.fakes import scripted
 # - the `wrap_tool_call` wrappers sit inside it and inside `SubAgentMiddleware`, so a
 #   scratchpad write and a `task` spawn cross the audit row and the authorization gate exactly like
 #   any other tool call.
-# - `AnthropicPromptCachingMiddleware` is last because it too replaces an upstream entry in place,
-#   and upstream's sits in the tail after the compaction group — behind even the model-call
-#   observers, which are new names and land with the rest of this repository's block. The two do
-#   not contend: caching marks the system prompt and tool schemas, which compaction never touches.
+# - `AnthropicPromptCachingMiddleware` is **upstream's own, and nothing here contributes it**:
+#   `deepagents.graph` calls `append_prompt_caching_middleware` unconditionally, after everything
+#   else, so it lands behind even the model-call observers. This repository used to splice a
+#   replacement into that slot by sharing the name; the collapse to one gateway deleted the
+#   replacement (`D-2026-09-04-a-gateway-is-the-only-provider`) and left upstream's entry running
+#   on every turn, where it no-ops — it is built with `unsupported_model_behavior="ignore"` and
+#   the gateway client is a `ChatOpenAI`. Its presence here is therefore a fact about upstream's
+#   assembly rather than about a decision taken in this file. The two do not contend either way:
+#   caching marks the system prompt and tool schemas, which compaction never touches.
 # - `enforce_loop_cap` appears on *every* build, harness or not
 #   (`D-2026-08-27-the-cap-is-a-property-of-the-loop-not-of-the-mode`): the runaway it bounds is
 #   the model-call loop itself, which exists in both modes. Its position carries no nesting

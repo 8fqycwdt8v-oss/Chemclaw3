@@ -1,0 +1,78 @@
+{
+  "probe": {
+    "id": "gr-29",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Scale the biaryl coupling to 2 kg of COc1ccc(Br)cc1 and tell me what I'm charging.",
+    "expects_tools": [
+      "stoichiometry_table",
+      "resolve_compound",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a mass or volume produced without the equivalents basis it came from",
+      "a solvent volume invented where no density or volume basis was given",
+      "the seeded lab-scale charge rescaled silently, with no note that it was"
+    ],
+    "direction": "The lab-scale charge is in the corpus with real equivalents. A good answer builds the table from those equivalents, shows the arithmetic, and refuses rather than guesses where a volume basis is ambiguous. Naming what changes at 2 kg that a charge table cannot capture is a bonus.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-29",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Scale the biaryl coupling to 2 kg of COc1ccc(Br)cc1 and tell me what I'm charging.",
+    "profile": "",
+    "answer": "I'll scale the biaryl coupling to 2 kg of 4-bromoanisole and build a charge table for you. First, let me gather what conditions this transformation actually runs at in the record.The record has no biaryl coupling runs on 4-bromoanisole yet. Let me search more broadly for biaryl coupling precedent and for any runs using this bromide:The knowledge graph is currently empty — no biaryl coupling conditions are on file yet. Before I can build a charge table, I need to know:\n\n1. **What is the coupling partner?** (The arylboronic acid, organozinc, organostannane, or olefin you're coupling this bromide to)\n2. **What are the conditions?** Specifically:\n   - Catalyst (Pd(PPh₃)₄, Pd(OAc)₂ + ligand, XPhos, etc.)\n   - Ligand (if separate)\n   - Base (K₂CO₃, Cs₂CO₃, K₃PO₄, etc.)\n   - Solvent and volume (if you have a reference run or a literature procedure)\n   - Temperature and time\n   - Equivalents of each reagent\n\n3. **What is your target product** — the biaryl you're making? (This tells me whether the bromoanisole is your limiting reagent or whether the coupling partner is.)\n\nOnce you supply these, I can:\n- Resolve each reagent name to its SMILES\n- Calculate what mass to weigh for each component scaled to 2 kg of bromoanisole\n- Show you the full charge table with masses and solvent volumes\n- Compute E-factor and PMI so you can compare this to alternatives\n\nDo you have a reference run or a literature procedure in mind?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "substrate_precedent"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0, 'reaction-fingerprint': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-re"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-repo/knowledge'} refused_on_i"
+      },
+      {
+        "tool": "substrate_precedent",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:substrate_precedent\">\n{\n  \"question\": \"reactions using COc1ccc(Br)cc1\",\n  \"hits\": [],\n  \"coverage\": {\n    \"labelled\": 0,\n    \"total\": 0,\n    \"sources\": [],\n "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 15.6,
+    "event_counts": {
+      "token": 21,
+      "tool_call": 3,
+      "evidence_source": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "fc76d788e30e4a8dbaa382a5c81b3bf3",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

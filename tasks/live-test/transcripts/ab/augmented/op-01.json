@@ -1,0 +1,92 @@
+{
+  "probe": {
+    "id": "op-01",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking the 4-bromoanisole Suzuki back up for a new analogue series. Before I write the study plan — what do we already know about this coupling in-house? Conditions, yields, what went wrong. I want the plan grounded in our own runs, not a textbook.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a run, yield or condition set that is not in a cited note",
+      "a literature or patent reference as the source",
+      "we have no records on this coupling"
+    ],
+    "direction": "Reconstructs what the record actually holds for this transformation and cites each note it used: the Suzuki biaryl run (its base, solvent system, temperature, degassing and isolated yield), the aqueous-protodeboronation failure mode, and the degassing / Pd cross-coupling scope playbooks. Every number traces to a note; anything the notes do not record is said to be not recorded rather than filled in. It then turns that into the shape of a study plan — what is already settled and therefore not worth re-running, and what is genuinely open. An answer that asks the chemist to supply the history it could have retrieved is a miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-01",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking the 4-bromoanisole Suzuki back up for a new analogue series. Before I write the study plan — what do we already know about this coupling in-house? Conditions, yields, what went wrong. I want the plan grounded in our own runs, not a textbook.",
+    "profile": "",
+    "answer": "I'll search our in-house record for 4-bromoanisole Suzuki runs and gather what we've learned from them.The reaction-fingerprint index hasn't been populated yet, so I can't search for structurally similar past runs. Let me search the knowledge graph more broadly for any 4-bromoanisole work or Suzuki coupling notes we may have written up.The record is empty for 4-bromoanisole Suzuki coupling. This means either:\n\n1. **No runs have been written to the knowledge graph yet** — the ELN may hold the data but hasn't been ingested as distilled notes, or the results haven't been formally documented\n2. **This is a restart on a new substrate after earlier work that wasn't captured**\n\nBefore I recommend what to do next, I need to clarify: **Do you have a prior ELN entry or lab notebook record of the 4-bromoanisole Suzuki runs you mentioned?** If so, I can:\n\n- Search for it directly if you give me a campaign/experiment ID\n- Have you upload the raw data so I can extract the conditions and outcomes\n- Search for similar aryl bromide Suzuki couplings in the system to build a comparative set\n\nAlternatively, if this is a genuinely fresh start on the substrate, I can help you design the study plan from precedent in the corpus — Suzuki conditions that have worked on other aryl halides and directing groups, and computational predictions for this specific substrate (reactivity, coupling thermodynamics). That's a different kind of grounding: structure-based rather than project history.\n\nWhich path matches what you're looking for?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "similar_reactions",
+      "find_notes",
+      "find_notes",
+      "find_past_jobs"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[] truncated_by=None total_before_cap=0 sources_failed=[] sources={'graph': 0, 'reaction-fingerprint': 0} sources_skipped={'graph': 'no notes found under /home/user/Chemclaw3/.live/knowledge-re"
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-00992008d52d9450 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARC"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 11.74,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 19,
+      "tool_call": 5,
+      "evidence_source": 2,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "5a0851d09a6e4450a309821bc260b9c6",
+    "first_degraded_index": 1,
+    "first_output_index": 2,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

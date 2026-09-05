@@ -40,7 +40,12 @@ from chemclaw.core import db
 from chemclaw.core.config import SCHEMA_VECTOR_DIM, settings
 from chemclaw.core.embeddings import embedding_config_key
 from chemclaw.core.errors import SubsystemUnavailableError
-from chemclaw.core.fulltext import TSQUERY_TERMS, reference_terms, reference_tokens
+from chemclaw.core.fulltext import (
+    TSQUERY_TERMS,
+    normalize_search_text,
+    reference_terms,
+    reference_tokens,
+)
 from chemclaw.ingest.documents.binding import DocumentShareError
 from chemclaw.ingest.documents.chunk import Chunk
 
@@ -987,7 +992,8 @@ class PostgresDocumentIndex:
                     {
                         "doc": chunk.doc_id,
                         "ord": chunk.ordinal,
-                        "content": chunk.content,
+                        # Normalised on the way in, exactly as the query is on the way out.
+                        "content": normalize_search_text(chunk.content),
                         "coord": chunk.coordinate,
                         "emb": self._chunk_vector(chunk),
                         "key": key,
@@ -1228,7 +1234,7 @@ class PostgresDocumentIndex:
     ) -> list[DocumentHit]:
         """Rank chunks by full-text `ts_rank` against the terms in `query`."""
         params = self._params(source, top_k, filters)
-        params["q"] = query
+        params["q"] = normalize_search_text(query)
         return await self._run(self._lexical, params)
 
 
