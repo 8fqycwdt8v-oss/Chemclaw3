@@ -1830,3 +1830,21 @@ believing the row is what kept the defect alive. A fixer found it by checking th
 them dangerously (`ABANDON` as a parent-close policy is worse than the default it replaces, not
 better). **Rule: a finding's diagnosis and its proposed remedy are two separate claims and the
 second is usually the less tested one.**
+
+**A test can be red only under `make cov`, and lesson 38's rule sends you the wrong way.**
+`test_concurrent_batches_do_not_race_on_the_cache` failed the full gate and passed every time I ran
+it alone — which reads exactly like the contended-load case above, and is not it. Coverage tracing
+multiplies a tight 4,800-iteration threaded loop by ~30 (4.8 s bare, 132-216 s traced) and the
+global cap is 180 s, so the run's outcome is decided by which side of that line the machine lands
+on. Five isolated runs under `--cov`: 132 s, 152 s pass; 200 s, 213 s, 216 s fail. Perfect
+correlation with the cap, none with the race the test is named for.
+
+Two things I nearly got wrong. I reached for "order dependence" first, because that is what the last
+two suite-only failures were, and it cost a detour. And the failure *presents* as the concurrency
+bug under test, so "flaky race test" is the reading that offers itself — on a test whose own
+docstring says a race test cannot promise to fail every run.
+
+**Rule: reproduce a suite-only failure under the gate's own flags before theorising.** `pytest <file>`
+is not `make cov`. And when a slow test sits under a shared cap, the number to check is its
+*traced* runtime, not its bare one — this is the third test in this repository whose cap was sized
+against a measurement nobody took under coverage.

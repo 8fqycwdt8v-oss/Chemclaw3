@@ -284,6 +284,22 @@ topic).
       sides read: a published fixture, a generated types package, or a job in `make ci` that
       fetches the client's own declaration and diffs it against the fixture.
 
+- [ ] **A durable question waiting on a chemist is written to the push-back table and never
+      pushed** — [M], found 2026-09-05 while checking the client half of the wire contract.
+      `durable/awaiting.py` writes an `awaiting-answer` row into `session_events` when a wait opens
+      *and* when it expires, and `AWAITING_KIND` has exactly two references in the tree: that line
+      and its own definition. The front door's tailer (`api/routes/streams.py`) subscribes with
+      `kinds=("job_completed", "job_failed")`, so the row is never read by anything — a producer
+      with no consumer, which is the `map_to_hpc_identity` shape, except that here the consumer
+      exists in the *other* repository: `Chemclaw3_ui`'s `useJobStreams` has a full
+      `awaiting_answer` branch, `chatStore` keeps a slice for it, and its comment asserts this
+      stream is "scoped server-side to `job_completed`, `job_failed` and `awaiting-answer`", which
+      is false. Degraded rather than broken, because `GET /pending` still answers on a poll and the
+      review queue treats the service as the authority. Closing it is a new `Event` member plus the
+      kind in that tuple — and the wire name has to be decided, since the producer says
+      `awaiting-answer` and the client reads `awaiting_answer`. The UI's false comment is a
+      separate one-line fix in that repository.
+
 - [ ] **`JsonCommitmentExport` cannot run a destructive sweep, and the grant for one already
       exists** — [S], the row `ingest/commitments/json_export.py`'s `snapshot` attribute says is
       queued and which was never written. It is hard-coded `False`, so a commitment withdrawn at
