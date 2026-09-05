@@ -15,7 +15,12 @@ from pathlib import Path
 
 import pytest
 
-from chemclaw.agent.chemclaw_agent import connector_specs
+from chemclaw.agent.chemclaw_agent import (
+    connector_specs,
+    harness_tool_names,
+    skill_tool_names,
+    subagent_tool_names,
+)
 from chemclaw.connectors.manifest import HttpEndpoint, StdioEndpoint
 from chemclaw.connectors.registry import (
     ConnectorError,
@@ -396,6 +401,45 @@ def test_a_connector_cannot_claim_an_ambient_tool_name(
     _use(monkeypatch, tmp_path)
     with pytest.raises(ConnectorError, match="a scratchpad file verb"):
         job_tools()
+
+
+def test_every_ambient_name_space_is_refused_to_a_connector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One third of that refusal was guarded by nothing, and the deletion test is how we know.
+
+    `_bound_by_this_process` unions three ambient name spaces, each stamped with its own reason
+    string. Deleting each `bound.update(...)` line in turn reddened a test for the scratchpad verbs
+    (the test above) and for the subagent spawner (`tests/test_tool_framing.py`'s derived guard) —
+    and reddened **nothing** for `harness_tool_names()`. So a refactor could have silently reopened
+    `write_todos` to a connector, and a connector that claimed it would win `tools_by_name` over the
+    plan harness that `agent/plan_gate.py` reads to decide whether a state-changing call is covered
+    by an approved plan.
+
+    The basis is the three name-source functions rather than `_bound_by_this_process`'s own return
+    value, and that is the whole design of this test: deriving the expectation from the dict under
+    test would make deleting a line delete the assertion with it, which is
+    `D-2026-09-05-a-ratchet-that-re-derives-half-its-basis-bounds-half-a-request` repeated in a new
+    file. Read off the middleware the way the sources themselves are, so an upstream rename moves
+    both halves together and a *fourth* name space is the only thing that still needs a hand.
+
+    Every arm is collected rather than asserted in place, so an unguarded name space reports as
+    itself instead of hiding behind whichever one sorts first.
+    """
+    unrefused: list[str] = []
+    for source in (skill_tool_names, harness_tool_names, subagent_tool_names):
+        for name in sorted(source()):
+            root = tmp_path / source.__name__ / name
+            root.mkdir(parents=True)
+            _bundle(root, "alpha", _http_manifest("alpha", tools=name))
+            _use(monkeypatch, root)
+            discovered.cache_clear()
+            try:
+                job_tools()
+            except ConnectorError:
+                continue
+            unrefused.append(f"{source.__name__}:{name}")
+    assert unrefused == []
 
 
 def test_a_generated_launcher_is_not_read_back_as_a_collision_on_a_second_build(

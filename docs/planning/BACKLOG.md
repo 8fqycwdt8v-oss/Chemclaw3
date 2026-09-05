@@ -170,25 +170,6 @@ topic).
       for the audit trail, where that question can be answered. What stays open is unchanged: the
       string is still the caller's to choose.
 
-- [ ] **One third of the ambient-name refusal is guarded by nothing** — [S], found reviewing
-      `D-2026-09-04-a-helpers-file-crosses-back-and-stays`. `connectors/registry._bound_by_this_process`
-      unions three sets so a connector cannot claim a name this deployment already binds:
-      `skill_tool_names()` (the six scratchpad file verbs), `subagent_tool_names()` (`task`) and
-      `harness_tool_names()` (`write_todos`). Each set is stamped with its own reason string, and a
-      grep for the three over `src/` and `tests/` is the whole evidence: `"a scratchpad file verb"`
-      is asserted once, by
-      `tests/test_connector_registry.py::test_a_connector_cannot_claim_an_ambient_tool_name`, which
-      drives a bundle declaring `read_file`; `"the subagent spawner"` is now reached by
-      `tests/test_tool_framing.py`'s derived guard; `"a plan-harness tool"` appears **only** at its
-      own definition, `registry.py:664`. Confirmed by deleting each line in turn: the first two turn
-      a test red and the third turns **nothing** red anywhere. So a
-      refactor may silently re-open `write_todos` to a connector, and a connector that claimed it
-      would win `tools_by_name` over the plan harness the gate (`agent/plan_gate.py`) reads. The
-      guard was not added with the other two on purpose: `agent/tool_framing.py` does not sort by
-      that name, so asserting it there would be a control in the wrong file — it belongs beside the
-      registry's own refusal test. Anchors: `connectors/registry.py::_bound_by_this_process`,
-      `tests/test_connector_registry.py`, `agent/plan_gate.py`.
-
 ## 2 — Answers that are wrong without saying so
 
 - [ ] **`retrieval_top_k` cuts silently and the sweep reports `truncated_by=None`** — [M], measured
