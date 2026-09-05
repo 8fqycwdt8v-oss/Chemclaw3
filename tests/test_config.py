@@ -836,14 +836,21 @@ def test_a_fleet_exactly_at_its_connection_ceiling_is_allowed() -> None:
     The shipped ceiling carries headroom, but nothing about this check should force it to: a
     release that provisions exactly what it opens is a correct release. Off by one here and every
     pod it renders refuses to start.
+
+    **The numbers had to move to keep testing the boundary.** They were written for the
+    uniform-width product — 17 pools x 8 = 136 exactly — and the arithmetic became a sum, so the
+    same pair opens 129 against a declared 136 and sits seven under the edge this test is named
+    for. Measured: with `>` relaxed to `>=`, the old numbers passed. The assertion also read a
+    constructor argument straight back, which is true whatever the check does; it now asserts the
+    figure the check compares.
     """
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
         pg_fleet_pools=17,
         pg_pool_max_size=8,
-        pg_fleet_max_connections=136,
+        pg_fleet_max_connections=129,
     )
-    assert settings.pg_fleet_max_connections == 136
+    assert settings.fleet_connections_per_server() == (129, 0)
 
 
 def test_a_fleet_that_would_exhaust_the_server_is_refused_by_pools_not_by_pods() -> None:
@@ -1624,6 +1631,19 @@ def test_a_hand_set_pool_count_that_cannot_hold_its_readiness_pools_is_charged_i
         _env_file=None, pg_fleet_pools=2, pg_pool_max_size=16, service_fleet_replicas=3
     )
     assert impossible.fleet_connections_per_server() == (32, 0)
+
+    # **A point that separates `3 x replicas` from `2 x`, which neither of the two above does.**
+    # Both give the same answer under either constant, so the threshold this test is named for was
+    # untested: measured, relaxing it to `2 x` left them passing while `(2 pools, 1 replica)` —
+    # a pair that cannot hold a front door's three — quietly declared 17 instead of 32.
+    borderline = Settings(  # type: ignore[call-arg]
+        _env_file=None, pg_fleet_pools=2, pg_pool_max_size=16, service_fleet_replicas=1
+    )
+    assert borderline.fleet_connections_per_server() == (32, 0), (
+        "two pools cannot contain a front door's three, so neither is the readiness probe's and "
+        "both are charged full width; subtracting one here is the under-declaration that exhausts "
+        "a server"
+    )
 
 
 def test_a_split_session_store_with_no_ceiling_for_its_server_warns(

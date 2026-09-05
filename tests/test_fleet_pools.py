@@ -23,7 +23,7 @@ import httpx
 import pytest
 
 from chemclaw.core import db
-from chemclaw.core.config import settings
+from chemclaw.core.config import pg_endpoint, settings
 from tests.pg import migrated_db_or_skip
 
 # The three a front-door process holds, and what each is for. Named here so a failure reads as
@@ -125,6 +125,13 @@ def test_a_worker_process_holds_one_pool() -> None:
     that is the one tail every worker runs through, core's `background-worker` and each bundle's
     `connector-worker-<name>` alike. Both chart roles are therefore this one measurement; a
     parametrization over their names would run the same code twice and read as coverage it is not.
+
+    **What driving the tail cannot see, asserted separately below.** A second pool opened inside
+    `serve_worker` itself — spelled as a second DSN rather than a second statement timeout — is
+    invisible here, because this drives the shared context and not that function: measured, such a
+    mutation doubled every worker pod's Postgres spend with this test green, while its sibling
+    `test_a_connector_server_holds_one_pool` drives a real root and caught the same change. The
+    module scan is the cheap half of the difference.
     """
 
     async def _run() -> int:
@@ -136,6 +143,14 @@ def test_a_worker_process_holds_one_pool() -> None:
     assert asyncio.run(_run()) == settings.pg_pool_max_size, (
         "a worker opened more than one pool's worth of connections; chemclaw.fleetPools counts it "
         "as one"
+    )
+    # And the worker's own module borrows nothing of its own. Every pool a worker holds comes from
+    # the stores it drives through the shared context above; a `db.connection(` or a `_pool_for(`
+    # in `durable/serve.py` is a pool the fleet budget counts for nobody.
+    serve = (Path(db.__file__).parent.parent / "durable" / "serve.py").read_text(encoding="utf-8")
+    assert "db.connection(" not in serve and "_pool_for(" not in serve, (
+        "durable/serve.py opens a pool of its own; a worker is counted as one pool, so this is a "
+        "fleet-budget change and POOLS_PER_FRONT_DOOR's sibling constants have to move with it"
     )
 
 
@@ -339,13 +354,23 @@ def test_a_split_session_store_adds_one_pool_to_every_role(
 
     monkeypatch.setattr(settings, "session_store", "postgres")
     monkeypatch.setattr(settings, "service_host", "127.0.0.1")
+    # A second *endpoint*, not just a second string. `application_name` is enough to mint a second
+    # pool and deliberately not enough here: the placement assertion compares the address
+    # `pg_endpoint` says each pool dials, and two spellings of one host compare equal — measured,
+    # `/readyz` probing `postgres_dsn` instead of the session DSN passed unnoticed under that
+    # fixture. The loopback aliases are the one pair that differs by address and still connects.
+    host = str(conninfo.conninfo_to_dict(settings.postgres_dsn).get("host") or "").lower()
+    if host not in {"localhost", "127.0.0.1"}:
+        pytest.skip(f"needs a loopback postgres_dsn to spell twice; this one dials {host!r}")
     monkeypatch.setattr(
         settings,
         "session_store_dsn",
-        conninfo.make_conninfo(settings.postgres_dsn, application_name="chemclaw-split-probe"),
+        conninfo.make_conninfo(
+            settings.postgres_dsn, host="127.0.0.1" if host == "localhost" else "localhost"
+        ),
     )
 
-    async def _front_door() -> int:
+    async def _front_door() -> tuple[int, list[tuple[tuple[str, str] | None, int]]]:
         from chemclaw.agent.checkpointer import close_checkpointer
         from chemclaw.api.app import create_app
         from chemclaw.api.runner import _turn_checkpointer
@@ -359,7 +384,10 @@ def test_a_split_session_store_adds_one_pool_to_every_role(
                 assert (await client.get("/readyz")).status_code in (200, 503)
             await _turn_checkpointer()
             try:
-                return len(db._all_pools())
+                return len(db._all_pools()), [
+                    (pg_endpoint(str(pool.conninfo)), int(pool.max_size))
+                    for pool in db._all_pools()
+                ]
             finally:
                 await close_checkpointer()
 
@@ -368,11 +396,24 @@ def test_a_split_session_store_adds_one_pool_to_every_role(
             await _touch_stores()
             return len(db._all_pools())
 
-    async def _run() -> tuple[int, int]:
+    async def _run() -> tuple[int, int, list[tuple[tuple[str, str] | None, int]]]:
         await migrated_db_or_skip()
-        return await _front_door(), await _worker()
+        front, placement = await _front_door()
+        return front, await _worker(), placement
 
-    front_door, worker = asyncio.run(_run())
+    front_door, worker, placement = asyncio.run(_run())
+    # **Where each pool dials, not just how many there are.** Counting alone passes when `/readyz`
+    # probes `postgres_dsn` instead of the session DSN — measured, 4 pools either way, while the
+    # split arithmetic charges 33 connections to the wrong server. `fleet_connections_per_server`
+    # is a statement about placement, so this has to be one too.
+    session = pg_endpoint(settings.session_store_dsn)
+    assert sorted(placement) == sorted(
+        [(pg_endpoint(settings.postgres_dsn), settings.pg_pool_max_size)]
+        + [(session, settings.pg_pool_max_size), (session, 1), (session, settings.pg_pool_max_size)]
+    ), (
+        f"a split front door's pools dial {sorted(placement)}: one full pool on postgres_dsn and, "
+        "on the session store, the stores' pool, /readyz's single connection and the checkpointer's"
+    )
     assert (front_door, worker) == (len(FRONT_DOOR_POOLS) + 1, 2), (
         f"a split session store gave the front door {front_door} pools and a worker {worker}, not "
         f"{len(FRONT_DOOR_POOLS) + 1} and 2. Settings.fleet_connections_per_server puts one full "

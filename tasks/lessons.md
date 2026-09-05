@@ -2122,3 +2122,32 @@ with uncommitted work in it.**
 construction sites of an interface I had given two required fields — because I had been running
 `vitest` and `eslint` on the files I touched. **Rule: after changing a shared type, run the whole
 typecheck, not the tests of the files that changed.**
+
+**Six tests I wrote to prove six fixes were vacuous, and they were vacuous the same way.** A
+fresh-context agent ran 30 mutations against the tests from one day's work: 23 caught, 7 survived.
+Every survivor is a test asserting *the shape of a thing rather than its effect* —
+
+- a **pool count** instead of which server each pool dials (`/readyz` probing the wrong DSN charged
+  33 connections to the wrong server, 4 pools either way, green);
+- a **substring of a PromQL rule** instead of what the rule computes (`or` → `and` between the two
+  per-server branches makes the alert unfireable; all seven assertions still true);
+- a **difference between two renders** instead of the number rendered (a `+5` inside
+  `chemclaw.fleetPools` declared 31 pools for a topology of 26; both sides moved together);
+- **three of a chart's four** fleet inputs fed to `Settings` (the fourth non-zero fails every pod at
+  startup, suite green);
+- **two sweep points on the same side** of the constant they exist to pin (`3 × replicas` → `2 ×`);
+- a **docstring naming a composition root the body never touches** (`serve_worker`) — its sibling
+  drives the real root and caught the identical mutation, which is the contrast that proves it.
+
+The last one is the tell for the whole set: the sibling test was written by the same session in the
+same hour and is not vacuous, because it drives the thing instead of describing it.
+
+**Rule: after writing a test for a fix, mutate the fix and watch the test fail — before writing the
+commit message.** Not the whole suite; just the one line the test is about. I already had this rule
+in the form "a test that substitutes its own copy of the thing under test proves nothing", and it
+did not fire, because none of these substitutes anything: they observe the real object and ask it
+the wrong question. The sharper form is that **a test and the fix it guards, written together, share
+a blind spot** — the only thing that finds it is changing the code and seeing what stays green.
+
+One of the six was a test I had already repaired once that same day, for a *different* vacuity, and
+it went green again on a mutation I had not thought to try.
