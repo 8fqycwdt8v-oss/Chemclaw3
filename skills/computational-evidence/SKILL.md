@@ -15,7 +15,7 @@ tools:
   - compute_xtb_energy
   - compute_electronic_properties
   - predict_site_reactivity
-  - propose_knowledge_note
+  - record_knowledge_note
   - find_calculations
   - list_artifacts
   - fetch_artifact
@@ -138,7 +138,7 @@ error bar derived from an empty store is the failure.
 ## Recording a computed result
 
 A computed value that matters beyond the conversation goes into the knowledge graph the
-same way everything agent-generated does — drafted via `propose_knowledge_note` and
+same way everything agent-generated does — drafted via `record_knowledge_note` and
 merged by a human through the PR-gate. Include the method, the uncertainty, and what the
 value was used to decide, so the next reader can judge whether it still applies. Do not
 record routine exploratory calculations; the calculation cache already keeps them, and a

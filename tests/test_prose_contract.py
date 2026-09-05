@@ -80,7 +80,7 @@ def test_a_note_type_the_graph_does_not_know_is_caught(monkeypatch: object) -> N
     monkeypatch.setattr(  # type: ignore[attr-defined]
         module,
         "_prose_sources",
-        lambda: {"fake/SKILL.md": "Record it with `propose_knowledge_note`, type `field-trial`."},
+        lambda: {"fake/SKILL.md": "Record it with `record_knowledge_note`, type `field-trial`."},
     )
     problems = check_prose_contract()
     assert len(problems) == 1

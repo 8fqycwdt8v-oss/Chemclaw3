@@ -141,7 +141,7 @@ topic).
   a hash of the todo *contents* — but it never compares the *tool being called* to anything in the
   plan. So once a human approves a one-line read-only plan ("look up the melting point of aspirin"),
   every tool in `authz.side_effecting_tools()` executes for the rest of that turn:
-  `propose_knowledge_note` (a knowledge-graph write / git push), `synthesize_memory`, every durable
+  `record_knowledge_note` (a knowledge-graph write / git push), `synthesize_memory`, every durable
   calc/BO launch. Combined with the unframed injection surfaces (connector output, `find_past_jobs`
   `plan_step`, ELN notes) this is the injection amplifier — untrusted text that reaches the model
   during an approved turn reaches the full write surface while the chemist believes they approved a
@@ -192,7 +192,7 @@ topic).
 - [ ] **`build_langgraph_agent(connectors=...)` accepts a tool that shadows a first-party name** —
       [S], the residual `D-2026-09-04-a-name-is-one-capability-across-every-namespace` names and
       leaves open, and whose `BACKLOG.md` row was never written. `connectors/registry.py`'s
-      `_declared_tool_names` refuses a *manifest* claiming `propose_knowledge_note`, and that is
+      `_declared_tool_names` refuses a *manifest* claiming `record_knowledge_note`, and that is
       the path a deployment takes; the `connectors` keyword is the one that bypasses it, because
       `agent/langgraph_agent.py`'s `bound = [*(as_structured_tool(fn) for fn in tools),
       *(connectors or [])]` concatenates the two lists with no name check at all. Closed in
@@ -884,7 +884,7 @@ only holds defects can only ever restore the system to what it already intended 
       objective plus a sidecar list (W3)"* — and Pydantic turns a class docstring into the schema
       `description`, so `convert_to_openai_tool` ships them. Measured 2026-08-25 on the `default`
       profile: `start_optimization_campaign` is 8,063 chars of schema, 4,392 of it description and
-      **3,047 of that elaboration past the first paragraph**; `propose_knowledge_note` 4,259/2,262/663.
+      **3,047 of that elaboration past the first paragraph**; `record_knowledge_note` 4,259/2,262/663.
       Those two are 25% of the profile's 12,536-token tool budget between them, and both are already
       in `tests/test_context_floor.py::KNOWN_OVERSIZED`.
 

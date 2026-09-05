@@ -517,7 +517,7 @@ set so adding to it is a reviewed edit:
 - **Conversation plumbing** — anything reading or writing the turn's own state
   (`ask_clarifying_question`, attachments, preferences, watches). Another process does not have the
   turn.
-- **The two PR-gate writers** (`propose_knowledge_note`, `record_confirmed_answer`) — the review
+- **The two PR-gate writers** (`record_knowledge_note`, `record_confirmed_answer`) — the review
   boundary. A connector reaches the gate only by returning a note in a job envelope, for core to
   publish.
 - **The knowledge-graph reads** (`find_notes`, `expand_note`, `find_knowledge_gaps`, and the

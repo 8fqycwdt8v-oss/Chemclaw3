@@ -143,7 +143,7 @@ class GitWriteError(ChemclawError):
 
     A `ChemclawError`, so `agent.tool_authz.surface_domain_errors` shows the reason to the model.
     As a bare `RuntimeError` it did not, and the 2026-08-02 live run measured what that costs:
-    every `propose_knowledge_note` call failed, the model was told only "Error: Function failed.",
+    every `record_knowledge_note` call failed, the model was told only "Error: Function failed.",
     it retried five times permuting its *arguments* because nothing said the problem was elsewhere,
     and then printed the ungated document into the chat as a fallback. The PR-gate's failure mode
     was to publish without the gate.

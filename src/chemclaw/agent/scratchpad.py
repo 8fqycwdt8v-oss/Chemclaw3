@@ -44,7 +44,7 @@ would be a memory nobody can erase and everybody can read. Those paths fall thro
 `StateBackend`, which is turn-scoped — they get a scratchpad and no memory, which is correct.
 
 **What this is not.** It is a working surface, not knowledge. Layer 4 stays Git plus Markdown behind
-the PR-gate: a conclusion worth keeping still goes through `propose_knowledge_note` and a human.
+the PR-gate: a conclusion worth keeping still goes through `record_knowledge_note` and a human.
 Nothing under `/memories/` is evidence a citation can resolve to — `verifier.turn_evidence` scores
 against tool outputs, and a file the model wrote itself is not one.
 

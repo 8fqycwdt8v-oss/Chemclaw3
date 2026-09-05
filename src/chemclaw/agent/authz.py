@@ -95,7 +95,7 @@ CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset(
 # nothing validates these names against the live tool surface.
 DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
     {
-        "propose_knowledge_note",  # pushes a branch to the knowledge repo
+        "record_knowledge_note",  # pushes a branch to the knowledge repo
         "record_confirmed_answer",  # pushes a branch to the knowledge repo
         "record_failure",  # pushes a branch to the knowledge repo, and retires a merged claim
     }
@@ -117,7 +117,7 @@ DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
 STATE_CHANGING_TOOLS: frozenset[str] = (
     frozenset(
         {
-            "propose_knowledge_note",  # pushes a branch to the knowledge repo
+            "record_knowledge_note",  # pushes a branch to the knowledge repo
             "record_confirmed_answer",  # pushes a branch to the knowledge repo
             "remember_preference",  # writes user_preferences
             "forget_preference",  # deletes from user_preferences
@@ -375,7 +375,7 @@ def authorize_tool(tool: str) -> None:
     docstring, not in a message a chemist reads.
 
     Args:
-        tool: The tool's registered name (e.g. `"propose_knowledge_note"`, `"gather_evidence"`).
+        tool: The tool's registered name (e.g. `"record_knowledge_note"`, `"gather_evidence"`).
 
     Raises:
         AuthorizationError: When enforcement is on and the user is not permitted to call `tool` —

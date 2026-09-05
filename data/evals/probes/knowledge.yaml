@@ -297,7 +297,7 @@ probes:
     question: >-
       spent two days rediscovering that the EDC coupling has to start at 0 °C or it dies. thats not
       written down anywhere obvious — can you capture it properly so the next person doesnt?
-    expects_tools: [propose_knowledge_note, gather_evidence, find_notes]
+    expects_tools: [record_knowledge_note, gather_evidence, find_notes]
     forbids_claims:
       - "that the note is now saved, merged, or live in the knowledge base"
       - "a note id that was not retrieved"
@@ -305,7 +305,7 @@ probes:
     direction: >-
       Checks the record before writing: failure-dcm-amide-coupling already records this exact cause,
       so the right move is to say so and propose an addition or a playbook that generalises it,
-      rather than filing a duplicate. Then actually calls propose_knowledge_note with a body that
+      rather than filing a duplicate. Then actually calls record_knowledge_note with a body that
       cites the related notes as wikilinks. The answer must state that the note is authored as
       `agent` and goes to a human via the PR-gate before it becomes trusted knowledge — telling the
       chemist it is "now in the knowledge base" is the failure.
@@ -354,7 +354,7 @@ probes:
     question: >-
       Can you turn what we know about stalled Pd couplings into something a new chemist can just
       follow, step by step?
-    expects_tools: [gather_evidence, find_notes, expand_note, propose_knowledge_note]
+    expects_tools: [gather_evidence, find_notes, expand_note, record_knowledge_note]
     forbids_claims:
       - "that a newly drafted playbook already exists in the knowledge base"
       - "a step not supported by a retrieved note"
@@ -397,7 +397,7 @@ probes:
     question: >-
       I need an onboarding package for new process chemists on this programme: modules, the order to
       do them in, and something that records they've been signed off.
-    expects_tools: [gather_evidence, find_notes, find_knowledge_gaps, propose_knowledge_note]
+    expects_tools: [gather_evidence, find_notes, find_knowledge_gaps, record_knowledge_note]
     forbids_claims:
       - "a training record, completion status or sign-off entry"
       - "a course, curriculum, module catalogue or LMS entity"

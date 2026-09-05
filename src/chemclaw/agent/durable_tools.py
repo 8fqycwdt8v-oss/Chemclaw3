@@ -100,7 +100,7 @@ class DurableJobStatus(BaseModel):
     status: str
     summary: str | None = None
     result: dict[str, Any] = Field(default_factory=dict)
-    # The calculations this run rested on, as `propose_knowledge_note` takes them (D-2026-08-21).
+    # The calculations this run rested on, as `record_knowledge_note` takes them (D-2026-08-21).
     # That tool's docstring has said "get them from a job's result envelope" since D-133 against an
     # envelope that carried none, so a note drafted from a calculation the agent had just run could
     # not cite it. Empty for a job that recorded none — a report, or a run from before the refs
@@ -368,7 +368,7 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     Returns:
         The status (running, completed, failed, cancelled, terminated, timed_out) and, once
         completed, the one-line `summary`, the structured `result`, and `calc_refs` — the
-        calculation keys the run rested on, which `propose_knowledge_note` takes so a conclusion
+        calculation keys the run rested on, which `record_knowledge_note` takes so a conclusion
         drawn from this job stays traceable to what computed it. A job still running reports the
         status alone.
 

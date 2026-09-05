@@ -10,7 +10,7 @@ import chemclaw.agent.graph_tools as graph_tools
 from chemclaw.agent.graph_tools import (
     expand_note,
     find_notes,
-    propose_knowledge_note,
+    record_knowledge_note,
     record_failure,
 )
 from chemclaw.core.config import settings
@@ -207,12 +207,12 @@ def test_find_notes_declares_a_cut_in_the_value_the_model_reads(
     assert (len(whole.matches), whole.total_matches) == (4, 4)
 
 
-def test_propose_knowledge_note_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_record_knowledge_note_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The write tool proposes an agent note through the (fake) PR-gate."""
     fake = FakeSubmitter()
     monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
     ref = asyncio.run(
-        propose_knowledge_note(
+        record_knowledge_note(
             id="reaction-x", type="reaction", body="From [[compound-a]].", source="eln-1"
         )
     )

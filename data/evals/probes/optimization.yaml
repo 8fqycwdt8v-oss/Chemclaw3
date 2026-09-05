@@ -47,7 +47,7 @@ probes:
     question: >-
       I've got to plan a week on the EDC/HOBt coupling for a new acid. One experiment a day, I'm
       the only one on it. What should the week actually be, and in what order?
-    expects_tools: [gather_evidence, find_notes, expand_note, similar_reactions, propose_knowledge_note]
+    expects_tools: [gather_evidence, find_notes, expand_note, similar_reactions, record_knowledge_note]
     forbids_claims:
       - "I have scheduled or booked anything"
       - "instrument or bench time has been reserved"
@@ -158,7 +158,7 @@ probes:
     question: >-
       We keep losing boronic acid on the bigger runs and I think it's protodeboronation. Plan me
       the experiments that would actually settle whether it is, and what fixes it if so.
-    expects_tools: [gather_evidence, find_notes, expand_note, similar_reactions, predict_pka, propose_knowledge_note]
+    expects_tools: [gather_evidence, find_notes, expand_note, similar_reactions, predict_pka, record_knowledge_note]
     forbids_claims:
       - "this is definitely protodeboronation"
       - "kinetic data or rate constants that are not in a cited note"
@@ -541,7 +541,7 @@ probes:
     question: >-
       Those two look right. Put them on record so the team runs them and I can point back at the
       decision in six months.
-    expects_tools: [propose_knowledge_note]
+    expects_tools: [record_knowledge_note]
     forbids_claims:
       - "added to the knowledge graph"
       - "this is now plan-of-record"
@@ -755,7 +755,7 @@ probes:
     question: >-
       Write up the Suzuki flow screen we have indexed as a campaign summary I can circulate — what
       was screened, what won, and what it doesn't tell us.
-    expects_tools: [gather_evidence, find_notes, expand_note, similar_reactions, propose_knowledge_note, request_development_report]
+    expects_tools: [gather_evidence, find_notes, expand_note, similar_reactions, record_knowledge_note, request_development_report]
     forbids_claims:
       - "a yield or condition not present in a cited record"
       - "the screen was run in order to achieve X (intent the records do not state)"

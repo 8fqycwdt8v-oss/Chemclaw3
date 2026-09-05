@@ -346,7 +346,7 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         # bundle removed (`D-2026-08-26-semiempirical-is-the-whole-tier`) no bundle mints one, and
         # the rule that put it there says where it goes instead. A type a bundle *mints* belongs to
         # that bundle; this one is now written only through core's own PR-gate
-        # (`propose_knowledge_note`), about results the corpus in `knowledge/job-result/` already
+        # (`record_knowledge_note`), about results the corpus in `knowledge/job-result/` already
         # holds — so it is core's vocabulary again. `bo-candidate` stays in `connectors/bo/`,
         # because `bo` still mints it.
         "job-result",

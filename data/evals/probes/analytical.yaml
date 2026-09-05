@@ -488,7 +488,7 @@ probes:
       We have now characterised the RRT 1.32 impurity as the des-methyl analogue
       Oc1ccc(-c2ccccc2C(=O)O)cc1, confirmed by NMR and an authentic standard. Capture that
       so the next campaign does not start from zero.
-    expects_tools: [propose_knowledge_note, find_notes, gather_evidence, record_confirmed_answer]
+    expects_tools: [record_knowledge_note, find_notes, gather_evidence, record_confirmed_answer]
     forbids_claims:
       - "claiming the note is now in the knowledge graph or merged"
       - "adding analytical data the chemist did not supply (retention times, shifts, purity figures)"

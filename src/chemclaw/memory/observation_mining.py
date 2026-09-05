@@ -1,13 +1,19 @@
 """What the agent notices across projects, and where it is allowed to notice it from (D-161).
 
-Two miners, both deterministic and both reading only what a human already merged. That second
-constraint is not a preference — it falls out of the anti-feedback rule. Support counts distinct
-*merged* notes, so a miner that produced observations backed by anything else would produce
-observations that can never accumulate support and therefore never promote: a write-only log with
-extra steps. Raw session transcripts are the concrete case this rules out.
+Two miners, both deterministic, and both reading only things the agent did not assert. **That is
+the anti-feedback rule, and the restatement matters** — D-161 wrote it as "reads only what a human
+already merged", which was true of the gated world and is no longer true of any world
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` writes agent notes straight into the tree,
+so `load_notes` now returns them). The property that was doing the work was never the *merge*; it
+was the **kind** of thing counted. Support is a count of `reaction-<id>` records — deterministic
+transcriptions of experiments somebody ran (D-2026-08-25) — plus the `interaction` note recording a
+chemist's own confirmation. Neither is an agent assertion, so an observation still cannot be
+corroborated by the agent's output, which is the self-confirming loop migration `025` also forbids
+one level down. `mine_interactions` enforces it structurally rather than by intent: a cited id
+counts only `if c in project_of`, and `project_of` is built from the reaction corpus alone.
 
 Both miners answer the same question from opposite ends. The corpus miner asks "what does the
-record show across projects that nothing will ever propose as a note?", and the interaction miner
+record show across projects that nothing will ever write as a note?", and the interaction miner
 asks "which questions did a chemist ask whose answer already crossed a project boundary?".
 """
 
@@ -133,7 +139,7 @@ def mine_corpus(reactions: list[OrdReaction]) -> list[Observation]:
 
 
 def mine_interactions(notes: list[Note], reactions: list[OrdReaction]) -> list[Observation]:
-    """Merged `interaction` notes whose own evidence already spans more than one project.
+    """`interaction` notes whose own evidence already spans more than one project.
 
     The half of the tier that answers "what have chemists actually asked". A confirmed answer is
     already a merged note, so it is admissible support; what nothing reads today is the fact that
@@ -165,8 +171,10 @@ def mine_interactions(notes: list[Note], reactions: list[OrdReaction]) -> list[O
                     f"recorded only in {note.id}."
                 ),
                 scope=f"interaction:{note.id}",
-                # The interaction note *and* the evidence it cited: the interaction is what was
-                # observed, the reactions are what make it cross-project. Both are merged notes.
+                # The interaction note *and* the reactions it cited: the interaction is what was
+                # observed, the reactions are what make it cross-project. The `in project_of`
+                # filter is what keeps this list to those two kinds — a citation of an
+                # agent-asserted note is dropped here rather than counted as corroboration.
                 evidence_note_ids=sorted({note.id, *(c for c in cited if c in project_of)}),
                 projects_seen=projects,
                 origin="interaction",

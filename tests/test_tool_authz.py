@@ -90,9 +90,9 @@ def test_write_tools_are_gated_by_default(monkeypatch: pytest.MonkeyPatch) -> No
     denied = set_current_identity("u-6", frozenset({"reader"}))
     try:
         with pytest.raises(
-            AuthorizationError, match="not authorized to use propose_knowledge_note"
+            AuthorizationError, match="not authorized to use record_knowledge_note"
         ):
-            authorize_tool("propose_knowledge_note")
+            authorize_tool("record_knowledge_note")
         with pytest.raises(AuthorizationError):
             authorize_tool("record_confirmed_answer")
         authorize_tool("find_notes")  # read tools stay open under 'allow'
@@ -101,7 +101,7 @@ def test_write_tools_are_gated_by_default(monkeypatch: pytest.MonkeyPatch) -> No
 
     ok = set_current_identity("u-7", frozenset({"process-chemist"}))
     try:
-        authorize_tool("propose_knowledge_note")  # privileged role → allowed
+        authorize_tool("record_knowledge_note")  # privileged role → allowed
     finally:
         reset_current_identity(ok)
 
@@ -143,7 +143,7 @@ def test_dev_mode_leaves_write_tools_open(monkeypatch: pytest.MonkeyPatch) -> No
     """With enforcement off, the built-in write gates are no-ops (local dev unchanged)."""
     monkeypatch.setattr(settings, "entra_required", False)
     authorize_tool("sample_conformers")
-    authorize_tool("propose_knowledge_note")
+    authorize_tool("record_knowledge_note")
     authorize_tool("record_confirmed_answer")
 
 
@@ -183,7 +183,7 @@ def test_deny_default_refuses_write_tools_even_for_privileged_roles(
         with pytest.raises(AuthorizationError, match="not authorized to use"):
             authorize_tool("sample_conformers")
         with pytest.raises(AuthorizationError, match="not authorized to use"):
-            authorize_tool("propose_knowledge_note")
+            authorize_tool("record_knowledge_note")
     finally:
         reset_current_identity(token)
 
@@ -270,13 +270,13 @@ def test_surfacing_converts_a_denial_into_the_tool_s_own_result() -> None:
 
     async def _denied() -> None:
         raise AuthorizationError(
-            "u-9 lacks a privileged role for the write tool propose_knowledge_note"
+            "u-9 lacks a privileged role for the write tool record_knowledge_note"
         )
 
-    ctx = _ctx("propose_knowledge_note")
+    ctx = _ctx("record_knowledge_note")
     _drive_surfacing(ctx, _denied)  # must not raise
     assert ctx.result == (
-        "Refused: u-9 lacks a privileged role for the write tool propose_knowledge_note"
+        "Refused: u-9 lacks a privileged role for the write tool record_knowledge_note"
     )
 
 
@@ -448,7 +448,7 @@ def _denial_message(tool: str, monkeypatch: pytest.MonkeyPatch) -> str:
     [
         ("predict_pka", "explicit_gate"),
         ("predict_pka", "deny_default"),
-        ("propose_knowledge_note", "write_gate"),
+        ("record_knowledge_note", "write_gate"),
     ],
 )
 def test_every_denial_reads_as_an_access_decision(
@@ -649,7 +649,7 @@ def test_a_pr_gate_git_failure_reaches_the_model() -> None:
     async def _git_failed() -> None:
         raise GitSubmitError("note_repo_dir has no 'origin' remote; nothing was submitted")
 
-    ctx = _ctx("propose_knowledge_note")
+    ctx = _ctx("record_knowledge_note")
     _drive_domain_errors(ctx, _git_failed)
     assert isinstance(ctx.result, str)
     assert "no 'origin' remote" in ctx.result

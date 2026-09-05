@@ -248,7 +248,7 @@ class ConnectorJobResult(BaseModel):
     # `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` shape exactly.
     external_ref: str = ""
     # The calculation keys this run rested on, so a conclusion drawn from it can cite them
-    # (D-2026-08-21). `propose_knowledge_note`'s `calc_refs` argument has told the model to "get
+    # (D-2026-08-21). `record_knowledge_note`'s `calc_refs` argument has told the model to "get
     # them from a job's result envelope" since D-133 and no envelope carried any: the only
     # producers in `src/` were the BO featurizer and the QM workflow's own note, neither of which
     # an agent drafting a note from a calculation it just ran can reach. Without them a stale

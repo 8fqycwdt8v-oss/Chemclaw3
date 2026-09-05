@@ -148,7 +148,7 @@ Beschreibungsfeld mehr, in das die Konvention zurückkriechen könnte.
 Plan:  1. Graph nach Verbindung X + ähnlichen Substraten durchsuchen  [find_notes/expand_note]
        2. Schnellen xTB-Screen der Regioselektivität rechnen           [compute_xtb_energy]
        3. NUR bei enger Energiedifferenz das Konformerensemble suchen   [durable calc-Job → awaiting]
-       4. Ergebnis als Note vorschlagen                                 [propose_knowledge_note → PR]
+       4. Ergebnis als Note vorschlagen                                 [record_knowledge_note → PR]
 ```
 Schritt 3 ist *bedingt und agenten-entschieden* — genau die Dynamik, die ein vorverdrahteter Fluss
 nicht ausdrückt. Das Tiering-Prinzip (§2: erst der Einzelpunkt, die teure Suche nur bei Bedarf)

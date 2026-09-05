@@ -12,7 +12,7 @@ instructions: >-
   were handed does not support. Report the reference the proposal came back with, so the chemist
   knows where to find it.
 tool_names:
-  - propose_knowledge_note
+  - record_knowledge_note
   - request_development_report
   - record_confirmed_answer
   - record_failure

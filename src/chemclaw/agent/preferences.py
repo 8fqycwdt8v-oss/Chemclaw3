@@ -156,7 +156,7 @@ async def remember_preference(key: str, value: str) -> str:
     substantive answer so advice fits how they actually work.
 
     Do **not** use this for chemistry knowledge: a distilled rule, a protocol, or a result belongs
-    in the knowledge graph via `propose_knowledge_note`, where a human reviews it. This store is
+    in the knowledge graph via `record_knowledge_note`, where a human reviews it. This store is
     personal and unreviewed, and putting shared knowledge here would route it around the PR-gate.
 
     Args:

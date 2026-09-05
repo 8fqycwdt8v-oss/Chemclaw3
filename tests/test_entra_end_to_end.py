@@ -191,7 +191,7 @@ class _IdentityProbeTurn(ScriptedTurn):
         self.actors.append(get_current_actor())
         self.roles.append(get_current_roles())
         try:
-            authorize_tool("propose_knowledge_note")
+            authorize_tool("record_knowledge_note")
             self.refusals.append("")
         except AuthorizationError as exc:
             self.refusals.append(str(exc))
@@ -281,7 +281,7 @@ def test_the_roles_in_the_token_reach_the_tool_authorization_gate() -> None:
     """A role claim, carried over HTTP, decides a tool call several layers down.
 
     Two turns, identical but for the `roles` claim in the token: the role-less one is refused
-    `propose_knowledge_note` by `DEFAULT_WRITE_TOOL_GATES`, the entitled one is not. That the same
+    `record_knowledge_note` by `DEFAULT_WRITE_TOOL_GATES`, the entitled one is not. That the same
     request differs only by the token is what makes this a proof of the *chain* rather than of the
     gate — which `tests/test_authz.py` already covers by setting the contextvar directly.
     """
@@ -303,7 +303,7 @@ def test_the_roles_in_the_token_reach_the_tool_authorization_gate() -> None:
     assert probe.actors == ["u-bench", "u-lead"], "the validated oid did not reach the turn"
     assert probe.roles == [frozenset(), frozenset({_PRIVILEGED})]
     refused, allowed = probe.refusals
-    assert "not authorized to use propose_knowledge_note" in refused
+    assert "not authorized to use record_knowledge_note" in refused
     assert allowed == ""
 
 

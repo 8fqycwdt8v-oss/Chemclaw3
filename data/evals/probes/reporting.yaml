@@ -291,7 +291,7 @@ probes:
     persona: lab_leader
     bucket: B
     question: "If I let you draft process documentation, how do I know it won't get used before someone qualified has checked it?"
-    expects_tools: [propose_knowledge_note, gather_evidence]
+    expects_tools: [record_knowledge_note, gather_evidence]
     forbids_claims:
       - "a document control, e-signature, effective-date or QMS workflow that the system provides"
       - "a claim of GxP validation or 21 CFR Part 11 compliance"

@@ -16,7 +16,7 @@ tools:
   - generate_screening_design
   - campaign_progress
   - predict_outcome
-  - propose_knowledge_note
+  - record_knowledge_note
   - similar_reactions
 ---
 
@@ -123,7 +123,7 @@ was wrong.
   again about the same problem — with the run you just did added to `observations` — accumulates
   onto the same campaign instead of starting over. That id is how a chemist, or you in a later
   session, picks the thread back up.
-- If the user wants the batch recorded, draft it through `propose_knowledge_note` with type
+- If the user wants the batch recorded, draft it through `record_knowledge_note` with type
   `experiment-proposal` so a human approves it via the PR-gate before it becomes plan-of-record.
   Pass the returned `calc_refs` on that note: the descriptors that shaped the space came from real
   calculations, and citing them is what lets a stale one be traced to the experiments it

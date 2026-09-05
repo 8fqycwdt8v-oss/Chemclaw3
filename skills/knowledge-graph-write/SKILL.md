@@ -4,7 +4,7 @@ description: >-
   Judgment for turning a finding into a knowledge-graph note — choosing its type,
   id, and links — and submitting it through the PR-gate for human review.
 tools:
-  - propose_knowledge_note
+  - record_knowledge_note
   - record_confirmed_answer
 ---
 

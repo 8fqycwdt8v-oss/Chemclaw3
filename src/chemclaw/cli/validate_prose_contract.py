@@ -30,7 +30,7 @@ Four rules, each deliberately narrow so the check stays true rather than noisy:
    it can only call a tool. Naming one is always either a dangling pointer or a missing tool.
 4. Every note type the prose tells the agent to *write* must be in `KNOWN_NOTE_TYPES`. This is rule
    1's shape applied to the other half of the write path, and it was missing: two skills instructed
-   `propose_knowledge_note(type="protocol")` and `type="experiment-batch"`, neither of which is a
+   `record_knowledge_note(type="protocol")` and `type="experiment-batch"`, neither of which is a
    known type, so an agent that followed either opened a PR that `kg-validate` then rejected — the
    capability was reachable and the artifact was not (D-164). A note type is named in the gated
    form **`type `x``** (the word, then the backticked slug); write it that way in prose so this
