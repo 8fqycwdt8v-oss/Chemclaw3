@@ -10,7 +10,7 @@ can check.)
 
 **The original framing here was "five tables that had writers and no readers", and that is false
 for four of them** — `cli/explain.py` reads `audit_events` and `job_records`, `publish/backfill.py`
-and `durable/job_record_store.py` read `job_records`, `kg/proposal_store.py` reads `note_proposals`
+and `durable/job_record_store.py` read `job_records`, `kg/record.py` reads `note_proposals`
 and `agent/plan_approval_store.py` reads `plan_approvals`. Only `turn_costs` had no reader at all,
 which is exactly what its own docstring said.
 

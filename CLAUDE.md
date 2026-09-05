@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Phases 0–5b of the plan are **implemented and CHECKMATE-reviewed**: toolchain + config,
 the agent+Temporal spine, fast calculators (xTB/pKa/solubility) with the Postgres
 calculation cache (the calculators themselves have since moved to `Chemclaw3-mcp`; the cache and
-the ledger stayed), BoFire BO campaigns, the knowledge graph + PR-gate, the eval/metric
+the ledger stayed), BoFire BO campaigns, the knowledge graph, the eval/metric
 layer, ECFP4/DRFP fingerprint search, ELN ingestion, the memory layers, and the report
 harness.
 
@@ -464,9 +464,24 @@ Durability lives **only** in Temporal, never in the conversation layer's own ad-
 rule is D-002's and it got *stricter* when layer 1 gained a checkpointer, because the checkpointer
 holds turn state and every long or expensive job is still Temporal's (D-2026-08-10 §3). Skills hold
 judgment; **connectors** hold capability (deterministic tools) — MCP is the protocol a connector
-speaks, not the thing that holds the capability (D-110/D-118). Anything agent-*asserted* enters the
-graph via a **PR-gate** (human validates before merge) — the agent proposes, a human decides, reused
-everywhere (job results, reports, distilled playbooks). See `docs/reference/architektur.md` §4, §9, §12.
+speaks, not the thing that holds the capability (D-110/D-118).
+
+**Knowledge is written directly and corrected, not pre-approved**
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). The PR-gate D-005 built — the agent
+proposes, a human decides, over job results, reports and distilled playbooks — is **gone**, and so
+is every module behind it. The axis that replaced it is whether a thing *changes what the agent
+does*: knowledge does not, so it lands in `knowledge/` the moment it is learned, carrying
+`created_by: agent` (D-160) and readable beside its own citations. Three things that already existed
+are what make that safe, and they are the control now: provenance on every retrieved chunk, the
+citations a chemist checks at the point of use, and contradiction — `memory/failure.py`'s
+`contradicts` edge, `kg/conflicts.py`, `memory/supersede.py` and bi-temporal `valid_to`. **A skill
+is the opposite case and stays gated**, with an admin as its reviewer, because it is injected into
+the prompt and reshapes every later answer with no citation trail. See
+`docs/reference/architektur.md` §4, §9, §12 for the layers, and that ADR for what replaced the gate.
+
+`kg/record.py` is the one write path, and the order it writes in is load-bearing now that a reader
+can see a half-written unit: dependencies, then the subject, then the retirements, so a note never
+appears in the graph before what it cites.
 
 **A deterministic transcription is not an assertion, and is not gated**
 (D-2026-08-25-an-eln-transcription-is-data-not-a-claim). An ELN entry becomes a row in
@@ -539,7 +554,7 @@ destructive/ambiguous, or the user asked to review before merge for this task.
   each side blamed was mitigating a third cause neither had named (D-2026-08-01-a-cap-that-starves-a-source).
 - **KISS**: simplest working solution; no over-engineering. No abstraction without a second
   real caller (Rule of Three); an abstraction with one caller gets inlined.
-- **DRY**: no duplicate logic — extract shared code. The PR-gate and the retriever interface
+- **DRY**: no duplicate logic — extract shared code. `kg/record.py` and the retriever interface
   are single reusable pieces, not copy-paste.
 - **No boilerplate**: only code that is actually used. Delete dead params, empty interfaces,
   and "for later" stubs on sight.

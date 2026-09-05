@@ -223,7 +223,7 @@ async def record_job(record: JobRecord) -> None:
     error a consumption counter must not make.
 
     **And it is booked after the write, for exactly the reason `chemclaw_notes_proposed_total` is
-    (`kg/pr_gate.py`).** "An activity's side effects happen once per successful execution" is the
+    (`kg/record.py`).** "An activity's side effects happen once per successful execution" is the
     guarantee this counter needs, and it is a guarantee only about the code that runs *after* the
     part which can fail: this activity runs under `BAD_DATA_RETRY`, so an increment at the top is
     booked once per *attempt*. The everyday case is not an outage — the upsert commits and the

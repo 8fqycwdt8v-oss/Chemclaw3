@@ -290,7 +290,7 @@ _DENIED_PRINCIPAL = re.compile(r"permission to .{0,200}? denied to ", re.IGNOREC
 # administrator wrote, `remote:` lines are the remote server's output, and a chatty CI hook can
 # emit kilobytes per rejected push. The argument list carries `refs/heads/<branch>`, and
 # `NoteSubmission.branch` is a field on a model built from a database row — bounded now
-# (`kg/submission.py`), but bounded there rather than here, and defence in depth is the point.
+# (`kg/record.py`), but bounded there rather than here, and defence in depth is the point.
 #
 # The cost of not capping is not disk: `SecretRedactingFilter` regex-scans every record's message
 # **while holding the logging lock**, so an arbitrarily long field makes an arbitrarily long stall
@@ -607,11 +607,20 @@ class GitNoteWriter:
         # containment, and a leading-dash relative path (e.g. `-x`) resolves *inside* the repo and
         # would otherwise reach git as an option rather than a pathspec.
         await self._git("add", "--", *written)
-        # Idempotent: byte-identical content stages nothing, so re-recording is a no-op.
-        returncode, _ = await self._run("diff", "--cached", "--quiet")
+        # Idempotent, and scoped to **our** paths: byte-identical content stages nothing.
+        # `--` and the path list are load-bearing rather than tidy — a bare `diff --cached` reports
+        # anything else already staged in this checkout and would turn a no-op write into a commit.
+        returncode, _ = await self._run("diff", "--cached", "--quiet", "HEAD", "--", *written)
         if returncode == 0:
             return WriteOutcome(reference=self._base, written=False)
-        await self._git("commit", "-m", write.message, "-m", _RECORD_TRAILER)
+        # **Path-limited, for the reason the worktree used to supply.** The gate this replaced
+        # committed inside a linked worktree with its own index, so residue staged in the shared
+        # checkout structurally could not reach a note's commit. There is no second index now, so
+        # the scoping has to be explicit: a plain `git commit` here commits whatever else somebody
+        # left staged, into a commit named after this note.
+        # `tests/test_knowledge.py::test_poisoned_index_does_not_leak_into_the_next_write` is what
+        # holds it, and it is the test that found this.
+        await self._git("commit", "-m", write.message, "-m", _RECORD_TRAILER, "--", *written)
         commit = await self._read("rev-parse", "HEAD")
         returncode, stderr = await self._run("push", self._remote, f"HEAD:refs/heads/{self._base}")
         if returncode != 0:

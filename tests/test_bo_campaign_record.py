@@ -230,7 +230,7 @@ def test_a_later_asker_does_not_become_the_campaign_s_author(
 def test_recording_never_costs_the_suggestion(monkeypatch: pytest.MonkeyPatch) -> None:
     """The chemist asked for candidates; a database blip must not turn that into an error.
 
-    The same trade `agent/audit.py` and `kg/proposal.py` make. The campaign id is a pure function
+    The same trade `agent/audit.py` and `kg/record.py` make. The campaign id is a pure function
     of the problem, so it is still the right handle to return on the turn where the write failed.
     """
 

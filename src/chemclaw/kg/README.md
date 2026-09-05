@@ -52,9 +52,22 @@ site, both established in `D-2026-08-16-a-cache-that-lets-every-caller-miss-toge
 The notes live in `knowledge/` at the repository root — one directory per note type, and
 `CHEMCLAW_NOTE_REPO_DIR` can point them at a dedicated checkout. Nothing here holds a note.
 
-## The PR-gate is the review line
+## `record.py` is the one write path
 
-`pr_gate.py` and `git_submitter.py` are the one mechanism by which anything agent-generated becomes
-knowledge: the agent opens a pull request, a human validates, a merge makes it true. That is "the
-agent proposes, a human decides", and it is reused everywhere — job results, reports, distilled
-playbooks — rather than reimplemented per feature. An agent never writes to the graph directly.
+`record.py` and `git_writer.py` are the one mechanism by which anything agent-generated becomes
+knowledge: the files are written into the tree readers scan, committed, and readable at once. It is
+reused everywhere — job results, reports, distilled playbooks — rather than reimplemented per
+feature.
+
+**There is no review step, and that is a decision rather than an omission**
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). D-005's PR-gate stood here until the
+premise it was written under was removed; what replaced it is provenance plus correction. A note
+carries `created_by: agent`, is served beside its own citations, and is refuted by a `contradicts`
+edge or retired by `supersede` — so a wrong machine-written claim is *visible where it is used and
+reversible*, which is a different guarantee from one that was checked before it landed. Say the
+second thing about this package only if you mean it.
+
+**The write order is part of the contract.** A PR merged every file at once, so no reader saw half
+a unit; a direct write can be read mid-flight. `_build_write` therefore writes dependencies, then
+the subject, then the retirements — each cites the one before it — and its docstring states the
+window that ordering accepts.

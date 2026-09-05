@@ -8,7 +8,7 @@ playbook", "how many hazard flags did the group raise last quarter" and "how muc
 agent-written" were all unanswerable from data the system had already stamped.
 
 **Stated precisely, because it was first stated too strongly.** These tables were not readerless:
-`cli/explain.py`, `publish/backfill.py`, `durable/job_record_store.py`, `kg/proposal_store.py` and
+`cli/explain.py`, `publish/backfill.py`, `durable/job_record_store.py`, `kg/record.py` and
 `agent/plan_approval_store.py` all read one or another of them, and only `turn_costs` had no reader
 at all. Every one of those is a *point lookup* — this session, this proposal, this approval — and
 the missing thing was the aggregate, not the read. `chemclaw.operations.__init__` carries the same
@@ -170,7 +170,7 @@ class ProposalOutcome(BaseModel):
     open: int = 0
     failed: int = 0
     #: Replaced by a newer proposal for the same knowledge. A real state since
-    #: `058_note_proposal_superseded.sql` and written by `kg/proposal_store.py`, and it had no
+    #: `058_note_proposal_superseded.sql` and written by `kg/record.py`, and it had no
     #: bucket here — so `hasattr` dropped it silently and `proposed=5, merged=1, open=0` said both
     #: that nothing awaited review and that four things did. The `OUTCOMES` constant one module up
     #: carries a four-line comment about exactly this ("a reader of history must not be bounded by

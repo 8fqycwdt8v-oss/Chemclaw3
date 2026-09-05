@@ -2,7 +2,7 @@
 name: knowledge-graph-write
 description: >-
   Judgment for turning a finding into a knowledge-graph note — choosing its type,
-  id, and links — and submitting it through the PR-gate for human review.
+  id, and links — and recording it, knowing nobody will review it before it is read.
 tools:
   - record_knowledge_note
   - record_confirmed_answer
@@ -10,9 +10,11 @@ tools:
 
 # Knowledge-graph write
 
-Holds the *judgment* for adding to the knowledge graph. The capability is the
-PR-gate (`kg.pr_gate.propose_note`); this skill decides *what* note to write and
-*how* to relate it.
+Holds the *judgment* for adding to the knowledge graph. The capability is
+`kg.record.record_note`; this skill decides *what* note to write and *how* to relate it.
+
+**Nothing checks it after you.** A recorded note is readable by the next person immediately, so the
+judgment below is the only judgment applied. Write what the evidence carries and no more.
 
 ## When to write a note
 
@@ -38,8 +40,13 @@ graph.
   Links are the graph's value; a note with no links is nearly invisible.
 - Set `confidence` and `valid_from`/`valid_to` honestly; record the `source`.
 
-## Submitting
+## Recording
 
-Every `created_by: agent` note goes through **`propose_note`** → a feature branch
-and a review PR (D-005: the agent proposes, a human decides). Never write agent knowledge
-straight to the main graph. Human-authored notes are committed directly.
+Every `created_by: agent` note goes through **`record_note`**, which writes it into the graph and
+commits it — no branch, no review, readable at once
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`).
+
+What the provenance stamp buys is that a reader can tell your note from a curated one, and what
+`contradicts`/`supersede` buy is that a wrong one can be corrected in place of being prevented.
+Neither is a reason to write loosely: state the claim the evidence supports, cite it, and set
+`confidence` honestly — an overconfident agent note is now served to the next chemist as-is.

@@ -22,7 +22,7 @@ This is the dependency-free half — models, both backends' contract, the in-mem
 two facades the connector tools call (`record_suggestion` writes, `read_campaign_thread` reads back
 what a later session needs to continue). The psycopg half is `campaign_record_store.py`, imported
 lazily:
-the same split `chemclaw.kg.proposal` uses, so a process without Postgres never pulls a driver for
+the same split `chemclaw.kg.record` uses, so a process without Postgres never pulls a driver for
 a store it will not use.
 """
 
@@ -530,7 +530,7 @@ async def record_suggestion(
     **Never raises on a database failure**, and always raises on ours. The candidates are already
     computed and are what the chemist asked for, so a blip must not turn a successful suggestion
     into a failed tool call — the trade
-    `chemclaw.agent.audit` and `chemclaw.kg.proposal` both make, for the same reason: the record is
+    `chemclaw.agent.audit` and `chemclaw.kg.record` both make, for the same reason: the record is
     about the thing, and losing it must not cost the thing.
 
     Returns the campaign id either way, because the id is a pure function of the problem: it is

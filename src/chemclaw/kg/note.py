@@ -148,7 +148,7 @@ def note_relative_path(note_type: str, note_id: str) -> str:
     """Where a note lives inside the knowledge directory: `<type>/<id>.md`.
 
     The one filename shape the whole system depends on, and until this it was an f-string in the
-    PR-gate (`chemclaw.kg.pr_gate`) that three other places re-derived by hand — including
+    PR-gate (`chemclaw.kg.record`) that three other places re-derived by hand — including
     `chemclaw.kg.graph.note_file_fingerprints`, which reads a note's id back out of `path.stem`,
     and the warehouse retriever, which spelled the layout *and* the literal type `"reaction"` into
     a `stat` call. A layout that lives in four places is a layout one of them will get wrong.

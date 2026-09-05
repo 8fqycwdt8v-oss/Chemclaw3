@@ -379,7 +379,7 @@ class JobSpec(BaseModel):
     nothing from one. It was for a while a marker that authorized nothing, because the gate
     consulted only `entra_expensive_actions`; `tests/test_authz.py` now cross-checks every declared
     job against the effective set. `publish_to_graph` lets core PR-gate a `Note` the job's result
-    carries — the write still goes through `chemclaw.kg.pr_gate`, never through the connector.
+    carries — the write still goes through `chemclaw.kg.record`, never through the connector.
 
     **A bundle may lower its own runtime ceiling and may not raise it** (`timeout_seconds`). The
     deployment keeps the maximum — the effective ceiling is the *lower* of the declared number and

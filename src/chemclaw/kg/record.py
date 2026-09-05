@@ -10,7 +10,7 @@ bi-temporal `valid_to`). **Correction, not pre-approval, is the control on knowl
 
 **Why a file write is enough to make it global.** `settings.notes_path` is
 `note_repo_dir / knowledge_dir` — the one location `load_notes` reads and this module writes, which
-is the property `config/kg.py` introduced it for. So a note is in the graph the moment its bytes
+is the property `chemclaw.core.config.kg` introduced it for. So a note is in the graph the moment its bytes
 land; the commit that follows is durability and history, not publication.
 
 **The vocabulary lives here rather than in a module of its own.** `submission.py` existed because

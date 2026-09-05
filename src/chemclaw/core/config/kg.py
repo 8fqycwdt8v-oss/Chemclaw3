@@ -68,7 +68,7 @@ class KgSettings(BaseSettings):
     def knowledge_path(self) -> Path:
         """Where the notes actually live on disk: `note_repo_dir / knowledge_dir`.
 
-        The PR-gate (`chemclaw.kg.git_submitter.GitNoteSubmitter`) writes into `note_repo_dir` — a
+        The PR-gate (`chemclaw.kg.git_writer.GitNoteWriter`) writes into `note_repo_dir` — a
         dedicated clone in any real deployment, never the service's own checkout
         (`_require_dedicated_checkout`) — so a reader that resolved `knowledge_dir` alone
         (relative to the process CWD) would be looking at a different tree than the one

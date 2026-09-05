@@ -119,7 +119,7 @@ def test_git_stderr_reaches_the_log_bounded_and_the_exception_whole(
 
     monkeypatch.setattr(GitNoteWriter, "_run", loud)
 
-    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_submitter"):
+    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_writer"):
         with pytest.raises(GitRemoteError) as caught:
             asyncio.run(submitter._git("push", "origin", "note/x", transient=True))
 
@@ -146,7 +146,7 @@ def test_a_long_branch_is_bounded_in_the_log_line_too(
 
     monkeypatch.setattr(GitNoteWriter, "_run", failing)
 
-    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_submitter"):
+    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_writer"):
         with pytest.raises(GitWriteError):
             asyncio.run(submitter._git("fetch", "origin", "refs/heads/note/" + "b" * 100_000))
 

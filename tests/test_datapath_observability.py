@@ -580,7 +580,7 @@ def test_git_stderr_reaches_the_log_at_the_raise(
     """
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     submitter = GitNoteWriter(repo_dir=str(tmp_path))
-    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_submitter"):
+    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_writer"):
         with pytest.raises(GitRemoteError):
             asyncio.run(submitter._git("push", "no-such-remote", "main", transient=True))
 
