@@ -1870,3 +1870,20 @@ file, commit the scrape in the same commit as the figure.**
 asserted "the last draw lands in the final tenth", which is false at n=2 where the correct
 stratified draw is the first probe of each half. **Rule: state the property (each band contributes
 one), never a proxy for it (the last one is near the end).**
+
+**An absolute-sounding qualifier in a one-line design instruction is a question, not a spec.** The
+owner wrote "things that change agent behaviour like skills only after human review". I read "only"
+as covering every turn, wrote a whole ADR section rejecting the local-skills tier on that reading,
+and was wrong: the review applies to the *shared* tree, and the local tier was the point of the
+design. Both readings are grammatical and they differ in exactly one property — whether an
+unreviewed skill may touch its own author's turns. **Rule: when a short instruction turns on a
+quantifier (only, always, never, all) and two readings would produce materially different code, put
+the two readings to the owner before writing either one up. The tell is that I can state the
+distinguishing property in a single sentence — if I can, I can ask.**
+
+**A rejected alternative's argument survives the rejection being overturned.** When the tier came
+back, the objection I had raised against it (per-user skills fragment answers across chemists with
+nothing recording why) was still true. Deleting it with the rejection would have lost the reason
+the design needs an inspectability invariant. **Rule: when a decision reverses, re-file the losing
+argument as a stated cost or as a requirement it generates — never delete it as though it had been
+wrong.**

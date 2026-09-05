@@ -19,8 +19,9 @@ census (D-2026-08-27) — measures a signal this paper does not run on.
 ## Deliberately NOT built
 
 - The per-actor personal skills directory. `_skill_directories()` (`langgraph_agent.py:759`) is
-  read per turn, so ambient identity is reachable there — but building it now with no generator
-  to write into it is `D-2026-08-15`'s "capability that ships off". The ADR names the seam.
+  read per turn, so ambient identity is reachable there — but nothing writes a per-actor directory
+  until a distiller exists, so building the resolution now is `D-2026-08-15`'s "capability that
+  ships off". The ADR states the tier's invariants so they are not re-derived.
 - The distiller itself. D-2026-08-27's posture is unchanged: define the measurement, build when
   it says to. This adds the missing half of the measurement, not the generator.
 - The code that ungates agent-asserted notes. `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
@@ -36,11 +37,18 @@ census (D-2026-08-27) — measures a signal this paper does not run on.
 tests, and two ADRs. Split into two because the census arm and the gate boundary are two decisions,
 and CLAUDE.md's rule is that an id naming two of them is the failure the ledger prevents.
 
-**The user's correction, mid-implementation, changed the design and is the better line.** The draft
-had a *personal ungated skills tier*, gated only on promotion. The owner's axis is cleaner:
-knowledge global and automatic, behaviour gated, and the behaviour gate belongs to an admin rather
-than to a chemist. The personal tier is now recorded as rejected, with its reason — a per-user skill
-is still a behaviour change, and it fragments answers across users with nothing recording why.
+**The design took two corrections from the owner and the second reversed the first.** The draft had
+a personal ungated skills tier; the owner's mid-turn message ("skills only after human review") read
+as absolute, so it was written up as *rejected*; the owner then clarified that the review applies to
+the **shared** tree and the local tier is the point of the design. It is now the decision. The
+objection raised against it was kept as an accepted cost rather than dropped — two chemists can get
+different answers with the reason in a file rather than in git — and answered by an invariant: a
+user must be able to list, read and delete the local skills acting on their turns.
+
+**The lesson worth carrying** (also in `tasks/lessons.md`): an absolute-sounding qualifier in a
+one-line design instruction is the place to ask rather than infer. "Only after human review" had two
+readings that differ in exactly one property — whether an unreviewed skill may touch its own author's
+turns — and a whole ADR section was written the wrong way round before the question was put.
 
 **Two claims were checked rather than assumed before being written down.** That
 `session_messages` actually holds tool results with a `status` (it does — `api/runner.py` stores the

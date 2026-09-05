@@ -1,4 +1,4 @@
-# D-2026-09-05-the-gate-follows-behaviour-not-knowledge — knowledge is global the moment it is learned; only what changes the agent waits for an admin
+# D-2026-09-05-the-gate-follows-behaviour-not-knowledge — knowledge is global the moment it is learned; a behaviour change waits for an admin before it reaches a second person
 
 **Status:** accepted · **Date:** 2026-09-05 · **Builds on:**
 D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks (the premise
@@ -57,10 +57,10 @@ recorded it for the next person.
   current evidence. **Correction, not pre-approval, is the control on knowledge** — and it is the
   one that scales with a corpus a reviewer could never read.
 
-### 2. Anything that changes agent behaviour is gated, and the reviewer is an admin
+### 2. A behaviour change that reaches everyone is gated, and the reviewer is an admin
 
-A skill is the case: it is injected into the prompt and silently reshapes how every later answer is
-formed, for everyone, **with no citation trail**. Nobody reads a skill at the point of use; they read
+A skill in the shared tree is the case: it is injected into the prompt and silently reshapes how
+every later answer is formed, for everyone, **with no citation trail**. Nobody reads a skill at the point of use; they read
 its consequences without knowing it ran. That is the exact inverse of the property that makes ungated
 knowledge safe, and it is why the same argument that frees knowledge binds behaviour.
 
@@ -76,27 +76,58 @@ owner decides it, for the deployment, once.
 
 `SkillsReadOnlyRefusal` stays: no agent path writes a skill directly, whatever else changes.
 
-### 3. Rejected: a personal, ungated skills tier
+**What "reaches everyone" excludes is section 3**, and the exclusion is deliberate rather than an
+oversight in this rule: a skill acting only on the turns of the person it was distilled for is
+answerable to that person, who can see it and delete it. The gate is for the step where it stops
+being theirs.
 
-Proposed during this review — a distilled skill landing in one chemist's own skills directory,
-active immediately, gated only on promotion to the shared tree — on the grounds that it costs no
-code (`CHEMCLAW_SKILLS_DIR` is already an OS-path-separator list) and hides the gate from the end
-user. **Rejected**, and the reason is the axis above: a per-user skill is still a behaviour change,
-merely a less visible one. It would fragment behaviour across users, so two chemists asking the same
-question get different answers with nothing in the record saying why — and the ungated tier that
-made D-161 safe worked because an observation *claims nothing* and arrives labelled, neither of
-which is true of a prompt-resident instruction.
+### 3. A skill is live for its own user before review, and global only after
 
-The seam is recorded rather than built, so the next session does not re-derive it:
-`agent/langgraph_agent.py::_skill_directories` is where a per-actor entry would go — read per turn,
-because the graph is compiled per turn, so ambient identity is reachable there the same way
-`agent/skill_access.py`'s role gate reads it. Building it with no caller is
-`D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`.
+Section 2 is the rule for the **shared** tree. A distilled skill lands first in the chemist's own
+skills directory, where it is active for their turns immediately and for nobody else's; promotion
+into `skills/` in git is the admin gate above. So the end user never waits on a review, and no
+unreviewed instruction ever reaches a second person.
+
+**This was proposed, then withdrawn, then taken** — recorded because the reasoning matters more than
+the outcome. It was withdrawn on the reading that "only after human review" is absolute; the owner's
+answer is that it applies to *shared* behaviour, and the local tier is the point of the design rather
+than a concession in it. The objection raised against it stands as a **cost**, not a refutation, and
+is stated below rather than dropped.
+
+**The invariants the local tier owes**, so whoever builds it does not re-derive them:
+
+- **Per-actor, resolved per turn.** `agent/langgraph_agent.py::_skill_directories` is the seam — read
+  per turn because the graph is compiled per turn, so ambient identity is reachable there exactly the
+  way `agent/skill_access.py`'s role gate reads it. A directory resolved once at startup would be one
+  user's skills served to everyone, which is the shared tier with no gate.
+- **It is never a source of shared truth.** A local skill may shape its own user's turns and may not
+  be cited, promoted automatically, or read by another actor's turn.
+- **The user can see what it does.** This is the answer to the cost below and is a requirement, not a
+  nicety: a chemist must be able to list and read the local skills acting on their turns, and remove
+  one. A behaviour change nobody can inspect is the property that makes the *shared* tier need a gate;
+  the local tier earns its exemption by being visible to the one person it affects.
+- **`SkillsReadOnlyRefusal` is unchanged.** No agent tool writes a skill, local or shared. The
+  distiller is a separate, deliberate write path, and it is the only one.
+
+**The accepted cost, stated because it is real.** Two chemists can now get different answers to the
+same question, and the record of why is a file in one of their directories rather than in git. That
+is a genuine loss of the property the shared tree has, taken deliberately in exchange for a loop that
+closes without a human in it — and the inspectability requirement above is what keeps it debuggable
+rather than mysterious.
 
 ## What this decision does not carry, and why
 
-**The code that ungates agent-asserted notes is a follow-up, and this ADR does not claim it
-shipped.** Today `kg/pr_gate.py` still fronts job results, campaign narratives, distilled playbooks,
+**Neither the local skills tier nor the code that ungates agent-asserted notes is built here, and
+this ADR claims neither shipped.**
+
+The local tier is blocked on the same thing everything in this area is blocked on: there is no
+distiller, so nothing writes into a per-actor directory and nobody can populate one — building the
+resolution now is `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`. What it takes is
+small and is named above; what it waits on is
+`D-2026-09-05-a-census-that-counts-only-success-is-blind-to-half-the-signal`'s trigger, measured on a
+deployment with real sessions.
+
+**The knowledge half is the larger follow-up.** Today `kg/pr_gate.py` still fronts job results, campaign narratives, distilled playbooks,
 report drafts, `failure_note` and observation promotion. Carrying section 1 means, at minimum: a
 direct write path for those note types, the note-proposal queue reduced to the behaviour cases,
 `durable/retention.py`'s refusal on `note_proposals` re-argued, and the `GET /proposals` surface and
@@ -122,7 +153,8 @@ own. D-161 solved this with a CHECK rather than a convention, and that is the ba
   wrong, labelled as agent-authored, until somebody contradicts it. The alternative was a queue
   nobody drains, which serves nothing at all and was measured at 4.2–42 person-years per million
   entries on the one path where it was tried.
-- **`skills/` stays git-resident and human-merged**, so a bad behaviour change is a revert — the
-  rollback property any future skill-evolution loop rests on.
+- **`skills/` stays git-resident and human-merged**, so a bad *shared* behaviour change is a
+  revert — the rollback property any future skill-evolution loop rests on. A local skill's rollback
+  is the user deleting it, which is why being able to see it is an invariant rather than a feature.
 - D-005 is narrowed, not retired: the PR-gate mechanism, its branch/worktree submitter and the
   proposal record are all unchanged, and keep their one remaining subject.
