@@ -168,7 +168,8 @@ async def worker_http(*, component: str, ready: Callable[[], bool]) -> AsyncIter
         # The loser of the race is held in a local and cancelled, rather than created inline and
         # walked away from: on the branch this `wait` exists for — `serving` wins, so `bound` is
         # never set — an inline future is left pending on an event nothing will ever set.
-        # `api/detach.py::_next_event` cancels its getter in a `finally` for the same reason.
+        # `api/detach.py::DetachableTurn._next_event` cancels its getter in a `finally` for the
+        # same reason.
         # Nothing was measured leaking, and the reason is worth knowing rather than trusting:
         # uvicorn answers a failed bind with `sys.exit(3)`, a `SystemExit` out of a task stops the
         # loop, and `asyncio.run`'s teardown then cancels the orphan before anything can print it.

@@ -283,8 +283,8 @@ def test_the_bind_flag_wait_is_cancelled_when_the_bind_does_not_win_the_race(
     `asyncio.wait([bound.wait(), serving], FIRST_COMPLETED)` built a task for the bind flag and kept
     no reference to it, so on the branch that exists for the bind *failing* — `serving` wins,
     `bound` is never set — that task is left pending on an event nothing will ever set.
-    `api/detach.py::_next_event` does the identical juggle and cancels its loser in a `finally` for
-    exactly this reason.
+    `api/detach.py::DetachableTurn._next_event` does the identical juggle and cancels its loser
+    in a `finally` for exactly this reason.
 
     **The stderr line the finding predicted does not appear, and the reason is worth pinning.** With
     a real port conflict uvicorn's `startup` calls `sys.exit(3)`, and a `SystemExit` out of a task
