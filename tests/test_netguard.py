@@ -1,13 +1,18 @@
 """The in-process egress guard: it blocks a non-allowlisted host and permits the declared ones."""
 
+import ast
 import re
 import socket
 from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
+from chemclaw.api import middleware
 from chemclaw.core import netguard
-from chemclaw.core.config import Settings
+from chemclaw.core.config import Settings, settings
+from chemclaw.core.http import is_loopback_host, is_loopback_url
 
 
 @pytest.fixture(autouse=True)
@@ -56,11 +61,144 @@ def test_localhost_suffix_is_not_trusted() -> None:
 
     An /etc/hosts line or a wildcard zone would otherwise turn the suffix into "any destination".
     """
-    assert netguard._is_loopback("localhost")
-    assert netguard._is_loopback("127.0.0.1")
-    assert netguard._is_loopback("::1")
-    assert not netguard._is_loopback("exfil.localhost")
-    assert not netguard._is_loopback("evil.example")
+    assert is_loopback_host("localhost")
+    assert is_loopback_host("127.0.0.1")
+    assert is_loopback_host("::1")
+    assert not is_loopback_host("exfil.localhost")
+    assert not is_loopback_host("evil.example")
+
+
+# One table, driven through every caller below. Each row is (host, is it unreachable from the
+# network?) — the *only* question any of them asks, whether the address arrives as a bind, an
+# endpoint or a destination.
+#
+# The four marked rows are where the two answers used to differ, measured on 2026-09-05 against
+# `aed402c`: `core.http.LOOPBACK_HOSTS` was three literal strings and `netguard._is_loopback`
+# parsed, so `127.0.0.2`, `0.0.0.0`, `::` and a bracketed `[::1]` were loopback to one and not to
+# the other. The consequence was not cosmetic — a pod with the shipped `service_host="0.0.0.0"`
+# bind and `CHEMCLAW_LLM_BASE_URL=http://127.0.0.2:8820/v1` passed
+# `api.middleware._refuse_unconfigured_llm_gateway`, the guard added to catch exactly that, and
+# then failed every turn on a refused connection.
+_ADDRESSES: list[tuple[str, bool]] = [
+    ("127.0.0.1", True),
+    ("127.0.0.2", True),  # was: loopback to the guard, network-exposed to the front door
+    ("127.255.255.254", True),  # the rest of 127.0.0.0/8, which no literal set can enumerate
+    ("localhost", True),
+    ("::1", True),
+    ("[::1]", True),  # a bracketed literal — the set never stripped them
+    ("::1%lo0", True),  # a zone id
+    # The unspecified address is NOT loopback, and this is the one row the two roles disagree on
+    # for a real reason: as a *bind* it is every interface (the whole subject of SEC-2), as a
+    # *destination* it never leaves the host. The shared answer is the strict one, so a bind is
+    # refused and a destination needs an allowlist entry. Nothing dials it — there is no
+    # `0.0.0.0` URL in the tree, and no local-server bind idiom reaches the guard's resolver.
+    ("0.0.0.0", False),
+    ("::", False),
+    ("", False),
+    ("exfil.localhost", False),  # a suffix is never resolved, never trusted
+    ("127.0.0.1.nip.io", False),
+    # An IPv4-mapped literal follows its mapped address, both ways. This row was written the
+    # other way round from the CPython docs and the parametrized run corrected it, which is the
+    # argument for driving a table rather than asserting the cases somebody thought of.
+    ("::ffff:127.0.0.1", True),
+    ("::ffff:8.8.8.8", False),
+    ("llm.internal.example", False),
+    ("not an address", False),
+]
+
+
+@pytest.mark.parametrize(("host", "loopback"), _ADDRESSES)
+def test_every_caller_gets_one_answer_about_one_address(host: str, loopback: bool) -> None:
+    """The shared predicate and both of its callers agree, row by row, over one table.
+
+    The two callers ask different questions of the same fact — the egress guard asks whether a
+    *destination* may be dialled without an allowlist entry, the front door asks whether a *bind*
+    is network-exposed — and before this test they got their answers from two different pieces of
+    code. Pinning them against one table is what makes a third caller's divergence a failing test
+    rather than a measurement somebody has to think to take.
+
+    `is_loopback_url` is included because a URL is how two of the four callers actually receive the
+    address (`llm_base_url`, a connector's `endpoint.url`), so a bracket- or parse-handling
+    difference between the bare host and the URL form would be a divergence of the same kind.
+    """
+    assert is_loopback_host(host) is loopback
+
+    # The egress guard: loopback needs no allowlist entry, everything else is refused.
+    netguard._reset_for_tests([])
+    netguard._resolved_ips.clear()
+    if loopback:
+        netguard._check((host, 443))
+    else:
+        with pytest.raises(netguard.EgressForbidden):
+            netguard._check((host, 443))
+
+    # The front door's bind rule: a loopback bind is dev and boots, anything else is refused.
+    with _service_host(host):
+        if loopback:
+            middleware._refuse_unauthenticated_exposure()
+        else:
+            with pytest.raises(RuntimeError, match="non-loopback interface"):
+                middleware._refuse_unauthenticated_exposure()
+
+    # And the URL form, for the callers that receive one.
+    if host and "not an address" not in host:
+        bracketed = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        assert is_loopback_url(f"http://{bracketed}:8820/v1") is loopback
+
+
+@contextmanager
+def _service_host(host: str) -> Iterator[None]:
+    """Bind `settings.service_host` to `host` in the unauthenticated, no-opt-out posture.
+
+    That posture is what makes `_refuse_unauthenticated_exposure` a pure function of the loopback
+    answer: with `entra_required` or `service_allow_insecure` on it returns for another reason and
+    would assert nothing about this table.
+    """
+    saved = (settings.service_host, settings.entra_required, settings.service_allow_insecure)
+    settings.service_host = host
+    settings.entra_required = False
+    settings.service_allow_insecure = False
+    try:
+        yield
+    finally:
+        (settings.service_host, settings.entra_required, settings.service_allow_insecure) = saved
+
+
+def test_the_loopback_answer_has_exactly_one_definition_in_src() -> None:
+    """No module may carry a second literal set of loopback hosts. AST-walked, not grepped.
+
+    The disagreement this file's table pins was not a bug inside either predicate — both were
+    right about what their own author meant — it was that there were *two*, and the second was a
+    three-element set that could not express `127.0.0.0/8`. So the durable guard is against the
+    shape: a collection literal naming loopback addresses is a predicate in disguise, and the next
+    one would diverge the same way, silently, on the same addresses.
+
+    `PG_LOOPBACK_HOSTS` is the one that remains and it is allowed here rather than folded in,
+    because measurement says it is a different predicate rather than a stale copy: it asks *is this
+    connection local* for a TLS/plaintext exemption, and its extra `""` member makes a hostless
+    sink URL (a `file://` outbox) local. Substituting `is_loopback_host` for it was measured across
+    its three readers and moves behaviour both ways — widening the exemption for `127.0.0.2`, the
+    rest of `127.0.0.0/8`, `[::1]` and a zone id, and narrowing it for the empty host. The argument
+    lives in `core/http.py`'s module docstring; this row is what keeps a *fourth* out.
+    """
+    known = {"src/chemclaw/core/config/__init__.py": "PG_LOOPBACK_HOSTS"}
+    src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    found: dict[str, list[int]] = {}
+    for path in sorted(src.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Set, ast.List, ast.Tuple)):
+                continue
+            literals = {e.value for e in node.elts if isinstance(e, ast.Constant)}
+            if "127.0.0.1" in literals and literals & {"localhost", "::1"}:
+                rel = path.relative_to(src.parents[1]).as_posix()
+                found.setdefault(rel, []).append(node.lineno)
+
+    assert set(found) <= set(known), (
+        f"a second literal set of loopback hosts appeared in {sorted(set(found) - set(known))}. "
+        "Call `chemclaw.core.http.is_loopback_host` instead — a set of literals cannot express "
+        "`127.0.0.0/8`, and the last two definitions disagreed on `127.0.0.2` and `0.0.0.0`."
+    )
 
 
 def test_a_bytes_host_does_not_walk_past_the_check() -> None:

@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, messag
 from psycopg.types.json import Jsonb
 
 from chemclaw.agent.chemclaw_agent import history_provider
-from chemclaw.agent.message_migration import LANGCHAIN_SHAPE
+from chemclaw.agent.message_migration import LANGCHAIN_SHAPE, convert_stored_messages
 from chemclaw.agent.session_store import (
     InMemoryHistoryProvider,
     PostgresHistoryProvider,
@@ -527,6 +527,70 @@ def test_an_unstamped_legacy_row_is_not_offered_as_the_chemists_own_words() -> N
             HumanMessage,
         ], "the legacy row stopped rendering in the transcript, which is a separate promise"
         assert await reader.recent_user_texts(session_id, limit=10) == ["ok go ahead"]
+
+    asyncio.run(_run())
+
+
+def test_a_converted_legacy_row_is_still_not_offered_as_the_chemists_own_words() -> None:
+    """The axis the test above holds constant: the migration that rewrites the row.
+
+    `make db-migrate` and the chart's post-upgrade Job both run
+    `message_migration.convert_stored_messages`, which rewrites every MAF row into
+    `message_to_dict(HumanMessage(...))` and stamps it `langchain`. So a shape-only exclusion holds
+    exactly until an operator migrates, and then stops — while nothing about the row's provenance
+    has changed. That provenance is the whole property: MAF's history provider was called on every
+    run rather than once after the answer, so a `user`-role row there can carry a tool result
+    rendered as text, and this read is the evidence set `require_quotes_are_verbatim` grades a
+    `basis="stated"` quote against.
+
+    The conversion is run for real rather than simulated, because the discriminator this relies on
+    (`message_original`) is written by the migration's own UPDATE and a fixture that stamped the
+    row by hand would only prove the test agrees with itself.
+    """
+
+    async def _run() -> None:
+        writer = await _provider_or_skip()
+        session_id = "sess-stated-quote-converted"
+        await _clear(session_id)
+        # A MAF `user` row carrying text no person typed — which is the case that matters, since a
+        # converted row is indistinguishable from a typed one by shape alone.
+        tool_shaped = '{"tool": "screen_hazards", "result": "24 wells, no DMF"}'
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)",
+                    (session_id, Jsonb(legacy_text("user", tool_shaped))),
+                )
+        await writer.save_messages(session_id, [HumanMessage(content="ok go ahead")])
+
+        reader = PostgresHistoryProvider()
+        assert await reader.recent_user_texts(session_id, limit=10) == ["ok go ahead"], (
+            "the MAF row was quotable before the conversion, so this test proves nothing about it"
+        )
+
+        outcome = await convert_stored_messages()
+        assert outcome.converted >= 1, (
+            "the conversion pass rewrote nothing, so the axis never moved"
+        )
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT message_shape, message->>'type', message_original IS NOT NULL "
+                    "FROM session_messages WHERE session_id = %s ORDER BY id LIMIT 1",
+                    (session_id,),
+                )
+                converted = await cur.fetchone()
+        assert converted == (LANGCHAIN_SHAPE, "human", True), (
+            "the row under test was not converted, so the shape predicate would still exclude it"
+        )
+
+        assert await reader.recent_user_texts(session_id, limit=10) == ["ok go ahead"], (
+            "a converted MAF row became quotable as the chemist's own words"
+        )
+        assert [type(m) for m in await reader.get_messages(session_id)] == [
+            HumanMessage,
+            HumanMessage,
+        ], "the converted row stopped rendering in the transcript, which is a separate promise"
 
     asyncio.run(_run())
 

@@ -61,8 +61,12 @@ class NoAuth(BaseModel):
 
     Correct for a stdio connector (a subprocess of our own pod, under our own identity) and for
     a loopback HTTP connector in dev. `HttpEndpoint` refuses it for a non-loopback declared URL,
-    reusing the front door's loopback rule (`chemclaw.core.http.LOOPBACK_HOSTS`) rather than
-    inventing a second notion of "safe address".
+    reusing the front door's loopback rule (`chemclaw.core.http.is_loopback_host`) rather than
+    inventing a second notion of "safe address" — which is now literally one function rather than a
+    shared name: that rule was a set of three literal strings until 2026-09-05, when it was measured
+    against `core.netguard`'s parsed copy and found to disagree on `127.0.0.2` and `0.0.0.0`. A
+    manifest whose URL names a second loopback address therefore used to be refused here as though
+    it were a network host.
 
     **This paragraph used to describe a validator that did not exist** — the rule lived in this
     docstring and nowhere else in the tree, so a manifest could ship pointing at a network host with

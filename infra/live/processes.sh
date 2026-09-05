@@ -101,13 +101,14 @@ export CHEMCLAW_CONNECTORS_REQUIRED="${CHEMCLAW_CONNECTORS_REQUIRED:-true}"
 # **This lane's bundles are derived, never listed.** `start_fleet_bundles` iterates
 # `fleet_bundle_names`, the intersection of core's endpoint-declaring bundles and the manifests the
 # fleet actually ships, so a bundle added to either side is picked up without editing this file.
-# That matters because `CHEMCLAW_CONNECTORS_REQUIRED` is true below: with `connectors_enabled`
+# That matters because `CHEMCLAW_CONNECTORS_REQUIRED` is true (set above): with `connectors_enabled`
 # unset, discovery is enablement, so a bundle core enables and nothing starts is not a warning —
 # it is a front door that refuses to boot. `rxnpredict` did exactly that when it was wired in
 # against a hardcoded pair, and the fix is to start what is enabled rather than to narrow what is
 # enabled: the core-served bundles (`bo`, `calc`, `molfp`, `rxnfp`, `results`) come from the dev
 # connector process, so constraining `CHEMCLAW_CONNECTORS_ENABLED` here would take those off the
 # lane too.
+
 # Traces, when something is listening for them. `make phoenix-up` puts an OTLP receiver on 4317;
 # with nothing there the exporter retries in the background and the run is unaffected, which is why
 # this is a probe rather than a flag somebody has to remember. Content stays suppressed:

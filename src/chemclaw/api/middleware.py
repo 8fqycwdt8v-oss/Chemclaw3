@@ -26,7 +26,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from chemclaw.connectors.identity import HEADER_CORRELATION
 from chemclaw.core.asgi import BodySizeLimit
 from chemclaw.core.config import settings
-from chemclaw.core.http import LOOPBACK_HOSTS, is_loopback_url
+from chemclaw.core.http import is_loopback_host, is_loopback_url
 from chemclaw.core.identity_context import (
     reset_current_correlation_id,
     reset_current_identity,
@@ -131,8 +131,12 @@ def _refuse_unauthenticated_exposure() -> None:
     deployment).
     `service_allow_insecure=true` is the explicit, conscious opt-out — it boots with the loud
     warning instead. Loopback dev and Entra-enforced deployments are untouched.
+
+    **What counts as loopback is `core.http.is_loopback_host`, not a set of three strings.** That is
+    what this used to read, and a bind on `127.0.0.2` — loopback, and not in the set — was refused
+    as though it were network-exposed while `core.netguard` treated the same address as local.
     """
-    if settings.entra_required or settings.service_host in LOOPBACK_HOSTS:
+    if settings.entra_required or is_loopback_host(settings.service_host):
         return
     if not settings.service_allow_insecure:
         raise RuntimeError(
@@ -181,7 +185,7 @@ def _refuse_unconfigured_llm_gateway() -> None:
     policy: where a real gateway points is the operator's decision and not this repository's.
     Loopback dev against the mock is untouched.
     """
-    if settings.service_host in LOOPBACK_HOSTS:
+    if is_loopback_host(settings.service_host):
         return
     if is_loopback_url(settings.llm_base_url):
         raise RuntimeError(

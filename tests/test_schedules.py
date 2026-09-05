@@ -26,6 +26,7 @@ from temporalio.client import (
     ScheduleUpdate,
     WorkflowExecutionStatus,
 )
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from chemclaw.core.config import settings
@@ -512,7 +513,16 @@ def _health_client(
         def get_schedule_handle(self, schedule_id: str) -> _ScheduleHandle:
             return _ScheduleHandle()
 
-        def get_workflow_handle(self, workflow_id: str) -> _WorkflowHandle:
+        def get_workflow_handle(
+            self, workflow_id: str, *, run_id: str | None = None
+        ) -> _WorkflowHandle:
+            # `run_id` is accepted and ignored on purpose. `_last_outcome` describes by workflow id
+            # alone, and addressing the chain's head instead (`first_execution_run_id`) is the
+            # regression that would report a killed drain as `CONTINUED_AS_NEW`. This fake models
+            # no chain — every fake run is its own head — so it *cannot* tell the two apart, and a
+            # fake that refused the kwarg would fail such a mutation on a `TypeError` swallowed
+            # into "unknown", which reads as coverage and is not. The guard is
+            # `test_a_chains_own_outcome_is_reported_and_not_its_heads`, against a live broker.
             return _WorkflowHandle()
 
     return cast(Client, _Client())
@@ -551,9 +561,13 @@ def test_schedule_health_surfaces_overlap_skips_and_the_last_run() -> None:
 def test_a_run_that_can_no_longer_be_described_degrades_to_unknown() -> None:
     """A run outside its retention window does not describe, and must not end the sweep.
 
-    `describe_schedules` reports up to eleven jobs from one `gather`; an exception raised while
-    recovering one job's outcome would take the other ten with it, which is the opposite of what a
-    health probe is for. The reason belongs in `note`, where an operator reads it.
+    `describe_schedules` reports every planned job from one `gather`; an exception raised while
+    recovering one job's outcome would take every other job with it, which is the opposite of what
+    a health probe is for. The reason belongs in `note`, where an operator reads it.
+
+    How many that is is asserted below rather than written here: the plan grows, and a count in a
+    docstring is a claim about the commit that wrote it (this one said eleven over a plan of
+    twelve).
     """
 
     def _gone() -> object:
@@ -569,6 +583,7 @@ def test_a_run_that_can_no_longer_be_described_degrades_to_unknown() -> None:
     )
 
     health = asyncio.run(describe_schedules(_health_client(info, _gone)))
+    assert len(health) == len(planned_schedules()) >= 1  # the sweep survived, whole
     assert [h.last_outcome for h in health] == ["unknown"] * len(health)
     assert all("run outcome unavailable (RuntimeError)" in h.note for h in health)
 
@@ -722,3 +737,200 @@ def test_a_schedule_whose_every_run_is_killed_is_not_reported_as_a_healthy_one()
     assert killed.skipped_overlap == 0
     assert killed.running_now == 0
     assert killed.note == ""
+
+
+# --- What "the newest finished run" means, and what a chain's outcome is ------------------------
+#
+# Both properties below are asserted against a live broker rather than against the fake above, and
+# for the same reason in each case: what makes them true is Temporal's behaviour, not this
+# repository's. `recent_actions` being oldest-first is the broker's contract, and a chain's head
+# reading `CONTINUED_AS_NEW` while its tail is dead is the broker's behaviour too. A fake
+# encodes whatever its author believed about both.
+
+
+# Flipped by the mixed-outcome test between two fires of one schedule. A Schedule fires one fixed
+# action — every run starts with the same (empty) arguments — so a flag the test can move is the
+# only way one schedule produces two different outcomes.
+_FAIL_NEXT_FIRE = [False]
+
+
+@workflow.defn(name="ScheduleHealthProbeFailsOnCue")
+class _CuedFailureProbeWorkflow:
+    """A periodic job that completes until the test cues it, then declares a failure."""
+
+    @workflow.run
+    async def run(self) -> str:
+        """Complete, or raise once cued — `ApplicationError` fails the run, not the task."""
+        if _FAIL_NEXT_FIRE[0]:
+            raise ApplicationError("this fire is the one that fails")
+        return "done"
+
+
+@workflow.defn(name="ScheduleHealthProbeChains")
+class _ChainingProbeWorkflow:
+    """A draining periodic job: two `continue_as_new` hops, then a park the ceiling ends."""
+
+    @workflow.run
+    async def run(self, hop: int = 0) -> str:
+        """Hand the chain on twice, then wait for `schedule_run_timeout_seconds` to kill it."""
+        if hop < 2:
+            workflow.continue_as_new(hop + 1)
+        await workflow.wait_condition(lambda: False)
+        return "unreachable"
+
+
+def _started_workflow_id(action: object) -> str:
+    """The workflow id a recorded schedule action started (narrowing the SDK's base class)."""
+    assert isinstance(action, ScheduleActionExecutionStartWorkflow)
+    return action.workflow_id
+
+
+def test_the_newest_finished_run_is_the_one_reported() -> None:
+    """A schedule whose newest run failed must not report the last good one.
+
+    `_last_outcome` reads `finished[-1]`, and `recent_actions` is oldest-first, so `[-1]` is the
+    newest — but nothing asserted it. Every other fixture in this file is outcome-homogeneous, so
+    `finished[-1]` -> `finished[0]` passed all 23 of them while turning the field into a report of
+    the last *good* run. That is exactly the healthy-looking dead job `last_outcome` exists to end:
+    a job that has just started dying goes on reporting `COMPLETED`.
+
+    Driven against a live broker because the ordering the index depends on is Temporal's property
+    and not this repository's — a fake asserts whatever its author assumed. So the run order is
+    asserted here too, beside the outcomes: oldest fire `COMPLETED`, newest `FAILED`, `started_at`
+    ascending.
+
+    The cue is flipped only once the first fire is *observed complete*, never merely started, so
+    the mixed corpus this test needs cannot collapse back into a homogeneous one on a slow poll.
+    """
+
+    async def _run() -> tuple[ScheduleHealth, list[str], list[datetime]]:
+        async with await start_local_env_or_skip() as env:
+            client = env.client
+            job = PlannedSchedule("probe-mixed", _CuedFailureProbeWorkflow, timedelta(seconds=3))
+            async with Worker(
+                client,
+                task_queue=settings.background_task_queue,
+                workflows=[_CuedFailureProbeWorkflow],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ):
+                handle = client.get_schedule_handle(job.schedule_id)
+                await client.create_schedule(job.schedule_id, _build_schedule(job))
+
+                async def _first_fire_completed() -> bool:
+                    info = (await handle.describe()).info
+                    recent = list(info.recent_actions or [])
+                    if not recent or list(info.running_actions or []):
+                        return False
+                    first = await client.get_workflow_handle(
+                        _started_workflow_id(recent[0].action)
+                    ).describe()
+                    return first.status is WorkflowExecutionStatus.COMPLETED
+
+                await _until(_first_fire_completed, "the first fire to complete")
+                _FAIL_NEXT_FIRE[0] = True
+
+                async def _a_later_fire_finished() -> bool:
+                    info = (await handle.describe()).info
+                    return len(list(info.recent_actions or [])) >= 2 and not list(
+                        info.running_actions or []
+                    )
+
+                await _until(_a_later_fire_finished, "a second fire, finished")
+                await handle.pause()
+                health = await _describe(client, job)
+                recent = list((await handle.describe()).info.recent_actions or [])
+                statuses = [
+                    (
+                        await client.get_workflow_handle(
+                            _started_workflow_id(action.action)
+                        ).describe()
+                    ).status
+                    for action in recent
+                ]
+                return (
+                    health,
+                    [("" if s is None else s.name) for s in statuses],
+                    [action.started_at for action in recent],
+                )
+
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(settings, "schedule_jitter_fraction", 0.0)
+    _FAIL_NEXT_FIRE[0] = False
+    try:
+        health, statuses, started = asyncio.run(_run())
+    finally:
+        _FAIL_NEXT_FIRE[0] = False
+        monkeypatched.undo()
+
+    # The fixture is genuinely mixed — asserted, not assumed, because a homogeneous one would make
+    # the assertion below pass whichever end of the list `_last_outcome` reads.
+    assert statuses[0] == "COMPLETED", statuses
+    assert statuses[-1] == "FAILED", statuses
+    assert started == sorted(started), "recent_actions is not oldest-first"
+    assert health.last_outcome == "FAILED", (
+        f"the newest finished run is {statuses[-1]} and the oldest is {statuses[0]}; "
+        "reporting the oldest is a job that has started dying still reading healthy"
+    )
+
+
+def test_a_chains_own_outcome_is_reported_and_not_its_heads() -> None:
+    """A `continue_as_new` chain reports what happened to the chain, not to its first run.
+
+    Four of the scheduled jobs drain by continuing as new, and a chain shares one workflow id — so
+    `_last_outcome` describes by that id alone, which answers with the chain's *tail*. The obvious
+    field on the recorded action, `first_execution_run_id`, addresses the *head*, which reads
+    `CONTINUED_AS_NEW` no matter how the chain ended: a killed drain would report as normal.
+
+    Both readings are taken here, so the assertion fails for the semantic reason if the lookup ever
+    starts naming a run. The unit tests above cannot do this — their fake models no chain, so the
+    two addresses are the same run — which is what left this, the ADR's headline finding, guarded
+    by nothing but a `TypeError` on a fake's signature.
+    """
+
+    async def _run() -> tuple[ScheduleHealth, str]:
+        async with await start_local_env_or_skip() as env:
+            client = env.client
+            job = PlannedSchedule("probe-chain", _ChainingProbeWorkflow, timedelta(seconds=5))
+            async with Worker(
+                client,
+                task_queue=settings.background_task_queue,
+                workflows=[_ChainingProbeWorkflow],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ):
+                handle = client.get_schedule_handle(job.schedule_id)
+                await client.create_schedule(job.schedule_id, _build_schedule(job))
+
+                async def _fired() -> bool:
+                    info = (await handle.describe()).info
+                    return bool(list(info.recent_actions or []))
+
+                await _until(_fired, "the chain to be fired")
+                await handle.pause()
+
+                async def _chain_is_dead() -> bool:
+                    info = (await handle.describe()).info
+                    return not list(info.running_actions or [])
+
+                await _until(_chain_is_dead, "the chain's last hop to hit its ceiling")
+                health = await _describe(client, job)
+                action = list((await handle.describe()).info.recent_actions or [])[-1].action
+                assert isinstance(action, ScheduleActionExecutionStartWorkflow)
+                head = await client.get_workflow_handle(
+                    action.workflow_id, run_id=action.first_execution_run_id
+                ).describe()
+                return health, ("" if head.status is None else head.status.name)
+
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(settings, "schedule_run_timeout_seconds", 1.0)
+    monkeypatched.setattr(settings, "schedule_jitter_fraction", 0.0)
+    try:
+        health, head_status = asyncio.run(_run())
+    finally:
+        monkeypatched.undo()
+
+    # The head is what the obvious lookup would have answered, and it is wrong about the chain.
+    assert head_status == "CONTINUED_AS_NEW"
+    assert health.last_outcome == "TIMED_OUT", (
+        "the chain was killed by its run timeout; reporting its head would say "
+        f"{head_status}, which is what a healthy hand-off looks like"
+    )

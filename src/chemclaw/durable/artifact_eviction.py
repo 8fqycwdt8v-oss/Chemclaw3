@@ -181,8 +181,13 @@ async def _evict_cold_artifacts() -> EvictionOutcome:
 # Schedule, so a parked run is bounded by `schedule_run_timeout_seconds`; nothing reads its
 # result; and one pass is an unconditional policy sweep, so a fire it skips costs a day of
 # blobs that the next pass reclaims with the rest. There is no party a parked run misleads —
-# the harm D-2026-08-16 measured was a chemist told `running`, and no chemist is here — and
-# `ScheduleHealth.last_outcome` reports both terminal states alike, so it separates neither.
+# the harm D-2026-08-16 measured was a chemist told `running`, and no chemist is here — and a
+# parked run is not silent either: `ScheduleHealth.last_outcome` reports the ceiling's kill as
+# `TIMED_OUT` where a declared failure reads `FAILED`, so an operator reading that surface sees a
+# terminal state either way. This comment asserted the opposite — that the field "reports both
+# terminal states alike, so it separates neither" — until it was measured against a live broker:
+# one schedule parked and one raising reported exactly those two names, and
+# `tests/test_schedules.py` now pins both. The stance is unchanged: it never rested on that clause.
 # Changing it because the neighbours changed is how a per-workflow decision turns into a sweep.
 @workflow.defn
 class ArtifactEvictionWorkflow:
