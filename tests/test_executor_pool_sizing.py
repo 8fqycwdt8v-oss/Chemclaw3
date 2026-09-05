@@ -39,11 +39,25 @@ def _block() -> None:
     time.sleep(_BLOCK_SECONDS / 2)
 
 
-def _short_call_ms(*, pool_reserved: int, offloads: int) -> float:
+def _short_call_ms(*, pool_reserved: int, offloads: int, trials: int = 5) -> float:
     """Saturate a pool sized for `pool_reserved` with `offloads` parses, then time a tiny call.
 
     The tiny call stands in for `api/auth.py`'s `await asyncio.to_thread(validate_token, ...)`,
     which every authenticated request makes. What is returned is the wait an operator feels.
+
+    **The best of `trials` runs, not one**, because a single latency sample on shared CI hardware
+    is not an estimate of anything. Contention is one-sided — a busy runner only ever adds time —
+    so the minimum is the honest reading of what this configuration achieves, and the mean would
+    be a reading of the runner. Measured here: the wide arm ranges 5.8-307 ms across six runs on
+    one idle box, and CI once sampled it at 636 ms against a narrow arm of 228 ms — an apparent
+    inversion that does not reproduce at any core count (checked at 2 and 4 with `taskset`, wide
+    winning every trial by 5x to 130x). The old single sample turned that variance straight into a
+    red build on a correct change, which is the failure mode that teaches a reader to re-run
+    rather than to read.
+
+    Five rather than three, because three was measured and was not enough: stressed on two pinned
+    cores against a competing spinner — harder than a GitHub runner — three trials still failed
+    about one run in eight, and five survived twenty consecutive runs of the same stress.
     """
 
     async def scenario() -> float:
@@ -57,7 +71,7 @@ def _short_call_ms(*, pool_reserved: int, offloads: int) -> float:
         await asyncio.gather(*blocking)
         return waited
 
-    return asyncio.run(scenario())
+    return min(asyncio.run(scenario()) for _ in range(trials))
 
 
 def test_the_front_door_reserves_for_the_fan_out_a_permit_licenses() -> None:
@@ -91,6 +105,13 @@ def test_a_short_call_queues_at_the_old_width_and_does_not_at_this_one() -> None
     Measured on a 4-core sandbox at 96 offloads of 200 ms: 762.7 ms against 123.2 ms worst case.
     The assertion is a ratio against `_BLOCK_SECONDS` rather than either figure, because absolute
     milliseconds on shared CI hardware are not a claim anybody can keep true.
+
+    **The ratio is not enough on its own, which cost a red build.** Both arms are timing samples,
+    so a runner that stalls the *wide* one inverts a ratio just as readily as it inflates an
+    absolute — CI sampled 228.5 ms narrow against 636.0 ms wide, which reads as "widening bought
+    nothing" and is a claim about the runner. `_short_call_ms` now takes the best of five runs per
+    arm; the ratio is what makes the assertion portable, and the repetition is what makes each side
+    of it a measurement rather than a sample.
     """
     offloads = front_door_reserved()
     old_width = settings.service_max_concurrent_turns + settings.attachment_max_concurrent_parses
