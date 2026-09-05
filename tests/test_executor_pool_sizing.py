@@ -18,6 +18,8 @@ the difference visible.
 """
 
 import asyncio
+import statistics
+import threading
 import time
 
 import pytest
@@ -31,47 +33,61 @@ from chemclaw.core.executor import front_door_reserved, install_default_executor
 _BLOCK_SECONDS = 0.2
 
 
-def _block() -> None:
-    """One offloaded parse: a GIL-holding half and a file-I/O half."""
+def _block(started: threading.Semaphore | None = None) -> None:
+    """One offloaded parse: a GIL-holding half and a file-I/O half.
+
+    `started` is released the instant this lands on a thread, which is what lets the caller wait
+    for the pool to be *actually* full rather than sleep and hope.
+    """
+    if started is not None:
+        started.release()
     end = time.perf_counter() + _BLOCK_SECONDS / 2
     while time.perf_counter() < end:
         pass
     time.sleep(_BLOCK_SECONDS / 2)
 
 
-def _short_call_ms(*, pool_reserved: int, offloads: int, trials: int = 5) -> float:
+def _short_call_ms(*, pool_reserved: int, offloads: int, trials: int = 3) -> float:
     """Saturate a pool sized for `pool_reserved` with `offloads` parses, then time a tiny call.
 
     The tiny call stands in for `api/auth.py`'s `await asyncio.to_thread(validate_token, ...)`,
     which every authenticated request makes. What is returned is the wait an operator feels.
 
-    **The best of `trials` runs, not one**, because a single latency sample on shared CI hardware
-    is not an estimate of anything. Contention is one-sided — a busy runner only ever adds time —
-    so the minimum is the honest reading of what this configuration achieves, and the mean would
-    be a reading of the runner. Measured here: the wide arm ranges 5.8-307 ms across six runs on
-    one idle box, and CI once sampled it at 636 ms against a narrow arm of 228 ms — an apparent
-    inversion that does not reproduce at any core count (checked at 2 and 4 with `taskset`, wide
-    winning every trial by 5x to 130x). The old single sample turned that variance straight into a
-    red build on a correct change, which is the failure mode that teaches a reader to re-run
-    rather than to read.
+    **The pool is saturated by waiting for it, not by sleeping at it — and that was the defect.**
+    This used to `await asyncio.sleep(0.05)` and assume all `offloads` had reached the executor.
+    `asyncio.to_thread` submits when its coroutine first runs, so on a loaded machine a fixed 50 ms
+    leaves most of them unsubmitted, the narrow pool is *not* full, and the short call sails
+    through. Measured on CI: **1.1 ms** on an arm whose entire purpose is to show a short call
+    waiting, which this test then reported as "no longer reproducing the queuing it exists to fix"
+    — a true statement about that run and a false one about the code. Every worker now releases a
+    semaphore as it lands, and the caller waits for as many as the pool can run at once, so
+    "saturated" is a fact of the run rather than a hope about its speed.
 
-    Five rather than three, because three was measured and was not enough: stressed on two pinned
-    cores against a competing spinner — harder than a GitHub runner — three trials still failed
-    about one run in eight, and five survived twenty consecutive runs of the same stress.
+    That is also why the earlier attempts to fix this with statistics did not hold. A single sample
+    became the best of five, which reads what a configuration *achieves* — right for the wide arm,
+    wrong for the narrow one, where the best of five is precisely the run that failed to saturate.
+    The repeat stays, at the median, because the wide arm still ranges 20-235 ms on one idle box
+    and a lone sample is not an estimate; but the race is fixed where it lives.
     """
 
     async def scenario() -> float:
-        install_default_executor(component="front-door", reserved=pool_reserved)
-        blocking = [asyncio.create_task(asyncio.to_thread(_block)) for _ in range(offloads)]
-        # Let every blocking call reach a thread (or the queue) before the short one is submitted.
-        await asyncio.sleep(0.05)
-        started = time.perf_counter()
+        pool = install_default_executor(component="front-door", reserved=pool_reserved)
+        width = pool._max_workers
+        started = threading.Semaphore(0)
+        blocking = [
+            asyncio.create_task(asyncio.to_thread(_block, started)) for _ in range(offloads)
+        ]
+        # Every thread the pool has is now running a block, so the next submission must queue.
+        # `min` because a pool wider than the fan-out never fills, which is the wide arm's point.
+        occupied = min(width, offloads)
+        await asyncio.to_thread(lambda: [started.acquire() for _ in range(occupied)])
+        submitted = time.perf_counter()
         await asyncio.to_thread(lambda: None)
-        waited = (time.perf_counter() - started) * 1000
+        waited = (time.perf_counter() - submitted) * 1000
         await asyncio.gather(*blocking)
         return waited
 
-    return min(asyncio.run(scenario()) for _ in range(trials))
+    return statistics.median(asyncio.run(scenario()) for _ in range(trials))
 
 
 def test_the_front_door_reserves_for_the_fan_out_a_permit_licenses() -> None:
@@ -106,12 +122,14 @@ def test_a_short_call_queues_at_the_old_width_and_does_not_at_this_one() -> None
     The assertion is a ratio against `_BLOCK_SECONDS` rather than either figure, because absolute
     milliseconds on shared CI hardware are not a claim anybody can keep true.
 
-    **The ratio is not enough on its own, which cost a red build.** Both arms are timing samples,
-    so a runner that stalls the *wide* one inverts a ratio just as readily as it inflates an
-    absolute — CI sampled 228.5 ms narrow against 636.0 ms wide, which reads as "widening bought
-    nothing" and is a claim about the runner. `_short_call_ms` now takes the best of five runs per
-    arm; the ratio is what makes the assertion portable, and the repetition is what makes each side
-    of it a measurement rather than a sample.
+    **The ratio is not enough on its own, which cost two red builds.** Both arms are timing
+    samples, so a runner that stalls the *wide* one inverts a ratio just as readily as it inflates
+    an absolute — CI sampled 228.5 ms narrow against 636.0 ms wide, which reads as "widening bought
+    nothing" and is a claim about the runner. `_short_call_ms` repeats each arm five times for that
+    reason. It takes the **median** and not the minimum, which was the second red build: the
+    minimum is the right reading of the wide arm and the wrong one of the narrow arm, whose point
+    is that a short call waits — best-of-five found the lucky run at 1.1 ms and this test announced
+    it was no longer reproducing its own premise.
     """
     offloads = front_door_reserved()
     old_width = settings.service_max_concurrent_turns + settings.attachment_max_concurrent_parses
