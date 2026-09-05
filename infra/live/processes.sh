@@ -292,9 +292,25 @@ PY
 start_fleet_bundles() {
   local python="$1" fleet_python="$2"
 
-  local name port
   # Derived from the fleet, never a list here — see the note beside CONNECTORS_REQUIRED.
-  for name in $(fleet_bundle_names "$python"); do
+  #
+  # Assigned first, then iterated. `for name in $(cmd)` does not propagate a non-zero exit under
+  # `set -e` — a traceback inside the derivation would print to stderr and the loop would then run
+  # over whatever partial output preceded it, starting some bundles and silently skipping others.
+  # The failure would surface minutes later as the front door's `ConnectorsUnavailable`, naming a
+  # connector nobody had noticed was missing, which is exactly the defect this derivation replaced.
+  # An assignment *does* propagate, so `|| die` here is what makes the guard real - the same shape
+  # `fleet_port` below already uses.
+  local names name port
+  names="$(fleet_bundle_names "$python")" || die "could not derive the fleet bundle list from \
+$REPO_ROOT/src/chemclaw/connectors and $MCP_REPO/manifests"
+  # An empty derivation is a wrong checkout, not a lane with nothing to start. `fleet_checkout_python`
+  # already refuses a missing `$MCP_REPO`; this catches one that exists and publishes no manifest
+  # this repository declares an endpoint for - which would otherwise start no fleet server at all and
+  # fail the front door minutes later on connectors it never mentions.
+  [ -n "$names" ] || die "no fleet bundle is served by both sides: this checkout declares endpoint \
+bundles that $MCP_REPO/manifests does not publish. Is CHEMCLAW_MCP_REPO the right checkout?"
+  for name in $names; do
     port="$(fleet_port "$python" "$name")" || die "no port in $MCP_REPO/manifests/$name/connector.yaml"
     # The same variable name on both sides, which is the manifest's `token_env` and the whole
     # reason a dev token works here: core reads it to send, the server reads it to verify.

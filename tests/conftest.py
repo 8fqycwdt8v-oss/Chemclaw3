@@ -394,13 +394,25 @@ _HELM_SKIP = "helm is not installed"
 def _report_helm_skips(terminalreporter: TerminalReporter) -> None:
     """Say how many rendered-chart tests an absent `helm` binary took away.
 
-    `helm` is not a Python dependency, so a plain `uv sync` never installs it, and the 33 tests
-    gated on `shutil.which("helm")` skip silently and still print a green line — the same failure
-    `_report_postgres_skips` exists for, on a second dependency that had no such warning. It is not
-    a hypothetical: rendering the chart is what found five HIGH-severity chart defects that had
-    survived earlier reviews precisely because nobody had rendered it, and a local run that skips
-    these 33 is not evidence any of that class of defect is still absent. Install it:
-    https://helm.sh/docs/intro/install/, or run `make helm-validate` once it is on `PATH`.
+    `helm` is not a Python dependency, so a plain `uv sync` never installs it, and the tests gated
+    on `shutil.which("helm")` skip silently and still print a green line — the same failure
+    `_report_postgres_skips` exists for, on a second dependency that had no such warning. A local
+    run that skips them is not evidence about the rendered chart, only about its static YAML.
+    Install it: https://helm.sh/docs/intro/install/.
+
+    **How many that is, the epilogue counts; this docstring does not, and the first version of it
+    did.** It said 33, over a set that measures **59** with `helm` off `PATH` — a number inherited
+    from a `BACKLOG.md` row rather than measured, which is the failure
+    `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` names, committed inside the change
+    that added the counter whose whole job is to make the count unnecessary.
+
+    **And it is a sandbox warning, not a CI one.** The same first version said these tests "skipped
+    silently on every run" in CI and that five HIGH chart defects survived "because nobody had
+    rendered the chart". `D-2026-09-04-a-review-of-a-review-finds-the-fixes` had already corrected
+    that a day earlier: `ubuntu-latest` ships Helm, so the `check` job has been rendering the chart
+    throughout, and those defects survived because the tests rendered **one** set of values. The
+    `Install Helm` step in that job is still worth having — it pins what was drifting with the
+    runner image — but it did not turn a dead gate on.
     """
     skipped = [
         report

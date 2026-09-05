@@ -39,16 +39,27 @@ have been lost here before, and were recoverable only because they had been comm
 | C | 48 | 19 | 7 | 22 | +12.5 |
 | all | 217 | 71 | 46 | 100 | +26.5 |
 
-Four pairs were dropped because one arm came back `ungraded` — a judge failure, which is evidence
-about the grader rather than about either arm (`du-08`, `gr-05`, `ms-01`, `rx-26`).
+Four pairs were dropped because one arm came back `ungraded` (`du-08`, `gr-05`, `ms-01`, `rx-26`)
+— a judge failure, which is evidence about the grader rather than about the system under test.
+**It is not arm-neutral, though, and calling it "either arm" hid that**: all four are on the
+*augmented* side and the baseline arm has none, every one for the same recorded reason (the judge's
+reply hit its token ceiling). The plausible mechanism is that a tool-armed transcript gives the
+judge more to read, which makes the drop a mild selection effect on the harder augmented answers
+rather than a coin toss. Four of 221 cannot move the headline, and a run with many more of them
+would need the ceiling raised before its aggregates meant anything.
 
 **On bucket A — where the capability exists and tools are supposed to win — tools helped 31% of the
 questions and hurt 23%.** Judge verdicts per arm:
 
-| bucket A | served | partial | unserved | fabricated |
+| bucket A (the 169 paired probes) | served | partial | unserved | fabricated |
 | --- | --- | --- | --- | --- |
 | with tools | 47 | 31 | 26 | 65 |
-| without tools | 28 | 21 | 67 | 57 |
+| without tools | 28 | 21 | 65 | 55 |
+
+Both rows cover the same 169 probes. Over all 173 the toolless arm reads 28/21/**67**/**57**,
+because its four extra verdicts are the ones whose *augmented* half came back ungraded — and a
+table whose two rows are different populations is not a comparison. This shipped as 67/57 beside a
+169-probe row.
 
 The shape is not "tools are better on average". It is **two opposite effects of similar size**:
 tools convert declines into answers (`unserved → served` 16, `unserved → partial` 12) and rescue
@@ -81,7 +92,12 @@ what it could not do.
 ## What it cost
 
 Read off `chemclaw_tokens_total` and its four component counters at the front door, before and
-after (so this is the two arms exactly, and excludes the judge):
+after (so this is the two arms exactly, and excludes the judge). **The two scrapes are committed
+beside the transcripts** as `token-counters.txt`: this table was the one thing here that no
+committed artifact could support, which is the "number nobody can re-derive" failure this
+repository names, and it does not become acceptable because the subject is a cost. The exposition
+rounds to six significant figures, so these deltas are exact to about ten tokens rather than to the
+digit — which is why the components do not quite sum to the totals:
 
 | arm | billed tokens | cache read | cache write | uncached input | output |
 | --- | --- | --- | --- | --- | --- |
@@ -107,3 +123,7 @@ which is the one number here that is not measured).
 4. **The two arms differ in prompt as well as in tools.** The control arm carries its own short
    instructions, because the default prompt describes tools it does not have. That is what "base
    model versus agent" means, and it is a confound worth naming rather than a bug to fix.
+5. **The control arm is not literally toolless**, as "What the arms actually did" records above: it
+   keeps six `FilesystemMiddleware` verbs and `task`, which a profile cannot strip, and spent 194
+   calls on them over an empty scratch filesystem. Ranked last because it costs the control arm
+   rather than flattering it — but it belongs in this list, and shipped only in the body.
