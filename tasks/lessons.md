@@ -1871,6 +1871,107 @@ asserted "the last draw lands in the final tenth", which is false at n=2 where t
 stratified draw is the first probe of each half. **Rule: state the property (each band contributes
 one), never a proxy for it (the last one is near the end).**
 
+**A clean auto-merge is not evidence the tree is unchanged.** The remote branch was the pre-squash
+history of an already-merged PR (branch deletion is blocked through this git proxy), so it looked
+content-free — its tree was byte-identical to the squash on `main`. Merging it re-added a
+`BACKLOG.md` row I had deleted in this cycle, with no conflict: from the merge base's view that
+branch *adds* the row and my commit removes it, and git resolved it in the branch's favour. **Rule:
+after merging a stale branch whose PR was squashed, diff the merge result against your own pre-merge
+HEAD, not just against the base.** Zero files differing is the assertion; "it auto-merged cleanly"
+is not.
+
+**A flag named for its conditional half gets skipped on the branch that matters.**
+`private_ca_transport` carried `trust_env=False` — with a docstring naming the exact proxy attack —
+behind `if not ca_bundle: return None`, and no shipped configuration sets a bundle. So the control
+was real, tested, documented, and absent from every deployment, and four separate documents cited it
+as protection. **Rule: when a function does an unconditional thing and a conditional thing, the name
+and the early return both belong to the unconditional one.** The corollary that found it: grep for
+who *takes* the branch, not for who mentions the function.
+
+**Fixing a conflated flag costs whatever else it was conflated with, and that has to be measured
+too.** `trust_env=False` refuses ambient proxies; it also stops httpx reading `SSL_CERT_FILE`, so
+the obvious fix would have silently swapped a deployment's trust store for `certifi` — measured, 1
+CA certificate against 118. The backlog row had warned about exactly this and I had already written
+the ADR without accounting for it. **Rule: when a row states a cost, measure the cost before
+deciding it is acceptable — and prefer taking back the half you did not object to (one explicit
+`verify=`) over accepting a second behavioural change you never put to the owner.**
+
+**Measure the options before putting them to the owner, and put the crux in the question.** The
+choice here looked like "guard-side or client-side"; measuring first showed the client-side option
+as originally scoped was theatre, because the LLM call goes out on a client `langchain-openai`
+builds with `trust_env=True` and centralising *first-party* construction never reaches it. A
+question asked before that measurement would have offered an option that does nothing.
+
+**I wrote a control and then hand-rolled the environment convention it depends on.** The ADR argued,
+correctly, that reading `no_proxy` a second time would be writing a second answer to it — and used
+`urllib.request.proxy_bypass` for that half while reading the proxy variables myself, as
+`name` and `name.upper()` over three names. Every client library lowercases instead, so
+`Https_Proxy` gave httpx a live proxy mount while my check saw nothing and the process booted
+clean. The test's own docstring made the argument that defeats it ("a control an operator disables
+by typing the variable in lower case") and stopped one step short. **Rule: when a rule cites an
+environment convention, get every part of that convention from one stdlib call — and when a
+docstring argues why case matters, enumerate the cases rather than two of them.**
+
+**A guard derived from the widest available set refuses things that set cannot describe.** I ran
+`derive_allowed` — every host by any protocol — through a proxy check. Measured, psycopg connects
+with all three proxy variables pointed at a dead port, so the Postgres host was never proxiable;
+a site whose `NO_PROXY` covered every HTTP destination and not its database would have been refused
+at boot by a message that was false. **Rule: a new check gets its own derivation of exactly what it
+can decide about, even when a wider set is sitting there already typed.**
+
+**Preserving one half of a conflated flag can break the other half in *either* direction.** First
+attempt at keeping `SSL_CERT_FILE` alive under `trust_env=False` used
+`create_default_context(cafile=None)` — which honours it, and on the shipped configuration silently
+swapped certifi's 118 roots for the OS store's 152, dropping 13. The correct fix reproduces the
+library's own precedence explicitly and is verified against it in all four combinations. **Rule:
+when replacing a library's default, measure your replacement against that default in every input
+combination, not just the one that motivated the change.**
+
+**My own fixture hid a finding.** The scheme-mismatch test failed for a reason unrelated to
+schemes: `calc_server_url` ships as loopback `http://`, so `HTTP_PROXY` really did carry it, and
+the fixture was measuring the shipped defaults rather than the property. **Rule: a fixture for a
+property test sets every input the property ranges over — a default left in place is an unstated
+arm.**
+
+**I attributed a difference between two full-suite runs to my own diff without checking the
+instrument.** The commit closing orphaned httpx clients claimed it "moved the suite's
+ResourceWarning count from 129 to 137". Four consecutive green runs read 129, 141, 137, 143 — the
+run *after* the fix was the highest — and driven directly, the two files involved emit 0 either
+way; the warnings belonged to a third file. **Rule: before attributing a metric's movement to a
+change, run the metric twice without the change. A number that moves on its own is not evidence,
+and a suite-wide aggregate of a GC-timing-dependent warning is exactly that kind of number.**
+The correction goes in the live prose, because `git log` keeps the wrong sentence either way.
+
+**A unit test that constructs the component is evidence about the component, never about whether
+anything calls it.** Six defects in one review round shared exactly that shape, and the worst of
+them was mine: `_TurnLedger.note_event` counted an `AnswerEvent` correctly, its tests called it
+directly, and the three columns it fills were `NULL/false/0` on every row a deployment could ever
+have written — because the event is *built* in `run_turn` rather than streamed, and never reached
+"the one place the counts are taken". **Rule: when a change adds a reader — a column, a counter, a
+gate, an index — the first test drives the production entry point and asserts on what the *sink*
+received. A test that calls the reader directly may exist, but never alone, and never first.**
+
+**A derived set is only better than a stated one when the derivation answers the question being
+asked.** I derived `capture_calls` from `side_effecting_tools()` and wrote a comment praising the
+derivation for being self-maintaining. It spans 49 tools, six of which write knowledge, so a turn
+that computed one xTB energy booked a knowledge capture. **Rule: before deriving a set from an
+existing partition, say out loud what question that partition answers and what question mine asks;
+if the sentences differ, the derivation is a coincidence that happens to type-check.**
+
+**A default is an assertion about every row that already exists.** `NOT NULL DEFAULT 0` on
+`retrieval_calls` backfilled the whole history of `turn_costs` with "answered without consulting the
+record" — the most interesting value the column can take — in a migration whose own next paragraph
+argued precisely this about the column beside it. **Rule: for a new column, ask what a query for its
+most interesting value would return on the day it ships. If that answer includes rows nobody
+measured, it is nullable.**
+
+**Writing a corpus for its retrieval shape is not the same as writing chemistry.** Two of the four
+chemistry errors in the 48-note eval corpus were inside gold sets: a Heck "at reflux" in DMF at
+110 °C, a Dean–Stark trap on an ethanol esterification. Every retrieval assertion passed throughout.
+**Rule: a fixture in a domain gets one read pass *as domain content*, separately from the pass that
+checks it exercises the code — and the corpus must not contradict itself, which is the half a
+non-expert reader can still check.**
+
 **A test can be red only under `make cov`, and lesson 38's rule sends you the wrong way.**
 `test_concurrent_batches_do_not_race_on_the_cache` failed the full gate and passed every time I ran
 it alone — which reads exactly like the contended-load case above, and is not it. Coverage tracing
@@ -1905,6 +2006,68 @@ nothing recording why) was still true. Deleting it with the rejection would have
 the design needs an inspectability invariant. **Rule: when a decision reverses, re-file the losing
 argument as a stated cost or as a requirement it generates — never delete it as though it had been
 wrong.**
+
+**`git add -A` in a tree other agents are working in stages their experiments as my commit.** My
+merge commit deleted one line from `connectors/registry.py` — the whole subject of the branch's
+first fix, present in both parents and the merge base — because four review agents were running
+mutation arms against `src/` while I resolved the merge with `git add -A`. The repo's "one writer
+per path when fanning out" rule covers the agents; it does not cover the *commit*. **Rule: when
+subagents may be mutating the tree, stage a merge by naming its files (`git add <paths>`), never
+`-A`; and brief read-only reviewers to mutate under a copy rather than in place.**
+
+**And my own verification could not have caught it.** I checked the merge result against my
+*pre-merge HEAD*, which is blind by construction to any file the merge legitimately touches. The
+check that finds this class is `git diff $(git merge-tree --write-tree <parent1> <parent2>)
+<merge>^{tree}`: it names every file where the committed merge differs from a clean merge of the
+same two parents, so a deliberate conflict resolution and an accidental capture appear side by side
+and have to be told apart one at a time. Mine showed three files; two were my resolutions and one
+was the accident. **Rule: verify a merge against a machine-computed merge of its own parents, not
+against either side of it.**
+
+**The guard caught what the reviewer and I both nearly missed, which is the argument for writing
+it.** `test_every_ambient_name_space_is_refused_to_a_connector` goes red on that deleted line, so
+CI would have refused the merge — a test written this week to stop a *future* refactor silently
+re-opening `write_todos` caught the session that wrote it doing exactly that, three commits later.
+
+**A control aimed at the wrong subject passes every test written for it.** My boot refusal charged
+every http(s) destination the process dials — and every first-party client for those had
+`trust_env=False`, half of them set by the same commit. Measured: zero proxy mounts each against two
+on a default client. So it refused deployments over destinations a proxy could not carry, missed the
+three it could, and on the shipped loopback defaults stopped `import chemclaw.core.config` and
+`pytest` outright for anyone behind a corporate proxy. Every arm I wrote passed, because I had
+tested the mechanism against my own model of it. **Rule: for a control that refuses, name the actor
+it defends against and measure that the actor can actually reach each thing being charged — a
+destination that cannot be attacked is a false refusal waiting for a deployment.**
+
+**Fixing a control can reintroduce the defect a reviewer just removed from it.** The first review
+found the proxy read missed mixed-case spellings; I fixed it with `getproxies_environment`.
+Re-targeting at grpc and urllib then forced a direct read again — that stdlib call drops `http`
+under `REQUEST_METHOD` and neither git nor grpc implements the carve-out — and the
+`name`/`name.upper()` shortcut came back with it. Measured, `Grpc_Proxy` was live again.
+**Rule: when a change re-opens code a review has already corrected, re-run that review's own
+measurement against the new version before running anything else.**
+
+**A test that cannot produce the collision it describes still passes.** My guard against two proxies
+collapsing onto one destination varied two variables on *one* reader — and a reader takes the first
+match and stops, so it could only ever record one. The mutation survived; the collision needs two
+readers on one host. **Rule: before asserting that a mutation is caught, run the mutation. A test
+whose scenario is impossible is green for the same reason the correct code is.**
+
+**An instrument that returns the same number for both arms may be blind rather than agreeing.**
+`SSLContext.get_ca_certs()` does not report a `capath` at all, so my four-row trust-store table read
+`0 | 0` and I recorded agreement — while an ambient `SSL_CERT_DIR` was silently widening a
+configured CA pin. **Rule: when a comparison's two sides agree at zero, prove the instrument can
+produce a non-zero before believing it.** A real handshake was one page of code and found the
+defect the table was written to rule out.
+
+**"Nobody has applied it yet" is not a fact the repository can hold.** I edited migration 082 in
+place because it was unmerged, and `tests/test_migrations_are_additive.py` — skipped on this
+sandbox's truncated clone, run on CI's `fetch-depth: 0` — caught it against the commit that
+introduced the file. The rule is mechanical on purpose: who has applied a migration is unknowable
+from inside the tree, and my own dev database had already applied it. **Rule: a migration is
+immutable from the commit that introduces it, not from the merge that ships it; a correction is a
+new file. And when a guard is skipped locally for an environmental reason, treat its subject as
+unchecked rather than as fine — the skip line says which.**
 
 ## 2026-09-05 — six reviewers over one session's front-end and event work
 

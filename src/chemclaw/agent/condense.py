@@ -320,7 +320,7 @@ def _client() -> Any:
     **What came back with it is the guard against construction raising for another reason.**
     Config alone can fail before a socket is ever opened: `CHEMCLAW_LLM_TLS_CA_BUNDLE` naming a
     file that is not on the pod reaches `ssl.create_default_context(cafile=...)` through
-    `core.http.private_ca_transport` and raises `FileNotFoundError` — measured, and a mistyped path
+    `core.http.gateway_client_kwargs` and raises `FileNotFoundError` — measured, and a mistyped path
     or an unmounted secret is the likeliest misconfiguration of the documented production stack.
     Unguarded, that costs the whole comparison rather than its prose columns. So the caller guards
     this again and degrades to the *same* per-protocol `unreadable` rows a dead endpoint produces

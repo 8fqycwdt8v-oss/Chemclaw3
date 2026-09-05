@@ -29,7 +29,7 @@ from functools import lru_cache
 from typing import Any
 
 from chemclaw.core.config import settings
-from chemclaw.core.http import private_ca_transport
+from chemclaw.core.http import gateway_client_kwargs
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
@@ -372,17 +372,25 @@ def _openai_client(
     config change (tests swap `Settings`) yields a fresh client, while a long-lived process reuses
     one. The httpx client pins the internal CA when one is configured, else the system store.
     """
+    import httpx
     from openai import OpenAI
 
-    http_client: Any | None = None
-    transport = private_ca_transport(ca_bundle)
-    if transport is not None:
-        import httpx
-
-        # The CA pinning and the ambient-proxy refusal are `core/http.private_ca_transport`'s, the
-        # same decision `agent/llm_provider._tls_http_client` takes for the chat client against the
-        # same gateway. Only the class differs — this seam is synchronous.
-        http_client = httpx.Client(**transport)
+    # The CA pinning and the refusal to read an ambient proxy are
+    # `core/http.gateway_client_kwargs`'s — the same decision
+    # `agent/llm_provider._tls_http_clients` takes for the chat client against the same gateway.
+    # Only the class differs — this seam is synchronous.
+    #
+    # **Built unconditionally**, where this used to build one only when a CA bundle was configured
+    # and hand the SDK `None` otherwise. `None` means the SDK builds its own with `trust_env=True`,
+    # and no shipped configuration sets a bundle — so every embedding of a note went out on a
+    # client that would follow `HTTPS_PROXY` wherever it pointed
+    # (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`).
+    # `Any` because the two HTTP stacks do not agree on the type
+    # (`D-2026-08-14-two-http-stacks-is-the-price-of-the-openai-major`): this closure
+    # carries `httpx` 0.28 while `openai` types its `http_client` as `httpx2`. The SDK
+    # accepts it — the private-CA branch has passed exactly this object since it was
+    # written — and only the annotation has to be told.
+    http_client: Any = httpx.Client(**gateway_client_kwargs(ca_bundle))
     return OpenAI(
         base_url=base_url,
         api_key=api_key or "not-required",

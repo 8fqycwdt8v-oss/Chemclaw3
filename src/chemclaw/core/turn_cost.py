@@ -102,4 +102,27 @@ class TurnCost(BaseModel):
     # nothing left to reclaim.
     compacted: bool = False
     context_unreducible: bool = False
+    # **The knowledge dimensions — what this turn looked at, what it cited, what it wrote back.**
+    #
+    # This row already carried what a turn spent and how it ended. It could not say whether the
+    # turn consulted the record at all, and that is the question two separate reviews of this
+    # system's knowledge loop had to answer with bespoke scripts because no series and no table
+    # held it. None of it is recoverable afterwards: the events are gone, and `session_messages`
+    # holds prose rather than which tool ran.
+    #
+    # `retrieval_calls == 0` on a turn that made a claim about this programme's chemistry is the
+    # signal the retrieval obligation in the system prompt exists to move, and the only way to
+    # know whether it worked. `capture_calls` is the same question in the write direction.
+    retrieval_calls: int = 0
+    capture_calls: int = 0
+    # `score_answer` computes these on **every** production turn and they were streamed to the
+    # client and discarded — `api/schemas.py` records that they are not persisted either, so the
+    # richest answer-quality signal this system produces was retained nowhere.
+    #
+    # `answer_confidence` stays `None` when the verifier did not run. That is not a low score and
+    # must never be stored as one: `review_required` can be True with `confidence is None`,
+    # because the answer-shape gate found something and that is not a score.
+    answer_confidence: float | None = None
+    review_required: bool = False
+    notes_cited: int = 0
     recorded_at: datetime | None = None

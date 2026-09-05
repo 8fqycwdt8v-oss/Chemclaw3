@@ -31,7 +31,7 @@ from typing import Any
 from langchain_core.callbacks import BaseCallbackHandler
 
 from chemclaw.core.config import settings
-from chemclaw.core.http import private_ca_transport
+from chemclaw.core.http import gateway_client_kwargs
 from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
@@ -324,7 +324,8 @@ def _openai_compatible_model(
         api_key=SecretStr(key or _KEYLESS_PLACEHOLDER),
         timeout=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
-        http_async_client=_tls_http_client(),
+        http_client=_tls_http_clients()[0],
+        http_async_client=_tls_http_clients()[1],
         stream_usage=settings.llm_stream_usage,
         **_generation_options(effort),
     )
@@ -372,33 +373,45 @@ def _generation_options(effort: str | None = None) -> dict[str, Any]:
 
 
 @cache
-def _tls_http_client() -> Any | None:
-    """An httpx client pinned to the internal CA when one is configured, else None (system store).
+def _tls_http_clients() -> tuple[Any, Any]:
+    """The sync and async httpx clients every chat call goes out on. Both, always.
 
-    Returning None lets the OpenAI SDK build its own default client — the right behavior for a
-    publicly-trusted endpoint; only a private-CA internal endpoint needs the explicit bundle.
+    **Both, because a client this process does not build is a client that trusts the environment.**
+    This returned a single async client and `None` whenever no private CA was configured, and
+    `ChatOpenAI` was handed only `http_async_client=` — so on the shipped configuration
+    (`llm_tls_ca_bundle` defaults to `""` and is set nowhere in `deploy/`, `infra/` or
+    `.env.example`) *neither* client was ours. `langchain-openai` and the OpenAI SDK built both with
+    httpx's default `trust_env=True`. Measured on that configuration with `HTTP_PROXY` naming a
+    local recorder: the recorder received `POST /v1/chat/completions` with the prompt body and the
+    gateway `Authorization` bearer, on both `invoke` and `ainvoke`, and `netguard._refused` stayed
+    at 0 — the guard sees a dial to the proxy's own address and the destination is no longer in it
+    (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`).
+
+    The CA branch was not protection either, and believing it was is what let this stand. Supplying
+    *any* of `http_client`/`http_async_client`/`openai_proxy`/`http_socket_options` makes
+    `langchain-openai` inject a socket-options transport that happens to shadow httpx's proxy
+    auto-detection — and it emits a warning telling the operator how to switch that off. Measured
+    with the bundle set and `LANGCHAIN_OPENAI_TCP_KEEPALIVE=0`, the sync client was back to
+    `trust_env=True` with two proxy mounts. An upstream side effect an env var disables is not a
+    control; `trust_env=False` on a client we own is.
 
     **Cached, because this is per *process*, not per turn.** `build_chat_model` runs on every graph
     build and a graph is compiled per turn (M7), so an uncached factory built a fresh
     `AsyncClient` — a fresh connection pool, a fresh TLS context — for every question asked, and
-    nothing ever closed one: the sockets waited on the garbage collector. That is on the
-    `openai_compatible` + private-CA path, which is the documented production target. It is also
-    the cost `agent/verifier.py::_default_client` already pays `@cache` to avoid, on a colder path
-    than this one; the main agent's client was the only one building per turn. That sentence named
-    `agent/challenge._default_client` beside it until 2026-08-27 — a module
-    `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` deleted, so the "two callers
-    already do this" argument rested on one caller and a ghost. It rests on one caller and a
-    measurement now: an uncached factory built a fresh `AsyncClient` per turn, which is the reason
-    here regardless of how many other modules do the same.
+    nothing ever closed one: the sockets waited on the garbage collector. It is also the cost
+    `agent/verifier.py::_default_client` already pays `@cache` to avoid, on a colder path than this
+    one; the main agent's client was the only one building per turn.
 
-    Process-scoped, so the pool binds to the first loop that uses it. Production runs one loop.
+    Process-scoped, so the async pool binds to the first loop that uses it. Production runs one
+    loop.
+
+    Returns:
+        `(sync_client, async_client)`, in the order `ChatOpenAI` takes them.
     """
-    transport = private_ca_transport(settings.llm_tls_ca_bundle)
-    if transport is None:
-        return None
     import httpx
 
-    # What pins the CA and refuses an ambient proxy is `core/http.private_ca_transport`, stated
-    # once for both LLM seams: the embedding client reaches the same gateway with the same bundle
-    # and had written the same two lines. Only the class differs, and only the caller knows it.
-    return httpx.AsyncClient(**transport)
+    # The CA pinning and the refusal to read an ambient proxy are `core/http.gateway_client_kwargs`,
+    # stated once for both LLM seams: the embedding client reaches the same gateway with the same
+    # bundle and had written the same lines. Only the class differs, and only the caller knows it.
+    kwargs = gateway_client_kwargs(settings.llm_tls_ca_bundle)
+    return httpx.Client(**kwargs), httpx.AsyncClient(**kwargs)
