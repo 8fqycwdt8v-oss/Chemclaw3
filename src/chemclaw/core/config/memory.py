@@ -101,10 +101,39 @@ class MemorySettings(BaseSettings):
     # that are not expiring (D-145) — so the first pass against a deployment that has never pruned
     # would attempt an unbounded number of them inside one activity, exceed
     # `retention_timeout_seconds`, and spend an attempt having committed only what it reached.
-    # Capped, each pass commits a bounded amount, reports the remainder in its own result, and the
-    # schedule drains the tail. 500 is roughly a minute of round trips: far more than a steady
-    # state produces in a day, far less than a first pass over a year of history.
+    # Capped, each batch commits a bounded amount and reports whether a tail remains. 500 is roughly
+    # a minute of round trips: far more than a steady state produces in a day, far less than a first
+    # pass over a year of history.
+    #
+    # **This bounds a batch, not a pass**, and the two used to be the same thing. Ending the pass
+    # here meant one pass disposed of at most 500 conversations against an arrival rate of 400–1 000
+    # a day, so the backlog grew while every pass reported success; `_prune_expired_rows` now sweeps
+    # again while a branch reports a tail and `retention_timeout_seconds` can still afford another
+    # sweep. So this number bounds one transaction, one set of round trips and one set of row locks,
+    # and the clock bounds the pass.
     retention_max_sessions_per_pass: int = Field(default=500, gt=0)
+    # The same bound for the age-cutoff branch (`session_events`, `tool_result_blobs`,
+    # `result_publications`), in rows rather than conversations: how many rows one `DELETE` removes
+    # before committing and asking again. Its sibling above counts conversations because that branch
+    # costs three round trips *per session*; this one is a single indexed `DELETE`, so the unit that
+    # decides its cost is the row.
+    #
+    # **What it trades, measured on 300 000 `tool_result_blobs` rows (2.4 GB, PostgreSQL 16.15).**
+    # Unbounded, the `DELETE` takes 11.5 s and is cancelled by a 5 s `statement_timeout` having
+    # removed **0** rows — every attempt, so Temporal exhausts `activity_max_attempts` and the table
+    # never shrinks. At 10 000 the same work commits in 11.04 s across 31 batches, worst batch
+    # 1 385 ms. Too large reproduces that defect exactly, on a schema whose worst row is
+    # `STORAGE EXTERNAL`; too small multiplies round trips against a fixed per-statement cost,
+    # holding the pass open for its whole `retention_timeout_seconds` and disposing of no more.
+    #
+    # It is a setting and not a module constant because the right value follows the deployment's
+    # row size and its `pg_statement_timeout_seconds`, and neither is knowable from here — the
+    # shipped 10 000 is sized against *this* schema's worst row, which is the one thing a site may
+    # not share. There is deliberately no cross-check against that timeout: a row count and a wall
+    # clock have no convertible relationship without a rate, which is why this is a knob rather than
+    # a derived value, and `_prune_by_age`'s own budget is what stops a batch series too slow for
+    # the pass it is inside.
+    retention_delete_batch_rows: int = Field(default=10_000, gt=0)
     # Mid-turn durable-job resume (gap AGT-2): when a turn launches a durable job, wait this
     # long for its result and continue the *same* turn with it, so "compute this, then reason
     # about the result" is one exchange. Off by default — holding a turn open holds an admission

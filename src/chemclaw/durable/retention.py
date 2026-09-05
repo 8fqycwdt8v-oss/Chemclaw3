@@ -182,14 +182,6 @@ from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 logger = logging.getLogger(__name__)
 
-# How many rows one age-cutoff `DELETE` removes before committing and asking again. Sized against
-# the worst row in this schema rather than the average: `tool_result_blobs` is `STORAGE EXTERNAL`,
-# and 10 000 of those measured a 1 385 ms batch (2.4 GB / 300 000 rows), which is comfortably inside
-# the 30 s `pg_statement_timeout_seconds` every connection carries and short enough that the row
-# locks it holds are not felt by a concurrent reader. See `_prune_by_age` for why this is a
-# constant and not a setting.
-_DELETE_BATCH_ROWS = 10_000
-
 # Tables this job is allowed to prune, with the timestamp column that dates a row and the extra
 # predicate that decides whether a row of that table is disposable at all. Explicit and closed: a
 # new table is a deliberate addition here, never something a wildcard sweeps up.
@@ -970,11 +962,13 @@ async def _prune_by_age(
     (`session_events_consumed_idx`, `tool_result_blobs_created_idx`), so a batch costs one indexed
     scan of its own size rather than a scan of the table.
 
-    The batch size is a module constant rather than a setting on purpose: it decides how much sits
-    in one transaction and how long row locks are held — a mechanical trade with one right answer
-    for a given row size — while the two things an operator actually states about retention are the
-    window (`retention_*_days`) and the pass budget (`retention_timeout_seconds`), both of which
-    stay settings and both of which bound this loop.
+    **The batch size is `retention_delete_batch_rows`**, read once per call so a pass cannot change
+    size half way through. It was a module constant on the argument that it is a mechanical trade
+    with one right answer for a given row size — which is true, and is exactly why it is a setting:
+    the row size is the deployment's, not this module's. The shipped 10 000 is sized against *this*
+    schema's worst row (`tool_result_blobs`, `STORAGE EXTERNAL`), and a site whose blobs are larger
+    needs a smaller batch to stay inside the same `pg_statement_timeout_seconds` — with a constant
+    its only route to that is a fork. That setting's docstring states the trade in both directions.
 
     Args:
         conn: The sweep's connection; each batch commits on it before the next is issued.
@@ -990,6 +984,9 @@ async def _prune_by_age(
         `(rows deleted, whether a full batch came back)`. The second is the same 0/1 probe the
         other branches report: a full batch means "very likely more", not a remainder.
     """
+    # Read once, not per batch: a `.env` reload mid-pass would otherwise change what "a full batch"
+    # means between the `LIMIT` and the comparison below, and a shrunk limit would read as drained.
+    batch_size = settings.retention_delete_batch_rows
     deleted = 0
     while True:
         async with conn.cursor() as cur:
@@ -1002,12 +999,12 @@ async def _prune_by_age(
                     f"SELECT ctid FROM {table} "
                     f"WHERE {disposable} AND {column} < now() - make_interval(days => %s) "
                     f"LIMIT %s))",
-                    (days, _DELETE_BATCH_ROWS),
+                    (days, batch_size),
                 )
                 await conn.commit()
             batch = cur.rowcount
         deleted += batch
-        if batch < _DELETE_BATCH_ROWS:
+        if batch < batch_size:
             return deleted, False
         if not budget.affords_more():
             return deleted, True

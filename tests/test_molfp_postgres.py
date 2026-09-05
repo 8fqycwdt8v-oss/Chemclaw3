@@ -7,6 +7,7 @@ substructure search works over it via the shared, backend-agnostic search functi
 """
 
 import asyncio
+import random
 
 import pytest
 
@@ -230,3 +231,217 @@ def test_emptiness_and_count_are_scoped_to_the_stores_definition() -> None:
         assert populated.index_empty is False
 
     asyncio.run(_run())
+
+
+_ANN_TABLE = "molfp_approximate_probe"
+_ANN_ROWS = 10_000
+_ANN_QUERIES = 40
+_ANN_DEFINITION = "ecfp:r2:b2048"
+# The floor this test ratchets: the mean fraction of the exact page the approximate arm returns,
+# over `_ANN_QUERIES` queries on the corpus built below. Measured at 1.000 on the shipped
+# `fingerprint_approximate_overfetch = 10`; pinned below that so ordinary index/planner drift is
+# not a failure while a real recall regression is. What it is NOT is a claim that the two arms
+# agree on the *ordered page* — they do not, and the assertion below says so in the other
+# direction, because that disagreement is ties rather than misses.
+_ANN_RECALL_FLOOR = 0.95
+
+
+def _probe_bits(index: int) -> str:
+    """A sparse fingerprint with the layered structure a real ECFP corpus has.
+
+    Not a uniform random bitstring, which would make every pair equidistant and the recall
+    measurement meaningless: a real corpus is scaffolds inside series inside analogs, so the
+    similarity distribution is a continuum with a dense head — which is exactly what an HNSW graph
+    is good and bad at in interesting ways. Three layers (scaffold, series, own substitution) plus
+    a deliberate exact duplicate every fiftieth record, so the page a query gets back contains real
+    ties and the tie-break the exact arm applies across the whole table has something to bite on.
+    """
+    if index % 50 == 0:  # an exact duplicate of its predecessor: a guaranteed tie at 1.0
+        index -= 1
+    scaffold = random.Random(90_000 + index // 500)
+    series = random.Random(50_000 + index // 20)
+    own = random.Random(index)
+    on = {scaffold.randrange(2048) for _ in range(12)}
+    on |= {series.randrange(2048) for _ in range(10)}
+    on |= {own.randrange(2048) for _ in range(8)}
+    row = ["0"] * 2048
+    for bit in on:
+        row[bit] = "1"
+    return "".join(row)
+
+
+async def _approximate_probe_store() -> PostgresFingerprintStore:
+    """Build (once) a corpus with an HNSW index and return a store bound to it.
+
+    A table of its own rather than the shipped `molecule_fingerprints`, for two reasons that both
+    decide the number this test reports. The candidate set the index proposes is filtered by
+    `definition` *afterwards* — that is what keeps the ordered index scan — so rows other tests
+    left in the shared table would consume candidate slots and make the measured recall depend on
+    which tests ran first. And 10 000 rows is what makes the planner choose the HNSW index at all;
+    pushing that into the shared table would slow every other test in this file for the life of
+    the database.
+    """
+    await migrated_db_or_skip()
+    async with db.connection(settings.postgres_dsn) as conn:
+        cursor = await conn.execute(f"SELECT to_regclass('{_ANN_TABLE}')")
+        row = await cursor.fetchone()
+        if row is None or row[0] is None:
+            await conn.execute(
+                f"CREATE TABLE {_ANN_TABLE} ("
+                "id TEXT PRIMARY KEY, label TEXT NOT NULL, "
+                f"bits bit({settings.ecfp_bits}) NOT NULL, definition TEXT NOT NULL)"
+            )
+            async with conn.cursor() as cur:
+                async with cur.copy(
+                    f"COPY {_ANN_TABLE} (id, label, bits, definition) FROM STDIN"
+                ) as copy:
+                    for index in range(_ANN_ROWS):
+                        await copy.write_row(
+                            (
+                                f"probe-{index:06d}",
+                                f"probe-molecule-{index}",
+                                _probe_bits(index),
+                                _ANN_DEFINITION,
+                            )
+                        )
+            await conn.execute(
+                f"CREATE INDEX {_ANN_TABLE}_jaccard_idx "
+                f"ON {_ANN_TABLE} USING hnsw (bits bit_jaccard_ops)"
+            )
+    return PostgresFingerprintStore(_ANN_TABLE, settings.ecfp_bits, _ANN_DEFINITION)
+
+
+def test_the_approximate_arm_actually_rides_the_index_it_trades_exactness_for() -> None:
+    """The approximate statement must take an HNSW Index Scan, or its recall number is a fiction.
+
+    This is the assertion that makes the next test mean something. Both arms return the same
+    columns and honour the same threshold and tie-break, so an approximate arm the planner quietly
+    served with a sequential scan would return the *exact* answer, measure 100% agreement, and
+    prove nothing at all — while a deployment that turned the setting on for the speed got neither
+    the speed nor a signal that it did not. So: the plan, on a corpus large enough for the planner
+    to have a choice, must name the table's `bit_jaccard_ops` index.
+    """
+
+    async def _run() -> list[str]:
+        store = await _approximate_probe_store()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute("SELECT set_config('hnsw.ef_search', '200', true)")
+            cursor = await conn.execute(
+                f"EXPLAIN (FORMAT JSON) {store._similar_approximate}",
+                {
+                    "q": _probe_bits(7),
+                    "definition": _ANN_DEFINITION,
+                    "threshold": 0.3,
+                    "k": 11,
+                    "candidates": 110,
+                },
+            )
+            row = await cursor.fetchone()
+        names: list[str] = []
+        pending = [row[0][0]["Plan"]] if row else []
+        while pending:
+            node = pending.pop()
+            names.append(f"{node['Node Type']}:{node.get('Index Name', '')}")
+            pending.extend(node.get("Plans", []))
+        return names
+
+    nodes = asyncio.run(_run())
+    assert any(f"{_ANN_TABLE}_jaccard_idx" in node for node in nodes), (
+        f"the approximate arm is not using the HNSW index, so it is not approximate: {nodes}"
+    )
+
+
+def test_how_far_from_exact_the_approximate_arm_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measure the approximate arm against the exact one and pin a floor under its recall.
+
+    The interesting question about an ANN is not whether it is fast — it is how much of the true
+    answer it gives back, and nothing in this repository was measuring that. So: the same 40
+    queries through the same store, once per arm, comparing the pages.
+
+    Two numbers come out and they say different things. **Recall** — how much of the exact page the
+    approximate page contains — is what a chemist loses: a precedent that exists and was not
+    returned. **Ordered-page agreement** is not, and conflating them is what made this look like a
+    recall problem when it is a tie problem: Tanimoto over sparse bits puts many rows at identical
+    similarity, the exact arm breaks those ties by id across the *whole* table, and a candidate set
+    that holds only part of a tie group cannot reproduce that however good its recall is. The two
+    pages are then equally good answers to a chemist's question and different answers to a
+    byte-comparison, so only the first is ratcheted.
+
+    The floor is deliberately a mean over queries rather than a per-query minimum: HNSW recall is a
+    distribution, one unlucky graph traversal is not a regression, and a per-query assertion would
+    be a flake generator. The measured value is printed so a run that passes still says what it
+    measured.
+    """
+
+    async def _run() -> tuple[float, float, int, int]:
+        store = await _approximate_probe_store()
+        chooser = random.Random(4)
+        queries = [_probe_bits(chooser.randrange(_ANN_ROWS)) for _ in range(_ANN_QUERIES)]
+
+        monkeypatch.setattr(settings, "fingerprint_search_exactness", "exact")
+        assert store.approximate is False
+        exact = [await store.find_similar(q, 11, 0.3) for q in queries]
+
+        monkeypatch.setattr(settings, "fingerprint_search_exactness", "approximate")
+        assert store.approximate is True
+        approximate = [await store.find_similar(q, 11, 0.3) for q in queries]
+
+        recalls = []
+        identical = 0
+        for exact_page, approximate_page in zip(exact, approximate, strict=True):
+            exact_ids = {hit.id for hit in exact_page}
+            approximate_ids = {hit.id for hit in approximate_page}
+            recalls.append(len(exact_ids & approximate_ids) / len(exact_ids) if exact_ids else 1.0)
+            identical += [h.id for h in exact_page] == [h.id for h in approximate_page]
+        return (
+            sum(recalls) / len(recalls),
+            min(recalls),
+            identical,
+            sum(len(page) for page in exact),
+        )
+
+    mean_recall, worst_recall, identical, exact_hits = asyncio.run(_run())
+    print(
+        f"\napproximate arm over {_ANN_QUERIES} queries / {_ANN_ROWS} rows: "
+        f"mean recall {mean_recall:.4f}, worst query {worst_recall:.3f}, "
+        f"ordered page identical to exact {identical}/{_ANN_QUERIES}, "
+        f"{exact_hits} exact hits compared"
+    )
+    assert exact_hits >= _ANN_QUERIES, "the corpus produced no neighbours to recall"
+    assert mean_recall >= _ANN_RECALL_FLOOR, (
+        f"approximate search recall fell to {mean_recall:.4f}, below the {_ANN_RECALL_FLOOR} this "
+        "test ratchets — a deployment on the approximate arm is now missing precedents it used to "
+        "return"
+    )
+
+
+def test_the_answer_says_which_arm_answered_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A search carries the arm that ran all the way out to the sentence the model reads.
+
+    The point of the whole split: an empty page from the approximate arm is not the same claim as
+    an empty page from the exact one, and a payload that does not say which is a "we have no
+    precedent for this structure" waiting to happen. Driven end to end through the real entry
+    point, on a query with no neighbour on file, so what is asserted is the sentence a chemist's
+    answer is written from rather than a flag on a store.
+    """
+
+    async def _run() -> tuple[str, str]:
+        store = await _store_or_skip()
+        await store.add(record_for("pg-arm-benzene", "c1ccccc1"))
+        # A perfluorinated cage shares no ECFP environment with anything else this suite indexes,
+        # so both arms genuinely find nothing and the two verdicts differ only in what they claim.
+        query = "FC1(F)C(F)(F)C(F)(F)C(F)(F)C(F)(F)C1(F)F"
+
+        monkeypatch.setattr(settings, "fingerprint_search_exactness", "exact")
+        exact = await find_similar_molecules(store, query, threshold=0.9)
+        monkeypatch.setattr(settings, "fingerprint_search_exactness", "approximate")
+        approximate = await find_similar_molecules(store, query, threshold=0.9)
+
+        assert exact.hits == [] and approximate.hits == []
+        assert exact.approximate is False and approximate.approximate is True
+        return exact.model_dump()["verdict"], approximate.model_dump()["verdict"]
+
+    exact_verdict, approximate_verdict = asyncio.run(_run())
+    assert "genuine negative result" in exact_verdict
+    assert "genuine negative" not in approximate_verdict
+    assert "NOT proof" in approximate_verdict

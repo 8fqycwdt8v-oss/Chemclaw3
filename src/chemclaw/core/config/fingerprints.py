@@ -6,6 +6,8 @@ cross-section validators; fields, env names and defaults are exactly as they wer
 sections shared a single module (D-072 mixins, split per D-156).
 """
 
+from typing import Literal
+
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
@@ -31,6 +33,38 @@ class FingerprintSettings(BaseSettings):
     drfp_bits: int = Field(default=2048, gt=0)
     fingerprint_top_k: int = Field(default=10, ge=1)
     fingerprint_similarity_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    # **Whether a structural-similarity search must be right, or only fast.** `exact` compares the
+    # query against every indexed fingerprint, so the neighbour list is the true top-k and an empty
+    # one is real evidence that the corpus holds no analog. `approximate` lets the HNSW index
+    # propose candidates and re-ranks them, so a true neighbour can be missed and "no precedent"
+    # stops being proof — which is why this is a deployment's decision and not a tuning constant,
+    # and why the answer says which arm ran (`FingerprintSearch.approximate`).
+    #
+    # The trade, measured on this branch against PostgreSQL 16.15 / pgvector 0.8.0 over 200,000
+    # real ECFP4 `bit(2048)` rows (`tests/test_molfp_postgres.py` re-measures the agreement half):
+    # the exact scan is 17.6 ms at 200k and linear at ~0.088 µs/row — ~880 ms at 10^6 and ~8.8 s at
+    # 10^7, and `CLAUDE.md` names Pistachio (order 10^7 reactions) as the first live integration.
+    # The index-ordered arm is ~1.25 ms and roughly flat in corpus size, a 14x at 200k that grows
+    # with the corpus. What it costs is *agreement*: over 60 queries at `ef_search=200` with a 10x
+    # over-fetch the returned page differed from the exact one for 22 of them — ties, not recall.
+    # Tanimoto over sparse bit vectors puts many rows at identical similarity and the exact
+    # `ORDER BY distance, id COLLATE "C"` breaks those ties across the *whole* table, which no
+    # truncated candidate set can reproduce.
+    #
+    # Default `exact`, because the tool this feeds is the one a chemist asks "have we ever made
+    # something like this?", and the failure mode of the other arm is the one this whole module is
+    # arranged against: a silent "no precedent" for a structure we have on file.
+    fingerprint_search_exactness: Literal["exact", "approximate"] = "exact"
+    # How many candidates per returned hit the approximate arm pulls off the index before it
+    # re-ranks and cuts. Only the top-k survives, so over-fetching buys agreement with the exact
+    # answer at the cost of a wider index probe; measured, the agreement curve is steep below ~4x
+    # and flat above ~10x. Ignored entirely under `exact`.
+    fingerprint_approximate_overfetch: int = Field(default=10, ge=1)
+    # `hnsw.ef_search` for the approximate arm — how wide pgvector's graph traversal keeps its
+    # own candidate list. pgvector's default of 40 is far too narrow for a page of 100 with a 10x
+    # over-fetch, so this is raised deliberately; the arm never sends less than it means to fetch,
+    # and pgvector's own hard ceiling of 1000 bounds it. Ignored entirely under `exact`.
+    fingerprint_approximate_ef_search: int = Field(default=200, ge=1, le=1000)
     # Upper bound on an agent-supplied `top_k` for the similarity tools (SEC-4). `top_k` reaches
     # `find_matches` from the model (the `molfp`/`rxnfp` bundles' MCP tools) and lands in a `LIMIT`,
     # so an arbitrarily large value would be an unbounded query. Clamp it to this — the

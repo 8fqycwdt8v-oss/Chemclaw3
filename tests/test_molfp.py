@@ -25,6 +25,7 @@ from chemclaw.science.fingerprints.molfp.search import (
 from chemclaw.science.fingerprints.store import (
     FingerprintError,
     FingerprintRecord,
+    FingerprintSearch,
     InMemoryFingerprintStore,
     Match,
     PostgresFingerprintStore,
@@ -720,6 +721,87 @@ def test_a_populated_index_with_no_match_is_a_genuine_negative() -> None:
         assert "genuine negative" in search_result.verdict
 
     asyncio.run(_run())
+
+
+def test_an_approximate_search_never_reports_a_genuine_negative() -> None:
+    """A deployment that trades exactness must not be able to say "we have no precedent".
+
+    The exactness setting decides what an empty page *means*, and that meaning has to reach the
+    model: an approximate search compared the query against a candidate set the index proposed,
+    not against the corpus, so "no indexed molecule matched" is the answer to a weaker question.
+    The failure this guards is the one the whole module is arranged against — a chemist told there
+    is no precedent for the structure in their hand — arriving through a performance knob rather
+    than through an unpopulated index, which is the version nothing about the payload would show.
+
+    Driven on the model rather than on a store, because the setting selects a *durable* arm and
+    this assertion is about the sentence the model reads: the two verdicts must differ, and the
+    approximate one must not carry the word the exact one is trusted for.
+    """
+    exact = FingerprintSearch[Match](subject="molecule", hits=[])
+    approximate = FingerprintSearch[Match](subject="molecule", hits=[], approximate=True)
+
+    assert "genuine negative" in exact.verdict
+    assert "genuine negative" not in approximate.verdict
+    assert "NOT proof" in approximate.verdict
+    # And it survives serialization, which is the whole reason `verdict` is a computed field.
+    assert approximate.model_dump()["approximate"] is True
+    assert "APPROXIMATE" in approximate.model_dump()["verdict"]
+
+
+def test_an_approximate_page_is_not_presented_as_the_definitive_set() -> None:
+    """A *full* page is where an approximate search is most quietly wrong, so it is flagged too.
+
+    An empty approximate result at least looks unusual. A page of ten neighbours looks exactly
+    like an exact page of ten neighbours and is not one: a closer precedent may sit outside the
+    candidate set the index proposed. `hits_truncated` already covers "more matched than fit";
+    this covers "we cannot prove these are the best", which is a different sentence.
+    """
+    hit = Match(id="m1", label="CCO", similarity=0.9)
+    exact = FingerprintSearch[Match](subject="molecule", hits=[hit])
+    approximate = FingerprintSearch[Match](subject="molecule", hits=[hit], approximate=True)
+
+    assert exact.verdict == "1 indexed molecule(s) matched this query."
+    assert approximate.verdict.startswith("APPROXIMATE RESULT:")
+    assert "may exist" in approximate.verdict
+
+
+def test_the_in_memory_backend_is_exact_and_says_so() -> None:
+    """The reference backend answers the store contract's `approximate` question with "never".
+
+    It scores every searchable record, which is exactly what makes it the reference the durable
+    backend's exact arm is asserted against — and the search it feeds must therefore never be
+    labelled approximate, whatever the deployment sets, because the setting selects between two
+    *SQL* statements and this backend has neither.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(record_for("ethanol", "CCO"))
+        assert store.approximate is False
+        settings.fingerprint_search_exactness = "approximate"
+        try:
+            assert store.approximate is False
+            result = await find_similar_molecules(store, "CCO", threshold=0.1)
+        finally:
+            settings.fingerprint_search_exactness = "exact"
+        assert result.approximate is False
+        assert "APPROXIMATE" not in result.verdict
+
+    asyncio.run(_run())
+
+
+def test_the_durable_store_reports_the_configured_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`PostgresFingerprintStore.approximate` reads the setting per call, and needs no database.
+
+    Per call rather than at construction so this property and `find_similar` cannot disagree about
+    which arm ran — the store is built once per process (`default_molecule_store`) and the setting
+    is what a deployment turns, so a value frozen in `__init__` would keep claiming the arm the
+    process started with.
+    """
+    store = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits, "ecfp:r2:b2048")
+    assert store.approximate is False
+    monkeypatch.setattr(settings, "fingerprint_search_exactness", "approximate")
+    assert store.approximate is True
 
 
 def test_a_hit_is_unaffected_by_the_emptiness_signal() -> None:

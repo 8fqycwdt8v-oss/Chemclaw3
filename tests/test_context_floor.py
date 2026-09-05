@@ -284,7 +284,48 @@ load_profiles()
 #: The headroom is ~840 tokens against 66,157 — the same tightness the entries above were chosen
 #: for, under what one `propose_knowledge_note` costs, so the next tool of that size cannot arrive
 #: unnoticed on either side of the process boundary.
-CEILINGS: dict[str, int] = {"__default__": 67_000}
+#: **64,000 as of 2026-09-05, lowered from 67,000, and this is the entry the file has been asking
+#: for since 2026-08-25: a ceiling that comes *down* because a reduction happened.** `default`
+#: measures **62,878** over the same 92 tools, where the entry above measured 66,157 — **-3,279
+#: tokens on every model call, with no tool removed and no argument taken away.**
+#:
+#: The cause was one model's prose, published five times. Pydantic renders a class docstring as its
+#: JSON-schema `description` and `convert_to_openai_tool` inlines it per *use*, so the design
+#: rationale on `CategoricalParameter`, `LinearConstraint`, `ExcludeConstraint`, `Observation`,
+#: `OptimizationProblem` and `CampaignSpec` — ADR ids, BoFire internals, why the constraint union
+#: has two members rather than five — travelled to the model inside all four `bo` endpoint tools
+#: *and* inside `start_optimization_campaign`. Measured per copy, the `OptimizationProblem` closure
+#: went **1,620 -> 1,029 tokens**, of which 920 -> 329 was description. Per tool:
+#: `suggest_next_experiment` 3,590 -> 2,951, `generate_screening_design` 2,900 -> 2,309,
+#: `predict_outcome` 2,839 -> 2,201, `campaign_progress` 2,726 -> 2,087,
+#: `start_optimization_campaign` 2,307 -> 1,535.
+#:
+#: **Nothing a caller can express changed** — every field, every default and every validator is
+#: untouched, and `tests/test_bo_tools.py` asserts both halves: that the published property set
+#: still covers `model_fields` for every model in the closure, and that the *load-bearing* guidance
+#: (when to give `structures`, that a one-parameter limit is a bound, that an exclusion needs an
+#: all-categorical problem) is still in the served `inputSchema`. The rationale is in `#` comments
+#: beside the fields, which is where `D-2026-08-28`'s fourth cause already put fifteen of them.
+#:
+#: **The `$defs` escape is still closed and is not what did this**, for the reason the
+#: `KNOWN_OVERSIZED` comment measures below: one tool references `OptimizationProblem` once, so
+#: there is no duplication inside a schema for a `$ref` to buy back. The four copies are four
+#: *tools*, and the OpenAI tools array has no cross-tool sharing at any price. What multiplies is
+#: the model, so what pays back five times is narrowing the model.
+#:
+#: The headroom is **1,122** tokens against 62,878 — under what one `propose_knowledge_note` costs
+#: (1,126), which is the property every entry above was chosen for, and it is stated here knowing
+#: it is a claim about this commit rather than about `HEAD`.
+#:
+#: **What is left in this prefix and is not a `bo` change**: 1,211 tokens of `title` and
+#: `discriminator` keys that no provider reads. `convert_to_openai_tool` strips titles via
+#: upstream's `_rm_titles`, which does not recurse into lists, so every model inside a `oneOf`
+#: keeps its field titles; and `dereference_refs` deletes `$defs` while leaving pydantic's
+#: `discriminator.mapping` pointing at `#/$defs/...` entries that no longer exist. 1,024 of the
+#: 1,211 is the five `bo` schemas, but the defect is in the conversion, not in the model — a fix
+#: belongs where every bundle's schema passes, and is a `docs/planning/BACKLOG.md` row rather than
+#: a `connectors/bo/` one.
+CEILINGS: dict[str, int] = {"__default__": 64_000}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
@@ -349,12 +390,18 @@ MAX_SINGLE_TOOL_TOKENS = 900
 #: at 2,307. **12,055 tokens on every default turn for four copies of one decision space** is the
 #: largest single narrowing left in this prefix, and it is a `connectors/bo/server/tools.py` change
 #: rather than a core one — `docs/planning/BACKLOG.md` carries the row.
+#: **Re-recorded 2026-09-05 after the narrowing the ceiling comment measures**, which is this
+#: file's own rule running the way it is supposed to: five figures moved, and the commit that moved
+#: them is the one that says so. `start_optimization_campaign` fell furthest in proportion (-33%)
+#: because `CampaignSpec` carried its own D-157 paragraph *and* the whole `OptimizationProblem`
+#: closure. All five stay on this list — a 900-token bound is not reachable by a tool that takes a
+#: BoFire decision space, for the same reason `ProtocolBody` puts the protocol writers here.
 KNOWN_OVERSIZED: dict[str, int] = {
-    "suggest_next_experiment": 3_590,
-    "generate_screening_design": 2_900,
-    "predict_outcome": 2_839,
-    "campaign_progress": 2_726,
-    "start_optimization_campaign": 2_307,
+    "suggest_next_experiment": 2_951,
+    "generate_screening_design": 2_309,
+    "predict_outcome": 2_201,
+    "campaign_progress": 2_087,
+    "start_optimization_campaign": 1_535,
     "propose_knowledge_note": 1_126,
     # Both +22 against the re-measurement above, and it is the same 22 twice: they share the
     # `ExperimentDesign` schema, and the `max_length` ceilings
@@ -645,6 +692,75 @@ def test_no_single_tool_schema_dominates_the_floor() -> None:
     assert not fixed, (
         f"{fixed} no longer exceed {MAX_SINGLE_TOOL_TOKENS} tokens — delete them from "
         "KNOWN_OVERSIZED. A debt list that outlives the debt reads as live state."
+    )
+
+
+def _nested_descriptions(node: Any, path: str = "") -> list[tuple[int, str, str]]:
+    """Every `description` below a tool's own, as (tokens, path, text).
+
+    A tool's top-level description is its docstring and is deliberately excluded: that one is the
+    prompt, argued for tool by tool. Everything under it is a *field* or a *model* description, and
+    a model's is published once per use — which is the multiplier this test exists to bound.
+    """
+    found: list[tuple[int, str, str]] = []
+    if isinstance(node, dict):
+        text = node.get("description")
+        if isinstance(text, str):
+            found.append((_count(text), path, text))
+        for key, value in node.items():
+            found.extend(_nested_descriptions(value, f"{path}.{key}"))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            found.extend(_nested_descriptions(value, f"{path}[{index}]"))
+    return found
+
+
+#: How long one *nested* schema description may be, in tokens.
+#:
+#: **This is the ratchet that would have caught the 2026-09-05 narrowing eleven weeks earlier**, and
+#: it is a different bound from `MAX_SINGLE_TOOL_TOKENS` rather than a finer one. That bound asks
+#: whether a tool is badly shaped; this one asks whether a *model* is carrying developer prose,
+#: which is invisible per tool because it is spread across every tool that references the model:
+#: `LinearConstraint`'s 288-token rationale never made any one schema look wrong and cost 1,440
+#: tokens a turn across five.
+#:
+#: **250 rather than the measured maximum.** The widest nested description in the `default` prefix
+#: on 2026-09-05 is `propose_knowledge_note`'s `relations` at **192** — a keyed list of relation
+#: kinds a caller genuinely has to be given — so the bound has ~30% headroom for a field
+#: explanation that gets clearer, and none for a design note. The three entries this test was
+#: written after measured 288, 264 and 220.
+#:
+#: The remedy is never "shorten the sentence until it fits": it is the one
+#: `D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not` established and this narrowing
+#: repeated — the model-facing half stays in the docstring, the rationale moves into a `#` comment
+#: beside the fields, where a reader of the module finds it and the model is not charged for it.
+MAX_NESTED_DESCRIPTION_TOKENS = 250
+
+
+def test_no_nested_schema_description_carries_a_design_note() -> None:
+    """A model docstring is a prompt once per *use*, so a long one is paid for several times over.
+
+    Pydantic publishes a class docstring as the JSON-schema `description`, and
+    `convert_to_openai_tool` inlines rather than `$ref`s — so prose written for whoever opens the
+    module is sent to the model inside every tool that names the model. The `bo` decision space was
+    the worst case and nothing in this file could see it: five schemas, each individually explicable
+    at 2,300-3,600 tokens, sharing ~680 tokens of ADR ids and BoFire internals apiece.
+    """
+    tool_names = {_tool_name(tool) for tool in _bound_tools(get_profile("default"))}
+    over: dict[str, tuple[int, str]] = {}
+    for tool in _bound_tools(get_profile("default")):
+        from langchain_core.utils.function_calling import convert_to_openai_tool
+
+        function = convert_to_openai_tool(tool)["function"]
+        for tokens, path, text in _nested_descriptions(function.get("parameters", {})):
+            if tokens > MAX_NESTED_DESCRIPTION_TOKENS:
+                key = f"{function['name']}{path}"
+                over[key] = (tokens, text[:80])
+    assert tool_names and not over, (
+        f"these schema descriptions are over {MAX_NESTED_DESCRIPTION_TOKENS} tokens: {over}. "
+        "A description below a tool's own is a field or a model explanation, and a model's ships "
+        "once per tool that references it — move the design rationale into a `#` comment beside "
+        "the fields and leave the sentence a caller needs."
     )
 
 

@@ -811,7 +811,7 @@ def test_an_age_cutoff_delete_is_batched_until_the_table_is_drained() -> None:
             await conn.commit()
 
         monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(retention, "_DELETE_BATCH_ROWS", 2)
+        monkeypatch.setattr(settings, "retention_delete_batch_rows", 2)
         monkeypatch.setattr(settings, "retention_session_events_days", 7)
         for name in (
             "retention_session_messages_days",
@@ -860,7 +860,7 @@ def test_a_batched_delete_stops_at_the_pass_budget_and_reports_the_tail() -> Non
                     )
             await conn.commit()
         monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(retention, "_DELETE_BATCH_ROWS", 2)
+        monkeypatch.setattr(settings, "retention_delete_batch_rows", 2)
         monkeypatch.setattr(settings, "retention_timeout_seconds", 0.001)
         try:
             budget = _Budget()
@@ -881,6 +881,60 @@ def test_a_batched_delete_stops_at_the_pass_budget_and_reports_the_tail() -> Non
     assert deleted == 2, f"a spent budget ran {deleted // 2} batches, not the one always allowed"
     assert more, "the branch stopped on its budget and reported nothing left"
     assert left == 4, "the batch that ran was not committed, or more than one ran"
+
+
+def test_the_delete_batch_size_is_the_setting_and_is_read_on_every_call() -> None:
+    """`retention_delete_batch_rows` reaches the `LIMIT`, and a module constant would not.
+
+    Promoting a constant to a setting fails in one specific way: the field ships, `.env.example`
+    documents it, an operator sets it, and the reader still holds the old literal — a knob that
+    renders nothing. This drives the same seeded table twice in one process with two different
+    values and asserts the batch the pass actually committed, so the value has to travel from the
+    settings object into the emitted SQL for both to pass.
+
+    The budget is spent on purpose. `_prune_by_age` always runs one batch, so with no clock left
+    the rows removed *are* the batch size, which no drained-table count could show.
+
+    Reading it once per call rather than once per batch is what the second half checks: two calls,
+    two sizes. A value captured at import gives one number twice.
+    """
+
+    async def _run(batch_size: int, tag: str) -> int:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute(f"DELETE FROM session_events WHERE session_id LIKE '{tag}-%'")
+            async with conn.cursor() as cur:
+                for index in range(6):
+                    await cur.execute(
+                        "INSERT INTO session_events "
+                        "(session_id, kind, payload, created_at, consumed_at) VALUES "
+                        "(%s, 'job_completed', %s, now() - make_interval(days => 90), now())",
+                        (f"{tag}-{index}", Jsonb({"job_id": f"j-{index}"})),
+                    )
+            await conn.commit()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_delete_batch_rows", batch_size)
+        monkeypatch.setattr(settings, "retention_timeout_seconds", 0.001)
+        try:
+            async with db.connection(settings.postgres_dsn) as conn:
+                deleted, _more = await retention._prune_by_age(
+                    conn, "session_events", "created_at", "consumed_at IS NOT NULL", 7, _Budget()
+                )
+        finally:
+            monkeypatch.undo()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute(f"DELETE FROM session_events WHERE session_id LIKE '{tag}-%'")
+            await conn.commit()
+        return deleted
+
+    async def _both() -> tuple[int, int]:
+        return await _run(2, "sized-a"), await _run(5, "sized-b")
+
+    two, five = asyncio.run(_both())
+    assert (two, five) == (2, 5), (
+        f"one batch removed {two} rows at a batch size of 2 and {five} at 5; the setting does not "
+        "reach the LIMIT, or it is read once at import rather than on every call"
+    )
 
 
 def test_the_pass_keeps_sweeping_until_the_backlog_is_drained() -> None:

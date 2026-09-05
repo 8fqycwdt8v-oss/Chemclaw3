@@ -28,6 +28,11 @@ log = logging.getLogger(__name__)
 # the sentence the model reads, and there are exactly two fingerprint indexes.
 Subject = Literal["molecule", "reaction"]
 
+# pgvector's own hard ceiling on `hnsw.ef_search` (0.8.0: `SET hnsw.ef_search = 1001` is an error).
+# Here rather than in config because it is a property of the extension, not a policy this
+# deployment gets to choose — the two settings that *are* policy are clamped against it.
+_HNSW_MAX_EF_SEARCH = 1000
+
 
 class FingerprintError(ChemclawError):
     """A fingerprint could not be computed or two fingerprints are incomparable (G4)."""
@@ -146,6 +151,15 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
 
     subject: Subject
     hits: list[HitT] = Field(default_factory=list)
+    # Whether the index answered *approximately* — the store's own `approximate`, carried into the
+    # payload for exactly the reason `index_empty` is. A deployment may trade exactness for a flat
+    # search cost (`fingerprint_search_exactness`), and under that trade an empty result is no
+    # longer proof that the corpus holds no analog: the scan looked at a candidate set the index
+    # proposed, not at every row. A chemist reading "no precedent found" must be told which of the
+    # two questions was answered, and so must a caller that stores the answer — the same rule
+    # `Chemclaw3-mcp`'s `props` follows by returning `method` and `caveat` beside every value.
+    # Defaults to the shipped arm, so a hit list built by hand in a test is what it looks like.
+    approximate: bool = False
     # True only when the index holds nothing searchable — never a hit list that merely came back
     # short. Probed (cheaply) at the one moment it can change the meaning of the result: no hits.
     index_empty: bool = False
@@ -180,6 +194,13 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
         Truncation is answered here for the same reason emptiness is: a scan the record cap cut
         short returned `hits: []`, `index_empty: false` and the sentence "this is a genuine
         negative result" over a corpus whose one match it had never looked at.
+
+        **Approximation is the third way this sentence can be a lie, and it is the quietest.** A
+        deployment on `fingerprint_search_exactness=approximate` searched a candidate set the HNSW
+        index proposed rather than the corpus, so "a genuine negative result" would claim a
+        completeness no ANN can offer — and unlike an empty index or a truncated scan, nothing
+        about the result *looks* different. So the approximate arm never says "genuine", and says
+        so on a full page too: the page is the best the index found, not provably the best there is.
         """
         if self.index_empty:
             return (
@@ -198,9 +219,19 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
                     f"{self.subject} exists. Report the search as inconclusive and say an operator "
                     "must raise the scan cap or repair the index (the connector log names which)."
                 )
+            if self.approximate:
+                return (
+                    f"APPROXIMATE SEARCH, NO MATCH: nothing in the candidate set matched, but "
+                    f"this deployment searches the {self.subject} index approximately (it ranks "
+                    "candidates proposed by the similarity index rather than comparing every "
+                    "stored record), so a true neighbour can be missed. This is NOT proof that no "
+                    f"similar {self.subject} exists. Say that an approximate search found nothing "
+                    "and that an exact search would be needed to rule a precedent out."
+                )
             return (
                 f"No indexed {self.subject} matched this query. The {self.subject} fingerprint "
-                "index holds records and was searched, so this is a genuine negative result."
+                "index holds records and was searched exactly — every stored record was compared "
+                "— so this is a genuine negative result."
             )
         matched = f"{len(self.hits)} indexed {self.subject}(s) matched this query."
         if self.scan_truncated or self.hits_truncated:
@@ -209,12 +240,31 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
                 f"({'record cap' if self.scan_truncated else 'result cap'}), so this is a lower "
                 "bound and further matches may exist. Do not report it as the complete set."
             )
+        if self.approximate:
+            return (
+                f"APPROXIMATE RESULT: {matched} This deployment searches the {self.subject} index "
+                "approximately, so these are the best neighbours the index proposed rather than "
+                "provably the best on file, and a closer one may exist. Do not present the list "
+                "as the definitive set of precedents."
+            )
         return matched
 
 
 @runtime_checkable
 class FingerprintStore(Protocol):
     """Persistence + similarity-search contract. Backends implement this."""
+
+    @property
+    def approximate(self) -> bool:
+        """Whether `find_similar` may miss a true neighbour — the property, not the technique.
+
+        On the store rather than returned by the search, because it is a property of the *index
+        this store is bound to* and not of one query: it decides how an empty result must be read,
+        and the entry points copy it onto `FingerprintSearch.approximate` so the answer carries it.
+        Phrased as "may miss", so a backend added later has to answer the question a chemist
+        actually asks rather than declare which algorithm it runs.
+        """
+        ...
 
     async def add(self, record: FingerprintRecord) -> None:
         """Insert or replace a fingerprint by its key.
@@ -294,6 +344,14 @@ class InMemoryFingerprintStore:
         """
         self._records: dict[tuple[str, str], FingerprintRecord] = {}
         self._definition = definition
+
+    @property
+    def approximate(self) -> bool:
+        """Never — this backend scores every searchable record.
+
+        Which is what makes it the reference the durable backend's exact arm is asserted against.
+        """
+        return False
 
     async def add(self, record: FingerprintRecord) -> None:
         """Insert or replace a fingerprint by `(source, id)`, superseding its unsourced twin.
@@ -388,6 +446,16 @@ class InMemoryFingerprintStore:
         return hits[:top_k]
 
 
+def _matches_from(rows: Sequence[TupleRow]) -> list[Match]:
+    """Turn `(source, id, label, similarity)` rows into hits — the one row shape both arms return.
+
+    Extracted because the two similarity statements are deliberately separate and their *result*
+    deliberately is not: a hit that differs by which arm found it would put the arm inside every
+    downstream consumer instead of on the search that ran.
+    """
+    return [Match(source=r[0], id=r[1], label=r[2], similarity=float(r[3])) for r in rows]
+
+
 class PostgresFingerprintStore:
     """Durable `FingerprintStore` backed by Postgres + pgvector, over one table.
 
@@ -396,30 +464,35 @@ class PostgresFingerprintStore:
     Tanimoto (= 1 - Jaccard distance) in SQL.
     A short-lived connection per call (KISS — the calc store's choice).
 
-    **This search is exact and linear, and three sentences here used to say the opposite.** They
-    read: "accelerated by the table's HNSW `bit_jaccard_ops` index; the ranking semantics match the
-    in-memory backend up to HNSW recall … the `WHERE` filter applies *after* the ordered HNSW scan,
-    so a selective threshold can return fewer than `top_k` rows … approximate by design." Measured
-    against a live PostgreSQL 16.15 / pgvector 0.8.0 on 200 000 `bit(2048)` rows, the planner
-    **never runs an HNSW scan for this statement**: with the `definition` equality and the
-    threshold predicate present it takes a Seq Scan (17.6 ms) or, with `enable_seqscan=off`, the
-    `definition` btree — and the rows that come back are the exact top-k, not an approximation.
-    The index exists (`002`, `003`) and this query does not use it.
+    **This backend has two similarity searches and a deployment picks one**
+    (`fingerprint_search_exactness`, default `exact`). They are written as two statements and two
+    methods rather than one statement with a flag in it, because they answer different questions
+    and the difference is the whole decision:
 
-    **The obvious restructure is fast and does not preserve the answer, which is why it is not
-    here.** Ordering by the index first and filtering afterwards — the shape the old docstring
-    described — measures **1.25 ms against 17.6 ms (14x)**, roughly flat in corpus size against a
-    scan that costs ~0.088 µs/row (~88 ms at 1M rows, ~880 ms at 10M, and `CLAUDE.md` names
-    Pistachio, order 10^7 reactions, as the first live integration). But over 60 queries at
-    `hnsw.ef_search=200` and a 10x over-fetch it returned a **different result set for 22 of
-    them** — not from poor recall but from ties: Tanimoto over sparse bit vectors produces many
-    rows at identical similarity, `ORDER BY distance, id` breaks those ties across the *whole
-    table*, and no truncated candidate set can reproduce that. So the choice is exact-and-linear
-    against approximate-and-flat, which is a decision about what a structural search may silently
-    fail to find — the same failure `find_matches` refuses NaN to prevent, a chemist told there is
-    no precedent for the structure they are holding — and a decision needs an ADR rather than a
-    refactor. `tests/test_molfp_postgres.py` pins the exactness so that whoever takes it has to
-    take it deliberately.
+    - **exact** (`_find_similar_exact`) compares the query against every row under this store's
+      definition. The `definition` equality and the threshold predicate are what keep the planner
+      off the HNSW index — measured against a live PostgreSQL 16.15 / pgvector 0.8.0 on 200 000
+      `bit(2048)` rows it takes a Seq Scan, 17.6 ms, and returns the true top-k. Linear:
+      ~0.088 µs/row, so ~880 ms at 10^6 and ~8.8 s at 10^7 rows, and `CLAUDE.md` names Pistachio
+      (order 10^7 reactions) as the first live integration. Three sentences here used to claim
+      this statement rode the HNSW index and was "approximate by design"; it never has.
+    - **approximate** (`_find_similar_approximate`) asks the HNSW index for
+      `top_k × fingerprint_approximate_overfetch` candidates in distance order, then applies the
+      definition scope, the threshold and the exact tie-break to *those*. ~1.25 ms at 200 000 rows
+      and roughly flat in corpus size — a 14x that widens as the corpus grows.
+
+    **What the second arm costs is agreement, and it is ties rather than recall.** Over 60 queries
+    at `hnsw.ef_search=200` with a 10x over-fetch the returned page differed from the exact page
+    for 22 of them. Tanimoto over sparse bit vectors puts many rows at *identical* similarity, and
+    the exact `ORDER BY distance, id COLLATE "C"` breaks those ties across the whole table — which
+    no truncated candidate set can reproduce. `tests/test_molfp_postgres.py` measures both halves:
+    the exact arm is pinned against the in-memory reference, and the approximate arm is pinned by a
+    floor on how far from exact it is, so a recall regression is visible rather than believed.
+
+    Every search says which arm ran (`approximate` below, copied onto
+    `FingerprintSearch.approximate`), because under the second one an empty result stops being
+    evidence of absence — the failure this whole module is arranged against, a chemist told there
+    is no precedent for the structure they are holding.
 
     `source_keyed` says whether the table carries the `source` half of the key
     (D-2026-08-27) — `reaction_fingerprints` does since `063`, `molecule_fingerprints` does not
@@ -507,19 +580,37 @@ class PostgresFingerprintStore:
         # en_US.UTF-8/ICU) orders mixed-case ids differently from Python's code-point sort
         # and would silently break the documented cross-backend ordering parity.
         #
-        # Those two predicates are also what keep the planner off the HNSW index, and the class
-        # docstring carries the measurement plus the reason that is a decision rather than a
-        # defect: the tie-break above is *across the table*, and no ANN candidate set reproduces
-        # it. Every row here computes the distance three times (projection, filter, order), which
-        # looks like the cheap win and is not — hoisting it into a subquery so it is computed once
-        # measured 28.7 ms against 18.0 ms, because the subquery materializes.
-        self._similar = (
+        # Those two predicates are also what keep the planner off the HNSW index, which is the
+        # whole difference between this statement and the one below. Every row here computes the
+        # distance three times (projection, filter, order), which looks like the cheap win and is
+        # not — hoisting it into a subquery so it is computed once measured 28.7 ms against
+        # 18.0 ms, because the subquery materializes.
+        self._similar_exact = (
             f"SELECT {self._source_read}, id, label, "
             f"1 - (bits <%%> %(q)s::bit({width})) AS similarity "
             f"FROM {table} "
             f"WHERE definition = %(definition)s "
             f"AND 1 - (bits <%%> %(q)s::bit({width})) >= %(threshold)s "
             f"ORDER BY bits <%%> %(q)s::bit({width}), {self._order} "
+            f"LIMIT %(k)s"
+        )
+        # The approximate arm, deliberately the same shape read top to bottom. The inner query is
+        # bare `ORDER BY <distance> LIMIT` — the only form pgvector's HNSW index can serve — and
+        # everything the exact statement puts in its `WHERE` moves *outside* it, because either
+        # predicate inside would cost the ordered index scan and turn this back into the statement
+        # above. That is also its one structural cost: rows under a superseded definition consume
+        # candidate slots, so an index mid-reindex answers from a narrower set than it looks like.
+        # The outer `ORDER BY` repeats the exact tie-break so that a candidate set which *does*
+        # contain a whole tie group orders it identically to the exact arm.
+        candidate_columns = "source, id, label" if source_keyed else "id, label"
+        self._similar_approximate = (
+            f"SELECT {self._source_read}, id, label, 1 - distance AS similarity FROM ("
+            f"SELECT {candidate_columns}, definition, "
+            f"bits <%%> %(q)s::bit({width}) AS distance "
+            f"FROM {table} ORDER BY bits <%%> %(q)s::bit({width}) LIMIT %(candidates)s"
+            ") candidates "
+            f"WHERE definition = %(definition)s AND distance <= 1 - %(threshold)s "
+            f"ORDER BY distance, {self._order} "
             f"LIMIT %(k)s"
         )
 
@@ -641,19 +732,85 @@ class PostgresFingerprintStore:
                 row = await cur.fetchone()
         return int(row[0]) if row else 0
 
+    @property
+    def approximate(self) -> bool:
+        """Whether this deployment's similarity search may miss a true neighbour.
+
+        Read per call rather than frozen at construction, so a reloaded or monkeypatched setting
+        is honoured and — more importantly — so this property and `find_similar` cannot disagree
+        about which arm ran. The two of them are the reason the answer can say which question it
+        answered; a cached copy here is how they would drift apart.
+        """
+        return settings.fingerprint_search_exactness == "approximate"
+
     async def find_similar(self, query_bits: str, top_k: int, threshold: float) -> list[Match]:
-        """Return up to `top_k` records with Tanimoto >= `threshold`, most similar first."""
+        """Return up to `top_k` records with Tanimoto >= `threshold`, most similar first.
+
+        The one place the deployment's choice is read (see the class docstring for the trade and
+        its measurements). Both arms return the same shape and honour the same threshold, ordering
+        and tie-break; what differs is whether the records they rank are all of them.
+        """
+        if self.approximate:
+            return await self._find_similar_approximate(query_bits, top_k, threshold)
+        return await self._find_similar_exact(query_bits, top_k, threshold)
+
+    async def _find_similar_exact(
+        self, query_bits: str, top_k: int, threshold: float
+    ) -> list[Match]:
+        """Rank every stored record under this definition — the true top-k, at a linear cost."""
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                params = {
-                    "q": query_bits,
-                    "threshold": threshold,
-                    "k": top_k,
-                    "definition": self._definition,
-                }
-                await cur.execute(self._similar, params)
+                await cur.execute(
+                    self._similar_exact,
+                    {
+                        "q": query_bits,
+                        "threshold": threshold,
+                        "k": top_k,
+                        "definition": self._definition,
+                    },
+                )
                 rows = await cur.fetchall()
-        return [Match(source=r[0], id=r[1], label=r[2], similarity=float(r[3])) for r in rows]
+        return _matches_from(rows)
+
+    async def _find_similar_approximate(
+        self, query_bits: str, top_k: int, threshold: float
+    ) -> list[Match]:
+        """Rank an over-fetched HNSW candidate set — flat in corpus size, and not provably top-k.
+
+        Two knobs, both set so the arm is as close to exact as an ANN arm can be. It asks the
+        index for `top_k × fingerprint_approximate_overfetch` candidates, so the threshold and the
+        tie-break cut into slack rather than into the page; and it raises `hnsw.ef_search` to at
+        least that many, because pgvector's graph traversal cannot return more good candidates
+        than it kept — a probe narrower than the fetch silently degrades recall rather than
+        failing. Both are clamped to pgvector's own ceiling on `ef_search`.
+
+        `SET LOCAL` rather than `SET`: the connection is borrowed from a shared pool, and a
+        session-level GUC left behind on it would follow every later borrower of that connection.
+        `set_config(..., true)` is the parameterizable spelling of `SET LOCAL` — `SET` itself takes
+        no bound parameters — and `db.connection` commits the surrounding transaction on exit,
+        which is what scopes it.
+        """
+        candidates = min(top_k * settings.fingerprint_approximate_overfetch, _HNSW_MAX_EF_SEARCH)
+        ef_search = min(
+            max(settings.fingerprint_approximate_ef_search, candidates), _HNSW_MAX_EF_SEARCH
+        )
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT set_config('hnsw.ef_search', %s, true)", (str(ef_search),)
+                )
+                await cur.execute(
+                    self._similar_approximate,
+                    {
+                        "q": query_bits,
+                        "threshold": threshold,
+                        "k": top_k,
+                        "candidates": candidates,
+                        "definition": self._definition,
+                    },
+                )
+                rows = await cur.fetchall()
+        return _matches_from(rows)
 
 
 async def find_matches(
@@ -670,12 +827,13 @@ async def find_matches(
     `hits_truncated` exists to name on the substructure entry point. One extra row is asked for and
     dropped, the same probe the bounded substructure scan uses.
 
-    The flag is exact on both backends, and the caveat that used to stand here was not. It said
-    the durable backend can under-report because "the threshold filter applies *after* pgvector's
-    ordered HNSW scan" — measured, that plan is never taken (see `PostgresFingerprintStore`), the
-    statement is an exact scan, and `k + 1` rows come back whenever `k + 1` qualify. The caveat
-    becomes true again the day this search is moved onto the index, which is the decision that
-    docstring records.
+    The flag is exact on the in-memory backend and on the durable backend's exact arm: `k + 1`
+    rows come back whenever `k + 1` qualify. On the durable backend's **approximate** arm it is a
+    floor in the other direction too — a `False` means the over-fetched candidate set held no
+    further qualifying row, not that the corpus holds none — which is why the arm that ran travels
+    out separately on `FingerprintSearch.approximate` instead of being folded into this flag. Two
+    different uncertainties compressed into one boolean is how the empty-list defect this module
+    is arranged against got made in the first place.
 
     The one place the generic search knobs fall back to config, so the molecule
     and reaction entry points cannot drift in how they default (DRY). `top_k` may arrive

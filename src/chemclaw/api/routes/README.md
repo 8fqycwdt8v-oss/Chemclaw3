@@ -28,6 +28,12 @@ disables `app.dependency_overrides`.)
 | `notes.py` | `GET /notes/{id}` — one knowledge note as the `NoteView` `expand_note` returns, so a citation chip resolves to the note it cites. `CurrentUser`-gated, not owner-scoped: the graph has no owner |
 | `jobs.py` | `GET/DELETE /jobs[...]` — the durable-run surface over `job_records` |
 
+`caching.py` holds no route. It is the conditional-GET policy the two *read* routes above share —
+`results.py` and `notes.py` — and it exists because the caching header a surface asked for
+(`public, max-age=31536000, immutable`) is wrong on both of them, in two different ways its module
+docstring sets out. One module rather than two header literals, so the two routes cannot drift into
+disagreeing policies.
+
 Two conventions to keep, both enforced by tests rather than asked for:
 
 - **Every route outside the three probes takes `CurrentUser`** (`chemclaw.api.deps`), directly or
