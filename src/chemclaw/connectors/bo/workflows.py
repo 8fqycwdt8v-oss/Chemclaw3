@@ -46,7 +46,15 @@ with workflow.unsafe.imports_passed_through():
     )
 
 from chemclaw.connectors.queues import bundle_queue
-from chemclaw.durable.publish import BAD_DATA_RETRY
+
+# `connector_queue_wait_timeout` is passed at every dispatched activity below, and the reason
+# is `durable/publish.py`'s: `start_to_close_timeout` starts when a worker picks the task up,
+# so on its own it bounds none of the wait for one. A bundle queue served by no pod was
+# otherwise indistinguishable from a busy one until the parent job's five-hour execution
+# ceiling fired — a failure that names neither the queue nor the reason and reaches no
+# workflow code. The bound is stated once, there, because a wait means something different on
+# a bundle queue than on core's.
+from chemclaw.durable.publish import BAD_DATA_RETRY, connector_queue_wait_timeout
 from chemclaw.durable.registry import durable_workflow
 
 
@@ -216,6 +224,7 @@ class BoCampaignWorkflow:
                 args=[spec.objective_name, candidates],
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
+                schedule_to_start_timeout=connector_queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
         )
@@ -250,6 +259,7 @@ class BoCampaignWorkflow:
                 args=[spec.problem, spec.n_initial, spec.seed],
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
+                schedule_to_start_timeout=connector_queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
             history = await self._evaluate(spec, seed, "seed", timeout, heartbeat_timeout)
@@ -274,6 +284,7 @@ class BoCampaignWorkflow:
                 args=[spec.problem, history, spec.batch, spec.seed],
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
+                schedule_to_start_timeout=connector_queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
             measured = await self._evaluate(
@@ -350,6 +361,7 @@ class BoCampaignWorkflow:
                 ],
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
+                schedule_to_start_timeout=connector_queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
             _carry_on_if_history_is_filling_up(payload, history, rounds_remaining, rounds_done)
@@ -381,6 +393,7 @@ class BoCampaignWorkflow:
             ],
             start_to_close_timeout=timeout,
             heartbeat_timeout=heartbeat_timeout,
+            schedule_to_start_timeout=connector_queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,
         )
 

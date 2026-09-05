@@ -62,15 +62,48 @@ service:
     enabled: true
     maxUnavailable: 1
   # Horizontal autoscaling for the stateless front door only (workers scale by queue, not HPA).
-  # NOTE (gap DEP-4): CPU is a poor proxy here — a pod blocked on the model uses almost no CPU
-  # while being completely full. The service now exposes `chemclaw_turns_in_flight` and
-  # `chemclaw_turn_capacity` at /metrics; scale on their ratio via a Prometheus-adapter external
-  # metric once one is available in the cluster. CPU stays the fallback until then.
+  #
+  # **CPU cannot see this service saturate, and that is measured rather than suspected.** A turn is
+  # 8.32 s of wall clock and 0.581 s of CPU — 7% machinery, 93% waiting on the model — so occupancy
+  # runs about 14× CPU and no CPU threshold tracks it. Driven with the admission semaphore *100%
+  # full* (every permit held, plus 150 idle SSE streams) the pod drew **218 millicores, 44% of the
+  # 350 mC target**: completely full and comfortably under the scale-up threshold. The fleet
+  # therefore sat at `minReplicas` while shedding, which is what the load lane saw directly — at
+  # offered concurrency 32, **33 of 48 turns shed with CPU at 35.0% of one core**. This was gap
+  # DEP-4, named here for a year with `chemclaw_turns_in_flight` and `chemclaw_turn_capacity`
+  # already exported and nothing reading them.
+  #
+  # So the HPA scales on **permits held**, which is the quantity that actually runs out, and keeps
+  # CPU beside it. Both metrics on one HPA is deliberate: the autoscaler takes the *highest*
+  # recommendation, so CPU still catches a genuine compute burst, and — the half that matters if
+  # the custom-metrics API is missing — a metric it cannot fetch never blocks a scale *up* driven by
+  # one it can, it only holds off scale-down. That is the fallback, and it is the reason `occupancy`
+  # is not simply a replacement.
   autoscaling:
     enabled: true
     minReplicas: 2
     maxReplicas: 6
     targetCPUUtilizationPercentage: 70
+    # **This requires something in the cluster that this chart does not install**, and saying so is
+    # the point: a `Pods` metric is served by the custom-metrics API, which means prometheus-adapter
+    # (or KEDA, or OpenShift's own adapter) configured to expose `chemclaw_turns_in_flight` for the
+    # front door's pods. Without one the HPA reports `FailedGetPodsMetric` and falls back to CPU as
+    # described above — degraded, visible in `kubectl describe hpa`, and not silent. `enabled:
+    # false` renders a CPU-only HPA exactly as before, for a cluster that has no adapter and does
+    # not want the event.
+    occupancy:
+      enabled: true
+      # The series name as the adapter must publish it. A value rather than a literal in the
+      # template because an adapter is free to rename what it exposes, and the series this app
+      # emits is the one thing this chart cannot change.
+      metricName: chemclaw_turns_in_flight
+      # The target, as a percentage of one pod's admission cap
+      # (`CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` under `config`). A percentage rather than an
+      # absolute count so the two cannot drift: the template multiplies them out, so raising the
+      # permit count raises the scale-up point with it instead of leaving a stale quantity behind.
+      # 60 leaves four of twelve permits free at the moment a new pod is asked for, which is roughly
+      # one turn's 8.3 s of scheduling and image-cached start.
+      targetPercent: 60
 
 # Core's own Temporal worker. Only one: every expensive workflow belongs to a connector bundle
 # below, each sized for its own work on its own queue (D-118).
@@ -479,16 +512,27 @@ postgres:
   # naming both sides; the runtime half is `chemclaw_pg_fleet_max_connections` against
   # `sum(chemclaw_pg_pool_max_size)`, which also catches a Deployment scaled by hand.
   #
+  # **A process is not a pool, and this ceiling was short by three times where it mattered.** A pool
+  # is keyed on `(loop, dsn, options)`, so a *front-door* process holds three: the stores' pool, the
+  # `/readyz` probe's own (`api/routes/ops.py` passes its own statement timeout, which is a
+  # different `options` string and therefore a different key), and the LangGraph checkpointer's.
+  # Every other pooled process — a worker, a connector server, the MCP face — holds one. Measured
+  # against a live server via `pg_stat_activity` and the `chemclaw_pg_pool_max_size` gauge, and
+  # pinned by `tests/test_config_pools.py`. The declared 136 was met by an arithmetic that counted
+  # one pool per process; the fleet opened roughly 208. The *runtime* alert was honest the whole
+  # time, because that gauge sums every pool the process holds — only the startup check, the one
+  # that fires before the pods are up, was not.
+  #
   # **This is a provisioning requirement, not a preference.** A stock Postgres ships
   # `max_connections=100` and will refuse this release at full scale. Either provision the instance
-  # for 136 plus whatever else shares it, or lower CHEMCLAW_PG_POOL_MAX_SIZE below until the
+  # for this number plus whatever else shares it, or lower CHEMCLAW_PG_POOL_MAX_SIZE below until the
   # product fits what you have — the startup check tells you which, in every pod, with both
   # numbers in the message. What it will not do any more is let the fleet find out under load,
   # which is how D-119's connect timeouts presented: an idle database and a service that could not
   # reach it.
   #
   # Set to 0 to declare no ceiling, which makes both the startup check and the alert inert.
-  maxConnections: 136
+  maxConnections: 288
 
 # The pre-install/pre-upgrade migration hook (D-034).
 migrateJob:
@@ -543,7 +587,14 @@ resources:
     # is refused above 1 (five per-process guarantees break across processes), so more front-door
     # CPU means more replicas. The request stays modest so scheduling density is unchanged; only the
     # burst headroom grows.
-    requests: { cpu: "500m", memory: "512Mi" }
+    #
+    # **The request is 1 CPU because the admission cap is 12.** A turn spends 0.581 s of CPU over
+    # 8.32 s of wall clock, so twelve permits held continuously is ~0.84 cores of steady demand —
+    # which a 500m request does not guarantee the moment the node is contended, and the symptom of
+    # not guaranteeing it is latency on every turn rather than a failure anyone can point at. The
+    # limit already allowed the burst; what was missing was the reservation. This raises what each
+    # front-door pod reserves, and at `maxReplicas: 6` that is 6 CPUs reserved rather than 3.
+    requests: { cpu: "1", memory: "512Mi" }
     limits: { cpu: "2", memory: "1Gi" }
   # The default for every worker Deployment, core's and a bundle's. A bundle that needs different
   # sizing overrides it with its own `resources:` under `connectors.<name>` rather than growing a
@@ -587,11 +638,16 @@ config:
   # Stated rather than left to the code default (16), because the code default was chosen for one
   # process and this chart runs a fleet of them — how many is `chemclaw.pooledProcesses`, derived
   # from the topology rather than counted here, because the count written here said seventeen while
-  # the chart rendered fourteen. 8 matches the front door's own admission cap
-  # (CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS below), which is the process with the most claim on
-  # connections — no turn holds one across the model call, so a pool the width of the admission cap
-  # already has headroom. `postgres.maxConnections` above is this times the pooled-process count,
-  # and `Settings` refuses the pair if they stop agreeing.
+  # the chart rendered fourteen. 8 used to be stated as "matching the front door's admission cap",
+  # and that equality is gone twice over: the cap is 12 now, and a front-door process holds *three*
+  # pools rather than one, so a connection here costs three times what that sentence assumed. The
+  # argument that survives is the one that was doing the work anyway — **a turn does not hold a
+  # connection across the model call**, only across a statement, so the pool never needed to be as
+  # wide as the cap; measured in the load lane, the pool peaked at 20 of 48 with zero waiters
+  # through 100 concurrent users. `chemclaw_pg_pool_requests_waiting` (alerted as
+  # `ChemclawPgPoolSaturated`) is what says otherwise, and is the only reason to raise this.
+  # `postgres.maxConnections` above is this times the pool count the topology implies, and
+  # `Settings` refuses the pair if they stop agreeing.
   CHEMCLAW_PG_POOL_MAX_SIZE: "8"
   # Matched to the pool above, because a worker admitting more activities than it can borrow
   # connections converts a shortage into retry churn rather than backpressure
@@ -768,6 +824,17 @@ config:
   # ingress rather than here.
   CHEMCLAW_SERVICE_RATE_LIMIT_PER_MINUTE: "120"
   CHEMCLAW_SERVICE_RATE_LIMIT_BURST: "30"
+  # The admission cap, per front-door process. Stated here rather than left to the code default for
+  # a reason the code default cannot serve: the HPA's occupancy target is a *fraction of this*
+  # (`service.autoscaling.occupancy.targetPercent`), so the number the autoscaler scales against and
+  # the number the pods enforce have to be the same number, read from one place. It is also the
+  # multiplicand in the fleet ceiling below.
+  #
+  # 12 is what the machinery measures — a turn is 8.32 s wall / 0.581 s CPU, so one core carries
+  # ~14 permits before CPU binds — and it is why `resources.service.requests.cpu` is 1 rather than
+  # 500m: twelve permits are ~0.84 cores of steady demand, which a half-core request does not
+  # guarantee under node contention.
+  CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS: "12"
   # What the shared LLM endpoint may be asked to serve by this whole deployment, at once.
   #
   # The admission cap is per-process and stays that way (SCALE-1: a fleet-wide counter would cost a
@@ -776,12 +843,18 @@ config:
   # CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS`, and until now nothing stated it: raising the per-process
   # cap from 8 to 16 to "use the box better" doubled fleet demand on a shared endpoint, silently.
   #
-  # 48 is exactly what the shipped values produce (6 × 1 × 8) — deliberately, so this ships as a
-  # *statement* of the current shape rather than as slack. Raise it only with a number from the
-  # endpoint's throughput budget; anything that exceeds it fails `Settings` validation at startup,
-  # in every pod, naming both sides. The runtime half is `chemclaw_fleet_turn_ceiling` against
-  # `sum(chemclaw_turn_capacity)`, which also catches a Deployment scaled by hand.
-  CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS: "48"
+  # It ships as exactly what the shipped values produce — deliberately, so this is a *statement* of
+  # the current shape rather than slack, and so any edit to a replica ceiling or the cap above has
+  # to come back here. Raise it only with a number from the endpoint's throughput budget; anything
+  # that exceeds it fails `Settings` validation at startup, in every pod, naming both sides. The
+  # runtime half is `chemclaw_fleet_turn_ceiling` against `sum(chemclaw_turn_capacity)`, which also
+  # catches a Deployment scaled by hand.
+  #
+  # **What that number now buys, in chemists.** Concurrent turns in flight = users × turns/hour ×
+  # 8.3 s / 3600, so 200 people at a turn a minute is 27.7 in flight and 200 people at a turn every
+  # 30 s is 55.3. The old ceiling was 48 *and unreachable*, because the CPU-only HPA never left
+  # `minReplicas: 2` = 16. Both halves had to move for either to matter.
+  CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS: "72"
   # JSON logs in-cluster. Every line already carries correlation_id / actor / session_id from the
   # context filter; JSON is what lets a log stack index them instead of regexing a `%`-string.
   CHEMCLAW_LOG_JSON: "true"
@@ -1254,6 +1327,27 @@ retention:
   #     CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS: "30"
   #     CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS: "30"
   #     CHEMCLAW_RETENTION_RESULT_PUBLICATIONS_DAYS: "90"
+  #     # The drain rate, and why it belongs in the same block as the windows it drains under.
+  #     CHEMCLAW_RETENTION_MAX_SESSIONS_PER_PASS: "500"
+  #     CHEMCLAW_RETENTION_SCHEDULE_MINUTES: "1440"
+  #
+  # **The checkpoint window is the one with a volume behind it, and the volume is large.** Upstream's
+  # `_dump_blobs` rewrites the *entire* messages channel per superstep, so a thread's storage is
+  # quadratic in its length: measured, ten turns on one thread with incompressible content wrote
+  # 24.3 MB to `checkpoint_blobs` for a 464 kB conversation — 52x amplification, and 26.3 MB on
+  # disk against 27.3 MB of WAL. At the load this chart is sized for that is on the order of tens of
+  # gigabytes a day, and the row count `infra/sql/README.md` states is not the number that fills a
+  # volume.
+  #
+  # **So a first pass against a database that has never pruned does not finish in one pass, and the
+  # last two keys are how it converges.** The conversation prune costs three round trips per
+  # session (whether an expired row may go depends on rows that are not expiring, D-145), so it is
+  # capped per pass, commits what it reached, and reports the remainder. The backlog therefore
+  # drains at `MAX_SESSIONS_PER_PASS × (1440 / SCHEDULE_MINUTES)` sessions a day: at the defaults,
+  # 500. Raise either — a shorter cadence is the cheaper lever, since each pass is bounded by
+  # `CHEMCLAW_RETENTION_TIMEOUT_SECONDS` regardless — until the remainder in the sweep's own result
+  # reaches zero, then put them back. Leaving them at the defaults on a year-old database is not a
+  # failure anybody sees; it is a sweep that never catches up while reporting success every day.
   # All five, because the example omitted the last one for as long as it existed and an operator
   # copying it inherits the omission. A table whose key is absent keeps growing —
   # `durable/retention.py`'s `_PRUNABLE` is the set with a window, and `_NOT_PRUNED` says what

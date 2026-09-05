@@ -34,7 +34,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.science.calc.geometry import without_geometry
 
 from chemclaw.connectors.queues import bundle_queue
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import calculation_retry, connector_queue_wait_timeout
 from chemclaw.durable.registry import durable_workflow
 
 
@@ -122,15 +122,28 @@ class CalcJobWorkflow:
                 workflow.memo_value("correlation_id", ""),
             ],
             start_to_close_timeout=timedelta(seconds=settings.xtb_job_timeout_seconds),
+            # **`start_to_close` starts when a worker picks the task up, so it bounds none of the
+            # wait.** This bundle's queue is one pod of eight slots and each `run_xtb_calculation`
+            # holds one for the whole composite, so at target load the backlog is real: measured on
+            # the broker, p50 schedule->start ~1.04 h and p95 ~1.98 h at a 300 s activity. That is
+            # backpressure and must pass. What must not pass unnoticed is the other shape — nothing
+            # serving `connector-calc` at all — which was bounded only by the parent's five-hour
+            # execution timeout, i.e. by a failure that names neither the queue nor the reason and
+            # is delivered to no workflow code. `durable/publish.py` states the bound once.
+            schedule_to_start_timeout=connector_queue_wait_timeout(),
             # The activity heartbeats between species and scan points. Without a heartbeat timeout
             # those heartbeats do nothing for failure detection, and a worker that dies mid-job
             # would be noticed only when the hour-long start-to-close budget expired — which on
             # minute-scale work is the difference between a retry and a wasted afternoon.
             heartbeat_timeout=timedelta(seconds=settings.xtb_job_heartbeat_timeout_seconds),
             # A malformed request (unbalanced equation, unknown solvent, bad atom index) is a
-            # `ValueError` no retry can fix — the same non-retryable class the QM job uses, so a
-            # bad input fails fast instead of burning the budget.
-            retry_policy=BAD_DATA_RETRY,
+            # `ValueError` no retry can fix, so a bad input still fails fast instead of burning the
+            # budget: `calculation_retry` carries `BAD_DATA_RETRY`'s type list unchanged. What it
+            # adds is a backoff sized to the one failure that *is* worth waiting out — the shared
+            # calculation backend refusing because every slot is taken (`CalcBusyError`). At
+            # Temporal's default spacing five attempts fit inside fifteen seconds, which is a spin
+            # against a hold that is a whole calculation long.
+            retry_policy=calculation_retry(),
         )
         # Applied here rather than in the activity because the activity's return type is
         # pinned by workflow histories in flight, and because `job_envelope` is a pure

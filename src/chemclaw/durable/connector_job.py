@@ -65,6 +65,8 @@ with workflow.unsafe.imports_passed_through():
 
 from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
+    activity_failure_reason,
+    light_write_queue_wait_timeout,
     publish_note_best_effort,
     publish_result_best_effort,
     queue_wait_timeout,
@@ -997,20 +999,24 @@ class ConnectorJobWorkflow:
                 # behind an unbounded wait. The doubling is `notify.py`'s, and it is what keeps the
                 # documented ordering (record first, then notify) safe rather than merely intended.
                 #
-                # **The stricter bound rather than `queue_wait_timeout()`, and it is the same
-                # exception `publish.py::queue_wait_timeout` already writes down for `notify.py`:**
-                # this write is best-effort by construction — the `except ActivityError` below
-                # swallows it and the job carries on — so it wants the bound that caps every
-                # attempt together, and it pays for that with a shorter retry budget on a row
-                # nothing downstream reads synchronously. Passing the general
-                # `schedule_to_start_timeout` here as well would be dead: an hour of queue wait
-                # cannot elapse inside a minute of schedule-to-close.
-                schedule_to_close_timeout=timedelta(
-                    seconds=settings.job_record_timeout_seconds * 2
-                ),
+                # **The bound was a `schedule_to_close_timeout` at twice the budget above, and
+                # that is a *total*** — spent almost entirely on a queue this call does not
+                # control, so under load the record was simply lost. `durable/notify.py` carries
+                # the measurement on the identical shape one step later. Splitting the wait from
+                # the work is what these two timeouts are for, and it gives the attempts their own
+                # budgets back: schedule-to-close capped all of them together.
+                #
+                # **`light_write_queue_wait_timeout()` and emphatically not `queue_wait_timeout()`,
+                # because this write is in front of `_notify_failure`.** Core's hour here is an
+                # hour in which a *failed* job has not told the chemist it failed — measured on
+                # 2026-08-28 as a run still RUNNING after 150 s, and asserted since by
+                # `tests/test_durable_observability.py`. The bound has to be generous against queue
+                # pressure and small against a job's life at the same time; `durable/publish.py`
+                # says which number that is and why.
+                schedule_to_start_timeout=light_write_queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
-        except ActivityError:
+        except ActivityError as exc:
             # **Counted, not just logged.** The line below has always said this run "survives only
             # in Temporal's history", i.e. that the swallow loses data nothing else holds — and it
             # was one of the ~30 modules whose deliberate swallows were invisible to anything but a
@@ -1021,8 +1027,10 @@ class ConnectorJobWorkflow:
                 degraded(
                     logger,
                     "job_record",
-                    "job record write failed for %s; this run survives only in Temporal's history",
+                    "job record write failed for %s (%s); this run survives only in Temporal's "
+                    "history",
                     record.job_id,
+                    activity_failure_reason(exc),
                 )
             return False
         return True

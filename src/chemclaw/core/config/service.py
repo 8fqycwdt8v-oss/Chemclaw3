@@ -112,11 +112,27 @@ class ServiceSettings(BaseSettings):
     service_max_plan_scans: int = Field(default=25, gt=0)
     # Admission control on concurrent agent turns (AG-15). Each turn holds one permit for its
     # whole streamed run, so at most this many turns hit the shared internal LLM endpoint at
-    # once; a turn that cannot get a permit within the admission timeout is shed with 503
-    # (retry) rather than piling onto a saturated endpoint. Tune to the endpoint's real
-    # throughput budget — the default is deliberately conservative. Health and push-back streams
-    # are not gated (they are not LLM-bound).
-    service_max_concurrent_turns: int = Field(default=8, gt=0)
+    # once; a turn that cannot get a permit within the admission timeout is shed rather than
+    # piling onto a saturated endpoint. Tune to the endpoint's real throughput budget. Health and
+    # push-back streams are not gated (they are not LLM-bound).
+    #
+    # **A shed is not a 503, and this comment said it was for as long as the guard has existed.**
+    # `POST /sessions/{id}/messages` streams, so the status line is written before a permit is
+    # asked for: measured at 400 and 800 offered turns, the wire shape is `HTTP 200` followed by an
+    # SSE frame `{"type":"error","code":"at_capacity","retryable":true}` — 743 of them, with the
+    # response still counted as a success by every 5xx-based alarm. (The 503s at
+    # `api/middleware.py` are a pool checkout and an unreachable Temporal, which is why grepping
+    # for one found it.) `chemclaw_turns_shed_total` is the only signal there is, which is why the
+    # chart alerts on its *share of offered turns* and not merely on its being non-zero: a
+    # deployment refusing two thirds of its chemists reports 100% availability.
+    #
+    # **The default is 12 because that is what the machinery measured.** A turn is 8.32 s wall and
+    # 0.581 s CPU — 7% machinery, 93% waiting on the model — so one core carries
+    # 1 ÷ 0.581 × 8.32 ≈ 14 permits before CPU binds, and the front door's own event loop wants the
+    # rest. 12 leaves that margin. The number that decides whether 200 chemists are served is
+    # this × replicas, and the fleet ceiling below is where an operator states what the endpoint
+    # will actually take.
+    service_max_concurrent_turns: int = Field(default=12, gt=0)
     service_turn_admission_timeout_seconds: float = Field(default=5.0, gt=0)
     # Threads kept *above* whatever this process's own admission caps can occupy, in the one
     # `asyncio.to_thread` pool they all share (`core/executor.py`). They exist for the calls that
@@ -196,7 +212,32 @@ class ServiceSettings(BaseSettings):
     # not the policy. `keepalive_seconds` reclaims an idle connection's slot. `max_header_bytes`
     # bounds the request line plus headers, without which a client can dribble an unbounded header
     # block for as long as it likes.
-    service_max_connections: int = Field(default=256, gt=0)
+    #
+    # **`--limit-concurrency` answers 503 above the ASGI app, so this bound is also the liveness
+    # probe's.** uvicorn counts open sockets — idle keep-alives included — and rejects at the
+    # protocol layer, before routing: proven with 20 idle keep-alive sockets against a limit of
+    # 20, where a *fresh* `GET /healthz` got 503, and again with 255 SSE streams held at 256,
+    # where `/healthz`, `/readyz`, `GET /sessions` and a turn POST all returned 503 together. The
+    # cascade that makes it an outage rather than a queue: one pod lost, the survivor takes every
+    # stream, `/readyz` drains it at ~30 s and `/healthz` has the kubelet SIGKILL it at ~60 s —
+    # killing every in-flight turn on the one pod still serving. The liveness probe's premise
+    # ("`/healthz` does no work, so its budget is about a wedged event loop") is false at the
+    # limit, and a restart there is strictly worse than doing nothing.
+    #
+    # Which is why the number is now derived from what this process's own caps can occupy rather
+    # than picked: 256 was 28% above `service_max_event_streams_total` alone, so the app's
+    # documented, supported state — a full complement of push-back streams — reached a transport
+    # bound that answers 503 to the kubelet. The composed validator refuses a configuration where
+    # `max_connections` is not at least streams + turns + the headroom below, which is the
+    # cross-check that was missing beside the three (fleet turns, fleet Postgres connections,
+    # fleet calc requests) that already exist.
+    service_max_connections: int = Field(default=512, gt=0)
+    # Sockets kept *above* what this process's own caps can occupy, in the same spirit as
+    # `service_thread_pool_headroom`: the two kubelet probes, the Prometheus scrape, and the
+    # ordinary non-streaming requests a browser makes (transcript reads, `/plans/pending`,
+    # attachment uploads) while its streams are open. Without it the backstop would sit exactly on
+    # the caps and the first probe past them would be the one refused.
+    service_connection_headroom: int = Field(default=64, gt=0)
     service_keepalive_seconds: int = Field(default=15, gt=0)
     service_max_header_bytes: int = Field(default=32_768, gt=0)
     # Wall-clock bound on one streamed turn — how long a turn may hold its admission permit. The

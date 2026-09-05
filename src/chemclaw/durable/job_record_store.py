@@ -98,10 +98,29 @@ _SELECT_ONE = f"SELECT {_COLUMNS}, completed_at FROM job_records WHERE job_id = 
 
 # The listing projection: everything a chemist needs to recognise a run, and none of the result
 # blob (see `JobRecordSummary`). Both filters are self-disabling — an empty term matches every row
-# through the `%s = ''` arm — so "any connector, any text" needs no second statement. ILIKE rather
-# than a `tsvector`: this table holds one row per durable run (thousands, not millions), the
-# reason is a sentence rather than a document, and a search index would be machinery to maintain
-# for a scan the database does in milliseconds.
+# through the `%s = ''` arm — so "any connector, any text" needs no second statement, and the
+# self-disabling arm costs nothing: `core/db.py` connects with `plan_cache_mode=force_custom_plan`,
+# so the planner sees the bound value, folds `%s = ''` away and is free to use an index on the
+# `ILIKE` that survives. Measured, that is exactly what it does.
+#
+# **ILIKE, still — but the sentence that used to follow it was a claim about a commit, and it was
+# false.** It read: "this table holds one row per durable run (thousands, not millions) … a search
+# index would be machinery to maintain for a scan the database does in milliseconds." At 200
+# chemists doing ~5 durable jobs a day that is ~365k rows a year, and a leading wildcard is
+# unindexable by a btree, so the scan the sentence called milliseconds is the **whole table** —
+# measured at 500 000 rows, 1 036 ms and 19 920 buffers for a term that matches nothing, holding
+# one of `pg_pool_max_size` connections for the duration, from a tool the *model* calls
+# (`agent/durable_tools.py::search_job_records`). A term that matches is fast for a reason that
+# hides this: the `completed_at` index lets the scan stop at the first page of hits, so every test,
+# demo and eyeball sees 0.2 ms. A miss is what an agent searching for a phrase it invented
+# produces.
+#
+# Migration `081` adds `gin_trgm_ops` indexes on the three searched columns, which is why the
+# statement below is unchanged: trigrams accelerate this *same* predicate rather than replacing it,
+# so the rows returned are identical (1 036 ms -> 1.09 ms on the miss, 950x). A `tsvector` — the
+# other thing that removes the scan — would have changed what the tool matches, from the substring
+# search its docstring promises to stems and boolean widening, and `core/fulltext.py` exists to
+# keep *that* rule identical across the two hybrid indexes rather than to be a second answer here.
 _SEARCH = """
     SELECT job_id, connector, job, rationale, summary, note_id, plan_step, state, completed_at
     FROM job_records

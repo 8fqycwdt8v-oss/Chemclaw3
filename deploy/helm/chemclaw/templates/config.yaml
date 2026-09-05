@@ -71,12 +71,20 @@
          front door — which is exactly the silent multiplication
          `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` exists to catch. Derived, it is the same
          number the HPA obeys. When the HPA is off, the fixed replica count is that number. */}}
-  CHEMCLAW_SERVICE_FLEET_REPLICAS: {{ if .Values.service.autoscaling.enabled }}{{ .Values.service.autoscaling.maxReplicas | quote }}{{ else }}{{ .Values.service.replicas | quote }}{{ end }}
+  CHEMCLAW_SERVICE_FLEET_REPLICAS: {{ include "chemclaw.frontDoorProcesses" . | quote }}
   {{- /* The connection budget's two inputs, derived for the same reason as the line above: a pool
          is opened per process, so what the database sees is `pg_pool_max_size × processes`, and a
          hand-written process count is a second copy of the topology. `chemclaw.pooledProcesses`
          counts the pods this chart renders that call `chemclaw.core.db.pooling`. */}}
   CHEMCLAW_PG_FLEET_POOLED_PROCESSES: {{ include "chemclaw.pooledProcesses" . | quote }}
+  {{- /* And how many of those are front doors, which is what turns that count into connections
+         rather than processes: measured against a live server, a turn-serving process holds three
+         pools (the stores', `/readyz`'s own — a different statement timeout is a different pool key
+         — and the LangGraph checkpointer's) while every other pooled process holds one. Charging
+         the whole fleet at one pool is why this chart declared 112 against `maxConnections: 136`
+         and passed while opening ~208. Derived from the same helper the replica ceiling is, so the
+         two cannot drift. */}}
+  CHEMCLAW_PG_FLEET_FRONT_DOOR_PROCESSES: {{ include "chemclaw.frontDoorProcesses" . | quote }}
   CHEMCLAW_PG_FLEET_MAX_CONNECTIONS: {{ .Values.postgres.maxConnections | quote }}
   {{- /* The third budget of the same shape, and the same reason it is derived: the calculation
          backend is one shared pod, `worker_max_concurrent_activities` bounds one worker *process*,

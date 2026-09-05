@@ -89,6 +89,57 @@ def test_tie_break_order_matches_the_in_memory_backend() -> None:
     asyncio.run(_run())
 
 
+def test_the_durable_page_is_the_exact_top_k_not_an_approximation() -> None:
+    """The durable search returns the *exact* page, ties included — the property an ANN loses.
+
+    `PostgresFingerprintStore`'s docstring used to say this search was "accelerated by the table's
+    HNSW `bit_jaccard_ops` index … approximate by design". Measured on 200 000 `bit(2048)` rows,
+    the planner never takes that plan: the `definition` equality and the threshold predicate cost
+    it the ordered index scan, so what ships is an exact sequential scan — 17.6 ms there, ~0.088
+    µs/row, i.e. ~880 ms at the 10^7 rows Pistachio implies. Ordering by the index first and
+    filtering afterwards is 14x faster (1.25 ms, roughly flat in N) and is **not** the same answer:
+    over 60 queries at `hnsw.ef_search=200` with a 10x over-fetch it returned a different result
+    set for 22 of them.
+
+    The mechanism is ties rather than recall, which is why this test is written the way it is.
+    Tanimoto over sparse bit vectors puts many rows at *identical* similarity, and `ORDER BY
+    distance, id COLLATE "C"` breaks those ties across the whole table — something no truncated
+    candidate set can reproduce. So: 200 rows of one structure, a page of 50. Exactly the 50
+    lowest ids must come back, in order. An ANN would return 50 equally-similar rows in graph
+    order, pass every similarity assertion in this file, and quietly answer a different question.
+
+    That is a decision (a structural search that may silently miss a precedent) rather than a
+    refactor, so it belongs in an ADR — and this test is what makes taking it deliberate.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        mem_store = InMemoryFingerprintStore(definition=molecule_definition())
+        # One structure unique to this test, so a 0.99 threshold isolates these rows from every
+        # other fixture in the shared table and the whole page is a tie.
+        structure = "CCCCCCCCCCCCO"
+        ids = [f"pg-exact-{index:03d}" for index in range(200)]
+        records = [record_for(cid, structure) for cid in ids]
+        await store.add_many(records)
+        for record in records:
+            await mem_store.add(record)
+
+        bits = ecfp_bitstring(structure)
+        page, truncated = await find_matches(store, bits, top_k=50, threshold=0.99)
+        reference, _ = await find_matches(mem_store, bits, top_k=50, threshold=0.99)
+
+        assert [hit.id for hit in page] == sorted(ids)[:50], (
+            "the durable page is not the exact lowest-id half of the tie — an approximate scan "
+            "returns 50 equally-similar rows in whatever order it found them"
+        )
+        assert [hit.id for hit in page] == [hit.id for hit in reference], (
+            "the two backends disagree about which 50 of 200 tied rows the page holds"
+        )
+        assert truncated, "150 rows over the page went unreported"
+
+    asyncio.run(_run())
+
+
 def test_upsert_and_substructure_over_postgres() -> None:
     """Re-adding an id replaces it; substructure search works over the durable backend."""
 

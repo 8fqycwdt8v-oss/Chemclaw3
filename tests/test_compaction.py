@@ -50,6 +50,7 @@ from chemclaw.agent.context_budget import (
 from chemclaw.agent.context_budget import _prefix as _prefix_var
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.message_pairing import calls_without_adjacent_results
+from chemclaw.agent.profiles import get_profile
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 
@@ -1022,29 +1023,42 @@ def test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged() -> None:
     thread re-expressed in the new unit.
 
     **Asserted against the ratchet ceiling rather than against today's prefix**, which is the whole
-    reason this test is worth having. `tests/test_context_floor.py` bounds the bound tool surface
-    at `MAX_PROFILE_TOKENS`; a measurement moves whenever any tool schema changes, and a test
-    written against one would drift into passing for a reason nobody chose. Written against the
-    ceiling, the day the surface is allowed to grow past what this setting can absorb, this fails
-    and names the trade instead of the behaviour changing quietly.
+    reason this test is worth having. `tests/test_context_floor.py` bounds the bound tool surface;
+    a measurement moves whenever any tool schema changes, and a test written against one would
+    drift into passing for a reason nobody chose. Written against the ceiling, the day the surface
+    is allowed to grow past what this setting can absorb, this fails and names the trade instead of
+    the behaviour changing quietly.
+
+    **And for eleven weeks it asserted all of that against a prefix no deployment sends.** Both
+    numbers it read — `_graph_prefix()` and the ratchet ceiling — came from a graph compiled with
+    `connectors=None`, so this test reported the shipped trigger cleared its prefix by 30,325 while
+    the shipped trigger was floored at 1 on every real turn: 73,500 against a **75,695**-token
+    prefix. A test written against a bound is only as good as the bound, and this one was measuring
+    the same short read the setting was derived from — the two could not disagree.
+
+    Both arms are now honest about a different thing, deliberately. The measured arm binds the
+    connector surface this repository serves, so it fails on a real turn's arithmetic. The bound
+    arm reads `PREFIX_BOUND`, which is the ceiling *plus* the allowance for the three bundles
+    served from `Chemclaw3-mcp` — the half no test here can measure and the half that made the
+    original number wrong.
     """
-    from tests.test_context_floor import CEILINGS
+    from tests.test_context_floor import PREFIX_BOUND, _connector_tools
 
-    ceiling = CEILINGS["__default__"]
-
-    prefix = _graph_prefix()
+    prefix = _graph_prefix() + estimate_tool_schemas(_connector_tools(get_profile("default")))
     trigger = settings.agent_tool_result_clear_trigger
 
     assert trigger > prefix, (
         f"agent_tool_result_clear_trigger is {trigger} against a {prefix}-token prefix, so it "
         "floors at 1 — the lossless edit would clear every reclaimable result on every model call"
     )
-    assert trigger > ceiling, (
-        f"agent_tool_result_clear_trigger is {trigger} against a ratchet ceiling of "
-        f"{ceiling}: a surface grown to its permitted bound would floor this trigger, "
-        "so either the ceiling or this setting has to move, deliberately"
+    assert trigger > PREFIX_BOUND, (
+        f"agent_tool_result_clear_trigger is {trigger} against a prefix bound of {PREFIX_BOUND}: "
+        "a surface grown to its permitted bound would floor this trigger, so either the ceiling, "
+        "the out-of-repo allowance or this setting has to move, deliberately"
     )
-    token = _prefix_var.set(prefix)
+    # At the *bound*, not at today's measurement: a band that only exists while the surface happens
+    # to be small is not the band the two settings were derived to have.
+    token = _prefix_var.set(PREFIX_BOUND)
     try:
         # It still has to leave a usable band below the destructive edit, which is the split's
         # whole point: clearing is free, the window is not.

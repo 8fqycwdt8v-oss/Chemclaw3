@@ -130,7 +130,7 @@ class AgentSettings(BaseSettings):
     # on every model call were budgeted against nothing: measured 2026-09-04, a thread the policy
     # cut to its 90,030-token budget left as a 137,301-token request at a 128k model.
     #
-    # What that costs an existing deployment is the prefix, exactly: at the 100,000 below and a
+    # What that costs an existing deployment is the prefix, exactly: at a 100,000 budget and a
     # 43,175-token prefix the thread gets **56,825** estimated tokens where it used to get 100,000,
     # so a session that never compacted may now compact, and one that compacted may compact
     # earlier. That is the intended trade — the alternative is a bound that does not bound — but it
@@ -138,9 +138,37 @@ class AgentSettings(BaseSettings):
     #
     # **A value at or below the prefix is not a budget.** `effective_trigger` floors at 1, which
     # means "reduce on every model call", and it says so once at WARNING rather than returning it
-    # silently (`context_budget._note_floored_trigger`). The clear trigger below is in that state at
-    # its shipped default; see the paragraph there.
-    agent_context_token_budget: int = Field(default=100_000, ge=1)
+    # silently (`context_budget._note_floored_trigger`).
+    #
+    # **135,000 as of 2026-09-05, and the 43,175 above is why: it was the prefix of a turn nobody
+    # runs.** `tests/test_context_floor.py` compiled its graph with `connectors=None` while every
+    # shipped turn binds eight connector bundles, so the figure both this paragraph and the trigger
+    # below were derived from omitted **32,520 estimated tokens** of endpoint tool schema. Measured
+    # 2026-09-05 on the surface a turn actually binds: **66,157** for the bundles this repository
+    # serves itself, plus **9,538** over 21 tools for the three served from `Chemclaw3-mcp`
+    # (`chem`, `rxnpredict`, `safety`, measured against the sibling checkout) — a **75,695**-token
+    # prefix against a 100,000 budget.
+    #
+    # So the 56,825 of thread this setting was raised to protect was never delivered: the real
+    # allowance was **24,305**, and the trigger below was floored at 1 on every shipped
+    # deployment — the state the paragraph there and `tests/test_compaction.py` both asserted was
+    # not happening, asserted against the same connector-less fixture that caused it.
+    #
+    # **Nothing about what a chemist needs changed, so the thread allowance is what is held
+    # fixed and the request bound is what moves.** 135,000 = a 78,000-token prefix bound (the
+    # ratchet ceiling, 67,000, plus 11,000 for the bundles that ratchet cannot see) + the 57,000
+    # of thread the paragraph above intended. Leaving this at 100,000 would not have saved the
+    # prefix — it is sent either way — it would only have kept halving the conversation to pay for
+    # it.
+    #
+    # **What it costs is a bigger worst case, and that is the honest half.** A request may now go
+    # out at up to 135,000 billed tokens where the bound said 100,000; a long thread on a busy
+    # deployment therefore costs up to 35% more per model call than the *bound* used to permit
+    # (though more than the floored behaviour actually sent, which was prefix + the newest tool
+    # batch). The instrument for wanting that number lower is a narrower prefix — profile routing,
+    # or `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas — not a
+    # budget that pretends the prefix is smaller than it is.
+    agent_context_token_budget: int = Field(default=135_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=0, ge=0)
     # `agent_tool_result_clear_trigger` is the *lossless* edit's own threshold, and splitting it
@@ -155,7 +183,7 @@ class AgentSettings(BaseSettings):
     # loses nothing, so it should run early and often; every token it reclaims early is a
     # conversation group the window never has to reach for. Anthropic's own composition separates
     # them by an order of magnitude for this reason (30k against 180k in the cookbook's research
-    # agent), and the default here is the same shape against this repository's 100k budget.
+    # agent), and the default here is the same shape against this repository's request budget.
     #
     # Above the budget it would be pointless — the window would already have fired — so the
     # validator in `Settings` refuses that rather than letting a deployment set a number that
@@ -183,7 +211,26 @@ class AgentSettings(BaseSettings):
     # and a rate would carry nothing a line does not. `tests/test_compaction.py` asserts both the
     # floor and this default's clearance above the ratchet ceiling, so the day a tool surface grows
     # past it, that test says so instead of the behaviour changing quietly.
-    agent_tool_result_clear_trigger: int = Field(default=73_500, ge=1)
+    #
+    # **108,000 as of 2026-09-05, and 73,500 was floored at 1 in every shipped deployment from the
+    # day it landed.** Its derivation was right and its input was not: the ratchet's ceiling
+    # described a graph compiled with **no connector bound**, so "43,500 + 30,000 of thread"
+    # cleared a prefix of 43,175 and not the 75,695 a turn actually sends. The paragraph above,
+    # this file's sibling paragraph on the budget, and the test that exists to catch exactly this
+    # all agreed with each other because all three read the same connector-less number — which is
+    # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` with a fixture in place of the
+    # prose.
+    #
+    # **Same derivation, honest input**: the ratchet ceiling (now 67,000 with the connector surface
+    # in its basis) plus 11,000 for the three bundles served from `Chemclaw3-mcp` that no test here
+    # can measure — they cost 9,538 measured against the sibling checkout on 2026-09-05 — plus the
+    # same 30,000 of thread this setting has always intended. It is still a translation rather than
+    # a retuning; what moved is the size of the thing being translated.
+    #
+    # The 11,000 is a *bound* and belongs beside the ceiling it extends, so it lives in
+    # `tests/test_context_floor.py::SERVED_ELSEWHERE_ALLOWANCE` where the assertion can read it,
+    # not as a second number here that would drift away from it.
+    agent_tool_result_clear_trigger: int = Field(default=108_000, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Measured against a real BPE tokenizer on this repository's own

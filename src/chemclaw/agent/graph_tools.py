@@ -10,7 +10,9 @@ it runs off the event loop.
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from datetime import date
+from pathlib import Path
 
 import networkx as nx
 from pydantic import BaseModel, Field
@@ -117,6 +119,71 @@ class NoteSearch(BaseModel):
     widened: bool = False
 
 
+def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) -> NoteSearch:
+    """Search every current note under `notes_dir` for `terms`, ranked and capped.
+
+    The whole answer, not just the scored pairs: ranking and truncation are O(N) over the matches
+    too, and on a broad query the matches *are* the corpus — measured, leaving only those two steps
+    behind still cost 621 ms of loop stall at eight concurrent calls over 10 000 notes. A partial
+    offload is the shape of the defect, not the fix.
+
+    **Synchronous on purpose, and it is the whole reason this function exists.** The load was
+    already offloaded and the O(N) scan over its result was not, so `term_coverage` — which
+    rebuilds each note's searchable text, `model_dump()`s its conditions and lowercases the body —
+    ran on the event loop that serves every other concurrent turn on the pod. Measured on a
+    10 000-note corpus with a 5 ms heartbeat: one `find_notes` stalled the loop for 151 ms and
+    eight concurrent ones for 836 ms, against an idle p50 of 0.18 ms. During that stall no SSE
+    token is flushed to any user on the pod, no `/healthz` is answered and no bearer token is
+    validated.
+
+    It buys latency and jitter, **not throughput**: the scan is pure Python holding the GIL, so a
+    thread pool runs eight of these no faster than one (measured elsewhere in this review at 0.91x
+    on four threads). The corpus is markdown in Git rather than rows in Postgres, so there is no
+    database to push the scan into either.
+
+    `load_notes`, not `build_graph`: this is a substring sweep over each note's own metadata and
+    body, and it never follows an edge. Assembling the graph made a cold call pay node and edge
+    insertion for a traversal it does not do, and made the sweep iterate dangling link targets —
+    nodes with no note behind them, skipped one line later. Both caches sit behind the same stat
+    fingerprint, so a warm call is unchanged.
+
+    Args:
+        notes_dir: The corpus root, resolved by the caller so this stays testable with a fixture.
+        terms: The query's tokens, already normalised by `query_terms`.
+        today: The date `is_current` is judged against — passed in rather than read here so one
+            scan cannot straddle midnight.
+        cap: How many references the answer may carry, `graph_max_results` from the caller.
+
+    Returns:
+        The search result, with `total_matches` counting the hits before the cap.
+    """
+    scored: list[tuple[int, NoteRef]] = []
+    for note in sorted(load_notes(notes_dir), key=lambda candidate: candidate.id):
+        # Discovery serves current evidence only: a not-yet-valid or expired note is not surfaced
+        # as current fact (KM-7). It stays in Git and remains reachable by explicit id.
+        if not note.is_current(today):
+            continue
+        coverage = term_coverage(note, terms)
+        if coverage:
+            scored.append((coverage, _ref(note)))
+    complete = [pair for pair in scored if pair[0] == len(terms)]
+    widened = not complete and bool(scored)
+    # Widened results rank by coverage (a note matching three of four terms beats one matching
+    # one), complete ones stay in id order — coverage is identical across them, and a stable
+    # order is what makes two identical queries return identical lists.
+    chosen = sorted(scored, key=lambda pair: (-pair[0], pair[1].id)) if widened else complete
+    # A broad needle matches most of the corpus, and the whole hit list goes into the model's
+    # context. Bound it like every other retrieval surface (`fingerprint_max_top_k`,
+    # `retrieval_top_k`) — and the cut is *declared* in the return value, because the log line
+    # this used to warn into is one no model reads, and a capped list with no marker reads as the
+    # whole corpus (D-066 #4).
+    return NoteSearch(
+        matches=[ref for _, ref in chosen[:cap]],
+        total_matches=len(chosen),
+        widened=widened,
+    )
+
+
 @tool
 async def find_notes(text: str) -> NoteSearch:
     """Find notes whose id, tags, SMILES, or body contain every word of `text` (case-insensitive).
@@ -136,44 +203,16 @@ async def find_notes(text: str) -> NoteSearch:
         result means not even one term matched — it does not mean the topic is absent from the
         graph; a differently-worded term may still find it.
     """
-    # `load_notes`, not `build_graph`: this is a substring sweep over each note's own metadata and
-    # body, and it never follows an edge. Assembling the graph made a cold call pay node and edge
-    # insertion for a traversal it does not do, and made the sweep iterate dangling link targets —
-    # nodes with no note behind them, skipped one line later. Both caches sit behind the same stat
-    # fingerprint, so a warm call is unchanged.
-    notes = await asyncio.to_thread(load_notes, settings.knowledge_path)
     # The same tokenizer and the same haystack every other note search uses
     # (`chemclaw.kg.search`), so a note this tool finds is one `gather_evidence` can also cite.
     # A bare `text.lower().split()` here made "the biaryl" require the literal word "the".
     terms = query_terms(text)
     if not terms:
         return NoteSearch()
-    today = date.today()
-    scored: list[tuple[int, NoteRef]] = []
-    for note in sorted(notes, key=lambda candidate: candidate.id):
-        # Discovery serves current evidence only: a not-yet-valid or expired note is not surfaced
-        # as current fact (KM-7). It stays in Git and remains reachable by explicit id.
-        if not note.is_current(today):
-            continue
-        coverage = term_coverage(note, terms)
-        if coverage:
-            scored.append((coverage, _ref(note)))
-    complete = [pair for pair in scored if pair[0] == len(terms)]
-    widened = not complete and bool(scored)
-    # Widened results rank by coverage (a note matching three of four terms beats one matching
-    # one), complete ones stay in id order — coverage is identical across them, and a stable
-    # order is what makes two identical queries return identical lists.
-    chosen = sorted(scored, key=lambda pair: (-pair[0], pair[1].id)) if widened else complete
-    # A broad needle matches most of the corpus, and the whole hit list goes into the model's
-    # context. Bound it like every other retrieval surface (`fingerprint_max_top_k`,
-    # `retrieval_top_k`) — and the cut is *declared* in the return value, because the log line
-    # this used to warn into is one no model reads, and a capped list with no marker reads as the
-    # whole corpus (D-066 #4).
-    cap = settings.graph_max_results
-    return NoteSearch(
-        matches=[ref for _, ref in chosen[:cap]],
-        total_matches=len(chosen),
-        widened=widened,
+    # Every step of the search runs in the worker thread, including the ranking and the cut: see
+    # `_scan_notes` for the measurement that says why a partial offload is not one.
+    return await asyncio.to_thread(
+        _scan_notes, settings.knowledge_path, terms, date.today(), settings.graph_max_results
     )
 
 

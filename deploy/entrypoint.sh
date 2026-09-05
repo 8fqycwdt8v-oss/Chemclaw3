@@ -38,15 +38,26 @@ case "${component}" in
     #
     #   --limit-concurrency        Connections, not turns. `service_max_concurrent_turns` bounds
     #                              what may hit the LLM; nothing bounded how many sockets could be
-    #                              open waiting for a permit or holding an SSE stream. Well above
-    #                              the turn cap on purpose — this is the backstop, not the policy.
+    #                              open waiting for a permit or holding an SSE stream. This is the
+    #                              backstop, not the policy — and it is also the *liveness probe's*
+    #                              bound, which is the part that was missed. uvicorn counts open
+    #                              sockets including idle keep-alives and answers 503 in
+    #                              `h11_impl`, above the ASGI app, so at the limit `/healthz` and
+    #                              `/readyz` are refused with everything else and the kubelet
+    #                              SIGKILLs a pod that is merely busy. Proven twice: 20 idle
+    #                              keep-alive sockets at a limit of 20 already 503'd a fresh
+    #                              `/healthz`, and 255 held SSE streams at 256 503'd every
+    #                              endpoint. `Settings` now refuses a configuration where this is
+    #                              below what the process's own stream and turn caps can occupy
+    #                              plus `service_connection_headroom`, so the app cannot reach its
+    #                              own transport bound by doing what it is configured to do.
     #   --timeout-keep-alive       An idle keep-alive connection held a slot indefinitely.
     #   --h11-max-incomplete-event-size  The header/request-line ceiling. Without it a client can
     #                              dribble an unbounded header block and grow the parse buffer for
     #                              as long as it likes (the classic slowloris shape).
     #
     # `_BodySizeLimit` covers the request *body*; these cover everything before it.
-    args+=(--limit-concurrency "${CHEMCLAW_SERVICE_MAX_CONNECTIONS:-256}")
+    args+=(--limit-concurrency "${CHEMCLAW_SERVICE_MAX_CONNECTIONS:-512}")
     args+=(--timeout-keep-alive "${CHEMCLAW_SERVICE_KEEPALIVE_SECONDS:-15}")
     args+=(--h11-max-incomplete-event-size "${CHEMCLAW_SERVICE_MAX_HEADER_BYTES:-32768}")
     # `--no-access-log`, now that the application emits its own. uvicorn's line was the *only*

@@ -87,6 +87,7 @@ from chemclaw.core.netguard import arm_from_settings as arm_egress_guard
 # arrive via import — which is all of them, now that the sections live in their own modules.
 __all__ = [
     "NOTE_INDEX_SOURCES",
+    "PG_POOLS_PER_FRONT_DOOR_PROCESS",
     "SCHEMA_VECTOR_DIM",
     "AgentSettings",
     "BoSettings",
@@ -133,6 +134,23 @@ PG_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 # * _WRAPPER_FINISH_STEPS` still holds — a fifth post-child step turns that red instead of leaving
 # this validator clearing a bound 30 s short.
 _WRAPPER_FINISH_STEPS = 4
+
+# How many Postgres pools one *front-door* process holds, and therefore the factor the fleet
+# connection budget was missing entirely.
+#
+# `core/db._pool_for` keys a pool on `(loop, dsn, options)`, so a process opens one per distinct
+# connection shape rather than one in total. A turn-serving process opens three: the stores' pool at
+# `pg_statement_timeout_seconds`, `/readyz`'s own pool at `service_readiness_db_timeout_seconds`
+# (`api/routes/ops.py`, a different `options` string and therefore a different key), and the
+# LangGraph checkpointer's, which builds its own `AsyncConnectionPool` at `pg_pool_max_size` and
+# registers it as a foreign pool.
+#
+# A literal here for the same reason `_WRAPPER_FINISH_STEPS` is one — `chemclaw.core` imports no
+# sibling, so this module cannot ask `core.db` what it holds — and pinned the same way:
+# `tests/test_config_pools.py` opens all three shapes against a live database and asserts
+# `db._process_max_connections() == PG_POOLS_PER_FRONT_DOOR_PROCESS * pg_pool_max_size`, so a fourth
+# pool turns that red instead of quietly restoring the under-count this constant exists to end.
+PG_POOLS_PER_FRONT_DOOR_PROCESS = 3
 
 
 def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
@@ -404,12 +422,59 @@ class Settings(
                     "service_max_concurrent_turns or the replica ceiling, or raise "
                     "service_fleet_max_concurrent_turns if the LLM endpoint can serve it."
                 )
+        # The socket backstop against what this process's own caps can occupy — the cross-check
+        # that was missing beside the three fleet ones below it.
+        #
+        # `--limit-concurrency` (`deploy/entrypoint.sh`) counts open sockets including idle
+        # keep-alives and answers 503 *above* the ASGI app, so it is the liveness probe's bound as
+        # well as a request's: proven with 20 idle keep-alive sockets at a limit of 20, where a
+        # fresh `GET /healthz` got 503, and with 255 SSE streams held at 256, where both probes and
+        # every route answered 503 together. The shipped numbers made that reachable from the app's
+        # own supported state — `service_max_event_streams_total` was 78% of
+        # `service_max_connections` on its own — and the kubelet's response to a busy pod is to
+        # SIGKILL it, which kills every in-flight turn on the pod that is still serving.
+        #
+        # Refused rather than warned because both sides are this deployment's own numbers and the
+        # failure is silent until it is an outage. Turns and streams are added rather than maxed:
+        # they are different sockets and a chemist mid-turn with a push-back stream open holds one
+        # of each.
+        occupied = self.service_max_event_streams_total + self.service_max_concurrent_turns
+        if self.service_max_connections < occupied + self.service_connection_headroom:
+            raise ValueError(
+                f"service_max_connections ({self.service_max_connections}) is below what this "
+                f"process's own caps can occupy plus its headroom: "
+                f"{self.service_max_event_streams_total} push-back streams "
+                f"(service_max_event_streams_total) + {self.service_max_concurrent_turns} turns "
+                f"(service_max_concurrent_turns) + {self.service_connection_headroom} reserved "
+                f"(service_connection_headroom) = "
+                f"{occupied + self.service_connection_headroom}. uvicorn's --limit-concurrency "
+                "counts sockets (idle keep-alives included) and answers 503 above the ASGI app, so "
+                "at the limit /healthz answers 503 too and the kubelet restarts a pod that is "
+                "merely busy — killing every turn in flight on it. Raise "
+                "service_max_connections, or lower the stream/turn caps it has to cover."
+            )
+        if self.pg_fleet_front_door_processes > self.pg_fleet_pooled_processes:
+            raise ValueError(
+                f"pg_fleet_front_door_processes ({self.pg_fleet_front_door_processes}) exceeds "
+                f"pg_fleet_pooled_processes ({self.pg_fleet_pooled_processes}): a front door is "
+                "one of the pooled processes, not a process beside them, so the second number "
+                "counts the first. The chart derives both from the same values block."
+            )
         if self.pg_fleet_max_connections:
-            opened = self.pg_fleet_pooled_processes * self.pg_pool_max_size
+            # Front doors first, at their measured three pools each, then every other pooled
+            # process at one. Counting the whole fleet at one pool was the defect
+            # (`pg_fleet_front_door_processes`); counting the whole fleet at three would overstate
+            # every worker, connector server and MCP face by the same factor in the other direction.
+            front_doors = self.pg_fleet_front_door_processes
+            others = self.pg_fleet_pooled_processes - front_doors
+            pools = front_doors * PG_POOLS_PER_FRONT_DOOR_PROCESS + others
+            opened = pools * self.pg_pool_max_size
             if opened > self.pg_fleet_max_connections:
                 raise ValueError(
                     f"this deployment may open {opened} Postgres connections "
-                    f"({self.pg_fleet_pooled_processes} pooled process(es) × "
+                    f"({front_doors} front-door process(es) × "
+                    f"{PG_POOLS_PER_FRONT_DOOR_PROCESS} pools each — the stores', /readyz's and "
+                    f"the checkpointer's — plus {others} other pooled process(es) × 1 pool, all at "
                     f"{self.pg_pool_max_size} per pool) against a declared server ceiling of "
                     f"{self.pg_fleet_max_connections}. Lower pg_pool_max_size or the number of "
                     "pooled processes, or raise pg_fleet_max_connections if the server's "

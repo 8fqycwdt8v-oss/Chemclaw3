@@ -813,17 +813,27 @@ def test_a_failed_job_reaches_its_session_even_with_the_record_queue_unserved(
     unserved: a failed connector job was still RUNNING after 150 s, parked on `record_job`, having
     never reached `_notify_failure` — so the one message telling the chemist their job died sat
     behind an unbounded wait. `durable/notify.py` documents and measures the identical defect on
-    the very next step, which is why the fix is its `schedule_to_close` doubling rather than a new
-    knob.
+    the very next step.
 
-    The two budgets are shortened so the test measures the *bound* rather than waiting out the
-    shipped one; with neither, the run does not end at all.
+    **The bound is now a `schedule_to_start_timeout`, and this test is why it is not core's hour.**
+    The doubling it replaced was 60 s of *total* budget, most of it spent on a queue this call does
+    not control, so under ordinary load the record was simply lost
+    (`tests/test_pushback_under_queue_pressure.py` drives that half). Splitting the wait from the
+    work fixes the loss; taking `queue_wait_timeout()` for the wait would have re-broken *this*
+    invariant, an hour at a time. `light_write_queue_wait_timeout` is the one that has to satisfy
+    both, and this run is the half that keeps it small.
+
+    The budgets are shortened so the test measures the *bound* rather than waiting out the shipped
+    one; with none of them, the run does not end at all.
     """
     from tests.fixtures.connectors.fixture.workflows import FixtureJobWorkflow
 
     monkeypatch.setattr(settings, "background_task_queue", "nobody-serves-this-either")
     monkeypatch.setattr(settings, "job_record_timeout_seconds", 2.0)
     monkeypatch.setattr(settings, "activity_timeout_seconds", 2.0)
+    # The queue-wait half of the bound, which is what actually fires here: nothing serves that
+    # queue, so the record never starts and the run has to give up on it rather than on the work.
+    monkeypatch.setattr(settings, "template_step_timeout_seconds", 2.0)
 
     async def _run() -> Any:
         async with await start_local_env_or_skip() as env:

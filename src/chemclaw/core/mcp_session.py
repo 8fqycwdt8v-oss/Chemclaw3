@@ -17,8 +17,10 @@ server, four things that are easy to get wrong and invisible when you do:
   that `streamablehttp_client`'s task group raises, so the tree has to be walked; and it must not be
   classified as an outage, because a 401 never comes back on its own and a durable job would spend
   its whole retry budget being told the same thing;
-* `isError=True` covers both "the tool refused you" and "the server fell over", and only the second
-  is worth a retry — the sibling repo's `mcp_server_kit` distinguishes them by a fixed string;
+* `isError=True` covers three different answers — "the tool refused you", "the server fell over"
+  and "the server is full" — and the first is the only one no retry can fix. The wire carries no
+  error code and no structured content on that path, so each of the other two is told apart by a
+  fixed string the serving side puts in the message (`SERVER_INTERNAL_ERROR`, `SERVER_AT_CAPACITY`);
 * a call that hits the read bound gives up **locally only** — the SDK raises and sends the server
   nothing — so the server runs the tool to completion and throws the answer away
   (`cancel_on_timeout`).
@@ -96,6 +98,29 @@ logger = logging.getLogger(__name__)
 # this stops matching and the behaviour degrades to a misclassification rather than a new failure.
 SERVER_INTERNAL_ERROR = "an internal error occurred"
 
+# What `Chemclaw3-mcp`'s `servers/calc` says when it turned a call away because the pod was full
+# rather than because the request was wrong (`engine/admission.AT_CAPACITY_MARKER`).
+#
+# **The wire has no other channel, and that is measured rather than assumed.** `mcp.server.lowlevel`
+# builds a refused call's answer with `_make_error_result`, which is a `CallToolResult` carrying one
+# text block, `isError=True`, and *no* `structuredContent` and no error code; FastMCP's `Tool.run`
+# has already flattened every exception type into one `ToolError` before that. Driven against the
+# running server on 2026-09-05, a saturation refusal arrives as `isError=True`,
+# `structuredContent=None`, and text beginning `Error executing tool <name>: [calc-at-capacity] …`.
+# So a fixed token in the message is the only thing that can carry this, exactly as
+# `SERVER_INTERNAL_ERROR` above already does for "the server broke".
+#
+# **What it is worth is the difference between backpressure and a dead job.** Without it a full pod
+# is indistinguishable from an unparameterised solvent: `McpRequestRefused` -> `CalcToolError` ->
+# `_BAD_DATA_TYPES` -> non-retryable, so a durable calculation failed on its first attempt carrying
+# the serving side's own advice to retry. Under load "full" is the normal state, which is what makes
+# a third class necessary rather than tidy.
+#
+# The literal is transcribed rather than imported: the two repositories share no package, so the
+# only thing keeping the pair honest is that each side pins the spelling it expects
+# (`tests/test_mcp_session.py` here, `servers/calc/tests/` there).
+SERVER_AT_CAPACITY = "[calc-at-capacity]"
+
 
 class McpConnectFailed(Exception):
     """The server could not be reached, so nothing ran. The caller decides what to call it."""
@@ -111,7 +136,28 @@ class McpCredentialRefused(Exception):
 
 
 class McpRequestRefused(Exception):
-    """The server answered and said no. Bad data: the identical call is refused identically."""
+    """The server answered and said no.
+
+    Bad data unless a subclass says otherwise: the identical call is refused identically. The one
+    subclass that says otherwise is `McpAtCapacity`, which is a refusal about the *server's* state
+    rather than about the request — kept inside this hierarchy so that every existing handler keeps
+    treating it as the refusal it is, and only a caller that has something better to do with
+    backpressure has to know it exists.
+    """
+
+
+class McpAtCapacity(McpRequestRefused):
+    """The server was reached, ran nothing, and refused because it is full.
+
+    The third state the two classes around this one did not have. `McpRequestRefused` means the
+    request was wrong and `McpServerFault` means the server broke; a busy pod is neither, and it is
+    the only one of the three where waiting and asking again is the correct response.
+
+    A subclass rather than a sibling, deliberately: `invoke` has exactly two callers today
+    (`connectors/calc/remote.py` and `ingest/labels/labeller.py`) and only the first has any use for
+    the distinction, so a sibling would have silently escaped the second's `except` clauses. Under
+    this hierarchy a caller that does nothing keeps the behaviour it had.
+    """
 
 
 class McpServerFault(Exception):
@@ -418,6 +464,8 @@ async def invoke(session: ClientSession, tool: str, arguments: dict[str, Any]) -
 
     `McpRequestRefused` carries the server's own message, because that message is the whole content
     of the refusal. `McpServerFault` means nobody answered, or the server answered that it broke.
+    `McpAtCapacity` — a subclass of the first — means the server answered that it is full, which is
+    the one refusal that is worth asking again about.
 
     This is the only place that can classify a failure of the *call*, because it is the only place
     that knows a call was in flight — `open_session`'s guard deliberately stops at the connection.
@@ -434,6 +482,8 @@ async def invoke(session: ClientSession, tool: str, arguments: dict[str, Any]) -
         message = text_of(result.content)
         if SERVER_INTERNAL_ERROR in message:
             raise McpServerFault(tool, internal=True)
+        if SERVER_AT_CAPACITY in message:
+            raise McpAtCapacity(f"{tool} was refused: {message}")
         raise McpRequestRefused(f"{tool} failed: {message}")
     text = text_of(result.content)
     try:

@@ -118,6 +118,31 @@ class StoreSettings(BaseSettings):
     # artifact-eviction budgets ship off until an operator states a number.
     pg_fleet_pooled_processes: int = Field(default=1, gt=0)
     pg_fleet_max_connections: int = Field(default=0, ge=0)
+    # How many of those pooled processes are *front doors*, which is the correction that turns the
+    # budget above from a plausible number into the real one.
+    #
+    # A pool is keyed on `(loop, dsn, options)` (`core/db._pool_for`), so "one process, one pool"
+    # was never what the code did — it was what the arithmetic assumed. Measured against a live
+    # server by opening the three call shapes a turn-serving process actually opens, `db._POOLS`
+    # holds **two** (the stores' default statement timeout, and `/readyz`'s own two-second one at
+    # `api/routes/ops.py`) and `_FOREIGN_POOLS` holds the checkpointer's
+    # (`agent/checkpointer.py`), for `_process_max_connections()` = 3 x `pg_pool_max_size`. The
+    # shipped chart therefore declared 112 against `maxConnections: 136` and passed while opening
+    # ~208. The *runtime* alert was honest the whole time, because
+    # `chemclaw_pg_pool_max_size` reads `_process_max_connections()` and so sums all three; only
+    # the startup check under-counted, and it is the one that fires before the pods are up.
+    #
+    # Every other pooled process — a Temporal worker, a connector server, the MCP face — builds no
+    # agent and serves no readiness route, so it holds the one stores pool. That is why this is a
+    # separate count rather than a multiplier on the whole fleet: charging every worker three pools
+    # would overstate the budget by as much as the old arithmetic understated it.
+    #
+    # `PG_POOLS_PER_FRONT_DOOR_PROCESS` is the measured constant beside the validator that uses it,
+    # pinned by `tests/test_config_pools.py` against a live database rather than restated here, for
+    # the reason this repository states everywhere: a number in prose is a claim about a commit.
+    # 1 is the honest default — a CLI, a test and a single-pod dev run are one front door — and the
+    # check is inert anyway until `pg_fleet_max_connections` is declared.
+    pg_fleet_front_door_processes: int = Field(default=1, ge=0)
     # Close a connection idle beyond this, so a burst does not pin `max_size` sockets forever.
     pg_pool_max_idle_seconds: float = Field(default=300.0, gt=0)
     # How long a caller waits for a free pooled connection before the request fails as a

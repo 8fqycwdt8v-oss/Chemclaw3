@@ -394,6 +394,20 @@ def prompt_caching_middleware() -> list[Any]:
     The empty list is still right when the provider is not Anthropic: upstream composes nothing
     there either, so there is no slot to occupy and no `langchain_anthropic` import to make.
 
+    **What that leaves the shipped provider, measured rather than assumed.** `openai_compatible` is
+    what the chart ships, so on every production model call the ~75,700-token static prefix
+    (`tests/test_context_floor.py`) is sent with no `cache_control` and no equivalent — the only
+    saving available is the *serving* stack recognising a repeated prefix, which is a deployment
+    decision (vLLM's `--enable-prefix-caching`) and not code. This function's half of that remedy is
+    that the prefix must be worth caching, and it is: measured 2026-09-05 over 321,856 characters,
+    two turns for different actors, correlation ids and threads send **byte-identical** bytes, and
+    two *processes* differ in exactly one 16-character token — the envelope nonce, which
+    `framing_envelope_secret` makes deployment-wide. Both halves are asserted
+    (`test_the_prefix_two_sessions_are_sent_is_the_same_bytes` and
+    `tests/test_prompt_caching.py::test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce`)
+    because a prefix cache is byte-keyed: one per-turn value anywhere in the prefix would cost the
+    whole saving with nothing reporting it.
+
     Returns:
         A one-element list on the Anthropic path — the real middleware when caching is on, an inert
         placeholder holding its name when it is off — and `[]` on every other provider. The list

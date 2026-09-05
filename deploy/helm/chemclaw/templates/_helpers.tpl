@@ -712,11 +712,28 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end -}}
 {{- end -}}
 
-{{- define "chemclaw.pooledProcesses" -}}
-{{- $total := .Values.service.replicas | int -}}
+{{- /* How many *front-door* processes this release may run — the front door's own share of the
+       count above, and the factor the connection budget was missing entirely
+       (`core/config/__init__.PG_POOLS_PER_FRONT_DOOR_PROCESS`). A pool is keyed on
+       `(loop, dsn, options)`, so a turn-serving process holds three (the stores', `/readyz`'s own
+       at its own statement timeout, and the LangGraph checkpointer's) where a worker, a connector
+       server and the MCP face hold one.
+
+       Its own definition rather than the expression inlined three times: it is the same number
+       CHEMCLAW_SERVICE_FLEET_REPLICAS renders, the number `chemclaw.pooledProcesses` starts from,
+       and the number the HPA's occupancy target is denominated against — and three copies of "the
+       HPA ceiling, or the fixed replica count when the HPA is off" is three places for the fourth
+       reader to get it wrong. */ -}}
+{{- define "chemclaw.frontDoorProcesses" -}}
 {{- if .Values.service.autoscaling.enabled -}}
-{{- $total = .Values.service.autoscaling.maxReplicas | int -}}
+{{- .Values.service.autoscaling.maxReplicas | int -}}
+{{- else -}}
+{{- .Values.service.replicas | int -}}
 {{- end -}}
+{{- end -}}
+
+{{- define "chemclaw.pooledProcesses" -}}
+{{- $total := include "chemclaw.frontDoorProcesses" . | int -}}
 {{- $total = add $total (.Values.workers.background.replicas | int) -}}
 {{- /* The face too, when it is enabled. It runs `connectors/server.py` over the in-process
        read-only tool set — knowledge search, fingerprint search, precedent lookup — so it opens a

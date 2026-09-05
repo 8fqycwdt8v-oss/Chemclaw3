@@ -19,6 +19,16 @@ full-price input and reports that caching never happens.
 `test_live_second_call_reads_from_cache` is the only one that spends money, and it is the only one
 that proves the provider *honoured* any of the above. It skips without a credential so `make test`
 stays offline.
+
+**The fourth thing is about the provider that ships, and it is the only remedy that exists there.**
+On `openai_compatible` there are no breakpoints to place, so the ~75,700-token prefix is saved only
+if the *serving* stack recognises a repeated prefix (vLLM's `--enable-prefix-caching` and its
+equivalents). That recognition is byte-exact, which makes the shape of the request this
+repository's half of the remedy — and nothing asserted it.
+`tests/test_context_floor.py::test_the_prefix_two_sessions_are_sent_is_the_same_bytes` holds the
+per-turn half; `test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce` below holds the
+per-*process* half, which is the one a fleet of replicas depends on and the one that turned out to
+have a real answer in config.
 """
 
 import ast
@@ -29,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
 import chemclaw.agent.llm_provider as provider
 from chemclaw.api.runner_usage import graph_usage_tokens
@@ -570,3 +581,94 @@ def test_no_module_level_call_dials_the_provider_at_collection() -> None:
         "runs at collection, where an exception aborts the entire pytest session rather than "
         "failing one test. Request the `live_credential` fixture instead."
     )
+
+
+# --------------------------------------------------------------------------------------------
+# The shipped provider's only cache: a byte-stable prefix the serving stack can recognise.
+# --------------------------------------------------------------------------------------------
+
+#: What a child process prints: its envelope tag, and the prefix hashed with the tag masked out.
+_CHILD = """
+import hashlib, json, sys
+sys.path.insert(0, "tests")
+from chemclaw.agent.framing import ENVELOPE_TAG
+from test_context_floor import sent_prefix
+prefix = sent_prefix("alice@example.com", "corr-a").replace(ENVELOPE_TAG, "<TAG>")
+print("RESULT " + json.dumps(
+    {"tag": ENVELOPE_TAG, "masked": hashlib.sha256(prefix.encode()).hexdigest()}
+))
+"""
+
+
+def _child_prefix(**env: str) -> dict[str, str]:
+    """Build the request prefix in a *fresh* process and report its tag and masked hash."""
+    import json
+    import subprocess
+    import sys
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _CHILD],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env={**os.environ, **env},
+        cwd=str(Path(__file__).resolve().parent.parent),
+    )
+    assert completed.returncode == 0, f"child failed:\n{completed.stderr[-3000:]}"
+    line = next(
+        (ln for ln in completed.stdout.splitlines() if ln.startswith("RESULT ")),
+        None,
+    )
+    assert line is not None, f"child printed no result:\n{completed.stdout[-3000:]}"
+    return dict(json.loads(line.removeprefix("RESULT ")))
+
+
+def test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce() -> None:
+    """Across processes the prefix varies in exactly one place, and config decides whether it does.
+
+    **This is the finding, and only a second process could have found it.** Within one process the
+    prefix is byte-identical for any two sessions (the floor test asserts that). Across processes
+    it is not: `agent/framing.py::_envelope_nonce` falls back to `secrets.token_hex(8)` when
+    `framing_envelope_secret` is unset, and that value is written into the system prompt — so every
+    replica, and every restart, sends a *different* prefix. Measured 2026-09-05 over 321,856
+    characters, two processes differed in that one 16-character token and in nothing else.
+
+    On `openai_compatible` — the shipped provider, where `prompt_caching_middleware` returns `[]` —
+    a server-side prefix cache is the entire remedy for a ~75,700-token prefix, and it is byte
+    keyed. So an unset `CHEMCLAW_FRAMING_ENVELOPE_SECRET` bounds that cache to one entry per
+    pod-process: at `maxReplicas: 6` the fleet pays six cold prefills for the same bytes and pays
+    them again on every rollout. The secret is already a chart secret and `Settings` already warns
+    when a Postgres session store runs without it, for a *correctness* reason
+    (`D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment`) —
+    this is a second, independent reason to set the same variable.
+
+    **Both halves are asserted rather than one**, because they fail differently: the masked
+    comparison catches anything *else* that is per-process (a boot id, a build stamp, a
+    hash-ordered set — the seeds differ deliberately), and the tag comparison catches the nonce
+    itself losing its configured determinism.
+    """
+    configured = _child_prefix(CHEMCLAW_FRAMING_ENVELOPE_SECRET="probe-secret", PYTHONHASHSEED="0")
+    random = _child_prefix(CHEMCLAW_FRAMING_ENVELOPE_SECRET="", PYTHONHASHSEED="999")
+
+    assert configured["masked"] == random["masked"], (
+        "two processes send different prefixes for a reason other than the envelope nonce, so no "
+        "server-side prefix cache can hit across replicas or across a restart and every model "
+        "call on every pod pays a full prefill of the whole static prefix"
+    )
+    assert configured["tag"] != random["tag"], (
+        "the envelope tag did not vary with `framing_envelope_secret` — either the fallback "
+        "stopped being per-process or the secret stopped reaching it; `agent/framing.py`"
+    )
+    from chemclaw.agent.framing import _envelope_nonce
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "chemclaw.agent.framing.settings",
+            Settings(  # type: ignore[call-arg]
+                _env_file=None, framing_envelope_secret=SecretStr("probe-secret")
+            ),
+        )
+        assert configured["tag"].endswith(_envelope_nonce()), (
+            "a configured envelope secret must give every process the same tag; that determinism "
+            "is what makes one prefix-cache entry serve the whole fleet"
+        )

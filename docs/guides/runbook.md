@@ -1149,10 +1149,31 @@ HPA edited in the cluster, or a rollout that left both generations up. Scale bac
 `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` to a number the endpoint can actually serve.
 
 #### ChemclawTurnsShed
-`warning`. The admission guard is declining load. Either the deployment is undersized or
-`service_max_concurrent_turns` is below what the endpoint serves. Check
-`ChemclawTurnLatencyHigh` first: slow turns hold permits, so latency usually precedes shedding
+`warning`. The admission guard is declining load. **A shed is an HTTP 200**, not a 503 — the turn
+route streams, so the status line is written before a permit is asked for and the refusal arrives as
+an SSE `{"type":"error","code":"at_capacity","retryable":true}` frame. Availability monitoring and
+any uptime probe read it as a success, which is why this counter is the only signal there is. Either
+the deployment is undersized or `service_max_concurrent_turns` is below what the endpoint serves.
+Check `ChemclawTurnLatencyHigh` first: slow turns hold permits, so latency usually precedes shedding
 rather than following it.
+
+#### ChemclawTurnsShedHeavily
+`critical`. More than a fifth of offered turns are being refused. Measured shape at 200 users:
+33 of 48 turns shed while the pod sat at 35% of one core, because a turn is ~93% waiting on the
+model and occupancy runs about 14× CPU. So do **not** read a low CPU graph as headroom here. Two
+questions, in order: (1) is the fleet scaling — `kubectl describe hpa chemclaw-service`; if it
+reports `FailedGetPodsMetric` for `chemclaw_turns_in_flight`, the custom-metrics API (prometheus
+-adapter or equivalent) is not publishing that series and the HPA has fallen back to a CPU signal
+that cannot reach its threshold, so it will sit at `minReplicas` forever. (2) if it *is* at
+`maxReplicas`, the fleet is genuinely at its ceiling: raise
+`service.autoscaling.maxReplicas` and `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` together, and
+only to a number the shared LLM endpoint's throughput budget supports.
+
+#### ChemclawFrontDoorAtItsPermitCeiling
+`warning`, and the leading indicator for both of the above. `sum(chemclaw_turns_in_flight) /
+sum(chemclaw_turn_capacity)` has been over 0.9 for fifteen minutes: the next turn is about to be
+shed. If the replica count is not rising, go to question (1) under `ChemclawTurnsShedHeavily` —
+this alert existing and the fleet not growing is exactly the autoscaler-blind case.
 
 #### ChemclawCalcBackendOverCommitted
 `warning`. More calculation-backend sessions are held across the fleet than

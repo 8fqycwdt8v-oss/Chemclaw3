@@ -100,8 +100,8 @@ moved into the chart and its test: a number written in prose is a number that go
 - **`CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` is the ceiling the whole deployment may put on the
   shared LLM endpoint** (D-2026-08-01-a-per-process-cap-multiplied-by-a-number-nobody-wrote-down).
   The admission cap is per-process by design, so the load that endpoint really sees is
-  `maxReplicas × uvicorn workers × CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` — 48 for the shipped chart,
-  which is exactly what it declares. A configuration whose product exceeds the declared ceiling
+  `maxReplicas × uvicorn workers × CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS`, and the chart declares
+  exactly that product. A configuration whose product exceeds the declared ceiling
   **refuses to start**, in every pod, with a message naming the product and each factor. Raising
   `service.autoscaling.maxReplicas` or the per-process cap therefore means raising this too, with a
   number from the endpoint's throughput budget — and the repository's own tests fail on a chart whose
@@ -221,7 +221,20 @@ half-written.
   This line used to read "the workers' health is their Temporal poll loop", which described an
   intent nothing enforced: a dead poll loop kept the process open and Kubernetes reported `Running`
   (D-2026-08-01-every-process-carries-its-own-witness).
-- HPA scales the stateless front door on CPU; workers scale by hand (queue depth), not HPA.
+- **The HPA scales the front door on admission occupancy, with CPU beside it as a fallback**;
+  workers scale by hand (queue depth), not HPA. CPU is the wrong quantity here and that was
+  measured, not suspected: a turn is 8.32 s of wall clock and 0.581 s of CPU — 93% of it waiting on
+  the model — so with every permit held plus 150 idle SSE streams a pod drew 218 millicores, **44%
+  of the CPU target while completely full**, and the load lane shed 33 of 48 offered turns at 35%
+  of one core. So `service.autoscaling.occupancy` adds a `Pods` metric on
+  `chemclaw_turns_in_flight`, targeted at a percentage of the permit count the pods enforce (the
+  chart multiplies them out, so the two cannot drift).
+  **This needs something the chart does not install**: a custom-metrics API — prometheus-adapter,
+  KEDA, or the cluster's own — publishing that series for these pods. Without one the HPA shows
+  `FailedGetPodsMetric` in `kubectl describe hpa` and falls back to the CPU metric, which is
+  degraded but not silent; that is why the CPU metric stays rather than being replaced (an
+  unfetchable metric blocks scale-*down* only, never a scale-up driven by one that reads).
+  `service.autoscaling.occupancy.enabled: false` renders the CPU-only HPA exactly as before.
 - **Request bounds** (D-2026-08-01-a-cheap-request-is-still-a-request): uvicorn is launched with
   `--limit-concurrency`, `--timeout-keep-alive` and `--h11-max-incomplete-event-size` (all from
   `CHEMCLAW_SERVICE_*` settings, none of which the app can impose on itself); an ASGI middleware

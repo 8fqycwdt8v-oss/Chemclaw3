@@ -34,6 +34,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, ErrorDat
 from chemclaw.connectors import registry
 from chemclaw.connectors.calc import remote
 from chemclaw.connectors.calc.remote import (
+    CalcBusyError,
     CalcServerError,
     CalcToolError,
     cached_remote,
@@ -45,6 +46,7 @@ from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.mcp_session import McpConnectFailed
 from chemclaw.core.metrics import METRICS
+from chemclaw.durable.publish import _BAD_DATA_TYPES
 from chemclaw.science.calc.store import CALCULATION_EPOCH, InMemoryStore
 
 # A version carrying *both* key delimiters, which is not a contrived string: `esol-delaney@2004`
@@ -277,6 +279,93 @@ def test_the_servers_internal_error_is_an_outage_not_bad_data(
         with pytest.raises(CalcServerError) as outage:
             await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
         assert "may work on a retry" in str(outage.value)
+
+    asyncio.run(_run())
+
+
+def test_a_full_pod_is_backpressure_not_bad_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The third state, and the one the taxonomy above did not have.
+
+    `servers/calc` refuses when every calculation slot is taken, and that refusal arrived here
+    indistinguishable from an unparameterised solvent: `isError=True`, a `ValueError`'s text, so
+    `McpRequestRefused` -> `CalcToolError` -> `_BAD_DATA_TYPES` -> the durable job marked
+    **non-retryable and failed on attempt 1**, carrying the serving side's own sentence "Retry once
+    one finishes" to the chemist. It only bites under load, which is exactly when a shared
+    calculation backend is full — one CREST search costs the whole pod — so at target load every
+    cache *miss* failed permanently while warm molecules kept working.
+
+    The refusal text is transcribed as the literal the server sends rather than built from this
+    repository's constant, for the reason `Chemclaw3-mcp`'s `tests/test_identity_contract.py`
+    gives about header spellings: a test that imports the constant agrees with itself and says
+    nothing about what the other side writes. The two repositories share no package, so this pair
+    of literals is the whole contract.
+    """
+
+    class _Full(_FakeSession):
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            if name == "calculation_key":
+                return _Result({"key": _KEY})
+            return _Result(
+                {
+                    "detail": (
+                        "Error executing tool predict_pka: [calc-at-capacity] this server has 0 "
+                        "of its 4 calculation slots free and predict_pka needs 1, so it was "
+                        "refused rather than queued. Retry once one finishes"
+                    )
+                },
+                is_error=True,
+            )
+
+    _session(monkeypatch, _Full(_KEY, {}))
+
+    async def _run() -> None:
+        with pytest.raises(CalcBusyError) as busy:
+            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        # What the chemist reads must not sound like a problem with their molecule, and must not
+        # repeat the server's advice to retry as if a person had to act on it.
+        assert "the calculation service is busy" in str(busy.value)
+        assert "Nothing is wrong with what was asked" in str(busy.value)
+        assert "CHEMCLAW_CALC_MAX_CONCURRENT_REQUESTS" not in str(busy.value)
+
+    asyncio.run(_run())
+
+    # The classification, which is the whole fix: `SubsystemUnavailableError` is the hierarchy
+    # `tests/test_publish.py` asserts is *absent* from `_BAD_DATA_TYPES`, so this is retryable by
+    # construction and cannot be made non-retryable without failing a test that says why.
+    assert issubclass(CalcBusyError, SubsystemUnavailableError)
+    assert not issubclass(CalcBusyError, ChemclawError)
+    assert not issubclass(CalcBusyError, CalcToolError)
+    assert CalcBusyError.__name__ not in _BAD_DATA_TYPES
+    assert "CalcToolError" in _BAD_DATA_TYPES
+
+
+def test_a_domain_refusal_is_still_bad_data_when_the_marker_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other direction, which is what stops the fix above from being a blanket loosening.
+
+    A marker matched too loosely would reclassify an unparameterised solvent as backpressure and
+    retry it to exhaustion — the mirror image of the defect, and the more expensive one, since a
+    bad molecule is bad on every attempt. The token is bracketed precisely so no sentence anybody
+    writes contains it by accident; this drives a refusal that talks about capacity in English and
+    asserts it is *still* classified as bad data.
+    """
+
+    class _Wordy(_FakeSession):
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            if name == "calculation_key":
+                return _Result({"key": _KEY})
+            return _Result(
+                {"detail": "this molecule has more capacity for hydrogen bonding than the model"},
+                is_error=True,
+            )
+
+    _session(monkeypatch, _Wordy(_KEY, {}))
+
+    async def _run() -> None:
+        with pytest.raises(CalcToolError) as refused:
+            await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+        assert not isinstance(refused.value, CalcBusyError)
 
     asyncio.run(_run())
 

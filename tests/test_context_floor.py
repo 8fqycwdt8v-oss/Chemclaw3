@@ -43,15 +43,19 @@ agree with itself forever.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from functools import cache
 from typing import Any
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
+from langchain_mcp_adapters.tools import load_mcp_tools
+from mcp.shared.memory import create_connected_server_and_client_session
 
 from chemclaw.agent.audit import NullAuditSink
-from chemclaw.agent.chemclaw_agent import _capability_tools, instructions_for
+from chemclaw.agent.chemclaw_agent import _capability_tools, connector_specs, instructions_for
 from chemclaw.agent.langgraph_agent import (
     _labelled,
     _skill_dirs,
@@ -61,6 +65,8 @@ from chemclaw.agent.langgraph_agent import (
 )
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile, registered_profile_names
+from chemclaw.connectors.registry import enabled, server_tools_module
+from chemclaw.connectors.transport import _allowed
 
 # Discovered at import, not in a fixture: `registered_profile_names()` parametrises the test below
 # and parametrisation is evaluated at *collection*, before any fixture runs. With the load in a
@@ -253,7 +259,32 @@ load_profiles()
 #: holds with less headroom than one `propose_knowledge_note` costs, which is the property every
 #: raise above was chosen for, and `_report` prints the day's figure so nobody has to trust this
 #: comment for it.
-CEILINGS: dict[str, int] = {"__default__": 43_500}
+#: **67,000 as of 2026-09-05, and again no tool was added — the fixture stopped lying instead.**
+#: `_bound_tools` compiled the graph with `connectors=None` while `build_langgraph_agent` has taken
+#: that argument since M7, so every figure above measured a turn with **no connector bound**:
+#: `default` binds **92** tools and measures **66,157**, where the connector-less fixture reported
+#: 61 and 42,730. The 23,427-token difference is 31 endpoint tools this repository serves itself,
+#: and a deployment has paid all of it on every model call since the first bundle shipped.
+#:
+#: **This is the same failure as the 2026-08-29 entry, one boundary further out**, and it is worth
+#: saying twice: that one measured the wrong *object* (a callable instead of the bound tool), this
+#: one measured the wrong *graph*. Both were invisible for the same reason — the assertion and the
+#: thing asserted were derived from the same short read — and both were found only by someone
+#: measuring a shipped turn rather than reading the test. The paragraph above promising that a
+#: connector "lands here the moment it is bound" was a statement about `_bound_tools`'s method that
+#: its own call site made false.
+#:
+#: **What this still does not cover is named rather than implied**: `SERVED_ELSEWHERE`'s three
+#: bundles are `Chemclaw3-mcp`'s, ~8,600 tokens over 21 tools measured against the sibling checkout
+#: on 2026-09-05, so the real shipped prefix is ~74,700 and this ceiling gates the ~87% of it that
+#: is knowable from this tree alone. That remainder is a measurement
+#: (`chemclaw_connector_tool_schema_tokens`), not a gap in the ratchet, and it cannot become one
+#: without this repository building somebody else's server.
+#:
+#: The headroom is ~840 tokens against 66,157 — the same tightness the entries above were chosen
+#: for, under what one `propose_knowledge_note` costs, so the next tool of that size cannot arrive
+#: unnoticed on either side of the process boundary.
+CEILINGS: dict[str, int] = {"__default__": 67_000}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
@@ -303,7 +334,26 @@ MAX_SINGLE_TOOL_TOKENS = 900
 #: below is the reason six of them stayed invisible for eleven weeks while a test claimed to catch
 #: exactly this. They are recorded rather than hidden by a bigger `MAX_SINGLE_TOOL_TOKENS`, which
 #: is the same choice the four original entries were recorded under; the bound stays 900.
+#: **Four names arrived on 2026-09-05 and, again, nothing was added.** `_bound_tools` began binding
+#: the connector surface a turn actually binds, and `bo`'s four `OptimizationProblem`-taking
+#: endpoint tools turned out to be the **widest schemas in the entire prefix** — wider than every
+#: in-process tool, and unseen for as long as the fixture compiled its graph with no connector.
+#: They are recorded here on the same terms as the six that arrived on 2026-08-29: this list is
+#: what makes debt visible, and refusing to record debt that was already being paid would only mean
+#: not measuring it. **The `MAX_SINGLE_TOOL_TOKENS` message's warning still stands for a tool that
+#: is new**; these are eleven weeks old and were merely invisible.
+#:
+#: The cause is one model, inlined four times: `OptimizationProblem` is a discriminated union of
+#: feature kinds, and `convert_to_openai_tool` inlines rather than `$ref`s (see above for why
+#: `$defs` is *worse*, not better). It is the same document `start_optimization_campaign` carries
+#: at 2,307. **12,055 tokens on every default turn for four copies of one decision space** is the
+#: largest single narrowing left in this prefix, and it is a `connectors/bo/server/tools.py` change
+#: rather than a core one — `docs/planning/BACKLOG.md` carries the row.
 KNOWN_OVERSIZED: dict[str, int] = {
+    "suggest_next_experiment": 3_590,
+    "generate_screening_design": 2_900,
+    "predict_outcome": 2_839,
+    "campaign_progress": 2_726,
     "start_optimization_campaign": 2_307,
     "propose_knowledge_note": 1_126,
     # Both +22 against the re-measurement above, and it is the same 22 twice: they share the
@@ -373,6 +423,94 @@ def _tool_schema(tool: Any) -> str:
     return json.dumps(convert_to_openai_tool(tool))
 
 
+#: The endpoint-bearing bundles this repository declares but does not serve, so their tool schemas
+#: cannot be measured here at any price.
+#:
+#: `chem`, `rxnpredict` and `safety` are `Chemclaw3-mcp`'s servers (`D-2026-08-09-a-connector-we-do-
+#: not-run`): this tree holds their `connector.yaml` and none of their code, so what their schemas
+#: cost arrives at handshake from a process this repository does not build.
+#: `connectors/transport.py::_record_schema_cost` publishes that half as
+#: `chemclaw_connector_tool_schema_tokens`, a measurement rather than a ratchet, for this reason.
+#:
+#: Named rather than left implicit, and asserted below, for the reason
+#: `cli/validate_connectors.py::unverified_tool_surfaces` gives about the identical blind spot one
+#: layer over: a check that quietly shrinks is worse than one that says what it did not look at.
+#: **Measured against the sibling checkout on 2026-09-05 they are ~8,600 tokens over 21 tools** —
+#: so the figure this file gates is the ~87% of the shipped prefix that is knowable offline.
+SERVED_ELSEWHERE = frozenset({"chem", "rxnpredict", "safety"})
+
+#: What to allow for `SERVED_ELSEWHERE`'s schemas when a *bound* on the whole prefix is needed.
+#:
+#: **A bound rather than a measurement, for the same reason `CEILINGS` is one**, and the two are
+#: added wherever a caller needs the figure a deployment actually pays: `PREFIX_BOUND` below.
+#:
+#: Measured 2026-09-05 against the `Chemclaw3-mcp` checkout beside this one — every declared tool,
+#: through this repository's own `convert_to_openai_tool` path — the three bundles cost **9,538
+#: tokens over 21 tools** (`chem` 5,380 / 12, `rxnpredict` 2,526 / 6, `safety` 1,632 / 3). 11,000
+#: carries ~15% over that, which is the headroom a surface this file cannot ratchet needs: nothing
+#: here fails when one of those servers adds a tool, so the allowance has to absorb one.
+#:
+#: **It is not asserted, and cannot be.** A test reading a sibling checkout would pass or fail on
+#: whether somebody happens to have cloned it, which is the failure mode
+#: `cli/validate_connectors.py::unverified_tool_surfaces` refuses for the same surface. What makes
+#: the figure re-derivable instead of a claim is that the method is written down: dump
+#: `tools/list` from each `chemclaw_mcp_<name>` server and convert it exactly as `_served_tools`
+#: converts a local one.
+SERVED_ELSEWHERE_ALLOWANCE = 11_000
+
+#: The whole static prefix a shipped `default` turn may cost, as a bound: this file's ceiling plus
+#: the allowance for what it cannot see.
+#:
+#: This is the number `core/config/agent.py` derives both compaction thresholds from — the trigger
+#: is `PREFIX_BOUND + 30,000` and the budget `PREFIX_BOUND + 57,000` — and
+#: `tests/test_compaction.py` asserts that relation rather than restating either figure. It is here
+#: rather than in the config because the ceiling is here: two numbers that must move together
+#: belong in one place, and the previous arrangement (a config comment quoting `43,500`) is exactly
+#: how the connector-less ceiling propagated into two settings that were floored for eleven weeks.
+PREFIX_BOUND = CEILINGS["__default__"] + SERVED_ELSEWHERE_ALLOWANCE
+
+
+@cache
+def _served_tools(connector: str) -> tuple[Any, ...]:
+    """Every tool one bundle's own MCP server advertises, as the `BaseTool`s a turn would bind.
+
+    **Not a fixture and not a hand-written schema: the bundle's real `FastMCP` server, over a real
+    MCP session, through `load_mcp_tools` — the same function
+    `connectors/transport.py::HeldConnectorSession._hold` calls.** An in-memory transport is the
+    only thing substituted, so what is measured is the
+    `tools/list` payload a deployment's pod would answer with. A schema invented here would be a
+    second declaration of somebody else's surface, which is the defect this whole file is about.
+
+    Cached per connector because the servers behind these imports are the heavy half of the tree
+    (`bo` pulls BoFire, `calc` its whole spec surface) and `_floor` is called once per profile per
+    test. One session per bundle for the module, not one per call.
+    """
+    module = server_tools_module(connector)
+    server = getattr(module, "server", None) if module is not None else None
+    if server is None:
+        return ()
+
+    async def load() -> list[Any]:
+        async with create_connected_server_and_client_session(server) as session:
+            return list(await load_mcp_tools(session))
+
+    return tuple(asyncio.run(load()))
+
+
+def _connector_tools(profile: Any) -> list[Any]:
+    """This profile's connector surface, narrowed exactly as a turn narrows it.
+
+    `connector_specs(profile)` is the production narrowing — `mcp_server_names` selects bundles and
+    `tool_names` narrows each surviving allow-list — and `_allowed` is production's own manifest
+    filter. Only the transport is replaced, so a bundle enabled, a tool added to a manifest, or a
+    profile widened all land in the floor without this file being taught about them.
+    """
+    tools: list[Any] = []
+    for spec in connector_specs(profile):
+        tools.extend(_allowed(list(_served_tools(spec.name)), spec.allowed_tools))
+    return tools
+
+
 def _bound_tools(profile: Any) -> list[Any]:
     """The tools this profile's compiled graph actually binds — every one, as the object it binds.
 
@@ -394,8 +532,23 @@ def _bound_tools(profile: Any) -> list[Any]:
     Reading the `ToolNode` is deliberate and is why this cannot drift again: any future tool source
     — a middleware, a connector, upstream — lands here the moment it is bound, without this file
     being taught about it. The backlog row that asked for this proposed spying on `bind_tools`
-    instead; the node holds the same 61 tools and needs no model call to say so, so the graph is
+    instead; the node holds the same tools and needs no model call to say so, so the graph is
     built and never invoked.
+
+    **That sentence was true of the method and false of this function, and `connectors=` is the
+    fix.** For as long as the paragraph above existed this call omitted the argument
+    `build_langgraph_agent` takes at line 148, so the ratchet measured a graph with **no connector
+    bound at all** — 61 tools where a shipped turn binds 92, and 42,730 tokens where the honest
+    figure is 66,157. A connector could not "land here the moment it is bound" because nothing here
+    ever bound one: the surface the deployment pays for was 35% larger than the number this file
+    gated, and the gap was the *whole* subject of the deferred-schema decision
+    (`D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`) sitting outside the only ratchet
+    that could have priced it.
+
+    What is bound is derived rather than invented — `_connector_tools` runs this repository's own
+    manifests through its own narrowing and its own MCP loader — so it tracks the tree instead of
+    a transcription of it. `SERVED_ELSEWHERE` names what that still cannot reach, and the test
+    below fails if that set ever changes silently.
 
     **Three upstream shapes are read below, and all three are pinned in
     `tests/test_upstream_surface.py`**: the node key `"tools"`, `PregelNode.bound`, and the private
@@ -407,6 +560,7 @@ def _bound_tools(profile: Any) -> list[Any]:
         model=GenericFakeChatModel(messages=iter([AIMessage(content="")])),
         profile=profile,
         audit_sink=NullAuditSink(),
+        connectors=_connector_tools(profile),
     )
     return list(graph.nodes["tools"].bound._tools_by_name.values())
 
@@ -524,6 +678,142 @@ def test_the_recorded_cost_of_a_known_oversized_tool_is_still_true() -> None:
         )
         + ". Re-record them in the same commit that moved them, and say in the pull request what "
         "moved them — a figure nobody re-derives is a claim about the afternoon it was taken."
+    )
+
+
+class _CapturingModel(GenericFakeChatModel):
+    """A model that records the prefix it is sent: the bound tool schemas and the system message.
+
+    Observed rather than re-derived, for the reason `_bound_tools` gives one function up: a prefix
+    assembled by this file is a second implementation of what the graph assembles, and the two
+    agreeing proves nothing about what leaves the process.
+    """
+
+    def bind_tools(self, tools: Any, **kw: Any) -> Any:
+        """Record the schemas exactly as bound, in the order bound — order is part of the bytes."""
+        from langchain_core.utils.function_calling import convert_to_openai_tool
+
+        _SENT.append({"tools": [convert_to_openai_tool(tool) for tool in tools]})
+        return self
+
+    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any) -> Any:
+        """Record the system message this call carries, then answer."""
+        from langchain_core.messages import SystemMessage
+
+        _SENT[-1]["system"] = [m.content for m in messages if isinstance(m, SystemMessage)]
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kw)
+
+
+#: What `_CapturingModel` recorded, newest last. Module level because the model is constructed by
+#: the graph builder and there is nowhere else for a per-call observation to go.
+_SENT: list[dict[str, Any]] = []
+
+
+def sent_prefix(actor: str, correlation_id: str) -> str:
+    """The bytes a model call sends before the conversation, for one actor and correlation id.
+
+    Public because `tests/test_prompt_caching.py` drives it in a subprocess to compare two
+    processes; there is no second in-repo way to obtain this string, and re-deriving it there
+    would compare two derivations rather than two processes.
+    """
+    import asyncio
+    import uuid
+
+    from langchain_core.messages import HumanMessage
+
+    _SENT.clear()
+    model = _CapturingModel(messages=iter([AIMessage(content="done")]))
+    graph = build_langgraph_agent(
+        model=model,
+        profile="default",
+        actor=actor,
+        correlation_id=correlation_id,
+        audit_sink=NullAuditSink(),
+        connectors=_connector_tools(get_profile("default")),
+    )
+    asyncio.run(
+        graph.ainvoke(
+            {"messages": [HumanMessage(content="hello")]},
+            {"configurable": {"thread_id": uuid.uuid4().hex}},
+        )
+    )
+    return json.dumps(_SENT[-1], sort_keys=False)
+
+
+def test_the_prefix_two_sessions_are_sent_is_the_same_bytes() -> None:
+    """A prefix cache can only hit on bytes that repeat, so the prefix must not carry a turn in it.
+
+    **This is the precondition under every prompt-caching remedy, and nothing asserted it.** The
+    shipped provider is `openai_compatible` (`deploy/helm/chemclaw/values.yaml`), where
+    `llm_provider.prompt_caching_middleware` returns `[]` — there are no `cache_control`
+    breakpoints to place, so the entire saving depends on the *serving* stack recognising a
+    repeated prefix (vLLM's `--enable-prefix-caching` and its equivalents). That recognition is
+    byte-exact: one timestamp, one correlation id, one session id or one reshuffled tool order
+    anywhere in the prefix turns a fleet-wide cache hit into a full prefill, on every call, with
+    nothing anywhere reporting it.
+
+    Measured 2026-09-05 at 321,856 characters: two turns for different actors, different
+    correlation ids and different threads are **byte-identical**. So the request is shaped
+    correctly today and this test is what keeps it that way — the failure it guards against is a
+    one-line addition to a system prompt, and it would be invisible in every other test here.
+    """
+    first = sent_prefix("alice@example.com", "corr-a")
+    second = sent_prefix("bob@example.com", "corr-b")
+    at = next(
+        (i for i, (a, b) in enumerate(zip(first, second, strict=False)) if a != b),
+        min(len(first), len(second)),
+    )
+    assert first == second, (
+        "the prefix two sessions are sent differs, so no server-side prefix cache can hit across "
+        f"them and every model call pays a full prefill. First difference at character {at}:\n"
+        f"  {first[at : at + 120]!r}\n  {second[at : at + 120]!r}"
+    )
+
+
+def test_the_floor_measures_the_connector_surface_a_turn_actually_binds() -> None:
+    """The ratchet's basis includes the endpoint tools, and this is what would have caught it.
+
+    **This is the assertion whose absence cost 23,427 tokens of blindness.** `_bound_tools` read
+    the compiled graph's `ToolNode` — the honest source — and then compiled that graph without the
+    `connectors=` argument production passes, so the ratchet gated a turn that does not exist. No
+    test could see it: every figure was self-consistent, and the docstring promising a connector
+    would "land here the moment it is bound" was about the read, not about the call.
+
+    What is asserted is *derived from the manifests*, not transcribed: every tool the enabled
+    bundles this repository serves declare must be in the bound set. A bundle added, a tool added
+    to a manifest, or `connectors=` dropped again all fail here, and the last one fails loudly
+    instead of shrinking the number in silence.
+    """
+    bound = {_tool_name(tool) for tool in _bound_tools(get_profile("default"))}
+    declared = {
+        tool
+        for manifest in enabled()
+        if manifest.endpoint is not None and manifest.name not in SERVED_ELSEWHERE
+        for tool in manifest.endpoint.tools
+    }
+    assert declared, "no in-repo connector declares an endpoint tool; this test now checks nothing"
+    assert declared <= bound, (
+        f"these declared connector tools are not in the floor's basis: {sorted(declared - bound)}. "
+        "The ratchet is measuring a turn with fewer tools than a deployment binds, which is the "
+        "exact defect `_bound_tools`'s `connectors=` argument exists to prevent."
+    )
+
+
+def test_the_bundles_this_floor_cannot_measure_are_exactly_the_ones_it_names() -> None:
+    """`SERVED_ELSEWHERE` is a claim about which schemas are out of reach, so it is checked.
+
+    A blind spot that drifts is worse than one that is declared: a bundle whose server moved into
+    this tree would silently stay excluded from the ceiling, and a *new* bundle served elsewhere
+    would silently widen the unmeasured half while the ceiling comment kept quoting ~87%. Both
+    directions fail here, which is the two-sidedness `OVERSIZED_TOLERANCE` is written for one
+    level down.
+    """
+    endpoint_bundles = {m.name for m in enabled() if m.endpoint is not None}
+    unmeasurable = {name for name in endpoint_bundles if not _served_tools(name)}
+    assert unmeasurable == SERVED_ELSEWHERE & endpoint_bundles, (
+        f"this file can measure the tool schemas of {sorted(endpoint_bundles - unmeasurable)} and "
+        f"not of {sorted(unmeasurable)}, but SERVED_ELSEWHERE names {sorted(SERVED_ELSEWHERE)}. "
+        "Update it and the ceiling comment's share-of-the-prefix figure in the same commit."
     )
 
 

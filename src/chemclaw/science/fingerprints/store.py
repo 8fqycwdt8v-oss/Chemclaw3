@@ -393,17 +393,38 @@ class PostgresFingerprintStore:
 
     Table and bit width are constructor parameters (both trusted internal constants), so
     the same class serves the molecule and reaction fingerprint tables. Similarity is
-    Tanimoto (= 1 - Jaccard distance) in SQL, accelerated by the table's HNSW
-    `bit_jaccard_ops` index; the ranking semantics match the in-memory backend up to HNSW
-    recall. Note the threshold interaction: the `WHERE` filter applies *after* the ordered
-    HNSW scan, so a selective threshold can return fewer than `top_k` rows even when that
-    many qualify in the table (bounded by `hnsw.ef_search`) — approximate by design.
+    Tanimoto (= 1 - Jaccard distance) in SQL.
     A short-lived connection per call (KISS — the calc store's choice).
+
+    **This search is exact and linear, and three sentences here used to say the opposite.** They
+    read: "accelerated by the table's HNSW `bit_jaccard_ops` index; the ranking semantics match the
+    in-memory backend up to HNSW recall … the `WHERE` filter applies *after* the ordered HNSW scan,
+    so a selective threshold can return fewer than `top_k` rows … approximate by design." Measured
+    against a live PostgreSQL 16.15 / pgvector 0.8.0 on 200 000 `bit(2048)` rows, the planner
+    **never runs an HNSW scan for this statement**: with the `definition` equality and the
+    threshold predicate present it takes a Seq Scan (17.6 ms) or, with `enable_seqscan=off`, the
+    `definition` btree — and the rows that come back are the exact top-k, not an approximation.
+    The index exists (`002`, `003`) and this query does not use it.
+
+    **The obvious restructure is fast and does not preserve the answer, which is why it is not
+    here.** Ordering by the index first and filtering afterwards — the shape the old docstring
+    described — measures **1.25 ms against 17.6 ms (14x)**, roughly flat in corpus size against a
+    scan that costs ~0.088 µs/row (~88 ms at 1M rows, ~880 ms at 10M, and `CLAUDE.md` names
+    Pistachio, order 10^7 reactions, as the first live integration). But over 60 queries at
+    `hnsw.ef_search=200` and a 10x over-fetch it returned a **different result set for 22 of
+    them** — not from poor recall but from ties: Tanimoto over sparse bit vectors produces many
+    rows at identical similarity, `ORDER BY distance, id` breaks those ties across the *whole
+    table*, and no truncated candidate set can reproduce that. So the choice is exact-and-linear
+    against approximate-and-flat, which is a decision about what a structural search may silently
+    fail to find — the same failure `find_matches` refuses NaN to prevent, a chemist told there is
+    no precedent for the structure they are holding — and a decision needs an ADR rather than a
+    refactor. `tests/test_fingerprint_store.py` pins the exactness so that whoever takes it has to
+    take it deliberately.
 
     `source_keyed` says whether the table carries the `source` half of the key
     (D-2026-08-27) — `reaction_fingerprints` does since `063`, `molecule_fingerprints` does not
     and must not. It is a constructor flag rather than two classes because everything that makes
-    this backend worth having is identical either way: the Jaccard SQL, the HNSW ordering, the
+    this backend worth having is identical either way: the Jaccard SQL, the ordering, the
     definition scoping and the pooling. What it changes is confined to the key columns the
     statements below are built from, and every read projects a constant `''` for a table without
     the column, so a row reaches Python in one shape whichever table it came from.
@@ -485,6 +506,13 @@ class PostgresFingerprintStore:
         # COLLATE "C" (byte order), because the database's default text collation (e.g.
         # en_US.UTF-8/ICU) orders mixed-case ids differently from Python's code-point sort
         # and would silently break the documented cross-backend ordering parity.
+        #
+        # Those two predicates are also what keep the planner off the HNSW index, and the class
+        # docstring carries the measurement plus the reason that is a decision rather than a
+        # defect: the tie-break above is *across the table*, and no ANN candidate set reproduces
+        # it. Every row here computes the distance three times (projection, filter, order), which
+        # looks like the cheap win and is not — hoisting it into a subquery so it is computed once
+        # measured 28.7 ms against 18.0 ms, because the subquery materializes.
         self._similar = (
             f"SELECT {self._source_read}, id, label, "
             f"1 - (bits <%%> %(q)s::bit({width})) AS similarity "
@@ -628,9 +656,12 @@ async def find_matches(
     `hits_truncated` exists to name on the substructure entry point. One extra row is asked for and
     dropped, the same probe the bounded substructure scan uses.
 
-    Honest limit on the durable backend: the threshold filter applies *after* pgvector's ordered
-    HNSW scan, so a selective threshold can return fewer rows than qualify in the table and the
-    flag then under-reports. It errs toward `False` — it never calls a complete page partial.
+    The flag is exact on both backends, and the caveat that used to stand here was not. It said
+    the durable backend can under-report because "the threshold filter applies *after* pgvector's
+    ordered HNSW scan" — measured, that plan is never taken (see `PostgresFingerprintStore`), the
+    statement is an exact scan, and `k + 1` rows come back whenever `k + 1` qualify. The caveat
+    becomes true again the day this search is moved onto the index, which is the decision that
+    docstring records.
 
     The one place the generic search knobs fall back to config, so the molecule
     and reaction entry points cannot drift in how they default (DRY). `top_k` may arrive

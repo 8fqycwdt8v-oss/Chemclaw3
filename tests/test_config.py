@@ -731,37 +731,75 @@ def test_the_connection_budget_is_undeclared_by_default() -> None:
 def test_a_fleet_exactly_at_its_connection_ceiling_is_allowed() -> None:
     """`>`, not `>=` — the shipped chart sits exactly on its own number.
 
-    `values.yaml` declares 136 against 17 pooled processes × a pool of 8, deliberately, so the
-    ceiling ships as a statement of the current shape rather than as slack. Off by one here and
-    every pod the chart renders refuses to start.
+    Written against the arithmetic the fleet actually opens: 6 front doors at three pools each plus
+    11 other pooled processes at one, all at a pool of 8. Off by one here and every pod the chart
+    renders refuses to start.
     """
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
         pg_fleet_pooled_processes=17,
+        pg_fleet_front_door_processes=6,
         pg_pool_max_size=8,
-        pg_fleet_max_connections=136,
+        pg_fleet_max_connections=232,
     )
-    assert settings.pg_fleet_max_connections == 136
+    assert settings.pg_fleet_max_connections == 232
+
+
+def test_a_front_door_is_counted_at_three_pools_and_a_worker_at_one() -> None:
+    """The correction itself: the same fleet costs 3× more where the front doors are.
+
+    `core/db._pool_for` keys a pool on `(loop, dsn, options)`, so a turn-serving process holds the
+    stores' pool, `/readyz`'s own (a different statement timeout, so a different key) and the
+    LangGraph checkpointer's — measured against a live server in
+    `tests/test_config_pools.py::test_a_front_door_process_opens_the_pools_the_budget_charges_it_for`.
+    Charging one per process is what let the shipped chart declare 112 against a 136 ceiling while
+    opening ~208; charging three per process would overstate every worker by the same factor in the
+    other direction, so the two are counted apart.
+    """
+    common = {"_env_file": None, "pg_fleet_pooled_processes": 4, "pg_pool_max_size": 10}
+    all_workers = Settings(pg_fleet_front_door_processes=0, **common)  # type: ignore[arg-type]
+    assert all_workers.pg_fleet_front_door_processes == 0
+    with pytest.raises(ValueError) as excinfo:
+        Settings(pg_fleet_front_door_processes=0, pg_fleet_max_connections=39, **common)  # type: ignore[arg-type]
+    assert "may open 40 Postgres connections" in str(excinfo.value)
+    with pytest.raises(ValueError) as excinfo:
+        Settings(pg_fleet_front_door_processes=4, pg_fleet_max_connections=39, **common)  # type: ignore[arg-type]
+    assert "may open 120 Postgres connections" in str(excinfo.value)
+
+
+def test_more_front_doors_than_pooled_processes_is_refused() -> None:
+    """A front door is one of the pooled processes, not a process beside them.
+
+    Without this the two counts could disagree in the direction that *subtracts*: `others` would go
+    negative and the budget would come out below what a single front door opens.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None, pg_fleet_pooled_processes=2, pg_fleet_front_door_processes=3
+        )
+    assert "pg_fleet_front_door_processes" in str(excinfo.value)
 
 
 def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> None:
     """The product is the thing nobody had computed, so the message has to show it.
 
     `core/config/store.py` stated "keep it under the server's max_connections" in prose and nothing
-    computed the left-hand side, so the shipped chart ran every pod on the default pool of 16 and
-    the fleet's real ceiling was ~272 against the max_connections=100 D-119 measured against. An
-    operator seeing this needs both numbers and both levers, not the name of one setting.
+    computed the left-hand side; when something finally did, it computed one pool per process and so
+    understated the shipped fleet by a factor of three where it mattered. An operator seeing this
+    needs both numbers and every factor, not the name of one setting.
     """
     with pytest.raises(ValueError) as excinfo:
         Settings(  # type: ignore[call-arg]
             _env_file=None,
             pg_fleet_pooled_processes=17,
+            pg_fleet_front_door_processes=6,
             pg_pool_max_size=16,
             pg_fleet_max_connections=136,
         )
     message = str(excinfo.value)
-    assert "272" in message and "136" in message
-    assert "17 pooled process" in message and "16 per pool" in message
+    assert "464" in message and "136" in message
+    assert "6 front-door process" in message and "3 pools each" in message
+    assert "11 other pooled process" in message and "16 per pool" in message
     assert "pg_fleet_max_connections" in message and "pg_pool_max_size" in message
 
 
