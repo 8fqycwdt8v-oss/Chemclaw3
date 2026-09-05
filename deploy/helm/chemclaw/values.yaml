@@ -564,12 +564,6 @@ resources:
 
 # Non-secret config → ConfigMap → CHEMCLAW_* env. Keys mirror chemclaw/config.Settings exactly.
 config:
-  # Where the calculation server lives. **Stated rather than left to the code default**, which is a
-  # loopback address (`http://127.0.0.1:8860/mcp`) chosen for a dev process — so before this key
-  # existed, a `helm install` produced a `calc` bundle whose every tool and all five durable jobs
-  # raised `CalcServerError` against nothing, on a chart that named no host, no token and no egress
-  # rule for the wire every one of those calls now crosses.
-  CHEMCLAW_CALC_SERVER_URL: "http://chemclaw3-mcp-calc:8860/mcp"
   # The one model destination. **Stated rather than left to the code default**, for the reason
   # `CHEMCLAW_CALC_SERVER_URL` above is: the default is the local dev mock on loopback, and a pod
   # that inherited it would refuse to boot (`api/middleware._refuse_unconfigured_llm_gateway`).
