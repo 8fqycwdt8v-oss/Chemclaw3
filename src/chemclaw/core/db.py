@@ -517,8 +517,12 @@ def bind_pool_metrics() -> None:
     pool this process holds**, not `settings.pg_pool_max_size`: a process routinely holds more than
     one — this module keys on `(dsn, options)` precisely so `/readyz` and the stores do not share
     connections, and the checkpointer registers a third — and measured against a live server that
-    was three pools and 48 connections reported as 16, which puts the shipped chart at ~184 real
-    connections against the 136 its values file provisions.
+    was three pools and 48 connections reported as 16. That under-count reached the fleet
+    validator too, which multiplied *processes* rather than pools: the shipped chart's real floor
+    is **208** where its values file provisioned 136. Both are fixed —
+    `pg_fleet_pools` counts pools and `postgres.maxConnections` provisions 256 — and the figure to
+    trust is whichever `tests/test_deploy_chart.py` derives from the rendered chart, not this
+    sentence.
 
     Imported inside the function: `core/metrics.py` is a sibling of this module and `core` keeps
     its no-module-scope-sibling-import rule (`tests/test_layering.py`), the same lazy exception

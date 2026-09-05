@@ -107,7 +107,6 @@ run() {
 
     local start; start="$(date +%s)"
     local storm_out; storm_out="$LIVE_DIR/soak-round.md"
-    CHEMCLAW_LLM_PROVIDER=openai_compatible \
     CHEMCLAW_LLM_BASE_URL="http://127.0.0.1:$MOCK_PORT/v1" \
     CHEMCLAW_LLM_MODEL=mock \
       timeout 1800 "$python" -m chemclaw.cli.live_storm \

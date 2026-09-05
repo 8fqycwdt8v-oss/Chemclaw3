@@ -177,6 +177,15 @@ class InMemoryPlanApprovalStore:
     It is *not* a test double. It is the backend a `session_store="memory"` deployment gets, and
     the CLI is a real one of those — so the harness gate holds there rather than being waived, and
     what it holds against has precisely the lifetime of the session state it authorizes.
+
+    **The list is append-only and `_latest` scans it backwards, and that is measured rather than
+    defended.** A review filed the unbounded growth as a defect; the numbers say otherwise, so they
+    are here instead of a bounded structure nobody needs. At 100 decisions — a long CLI session —
+    the worst-case lookup is 0.005 ms; at 10,000 it is 0.2 ms and 0.6 MB; at 200,000, which no
+    process reaching this backend will see, 3.5 ms and 12.8 MB. The shipped chart sets
+    `session_store="postgres"`, so a deployed fleet uses `PlanApprovalStore` and never this. Adding
+    an eviction policy here would buy nothing and cost a second definition of "which approval is
+    live" — the one thing the two backends must not disagree about.
     """
 
     def __init__(self) -> None:

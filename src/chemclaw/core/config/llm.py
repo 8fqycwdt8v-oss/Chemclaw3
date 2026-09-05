@@ -1,4 +1,4 @@
-"""The LLM provider seam (plan Phase F0) plus everything that rides its transport.
+"""The LLM gateway seam (plan Phase F0) plus everything that rides its transport.
 
 One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
 every section into the one config object and owns the env prefix, the `.env` loading and the
@@ -13,30 +13,39 @@ from pydantic_settings import BaseSettings
 
 
 class LlmSettings(BaseSettings):
-    """The LLM provider seam (plan Phase F0) plus everything that rides its transport.
+    """The LLM gateway seam (plan Phase F0) plus everything that rides its transport.
 
-    Grouped because these knobs configure the one internal (or dev-Anthropic) endpoint and its
-    uses: chat generation, per-task model routing (F10-E), the LLM-as-judge verifier (F10-B),
-    and the embedding path (F10-A) — which reuses the LLM base_url/credential/TLS, so its
+    Grouped because these knobs configure the one OpenAI-compatible gateway and its uses: chat
+    generation, per-task model routing (F10-E), the LLM-as-judge verifier (F10-B), the live-probe
+    judge, and the embedding path (F10-A) — which reuses the LLM base_url/credential/TLS, so its
     provider knobs and the validator tying it to `llm_base_url` live here, in the section that
     owns that link.
     """
 
-    # The agent's chat client is selected by config, so the deployment can point the agent at
-    # the internal OpenAI-compatible ("OpenLLM-like") endpoint without any code change, keeping
-    # Anthropic as a local-dev path. `openai_compatible` reaches the endpoint with **one generic
-    # API credential** (`llm_api_key`) — deliberately *not* per-user Entra: the raw inference
-    # call is not a user-scoped resource (see docs/archive/plans/foundation-plan.md §0).
-    # `llm_base_url`/`llm_model` are required for `openai_compatible` (validated below); the TLS
-    # CA bundle, timeout, and retry budget shape the transport so an internal endpoint with a
-    # private CA works from config alone. `llm_temperature`/`llm_max_tokens` are the default
-    # generation params threaded into the agent (F0.3). The default provider is `anthropic` so a
-    # fresh checkout config singleton is valid with no endpoint set; production sets
-    # `CHEMCLAW_LLM_PROVIDER=openai_compatible` + the base_url/model. No provider client class
-    # is imported outside `agent/llm_provider.py`.
-    llm_provider: Literal["openai_compatible", "anthropic"] = "anthropic"
-    llm_base_url: str = ""
-    llm_model: str = ""
+    # **Every model call goes to one OpenAI-compatible gateway, and which vendor sits behind it is
+    # the gateway's business rather than this codebase's**
+    # (`D-2026-09-04-a-gateway-is-the-only-provider`). There is no provider field: an `llm_provider`
+    # naming a second SDK is what let `llm_base_url` be silently ignored on one of the two paths,
+    # so a network-exposed pod configured with an internal gateway URL booted clean and sent every
+    # prompt to the public vendor API. A destination that cannot be overridden by a mode selector
+    # cannot be bypassed by one.
+    #
+    # The gateway is reached with **one generic API credential** (`llm_api_key`) — deliberately
+    # *not* per-user Entra: the raw inference call is not a user-scoped resource (see
+    # docs/archive/plans/foundation-plan.md §0). The TLS CA bundle, timeout and retry budget shape
+    # the transport so an internal endpoint with a private CA works from config alone.
+    # `llm_temperature`/`llm_max_tokens` are the default generation params threaded into the agent
+    # (F0.3).
+    #
+    # **The defaults name the mock gateway on this machine**, so a fresh checkout is valid with no
+    # credential and no endpoint — and the worst a misconfigured deployment can do is dial its own
+    # loopback and be refused, loudly, on the first turn. The previous default was the public
+    # Anthropic API, which failed *quietly* and in the exfiltrating direction. `make live-up` and
+    # `infra/live/` start `chemclaw.cli.mock_llm` on exactly this address
+    # (`cli/mock_llm.MOCK_PORT`); both are still validated as non-empty below, because an empty
+    # base URL would hand the request back to the OpenAI SDK's own hardcoded public host.
+    llm_base_url: str = "http://127.0.0.1:8820/v1"
+    llm_model: str = "mock"
     # A `SecretStr`, like every other credential on this object
     # (`D-2026-08-26-a-credential-is-a-type-not-a-convention`): its `repr` is `**********`, so the
     # value cannot reach a log line, a `model_dump()` or a pydantic error message through a route
@@ -78,11 +87,11 @@ class LlmSettings(BaseSettings):
     # `core/logging.py`'s `_SECRET_SETTINGS` entirely until 2026-08-26, so the fallback
     # endpoint's key was the one credential in this file that no redaction covered at all.
     llm_fallback_api_key: SecretStr = SecretStr("")
-    # Unset by default, and that default is load-bearing: current frontier models (the shipped
-    # `agent_model`, claude-sonnet-5) reject an explicit `temperature` outright —
-    # `400 invalid_request_error: temperature is deprecated for this model` — so a config that
-    # always sent one failed *every* turn on the default Anthropic path. No test caught it
-    # because every test injects a fake chat client, so the parameter never reached a real API.
+    # Unset by default, and that default is load-bearing: current frontier models reject an
+    # explicit `temperature` outright — `400 invalid_request_error: temperature is deprecated for
+    # this model` — so a config that always sent one failed *every* turn on the then-default
+    # provider. No test caught it because every test injects a fake chat client, so the parameter
+    # never reached a real API.
     # `None` means "send no temperature and let the model use its own default"; a deployment on a
     # model that still accepts one sets it explicitly. Threaded into the agent by
     # `build_langgraph_agent`, which omits the key entirely when this is None (F0.3).
@@ -92,21 +101,13 @@ class LlmSettings(BaseSettings):
     # How hard the model is asked to think before answering — the deployment's default, which a
     # profile may override per agent (`AgentProfile.effort`).
     #
-    # **`openai_compatible` only**, enforced by `_effort_is_provider_scoped` below for this field
-    # and by `llm_provider.build_chat_model` for every path including `AgentProfile.effort`.
-    #
-    # This comment used to argue the opposite, and the retraction is the useful part. It said both
-    # clients "take a `reasoning_effort` kwarg — measured on the installed distributions", and that
-    # publishing `low | medium | high` as their intersection "keeps the promise that a generation
-    # setting means the same thing on both". What was measured was that both clients *accept* the
-    # kwarg; what neither was asked is what they *send*. Through `_get_request_payload`,
-    # `ChatAnthropic` turns it into `output_config={'effort': ...}` **plus** an injected
-    # `thinking={'type': 'adaptive'}` — extended thinking, a different feature with a `temperature`
-    # conflict and a claim on `llm_max_tokens`. There was no intersection to publish; there were
-    # two parameters wearing one name.
-    #
-    # `low | medium | high` survives as the vocabulary because it is what the supported provider
-    # honours, not because it is shared.
+    # **Unconditionally usable, and that is a widening this collapse bought.** It used to be
+    # refused on the Anthropic path by two guards, because `ChatAnthropic` folded the same kwarg
+    # into `output_config={'effort': ...}` **plus** an injected `thinking={'type': 'adaptive'}` —
+    # extended thinking, a different feature with a `temperature` conflict and a claim on
+    # `llm_max_tokens`. There was no intersection to publish; there were two parameters wearing one
+    # name. With one client there is one meaning, so both guards are gone and `low | medium | high`
+    # is simply what the gateway is asked for.
     #
     # **`None` means the key is absent from the request**, not present-and-null — the rule this
     # module records having broken every turn once, and it binds harder here than for
@@ -115,11 +116,12 @@ class LlmSettings(BaseSettings):
     # rather than degrading to the fallback. Unset is therefore the shipped default, and a
     # deployment turns it on against an endpoint it has checked.
     #
-    # Both clients are `extra="ignore"`, so a client that stopped accepting this kwarg would drop
-    # it in silence rather than raise — which is why `tests/test_llm_effort.py` asserts the
-    # **request payload** rather than the attribute on the constructed object. An earlier version
-    # of this comment cited `tests/test_llm_provider.py` for an attribute assertion; that file
-    # contains no `effort`, and the assertion it described is the one that missed all of the above.
+    # `ChatOpenAI` is `extra="ignore"`, so a client that stopped accepting this kwarg — or a
+    # gateway that does not understand it — would drop it in silence rather than raise, which is
+    # why `tests/test_llm_effort.py` asserts the **request payload** rather than the attribute on
+    # the constructed object. An earlier version of this comment cited `tests/test_llm_provider.py`
+    # for an attribute assertion; that file contains no `effort`, and the assertion it described is
+    # the one that missed all of the above.
     llm_effort: Literal["low", "medium", "high"] | None = None
     # **The model's context window, and until this existed no number anywhere in this tree was
     # one.** `agent_context_token_budget` is 100,000 by fiat, and neither it nor the static prefix
@@ -141,31 +143,12 @@ class LlmSettings(BaseSettings):
     # window is a property of the endpoint every task shares. A deployment that routes tasks across
     # models with different windows should declare the smallest.
     llm_context_window_tokens: int = Field(default=0, ge=0)
-    # Anthropic prompt caching: mark the static prefix — the tool schemas and the system prompt —
-    # so a repeat call reads it at roughly a tenth of the input price instead of re-sending it at
-    # full price. Read only by `agent/llm_provider.prompt_caching_middleware`, which is also the
-    # only place that knows caching is provider-specific.
-    #
-    # **On by default, because the prefix here is large, static, and re-sent on every model call.**
-    # Measured on the default profile: 25,548 characters of system prompt across two blocks plus 29
-    # tool schemas — 21,321 tokens that are byte-identical for the whole life of a profile,
-    # ahead of a conversation tail that is not. Measured live before this existed, across 22 billed
-    # turns: `cache_read_tokens = 0` and `cache_write_tokens = 0` on every one of them, an
-    # input:output ratio of 199:1, and single turns reaching 260,000 input tokens. A cache write
-    # costs 1.25x, a read 0.1x, so two calls over one prefix already pay for the write — and a
-    # single agent turn makes one model call per tool round trip, so break-even arrives inside the
-    # first turn rather than across turns.
-    #
-    # Off is for a deployment that has measured the opposite: turns rarer than the 5-minute TTL and
-    # exactly one model call each, where every write is paid and never read.
-    llm_prompt_caching: bool = True
     # Per-task model routing (plan F10-E). Maps a task name to the model id to use for it, so a
     # cheap model can run high-throughput/secondary steps (verification, classification) while
     # the frontier model drives the main reasoning turn — without a second provider or a second
-    # import site (`build_chat_model(task)` stays the one place a model is built). Model ids
-    # are for the *active* provider (an `openai_compatible` model name, or an Anthropic one); a
-    # task with no entry falls back to the provider's default (`llm_model`/`agent_model`), so an
-    # empty map (the default) is exactly today's single-model behavior. ENV override is JSON,
+    # import site (`build_chat_model(task)` stays the one place a model is built). Model ids are
+    # whatever the gateway serves under that name; a task with no entry falls back to `llm_model`,
+    # so an empty map (the default) is exactly today's single-model behavior. ENV override is JSON,
     # e.g. CHEMCLAW_MODEL_ROUTES='{"verifier": "internal-small", "agent": "internal-large"}'.
     model_routes: dict[str, str] = Field(default_factory=dict)
     # Answer verification & confidence routing (plan F10-B). When `verifier_enabled`, a drafted
@@ -253,76 +236,49 @@ class LlmSettings(BaseSettings):
     embedding_batch_size: int = Field(default=256, ge=1)
 
     @model_validator(mode="after")
-    def _llm_provider_config(self) -> Self:
-        """`openai_compatible` needs an endpoint and a model, or the client cannot be built.
+    def _gateway_is_addressed(self) -> Self:
+        """The gateway needs an address and a model name, or the client cannot be built.
 
-        Checked at startup so a half-configured provider fails here with a clear message rather
-        than as an opaque connection/404 error on the first model call. The `anthropic` dev path
-        needs neither (it reads its key/model elsewhere), so the check is provider-scoped.
+        **Unconditional, where this used to be scoped to one value of a provider field.** That
+        scoping is what let the other value ignore `llm_base_url` entirely: a deployment could set
+        a gateway URL, pass every validator, and have the client resolve to the public vendor host
+        anyway. With one client there is one destination, so the check that guards it applies to
+        every configuration there is.
+
+        Both fields default to the local mock gateway, so this fires only on a deployment that
+        explicitly blanks one — which is the case that matters, because an empty `base_url` is not
+        "no destination", it is the OpenAI SDK's own hardcoded public host. Checked at startup so a
+        half-configured endpoint fails here with a clear message rather than as an opaque
+        connection/404 error on the first model call.
         """
-        if self.llm_provider == "openai_compatible":
-            required = (("llm_base_url", self.llm_base_url), ("llm_model", self.llm_model))
-            missing = [name for name, value in required if not value]
-            if missing:
-                raise ValueError(
-                    f"llm_provider='openai_compatible' requires {', '.join(missing)} to be set"
-                )
-        return self
-
-    @model_validator(mode="after")
-    def _effort_is_provider_scoped(self) -> Self:
-        """`llm_effort` is refused on the Anthropic path, because there it means something else.
-
-        **Measured, not read off the documentation, and the first version of this feature had it
-        wrong.** `_generation_options` passes `reasoning_effort` to whichever client is configured
-        on the strength of both accepting the kwarg. Both do accept it; they do not do the same
-        thing with it. Against `langchain-anthropic`, `_get_request_payload` for `claude-sonnet-5`:
-
-            reasoning_effort="high"  ->  output_config={'effort': 'high'}
-                                         thinking={'type': 'adaptive', 'display': 'summarized'}
-
-        So on that provider the knob silently enables **extended thinking**, which is a different
-        decision with three consequences the setting's name does not hint at: `thinking` and a set
-        `temperature` cannot both be sent (a 400, and `llm_provider._failover_exceptions`
-        deliberately does not fail 400s over, so *every* turn fails); thinking tokens are drawn from
-        `llm_max_tokens`, shrinking the answer allowance `agent/context_budget.py` reserves it as;
-        and a model with no effort levels is still sent `output_config`.
-
-        Refused rather than translated, and refused rather than silently ignored. Translating means
-        choosing a thinking budget nobody has asked for and making two other settings conditional on
-        this one. Ignoring means a profile that says `effort: high` quietly getting default effort —
-        a control that reads as one and is not, which this repository has a standing rule against.
-        Turning it on for Anthropic is a real decision and wants its own ADR; until then this says
-        so at startup instead of at the first turn.
-        """
-        if self.llm_effort is not None and self.llm_provider == "anthropic":
+        required = (("llm_base_url", self.llm_base_url), ("llm_model", self.llm_model))
+        missing = [name for name, value in required if not value]
+        if missing:
             raise ValueError(
-                "llm_effort is only supported on llm_provider='openai_compatible'; on 'anthropic' "
-                "reasoning_effort enables extended thinking (measured: it adds "
-                "thinking={'type': 'adaptive'}), which conflicts with llm_temperature and draws "
-                "from llm_max_tokens. Unset CHEMCLAW_LLM_EFFORT, or set "
-                "CHEMCLAW_LLM_PROVIDER=openai_compatible."
+                f"the LLM gateway requires {', '.join(missing)} to be set — an empty base URL is "
+                "not 'no destination', it is the provider SDK's own public host"
             )
         return self
 
     @model_validator(mode="after")
     def _embedding_provider_config(self) -> Self:
-        """`openai_compatible` embeddings need the shared endpoint and a model name.
+        """`openai_compatible` embeddings need a model name — the endpoint is already required.
 
-        The embedding path reuses the LLM transport (`llm_base_url`), which stays empty under
-        the default `anthropic` chat provider — so the combination must be rejected at startup
-        instead of surfacing as an opaque connection error on the first note-index or query
-        embedding deep in the retrieval path.
+        The embedding path reuses the LLM transport, so a half-configured pair has to be rejected
+        at startup instead of surfacing as an opaque connection error on the first note-index or
+        query embedding deep in the retrieval path. `embedding_model` is the whole check:
+        it has no default, because no gateway serves embeddings under a name this repository
+        can guess.
+
+        **`llm_base_url` is deliberately not re-checked here, and saying so is the point.** It was,
+        with a docstring claiming the re-check caught a deployment that blanked it — and the branch
+        could never run: `_gateway_is_addressed` above is unconditional and declared first, so
+        pydantic raises on an empty base URL before this validator is reached, whatever the
+        embedding provider is. The test that covered it passed on the *other* validator's message.
+        Nothing is weakened by the removal; the surviving check is strictly the wider one.
         """
-        if self.embedding_provider == "openai_compatible":
-            required = (
-                ("llm_base_url", self.llm_base_url),
-                ("embedding_model", self.embedding_model),
+        if self.embedding_provider == "openai_compatible" and not self.embedding_model:
+            raise ValueError(
+                "embedding_provider='openai_compatible' requires embedding_model to be set"
             )
-            missing = [name for name, value in required if not value]
-            if missing:
-                raise ValueError(
-                    f"embedding_provider='openai_compatible' requires "
-                    f"{', '.join(missing)} to be set"
-                )
         return self

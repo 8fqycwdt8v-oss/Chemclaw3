@@ -63,6 +63,45 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **The LLM gateway inherits an ambient proxy unless a private CA bundle is configured** — [S],
+  found while collapsing the provider seam (`D-2026-09-04-a-gateway-is-the-only-provider`).
+  `agent/llm_provider._tls_http_client` returns `None` when `llm_tls_ca_bundle` is empty, which
+  leaves `ChatOpenAI` to build its own `httpx` client — and that client reads `HTTPS_PROXY` /
+  `ALL_PROXY` from the environment. So on a publicly-trusted gateway (no bundle), an env var set on
+  the pod redirects every prompt, completion and `Authorization` bearer to a host of the setter's
+  choosing. `core/http.private_ca_transport` states `trust_env=False` and both LLM seams take it,
+  but only on the bundle branch; `evals/live_judge.py` used to pass `trust_env=False`
+  unconditionally for its own client and lost that when it moved onto the seam, which is how this
+  surfaced. The fix is one line — hand a `trust_env=False` client in on the no-bundle branch too —
+  and it is **not** free: `trust_env=False` also stops httpx reading `SSL_CERT_FILE` /
+  `SSL_CERT_DIR`, so a deployment relying on an env-supplied trust store would break. That is a
+  behavioural change for every deployment behind a corporate proxy and wants its own ADR rather
+  than riding along with the collapse.
+  **`core/netguard` is a partial mitigation rather than a bystander, and a first telling of this
+  row said otherwise.** Measured, with the guard armed on `{127.0.0.1, localhost,
+  gateway.internal}`: `evil-proxy.example` and `corp-proxy.internal` are both refused at
+  `getaddrinfo`, and a bare `203.0.113.9:3128` at `connect` — so an `HTTPS_PROXY` naming a host
+  outside the derived allowlist does not get out. What the guard cannot see is a proxy the
+  deployment has *legitimately* allowlisted (`CHEMCLAW_EGRESS_ALLOW`, or a corporate proxy sharing
+  a host with declared infrastructure), where nothing distinguishes the operator's intent from an
+  env var somebody else set. That residual case, plus the guard being disableable
+  (`CHEMCLAW_EGRESS_GUARD_ENABLED=false`), is what keeps this row open.
+
+- [ ] **The gateway boot guard reaches one process, and the worker is the other one** — [M],
+  opened by `D-2026-09-04-a-gateway-is-the-only-provider`. `_refuse_unconfigured_llm_gateway` and
+  `_refuse_unauthenticated_exposure` are called only from `api/app.py`, so a background worker
+  never runs either — and `durable/template_activities.py` builds a graph inside an activity, so a
+  worker pod *does* make model calls to `llm_base_url`. The chart is not affected (verified:
+  `helm template` renders `CHEMCLAW_LLM_BASE_URL` into `chemclaw-config`, and 9 Deployments plus 3
+  Jobs `envFrom` it), so this bites a non-Helm or partially-overridden deployment, which gets a
+  silent loopback dial in the worker where the front door would have refused to boot.
+  **Not a one-liner, which is why it is a row.** The guard's signal is `service_host` being
+  non-loopback — a property of a *bind*, and a worker does not bind. Extending it means deciding
+  what "exposed" means for a process that only makes outbound calls, which is a design question.
+  The front-door-only scope is pre-existing (`_refuse_unauthenticated_exposure` has always been
+  that way); what is new is that the ADR's argument — "loudly at boot rather than loudly on the
+  first turn" — only holds for one of the two process kinds.
+
 - [ ] **A standing plan approval authorizes any state-changing tool, not the plan's steps** — [L],
   from the 2026-08 security review (proven live). `plan_gate.enforce_plan_approval` refuses a
   state-changing call unless an approval exists for the current plan's identity — `plan_identity`,
@@ -806,10 +845,15 @@ only holds defects can only ever restore the system to what it already intended 
       day's verifier-margin run spent ~120 calls through it), so present-and-rejected is a *state*
       of this environment rather than a fact about it, and the worse case remains the stale one —
       it reads as a defect rather than as a missing credential.
-      `tests/test_prompt_caching.py` probes reachability and skips with a reason naming which case
-      it is, so the suite is honest about it. The *live* half of the eval plan (the bucket-C control
-      arm, any external benchmark, grading any probe on the model's judgement) needs the working
-      state and nothing else — probe first (`printenv 'API-KEY'`, one cheap call), then run the
+      **Nothing in the suite probes it any more**: `tests/test_prompt_caching.py` did, skipping with
+      a reason that named which case it was, and that file went with the prompt-caching mechanism
+      when the provider concept was removed (`D-2026-09-04-a-gateway-is-the-only-provider`). The
+      key is also no longer usable by `src/` directly — every model call goes to the gateway
+      `CHEMCLAW_LLM_BASE_URL` names, so this credential is only a credential *for* a gateway
+      (`infra/live/e2e-full-stack/up.sh` maps it onto `CHEMCLAW_LLM_API_KEY` when one is
+      configured). The *live* half of the eval plan (the bucket-C control arm, any external
+      benchmark, grading any probe on the model's judgement) needs the working state and nothing
+      else — probe first (`printenv 'API-KEY'`, one cheap call **through a gateway**), then run the
       measurement in the same session, because tomorrow's state is not evidence about today's.
 
 - [ ] **Memory records; it does not change what the next turn does** — [L], and it needs an ADR

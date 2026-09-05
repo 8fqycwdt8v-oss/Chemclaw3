@@ -16,7 +16,7 @@
 # **`[[d-collide]]` is a mock selector and is inert to a real model.** `cli/mock_llm.py` picks a
 # behaviour by the `[[name]]` marker in the turn's message, so this one question drives a real
 # durable launcher with **zero LLM calls** when the lane points at the mock
-# (`CHEMCLAW_LLM_PROVIDER=openai_compatible`, `CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`) —
+# (`CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`, which is the shipped default) —
 # which is what makes this suite runnable without a model credential at all. Against a real model
 # the marker is four characters of noise in a question that already asks for the same calculation,
 # and the same assertions hold. Carrying the selector inside the message rather than beside it is

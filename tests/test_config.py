@@ -63,14 +63,97 @@ def test_skills_dirs_splits_the_path_list() -> None:
     assert trailing.skills_dirs == ["skills"]
 
 
-def test_llm_provider_defaults_to_anthropic() -> None:
-    """The default provider is the dev path, so the config singleton is valid with no endpoint."""
+def test_the_default_gateway_is_the_mock_on_this_machine() -> None:
+    """A fresh checkout is valid with no endpoint and no credential — and cannot leave the host.
+
+    The previous default was `llm_provider="anthropic"` with an empty `llm_base_url`, which meant a
+    process that configured nothing sent every prompt to the public vendor API. This one dials
+    `cli/mock_llm`'s port on loopback, so the worst an unconfigured deployment can do is be refused
+    a connection — loudly, on the first turn, rather than quietly and outbound
+    (`D-2026-09-04-a-gateway-is-the-only-provider`). A non-loopback bind on this default is refused
+    at boot by `api/middleware._refuse_unconfigured_llm_gateway`.
+
+    There is no `llm_provider` field to assert; that is the point, and
+    `test_no_provider_field_survives` is what says so.
+    """
+    from chemclaw.cli.mock_llm import MOCK_BASE_URL
+
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert settings.llm_provider == "anthropic"
-    # Unset, not 0.0: the default `agent_model` rejects an explicit temperature outright, so a
+    assert settings.llm_base_url == MOCK_BASE_URL
+    assert settings.llm_model == "mock"
+    # Unset, not 0.0: current frontier models reject an explicit temperature outright, so a
     # default of 0.0 made the shipped config fail every live turn with a 400.
     assert settings.llm_temperature is None
     assert settings.llm_max_tokens == 4096
+
+
+def test_the_live_lane_derives_its_bundle_list_rather_than_naming_one() -> None:
+    """A bundle set written into the shell goes stale the day a bundle is added.
+
+    `CHEMCLAW_CONNECTORS_REQUIRED` is true in this lane and `connectors_enabled` is unset, so
+    discovery is enablement and a bundle core enables that nothing starts is not a warning — it is
+    `ConnectorsUnavailable` and a front door that refuses to boot. That is not hypothetical:
+    wiring `rxnpredict` in as a declaration-only bundle broke `make live-up` against a
+    `for name in chem safety` loop, and it stayed broken because nothing here failed.
+
+    Two fixes were written for it independently, and the one that survived is the wider one — the
+    lane starts what is *enabled* rather than narrowing what is enabled. Constraining
+    `CHEMCLAW_CONNECTORS_ENABLED` to the fleet's bundles would have taken the core-served ones
+    (`bo`, `calc`, `molfp`, `rxnfp`, `results`) off the lane with it, which is why this asserts the
+    derivation exists and *not* that the lane pins its enabled set.
+    """
+    script = (
+        Path(__file__).resolve().parent.parent / "infra" / "live" / "processes.sh"
+    ).read_text()
+
+    assert "fleet_bundle_names()" in script, "the lane must derive its fleet bundles"
+    assert 'for name in $(fleet_bundle_names "$python"); do' in script, (
+        "start_fleet_bundles must iterate the derived names rather than a list written here"
+    )
+    assert "export CHEMCLAW_CONNECTORS_ENABLED" not in script, (
+        "the lane must not pin its enabled set: narrowing it drops the core-served bundles the "
+        "dev connector process provides, which is a second way to break the same boot"
+    )
+
+
+def test_the_live_lane_does_not_transcribe_the_gateway_address_into_shell() -> None:
+    """`infra/live/processes.sh` must ask this config for the gateway, never carry a copy of it.
+
+    The lane decides whether to start `cli/mock_llm` by comparing the *resolved* `llm_base_url`
+    against `MOCK_BASE_URL`, both read out of the interpreter it is about to launch every process
+    with. It used to compare `$CHEMCLAW_LLM_BASE_URL` against the address written out in the
+    script — which was true for as long as an operator had to set that variable, and false from
+    the moment `D-2026-09-04-a-gateway-is-the-only-provider` made it a `Settings` default that
+    nothing in the lane sets. Measured on `make live-up`: the mock never started, the front door
+    came up pointed at a closed port, and the run log named the gateway as though it were serving.
+
+    An absence test, because the failure is a *duplication* rather than a wrong value: the copy
+    agreed with the default on the day it was written, and a shell string cannot be re-derived
+    when the Python one moves. `.env.example` is deliberately not covered — a documented mirror of
+    every setting is what that file is for, and nothing branches on it.
+    """
+    from chemclaw.cli.mock_llm import MOCK_BASE_URL
+
+    script = Path(__file__).resolve().parent.parent / "infra" / "live" / "processes.sh"
+    text = script.read_text(encoding="utf-8")
+    for address in {MOCK_BASE_URL, Settings(_env_file=None).llm_base_url}:  # type: ignore[call-arg]
+        assert address not in text, (
+            f"{script.name} writes out {address!r}, which this config also defines. Read it from "
+            "`Settings`/`cli.mock_llm` instead — a shell copy of a Python default is exactly how "
+            "the lane came to start a front door pointed at a mock it did not start."
+        )
+
+
+def test_no_provider_field_survives() -> None:
+    """The concept is gone, not narrowed to one value — asserted, because that was the decision.
+
+    A one-value enum would have left every reader in place and the next vendor one commit away.
+    `agent_model` goes with it: a vendor model id in git whose only readers were the deleted
+    branch and an `or` tail behind `llm_model`.
+    """
+    assert "llm_provider" not in Settings.model_fields
+    assert "llm_prompt_caching" not in Settings.model_fields
+    assert "agent_model" not in Settings.model_fields
 
 
 def test_parity_defaults_are_backward_compatible() -> None:
@@ -110,21 +193,22 @@ def test_parity_json_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.tool_authz_default == "deny"
 
 
-def test_openai_compatible_requires_endpoint_and_model() -> None:
-    """Selecting the internal provider without a base_url/model fails at startup, clearly."""
+def test_a_blanked_gateway_address_is_refused() -> None:
+    """An empty base URL is not "no destination" — it is the SDK's own hardcoded public host.
+
+    This check was scoped to `llm_provider == "openai_compatible"`, which is exactly how the other
+    value came to ignore `llm_base_url` entirely. Unconditional now: both fields default to the
+    mock, so it fires only on a deployment that explicitly blanks one, which is the case worth
+    catching.
+    """
     with pytest.raises(ValueError, match="llm_base_url"):
-        Settings(_env_file=None, llm_provider="openai_compatible")  # type: ignore[call-arg]
+        Settings(_env_file=None, llm_base_url="")  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="llm_model"):
-        Settings(  # type: ignore[call-arg]
-            _env_file=None,
-            llm_provider="openai_compatible",
-            llm_base_url="https://llm.internal/v1",
-        )
+        Settings(_env_file=None, llm_model="")  # type: ignore[call-arg]
 
 
 def test_llm_base_url_overrides_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """The internal endpoint is a `CHEMCLAW_`-prefixed env var, like every other setting."""
-    monkeypatch.setenv("CHEMCLAW_LLM_PROVIDER", "openai_compatible")
     monkeypatch.setenv("CHEMCLAW_LLM_BASE_URL", "https://llm.internal/v1")
     monkeypatch.setenv("CHEMCLAW_LLM_MODEL", "internal-model")
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
@@ -257,18 +341,19 @@ def test_the_shipped_defaults_boot() -> None:
     )
 
 
-def test_openai_compatible_embeddings_require_endpoint_and_model() -> None:
-    """The embedding provider reuses `llm_base_url`; selecting it half-configured fails early."""
-    with pytest.raises(ValueError, match="llm_base_url"):
+def test_openai_compatible_embeddings_require_a_model_name() -> None:
+    """Selecting the endpoint embedder without naming its model fails at startup, in its own words.
+
+    The endpoint half is *not* asserted here, because this validator does not own it: an empty
+    `llm_base_url` is refused unconditionally by `_gateway_is_addressed`, which is declared first
+    and therefore raises before this one runs. This test used to pass `llm_base_url=""` and match
+    on `"llm_base_url"` — which is the other validator's message, so it stayed green with the
+    embedding branch deleted. Matching the embedding validator's own wording is what makes it a
+    test of the embedding validator (`test_a_blanked_gateway_address_is_refused` covers the rest).
+    """
+    with pytest.raises(ValueError, match="requires embedding_model"):
         Settings(  # type: ignore[call-arg]
             _env_file=None,
-            embedding_provider="openai_compatible",
-            embedding_model="internal-embed",
-        )
-    with pytest.raises(ValueError, match="embedding_model"):
-        Settings(  # type: ignore[call-arg]
-            _env_file=None,
-            llm_provider="openai_compatible",
             llm_base_url="https://llm.internal/v1",
             llm_model="internal-model",
             embedding_provider="openai_compatible",
@@ -729,19 +814,42 @@ def test_the_connection_budget_is_undeclared_by_default() -> None:
 
 
 def test_a_fleet_exactly_at_its_connection_ceiling_is_allowed() -> None:
-    """`>`, not `>=` — the shipped chart sits exactly on its own number.
+    """`>`, not `>=` — a chart may declare exactly the number it renders.
 
-    `values.yaml` declares 136 against 17 pooled processes × a pool of 8, deliberately, so the
-    ceiling ships as a statement of the current shape rather than as slack. Off by one here and
-    every pod the chart renders refuses to start.
+    The shipped ceiling carries headroom, but nothing about this check should force it to: a
+    release that provisions exactly what it opens is a correct release. Off by one here and every
+    pod it renders refuses to start.
     """
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
-        pg_fleet_pooled_processes=17,
+        pg_fleet_pools=17,
         pg_pool_max_size=8,
         pg_fleet_max_connections=136,
     )
     assert settings.pg_fleet_max_connections == 136
+
+
+def test_a_fleet_that_would_exhaust_the_server_is_refused_by_pools_not_by_pods() -> None:
+    """One front-door process opens 48 connections, and this check used to charge it 16.
+
+    The measured shape (`tests/test_fleet_pools.py`): a front-door process holds three pools — the
+    stores', the `/readyz` probe's own `(dsn, statement timeout)` key, and the LangGraph
+    checkpointer's registered autocommit pool — so at `pg_pool_max_size=16` it opens 48. The
+    validator multiplied `pg_pool_max_size` by a *process* count, so `1 × 16 = 16` cleared a
+    declared ceiling of 40 for a process that exhausts it, in the direction that lets a deployment
+    run the server out of `max_connections`.
+
+    Written against the single-process case deliberately: it is the smallest fleet that fails, so
+    the assertion is about the arithmetic and not about any chart's replica counts.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            pg_fleet_pools=3,  # one front door
+            pg_pool_max_size=16,
+            pg_fleet_max_connections=40,
+        )
+    assert "48 Postgres connections" in str(excinfo.value)
 
 
 def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> None:
@@ -750,19 +858,22 @@ def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> Non
     `core/config/store.py` stated "keep it under the server's max_connections" in prose and nothing
     computed the left-hand side, so the shipped chart ran every pod on the default pool of 16 and
     the fleet's real ceiling was ~272 against the max_connections=100 D-119 measured against. An
-    operator seeing this needs both numbers and both levers, not the name of one setting.
+    operator seeing this needs both numbers and both levers, not the name of one setting — and,
+    since the count moved from pods to pools, the sentence that says a process is not a pool: a
+    reader who reaches this message while looking at 14 pods needs to know why the number is 26.
     """
     with pytest.raises(ValueError) as excinfo:
         Settings(  # type: ignore[call-arg]
             _env_file=None,
-            pg_fleet_pooled_processes=17,
+            pg_fleet_pools=17,
             pg_pool_max_size=16,
             pg_fleet_max_connections=136,
         )
     message = str(excinfo.value)
     assert "272" in message and "136" in message
-    assert "17 pooled process" in message and "16 per pool" in message
+    assert "17 pool(s)" in message and "16 per pool" in message
     assert "pg_fleet_max_connections" in message and "pg_pool_max_size" in message
+    assert "the front door holds three" in message
 
 
 def test_the_calculation_backend_budget_is_undeclared_by_default() -> None:
@@ -1023,7 +1134,6 @@ def test_enforced_posture_refuses_a_plaintext_temporal_broker() -> None:
         "entra_required": True,
         "entra_audience": "api://x",
         "entra_tenant_id": "t",
-        "llm_provider": "openai_compatible",
         "llm_base_url": "http://llm:8000/v1",
         "llm_model": "m",
         "harness_enabled": True,
@@ -1045,7 +1155,6 @@ def test_enforced_posture_refuses_a_plaintext_postgres_dsn() -> None:
         "entra_required": True,
         "entra_audience": "api://x",
         "entra_tenant_id": "t",
-        "llm_provider": "openai_compatible",
         "llm_base_url": "http://llm:8000/v1",
         "llm_model": "m",
         "harness_enabled": True,
@@ -1071,7 +1180,6 @@ def test_enforced_posture_refuses_a_plaintext_session_store_dsn() -> None:
         "entra_required": True,
         "entra_audience": "api://x",
         "entra_tenant_id": "t",
-        "llm_provider": "openai_compatible",
         "llm_base_url": "http://llm:8000/v1",
         "llm_model": "m",
         "harness_enabled": True,
@@ -1112,7 +1220,6 @@ def test_the_tls_guard_reads_a_dsn_the_way_libpq_does(why: str, dsn: str) -> Non
         "entra_required": True,
         "entra_audience": "api://x",
         "entra_tenant_id": "t",
-        "llm_provider": "openai_compatible",
         "llm_base_url": "http://llm:8000/v1",
         "llm_model": "m",
         "harness_enabled": True,
@@ -1127,7 +1234,6 @@ _ENFORCED_POSTURE: dict[str, Any] = {
     "entra_required": True,
     "entra_audience": "api://x",
     "entra_tenant_id": "t",
-    "llm_provider": "openai_compatible",
     "llm_base_url": "http://llm:8000/v1",
     "llm_model": "m",
     "harness_enabled": True,
@@ -1232,7 +1338,6 @@ def test_an_unparseable_dsn_is_refused_without_printing_its_password() -> None:
         "entra_required": True,
         "entra_audience": "api://x",
         "entra_tenant_id": "t",
-        "llm_provider": "openai_compatible",
         "llm_base_url": "http://llm:8000/v1",
         "llm_model": "m",
         "harness_enabled": True,
@@ -1268,7 +1373,6 @@ def test_the_tls_guard_still_exempts_the_forms_that_carry_no_network() -> None:
         "entra_required": True,
         "entra_audience": "api://x",
         "entra_tenant_id": "t",
-        "llm_provider": "openai_compatible",
         "llm_base_url": "http://llm:8000/v1",
         "llm_model": "m",
         "harness_enabled": True,

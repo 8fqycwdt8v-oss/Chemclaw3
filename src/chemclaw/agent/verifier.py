@@ -343,14 +343,14 @@ def _default_client() -> Any:
 async def require_verifier_capability(*, client: Any | None = None) -> None:
     """Refuse to start a deployment whose judge endpoint cannot enforce structured output.
 
-    On `openai_compatible`, a server that rejects `response_format` with a 400 — or accepts it and
-    returns prose — lands in `verify_answer`'s broad `except` and silently degrades **every**
-    judged answer to the deterministic citation gate for the life of the deployment. Measured
+    A gateway that rejects `response_format` with a 400 — or accepts it and returns prose — lands
+    in `verify_answer`'s broad `except` and silently degrades **every** judged answer to the
+    deterministic citation gate for the life of the deployment. Measured
     against a real loopback server (`tests/test_verifier.py`): the same contradicted-citation
     answer a working judge scores `confidence=0.0, unsupported=True` comes back
     `confidence=1.0, unsupported=False` degraded. `score_answer` flags the substitution per turn,
-    but a misconfiguration that is permanent deserves the `_require_anthropic_key` treatment: fail
-    at startup, naming what to fix, rather than as a counter that climbs quietly in production.
+    but a misconfiguration that is permanent deserves to fail at startup, naming what to fix,
+    rather than as a counter that climbs quietly in production.
 
     So this makes one real structured-output call against the routed `"verifier"` model before the
     front door serves, and raises when the call fails or returns nothing parseable. Called from
@@ -358,11 +358,12 @@ async def require_verifier_capability(*, client: Any | None = None) -> None:
     because refusing to *start* is the only way to keep a misconfigured pod out of a rollout.
 
     A no-op unless `verifier_enabled`, because the probe costs a model call and the degradation it
-    guards against cannot happen with the judge off. A no-op on `anthropic` too: `ChatAnthropic`
-    does not implement structured output via `response_format`, so the failure mode this probes for
-    does not exist there — and probing would make a startup depend on a paid external call.
+    guards against cannot happen with the judge off. The second half of that condition was
+    `llm_provider != "openai_compatible"` — a whole deployment shape on which this control did not
+    run — and it is gone with the provider concept: there is one endpoint now, so the probe either
+    runs or the judge is off.
     """
-    if not settings.verifier_enabled or settings.llm_provider != "openai_compatible":
+    if not settings.verifier_enabled:
         return
     if client is None:
         # The same cached client every verified turn will use, so the probe exercises the exact

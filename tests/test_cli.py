@@ -399,15 +399,15 @@ def test_a_startup_failure_is_a_message_and_an_exit_code_not_a_traceback(
     graph-construction stack trace — and the console script exited on the traceback rather than on
     a code. A new operator running `make chat` without a credential got nine frames instead of the
     one sentence naming what to export, and the same hole covered every other startup failure: an
-    unreachable checkpointer DSN, a bad `CHEMCLAW_LLM_PROVIDER`.
+    unreachable checkpointer DSN, a blanked `CHEMCLAW_LLM_BASE_URL`.
     """
 
     def _fails(_args: object) -> None:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set — the Anthropic chat-client path needs it")
+        raise RuntimeError("the LLM gateway requires llm_base_url to be set")
 
     monkeypatch.setattr(cli, "_run", _fails)
     assert cli.main(["--admin", "-m", "hello"]) == 1
-    assert "ANTHROPIC_API_KEY is not set" in capsys.readouterr().err
+    assert "the LLM gateway requires llm_base_url" in capsys.readouterr().err
 
 
 def test_the_console_script_returns_an_exit_code_on_the_happy_path_too(
