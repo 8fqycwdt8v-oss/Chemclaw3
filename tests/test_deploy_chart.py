@@ -1223,11 +1223,20 @@ registered autocommit pool. Every other role holds one. Measured rather than ass
 
 
 def _fleet_pools(values: dict[str, Any]) -> int:
-    """The Postgres pools this chart renders — the helper's arithmetic.
+    """The Postgres pools this chart renders at its **rollout peak** — the helper's arithmetic.
 
     **Pools, not pods**, which is the defect this file used to share with the validator: both
     multiplied `pg_pool_max_size` by a process count, so a front door measured at three pools and
     48 connections was charged 16 and the shipped chart declared 136 against a real floor of 208.
+
+    **And the peak, not the steady state**, which is the defect it shared with the template until
+    2026-09-05: a rolling update runs both generations, so every Deployment that surges holds its
+    pools twice over for the length of the upgrade. Steady the shipped chart is 26 pools; at the
+    peak it is 36, which is 288 connections against a ceiling that declared 256 — a shortfall a
+    site provisioned to the declared number met on every upgrade, while
+    `ChemclawFleetAboveItsConnectionCeiling`, which reads the live sum against that same
+    declaration, was true for the length of every one of them and paged whenever a rollout
+    outlasted its 10-minute `for:`.
 
     Kept here rather than read out of the template because the point of the test is to check the
     template against the topology *independently*; reading its own answer back would assert
@@ -1237,23 +1246,29 @@ def _fleet_pools(values: dict[str, Any]) -> int:
     front_door = (
         autoscaling["maxReplicas"] if autoscaling["enabled"] else values["service"]["replicas"]
     )
-    total = front_door * POOLS_PER_FRONT_DOOR
+    # Every rolling Deployment gets this many extra pods for the length of an upgrade. Declared in
+    # values rather than inherited from Kubernetes' 25%-rounded-up default precisely so this
+    # multiplication has something to read.
+    surge = int(values["rollout"]["maxSurgePods"])
+    total = (front_door + surge) * POOLS_PER_FRONT_DOOR
+    # The background worker is the one pool-holding role that does not surge: `Recreate`, because
+    # two of it race on a host-local knowledge checkout (`deployment-workers.yaml`).
     total += values["workers"]["background"]["replicas"]
     # The face serves the same in-process read-only tools over MCP and opens the same pool. Off by
     # default, so this term is zero for the shipped values and the point of it is the release that
     # turns the switch on.
     if values["mcpFace"]["enabled"]:
-        total += values["mcpFace"]["replicas"]
+        total += values["mcpFace"]["replicas"] + surge
     for bundle in values["connectors"].values():
         if not bundle["enabled"]:
             continue
         # An externally hosted bundle (`url`) pods no server here, so it pools nothing here.
         if bundle.get("server") and not bundle.get("url"):
-            total += bundle.get("serverReplicas", bundle.get("replicas"))
+            total += bundle.get("serverReplicas", bundle.get("replicas")) + surge
         # Each half at its own count: two Deployments, two knobs, and a `url:` bundle's worker
         # still pods here even though its server does not.
         if bundle.get("worker"):
-            total += bundle.get("workerReplicas", bundle.get("replicas"))
+            total += bundle.get("workerReplicas", bundle.get("replicas")) + surge
     return int(total)
 
 
@@ -1337,8 +1352,17 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
     assert ".Values.service.autoscaling.maxReplicas" in front_door.split("{{- end -}}")[0]
     # And it counts POOLS: the front-door term is multiplied by what one such process holds. This
     # is the line whose absence declared 136 for a fleet that opens 208.
-    assert f"mul $frontDoor {POOLS_PER_FRONT_DOOR}" in definition, (
-        "chemclaw.fleetPools counts front-door pods rather than the pools each one holds"
+    #
+    # And it counts them at the ROLLOUT PEAK: the surge is inside the multiplication, because an
+    # upgrade runs both generations and a front-door pod costs three pools, not one. Written as one
+    # text pin rather than two, since `mul $frontDoor 3` beside a surge added somewhere else would
+    # satisfy a pair of looser assertions while charging the front door's overlap once.
+    assert f"mul (add $frontDoor $surge) {POOLS_PER_FRONT_DOOR}" in definition, (
+        "chemclaw.fleetPools counts front-door pods rather than the pools each one holds, or "
+        "counts one generation of them rather than the two a rolling update runs"
+    )
+    assert 'include "chemclaw.rolloutSurgePods"' in definition, (
+        "the surge the ceiling multiplies by must come from the same helper the Deployments render"
     )
     # And every other pooled process comes from the same blocks the Deployments do.
     assert ".Values.workers.background.replicas" in definition
@@ -2928,6 +2952,53 @@ def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_every_pool_holding_deployment_surges_by_the_number_the_ceiling_was_computed_against() -> (
+    None
+):
+    """The connection ceiling multiplies by a surge; this is what makes that surge real.
+
+    `chemclaw.fleetPools` counts the rollout *peak* — a rolling update runs both generations, and
+    connections are the one resource the new one takes from the old. That arithmetic is only true
+    if the Deployments actually carry the surge it multiplies by, and until 2026-09-05 none of them
+    declared a strategy at all: Kubernetes defaulted `maxSurge` to 25% rounded up, which put the
+    shipped chart's peak at 39 pools (312 connections) rather than 36, against a declared 256.
+
+    So both halves are asserted here. Every rolling pool-holder renders exactly
+    `rollout.maxSurgePods`, and the background worker is the one that opts out — `Recreate`, for a
+    reason that is about two pods racing on a host-local knowledge checkout rather than about
+    connections, which is why `_fleet_pools` leaves its term unsurged.
+    """
+    rendered = _render("--set", "mcpFace.enabled=true")
+    assert rendered.returncode == 0, rendered.stderr
+    surge = int(_values()["rollout"]["maxSurgePods"])
+
+    rolling: dict[str, Any] = {}
+    recreate: set[str] = set()
+    for doc in yaml.safe_load_all(rendered.stdout):
+        if not doc or doc.get("kind") != "Deployment":
+            continue
+        strategy = doc["spec"].get("strategy") or {}
+        name = doc["metadata"]["name"]
+        if strategy.get("type") == "Recreate":
+            recreate.add(name)
+        else:
+            rolling[name] = strategy
+
+    assert recreate == {"chemclaw-background-worker"}, (
+        f"the roles that never overlap generations are {sorted(recreate)}; `_fleet_pools` leaves "
+        "exactly the background worker's term unsurged, so any other Recreate makes the ceiling "
+        "over-count and any background worker that starts rolling makes it under-count"
+    )
+    assert rolling, "no rolling Deployment rendered — the extraction is broken"
+    for name, strategy in sorted(rolling.items()):
+        assert strategy.get("rollingUpdate", {}).get("maxSurge") == surge, (
+            f"{name} renders {strategy!r}; the connection ceiling is computed against "
+            f"rollout.maxSurgePods={surge}, and a Deployment that surges by anything else "
+            "(Kubernetes defaults to 25% rounded up) peaks above the number the chart declared"
+        )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 @pytest.mark.parametrize(
     ("key", "helper"),
     [
@@ -3453,16 +3524,24 @@ def test_turning_on_a_pooled_component_moves_the_declared_connection_budget() ->
     keeps saying the same thing when a replica default moves. One pool per face replica, not the
     front door's three: it serves read-only tools and takes no turn, so it holds neither a
     checkpointer pool nor a readiness probe's.
+
+    Plus one surge, once, whatever the replica count: turning the face on adds a Deployment, and a
+    rolling update runs a Deployment's two generations at the same time
+    (`rollout.maxSurgePods`). That term is what the ceiling was missing for every rolling
+    pool-holder until 2026-09-05 — asserted here in the same difference, so a surge the helper
+    forgets to charge for one role shows up as an off-by-`maxSurgePods` rather than as nothing.
     """
     baseline = _declared_fleet_pools()
+    surge = int(_values()["rollout"]["maxSurgePods"])
     for replicas in (1, 10):
         with_face = _declared_fleet_pools(
             "--set", "mcpFace.enabled=true", "--set", f"mcpFace.replicas={replicas}"
         )
-        assert with_face - baseline == replicas, (
+        assert with_face - baseline == replicas + surge, (
             f"enabling mcp-face at {replicas} replicas moved the declared fleet pool count by "
-            f"{with_face - baseline}; every one of those pods opens a pool, so the fleet's "
-            "connection ceiling is understated by the difference and the guard cannot fire"
+            f"{with_face - baseline}, not {replicas + surge}; every one of those pods opens a pool "
+            "and an upgrade runs both generations, so the connection ceiling is understated by "
+            "the difference and the guard cannot fire"
         )
 
 

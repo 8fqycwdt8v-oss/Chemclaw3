@@ -738,8 +738,47 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end -}}
 {{- end -}}
 
+{{- /* How many extra pods of one Deployment a rolling update may run beside the old generation.
+
+       Declared rather than inherited. Kubernetes defaults `maxSurge` to 25% rounded up, and the
+       connection ceiling below is *multiplied* by this number — so a bound the chart depends on
+       arithmetically must be a bound the chart states. Inherited, the shipped topology surges by
+       ten pools (two front-door pods at three each, plus one per connector Deployment) and peaks
+       at 312 connections against a ceiling that declared 256; declared as 1 it peaks at 288, and
+       the peak is what `chemclaw.fleetPools` now counts.
+
+       Not 0. A single-replica connector Deployment with no surge is a Deployment that goes away
+       during its own upgrade, which trades an availability property for connections the ceiling
+       can simply be provisioned for. The background worker is the one role that does surge to
+       nothing, and it says why in `deployment-workers.yaml`: `Recreate`, because two of it race
+       on a host-local knowledge checkout. */ -}}
+{{- define "chemclaw.rolloutSurgePods" -}}
+{{- .Values.rollout.maxSurgePods | int -}}
+{{- end -}}
+
+{{- /* The rollout strategy every pool-holding Deployment shares, so the surge the ceiling is
+       computed against is the surge the cluster is told. `maxUnavailable` is left to Kubernetes:
+       this is a statement about the *upper* bound on concurrent pods, which is the only half the
+       connection budget can see. */ -}}
+{{- define "chemclaw.rolloutStrategy" -}}
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: {{ include "chemclaw.rolloutSurgePods" . }}
+{{- end -}}
+
+{{- /* **The peak, not the steady state.** A rolling update runs both generations at once, and
+       `deployment-workers.yaml` reasoned about that overlap as "only capacity" — true of turns and
+       false of connections, which are the one resource a second generation takes from the first.
+       Measured against the shipped chart: 26 pools steady, 36 at the rollout peak, 288 connections
+       where the ceiling declared 256. The consequence was not merely a wrong comment. A site that
+       provisioned Postgres to exactly the declared number lost 56 connections on every upgrade,
+       and `ChemclawFleetAboveItsConnectionCeiling` — which compares the *live* pool sum against
+       that same declaration — was armed against a correct deployment: true for the length of every
+       rolling update, paging whenever one outlasted its 10-minute `for:`. */ -}}
 {{- define "chemclaw.fleetPools" -}}
 {{- $frontDoor := include "chemclaw.frontDoorProcesses" . | int -}}
+{{- $surge := include "chemclaw.rolloutSurgePods" . | int -}}
 {{- /* Three each, and the only role for which the number is not one — see the header. A pool is
        keyed on `(loop, dsn, options)`, so a turn-serving process holds the stores' pool,
        `/readyz`'s own at its own statement timeout, and the LangGraph checkpointer's, where a
@@ -748,7 +787,10 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
        this helper: a test that read the template's own answer back would assert nothing. What
        pins the 3 to reality is neither of those two but `tests/test_fleet_pools.py`, which drives
        the real front-door composition root and counts the pools it actually opens. */ -}}
-{{- $total := mul $frontDoor 3 -}}
+{{- $total := mul (add $frontDoor $surge) 3 -}}
+{{- /* The background worker is `Recreate` (see `deployment-workers.yaml`), so it is the one
+       pool-holding role whose generations never overlap and the one term the surge does not
+       touch. */ -}}
 {{- $total = add $total (.Values.workers.background.replicas | int) -}}
 {{- /* The face too, when it is enabled. It runs `connectors/server.py` over the in-process
        read-only tool set — knowledge search, fingerprint search, precedent lookup — so it opens a
@@ -757,7 +799,7 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
        guard checks the *declared* number, so it could not fire: the first sign was the runtime
        `ChemclawFleetAboveItsConnectionCeiling` alert, after the pods were up. */ -}}
 {{- if .Values.mcpFace.enabled -}}
-{{- $total = add $total (.Values.mcpFace.replicas | int) -}}
+{{- $total = add $total (add (.Values.mcpFace.replicas | int) $surge) -}}
 {{- end -}}
 {{- range $name, $cfg := .Values.connectors -}}
 {{- if $cfg.enabled -}}
@@ -769,8 +811,8 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
        separately scalable. Reading `replicas` for both was right only while one knob drove both;
        it is also what made a `url:` bundle with a worker contribute `nil | int` = 0 to the
        budget, since `replicas` was never required of one. */ -}}
-{{- if and $cfg.server (not $cfg.url) -}}{{- $total = add $total ($cfg.serverReplicas | default $cfg.replicas | int) -}}{{- end -}}
-{{- if $cfg.worker -}}{{- $total = add $total ($cfg.workerReplicas | default $cfg.replicas | int) -}}{{- end -}}
+{{- if and $cfg.server (not $cfg.url) -}}{{- $total = add $total (add ($cfg.serverReplicas | default $cfg.replicas | int) $surge) -}}{{- end -}}
+{{- if $cfg.worker -}}{{- $total = add $total (add ($cfg.workerReplicas | default $cfg.replicas | int) $surge) -}}{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- $total -}}

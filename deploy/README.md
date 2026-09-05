@@ -409,8 +409,9 @@ declared ceiling and is self-disabling when none is declared:
 `ChemclawCalcBackendOverCommitted` (`sum(chemclaw_calc_requests_in_flight)` against
 `chemclaw_calc_backend_max_concurrent_requests`).
 
-**The connection one is charged in pools, and it used to be charged in pods.** `postgres.maxConnections`
-is compared against `chemclaw.fleetPools × CHEMCLAW_PG_POOL_MAX_SIZE`, and `pg_pool_max_size` bounds
+**The connection one is charged in pools at the rollout peak; it used to be charged in pods, and
+then in one generation of them.** `postgres.maxConnections` is compared against
+`chemclaw.fleetPools × CHEMCLAW_PG_POOL_MAX_SIZE`, and `pg_pool_max_size` bounds
 one *pool*: `core/db` keys a pool on `(dsn, libpq options)`, so a process holds one per distinct
 pair plus any foreign pool it registers. Measured by driving each role's composition root, a
 front-door process holds the stores' pool, the `/readyz` probe's (its own statement timeout is a
@@ -420,6 +421,17 @@ server and the mcp-face holds one. Counting pods declared a ceiling covering abo
 what the shipped fleet opens, which is why `postgres.maxConnections` rose in the same commit that
 corrected the arithmetic — **a release provisioning to the old number has to raise its Postgres
 `max_connections` to the new one, or lower `CHEMCLAW_PG_POOL_MAX_SIZE` until the product fits.**
+
+It rose a second time for the same shape of reason. The list of live-fleet excursions above names
+"a rollout leaving both generations up" as a thing only the *alert* can see — and that was true of
+the turn ceiling and false of this one, because a rollout's overlap is not a surprise a cluster
+springs on the chart: it is `maxSurge`, which the chart now declares (`rollout.maxSurgePods`) and
+`chemclaw.fleetPools` multiplies by. So the declared ceiling is the peak an upgrade actually
+reaches rather than the steady state it settles at. Left as it was, a site that provisioned Postgres
+to exactly the declared number lost connections on every upgrade, and
+`ChemclawFleetAboveItsConnectionCeiling`'s expression was true for the length of every rolling
+update, so it paged whenever one outlasted its 10-minute `for:` — an alert armed against a correct
+deployment, which is the failure mode that costs an operator the next real one.
 The startup check names both sides in every pod; `sum(chemclaw_pg_pool_max_size)` has been the
 honest live reading throughout, which is why the alert could fire on a fleet whose per-pod
 validation passed.

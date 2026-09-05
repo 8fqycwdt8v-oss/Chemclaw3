@@ -2,6 +2,27 @@
 # becomes one CHEMCLAW_-prefixed env var on the pods — the single pydantic Settings is the only
 # config source in-cluster (no second config system). Secrets are referenced, never inlined.
 
+# How a rolling update replaces a pool-holding Deployment's pods.
+#
+# **This is a connection budget knob before it is a rollout knob**, which is why it is stated here
+# rather than left to the Kubernetes default of 25%-rounded-up. `postgres.maxConnections` below is
+# checked against `chemclaw.fleetPools`, and that helper counts the *peak* — both generations of
+# every Deployment that surges — because a rolling update is when the fleet opens the most
+# connections it will ever open. `deployment-workers.yaml` had already looked straight at that
+# overlap and called it "only capacity": true of turns, false of the one resource a second
+# generation takes from the first. How much the difference is, is not written here for the same
+# reason the steady count is not — it moves with the topology, and
+# `tests/test_deploy_chart.py::_fleet_pools` is where it is derived and stated.
+#
+# Raising this is a provisioning change: every surge pod holds what its role holds, and `Settings`
+# refuses the product at startup in every pod. Lowering it to 0 is not free either — a
+# single-replica connector Deployment with no surge is unavailable during its own upgrade. The
+# background worker opts out entirely with `Recreate`, for a reason that is about a host-local
+# knowledge checkout rather than about connections; `tests/test_deploy_chart.py` asserts that it is
+# the only one, because the arithmetic leaves exactly its term unsurged.
+rollout:
+  maxSurgePods: 1
+
 image:
   repository: image-registry.openshift-image-registry.svc:5000/chemclaw/chemclaw
   tag: "0.1.0"
@@ -560,8 +581,23 @@ postgres:
   # which is how D-119's connect timeouts presented: an idle database and a service that could not
   # reach it.
   #
+  # **A rolling update runs two generations, and this counted one.** `chemclaw.fleetPools` now
+  # counts the *peak* — every Deployment that surges, at `rollout.maxSurgePods` extra pods — because
+  # an upgrade is when the fleet holds the most connections it will ever hold. A site that
+  # provisioned Postgres to exactly the number declared here therefore came up short on every
+  # upgrade, and `ChemclawFleetAboveItsConnectionCeiling` — which reads the *live* pool sum against
+  # this same declaration — was armed against a correct deployment: its expression is true for the
+  # length of every rolling update, and it pages whenever one outlasts its 10-minute `for:`. An
+  # alert that a routine operation can trip is an alert its reader learns to wave through. The rise below is that peak becoming visible rather than a new cost: the
+  # release always opened it. How large the peak is stays out of this file and lives in
+  # `tests/test_deploy_chart.py::_fleet_pools`, which derives it and prints both sides when the
+  # product no longer fits.
+  #
+  # The rise keeps the same headroom above the render that the previous number carried, for the
+  # same reason: enabling one more connector must not be a database change in the same commit.
+  #
   # Set to 0 to declare no ceiling, which makes both the startup check and the alert inert.
-  maxConnections: 256
+  maxConnections: 336
 
 # The pre-install/pre-upgrade migration hook (D-034).
 migrateJob:

@@ -279,9 +279,18 @@ The deferral itself stands.
 tools where a shipped turn binds 113 — its docstring's claim that reading the `ToolNode` is why it
 cannot drift was true of the *method* and false of the *fixture*, which is the paragraph above
 happening a third time. Measured both ways in one commit: 43,179 with the argument omitted, 64,099
-with it passed. **The real shipped prefix is ~73,600 tokens**, of which 9,538 come from bundles
-served out of `Chemclaw3-mcp` and are unratchetable here by construction — `SERVED_ELSEWHERE`
-names them and a test fails when that drifts. Its first consequence is that the compaction defaults
+with it passed. **The real shipped prefix is the ratchet's ceiling plus what the sibling
+fleet serves**, and neither half is a number this file may hold: the second comes from bundles
+served out of `Chemclaw3-mcp`, which this repository does not build and cannot watch, so it goes
+stale on somebody else's merge schedule. It went stale that way inside a day — the figure written
+here moved by 326 tokens on a `Raises:` paragraph merged next door between the measurement and the
+commit recording it. `SERVED_ELSEWHERE` names the bundles, `SERVED_ELSEWHERE_ALLOWANCE` is the bound
+this repository holds them to, and
+`test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_bound` runs the sibling's
+own servers against it — skipping, with the reason in the message, where there is no sibling
+checkout, because a check that quietly shrinks is worse than one that says what it did not look at.
+
+Its first consequence is that the compaction defaults
 were derived against the smaller prefix, so `agent_tool_result_clear_trigger` was floored at 1 while
 two places asserted it was not; they are re-derived to 106,000 and 133,000 against
 `PREFIX_BOUND`, and the assertion now measures the prefix with connectors bound.

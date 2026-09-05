@@ -9,6 +9,7 @@ spec:
   {{- if not .Values.service.autoscaling.enabled }}
   replicas: {{ .Values.service.replicas }}
   {{- end }}
+  {{- include "chemclaw.rolloutStrategy" . | nindent 2 }}
   selector:
     matchLabels:
       {{- include "chemclaw.selectorLabels" . | nindent 6 }}
