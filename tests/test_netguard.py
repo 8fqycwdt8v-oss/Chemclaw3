@@ -1,6 +1,7 @@
 """The in-process egress guard: it blocks a non-allowlisted host and permits the declared ones."""
 
 import ast
+import pathlib
 import re
 import socket
 from collections.abc import Iterator
@@ -382,3 +383,197 @@ def test_a_blocked_name_never_reaches_connect() -> None:
     with pytest.raises(netguard.EgressForbidden):
         socket.getaddrinfo("blocked.example", 443)
     assert netguard._resolved_ips == before, "a refused resolution still recorded an IP"
+
+
+def _proxy_env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
+    """Clear every proxy variable this environment happens to carry, then set `values`.
+
+    The CI container and the dev sandbox both run behind a filtering proxy of their own, so a test
+    that only *sets* a variable is measuring the ambient environment as much as its own arm. Every
+    spelling goes, in both cases, because `refuse_proxied_egress` and `urllib` read both.
+    """
+    for name in netguard._PROXY_ENV_VARS + ("no_proxy",):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+
+def _proxy_settings(**overrides: str) -> Settings:
+    """A settings object dialling one non-loopback gateway, so a proxy has something to carry."""
+    return Settings(
+        llm_base_url="https://gateway.internal/v1",
+        egress_allow=overrides.pop("egress_allow", "gateway.internal"),
+        **overrides,  # type: ignore[arg-type]
+    )
+
+
+def test_an_undeclared_proxy_refuses_the_process_at_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hole this closes: a proxy moves the destination out of the address the guard checks.
+
+    Measured before the fix, with the allowlist empty and one local HTTP proxy: a request to an
+    external host through `proxy=http://127.0.0.1:<port>` returned **HTTP 200 with the body** and
+    `netguard._refused` never moved, while the same request through a *named* proxy and the same
+    request with no proxy were both refused at `getaddrinfo`. The loopback arm needs no
+    allowlisting because `_check` exempts loopback by construction — and it must keep doing so,
+    since this process dials Postgres, Temporal and the calc backend there.
+
+    A loopback proxy is not an attacker-only shape: an OpenShift service mesh or egress sidecar is
+    one by design, and it is also the reason the module docstring's usual fallback does not apply —
+    a sidecar shares the pod's network namespace, so its traffic never crosses a NetworkPolicy
+    enforcement point. There is no layer below this one for this shape.
+    """
+    _proxy_env(monkeypatch, HTTP_PROXY="http://127.0.0.1:15001")
+    with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured"):
+        netguard.refuse_proxied_egress(_proxy_settings())
+
+
+@pytest.mark.parametrize("variable", ["http_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"])
+def test_every_proxy_spelling_is_read(monkeypatch: pytest.MonkeyPatch, variable: str) -> None:
+    """Both cases of all three, because a client library reads whichever one is set.
+
+    `httpx` and `requests` resolve `http_proxy`/`https_proxy`/`all_proxy` case-insensitively, so a
+    check that read only the upper-case spellings would be a control an operator disables by typing
+    the variable in lower case — which is the spelling most shell examples use.
+    """
+    _proxy_env(monkeypatch, **{variable: "http://127.0.0.1:15001"})
+    with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured"):
+        netguard.refuse_proxied_egress(_proxy_settings())
+
+
+def test_a_proxy_named_in_the_allowlist_is_the_operators_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The escape hatch, and why it is `egress_allow` rather than the loopback exemption.
+
+    A deployment legitimately behind a mesh says so by naming the sidecar, and naming it is exactly
+    what distinguishes the operator's intent from an env var somebody else set. Loopback does not
+    earn the exemption here for the same reason it is the dangerous case: the address carries no
+    signal at all.
+    """
+    _proxy_env(monkeypatch, HTTP_PROXY="http://127.0.0.1:15001")
+    netguard.refuse_proxied_egress(_proxy_settings(egress_allow="gateway.internal,127.0.0.1"))
+
+
+def test_no_proxy_covering_every_destination_is_not_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The question is not "is a proxy set" but "would it carry anything this process dials".
+
+    Without this, a container that configures a proxy for its own package installs and excludes the
+    cluster — which is what this repository's own CI and dev sandboxes do — could not run the
+    process at all. The bypass test is the stdlib's own (`urllib.request.proxy_bypass`) rather than
+    a second reading of `no_proxy` written here, because a second reading is a second answer.
+    """
+    _proxy_env(
+        monkeypatch,
+        HTTP_PROXY="http://127.0.0.1:15001",
+        NO_PROXY="gateway.internal,127.0.0.1,localhost",
+    )
+    netguard.refuse_proxied_egress(_proxy_settings())
+
+
+def test_no_proxy_that_misses_one_destination_still_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One uncovered destination is enough, which is what makes the bypass check a narrowing.
+
+    The failure to avoid is a `NO_PROXY` that looks thorough and leaves the gateway out — the one
+    destination whose traffic is the prompts and the bearer.
+    """
+    _proxy_env(monkeypatch, HTTP_PROXY="http://127.0.0.1:15001", NO_PROXY="127.0.0.1,localhost")
+    with pytest.raises(RuntimeError, match="gateway.internal"):
+        netguard.refuse_proxied_egress(_proxy_settings())
+
+
+def test_no_proxy_configured_is_the_silent_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The overwhelmingly common configuration must cost nothing and say nothing."""
+    _proxy_env(monkeypatch)
+    netguard.refuse_proxied_egress(_proxy_settings())
+
+
+def test_disabling_the_guard_disables_this_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`arm_from_settings` returns before the refusal, and that is deliberate.
+
+    A deployment that has opted out of the guard has opted out of this with it — one opt-out, said
+    once at WARNING, rather than a second switch nobody knows to look for.
+    """
+    _proxy_env(monkeypatch, HTTP_PROXY="http://127.0.0.1:15001")
+    netguard.arm_from_settings(_proxy_settings(egress_guard_enabled=False))  # type: ignore[arg-type]
+
+
+def test_the_refusal_names_the_proxy_and_what_it_would_carry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator reading this at boot has to be able to act on it without reading the source.
+
+    Three things have to be in the message: which proxy, which destinations it would carry, and the
+    one edit that says "this is intended". The failure being avoided is a refusal that names a rule
+    instead of a fact, which reads as a bug in the platform rather than a configuration to fix.
+    """
+    _proxy_env(monkeypatch, HTTPS_PROXY="http://sidecar.internal:15001")
+    with pytest.raises(RuntimeError) as raised:
+        netguard.refuse_proxied_egress(_proxy_settings())
+    message = str(raised.value)
+    assert "sidecar.internal" in message
+    assert "gateway.internal" in message
+    assert "CHEMCLAW_EGRESS_ALLOW" in message
+
+
+def test_arm_from_settings_is_where_the_refusal_is_wired(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tests above call the function; this one pins that anything *calls the function*.
+
+    `arm_from_settings` is the single call `chemclaw.core.config` makes, which is what puts this
+    refusal in front of the durable worker as well as the front door — the gap
+    `api/middleware._refuse_unconfigured_llm_gateway` has by construction, since its signal is a
+    non-loopback *bind* and a worker does not bind. Without this arm, deleting one line from
+    `arm_from_settings` would leave every test above green and every process unguarded.
+
+    It must also refuse *before* arming, because a proxied call is a legitimate-looking dial to an
+    allowlisted address: arming first would mean starting a process whose guard is structurally
+    blind to where its prompts go.
+    """
+    _proxy_env(monkeypatch, HTTP_PROXY="http://127.0.0.1:15001")
+    with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured"):
+        netguard.arm_from_settings(_proxy_settings())
+
+
+def test_refusing_the_proxy_does_not_surrender_the_environment_trust_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`trust_env` conflates proxy discovery with the trust store; only the first is objected to.
+
+    The backlog row that opened this named the cost and was right: `trust_env=False` also stops
+    httpx reading `SSL_CERT_FILE`/`SSL_CERT_DIR`, so a client that merely dropped `trust_env` would
+    swap a deployment's env-supplied trust store for `certifi` — silently, and visibly only as a
+    TLS failure against the site's own privately-signed gateway. Measured with a probe bundle
+    holding one certificate against `certifi`'s 118: `trust_env=False` with no explicit `verify`
+    read **118**, and with the context this builds it reads **1**.
+
+    `create_default_context(cafile=None)` is what makes that a one-liner rather than a second
+    setting — it falls through to OpenSSL's own default paths, which honour both variables.
+    """
+    import ssl
+
+    import certifi
+    import httpx
+
+    from chemclaw.core.http import gateway_client_kwargs
+
+    first = pathlib.Path(certifi.where()).read_text(encoding="utf-8")
+    one_cert = first.split("-----END CERTIFICATE-----")[0] + "-----END CERTIFICATE-----\n"
+    bundle = tmp_path / "one-ca.pem"
+    bundle.write_text(one_cert, encoding="utf-8")
+    monkeypatch.setenv("SSL_CERT_FILE", str(bundle))
+
+    client = httpx.Client(**gateway_client_kwargs(""))
+    # Read off the pool the client actually dials with, not off the kwargs — the kwargs are what
+    # this test would be asserting against itself.
+    context = client._transport._pool._ssl_context  # type: ignore[attr-defined]
+    assert isinstance(context, ssl.SSLContext)
+    assert len(context.get_ca_certs()) == 1, "the environment-supplied trust store was replaced"
+    assert client.trust_env is False
+    assert len(ssl.create_default_context().get_ca_certs()) == 1, (
+        "the premise: OpenSSL's default paths honour SSL_CERT_FILE, which is what makes "
+        "`cafile=None` preserve the deployment's store rather than fall back to certifi"
+    )

@@ -1870,3 +1870,34 @@ file, commit the scrape in the same commit as the figure.**
 asserted "the last draw lands in the final tenth", which is false at n=2 where the correct
 stratified draw is the first probe of each half. **Rule: state the property (each band contributes
 one), never a proxy for it (the last one is near the end).**
+
+**A clean auto-merge is not evidence the tree is unchanged.** The remote branch was the pre-squash
+history of an already-merged PR (branch deletion is blocked through this git proxy), so it looked
+content-free — its tree was byte-identical to the squash on `main`. Merging it re-added a
+`BACKLOG.md` row I had deleted in this cycle, with no conflict: from the merge base's view that
+branch *adds* the row and my commit removes it, and git resolved it in the branch's favour. **Rule:
+after merging a stale branch whose PR was squashed, diff the merge result against your own pre-merge
+HEAD, not just against the base.** Zero files differing is the assertion; "it auto-merged cleanly"
+is not.
+
+**A flag named for its conditional half gets skipped on the branch that matters.**
+`private_ca_transport` carried `trust_env=False` — with a docstring naming the exact proxy attack —
+behind `if not ca_bundle: return None`, and no shipped configuration sets a bundle. So the control
+was real, tested, documented, and absent from every deployment, and four separate documents cited it
+as protection. **Rule: when a function does an unconditional thing and a conditional thing, the name
+and the early return both belong to the unconditional one.** The corollary that found it: grep for
+who *takes* the branch, not for who mentions the function.
+
+**Fixing a conflated flag costs whatever else it was conflated with, and that has to be measured
+too.** `trust_env=False` refuses ambient proxies; it also stops httpx reading `SSL_CERT_FILE`, so
+the obvious fix would have silently swapped a deployment's trust store for `certifi` — measured, 1
+CA certificate against 118. The backlog row had warned about exactly this and I had already written
+the ADR without accounting for it. **Rule: when a row states a cost, measure the cost before
+deciding it is acceptable — and prefer taking back the half you did not object to (one explicit
+`verify=`) over accepting a second behavioural change you never put to the owner.**
+
+**Measure the options before putting them to the owner, and put the crux in the question.** The
+choice here looked like "guard-side or client-side"; measuring first showed the client-side option
+as originally scoped was theatre, because the LLM call goes out on a client `langchain-openai`
+builds with `trust_env=True` and centralising *first-party* construction never reaches it. A
+question asked before that measurement would have offered an option that does nothing.

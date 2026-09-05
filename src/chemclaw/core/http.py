@@ -51,13 +51,16 @@ else's HTTP endpoint" and exists only to stop a second copy appearing:
   in both directions (`::ffff:127.0.0.1` is loopback, `::ffff:8.8.8.8` is not) — `ipaddress` does
   that itself, and this docstring said the opposite until `tests/test_netguard.py` was run.
 
-- **`private_ca_transport`** — the two decisions an internal, privately-signed endpoint forces on
-  an httpx client, stated once. Both LLM seams need them and neither may own them: the chat client
-  (`agent/llm_provider._tls_http_client`, async) and the embedding client
-  (`core/embeddings._openai_client`, sync) reach the *same* gateway with the same CA bundle, and
-  they wrote the same two lines separately. A `dict` of kwargs rather than a client, because the
-  only thing that legitimately differs between them is the class — and returning a client would
-  force this module to pick sync or async for a caller that already knows.
+- **`gateway_client_kwargs`** — the decisions a client reaching the model gateway must take,
+  stated once. Both LLM seams need them and neither may own them: the chat client
+  (`agent/llm_provider._tls_http_clients`) and the embedding client
+  (`core/embeddings._openai_client`) reach the *same* gateway with the same CA bundle, and they
+  wrote the same lines separately. A `dict` of kwargs rather than a client, because the only thing
+  that legitimately differs between them is the class — and returning a client would force this
+  module to pick sync or async for a caller that already knows. It used to be called
+  `private_ca_transport` and to return `None` when no bundle was configured; that name and that
+  return are why `trust_env=False` reached no shipped deployment
+  (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`).
 
 There was a second primitive, `error_detail`, and the paragraph above used to say in the present
 tense that "several modules (the Nextflow launcher, the Entra token/OBO exchanges)" called it. All
@@ -123,31 +126,57 @@ def is_loopback_url(url: str) -> bool:
     return is_loopback_host(host)
 
 
-def private_ca_transport(ca_bundle: str) -> dict[str, Any] | None:
-    """The httpx client kwargs for an endpoint behind a private CA, or None for the system store.
+def gateway_client_kwargs(ca_bundle: str = "") -> dict[str, Any]:
+    """The httpx client kwargs for a client this process builds to reach the model gateway.
 
-    Two decisions, both of which were made twice before this existed:
+    Two decisions, and the second one is why this function stopped being allowed to return `None`:
 
-    - **An `SSLContext`, not `verify="<path>"`.** httpx deprecated the string form
-      ("`verify=<str>` is deprecated. Use `verify=ssl.create_default_context(cafile=...)`"), and
-      building the context is also the only form that says what the bundle *is* — a CA file to
-      verify the peer against, rather than a path httpx has to guess the meaning of.
-    - **`trust_env=False`.** `HTTPS_PROXY`/`ALL_PROXY` set on the pod would otherwise redirect
-      every prompt, completion, embedded note and `Authorization` bearer to a host of the env
-      setter's choosing, *past* the CA pinning above — a proxy re-terminates TLS.
+    - **`trust_env=False`, always.** `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` set on the pod would
+      otherwise redirect every prompt, completion, embedded note and `Authorization` bearer to a
+      host of the env setter's choosing — and a proxy *re-terminates TLS*, so it walks past the CA
+      pinning below rather than being caught by it.
+    - **An `SSLContext`, always, not `verify="<path>"` and not nothing.** httpx deprecated the
+      string form ("`verify=<str>` is deprecated. Use `verify=ssl.create_default_context(...)`"),
+      and building the context is also the only form that says what the bundle *is* — a CA file to
+      verify the peer against, rather than a path httpx has to guess the meaning of. It is built on
+      the no-bundle branch too, because `trust_env=False` *also* stops httpx reading
+      `SSL_CERT_FILE`/`SSL_CERT_DIR`: refusing the proxy would otherwise silently swap a
+      deployment's env-supplied trust store for `certifi`, which is a second behavioural change
+      nobody asked for. `create_default_context(cafile=None)` falls through to OpenSSL's own
+      default paths, which honour those two variables — so the trust store is taken back explicitly
+      rather than surrendered along with the proxy. The comment below has the measurement.
 
-    Returns None when no bundle is configured, which leaves the SDK's own default client in place:
-    the right behaviour for a publicly-trusted endpoint, and the reason this returns kwargs rather
-    than raising.
+    **This returned `None` for the whole no-bundle branch until 2026-09-05, and that made the first
+    decision unreachable in every shipped configuration.** `llm_tls_ca_bundle` defaults to `""` and
+    is set nowhere in `deploy/`, `infra/` or `.env.example`, so both callers took the `None` branch,
+    passed no client to the SDK, and the SDK built its own with httpx's default `trust_env=True`.
+    Measured on that configuration with `HTTP_PROXY` pointed at a local recorder: the recorder
+    received `POST /v1/chat/completions` carrying the prompt body and the gateway bearer, and
+    `netguard._refused` never moved — the guard cannot see it, because the socket layer is dialling
+    the proxy's own address and the destination has left the address entirely.
+
+    So the kwargs are unconditional and a caller must always build the client. The CA half is the
+    part that is conditional, which is the opposite of how this read before.
 
     Args:
-        ca_bundle: Path to the CA bundle (`settings.llm_tls_ca_bundle`), or "" for none.
+        ca_bundle: Path to the CA bundle (`settings.llm_tls_ca_bundle`), or "" for the system store.
 
     Returns:
-        Kwargs for `httpx.Client(**kwargs)` / `httpx.AsyncClient(**kwargs)`, or None.
+        Kwargs for `httpx.Client(**kwargs)` / `httpx.AsyncClient(**kwargs)`. Never None.
     """
-    if not ca_bundle:
-        return None
     import ssl
 
-    return {"verify": ssl.create_default_context(cafile=ca_bundle), "trust_env": False}
+    # `cafile=None` is not "no verification" — `create_default_context` falls through to OpenSSL's
+    # own default paths, which honour `SSL_CERT_FILE`/`SSL_CERT_DIR`. That fall-through is the
+    # whole reason this passes `verify` on *both* branches: `trust_env=False` also stops httpx
+    # reading those two variables, so a client that merely dropped `trust_env` would silently
+    # replace a deployment's env-supplied trust store with `certifi`. Measured — one probe bundle
+    # holding a single certificate, against `certifi`'s 118:
+    #
+    #     trust_env=True,  SSL_CERT_FILE set                    ->    1 CA cert
+    #     trust_env=False, SSL_CERT_FILE set, no explicit verify->  118 CA certs   <- the trap
+    #     trust_env=False, SSL_CERT_FILE set, verify=this ctx   ->    1 CA cert
+    #
+    # `trust_env` conflates proxy discovery with the trust store and only the first is objected to
+    # here, so the trust store is taken back explicitly rather than surrendered with it.
+    return {"trust_env": False, "verify": ssl.create_default_context(cafile=ca_bundle or None)}

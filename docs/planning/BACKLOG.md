@@ -63,62 +63,19 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **The LLM gateway inherits an ambient proxy unless a private CA bundle is configured** — [S],
-  found while collapsing the provider seam (`D-2026-09-04-a-gateway-is-the-only-provider`).
-  `agent/llm_provider._tls_http_client` returns `None` when `llm_tls_ca_bundle` is empty, which
-  leaves `ChatOpenAI` to build its own `httpx` client — and that client reads `HTTPS_PROXY` /
-  `ALL_PROXY` from the environment. So on a publicly-trusted gateway (no bundle), an env var set on
-  the pod redirects every prompt, completion and `Authorization` bearer to a host of the setter's
-  choosing. `core/http.private_ca_transport` states `trust_env=False` and both LLM seams take it,
-  but only on the bundle branch; `evals/live_judge.py` used to pass `trust_env=False`
-  unconditionally for its own client and lost that when it moved onto the seam, which is how this
-  surfaced. The fix is one line — hand a `trust_env=False` client in on the no-bundle branch too —
-  and it is **not** free: `trust_env=False` also stops httpx reading `SSL_CERT_FILE` /
-  `SSL_CERT_DIR`, so a deployment relying on an env-supplied trust store would break. That is a
-  behavioural change for every deployment behind a corporate proxy and wants its own ADR rather
-  than riding along with the collapse.
-  **`core/netguard` is a partial mitigation rather than a bystander, and a first telling of this
-  row said otherwise.** Measured, with the guard armed on `{127.0.0.1, localhost,
-  gateway.internal}`: `evil-proxy.example` and `corp-proxy.internal` are both refused at
-  `getaddrinfo`, and a bare `203.0.113.9:3128` at `connect` — so an `HTTPS_PROXY` naming a host
-  outside the derived allowlist does not get out. What the guard cannot see is a proxy the
-  deployment has *legitimately* allowlisted (`CHEMCLAW_EGRESS_ALLOW`, or a corporate proxy sharing
-  a host with declared infrastructure), where nothing distinguishes the operator's intent from an
-  env var somebody else set. That residual case, plus the guard being disableable
-  (`CHEMCLAW_EGRESS_GUARD_ENABLED=false`), is what keeps this row open.
-
-- [ ] **A loopback proxy is outside the egress guard by construction, and a service mesh is exactly
-  that shape** — [M], opened 2026-09-05 by the pass that unified the two loopback predicates onto
-  `core/http.is_loopback_host`. The row above measured that a *named* proxy is refused and
-  concluded the guard is "a partial mitigation"; the half it did not measure is that a proxy on
-  **loopback needs no allowlisting at all**, because `netguard._check` exempts loopback by
-  construction — and must keep exempting it, since the process dials Postgres, Temporal and the
-  calc backend there. Measured with the allowlist deliberately empty, one local HTTP proxy and
-  `httpx` (`_refused` read off the module after each arm):
-
-  | arm | outcome | `netguard._refused` |
-  | --- | --- | --- |
-  | `proxy=http://proxy.corp:3128` → `http://exfil.example/steal` | refused at `getaddrinfo` | 1 |
-  | `proxy=http://127.0.0.1:<port>` → `http://exfil.example/steal` | **HTTP 200, body returned** | **0** |
-  | no proxy → `http://exfil.example/steal` (the control) | refused at `getaddrinfo` | 1 |
-
-  The middle arm is the finding: the request reached its external destination end to end, and the
-  counter never moved — so nothing logs at ERROR, nothing alerts, and `chemclaw_egress_refused_total`
-  reads as a clean pod. This is the *shipped* topology rather than an attacker-only one: an
-  OpenShift service mesh or egress sidecar is a loopback proxy by design, so
-  `HTTPS_PROXY=http://127.0.0.1:15001` on the pod re-terminates TLS for every prompt, completion
-  and `Authorization` bearer and forwards them wherever the sidecar is configured to.
-  `core/http.private_ca_transport` sets `trust_env=False` and closes it for the two LLM seams that
-  take it — on the CA-bundle branch only (the row above), and for no other `httpx`/`requests`
-  client in the tree.
-
-  **Not fixable by widening the loopback answer**, which is why this is a row and not a patch: the
-  guard's model is "which *host* may this process dial", and a proxy moves the destination out of
-  the address entirely. Closing it means treating proxy configuration as a destination — reading
-  `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` at arm time and refusing, or requiring the proxy to be
-  named in `CHEMCLAW_EGRESS_ALLOW` even when it is loopback — which changes behaviour for every
-  deployment behind a legitimate mesh and wants the same ADR the `trust_env=False` half of the row
-  above is already deferred to.
+- [ ] **An external vector store's client builds its own httpx and is outside the proxy fix** —
+  [S], opened 2026-09-05 by `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
+  `retrieval/vectors/qdrant.py:118` constructs `AsyncQdrantClient`, which builds its own httpx
+  client internally and takes only `verify` from this repository — so `trust_env` stays at its
+  default and a configured proxy would carry that traffic. It is **not** the LLM seam, so no prompt
+  or bearer is on it; what is on it is embedded note text and the query vectors. Recorded rather
+  than blind-patched for one reason: `qdrant_client` is not in this closure (`pgvector` is the
+  shipped provider), so the claim "passing a client works" would be untested prose, which is the
+  shape this repository keeps deleting. **The boot refusal covers it** in any deployment that has
+  not declared a proxy, which is every shipped one — this is the residual for a site that has
+  declared one *and* runs the non-default vector store. Closing it needs the extra installed, then
+  one measurement of whether the SDK accepts a caller-supplied client. Anchors:
+  `retrieval/vectors/qdrant.py`, `core/http.py::gateway_client_kwargs`.
 
 - [ ] **The gateway boot guard reaches one process, and the worker is the other one** — [M],
   opened by `D-2026-09-04-a-gateway-is-the-only-provider`. `_refuse_unconfigured_llm_gateway` and

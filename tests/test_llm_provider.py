@@ -38,7 +38,7 @@ _CLIENT_SEAMS: dict[str, str] = {
     "core/embeddings.py": (
         "the parallel embedding seam. It cannot go through `build_chat_model` — that builds a "
         "*chat* model and `ChatOpenAI` cannot embed — so it builds `openai.OpenAI` against the "
-        "same gateway, with the same transport rule (`core/http.private_ca_transport`)"
+        "same gateway, with the same transport rule (`core/http.gateway_client_kwargs`)"
     ),
 }
 
@@ -238,45 +238,86 @@ def test_an_endpoint_that_cannot_report_usage_can_be_told_so(
     assert _openai_compatible_model("m").stream_usage is False
 
 
-def test_the_private_ca_client_is_built_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_gateway_clients_are_built_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
     """A graph is compiled per turn, so an uncached client factory is a per-turn socket leak.
 
-    `build_chat_model` runs on every graph build, and with a private CA bundle — the documented
-    production target — it reaches `_tls_http_client`. Uncached, that built a
-    fresh `AsyncClient` (its own pool, its own TLS context) per question asked, and nothing ever
-    closed one. The verifier and challenge clients already pay `@cache` for exactly this on colder
-    paths; this was the hot one.
+    `build_chat_model` runs on every graph build and reaches `_tls_http_clients`. Uncached, that
+    built a fresh `AsyncClient` (its own pool, its own TLS context) per question asked, and nothing
+    ever closed one. The verifier client already pays `@cache` for exactly this on a colder path;
+    this is the hot one.
     """
     import certifi
 
-    from chemclaw.agent.llm_provider import _tls_http_client
+    from chemclaw.agent.llm_provider import _tls_http_clients
 
-    _tls_http_client.cache_clear()
+    _tls_http_clients.cache_clear()
     # A real PEM, because httpx loads the bundle when the client is constructed — a made-up path
     # would fail in `ssl` before reaching the property under test. Which trust store it is does not
     # matter here; that it is a store the client accepts does.
     monkeypatch.setattr(settings, "llm_tls_ca_bundle", certifi.where())
     try:
-        first = _tls_http_client()
-        assert first is not None, "a configured bundle must produce a pinned client"
-        assert _tls_http_client() is first, "a second turn must reuse the process's client"
+        first = _tls_http_clients()
+        assert _tls_http_clients() is first, "a second turn must reuse the process's clients"
     finally:
-        _tls_http_client.cache_clear()
+        _tls_http_clients.cache_clear()
 
 
-def test_no_bundle_leaves_the_sdk_its_own_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The other half of the cache: caching must not turn "no bundle" into a client.
+def test_both_gateway_clients_exist_and_refuse_the_environment_with_no_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shipped configuration is the no-bundle one, and it used to be the unprotected one.
 
-    A publicly-trusted endpoint wants the SDK's own default, which is what `None` asks for.
+    **This test is the inverse of the one it replaces.** `test_no_bundle_leaves_the_sdk_its_own
+    _client` asserted that no bundle yields `None` — "a publicly-trusted endpoint wants the SDK's
+    own default" — which is true about TLS and was the whole defect about proxies. `None` means
+    the SDK builds the client, and an SDK-built httpx client carries `trust_env=True`: measured on
+    that configuration with `HTTP_PROXY` naming a local recorder, the recorder received
+    `POST /v1/chat/completions` with the prompt body and the gateway `Authorization` bearer, on
+    both `invoke` and `ainvoke`, while `netguard._refused` stayed at 0. A guard cannot see a
+    proxied call, because the destination has left the address
+    (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`).
+
+    So both clients are ours on every branch, and the bundle decides only *verification*. Asserted
+    on the sync client as well as the async one because the sync one was never passed at all —
+    `ChatOpenAI` got `http_async_client=` alone, so `invoke` went out on a client this repository
+    had never seen.
     """
-    from chemclaw.agent.llm_provider import _tls_http_client
+    from chemclaw.agent.llm_provider import _tls_http_clients
 
-    _tls_http_client.cache_clear()
+    _tls_http_clients.cache_clear()
     monkeypatch.setattr(settings, "llm_tls_ca_bundle", "")
     try:
-        assert _tls_http_client() is None
+        sync_client, async_client = _tls_http_clients()
+        assert sync_client is not None and async_client is not None
+        for client in (sync_client, async_client):
+            assert client.trust_env is False, "a client that trusts the env follows HTTP(S)_PROXY"
+            proxy_mounts = [key for key in client._mounts if key.pattern is not None]
+            assert proxy_mounts == [], f"proxy mounts resolved from the environment: {proxy_mounts}"
     finally:
-        _tls_http_client.cache_clear()
+        _tls_http_clients.cache_clear()
+
+
+def test_the_chat_model_is_handed_both_of_this_process_s_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What the model is *built with*, not what the factory returns — the gap the defect lived in.
+
+    The factory could be perfect and the constructor still pass one of its two results, which is
+    exactly what happened: `http_async_client=` alone, so every `invoke` used an SDK-built client.
+    Reads the objects off the constructed `ChatOpenAI` rather than the call, so an argument dropped
+    in a refactor fails here.
+    """
+    _openai_endpoint(monkeypatch)
+    from chemclaw.agent.llm_provider import _tls_http_clients, build_chat_model
+
+    _tls_http_clients.cache_clear()
+    try:
+        model = build_chat_model()
+        sync_client, async_client = _tls_http_clients()
+        assert model.root_client._client is sync_client
+        assert model.root_async_client._client is async_client
+    finally:
+        _tls_http_clients.cache_clear()
 
 
 def _openai_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:

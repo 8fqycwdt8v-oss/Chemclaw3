@@ -23,6 +23,13 @@ libc**, or a syscall from a **compiled extension** (this closure carries `grpcio
 than asking Python nicely — and the chart's `git_remote` / egress rules are where they land. This
 guard catches the large class a static import scan cannot: a dependency reaching out at runtime.
 
+**One shape has no such backstop, and it is why `refuse_proxied_egress` exists.** A proxy moves the
+destination out of the address, so the allowlist cannot see it; and where the proxy is a sidecar on
+loopback — the shipped OpenShift shape — it shares the pod's network namespace, so the NetworkPolicy
+cannot see it either. That case is refused at boot rather than at dial, which is also what makes it
+reach the child process the paragraph above concedes: `git` inherits the environment, and a
+configured proxy is now a thing this process refuses to start beside.
+
 Armed once, at `chemclaw.core.config` import, beside `pin_langsmith_egress`, because that module is
 the one import every entrypoint makes (the front door, the CLI, the connector server, the durable
 worker). Arming it there makes the guard a property of the system rather than of a launcher — the
@@ -33,6 +40,7 @@ LLM provider).
 from __future__ import annotations
 
 import logging
+import os
 import socket
 from collections.abc import Iterable
 from typing import Any
@@ -312,12 +320,90 @@ def allowed_hosts() -> frozenset[str]:
     return _allowed
 
 
+_PROXY_ENV_VARS = ("all_proxy", "http_proxy", "https_proxy")
+
+
+def refuse_proxied_egress(settings: Any) -> None:
+    """Refuse to start when a proxy variable would carry this process's traffic off-address.
+
+    **A proxy moves the destination out of the address, which is the one thing an allowlist guard
+    cannot see.** Everything below `arm()` asks "which *host* may this process dial"; a client
+    configured with a proxy dials the *proxy* and names the real destination in the request line.
+    Measured with the allowlist empty and a local recorder standing in for a sidecar: a request to
+    an external host through `proxy=http://127.0.0.1:<port>` returned HTTP 200 with the body, and
+    `_refused` never moved — while the same request with a *named* proxy, and the same request with
+    no proxy at all, were both refused at `getaddrinfo`. The loopback arm needs no allowlisting,
+    because `_check` exempts loopback by construction and must keep exempting it: this process
+    dials Postgres, Temporal and the calc backend there.
+
+    That is not an attacker-only shape. An OpenShift service mesh or egress sidecar *is* a loopback
+    proxy by design, and it is the layer that would otherwise be the backstop: a sidecar shares the
+    pod's network namespace, so traffic to it never crosses a NetworkPolicy enforcement point. For
+    this one shape the module docstring's "that is the NetworkPolicy's job" does not hold, and
+    nothing below the guard catches it.
+
+    So a proxy is treated as a **destination**: if one is configured and its host is not named in
+    `CHEMCLAW_EGRESS_ALLOW`, this process does not start. Named explicitly rather than accepted for
+    being loopback, because loopback is exactly the case that needs the operator's signature.
+
+    **`NO_PROXY` is honoured, and that is what keeps this from being a nuisance.** The question is
+    not "is a proxy set" but "would a proxy carry traffic to somewhere this deployment actually
+    dials", so the destinations are `derive_allowed(settings)` and the bypass test is the stdlib's
+    own (`urllib.request.proxy_bypass`) rather than a second reading of `no_proxy`
+    written here. A sandbox whose `no_proxy` covers the loopback addresses the dev defaults use —
+    this repository's CI containers, among others — configures a proxy and is not refused, because
+    no call this process makes would go through it.
+
+    Silent when the guard is disabled, because `arm_from_settings` returns before reaching this: a
+    deployment that has opted out of the guard has opted out of this too, and says so at WARNING.
+
+    Raises:
+        RuntimeError: naming the proxy, the destinations it would carry, and the one way to
+            proceed. Loud at boot rather than loud on the first turn, and unlike
+            `api/middleware._refuse_unconfigured_llm_gateway` it reaches the durable worker too,
+            because it hangs off the `chemclaw.core.config` import every entrypoint makes.
+    """
+    from urllib.request import proxy_bypass
+
+    configured = {
+        value.strip()
+        for name in _PROXY_ENV_VARS
+        for value in (os.environ.get(name, ""), os.environ.get(name.upper(), ""))
+        if value.strip()
+    }
+    if not configured:
+        return
+    proxy_hosts = {host for host in (_host_from_url(url) for url in configured) if host}
+    declared = {
+        entry.strip().lower() for entry in (settings.egress_allow or "").split(",") if entry.strip()
+    }
+    undeclared = sorted(proxy_hosts - declared)
+    if not undeclared:
+        return
+    carried = sorted(host for host in derive_allowed(settings) if not proxy_bypass(host))
+    if not carried:
+        return
+    raise RuntimeError(
+        "SECURITY: a proxy is configured in this process's environment "
+        f"({', '.join(undeclared)}) and would carry traffic to {', '.join(carried)} — every "
+        "prompt, completion and Authorization bearer would be re-terminated at a host this "
+        "deployment has not declared, past the CA pinning and invisibly to the egress guard, "
+        "which sees only the dial to the proxy. Name the proxy in CHEMCLAW_EGRESS_ALLOW to say "
+        "this is intended, add these destinations to NO_PROXY, or unset the proxy variable."
+    )
+
+
 def arm_from_settings(settings: Any) -> None:
     """Derive the allowlist from `settings` and arm, unless the guard is disabled.
 
     The one call `chemclaw.core.config` makes. When `egress_guard_enabled` is False the guard is not
     installed and the process runs unguarded — the stated opt-out for a deployment relying on the
-    NetworkPolicy alone.
+    NetworkPolicy alone, and `refuse_proxied_egress` is skipped with it.
+
+    The proxy refusal runs **before** `arm`, because it is the one failure a running guard cannot
+    report: a proxied call is a legitimate-looking dial to an allowlisted or loopback address, so
+    arming first would mean starting a process whose guard is structurally blind to where its
+    prompts go.
     """
     if not settings.egress_guard_enabled:
         logger.warning(
@@ -325,6 +411,7 @@ def arm_from_settings(settings: Any) -> None:
             "bounded only by the NetworkPolicy, not by this process"
         )
         return
+    refuse_proxied_egress(settings)
     arm(derive_allowed(settings))
     _publish_armed()
 
