@@ -140,10 +140,12 @@ def gateway_client_kwargs(ca_bundle: str = "") -> dict[str, Any]:
       and building the context is also the only form that says what the bundle *is* — a CA file to
       verify the peer against, rather than a path httpx has to guess the meaning of. It is built on
       the no-bundle branch too, and it reproduces httpx's own `trust_env=True` precedence —
-      configured bundle, else `SSL_CERT_FILE`/`SSL_CERT_DIR`, else certifi — because `trust_env`
-      conflates proxy discovery with the trust store and only the first is objected to here.
-      Getting that precedence *wrong in either direction* silently changes which certificates every
-      deployment trusts; the comment below has both measurements.
+      configured bundle, else `SSL_CERT_FILE`, else `SSL_CERT_DIR`, else certifi — because
+      `trust_env` conflates proxy discovery with the trust store and only the first is objected to
+      here. **Exclusive, one source, never a union**, which is what httpx does and what a first
+      version of this got wrong. Getting that precedence wrong in either direction silently changes
+      which certificates every deployment trusts, and one of the two directions is invisible to
+      `get_ca_certs()`; the comment below has both measurements.
 
     **This returned `None` for the whole no-bundle branch until 2026-09-05, and that made the first
     decision unreachable in every shipped configuration.** `llm_tls_ca_bundle` defaults to `""` and
@@ -158,7 +160,9 @@ def gateway_client_kwargs(ca_bundle: str = "") -> dict[str, Any]:
     part that is conditional, which is the opposite of how this read before.
 
     Args:
-        ca_bundle: Path to the CA bundle (`settings.llm_tls_ca_bundle`), or "" for the system store.
+        ca_bundle: Path to the CA bundle (`settings.llm_tls_ca_bundle`), or "" to take the store
+            from the environment, else certifi. Not "the system store": OpenSSL's own default
+            paths are what this deliberately does *not* fall through to.
 
     Returns:
         Kwargs for `httpx.Client(**kwargs)` / `httpx.AsyncClient(**kwargs)`. Never None.
@@ -168,27 +172,38 @@ def gateway_client_kwargs(ca_bundle: str = "") -> dict[str, Any]:
 
     import certifi
 
-    # **This reproduces what httpx does with `trust_env=True`, minus the proxy.** `trust_env`
-    # conflates proxy discovery with the trust store, only the first is objected to here, and
-    # surrendering the second with it is a behavioural change nobody asked for — in *both*
-    # directions, which is the part a first version of this got wrong:
+    # **This reproduces what httpx does with `trust_env=True`, minus the proxy** — including that
+    # its precedence is *exclusive*. `httpx._config.create_ssl_context` is
+    # `if SSL_CERT_FILE: … elif SSL_CERT_DIR: … else certifi`, one source and never a union, and a
+    # first version of this function merged them: `cafile` conditional, `capath` unconditional. The
+    # consequence was the opposite of this function's purpose, and only a real handshake could see
+    # it — `SSLContext.get_ca_certs()` does not report a `capath` at all, so the table that
+    # "verified" the merge agreed with itself while the stores diverged. Driven against a rogue CA
+    # dropped into a hashed directory, with `llm_tls_ca_bundle` pinned to a *different* store:
     #
-    #   - Dropping `trust_env` without an explicit `verify` loses `SSL_CERT_FILE`/`SSL_CERT_DIR`.
-    #     Measured against a probe bundle holding one certificate: 118 (certifi) where the
-    #     deployment had asked for 1.
-    #   - Passing `create_default_context(cafile=None)` instead loses *certifi*, falling through to
-    #     OpenSSL's default paths. Measured on the shipped configuration (no bundle, no
-    #     `SSL_CERT_*`): 152 certificates from the OS store against the SDK's previous 118, with
-    #     **13 roots in certifi and not in the OS store**. That is a narrowing on every deployment,
-    #     and it would have shipped as a TLS failure against whichever gateway one of those 13
-    #     signed.
+    #     old private_ca_transport (pin, trust_env=False)  -> refuses the rogue CA
+    #     httpx trust_env=True + the same pin              -> refuses the rogue CA
+    #     the merged version                               -> TRUSTS it
     #
-    # So the precedence is stated rather than inherited: an explicitly configured bundle, else the
-    # environment's store, else certifi — which is httpx's own order, and leaves the trust store
-    # exactly as it was before this function started building the client.
-    cafile = ca_bundle or os.environ.get("SSL_CERT_FILE") or None
-    capath = os.environ.get("SSL_CERT_DIR") or None
-    if cafile is None and capath is None:
+    # One environment variable adding roots to a client whose whole point is that the environment
+    # cannot redirect it, on the one path `llm_tls_ca_bundle` exists for. `trust_env` conflates
+    # proxy discovery with the trust store, only the first is objected to here, and reproducing the
+    # second means reproducing its precedence exactly rather than approximately.
+    #
+    # Getting it wrong in the *other* direction is just as silent: passing
+    # `create_default_context(cafile=None)` picks up `SSL_CERT_FILE` but on the shipped
+    # configuration falls through to OpenSSL's default paths and drops certifi — measured, 152
+    # certificates from the OS store against the SDK's previous 118, with 13 roots in certifi and
+    # not in the OS store.
+    cafile: str | None = None
+    capath: str | None = None
+    if ca_bundle:
+        cafile = ca_bundle
+    elif os.environ.get("SSL_CERT_FILE"):
+        cafile = os.environ["SSL_CERT_FILE"]
+    elif os.environ.get("SSL_CERT_DIR"):
+        capath = os.environ["SSL_CERT_DIR"]
+    else:
         cafile = certifi.where()
     return {
         "trust_env": False,

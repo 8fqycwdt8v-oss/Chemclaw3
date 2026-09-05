@@ -8,13 +8,14 @@ import socket
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from chemclaw.api import middleware
 from chemclaw.core import netguard
 from chemclaw.core.config import Settings, settings
-from chemclaw.core.http import is_loopback_host, is_loopback_url
+from chemclaw.core.http import gateway_client_kwargs, is_loopback_host, is_loopback_url
 
 
 @pytest.fixture(autouse=True)
@@ -404,26 +405,50 @@ def _proxy_env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
         monkeypatch.setenv(name, value)
 
 
-def _proxy_settings(**overrides: str) -> Settings:
-    """A settings object dialling one non-loopback https gateway, plus a database and a broker.
+def _proxy_settings(**overrides: object) -> Settings:
+    """A deployment dialling a gRPC OTLP collector, plus destinations no proxy variable can carry.
 
-    The two non-HTTP destinations are here on purpose: they are what `derive_allowed` returns and
-    what a first version of this check charged to a proxy, so every "not refused" arm below is also
-    an assertion that they are *not* counted.
+    The gateway, the calc backend, the database and the broker are here on purpose: they are what
+    a first version of this check charged, and every "not refused" arm below is therefore also an
+    assertion that they are *not* counted. Charging them refused deployments for a reason that was
+    not true — measured, every first-party client for them passes `trust_env=False`, zero proxy
+    mounts against two on a default `httpx.Client` — and on the shipped loopback defaults it
+    stopped a developer behind a corporate proxy from importing the config at all.
     """
     return Settings(
         llm_base_url="https://gateway.internal/v1",
-        # Every HTTP destination on one host and one scheme, so an arm about *which* destinations
-        # are counted is not also an arm about the shipped loopback defaults. Leaving these at
-        # their defaults made the scheme arm below fail for a reason that had nothing to do with
-        # schemes: `calc_server_url` ships as `http://127.0.0.1:…`, so `HTTP_PROXY` alone really
-        # does carry it, and the fixture was measuring that instead of the property under test.
-        calc_server_url="https://gateway.internal/calc",
-        rxnlabel_server_url="https://gateway.internal/rxnlabel",
-        postgres_dsn="postgresql://chemclaw@db.internal:5432/chemclaw",
-        temporal_address="temporal.internal:7233",
-        egress_allow=overrides.pop("egress_allow", "gateway.internal"),
+        calc_server_url="https://calc.internal/mcp",
+        postgres_dsn=str(
+            overrides.pop("postgres_dsn", "postgresql://chemclaw@db.internal:5432/chemclaw")
+        ),
+        temporal_address=str(overrides.pop("temporal_address", "temporal.internal:7233")),
+        otel_enabled=bool(overrides.pop("otel_enabled", True)),
+        otel_endpoint=str(overrides.pop("otel_endpoint", "https://collector.obs:4317")),
+        egress_allow=str(overrides.pop("egress_allow", "gateway.internal")),
         **overrides,  # type: ignore[arg-type]
+    )
+
+
+def _entra_settings(**overrides: object) -> Settings:
+    """A deployment in the enforced identity posture, whose JWKS fetch goes out through urllib."""
+    return _proxy_settings(
+        entra_required=True,
+        # Loopback, because `entra_required` refuses a plaintext broker channel and this fixture is
+        # about the JWKS fetch rather than about Temporal's transport.
+        temporal_address="127.0.0.1:7233",
+        # Loopback too, for the same reason: `entra_required` refuses a plaintext DSN, and this
+        # fixture's subject is the JWKS fetch rather than Postgres' transport.
+        postgres_dsn="postgresql://chemclaw@127.0.0.1:5432/chemclaw",
+        entra_audience="api://chemclaw",
+        entra_tenant_id="tenant",
+        harness_enabled=True,
+        entra_jwks_url=str(
+            overrides.pop(
+                "entra_jwks_url", "https://login.microsoftonline.com/tenant/discovery/v2.0/keys"
+            )
+        ),
+        otel_enabled=overrides.pop("otel_enabled", False),
+        **overrides,
     )
 
 
@@ -440,10 +465,9 @@ def _assert_live(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> None:
     """The positive control every "not refused" arm needs to mean anything.
 
     A test that asserts "no exception" passes just as well against a function whose body has been
-    deleted — measured: gutting `refuse_proxied_egress` to `lambda settings: None` left four of the
-    arms below green. So each of them re-runs with the bypass removed and asserts the refusal
-    *does* fire, which is what distinguishes "this configuration is accepted" from "nothing is
-    checked".
+    deleted — measured on an earlier version: gutting `refuse_proxied_egress` left several arms
+    green. So each of them re-runs with the bypass removed and asserts the refusal *does* fire,
+    which is what distinguishes "this configuration is accepted" from "nothing is checked".
     """
     _proxy_env(monkeypatch, HTTPS_PROXY="http://control.invalid:3128")
     assert _refuses(settings), (
@@ -457,15 +481,10 @@ def test_an_undeclared_proxy_refuses_the_process_at_boot(monkeypatch: pytest.Mon
 
     Measured before the fix, with the allowlist empty and one local HTTP proxy: a request to an
     external host through `proxy=http://127.0.0.1:<port>` returned **HTTP 200 with the body** and
-    `netguard._refused` never moved, while the same request through a *named* proxy and the same
-    request with no proxy were both refused at `getaddrinfo`. The loopback arm needs no
-    allowlisting because `_check` exempts loopback by construction — and it must keep doing so,
-    since this process dials Postgres, Temporal and the calc backend there.
-
-    A loopback proxy is not an attacker-only shape: an OpenShift service mesh or egress sidecar is
-    one by design, and it is also the reason the module docstring's usual fallback does not apply —
-    a sidecar shares the pod's network namespace, so its traffic never crosses a NetworkPolicy
-    enforcement point. There is no layer below this one for this shape.
+    `netguard._refused` never moved. A loopback proxy is not an attacker-only shape — an OpenShift
+    service mesh or egress sidecar is one by design, and a sidecar shares the pod's network
+    namespace, so its traffic never crosses a NetworkPolicy enforcement point either. There is no
+    layer below this one for this shape.
     """
     _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001")
     with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured"):
@@ -483,25 +502,127 @@ def test_an_undeclared_proxy_refuses_the_process_at_boot(monkeypatch: pytest.Mon
         "all_proxy",
         "ALL_PROXY",
         "All_Proxy",
+        "grpc_proxy",
+        "GRPC_PROXY",
+        "Grpc_Proxy",
     ],
 )
 def test_every_proxy_spelling_is_read(monkeypatch: pytest.MonkeyPatch, variable: str) -> None:
-    """Every case, not both cases — and the difference was a working bypass of this whole check.
+    """Every case, not both cases — and the difference was a working bypass, twice.
 
-    The first version of this read `name` and `name.upper()` for three names, and its docstring
-    argued the case correctly ("a control an operator disables by typing the variable in lower
-    case") one step short of the conclusion. `urllib.getproxies_environment` lowercases *every*
-    `*_proxy` name, and so do httpx and requests: measured, `Https_Proxy`, `HTTPS_proxy`,
-    `https_PROXY`, `Http_Proxy` and `All_Proxy` each gave an httpx client one proxy mount while the
-    hand-rolled check saw nothing and the process booted silently.
-
-    So this is parametrised over mixed-case spellings specifically. The lesson is the one the ADR
-    already states about `no_proxy` and did not apply to the proxy variables themselves: reading an
-    environment convention a second time is writing a second answer to it.
+    A first version read `name` and `name.upper()`, which misses every mixed-case spelling while
+    httpx, requests, git and grpc all lower-case the name. That was found by review and fixed by
+    going through `urllib.request.getproxies_environment`. Re-targeting the check at grpc and
+    urllib then required reading the variables directly again — CPython drops `http` from that
+    mapping whenever `REQUEST_METHOD` is set, and neither git nor grpc implements the carve-out —
+    and the *same* two-spelling shortcut came back with it. Measured: `Grpc_Proxy` gave grpc a live
+    proxy and the process booted silently. `grpc_proxy` is parametrised here because it is the one
+    variable only this deployment's exporter reads.
     """
     _proxy_env(monkeypatch, **{variable: "http://127.0.0.1:15001"})
     with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured"):
         netguard.refuse_proxied_egress(_proxy_settings())
+
+
+def test_only_the_destinations_whose_clients_read_the_environment_are_charged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The narrowing this check turns on, asserted as a property rather than described.
+
+    Every first-party HTTP client — the gateway, the embedding seam, the calc backend, every
+    connector endpoint — passes `trust_env=False`, so a proxy variable cannot carry any of them.
+    Charging them made the refusal fire on deployments where measurably nothing would be proxied,
+    and on the shipped loopback defaults it stopped a developer behind a corporate proxy from
+    importing the config at all. This arm dials all four and expects silence.
+    """
+    settings = Settings(
+        llm_base_url="https://gateway.internal/v1",
+        calc_server_url="https://calc.internal/mcp",
+        rxnlabel_server_url="https://rxnlabel.internal/mcp",
+        postgres_dsn="postgresql://chemclaw@db.internal:5432/chemclaw",
+        temporal_address="temporal.internal:7233",
+        egress_allow="gateway.internal",
+    )
+    _proxy_env(monkeypatch, HTTPS_PROXY="http://sidecar.internal:15001", HTTP_PROXY="http://s:1")
+    assert netguard.proxied_destinations(settings) == {}
+    assert not _refuses(settings)
+    for host in ("gateway.internal", "calc.internal", "db.internal", "temporal.internal"):
+        assert host in netguard.derive_allowed(settings), (
+            "the premise: these are on the allowlist, so this arm is about the narrowing rather "
+            "than about them being absent"
+        )
+
+
+def test_the_shipped_defaults_start_behind_a_corporate_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stock checkout on a developer's machine must import, and once it did not.
+
+    Measured on the version this replaces: `HTTP_PROXY=http://proxy.corp:3128 python -c "import
+    chemclaw.core.config"` raised, and `pytest` collection died with it — because every shipped
+    destination is loopback and loopback destinations were charged. Anyone behind a corporate proxy
+    could not run this repository. The refusal must be about what a proxy can carry, not about
+    whether one is configured.
+    """
+    _proxy_env(monkeypatch, HTTP_PROXY="http://proxy.corp:3128", ALL_PROXY="http://proxy.corp:3128")
+    assert not _refuses(Settings())
+
+
+def test_the_grpc_exporter_is_charged_whatever_the_targets_scheme(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Grpc resolves its proxy without consulting the target, which no per-scheme rule would catch.
+
+    `core/logging.py` uses the **gRPC** OTLP exporter, and grpc reads `grpc_proxy`, then
+    `https_proxy`, then `http_proxy`, regardless of whether the endpoint is `https`. Measured with
+    only `http_proxy` set against a TLS target: three `CONNECT` frames reached the recorder. With
+    `otel_include_sensitive_data` that traffic is prompts and completions, so this is the live hole
+    the re-targeting exists to close.
+    """
+    settings = _proxy_settings()
+    for variable in ("grpc_proxy", "https_proxy", "http_proxy"):
+        _proxy_env(monkeypatch, **{variable: "http://sidecar.internal:15001"})
+        assert _refuses(settings), f"{variable} must charge the gRPC exporter"
+
+
+def test_a_bare_host_port_otlp_endpoint_is_not_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`collector.obs:4317` is a real OTLP spelling and `urlsplit` reads its host as the *scheme*.
+
+    A scheme-filtered version of this check dropped that form entirely — the destination with the
+    most sensitive traffic on it, silently uncharged, on the spelling the OTLP documentation uses.
+    """
+    _proxy_env(monkeypatch, HTTPS_PROXY="http://sidecar.internal:15001")
+    settings = _proxy_settings(otel_endpoint="collector.obs:4317")
+    assert "collector.obs" in " ".join(netguard.proxied_destinations(settings))
+    assert _refuses(settings)
+
+
+def test_the_jwks_fetch_is_charged_by_its_own_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`PyJWKClient` goes through `urllib`, which *does* resolve per scheme — unlike grpc.
+
+    The two readers in this check disagree about the environment and both are reproduced rather
+    than averaged: an `https` JWKS endpoint is carried by `https_proxy` or `all_proxy` and not by
+    `http_proxy`, while the exporter beside it is carried by any of them.
+    """
+    settings = _entra_settings()
+    for variable in ("https_proxy", "all_proxy"):
+        _proxy_env(monkeypatch, **{variable: "http://sidecar.internal:15001"})
+        assert _refuses(settings), f"{variable} must charge the JWKS fetch"
+    _proxy_env(monkeypatch, HTTP_PROXY="http://sidecar.internal:15001")
+    assert not _refuses(settings), "an https JWKS endpoint is not carried by HTTP_PROXY"
+    _assert_live(monkeypatch, settings)
+
+
+def test_an_unenforced_identity_posture_has_no_jwks_fetch_to_charge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`entra_required=False` means nothing fetches the key set, so nothing is proxied."""
+    settings = _proxy_settings(
+        otel_enabled=False, entra_jwks_url="https://login.microsoftonline.com/t/keys"
+    )
+    _proxy_env(monkeypatch, HTTPS_PROXY="http://sidecar.internal:15001")
+    assert not _refuses(settings)
+    _assert_live(monkeypatch, _entra_settings())
 
 
 def test_a_proxy_named_in_the_allowlist_is_the_operators_decision(
@@ -514,88 +635,63 @@ def test_a_proxy_named_in_the_allowlist_is_the_operators_decision(
     earn the exemption here for the same reason it is the dangerous case: the address carries no
     signal at all.
     """
-    settings_with_proxy = _proxy_settings(egress_allow="gateway.internal,127.0.0.1")
+    declared = _proxy_settings(egress_allow="gateway.internal,127.0.0.1")
     _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001")
-    assert not _refuses(settings_with_proxy)
-    _assert_live(monkeypatch, settings_with_proxy)
+    assert not _refuses(declared)
+    _assert_live(monkeypatch, declared)
 
 
-def test_no_proxy_covering_every_destination_is_not_refused(
+def test_no_proxy_covering_every_charged_destination_is_not_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The question is not "is a proxy set" but "would it carry anything this process dials".
 
-    Without this, a container that configures a proxy for its own package installs and excludes the
-    cluster — which is what this repository's own CI and dev sandboxes do — could not run the
-    process at all. The bypass test is the stdlib's own (`urllib.request.proxy_bypass`) rather than
-    a second reading of `no_proxy` written here, because a second reading is a second answer.
+    The bypass test is the stdlib's own (`urllib.request.proxy_bypass`) rather than a second
+    reading of `no_proxy` written here, because a second reading is a second answer.
     """
     settings = _proxy_settings()
-    _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001", NO_PROXY="gateway.internal")
+    _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001", NO_PROXY="collector.obs")
     assert not _refuses(settings)
     _assert_live(monkeypatch, settings)
 
 
 def test_a_wildcard_no_proxy_bypasses_everything(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`no_proxy=*` is a real configuration and both httpx and the stdlib honour it.
-
-    Checked because the two have to agree: if this check read `no_proxy` itself it could easily
-    treat `*` as a literal hostname and refuse a deployment whose clients proxy nothing at all.
-    """
+    """`no_proxy=*` is a real configuration and both httpx and the stdlib honour it."""
     settings = _proxy_settings()
     _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001", NO_PROXY="*")
     assert not _refuses(settings)
     _assert_live(monkeypatch, settings)
 
 
-def test_no_proxy_that_misses_one_destination_still_refuses(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One uncovered destination is enough, which is what makes the bypass check a narrowing.
+def test_two_readers_on_one_host_do_not_collapse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A declared proxy must not hide an undeclared one reaching the same host by another reader.
 
-    The failure to avoid is a `NO_PROXY` that looks thorough and leaves the gateway out — the one
-    destination whose traffic is the prompts and the bearer.
+    An earlier version keyed `carried` by destination host alone, so two entries for one host
+    overwrote each other and only the survivor was compared against the allowlist. **The first
+    test written for this could not fail**, because it varied two variables on *one* reader — and a
+    reader takes the first variable that hits and stops, so it can only ever record one proxy. The
+    collision needs two readers, which is what this deployment has: the gRPC exporter and the
+    `urllib` JWKS fetch, resolving different variables, both able to name the same host.
+
+    Here the exporter is carried by an **undeclared** proxy and the JWKS fetch by a declared one,
+    on one host. Keyed by host, whichever landed second wins the comparison and the process starts
+    with the exporter's spans — prompts, under `otel_include_sensitive_data` — going to a host
+    nobody declared.
     """
-    _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001", NO_PROXY="127.0.0.1,localhost")
-    with pytest.raises(RuntimeError, match="gateway.internal"):
-        netguard.refuse_proxied_egress(_proxy_settings())
-
-
-def test_a_proxy_for_another_scheme_carries_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`HTTP_PROXY` alone against an `https` destination proxies nothing, and must not refuse.
-
-    Measured on httpx: with only `HTTP_PROXY` set and every destination on `https`, the client
-    builds a plain connection pool rather than an `HTTPProxy` transport — so a check that asked
-    "is any proxy variable set" reported as carried a configuration in which nothing leaves through
-    the proxy. This is the arm that makes the per-scheme lookup load-bearing rather than tidy.
-    """
-    settings = _proxy_settings()
-    _proxy_env(monkeypatch, HTTP_PROXY="http://127.0.0.1:15001")
-    assert not _refuses(settings)
-    _assert_live(monkeypatch, settings)
-
-
-def test_a_database_and_a_broker_are_not_charged_to_a_proxy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`derive_allowed` is every host by any protocol; a proxy variable carries only HTTP.
-
-    Measured against live Postgres with all three proxy variables pointed at a dead port: psycopg
-    connects and returns a row — libpq does not read them. Charging the DSN host and the Temporal
-    frontend to a proxy would refuse a deployment whose `NO_PROXY` covers every HTTP destination
-    and simply does not name its database, which is a pod that will not start for a reason that is
-    not true. The settings here dial both, so this arm fails the moment the destination set widens
-    back to `derive_allowed`.
-    """
-    settings = _proxy_settings()
-    _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001", NO_PROXY="gateway.internal")
-    assert not _refuses(settings), "a non-HTTP destination was charged to a proxy"
-    assert netguard.proxied_destinations(settings) == {}
-    for host in ("db.internal", "temporal.internal"):
-        assert host in netguard.derive_allowed(settings), (
-            "the premise: these are on the allowlist, so this arm is about the narrowing rather "
-            "than about them being absent"
-        )
+    shared = _entra_settings(
+        otel_enabled=True,
+        otel_endpoint="https://shared.internal:4317",
+        entra_jwks_url="https://shared.internal/tenant/keys",
+        egress_allow="gateway.internal,declared.corp",
+    )
+    _proxy_env(
+        monkeypatch,
+        GRPC_PROXY="http://undeclared.corp:3128",
+        HTTPS_PROXY="http://declared.corp:3128",
+    )
+    carried = netguard.proxied_destinations(shared)
+    assert len(carried) == 2, f"one reader's entry was overwritten by the other's: {carried}"
+    assert _refuses(shared), "the undeclared proxy on the exporter was hidden by the declared one"
 
 
 def test_no_proxy_configured_is_the_silent_case(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -607,12 +703,8 @@ def test_no_proxy_configured_is_the_silent_case(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_disabling_the_guard_disables_this_too(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`arm_from_settings` returns before the refusal, and that is deliberate.
-
-    A deployment that has opted out of the guard has opted out of this with it — one opt-out, said
-    once at WARNING, rather than a second switch nobody knows to look for.
-    """
-    off = _proxy_settings(egress_guard_enabled=False)  # type: ignore[arg-type]
+    """`arm_from_settings` returns before the refusal, and that is deliberate."""
+    off = _proxy_settings(egress_guard_enabled=False)
     _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001")
     netguard.arm_from_settings(off)
     assert _refuses(_proxy_settings()), (
@@ -621,24 +713,24 @@ def test_disabling_the_guard_disables_this_too(monkeypatch: pytest.MonkeyPatch) 
     )
 
 
-def test_the_refusal_names_the_proxy_and_what_it_would_carry(
+def test_the_refusal_names_the_proxy_the_destination_and_what_reads_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An operator reading this at boot has to be able to act on it without reading the source.
+    """An operator has to be able to act on this at boot without reading the source.
 
-    Three things have to be in the message: which proxy, which destinations it would carry, and the
-    one edit that says "this is intended" — *in the form that works*. Measured, only the bare host
-    is accepted: `proxy.corp:3128` and `http://proxy.corp:3128` both still refuse, and both land in
-    `derive_allowed` verbatim where `_check` can never match them. So the message says so.
+    Four things: which proxy, which destination, **what reads the environment for it** — because
+    "the OTLP exporter" is what makes the refusal checkable rather than mysterious — and the one
+    edit that proceeds, in the form that works. Measured, only the bare host is accepted:
+    `proxy.corp:3128` and `http://proxy.corp:3128` both still refuse.
     """
     _proxy_env(monkeypatch, HTTPS_PROXY="http://sidecar.internal:15001")
     with pytest.raises(RuntimeError) as raised:
         netguard.refuse_proxied_egress(_proxy_settings())
     message = str(raised.value)
     assert "sidecar.internal" in message
-    assert "gateway.internal" in message
-    assert "CHEMCLAW_EGRESS_ALLOW" in message
-    assert "bare host" in message, "the form that actually works has to be in the message"
+    assert "collector.obs" in message
+    assert "OTLP span exporter" in message
+    assert "bare host" in message
 
 
 def test_only_the_bare_host_form_of_the_escape_hatch_works(
@@ -657,12 +749,7 @@ def test_arm_from_settings_is_where_the_refusal_is_wired(monkeypatch: pytest.Mon
     `arm_from_settings` is the single call `chemclaw.core.config` makes, which is what puts this
     refusal in front of the durable worker as well as the front door — the gap
     `api/middleware._refuse_unconfigured_llm_gateway` has by construction, since its signal is a
-    non-loopback *bind* and a worker does not bind. Without this arm, deleting one line from
-    `arm_from_settings` would leave every test above green and every process unguarded.
-
-    It must also refuse *before* arming, because a proxied call is a legitimate-looking dial to an
-    allowlisted address: arming first would mean starting a process whose guard is structurally
-    blind to where its prompts go.
+    non-loopback *bind* and a worker does not bind.
     """
     _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001")
     with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured"):
@@ -689,8 +776,6 @@ def test_refusing_the_proxy_does_not_surrender_the_environment_trust_store(
     import certifi
     import httpx
 
-    from chemclaw.core.http import gateway_client_kwargs
-
     first = pathlib.Path(certifi.where()).read_text(encoding="utf-8")
     one_cert = first.split("-----END CERTIFICATE-----")[0] + "-----END CERTIFICATE-----\n"
     bundle = tmp_path / "one-ca.pem"
@@ -708,3 +793,199 @@ def test_refusing_the_proxy_does_not_surrender_the_environment_trust_store(
         "the premise: OpenSSL's default paths honour SSL_CERT_FILE, which is what makes "
         "`cafile=None` preserve the deployment's store rather than fall back to certifi"
     )
+
+
+def _self_signed(label: str, directory: Path) -> tuple[Path, Path]:
+    """A throwaway self-signed CA-and-server certificate, as (cert, key).
+
+    **Issued for `127.0.0.1`, not for a name.** The distinguishing fact under test is which issuer
+    a client trusts, and a certificate for a made-up hostname cannot express it here: the guard
+    this file is about refuses the `getaddrinfo` for any non-allowlisted name, so every arm would
+    return "not trusted" for a reason that has nothing to do with the trust store. Every
+    certificate is therefore valid for the loopback address and differs only in who signed it —
+    `label` names the file, and the handshake decides on the issuer alone.
+    """
+    import datetime
+    import ipaddress
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, label)])
+    now = datetime.datetime.now(datetime.UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_path = directory / f"{label}.pem"
+    key_path = directory / f"{label}.key"
+    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    return cert_path, key_path
+
+
+@contextmanager
+def _tls_server(cert: Path, key: Path) -> Iterator[int]:
+    """Serve one HTTPS endpoint on loopback with `cert`, yielding its port."""
+    import http.server
+    import ssl as ssl_module
+    import threading
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("content-length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args: object) -> None:
+            return
+
+    context = ssl_module.SSLContext(ssl_module.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile=str(cert), keyfile=str(key))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield int(server.server_address[1])
+    finally:
+        server.shutdown()
+
+
+def _trusts(kwargs: dict[str, Any], port: int) -> bool:
+    """Whether a client built from `kwargs` completes a TLS handshake with the server on `port`.
+
+    A handshake rather than `SSLContext.get_ca_certs()`, because that call **does not report a
+    `capath` at all** — it is blind to exactly the half of the trust store this file's findings
+    turned on, and a table built from it agreed with itself while the stores diverged.
+    """
+    import httpx
+
+    with httpx.Client(**kwargs) as client:
+        try:
+            client.get(f"https://127.0.0.1:{port}/")
+        except httpx.ConnectError:
+            return False
+        return True
+
+
+def _hashed_capath(cert: Path, directory: Path) -> Path:
+    """`cert` installed into a fresh OpenSSL hash directory, which is what `capath` requires."""
+    import subprocess
+
+    capath = directory / "capath"
+    capath.mkdir()
+    (capath / cert.name).write_bytes(cert.read_bytes())
+    subprocess.run(["openssl", "rehash", str(capath)], check=True, capture_output=True)
+    return capath
+
+
+def test_an_ambient_cert_dir_cannot_widen_a_configured_ca_pin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The one path `llm_tls_ca_bundle` exists for, and a first version of this widened it.
+
+    **`SSLContext.get_ca_certs()` cannot see a `capath` at all**, so the four-row table that
+    "verified" the trust store agreed with itself while the stores diverged — `SSL_CERT_DIR` read
+    0 on both sides because the instrument was blind, not because the answer matched. This drives a
+    real handshake instead, which is the only thing that can tell the difference.
+
+    The defect: httpx's own precedence is *exclusive* (`httpx._config.create_ssl_context` is
+    `if SSL_CERT_FILE: … elif SSL_CERT_DIR: … else certifi`), and the first version made `cafile`
+    conditional while leaving `capath` unconditional — so an ambient `SSL_CERT_DIR` added roots to
+    a client whose configured pin is the whole reason it exists. Measured then: the code this
+    replaced refused the rogue CA, httpx with the same pin refused it, and the merged version
+    returned 200.
+    """
+    pinned_cert, _ = _self_signed("pinned.invalid", tmp_path)
+    rogue_cert, rogue_key = _self_signed("rogue.invalid", tmp_path)
+    monkeypatch.setenv("SSL_CERT_DIR", str(_hashed_capath(rogue_cert, tmp_path)))
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+
+    with _tls_server(rogue_cert, rogue_key) as port:
+        pinned = gateway_client_kwargs(str(pinned_cert))
+        assert not _trusts(pinned, port), (
+            "an ambient SSL_CERT_DIR widened a configured CA pin — the environment redirected the "
+            "one client whose configuration exists to stop it"
+        )
+        # The control: with no pin configured, the environment's store *is* the answer, and the
+        # same rogue CA is trusted. Without this the assertion above passes on a client that
+        # trusts nothing at all.
+        assert _trusts(gateway_client_kwargs(""), port), (
+            "with no bundle configured the environment's store must still be honoured"
+        )
+
+
+def test_a_configured_bundle_is_the_store_and_certifi_is_not_added_to_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pin that also trusts certifi is not a pin, and `get_ca_certs()` counting is not the check.
+
+    This is the mutation the count-based assertion could not catch: making `cafile` ignore
+    `ca_bundle` left the old test green, because it configured the bundle *as* `certifi.where()`
+    and then asserted only that the store was non-empty.
+    """
+    pinned_cert, pinned_key = _self_signed("pinned.invalid", tmp_path)
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
+    with _tls_server(pinned_cert, pinned_key) as port:
+        assert _trusts(gateway_client_kwargs(str(pinned_cert)), port), (
+            "the configured bundle is not reaching the context"
+        )
+        assert not _trusts(gateway_client_kwargs(""), port), (
+            "with no bundle the default store must not already trust this throwaway CA"
+        )
+
+
+def test_the_environment_store_is_read_the_way_httpx_reads_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`SSL_CERT_FILE` wins over `SSL_CERT_DIR`, exclusively — not merged with it.
+
+    Pinned against upstream rather than against a belief: the assertion is that this function and
+    `httpx.Client(trust_env=True)` reach the *same* answer on the same environment, driven through
+    a handshake because the two disagree only where the counting instrument is blind.
+    """
+    file_cert, file_key = _self_signed("fromfile.invalid", tmp_path)
+    dir_cert, dir_key = _self_signed("fromdir.invalid", tmp_path)
+    monkeypatch.setenv("SSL_CERT_FILE", str(file_cert))
+    monkeypatch.setenv("SSL_CERT_DIR", str(_hashed_capath(dir_cert, tmp_path)))
+
+    with _tls_server(dir_cert, dir_key) as port:
+        ours = _trusts(gateway_client_kwargs(""), port)
+        theirs = _trusts({"trust_env": True, "verify": True}, port)
+        assert ours is theirs, (
+            f"this function trusts the SSL_CERT_DIR issuer ({ours}) where httpx does not "
+            f"({theirs}) — the precedence is a union rather than upstream's elif"
+        )
+        assert ours is False, (
+            "the premise: SSL_CERT_FILE is set, so SSL_CERT_DIR must not be consulted at all"
+        )
+    with _tls_server(file_cert, file_key) as port:
+        assert _trusts(gateway_client_kwargs(""), port), (
+            "SSL_CERT_FILE is set and its issuer must be the one that is trusted"
+        )

@@ -46,6 +46,7 @@ LLM provider).
 from __future__ import annotations
 
 import logging
+import os
 import socket
 from collections.abc import Iterable
 from typing import Any
@@ -328,69 +329,116 @@ def allowed_hosts() -> frozenset[str]:
     return _allowed
 
 
-def _http_destinations(settings: Any) -> list[str]:
-    """Every `http(s)` URL this process dials, as URLs rather than as bare hosts.
+# The variables every consumer of this convention reads, lower case winning. `grpc_proxy` is here
+# because grpc reads it *first* and then falls back to the other two; nothing else in this process
+# looks at it.
+_PROXY_VARIABLES = ("all_proxy", "grpc_proxy", "http_proxy", "https_proxy")
 
-    **Deliberately not `derive_allowed`, and the difference is what stops false refusals.** That
-    set is every host this process may dial *by any protocol*, and a proxy variable carries none of
-    the non-HTTP ones: measured against live Postgres with all three variables pointed at a dead
-    port, psycopg connects and returns a row — libpq does not read them. Charging the database and
-    the Temporal frontend to a proxy would refuse a deployment whose `NO_PROXY` correctly covers
-    every HTTP destination and simply does not name its DSN host, which is a pod that will not
-    start for a reason that is not true.
 
-    URLs rather than hosts because the *scheme* decides which variable applies: with `HTTP_PROXY`
-    set alone and every destination on `https`, httpx builds a plain connection pool and nothing is
-    proxied at all. A check that asked only "is any proxy variable set" reported that configuration
-    as carried.
+def _proxy_value(name: str) -> str:
+    """One proxy variable's value, lower case winning — as httpx, requests, git and grpc read it.
 
-    `egress_allow` entries are not included: they are bare hosts with no scheme, so there is nothing
-    to decide which variable would carry them. That is a gap in the conservative direction — a
-    declared extra destination reached over HTTP is not counted — and it is the price of not
-    inventing a scheme for a string the operator wrote as a host.
+    **Read here rather than through `urllib.request.getproxies_environment`, and that is a reversal
+    with a measurement behind it.** Going through the stdlib was the right call when the consumers
+    were all `urllib`-shaped, and it fixed a real bypass: a hand-rolled `name`/`name.upper()` read
+    missed `Https_Proxy` and every other mixed-case spelling. This keeps that fix — both cases,
+    lower winning, which is exactly what `getproxies_environment` does — and drops the one behaviour
+    of it that is wrong for *these* consumers: CPython pops `http` from the mapping whenever
+    `REQUEST_METHOD` is in the environment (the CGI `Proxy:` header defence, CVE-2016-1000110), and
+    neither git nor grpc implements that carve-out. Measured with `REQUEST_METHOD=GET` and
+    `HTTP_PROXY` set: `getproxies_environment()` returns `{}` while `git` still sends
+    `GET http://…/info/refs` to the proxy. Reproducing the carve-out here would have made the
+    refusal silent in exactly the case a child process is still proxied.
     """
-    candidates = [
-        settings.llm_base_url,
-        settings.llm_fallback_base_url,
-        settings.calc_server_url,
-        settings.rxnlabel_server_url,
-    ]
-    candidates.extend(getattr(settings, "connector_urls", {}).values())
+    if os.environ.get(name, "").strip():
+        return os.environ[name].strip()
+    # Every other spelling, not just `.upper()`. Writing this as `name` plus `name.upper()` is the
+    # bypass a reviewer already found once on this branch and which this function reintroduced
+    # while fixing something else: measured, `Grpc_Proxy` gave grpc a live proxy and left the
+    # check silent. `getproxies_environment` lower-cases *every* name for exactly this reason, and
+    # prefers an exact lower-case hit when both spellings are set — both halves are reproduced here
+    # rather than approximated.
+    for key, value in os.environ.items():
+        if key.lower() == name and value.strip():
+            return value.strip()
+    return ""
+
+
+def _env_reading_destinations(settings: Any) -> list[tuple[str, str, tuple[str, ...]]]:
+    """The destinations whose clients actually read a proxy variable, as (url, reader, variables).
+
+    **This is deliberately not `derive_allowed`, and not "every http(s) destination" either.** A
+    first version of this check charged the LLM gateway, the calc backend and every connector
+    endpoint — and every client this repository builds for those passes `trust_env=False`, so a
+    proxy variable cannot carry one of them. Measured with both variables set: zero proxy mounts on
+    the gateway client against two on a default `httpx.Client`. The check refused processes over
+    destinations that were already immune while the destinations that are *not* immune went
+    uncharged, which is the module's own stated failure mode — "a refusal for a reason that is not
+    true is a pod that will not start" — with a false negative behind it.
+
+    It also broke a developer's checkout outright: the shipped destinations are loopback, so on a
+    stock tree `HTTP_PROXY=http://proxy.corp:3128 python -c "import chemclaw.core.config"` refused
+    to start and `pytest` collection died. Anyone behind a corporate proxy could not run this
+    repository.
+
+    So the question is not "which hosts does this process dial" but **"which of them are dialled by
+    something that reads the environment"**, and today that is two:
+
+    - **The OTLP span exporter.** `core/logging.py` uses the *gRPC* exporter, and grpc resolves
+      `grpc_proxy` then `https_proxy` then `http_proxy` **regardless of the target's scheme** —
+      measured, `http_proxy` alone carried a `https://` target, three `CONNECT` frames to the
+      recorder. With `otel_include_sensitive_data` that traffic is prompts and completions.
+    - **The Entra JWKS endpoint.** `api/auth.py` builds a `PyJWKClient`, which fetches through
+      `urllib.request.urlopen` — no `trust_env`, and measured to follow `HTTP_PROXY`. It is the
+      anchor every bearer token is validated against.
+
+    **`git` is the third and is filed rather than charged** (`docs/planning/BACKLOG.md`). The KG
+    PR-gate shells out to `git push`, which inherits the environment and is measurably proxied —
+    but its URL is not on this object: `git_remote` is the string `"origin"`, and resolving it means
+    `git remote get-url` in a subprocess at *config import*, a cost every entrypoint would pay at
+    every start for a destination only one subsystem uses.
+    """
+    destinations: list[tuple[str, str, tuple[str, ...]]] = []
+    if getattr(settings, "otel_enabled", False) and settings.otel_endpoint:
+        # Every variable, and not by scheme: grpc's resolution ignores the target's.
+        destinations.append(
+            (
+                settings.otel_endpoint,
+                "the OTLP span exporter",
+                ("grpc_proxy", "https_proxy", "http_proxy", "all_proxy"),
+            )
+        )
     if getattr(settings, "entra_required", False):
-        candidates.append(getattr(settings, "entra_jwks_endpoint", "") or settings.entra_jwks_url)
-    if getattr(settings, "otel_enabled", False):
-        candidates.append(settings.otel_endpoint)
-    if getattr(settings, "vector_store_provider", "pgvector") != "pgvector":
-        candidates.append(settings.vector_store_url)
-    return [url for url in candidates if url and urlsplit(url).scheme in ("http", "https")]
+        jwks = getattr(settings, "entra_jwks_endpoint", "") or settings.entra_jwks_url
+        if jwks:
+            scheme = urlsplit(jwks).scheme or "https"
+            destinations.append((jwks, "the Entra JWKS fetch", (f"{scheme}_proxy", "all_proxy")))
+    return destinations
 
 
-def proxied_destinations(settings: Any) -> dict[str, str]:
-    """Which of this process's HTTP destinations a configured proxy would carry, and by which host.
+def proxied_destinations(settings: Any) -> dict[str, tuple[str, str]]:
+    """Destination host -> (proxy host, what reads the environment for it).
 
-    Read through `urllib.request.getproxies_environment` and `proxy_bypass` rather than off
-    `os.environ` directly, and that is the whole correctness argument. A hand-rolled read of
-    `http_proxy` plus `HTTP_PROXY` misses every mixed-case spelling — `Https_Proxy`, `HTTPS_proxy`,
-    `https_PROXY` — and measured, httpx honours all of them: one proxy mount each, while the
-    hand-rolled check saw nothing and the process booted silently. `getproxies_environment`
-    lowercases every name, which is also what httpx, requests and `proxy_bypass` itself do, so the
-    two halves of this function agree about what a proxy variable is. The ADR's own rule against
-    writing a second reading of `no_proxy` applies to the proxy variables in exactly the same way,
-    and the first version of this file broke it.
+    Keyed by destination and *valued* with the proxy rather than the reverse, and holding both
+    facts, because the message has to name all three. An earlier version mapped host to proxy alone
+    and was overwritten when two variables named different proxies for one host — the declared one
+    won the comparison and the undeclared one carried the traffic, which is a false pass on the one
+    question this function exists to answer.
     """
-    from urllib.request import getproxies_environment, proxy_bypass
+    from urllib.request import proxy_bypass
 
-    proxies = getproxies_environment()
-    carried: dict[str, str] = {}
-    for url in _http_destinations(settings):
-        parts = urlsplit(url)
-        proxy = proxies.get(parts.scheme) or proxies.get("all")
-        host = (parts.hostname or "").lower()
-        if not proxy or not host or proxy_bypass(host):
+    carried: dict[str, tuple[str, str]] = {}
+    for url, reader, variables in _env_reading_destinations(settings):
+        # A bare `host:port` is a real OTLP endpoint spelling and `urlsplit` reads its host as the
+        # *scheme*, so the netloc is taken the way `_host_from_url` already takes it.
+        host = _host_from_url(url)
+        if not host or proxy_bypass(host):
             continue
-        proxy_host = _host_from_url(proxy)
-        if proxy_host:
-            carried[host] = proxy_host
+        for variable in variables:
+            proxy_host = _host_from_url(_proxy_value(variable))
+            if proxy_host:
+                carried[f"{host} ({reader}, via {variable.upper()})"] = (proxy_host, reader)
+                break
     return carried
 
 
@@ -402,30 +450,20 @@ def refuse_proxied_egress(settings: Any) -> None:
     configured with a proxy dials the *proxy* and names the real destination in the request line.
     Measured with the allowlist empty and a local recorder standing in for a sidecar: a request to
     an external host through `proxy=http://127.0.0.1:<port>` returned HTTP 200 with the body, and
-    `_refused` never moved — while the same request with a *named* proxy, and the same request with
-    no proxy at all, were both refused at `getaddrinfo`. The loopback arm needs no allowlisting,
-    because `_check` exempts loopback by construction and must keep exempting it: this process
-    dials Postgres, Temporal and the calc backend there.
+    `_refused` never moved. The loopback arm needs no allowlisting, because `_check` exempts
+    loopback by construction and must keep exempting it: this process dials Postgres, Temporal and
+    the calc backend there. An OpenShift service mesh or egress sidecar is a loopback proxy by
+    design, and a sidecar shares the pod's network namespace, so its traffic never crosses a
+    NetworkPolicy enforcement point either — for this shape there is no layer below this one.
 
-    That is not an attacker-only shape. An OpenShift service mesh or egress sidecar *is* a loopback
-    proxy by design, and it is also the reason the module docstring's usual fallback does not apply
-    — a sidecar shares the pod's network namespace, so its traffic never crosses a NetworkPolicy
-    enforcement point. There is no layer below this one for this shape.
-
-    So a proxy is treated as a **destination**: if one would carry anything this process dials over
-    HTTP and its host is not named in `CHEMCLAW_EGRESS_ALLOW`, this process does not start. Named
-    explicitly rather than accepted for being loopback, because loopback is exactly the case that
-    needs the operator's signature.
-
-    **`NO_PROXY` is honoured, and the destination set is narrowed to what a proxy can actually
-    carry** — see `proxied_destinations` and `_http_destinations` for why each of those is what
-    keeps a legitimate deployment starting. Silent when the guard is disabled, because
-    `arm_from_settings` returns before reaching this: a deployment that has opted out of the guard
-    has opted out of this too, and says so at WARNING.
+    **What it charges is the narrow half, and `_env_reading_destinations` is where that argument
+    is.** The first-party HTTP clients take `trust_env=False` (`core/http.gateway_client_kwargs`
+    and four others), so a proxy variable cannot carry them and charging them refused deployments
+    for a reason that was not true. What is charged is what reads the environment.
 
     Raises:
-        RuntimeError: naming the proxy, the destinations it would carry, and the one way to
-            proceed. Loud at boot rather than loud on the first turn, and unlike
+        RuntimeError: naming the proxy, the destination, *what reads the environment for it*, and
+            the one edit that proceeds. Loud at boot rather than loud on the first turn, and unlike
             `api/middleware._refuse_unconfigured_llm_gateway` it reaches the durable worker too,
             because it hangs off the `chemclaw.core.config` import every entrypoint makes.
     """
@@ -436,19 +474,18 @@ def refuse_proxied_egress(settings: Any) -> None:
         entry.strip().lower() for entry in (settings.egress_allow or "").split(",") if entry.strip()
     }
     undeclared = {
-        destination: proxy for destination, proxy in carried.items() if proxy not in declared
+        destination: proxy for destination, (proxy, _) in carried.items() if proxy not in declared
     }
     if not undeclared:
         return
     proxies = ", ".join(sorted(set(undeclared.values())))
-    destinations = ", ".join(sorted(undeclared))
+    destinations = "; ".join(sorted(undeclared))
     raise RuntimeError(
         f"SECURITY: a proxy is configured in this process's environment ({proxies}) and would "
-        f"carry traffic to {destinations} — every prompt, completion and Authorization bearer "
-        "would be re-terminated at a host this deployment has not declared, past the CA pinning "
-        "and invisibly to the egress guard, which sees only the dial to the proxy. To proceed, "
-        "add the proxy to CHEMCLAW_EGRESS_ALLOW as a bare host (no scheme, no port) to say this "
-        "is intended, add these destinations to NO_PROXY, or unset the proxy variable."
+        f"carry traffic to {destinations} — that traffic would reach a host this deployment has "
+        "not declared, and the egress guard cannot see it because it sees only the dial to the "
+        "proxy. To proceed, add the proxy to CHEMCLAW_EGRESS_ALLOW as a bare host (no scheme, no "
+        "port) to say this is intended, add these destinations to NO_PROXY, or unset the variable."
     )
 
 

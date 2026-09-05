@@ -105,8 +105,9 @@ combinations:
 The trust store is therefore unchanged in every case and only the proxy is refused, which is what
 lets this ADR close the row above it as well as its own.
 
-**The guard half.** `netguard.refuse_proxied_egress` treats a proxy as a destination: if one is
-configured and its host is not named in `CHEMCLAW_EGRESS_ALLOW`, the process does not start. Named
+**The guard half.** `netguard.refuse_proxied_egress` treats a proxy as a destination: if one would
+carry traffic this process sends and its host is not named in `CHEMCLAW_EGRESS_ALLOW`, the process
+does not start. Named
 explicitly rather than accepted for being loopback, because loopback is exactly the case that needs
 the operator's signature. It hangs off `arm_from_settings`, which is the one call
 `chemclaw.core.config` makes, so unlike `api/middleware._refuse_unconfigured_llm_gateway` it reaches
@@ -180,23 +181,67 @@ exception", which a deleted body satisfies. Each negative arm now carries a posi
 re-runs the same settings with the bypass removed and asserts the refusal does fire. Against the
 gutted body the file goes from 8 failures to 19.
 
+## The guard half was aimed at the wrong destinations, and a second review found it
+
+The first version charged every `http(s)` destination this process dials. Measured, **every
+first-party client for those passes `trust_env=False`** — the gateway and embedding clients by this
+ADR's own client half, the calc/rxnlabel MCP client and the connector client already — so a proxy
+variable cannot carry one of them: zero proxy mounts each, against two on a default `httpx.Client`.
+The control refused processes over destinations that were already immune, which is the module's own
+stated failure mode ("a refusal for a reason that is not true is a pod that will not start"), and it
+did so in the shipped configuration: every default destination is loopback, so on a stock checkout
+
+```
+$ HTTP_PROXY=http://proxy.corp:3128 python -c "import chemclaw.core.config"
+RuntimeError: SECURITY: a proxy is configured ... would carry traffic to 127.0.0.1
+```
+
+and `pytest` collection died with it. Anybody behind a corporate proxy could not run this
+repository. Meanwhile the destinations that genuinely *are* env-proxied went uncharged.
+
+**So the question is not "which hosts does this process dial" but "which of them are dialled by
+something that reads the environment"**, and the owner chose to re-target it on that basis. Today
+that is two, and they disagree about the environment in a way that has to be reproduced rather than
+averaged:
+
+| reader | destination | carried by | why |
+| --- | --- | --- | --- |
+| the gRPC OTLP exporter | `otel_endpoint` | `grpc_proxy`, `https_proxy`, `http_proxy`, `all_proxy` | grpc resolves without consulting the target's scheme — measured, `http_proxy` alone carried a `https://` target, three `CONNECT` frames |
+| the Entra JWKS fetch | `entra_jwks_url` | the destination's own scheme, or `all_proxy` | `urllib` resolves per scheme |
+
+The exporter is the live one: with `otel_include_sensitive_data` its spans carry prompts and
+completions. A bare `collector.obs:4317` endpoint — the spelling the OTLP documentation uses — is
+also handled, where a scheme filter dropped it entirely because `urlsplit` reads its host as the
+scheme.
+
+**`git` is the third and is filed rather than charged.** The KG PR-gate shells out to `git push`,
+which inherits the environment and is measurably proxied, but its URL is not on the settings object
+(`git_remote` is the string `"origin"`): resolving it means a `git remote get-url` subprocess at
+config import, a cost every entrypoint pays at every start for a destination one subsystem uses.
+
+Two more from the same review. `carried` was keyed by destination host alone, so two *readers*
+naming different proxies for one host overwrote each other — the declared one won the comparison and
+the undeclared one carried the traffic, a false pass on the one question this answers. And the
+re-targeting reintroduced the very bypass the first review had closed: reading the variables
+directly again (necessary, because `getproxies_environment` drops `http` whenever `REQUEST_METHOD`
+is set and neither git nor grpc implements that carve-out) brought back a `name`/`name.upper()`
+shortcut, and measured, `Grpc_Proxy` gave grpc a live proxy while the check stayed silent.
+
 ## What is still open
 
 - **`retrieval/vectors/qdrant.py`** builds an `AsyncQdrantClient`, which constructs its own httpx
   and takes only `verify`. It is an opt-in non-default provider (`pgvector` ships) and
   `qdrant_client` is not installed in this closure, so it is recorded rather than blind-patched.
   The boot refusal covers it in any deployment that has not declared a proxy.
-- **`api/auth.py`'s JWKS client**, and it is the one worth reading twice. `PyJWKClient` fetches the
-  tenant key set through `urllib.request.urlopen`, which has no `trust_env` and follows `HTTP_PROXY`
-  — measured, a recorder standing in as the proxy received
+- **`api/auth.py`'s JWKS client is charged but not fixed.** `PyJWKClient` fetches the tenant key
+  set through `urllib.request.urlopen`, which has no `trust_env` and follows `HTTP_PROXY` —
+  measured, a recorder standing in as the proxy received
   `GET http://login.microsoftonline.com/…/keys`. That is the anchor every bearer token is validated
-  against. It is *not* fixed here because there is no per-client seam: `urlopen` resolves proxies
-  from the process-global default opener, so closing it means `install_opener(build_opener(
-  ProxyHandler({})))` at import — a process-wide side effect on every library that uses `urlopen`,
-  which is a decision of its own rather than a detail of this one. The boot refusal stands in front
-  of it for every deployment that has not declared a proxy, which is every shipped one; the residual
-  is a site that *has* declared one, where the LLM seam refuses the proxy and this one does not.
-  Filed with the measurement.
+  against. The boot refusal now names it, so a deployment cannot acquire the exposure silently; what
+  is unfixed is that a site which *declares* its proxy still proxies that fetch, because there is no
+  per-client seam — `urlopen` resolves from the process-global default opener, so closing it means
+  `install_opener(build_opener(ProxyHandler({})))` at import, a process-wide side effect on every
+  library that uses `urlopen` and a decision of its own. Filed with the measurement.
 
 - **The dev/eval HTTP clients** (`evals/live.py`, `cli/live_probes.py`, `cli/live_storm.py`) build
   httpx clients without `trust_env=False`. They dial this system's own front door on loopback from

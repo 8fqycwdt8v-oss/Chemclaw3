@@ -1976,3 +1976,56 @@ nothing recording why) was still true. Deleting it with the rejection would have
 the design needs an inspectability invariant. **Rule: when a decision reverses, re-file the losing
 argument as a stated cost or as a requirement it generates — never delete it as though it had been
 wrong.**
+
+**`git add -A` in a tree other agents are working in stages their experiments as my commit.** My
+merge commit deleted one line from `connectors/registry.py` — the whole subject of the branch's
+first fix, present in both parents and the merge base — because four review agents were running
+mutation arms against `src/` while I resolved the merge with `git add -A`. The repo's "one writer
+per path when fanning out" rule covers the agents; it does not cover the *commit*. **Rule: when
+subagents may be mutating the tree, stage a merge by naming its files (`git add <paths>`), never
+`-A`; and brief read-only reviewers to mutate under a copy rather than in place.**
+
+**And my own verification could not have caught it.** I checked the merge result against my
+*pre-merge HEAD*, which is blind by construction to any file the merge legitimately touches. The
+check that finds this class is `git diff $(git merge-tree --write-tree <parent1> <parent2>)
+<merge>^{tree}`: it names every file where the committed merge differs from a clean merge of the
+same two parents, so a deliberate conflict resolution and an accidental capture appear side by side
+and have to be told apart one at a time. Mine showed three files; two were my resolutions and one
+was the accident. **Rule: verify a merge against a machine-computed merge of its own parents, not
+against either side of it.**
+
+**The guard caught what the reviewer and I both nearly missed, which is the argument for writing
+it.** `test_every_ambient_name_space_is_refused_to_a_connector` goes red on that deleted line, so
+CI would have refused the merge — a test written this week to stop a *future* refactor silently
+re-opening `write_todos` caught the session that wrote it doing exactly that, three commits later.
+
+**A control aimed at the wrong subject passes every test written for it.** My boot refusal charged
+every http(s) destination the process dials — and every first-party client for those had
+`trust_env=False`, half of them set by the same commit. Measured: zero proxy mounts each against two
+on a default client. So it refused deployments over destinations a proxy could not carry, missed the
+three it could, and on the shipped loopback defaults stopped `import chemclaw.core.config` and
+`pytest` outright for anyone behind a corporate proxy. Every arm I wrote passed, because I had
+tested the mechanism against my own model of it. **Rule: for a control that refuses, name the actor
+it defends against and measure that the actor can actually reach each thing being charged — a
+destination that cannot be attacked is a false refusal waiting for a deployment.**
+
+**Fixing a control can reintroduce the defect a reviewer just removed from it.** The first review
+found the proxy read missed mixed-case spellings; I fixed it with `getproxies_environment`.
+Re-targeting at grpc and urllib then forced a direct read again — that stdlib call drops `http`
+under `REQUEST_METHOD` and neither git nor grpc implements the carve-out — and the
+`name`/`name.upper()` shortcut came back with it. Measured, `Grpc_Proxy` was live again.
+**Rule: when a change re-opens code a review has already corrected, re-run that review's own
+measurement against the new version before running anything else.**
+
+**A test that cannot produce the collision it describes still passes.** My guard against two proxies
+collapsing onto one destination varied two variables on *one* reader — and a reader takes the first
+match and stops, so it could only ever record one. The mutation survived; the collision needs two
+readers on one host. **Rule: before asserting that a mutation is caught, run the mutation. A test
+whose scenario is impossible is green for the same reason the correct code is.**
+
+**An instrument that returns the same number for both arms may be blind rather than agreeing.**
+`SSLContext.get_ca_certs()` does not report a `capath` at all, so my four-row trust-store table read
+`0 | 0` and I recorded agreement — while an ambient `SSL_CERT_DIR` was silently widening a
+configured CA pin. **Rule: when a comparison's two sides agree at zero, prove the instrument can
+produce a non-zero before believing it.** A real handshake was one page of code and found the
+defect the table was written to rule out.

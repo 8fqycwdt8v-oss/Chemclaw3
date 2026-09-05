@@ -11,6 +11,7 @@ Bundles are written to `tmp_path` and `connectors_dir` is pointed at it, so noth
 on which connectors the repo happens to ship today.
 """
 
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import pytest
@@ -75,9 +76,11 @@ def _http_manifest(name: str, port: int = 9001, tools: str = "search") -> str:
 def _use(monkeypatch: pytest.MonkeyPatch, root: Path, *, enabled_list: str = "") -> None:
     """Point the registry at `root` as its only connectors dir, with the given enable-list.
 
-    Every test here calls this exactly once, before its first `discovered()`/`enabled()` call, so
-    no local `cache_clear()` is needed: `tests/conftest.py`'s autouse fixture guarantees the cache
-    is already empty when this test started.
+    Almost every test here calls this exactly once, before its first `discovered()`/`enabled()`
+    call, so no local `cache_clear()` is needed: `tests/conftest.py`'s autouse fixture guarantees
+    the cache is already empty when the test started.
+    `test_every_ambient_name_space_is_refused_to_a_connector` is the exception and says so — it
+    repoints the registry once per ambient name and clears `discovered` itself between arms.
     """
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(root))
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", enabled_list)
@@ -403,42 +406,68 @@ def test_a_connector_cannot_claim_an_ambient_tool_name(
         job_tools()
 
 
+# Each ambient name space beside the reason string `_bound_by_this_process` stamps it with. The
+# reason is transcribed rather than imported for the same argument `Chemclaw3-mcp`'s identity
+# contract makes about header spellings: it is what an operator reads in the refusal, so a test
+# that imported it would agree with a typo. Two of the three appeared nowhere but their own
+# definition before this.
+_AMBIENT_NAME_SPACES = (
+    (skill_tool_names, "a scratchpad file verb"),
+    (harness_tool_names, "a plan-harness tool"),
+    (subagent_tool_names, "the subagent spawner"),
+)
+
+
+@pytest.mark.parametrize(
+    ("source", "reason"), _AMBIENT_NAME_SPACES, ids=lambda v: getattr(v, "__name__", v)
+)
 def test_every_ambient_name_space_is_refused_to_a_connector(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    source: Callable[[], Iterable[str]],
+    reason: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One third of that refusal was guarded by nothing, and the deletion test is how we know.
 
     `_bound_by_this_process` unions three ambient name spaces, each stamped with its own reason
     string. Deleting each `bound.update(...)` line in turn reddened a test for the scratchpad verbs
-    (the test above) and for the subagent spawner (`tests/test_tool_framing.py`'s derived guard) —
-    and reddened **nothing** for `harness_tool_names()`. So a refactor could have silently reopened
-    `write_todos` to a connector, and a connector that claimed it would win `tools_by_name` over the
-    plan harness that `agent/plan_gate.py` reads to decide whether a state-changing call is covered
-    by an approved plan.
+    and for the subagent spawner, and reddened **nothing** for `harness_tool_names()`. So a
+    refactor could have silently reopened `write_todos` to a connector, and a connector that
+    claimed it would win `tools_by_name` over the plan harness `agent/plan_gate.py` reads
+    (measured upstream: `ToolNode` assigns `_tools_by_name[tool.name]` last-wins, and the
+    connector's tool is appended after the middleware's).
 
-    The basis is the three name-source functions rather than `_bound_by_this_process`'s own return
-    value, and that is the whole design of this test: deriving the expectation from the dict under
-    test would make deleting a line delete the assertion with it, which is
-    `D-2026-09-05-a-ratchet-that-re-derives-half-its-basis-bounds-half-a-request` repeated in a new
-    file. Read off the middleware the way the sources themselves are, so an upstream rename moves
-    both halves together and a *fourth* name space is the only thing that still needs a hand.
+    **The basis is the three name-source functions, not `_bound_by_this_process`'s return value —
+    and the first version of this docstring got the reason wrong.** It said deriving from the dict
+    under test "would make deleting a line delete the assertion with it". That is false as stated,
+    and `tests/test_tool_framing.py` is the counter-example sitting in the tree: it reads
+    `_bound_by_this_process` too, as the *observation*, while its expectation comes from the name
+    sources — and it does redden on two of the same three deletions. What matters is which side of
+    the comparison the dict is on, not whether it appears. The sources are used here because they
+    are the independent side, which is the same property stated correctly.
 
-    Every arm is collected rather than asserted in place, so an unguarded name space reports as
-    itself instead of hiding behind whichever one sorts first.
+    The vacuity assertion is copied from that neighbour, and is not decoration: a first-party
+    narrowing that made a source return nothing would leave this arm green over an empty loop while
+    the name it guards went unclaimed.
     """
+    names = sorted(source())
+    assert names, f"{source.__name__} yields no name, so this arm asserts nothing"
     unrefused: list[str] = []
-    for source in (skill_tool_names, harness_tool_names, subagent_tool_names):
-        for name in sorted(source()):
-            root = tmp_path / source.__name__ / name
-            root.mkdir(parents=True)
-            _bundle(root, "alpha", _http_manifest("alpha", tools=name))
-            _use(monkeypatch, root)
-            discovered.cache_clear()
-            try:
-                job_tools()
-            except ConnectorError:
-                continue
-            unrefused.append(f"{source.__name__}:{name}")
+    for name in names:
+        root = tmp_path / source.__name__ / name
+        root.mkdir(parents=True)
+        _bundle(root, "alpha", _http_manifest("alpha", tools=name))
+        _use(monkeypatch, root)
+        discovered.cache_clear()
+        try:
+            job_tools()
+        except ConnectorError as refusal:
+            assert reason in str(refusal), (
+                f"{name} was refused, but not as {reason!r} — the operator-facing reason and the "
+                "name space that owns it have drifted apart"
+            )
+            continue
+        unrefused.append(name)
     assert unrefused == []
 
 

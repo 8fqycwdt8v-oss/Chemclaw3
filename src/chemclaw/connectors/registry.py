@@ -650,8 +650,15 @@ def _bound_by_this_process() -> dict[str, str]:
     into the very registry read here — so reading them back would make every deployment with jobs
     fail on its second build, on a name it declared itself. The launchers are recognised by the
     module that generated them rather than by a marker, so there is nothing to remember to set.
-    Template launchers are deliberately *not* excluded: `run_<name>` is a different name space that
-    a bundle has no business claiming either.
+    **Template launchers are a fourth name space and this sentence used to claim they were
+    covered.** It read "template launchers are deliberately *not* excluded", which is true of the
+    exclusion above and false about the outcome: measured, a bundle declaring
+    `run_bond_strength_survey` is accepted. The launchers are not in `registered_tools()` when this
+    runs — `chemclaw_agent._register_generated_tools` is `[*job_tools(), *template_tools()]`, so
+    the collision check has already returned before the first launcher is registered. The gap is
+    the ordering, not the exclusion. Filed in `docs/planning/BACKLOG.md` rather than closed here,
+    because reading the template registry from this module is a new import edge
+    (`tests/test_layering.py`) and a decision about which registry owns that name space.
     """
     from chemclaw.agent import chemclaw_agent
 

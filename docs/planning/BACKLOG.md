@@ -63,6 +63,30 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **A connector can claim a step-template launcher name, and the registry says it cannot** —
+  [S], found 2026-09-05 reviewing the ambient-name guard. `_bound_by_this_process` refuses a bundle
+  that claims an in-process tool, a scratchpad verb, `write_todos` or `task`. Its docstring adds
+  that `run_<name>` template launchers are "a different name space that a bundle has no business
+  claiming either" — and measured, a bundle declaring `run_bond_strength_survey` is **accepted**:
+
+  ```
+  NOT REFUSED: a connector may claim the template launcher 'run_bond_strength_survey'
+  ```
+
+  The cause is ordering rather than an oversight in the union. `chemclaw_agent
+  ._register_generated_tools` is `[*job_tools(), *template_tools()]`, so `job_tools()` runs the
+  collision check while `registered_tools()` still holds no launcher — measured empty at that
+  moment. The consequence is the one the whole check exists to prevent, one name space out: the
+  bundle's tool wins `tools_by_name` and a chemist asking for a template gets the connector's tool
+  under the launcher's name, with no error.
+  **Not a one-liner, which is why it is a row.** Closing it means either reading
+  `chemclaw.templates.registry` from `connectors/registry` — a new import edge
+  `tests/test_layering.py` would have to be told about, in the direction that module has so far
+  avoided — or moving the collision check to after both registrations, which changes when a
+  misconfiguration is reported. Which registry owns that name space is the decision.
+  The false sentence is corrected in this commit; the gap is not. Anchors:
+  `connectors/registry.py::_bound_by_this_process`, `agent/chemclaw_agent.py::_register_generated_tools`.
+
 - [ ] **The JWKS fetch follows an ambient proxy and has no seam to stop it** — [M], opened
   2026-09-05 by the review of `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
   `api/auth.py:85` builds a `PyJWKClient`, whose `fetch_data` calls `urllib.request.urlopen` —

@@ -478,35 +478,71 @@ def test_no_shipped_document_names_a_connector_bundle_that_is_gone() -> None:
 
 
 def _makefile_targets_and_phony() -> tuple[list[str], set[str]]:
-    """Every target the Makefile declares, and every name its `.PHONY` lines list."""
+    """Every target the Makefile declares, and every name its `.PHONY` lines list.
+
+    Multi-target rules (`a b:`) are read as the several targets they are, because a rule that
+    declares two and is parsed as none is a silent hole in the check below. GNU's own special
+    targets are excluded by their leading dot: `.DELETE_ON_ERROR` and `.SUFFIXES` are directives
+    rather than recipes, and listing one in `.PHONY` would be meaningless — without this the first
+    person to add the standard hardening line gets a failure whose only remedy is wrong.
+    """
     makefile = (_ROOT / "Makefile").read_text(encoding="utf-8")
     phony: set[str] = set()
     for match in re.finditer(r"^\.PHONY:((?:.*\\\n)*.*)$", makefile, re.MULTILINE):
         phony.update(match.group(1).replace("\\", " ").split())
-    targets = [
-        match.group(1)
-        for match in re.finditer(r"^([a-zA-Z0-9_.-]+):(?![=])", makefile, re.MULTILINE)
-        if match.group(1) != ".PHONY"
-    ]
+    rule = re.compile(r"^([A-Za-z0-9_.%-]+(?:[ \t]+[A-Za-z0-9_.%-]+)*)[ \t]*::?(?![=])")
+    targets: list[str] = []
+    inside_define = False
+    for line in makefile.splitlines():
+        # `define`/`endef` bodies are verbatim text, not Makefile syntax. This one holds a Python
+        # program whose `if not rules:` reads as a three-target rule to any regex that does not
+        # know it is inside a block — which is exactly what happened the first time this parser
+        # learned to read multi-target rules.
+        if line.startswith("define "):
+            inside_define = True
+            continue
+        if line.startswith("endef"):
+            inside_define = False
+            continue
+        if inside_define:
+            continue
+        found = rule.match(line)
+        if found:
+            targets.extend(
+                name
+                for name in found.group(1).split()
+                if not name.startswith(".") and "%" not in name
+            )
     return list(dict.fromkeys(targets)), phony
 
 
-def test_every_makefile_target_that_names_no_file_is_declared_phony() -> None:
+def test_the_phony_list_and_the_target_list_are_the_same_list() -> None:
     """A `.PHONY` list maintained by hand is a second declaration of the target list.
 
     That is the same shape as every other drift this file checks, and it had drifted: seven of the
     Makefile's targets were missing from it — `live-ab`, the three `live-e2e-full-stack*` targets,
-    `upstream-check`, `share-estimate` and `share-sync`, all of them added after the line was last
-    touched. Nothing here is subtle about why it matters: `make` treats a non-phony target as a
-    recipe for a *file*, so the day anything creates a path named `live-ab` in the repository root,
-    `make live-ab` reports "up to date" and runs nothing. A target that silently does nothing is
-    worse than a missing one, because the operator gets a zero exit code.
+    `upstream-check`, `share-estimate` and `share-sync`, all added after the line was last touched.
+    `make` treats a non-phony target as a recipe for a *file*, so the day anything creates a path
+    named `live-ab` in the repository root, `make live-ab` reports "up to date", runs nothing, and
+    exits zero. A target that silently does nothing is worse than a missing one.
 
-    The check is derived rather than transcribed — no list of the seven names lives here — so a
-    target added next year is covered on the day it is written rather than on the day someone
-    notices. The exemption is real-file targets, which is why this test asks whether the name exists
-    on disk instead of asserting the two sets are equal outright; today none of them do.
+    **Equality, not containment, and the first version of this test got that wrong in the way that
+    mattered.** It asked only which targets were missing from `.PHONY` *and named no file on
+    disk* — so it went green in precisely the scenario the paragraph above describes: measured,
+    removing `share-sync` from `.PHONY` and running `touch share-sync` left the test passing while
+    `make share-sync` printed "is up to date" and did nothing. Worse, ten root paths already
+    collide with plausible target names (`docs`, `tests`, `src`, `infra`, `schema`, `data`,
+    `skills`, `knowledge`, `tasks`, `Makefile`), so a future `docs:` target would have been
+    exempted from the day it was written.
+
+    Equality also closes the other direction the old form could not see — a stale `.PHONY` entry
+    for a target that no longer exists — which is the drift this file checks in both directions
+    everywhere else. Every target here is phony today (67 of them, matching `make help`), so the
+    stricter form costs nothing: a real file target would need its own exemption *and* an argument,
+    which is the conversation this failing should start.
     """
     targets, phony = _makefile_targets_and_phony()
-    undeclared = [name for name in targets if name not in phony and not (_ROOT / name).exists()]
-    assert undeclared == [], f"Makefile targets missing from .PHONY: {undeclared}"
+    assert set(targets) == phony, (
+        f"targets missing from .PHONY: {sorted(set(targets) - phony)}; "
+        f".PHONY names with no target: {sorted(phony - set(targets))}"
+    )
