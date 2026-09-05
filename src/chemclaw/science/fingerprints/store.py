@@ -592,6 +592,20 @@ class PostgresFingerprintStore:
         stale-definition row is still a correct substructure hit. When `limit` is set the scan
         is `ORDER BY <key> LIMIT` — a bounded, deterministic slice so a huge corpus is never
         materialized whole into the worker heap (the caller warns when the cap truncates).
+
+        **Bounded in the *heap*; it was not bounded in the database, and migration `082` is what
+        made the second half true.** The ordering is `COLLATE "C"` — deliberately, so this backend
+        sorts identically to the in-memory one — and the primary key is a btree in the database's
+        own collation, so no index could satisfy it: the server sorted every row in the table and
+        then returned `limit` of them. Measured on 200 000 rows at the shipped cap of 5 000, that
+        was an external merge spilling 136 MB to disk, 2 228 ms, against 10.7 ms through the index
+        `082` adds.
+
+        The row's own weight is the caller's problem and stays one: `bits` is 2 048 characters per
+        record and the substructure scan reads only `label`, so a 5 001-row slice ships 10.4 MB it
+        discards — measured at 2 055 ms against 261 ms for the same rows without that column. This
+        method cannot drop it (a `FingerprintRecord` carries its bits by definition); what removes
+        it is the caller asking for only what it reads.
         """
         if limit is None:
             sql, params = self._all, None

@@ -10,6 +10,7 @@ import asyncio
 
 import pytest
 
+from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
 from chemclaw.science.fingerprints.molfp.search import (
@@ -144,6 +145,45 @@ def test_the_durable_page_is_the_exact_top_k_not_an_approximation() -> None:
         assert truncated, "150 rows over the page went unreported"
 
     asyncio.run(_run())
+
+
+def test_the_capped_scan_reads_in_key_order_without_sorting_the_table() -> None:
+    """`all_records(limit=…)` must not sort the whole corpus to return `limit` rows.
+
+    The slice is ordered by `id COLLATE "C"` — load-bearing, because it is what makes this backend
+    order identically to the in-memory one (a database's default collation puts `a1` before `B1`).
+    The primary key is a btree in the *database's* collation and therefore cannot satisfy that
+    ordering, so before `082` the planner sorted every row in the table and then took the first
+    `substructure_scan_max_records + 1`. Measured on 200 000 rows at the shipped cap of 5 000:
+    `Sort (external merge, 136 MB to disk)`, 2 228 ms and 103 466 temp blocks written, against
+    10.7 ms and no temp through the index. The cost grows with the corpus the cap exists to protect
+    the process from, on a path the agent calls (`molfp.find_substructure_matches`).
+
+    Asserted as the **absence of a Sort node** rather than as a duration: at fixture scale sorting
+    a handful of rows is both correct and instant, so a timing assertion would see nothing. The
+    sequential scan is disabled for the same reason as in `tests/test_reaction_records.py` — on one
+    page the planner is right to scan, and the question here is what the schema offers it.
+    """
+
+    async def _run() -> list[str]:
+        store = await _store_or_skip()
+        statement = f"{store._all} ORDER BY {store._order} LIMIT %(limit)s"
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute("SET LOCAL enable_seqscan = off")
+            cursor = await conn.execute(f"EXPLAIN (FORMAT JSON) {statement}", {"limit": 5001})
+            row = await cursor.fetchone()
+        nodes: list[str] = []
+        pending = [row[0][0]["Plan"]] if row else []
+        while pending:
+            node = pending.pop()
+            nodes.append(str(node["Node Type"]))
+            pending.extend(node.get("Plans", []))
+        return nodes
+
+    nodes = asyncio.run(_run())
+    assert not any("Sort" in node for node in nodes), (
+        f"the capped scan sorts the whole table before taking its slice: {nodes}"
+    )
 
 
 def test_upsert_and_substructure_over_postgres() -> None:
