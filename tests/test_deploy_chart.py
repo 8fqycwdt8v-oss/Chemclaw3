@@ -368,7 +368,7 @@ def test_every_shipped_connector_has_a_chart_entry() -> None:
         # Temporal queue whoever hosts the tools — while the only count this test demanded was
         # skipped entirely for a `url:` bundle. One such bundle owning durable work would have
         # rendered an empty `replicas` (Kubernetes reads that as 1) and contributed `nil | int` = 0
-        # to `chemclaw.pooledProcesses`, so the connection budget would have been short by exactly
+        # to `chemclaw.fleetPools`, so the connection budget would have been short by exactly
         # the pods that were running. No shipped bundle is that shape today, which is why it was
         # latent; the shape is legal, which is why it is checked.
         entry = entries[name]
@@ -455,14 +455,14 @@ def test_an_externally_hosted_connector_is_dialled_where_the_operator_says() -> 
 def test_an_externally_hosted_connector_is_not_counted_against_the_connection_ceiling() -> None:
     """A pod that does not exist may not spend the fleet's Postgres budget.
 
-    `chemclaw.pooledProcesses` multiplies into the ceiling `Settings` refuses to exceed, so an
+    `chemclaw.fleetPools` multiplies into the ceiling `Settings` refuses to exceed, so an
     over-count is not cosmetic: it shrinks the pool every real pod is allowed, or trips the refusal
     outright and CrashLoops the release.
     """
     helpers = (CHART / "templates" / "_helpers.tpl").read_text()
-    _, _, definition = helpers.partition('define "chemclaw.pooledProcesses"')
+    _, _, definition = helpers.partition('define "chemclaw.fleetPools"')
     assert "if and $cfg.server (not $cfg.url)" in definition, (
-        "chemclaw.pooledProcesses counts a server pod for an externally hosted bundle"
+        "chemclaw.fleetPools counts a server pod for an externally hosted bundle"
     )
 
 
@@ -1127,15 +1127,32 @@ def test_the_fleet_ceiling_has_a_runtime_check_config_validation_cannot_do() -> 
     )
 
 
-def _pooled_processes(values: dict[str, Any]) -> int:
-    """The processes this chart renders that open a Postgres pool — the helper's arithmetic.
+POOLS_PER_FRONT_DOOR = 3
+"""How many Postgres pools one front-door process holds.
+
+The stores' pool, the `/readyz` probe's (`api/routes/ops.py` borrows with its own statement
+timeout, and `core/db` keys a pool on `(dsn, libpq options)`) and the LangGraph checkpointer's
+registered autocommit pool. Every other role holds one. Measured rather than assumed:
+`tests/test_fleet_pools.py` drives each role's real composition root and counts.
+"""
+
+
+def _fleet_pools(values: dict[str, Any]) -> int:
+    """The Postgres pools this chart renders — the helper's arithmetic.
+
+    **Pools, not pods**, which is the defect this file used to share with the validator: both
+    multiplied `pg_pool_max_size` by a process count, so a front door measured at three pools and
+    48 connections was charged 16 and the shipped chart declared 136 against a real floor of 208.
 
     Kept here rather than read out of the template because the point of the test is to check the
     template against the topology *independently*; reading its own answer back would assert
     nothing.
     """
     autoscaling = values["service"]["autoscaling"]
-    total = autoscaling["maxReplicas"] if autoscaling["enabled"] else values["service"]["replicas"]
+    front_door = (
+        autoscaling["maxReplicas"] if autoscaling["enabled"] else values["service"]["replicas"]
+    )
+    total = front_door * POOLS_PER_FRONT_DOOR
     total += values["workers"]["background"]["replicas"]
     # The face serves the same in-process read-only tools over MCP and opens the same pool. Off by
     # default, so this term is zero for the shipped values and the point of it is the release that
@@ -1156,7 +1173,7 @@ def _pooled_processes(values: dict[str, Any]) -> int:
 
 
 def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() -> None:
-    """The chart may not declare a connection ceiling its own pod count exceeds.
+    """The chart's own numbers must clear the validator every pod runs at startup.
 
     `core/config/store.py` stated "the deployment total is max_size × processes, which must stay
     under the server's max_connections" and nothing computed it, so the chart set no pool key at
@@ -1164,52 +1181,77 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
     ceiling ~272 against the `max_connections=100` D-119 measured against. `Settings` now refuses
     the product — which means shipping a chart whose own values exceed it would CrashLoop every
     pod on first deploy. This is the check that catches that here instead.
+
+    **Checked by constructing a real `Settings`, not by re-implementing the comparison.** This test
+    used to assert `processes * per_pool <= declared` itself, so when the validator's own
+    arithmetic counted *processes* where the front door holds three pools, this test agreed with it
+    and both were wrong together — a declared 136 against a measured floor of 208. Feeding the
+    rendered numbers to the validator leaves exactly one arithmetic in the repository, and any
+    future correction to it lands here on the same commit.
     """
+    from chemclaw.core.config import Settings
+
     values = _values()
-    processes = _pooled_processes(values)
+    pools = _fleet_pools(values)
     per_pool = int(values["config"]["CHEMCLAW_PG_POOL_MAX_SIZE"])
     declared = int(values["postgres"]["maxConnections"])
 
-    assert processes * per_pool <= declared, (
-        f"the chart scales to {processes} pooled processes × {per_pool} connections = "
-        f"{processes * per_pool} against a declared ceiling of {declared}; every pod would refuse "
-        "to start"
-    )
+    try:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            pg_fleet_pools=pools,
+            pg_pool_max_size=per_pool,
+            pg_fleet_max_connections=declared,
+        )
+    except ValueError as exc:  # pragma: no cover - the failure this test exists to report
+        pytest.fail(
+            f"the shipped chart renders {pools} pools × {per_pool} connections = "
+            f"{pools * per_pool} against a declared ceiling of {declared}; every pod would refuse "
+            f"to start with: {exc}"
+        )
 
     # Derived from the topology, never hand-written beside it — a second copy of the replica counts
     # goes stale the first time a connector is enabled, which is exactly the silent multiplication
     # the ceiling exists to catch, reintroduced by the mechanism meant to catch it.
-    assert "CHEMCLAW_PG_FLEET_POOLED_PROCESSES" not in values["config"], (
-        "the pooled-process count must be derived in templates/_helpers.tpl, not hand-written"
+    assert "CHEMCLAW_PG_FLEET_POOLS" not in values["config"], (
+        "the fleet pool count must be derived in templates/_helpers.tpl, not hand-written"
     )
     # And not restated in prose either, which is how it went wrong: two comments in this values file
-    # said "17 pooled processes" and "seventeen of them" while `chemclaw.pooledProcesses` rendered
+    # said "17 pooled processes" and "seventeen of them" while the helper rendered
     # 14, so the arithmetic beside `maxConnections` produced a number the chart does not render.
     # `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` is the rule; this is its pin.
+    # It covers "pools" as well as "pooled processes" since 2026-09-05, because that is what the
+    # helper counts now and a rename is a way for a pin to stop pinning anything.
     prose = (CHART / "values.yaml").read_text()
     restated = re.findall(
         r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
-        r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b[^.\n]{0,20}pooled process",
+        r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b[^.\n]{0,20}"
+        r"(?:pooled process(?:es)?|pools|pool count)\b",
         prose,
         flags=re.IGNORECASE,
     )
     assert not restated, (
-        f"values.yaml writes down a pooled-process count ({restated}); it is rendered by "
-        "chemclaw.pooledProcesses and goes stale here the first time a replica count moves"
+        f"values.yaml writes down a fleet pool count ({restated}); it is rendered by "
+        "chemclaw.fleetPools and goes stale here the first time a replica count moves"
     )
     config_template = (CHART / "templates" / "config.yaml").read_text()
     assert re.search(
-        r"^\s*CHEMCLAW_PG_FLEET_POOLED_PROCESSES:.*chemclaw\.pooledProcesses",
+        r"^\s*CHEMCLAW_PG_FLEET_POOLS:.*chemclaw\.fleetPools",
         config_template,
         flags=re.MULTILINE,
-    ), "CHEMCLAW_PG_FLEET_POOLED_PROCESSES does not come from the rendered topology"
+    ), "CHEMCLAW_PG_FLEET_POOLS does not come from the rendered topology"
 
     helpers = (CHART / "templates" / "_helpers.tpl").read_text()
-    _, _, definition = helpers.partition('define "chemclaw.pooledProcesses"')
-    assert definition, "_helpers.tpl defines no chemclaw.pooledProcesses"
+    _, _, definition = helpers.partition('define "chemclaw.fleetPools"')
+    assert definition, "_helpers.tpl defines no chemclaw.fleetPools"
     # The front door counts at its HPA ceiling, not its floor: a budget that only holds at
     # minReplicas is a budget the fleet breaks by scaling up, which is what it is for.
     assert ".Values.service.autoscaling.maxReplicas" in definition
+    # And it counts POOLS: the front-door term is multiplied by what one such process holds. This
+    # is the line whose absence declared 136 for a fleet that opens 208.
+    assert f"mul $frontDoor {POOLS_PER_FRONT_DOOR}" in definition, (
+        "chemclaw.fleetPools counts front-door pods rather than the pools each one holds"
+    )
     # And every other pooled process comes from the same blocks the Deployments do.
     assert ".Values.workers.background.replicas" in definition
     assert "range $name, $cfg := .Values.connectors" in definition
@@ -3298,11 +3340,11 @@ def test_the_pre_install_hook_reads_a_configuration_that_exists_when_it_runs() -
         )
 
 
-def _declared_pooled_processes(*overrides: str) -> int:
-    """`CHEMCLAW_PG_FLEET_POOLED_PROCESSES` as this render puts it in the ConfigMap."""
+def _declared_fleet_pools(*overrides: str) -> int:
+    """`CHEMCLAW_PG_FLEET_POOLS` as this render puts it in the ConfigMap."""
     result = _render(*overrides)
     assert result.returncode == 0, result.stderr
-    return int(_rendered_config(result.stdout)["CHEMCLAW_PG_FLEET_POOLED_PROCESSES"])
+    return int(_rendered_config(result.stdout)["CHEMCLAW_PG_FLEET_POOLS"])
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
@@ -3311,7 +3353,7 @@ def test_turning_on_a_pooled_component_moves_the_declared_connection_budget() ->
 
     It runs `connectors/server.py` over the in-process read-only tool set — knowledge search,
     fingerprint search, precedent lookup — so it holds up to `CHEMCLAW_PG_POOL_MAX_SIZE`
-    connections per replica. `chemclaw.pooledProcesses` summed the front door (or its HPA maximum),
+    connections per replica. `chemclaw.fleetPools` summed the front door (or its HPA maximum),
     the background worker and each connector half, and never visited `.Values.mcpFace`. The startup
     guard in `core/config` checks the *declared* number against `postgres.maxConnections`, so an
     undercount cannot make it fire: at ten face replicas the fleet opens 192 connections against a
@@ -3320,17 +3362,46 @@ def test_turning_on_a_pooled_component_moves_the_declared_connection_budget() ->
 
     Asserted as the *difference* between two renders rather than against a modelled total: that
     isolates the term this test is about, needs no second copy of the helper's arithmetic here, and
-    keeps saying the same thing when a replica default moves.
+    keeps saying the same thing when a replica default moves. One pool per face replica, not the
+    front door's three: it serves read-only tools and takes no turn, so it holds neither a
+    checkpointer pool nor a readiness probe's.
     """
-    baseline = _declared_pooled_processes()
+    baseline = _declared_fleet_pools()
     for replicas in (1, 10):
-        with_face = _declared_pooled_processes(
+        with_face = _declared_fleet_pools(
             "--set", "mcpFace.enabled=true", "--set", f"mcpFace.replicas={replicas}"
         )
         assert with_face - baseline == replicas, (
-            f"enabling mcp-face at {replicas} replicas moved the declared pooled-process count by "
+            f"enabling mcp-face at {replicas} replicas moved the declared fleet pool count by "
             f"{with_face - baseline}; every one of those pods opens a pool, so the fleet's "
             "connection ceiling is understated by the difference and the guard cannot fire"
+        )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_scaling_the_front_door_moves_the_budget_by_the_pools_a_front_door_holds() -> None:
+    """One more front-door replica is three more pools, and the chart used to say one.
+
+    The measured shape (`tests/test_fleet_pools.py`): a front-door process holds the stores' pool,
+    the `/readyz` probe's own key and the checkpointer's registered pool — 3 × `pg_pool_max_size`
+    connections, not one pool's worth. Counting pods is what let the shipped chart declare 136 for
+    a fleet whose floor is 208, and it is the front door that scales, so the error grew with the
+    HPA rather than staying a fixed offset.
+
+    A difference between two renders for the same reason the face test takes one: it isolates the
+    term and survives a change to any other replica default.
+    """
+    baseline = _declared_fleet_pools()
+    ceiling = int(_values()["service"]["autoscaling"]["maxReplicas"])
+    for extra in (1, 4):
+        scaled = _declared_fleet_pools(
+            "--set", f"service.autoscaling.maxReplicas={ceiling + extra}"
+        )
+        assert scaled - baseline == extra * POOLS_PER_FRONT_DOOR, (
+            f"{extra} more front-door replica(s) moved the declared fleet pool count by "
+            f"{scaled - baseline}, not {extra * POOLS_PER_FRONT_DOOR}; each opens "
+            f"{POOLS_PER_FRONT_DOOR} pools, so the ceiling is understated by the difference and "
+            "the startup guard cannot fire"
         )
 
 

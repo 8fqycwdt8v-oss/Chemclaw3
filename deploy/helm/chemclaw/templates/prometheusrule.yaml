@@ -464,9 +464,11 @@ spec:
             runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawfleetaboveitsconnectionceiling
             summary: The fleet can open more Postgres connections than it is allowed to
             description: >-
-              More pooled processes are running than `postgres.maxConnections` accounts for, so the
+              More Postgres pools are open than `postgres.maxConnections` accounts for, so the
               database can be asked for more connections than it will serve — which surfaces as
-              connect failures against a server that is not busy. Either scale back or raise
+              connect failures against a server that is not busy. Pools, not pods: this gauge sums
+              every pool a process holds (a front door holds three), which is why it can fire on a
+              fleet whose per-pod configuration validated. Either scale back or raise
               `postgres.maxConnections` with a number from the server's own `max_connections`.
 
     - name: chemclaw.cost

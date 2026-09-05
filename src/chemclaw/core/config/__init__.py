@@ -346,11 +346,13 @@ class Settings(
           the ceiling their endpoint can serve; undeclared, there is nothing to check against.
         - **A fleet opening more Postgres connections than the server will serve.** The same shape
           one subject over, and `core/config/store.py` had stated the multiplication in prose since
-          the pool landed: `pg_pool_max_size` bounds one process, and the deployment total is that
-          times every process that opens a pool. Nothing computed it, so the shipped chart ran all
+          the pool landed: `pg_pool_max_size` bounds one *pool*, and the deployment total is that
+          times every pool the fleet opens. Nothing computed it, so the shipped chart ran all
           of its pods on the default 16 and the fleet ceiling was ~272 against the
-          `max_connections=100` D-119 measured against. Same self-disabling convention: undeclared
-          means inert.
+          `max_connections=100` D-119 measured against. Then the computation itself counted
+          *processes*, which is the same error one level in: a front-door process holds three pools
+          and opens 48 connections where `1 × 16` said 16. Same self-disabling convention:
+          undeclared means inert.
         - **A fleet dispatching more concurrent calculations than the backend will serve.** The
           third instance of the same shape, one subject over again: the activity cap bounds one
           worker process and `servers/calc` is a single shared pod, so scaling the `calc` worker
@@ -466,15 +468,21 @@ class Settings(
                     "service_fleet_max_concurrent_turns if the LLM endpoint can serve it."
                 )
         if self.pg_fleet_max_connections:
-            opened = self.pg_fleet_pooled_processes * self.pg_pool_max_size
+            # **Pools, not processes.** `pg_pool_max_size` bounds one pool and a process holds one
+            # per distinct `(dsn, libpq options)` key plus any foreign pool it registers, so a
+            # front door holds three (stores, `/readyz`'s own statement timeout, the checkpointer's
+            # autocommit pool) and opens 3 × `pg_pool_max_size`. Multiplying by processes said
+            # `1 × 16 = 16` for a process measured at 48.
+            opened = self.pg_fleet_pools * self.pg_pool_max_size
             if opened > self.pg_fleet_max_connections:
                 raise ValueError(
                     f"this deployment may open {opened} Postgres connections "
-                    f"({self.pg_fleet_pooled_processes} pooled process(es) × "
+                    f"({self.pg_fleet_pools} pool(s) × "
                     f"{self.pg_pool_max_size} per pool) against a declared server ceiling of "
-                    f"{self.pg_fleet_max_connections}. Lower pg_pool_max_size or the number of "
-                    "pooled processes, or raise pg_fleet_max_connections if the server's "
-                    "max_connections can serve it."
+                    f"{self.pg_fleet_max_connections}. A process holds one pool per distinct DSN "
+                    "and statement timeout, plus the checkpointer's — the front door holds three. "
+                    "Lower pg_pool_max_size or the number of pooled processes, or raise "
+                    "pg_fleet_max_connections if the server's max_connections can serve it."
                 )
         if self.calc_backend_max_concurrent_requests:
             # Three factors, not two: a solvent screen fans out inside one activity under
