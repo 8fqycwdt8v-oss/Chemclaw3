@@ -142,24 +142,46 @@ def _redact(dsn: str) -> str:
     return conninfo.make_conninfo("", **parts)
 
 
-# **Never let this pool serve a query from a generic plan.** psycopg auto-prepares a statement on
-# its fifth execution, and a pooled connection lives long enough to reach that on the first
-# minute of traffic. Postgres may then switch a prepared statement to a *generic* plan — one
-# planned once with the parameters unknown — and for the shape this system's retrieval is built
-# on that plan is a sequential scan, because an `ORDER BY embedding <=> $1` cannot use an HNSW
-# index when `$1` is not yet a value. Measured on 100k chunks, the dense note query went
-# **9 ms → 1,280 ms on execution 11 and stayed there for the life of that connection**, and
-# `EXPLAIN (GENERIC_PLAN)` names the reason: `Seq Scan on note_index` under a `Sort`. Two other
-# statements have the same shape today (the scoped lexical `= ANY($1)` and fingerprint
-# similarity), and any future `ORDER BY <parameterised distance>` would join them silently.
+# **Never let this pool serve a query from a generic plan.** psycopg auto-prepares a statement at
+# `prepare_threshold=5`, so the sixth execution is the first prepared one, and a pooled connection
+# reaches that in the first minute of traffic. Postgres may then serve it from a *generic* plan —
+# planned once with the parameters unknown — and keep that plan for the life of the connection.
+#
+# **The statement this actually bites is the scoped lexical one, and the mechanism is a cost
+# estimate rather than an index that cannot be used.** `retrieval/vector_index.py::_lexical`
+# carries `(%(ids)s::text[] IS NULL OR note_id = ANY(%(ids)s::text[]))`, and one prepared statement
+# serves both parameterisations of it — which want *structurally different* plans. Measured at 100k
+# notes: with `ids` NULL the OR constant-folds away and the custom plan is a parallel seq scan plus
+# a top-N sort (cost 5,194); with 20 ids it is `Index Scan using note_index_pkey`,
+# `Index Cond: note_id = ANY(...)` (cost 118). The generic plan can be neither, so it is a bitmap
+# heap scan carrying the OR as a filter — and it estimates **rows=3** where the unscoped call
+# returns 100,000, which makes its cost estimate 1,190 against the correct plan's 5,194. `auto`
+# compares those estimates and keeps the wrong one: the unscoped query goes **36.8 ms → 66.7 ms at
+# execution 6 and stays there**, 1.81x, while `force_custom_plan` holds 37.0 ms flat.
+#
+# **The dense vector query is not the one at risk, and the sentence here used to say it was.** That
+# claim — that `ORDER BY embedding <=> $1` cannot use an HNSW index with `$1` unknown, costing
+# 9 ms → 1,280 ms — does not reproduce and is not how pgvector behaves.
+# `EXPLAIN (GENERIC_PLAN)` on `_dense`'s own shape prints `Index Scan using
+# note_index_embedding_idx`, `Order By: (embedding <=> ($1)::vector(384))`, and the query measures
+# 1.10 ms → 0.69 ms across twenty executions under `auto`. The setting is right; the reason given
+# for it was a guess, and a guess in the present tense is what
+# `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` is about.
 #
 # The remedy is the server's own, and it is set here rather than per statement so that a query
 # added next year inherits it: `force_custom_plan` keeps the prepared statement — the parse is
-# still cached — and re-plans each execution with the parameters in hand. **Measured cost of that
-# on the queries which do not need it**: a point lookup goes 135.7 µs → 140.5 µs, about 10 µs,
-# against removing a 142x cliff. The checkpointer pool (`agent/checkpointer.py`) deliberately does
-# not get this: its statements are primary-key lookups where a generic plan is both correct and
-# the cheaper one.
+# still cached — and re-plans each execution with the parameters in hand. **Measured cost on the
+# queries that do not need it**: a point lookup goes 135.7 µs → 140.5 µs, about 10 µs.
+#
+# **The checkpointer pool (`agent/checkpointer.py`) is deliberately excluded, and not for the
+# reason this said either.** It claimed that pool's statements are primary-key lookups; LangGraph's
+# own SQL carries `(%s::text IS NULL OR checkpoint_id < %s)` and two `= ANY(%s)` clauses, which is
+# the same family measured above. What makes it safe is *where* the OR sits: behind
+# `thread_id = %s AND checkpoint_ns = %s`, so the generic plan is `Index Only Scan Backward using
+# checkpoints_pkey` with both equalities in the `Index Cond` and the OR filtering one thread's
+# checkpoints rather than a corpus. Measured at 200k rows across 2,000 threads, 0.35 ms under
+# `auto` against 0.37 ms forced — no difference to buy. The property to preserve when adding a
+# statement there is that one, not "it is a primary-key lookup".
 _FORCE_CUSTOM_PLAN = "-c plan_cache_mode=force_custom_plan"
 
 

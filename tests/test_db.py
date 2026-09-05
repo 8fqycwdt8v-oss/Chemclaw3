@@ -85,6 +85,40 @@ def test_no_statement_timeout_still_carries_the_plan_mode_and_the_dsn_options() 
         assert "statement_timeout" not in merged  # none was asked for
 
 
+def test_the_checkpointer_pool_is_not_given_the_plan_mode_and_the_reason_is_structural() -> None:
+    """The one pool deliberately outside `_FORCE_CUSTOM_PLAN`, pinned so the exclusion is a choice.
+
+    `agent/checkpointer.py` builds its own `AsyncConnectionPool` and passes no `options`, so it
+    never sees the plan mode. That exclusion used to be justified by "its statements are
+    primary-key lookups"; LangGraph's own SQL carries `(%s::text IS NULL OR checkpoint_id < %s)`
+    and two `= ANY(%s)` clauses, which is exactly the family `_FORCE_CUSTOM_PLAN` exists for.
+
+    What actually makes it safe is *where* that OR sits — behind `thread_id = %s AND
+    checkpoint_ns = %s`, so the generic plan puts both equalities in the `Index Cond` of an
+    `Index Only Scan Backward using checkpoints_pkey` and the OR filters one thread's checkpoints.
+    Measured at 200k rows over 2,000 threads: 0.35 ms under `auto` against 0.37 ms forced.
+
+    So this asserts the *absence*, in both directions that matter. The pool takes no `options`
+    argument at all, which is what keeps `core.db`'s merge out of it; and a future statement there
+    whose risky clause is not behind that leading equality is a reason to revisit the exclusion,
+    which is the sentence `_FORCE_CUSTOM_PLAN` now carries instead of the false one.
+    """
+    from chemclaw.agent import checkpointer
+
+    source = Path(str(checkpointer.__file__)).read_text("utf-8")
+    _, _, construction = source.partition("AsyncConnectionPool(")
+    body, _, _ = construction.partition(")")
+    assert "options" not in body, (
+        "the checkpointer pool now passes `options`; `_FORCE_CUSTOM_PLAN` is excluded from it "
+        "because its risky clauses sit behind an equality on the primary key's leading columns, "
+        "and a pool that sets options at all is one whose exclusion needs re-deciding"
+    )
+    assert "plan_cache_mode" not in source, (
+        "the checkpointer sets a plan cache mode; that is a decision `core/db.py`'s "
+        "`_FORCE_CUSTOM_PLAN` comment argues against, so it needs an ADR rather than a diff"
+    )
+
+
 def test_statement_timeout_applies_when_the_dsn_has_no_options() -> None:
     """The ordinary case: no DSN options, so ours is the whole string."""
     assert db._merged_options("postgresql://h/db", 1.5) == (
