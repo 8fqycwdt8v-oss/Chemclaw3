@@ -9,5 +9,5 @@ conditions:
   yield_percent: 68.0
   outcome: success
 ---
-Heck coupling of the aryl bromide with ethyl acrylate, palladium acetate and triethylamine in DMF,
-run at reflux. Ten hours at reflux; the reaction is slow but clean.
+Heck coupling of the aryl bromide with ethyl acrylate, palladium acetate and triethylamine in
+toluene, run at reflux (111 °C). Ten hours at reflux; the reaction is slow but clean.

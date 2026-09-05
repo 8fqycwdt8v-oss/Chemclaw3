@@ -365,16 +365,10 @@ async def gather_evidence(
     if settings.retrieval_mode == "hybrid":
         # RRF already produces the cross-source ranking (best first), so it *is* the order the cap
         # keeps — re-sorting by a single source's raw score would discard the fusion.
-        # Re-stated as the fused position on the way out: the order below is a summed reciprocal
-        # rank and a chunk's own `score` is its finder's cosine/`ts_rank`/confidence, so the model
-        # was handed a ranking and a number that disagree. `restated_as_position` is the same
-        # restatement `ingest/documents/retriever.py` already makes over its own two-leg fusion.
-        ranked = restated_as_position(
-            reciprocal_rank_fusion(
-                ranked_lists,
-                k=settings.retrieval_fusion_k,
-                weights=settings.retrieval_source_weights_map,
-            )
+        merged = reciprocal_rank_fusion(
+            ranked_lists,
+            k=settings.retrieval_fusion_k,
+            weights=settings.retrieval_source_weights_map,
         )
     else:
         # Round-robin, not a flat union re-sorted by score: the cap below has to be survivable by
@@ -382,7 +376,18 @@ async def gather_evidence(
         # is meaningful within it (KM-5). Sorting the union by `score` compared a note's confidence
         # against a `ts_rank` against a cosine, which is the comparison `EvidenceChunk.score`
         # documents as invalid — see `_interleave_dedup` for what it measured.
-        ranked = _interleave_dedup(ranked_lists)
+        merged = _interleave_dedup(ranked_lists)
+    # **Re-stated as the merged position on the way out, in both modes.** Whatever produced the
+    # order — a summed reciprocal rank, or a round-robin — a chunk's own `score` is its *finder's*
+    # cosine, `ts_rank` or note confidence, so the model was handed a ranking and a number that
+    # disagree. This used to be applied to `hybrid` only, on the argument that round-robin
+    # preserves each source's own ordering so the number still explains something; measured over
+    # the shipped corpus in `graph` mode, the score column was monotone with the delivered order on
+    # **2 of 7** queries, and both of those returned one and two chunks. The argument was thin when
+    # it was written and false once `GraphRetriever` began ranking by BM25-lite relevance rather
+    # than by the confidence it puts in this field. Nothing is lost: `EvidenceChunk.confidence`
+    # carries the note's confidence in its own field, and `retriever` says which leg found it.
+    ranked = restated_as_position(merged)
     # Frame each chunk's content as retrieved data before it enters the model context, so a
     # note body carrying adversarial text is read as evidence to cite, not an instruction.
     #

@@ -95,9 +95,13 @@ def restated_as_position(chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
     reported is the only quantity the fusion actually produced: rank. `1 / (1 + position)` keeps it
     inside the field's `[0, 1]` domain, descending, and monotone with the order it explains.
 
-    Not applied to the `graph` merge mode, and that is the distinction rather than an omission:
-    round-robin preserves each source's own ordering, so a chunk's own score still explains its
-    position within the list it came from. Only the fused order is a quantity no source holds.
+    Applied to **both** merge modes. It was `hybrid` only, on the argument that round-robin
+    preserves each source's own ordering so a chunk's score still explains its position within the
+    list it came from — an argument that was thin (the delivered list is interleaved, so the reader
+    sees one column, not four) and became false when `GraphRetriever` started ranking by BM25-lite
+    relevance rather than by the confidence it writes into this field. Measured in `graph` mode over
+    the shipped corpus, the score column was monotone with the delivered order on **2 of 7**
+    queries, and those two returned one and two chunks.
     """
     return [
         chunk.model_copy(update={"score": round(1.0 / (1 + position), 4)})

@@ -12,5 +12,5 @@ conditions:
   outcome: success
 ---
 Suzuki–Miyaura coupling of 4-bromotoluene with phenylboronic acid to the biaryl product, Pd(PPh3)4
-catalyst and K2CO3 base, reflux in THF/water. 88% isolated yield. Held at reflux for four hours; the
+catalyst and K3PO4 base, reflux in 2-MeTHF/water. 88% isolated yield. Held at reflux for four hours; the
 coupling was run under nitrogen after three degas cycles; see [[playbook-degassing-air-sensitive]].

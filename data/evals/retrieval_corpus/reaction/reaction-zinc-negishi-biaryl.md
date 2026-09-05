@@ -12,7 +12,7 @@ conditions:
   outcome: success
 ---
 Negishi coupling of the arylzinc bromide with 4-bromotoluene to the same biaryl the Suzuki route
-makes. The arylzinc was prepared in situ by inserting activated zinc dust into the aryl bromide,
+makes. The phenylzinc was prepared in situ by inserting activated zinc dust into bromobenzene,
 titrated, and transferred by cannula onto the palladium charge. 84% isolated yield at 60 °C.
 
 The zinc chemistry is the whole of the difference from the Suzuki route: the zinc insertion, the

@@ -33,6 +33,12 @@ class EvidenceChunk(BaseModel):
     # which *is* comparable across sources, and each retriever applies this score inside its own
     # ranking where it means something.
     #
+    # **What reaches the model is therefore not the finder's number.** `hybrid.restated_as_position`
+    # rewrites this field to `1 / (1 + position)` in the merged list, in both modes, because a
+    # number that contradicts the order it is printed beside is worse than no number. The finder's
+    # own value governs its source's ranking and the cap, and is spent by the time the chunk is
+    # returned; `confidence` below carries the note's confidence as a field of its own.
+    #
     # Defaults to a neutral 0.5: every current retriever sets it explicitly, so this only governs a
     # future retriever that forgets to — and neutral keeps such a chunk in the middle of its
     # source's ranking rather than silently pinning it last (and truncated).

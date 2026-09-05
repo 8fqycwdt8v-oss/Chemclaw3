@@ -332,17 +332,36 @@ def test_hybrid_mode_reports_the_fused_rank_not_the_finders_own_score(
     assert all(0.0 < score <= 1.0 for score in scores)
 
 
-def test_graph_mode_keeps_the_finders_own_score(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The absence, pinned — a blanket restatement would delete a real signal.
+def test_graph_mode_reports_the_merged_position_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default mode has the same defect, and this test used to pin the exemption.
 
-    The `graph` merge is a round-robin interleave, which preserves each source's own ordering, so a
-    chunk's score still explains its position within the list it came from. Restating it there
-    would throw away KM-5's truncation signal (a more-trusted note surviving the cut first) for the
-    default deployment, which is every deployment that has not opted into hybrid.
+    It asserted that `graph` keeps the finder's own number, on the argument that round-robin
+    preserves each source's ordering so the score still explains a chunk's position "within the
+    list it came from". The model is not handed four lists — it is handed one interleaved column,
+    where a note's `confidence`, a `ts_rank` and a cosine sit under one heading. Measured over the
+    shipped corpus in this mode, that column was monotone with the delivered order on **2 of 7**
+    queries, and both of those returned fewer than three chunks.
+
+    The exemption's second argument — that restating would "throw away KM-5's truncation signal" —
+    was wrong about where the signal lives twice over: the score orders a source's own list and the
+    cap *inside* the retriever, both of which have happened by the time a chunk reaches here, and
+    the note's confidence is on `EvidenceChunk.confidence`, a field of its own.
     """
     monkeypatch.setattr(settings, "retrieval_mode", "graph", raising=False)
     monkeypatch.setattr(research_tools, "_sources", lambda _anchor: _three_incomparable_legs())
 
     sweep = asyncio.run(research_tools.gather_evidence("anything"))
+    scores = [chunk.score for chunk in sweep.chunks]
 
-    assert {chunk.score for chunk in sweep.chunks} & {0.30, 0.40, 0.02, 0.09, 0.60, 0.95}
+    assert scores == sorted(scores, reverse=True), (
+        f"the score column is not monotone with the order it sits beside: {scores}"
+    )
+    assert scores[0] == 1.0
+    assert not {chunk.score for chunk in sweep.chunks} & {0.30, 0.40, 0.02, 0.09, 0.60, 0.95}, (
+        "a finder's own scale reached the model beside an order it does not explain"
+    )
+    # The signal the old exemption said this would delete lives in a field of its own, which is
+    # what makes restating `score` lossless. Asserted against the model rather than these chunks:
+    # the fixture's retrievers build chunks directly and set no confidence, so reading it off them
+    # would be a fact about the fixture.
+    assert "confidence" in EvidenceChunk.model_fields

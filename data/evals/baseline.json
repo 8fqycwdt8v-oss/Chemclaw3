@@ -1,5 +1,5 @@
 {
-  "case_set_version": "autonomy-2026-08-25",
+  "case_set_version": "retrieval-2026-09-05",
   "metrics": {
     "plan_execute_utility": 0.5,
     "plan_quality": 0.75,
@@ -9,7 +9,7 @@
     "e_factor": 35.37689393939394,
     "pmi": 36.37689393939394,
     "retrieval_recall": 0.95,
-    "retrieval_precision": 0.4758333333333334,
+    "retrieval_precision": 0.4758333333333333,
     "precision": 0.6666666666666666,
     "recall": 0.6666666666666666,
     "f1": 0.6666666666666666,
