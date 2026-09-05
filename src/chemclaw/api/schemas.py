@@ -376,10 +376,13 @@ def _transcript(
 
     **What this recovers, and what it cannot.** Tool calls and their outcomes were always in
     storage and merely discarded by the route, so they come back for free. Plan snapshots,
-    attachment references and the answer's `confidence`/`review_required` were **never persisted**
-    — they are turn-time events computed and streamed, and nothing writes them to
-    `session_messages`. Recovering those is a change to what a turn *stores*, not to how it is
-    read, so it is a separate decision rather than something this can quietly approximate.
+    attachment references are **never persisted** — they are turn-time events computed and
+    streamed, and nothing writes them to `session_messages`. The answer's
+    `confidence`/`review_required` are the one line of this that changed: `turn_costs` has kept
+    them since migration 082, keyed by *correlation id*, so they are recoverable for a turn and
+    still not for a message. This reader is per-message and joins on nothing that would reach that
+    row. Recovering any of it here is a change to what a turn *stores*, not to how it is read, so
+    it is a separate decision rather than something this can quietly approximate.
 
     **The ref is computed here, not looked up.** A stored result's handle is the SHA-256 of the
     result's own text (`api/tool_results.py::content_address`), and the text is sitting in the

@@ -153,6 +153,64 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
 # that are not in-process at all (`index_*` are MCP tools behind an `allowed_tools` boundary),
 # inherited from `DEFAULT_WRITE_TOOL_GATES`. Those are correct entries and correctly absent from
 # the registry.
+# The **in-process** reads that consult the record — core's half of what a turn looked at before it
+# answered. The bundles' half is their own `knowledge_read` declaration; `knowledge_read_tools()`
+# below is the union, and is what anything counting a turn should read.
+#
+# A hand-written subset of `READ_ONLY_TOOLS` below, and the hand-writing is the honest part: authz
+# partitions tools by *what they may do without approval*, which is a different question from *did
+# this turn consult what we know*. `ask_clarifying_question` and `check_pending_requests` are
+# read-only and consult nothing; deriving this set from the authz partition would count a turn that
+# asked the chemist a question as a turn that searched the record.
+#
+# `tests/test_turn_knowledge.py` asserts this stays a subset of `READ_ONLY_TOOLS`, so a tool that
+# becomes state-changing cannot go on being counted as a read.
+KNOWLEDGE_READ_TOOLS: frozenset[str] = frozenset(
+    {
+        "assemble_evidence_pack",
+        "condense_protocols",
+        "expand_note",
+        "find_knowledge_gaps",
+        "find_notes",
+        "find_past_jobs",
+        "gather_evidence",
+        "recall_observations",
+        "recall_preferences",
+    }
+)
+
+# The writes that reach **the record** — what a turn put back into what we know.
+#
+# Stated, for the same reason the read set is, and this half shipped *derived* from
+# `side_effecting_tools()` on the argument that a bundle's future write tool would then be counted
+# the day it is enabled. Measured, that derivation spanned 49 tools, of which six write knowledge:
+# a turn that computed one xTB energy booked `capture_calls = 1`, so the column answered "did this
+# turn call a state-changing tool" — which `tool_calls` minus the reads already approximates —
+# rather than "did this turn write anything back", which is the question it exists to answer and
+# the only one no other column can.
+#
+# The generality that was traded away is smaller than it looks: a connector bundle cannot write to
+# the knowledge graph or the memory tiers at all. Every path into them is one of these six, because
+# the PR-gate is in-process and the memory stores are this repository's own.
+#
+# `synthesize_memory` is here although it *launches* rather than writes: the job it starts opens
+# pull requests against the knowledge repository, so a turn that called it is a turn that put
+# something back. `forget_preference` is here although it captures nothing: it changes the durable
+# record, which is what this column reports on.
+#
+# `tests/test_turn_knowledge.py` asserts this stays inside `side_effecting_tools()`, so a write
+# that stops being gated cannot go on being counted as one.
+KNOWLEDGE_WRITE_TOOLS: frozenset[str] = frozenset(
+    {
+        "forget_preference",
+        "propose_knowledge_note",
+        "record_confirmed_answer",
+        "record_failure",
+        "remember_preference",
+        "synthesize_memory",
+    }
+)
+
 READ_ONLY_TOOLS: frozenset[str] = frozenset(
     {
         "ask_clarifying_question",
@@ -200,6 +258,26 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         "recall_preferences",
     }
 )
+
+
+@cache
+def knowledge_read_tools() -> frozenset[str]:
+    """Every tool that consults the record — in-process, plus what the enabled bundles declare.
+
+    The union `turn_costs.retrieval_calls` is counted against. Core's half is stated
+    (`KNOWLEDGE_READ_TOOLS`); a bundle's half is its own declaration, because core naming other
+    people's tools is the second source of truth D-118 exists to prevent — and because leaving it
+    out was a real hole rather than a theoretical one: `rxnfp`'s seven searches over the reaction
+    corpus and `molfp`'s two over the fingerprint index are exactly "did this turn look at the
+    record", and a turn that answered from `substrate_precedent` alone booked `retrieval_calls`
+    zero.
+
+    Cached for the process's life on the same argument `side_effecting_tools` makes, and cleared
+    beside it by `tests/conftest.py`'s discovery-cache fixture.
+    """
+    from chemclaw.connectors.registry import knowledge_read_tool_names
+
+    return KNOWLEDGE_READ_TOOLS | frozenset(knowledge_read_tool_names())
 
 
 @cache

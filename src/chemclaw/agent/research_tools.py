@@ -29,9 +29,9 @@ from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.eln.records import default_record_store
 from chemclaw.ingest.rejections import IngestRejection, refusals_matching
 from chemclaw.ingest.sources.registry import active_retrieve_sources
-from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep, SourceRetriever
+from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep, Hits, SourceRetriever
 from chemclaw.retrieval.fanout import record_kept_chunks, sweep_sources
-from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
+from chemclaw.retrieval.hybrid import reciprocal_rank_fusion, restated_as_position
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.store import default_reaction_store
 
@@ -277,11 +277,10 @@ async def gather_evidence(
 ) -> EvidenceSweepWithRefusals:
     """Gather cited evidence for a research question from every internal source at once.
 
-    Runs each text source (the knowledge graph, and any future literature/analytics source)
-    on `query`, and — when an anchor reaction is given — also pulls structurally similar past
-    reactions (DRFP). Results are merged and de-duplicated. Empty is a valid answer (nothing
-    on file), never invented — and it now *means* that: if every source was unreachable this
-    raises instead of returning empty, so "nothing on file" is never how an outage is reported.
+    Runs each text source on `query`, and — when an anchor reaction is given — also pulls
+    structurally similar past reactions (DRFP). Results are merged and de-duplicated. Empty is a
+    valid answer (nothing on file) and never invented: if every source is unreachable this raises
+    rather than returning empty, so an outage is never reported as an absence.
 
     Args:
         query: The natural-language question or key terms (matched over note id/tags/body).
@@ -289,27 +288,29 @@ async def gather_evidence(
         note_type: Optional graph filter, e.g. "reaction", "optimization-campaign", "playbook".
         tag: Optional graph tag filter (e.g. a project name).
         since: Optional ISO date (YYYY-MM-DD); keep only notes dated on or after it — for a
-            reaction note, the day the experiment was run. Use it for "what have we tried
-            recently"; note that a note with no date is excluded, not assumed to be in range.
-            Structural hits from a `reaction_smiles` anchor are windowed too, against the
-            transcription record's own dates.
+            reaction note, the day it was run. A note with no date is excluded, not assumed in
+            range. Structural hits from a `reaction_smiles` anchor are windowed too.
         until: Optional ISO date (YYYY-MM-DD); keep only notes dated on or before it.
 
     Returns:
         The sweep: its `chunks` (each with its content, the `source_note_id` to cite or expand, and
         which retriever found it), plus what it could not say. **Read `truncated_by`,
-        `sources_failed` and `refused_on_ingest` before concluding anything from an absence.**
-        `truncated_by` is set when a cap cut the list — `count` means narrow the query with a
-        `note_type`/`tag`/date filter, `chars` means the sources are returning long chunks and a
-        narrower question will reach
-        further — and `total_before_cap` says how much there was. A name in `sources_failed` means
-        that source could not be asked at all, so the answer is about less than the whole corpus
-        however complete the chunks look.
+        `sources_truncated`, `sources_failed` and `refused_on_ingest` before concluding anything
+        from an absence.**
+        `truncated_by` cuts the *merged* list — `count` means narrow with a `note_type`/`tag`/date
+        filter, `chars` means the chunks are long and a narrower question reaches further — and
+        `total_before_cap` says how much survived merging. **`None` there does not mean you saw
+        everything**: each source also cuts before the merge, and `sources_truncated` says which
+        did and by how much. `{"graph": 4992}` means you are reading the top eight of thousands —
+        narrow the question, or say the answer is from the best matches rather than the whole
+        record. A source absent from it cut nothing or cannot tell. A name in `sources_failed`
+        could not be asked at all, so the answer covers less than the corpus however complete the
+        chunks look.
 
         `refused_on_ingest` is **not evidence and not a result**. Each entry is a record an ingest
-        source offered and this system *refused*, with the reason it was refused — a record that is
-        therefore absent from the corpus, however much it matches the question. Report it as what
-        it is ("that entry was rejected on ingest because …"); never present its id, its numbers or
+        source offered and this system *refused*, with the reason — so it is absent from the
+        corpus however well it matches. Report it as what it is ("that entry was rejected on
+        ingest because …"); never present its id, its numbers or
         its reason as something found in the corpus, and never fill the gap it names with a value.
         `refusals_unavailable` is non-empty when that ledger could not be asked, in which case an
         empty list says nothing about whether anything was refused.
@@ -364,7 +365,7 @@ async def gather_evidence(
     if settings.retrieval_mode == "hybrid":
         # RRF already produces the cross-source ranking (best first), so it *is* the order the cap
         # keeps — re-sorting by a single source's raw score would discard the fusion.
-        ranked = reciprocal_rank_fusion(
+        merged = reciprocal_rank_fusion(
             ranked_lists,
             k=settings.retrieval_fusion_k,
             weights=settings.retrieval_source_weights_map,
@@ -375,7 +376,18 @@ async def gather_evidence(
         # is meaningful within it (KM-5). Sorting the union by `score` compared a note's confidence
         # against a `ts_rank` against a cosine, which is the comparison `EvidenceChunk.score`
         # documents as invalid — see `_interleave_dedup` for what it measured.
-        ranked = _interleave_dedup(ranked_lists)
+        merged = _interleave_dedup(ranked_lists)
+    # **Re-stated as the merged position on the way out, in both modes.** Whatever produced the
+    # order — a summed reciprocal rank, or a round-robin — a chunk's own `score` is its *finder's*
+    # cosine, `ts_rank` or note confidence, so the model was handed a ranking and a number that
+    # disagree. This used to be applied to `hybrid` only, on the argument that round-robin
+    # preserves each source's own ordering so the number still explains something; measured over
+    # the shipped corpus in `graph` mode, the score column was monotone with the delivered order on
+    # **2 of 7** queries, and both of those returned one and two chunks. The argument was thin when
+    # it was written and false once `GraphRetriever` began ranking by BM25-lite relevance rather
+    # than by the confidence it puts in this field. Nothing is lost: `EvidenceChunk.confidence`
+    # carries the note's confidence in its own field, and `retriever` says which leg found it.
+    ranked = restated_as_position(merged)
     # Frame each chunk's content as retrieved data before it enters the model context, so a
     # note body carrying adversarial text is read as evidence to cite, not an instruction.
     #
@@ -435,6 +447,14 @@ async def gather_evidence(
         # what lets the model say "the share requires an entitled actor" instead of "nothing on
         # file".
         sources={name: len(hits) for (name, _), hits in zip(sources, ranked_lists, strict=True)},
+        # The per-leg cut, for the legs that can report one. `Hits.dropped` is 0 when a source cut
+        # nothing or cannot say, and only the non-zero entries are carried — an absence here means
+        # "not truncated, or not knowable", which is the distinction the field's own comment makes.
+        sources_truncated={
+            name: hits.dropped
+            for (name, _), hits in zip(sources, ranked_lists, strict=True)
+            if isinstance(hits, Hits) and hits.dropped
+        },
         sources_skipped=skipped,
     )
 

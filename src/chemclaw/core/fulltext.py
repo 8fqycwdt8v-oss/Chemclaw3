@@ -41,7 +41,15 @@ _EXCLUSION = "-"
 # that split it into `98` and `5` reported a hit for the query `98` that the server does not return.
 # That is the *over*-matching direction, which is the worse one: the offline backend the unit tests
 # stand on answered a question production cannot.
-_WORD = re.compile(r"\d+\.\d+|[^\W_]+", re.UNICODE)
+#
+# **The signed interior number is the third alternative, and it mirrors Postgres rather than
+# flattening it.** `to_tsvector('english', 'CAS 108-24-7')` is `'108' '-24' '-7'` — the parser keeps
+# the hyphen on each interior number as a sign — so a reference that produced `{108, 24, 7}` would
+# call a note a hit for the query `24` that the durable backend does not return. The lookbehind is
+# any word character rather than a digit, because the parser does the same after a letter:
+# `LOT-2024-0031` is `'lot' '-2024' '-0031'`. Ordered after the decimal so `2.5-3.0` takes the
+# float first.
+_WORD = re.compile(r"\d+\.\d+|(?<=[^\W_])-\d+|[^\W_]+", re.UNICODE)
 
 # A `-` immediately before a digit. Postgres's parser reads that hyphen as a **sign** and keeps it
 # on the lexeme, and that is the one place its tokenisation loses a chemist's data outright.
@@ -68,7 +76,16 @@ _WORD = re.compile(r"\d+\.\d+|[^\W_]+", re.UNICODE)
 # number 78" now reads as "find 78". On a corpus of temperatures, concentrations and equivalents
 # that is the reading a chemist intends, and it is the only one under which a negative quantity is
 # searchable at all.
-_SIGN_GLUED_TO_NUMBER = re.compile(r"-(?=\d)")
+#
+# **Anchored at a token boundary, and the anchor is the whole correctness of it.** Unanchored, this
+# also split the *interior* hyphens of an identifier — and that is not a cosmetic difference,
+# because of what `TSQUERY_TERMS` does downstream. `websearch_to_tsquery('108-24-7')` renders
+# **one** clause, a phrase (`'108' <-> '-24' <-> '-7'`) the widening leaves whole; normalised to
+# `108 24 7` it renders **three** top-level clauses, which the widening then ORs. Measured on a
+# 301-note corpus holding one CAS number and 300 ordinary notes mentioning `pH 7`, `24 h` and
+# `batch 108`: the unanchored form matched **301 rows** where the anchored one matches **1**, and
+# seven of the lexical leg's eight slots went to notes that share a digit.
+_SIGN_GLUED_TO_NUMBER = re.compile(r"(?<![^\W_])-(?=\d)")
 
 
 def normalize_search_text(text: str) -> str:

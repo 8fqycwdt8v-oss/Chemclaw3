@@ -52,6 +52,11 @@ _COLUMNS = (
     "ttft_seconds",
     "compacted",
     "context_unreducible",
+    "retrieval_calls",
+    "capture_calls",
+    "answer_confidence",
+    "review_required",
+    "notes_cited",
 )
 
 # `correlation_id` is the conflict target, so it is the one column the update must not re-set.

@@ -184,51 +184,61 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **`retrieval_top_k` cuts silently and the sweep reports `truncated_by=None`** — [M], measured
-      2026-09-04 and the half `D-2026-09-04-a-ranker-that-sorts-alphabetically-is-not-a-ranker`
-      deliberately left. `retrievers.py`'s `[: settings.retrieval_top_k]` discards everything past
-      8, and `research_tools.py`'s `total_before_cap` is computed **after** the merge, so on 5,000
-      matching notes `gather_evidence` reports `chunks=8, total_before_cap=8, truncated_by=None`
-      while 4,992 were dropped inside the leg. The two bounds wired to `truncated_by` cannot bite:
-      max distinct chunks is 8x3 plus the fingerprint leg's 10, against
-      `gather_evidence_max_chunks` 40. `EvidenceSweep` exists precisely so "a cut does not look
-      like a corpus" and this cut is invisible to it. **The fix is a contract change, which is why
-      it is a row rather than a patch**: `Retriever.retrieve` returns `list[EvidenceChunk]`, so the
-      found-count has nowhere to travel — the two shapes that need no protocol change are a mutable
-      attribute on the retriever (unsafe: one instance serves concurrent turns) and the count
-      repeated on every chunk, and both are worse than the gap. Do it as a small result object
-      across all four retrievers, `fanout.sweep_sources`, `harness.gather_section` and their tests.
-      `FingerprintSearch.hits_truncated` is the shape to copy.
+- [ ] **RRF's premise is independent rankers and this system has correlated ones;
+      `retrieval_fusion_k` is not the dial that fixes it** — [M], re-measured 2026-09-05 against
+      current `HEAD`, and **both remedies this row used to propose are measured no-ops**. Keep the
+      numbers here so nobody re-litigates them.
 
-- [ ] **RRF at `k=60` over 8-item lists counts sources rather than ranks, and two of the three are
-      the same ranker** — [M], measured 2026-09-04. With `retrieval_fusion_k` 60 and
-      `retrieval_top_k` 8, rank 1 scores 0.016393 and rank 8 scores 0.014706 — a **1.11x** spread,
-      against **2.00x** for being found twice. A note in two sources at rank *r* beats a one-source
-      rank-1 note whenever `r < 62`, i.e. always, for every list this system produces. Worse than
-      ordinary RRF crowding, because `GraphRetriever` and `LexicalRetriever` apply the *same*
-      boolean rule over the *same* corpus (`vector_index.py` says so), so the agreement bonus
-      rewards redundancy and demotes the only leg with an orthogonal signal: measured, a note found
-      only by the dense leg fuses **last** of nine, and end to end the note answering the query
-      moves from position 2 in `graph` mode to position 9 in `hybrid`. Two candidate fixes and they
-      are not the same decision — set `k` to the scale of the lists (2-10), and/or weight
-      `graph`+`lexical` as one tier via the existing `retrieval_source_weights`. Ship the fused
-      score on the chunk either way; today the `score` the model reads back is the source's own and
-      does not explain the order.
+      The arithmetic stands: at `retrieval_fusion_k` 60 over lists of `retrieval_top_k` 8, the
+      within-source spread is **1.11x** (rank 1 = 1/61, rank 8 = 1/68) against **2.00x** for being
+      found twice, so a two-source note at rank *r* beats a one-source rank-1 note while `r < 62`.
+      End to end on a 35-note corpus with three real legs, the note answering the query sits at
+      position 2 in `graph` mode and **position 9 of 9** in `hybrid`.
 
-- [ ] **The retrieval gold corpus is smaller than `retrieval_top_k`, so the gate cannot see a
-      ranking defect** — [S], measured 2026-09-04. `data/evals/retrieval_corpus` holds **6** notes
-      against a k of 8, so the cut can never engage and 4 of 5 gold cases sit at recall 1.00.
-      Adding 30 ordinary notes whose ids sort earlier, **with no code change**, takes
-      `retrieval-coupling` from 1.00 to 0.25 and `retrieval-suzuki` from 1.00 to 0.50. The module's
-      own docstring says it exists so a change "could not quietly halve recall unnoticed"; it
-      cannot detect the only way recall actually halves. Grow it past `retrieval_top_k` (30-50,
-      most of them distractors matching the query terms) and add one case whose expected note sorts
-      last alphabetically. Related and larger: `data/evals/probes/knowledge.yaml` already names
-      **44** (query, note) pairs against the real corpus in its `direction:` prose, unreadable
-      because `Probe` is `extra="forbid"` — one field would turn a 10-pair fixture gold set into a
-      44-pair one over the product corpus, and `DEFERRED.md`'s claim that "the shipped graph has
-      none" is false.
+      **Neither `k` nor `retrieval_source_weights` can close it, and that is arithmetic rather than
+      tuning**: the agreement term contains no `k`, so a note found at rank 1 by two legs scores
+      `2/(k + 1/w)` against a dense-only rank-1 note's `1/(k+1)` — the first wins for *every*
+      positive `k` and `w`. Measured: lowering `k` to 20 or 10 changes the order on **0 of 7** real
+      queries; at the minimum `k=1` the answer note reaches position 6, still below every two-source
+      note. Tiering `graph`+`lexical` at weight 0.5 leaves it at position 9, inert.
 
+      **The correlation is worse than "two of the three"**: on the real `knowledge/` corpus,
+      `graph ∩ lexical` = 47/55, `graph ∩ vector` = 44/55, `lexical ∩ vector` = 41/53 — because the
+      shipped `embedding_provider` is `hash`, which is token-count hashing, so *all three* legs are
+      term-overlap rankers. The dense leg only becomes orthogonal under `openai_compatible`.
+
+      **What was fixed instead**, because it was a defect rather than a tuning question: the fused
+      list carried each chunk's *finder's* score, monotone with the fused order on **0 of 7**
+      queries. `hybrid.restated_as_position` now reports the rank the fusion actually produced.
+
+      **What would work is "one corpus, one vote"** — `ingest/documents/retriever.py` already fuses
+      its own two legs internally so the share votes once, while the note corpus runs three legs as
+      three votes over one corpus. Expressing that means the data-source manifest saying which
+      sources are one corpus, which is an ADR rather than a setting. Scope note: with three note
+      legs the merge cap never engages (24 chunks against 40), so today the cost is prompt *order*,
+      not recall; it becomes recall at five or more legs. And `retrieval_mode` defaults to `graph`
+      with `CHEMCLAW_DATA_SOURCES=graph,eln-json`, so **no shipped configuration runs RRF over note
+      sources at all** — hybrid staying opt-in is the mitigation until the ADR is taken.
+
+- [ ] **The 44 labelled (query, note) pairs in `knowledge.yaml` are unreadable as data** — [M],
+      measured 2026-09-05. `data/evals/probes/knowledge.yaml` has **19 probes naming
+      real `knowledge/` note ids inside their `direction:` prose, 44 pairs in total** — a labelled
+      gold set against the *product* corpus that no gate can read, because `Probe` is
+      `extra="forbid"` (`evals/probe.py`). `DEFERRED.md`'s claim that "the shipped graph has none"
+      was corrected in the same commit as this row.
+
+      **Score it in the live lane, not offline, and that is the finding.** Measured offline by
+      running `GraphRetriever` on each probe's raw question: mean recall **0.636**, two probes at
+      0.00 — below the gate's floor on day one, because probe questions are conversational chemist
+      prose (10-27 terms) while the live agent reformulates before calling `gather_evidence`.
+      Gating that offline would restate the `retrieval-cross-coupling-literal-miss` case 19 times
+      without the `expect_pass: false` that makes it honest.
+
+      The shape: add `expects_notes: list[str]` to `Probe`, transcribe the 44 pairs, and score it in
+      `evals/live.py` beside `expects_tools` — `returned_ids` is already accumulated there, so it is
+      the same three lines as `live.py:499-500`. Plus a cheap **offline** validator that every
+      `expects_notes` id exists in `knowledge/`, which is the half CI can run. Its own PR: it needs
+      a running front door to verify green.
 - [ ] **The PR-gate's submission is O(corpus) and serialises cluster-wide** — [M], measured
       2026-09-04 against real bare remotes: 0.218 s per proposal at 100 notes, 0.574 s at 1,000,
       **2.916 s at 10,000** — 87% of it `git worktree add -B`, a full checkout of the corpus, in
