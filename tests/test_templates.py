@@ -555,14 +555,38 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
         }
     )
 
+    @activity.defn(name="record_job")
+    async def fake_record_job(record: Any) -> None:
+        """Stand in for the real record write, which wants a sink this test does not configure.
+
+        Registered by the *name* the workflow dispatches, because Temporal routes on the activity
+        name rather than the callable.
+        """
+        return None
+
     async def _run() -> Any:
         async with await start_env_or_skip() as env:
             client = pydantic_client(env)
-            async with Worker(
-                client,
-                task_queue="test-templates",
-                workflows=[TemplateWorkflow],
-                activities=[fake_tool, fake_agent],
+            async with (
+                Worker(
+                    client,
+                    task_queue="test-templates",
+                    workflows=[TemplateWorkflow],
+                    activities=[fake_tool, fake_agent],
+                ),
+                # **The record write needs a worker, or this test measures a timeout.**
+                # `TemplateWorkflow` ends by dispatching `record_job` to the background queue, and
+                # nothing here served it — so the run only finished when that activity's bound
+                # expired, and the assertions below ran 60 s later than they read. That was
+                # invisible while the bound was a 60 s `schedule_to_close`; splitting it into a
+                # 900 s `schedule_to_start` turned the same 63-second test into a fifteen-minute
+                # one and stalled the suite. A test whose duration is somebody else's timeout is
+                # measuring the timeout.
+                Worker(
+                    client,
+                    task_queue=settings.background_task_queue,
+                    activities=[fake_record_job],
+                ),
             ):
                 return await client.execute_workflow(
                     TemplateWorkflow.run,
