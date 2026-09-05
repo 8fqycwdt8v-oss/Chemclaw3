@@ -263,9 +263,10 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "note_proposals",
         ("actor", "decided_by"),
-        "who proposed a knowledge note, and who signed it off at the PR-gate — the second is the "
-        "human half of 'the agent proposes, a human decides' and is the whole reason the gate is "
-        "auditable",
+        "who proposed a knowledge note, and who signed it off, while there was a PR-gate to sign "
+        "one off at (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` retired it). No row "
+        "is written here any more and the table stays for the rows that are: a deployment that ran "
+        "the gate holds real sign-offs by real people, and an erasure request must still find them",
     ),
     ("bo_suggestions", ("actor",), "who a campaign's recommendation was made for"),
     ("bo_campaigns", ("opened_by",), "who framed an optimization campaign's decision space"),

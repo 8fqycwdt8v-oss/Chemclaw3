@@ -51,12 +51,6 @@ class KgSettings(BaseSettings):
     # so a persistent failure gives up instead of retrying forever.
     note_write_timeout_seconds: float = Field(default=120.0, gt=0)
     note_write_max_attempts: int = Field(default=3, ge=1)
-    # How much of a failed submission's error text the `note_proposals` record keeps. Bounded
-    # because the text is whatever git wrote to stderr, and an unbounded field on a compliance
-    # table is a place for a repository path to be stored forever. It is a bound and *not* a
-    # redaction — the credential case is handled by redacting before this cut, because a
-    # token-bearing remote URL measures well under any length worth keeping.
-    proposal_reason_chars: int = Field(default=300, ge=1)
     # Wall-clock bound on a single git command in the PR-gate submitter. A hung fetch/push (dead
     # remote, credential prompt) is killed after this, so it can never deadlock the process-wide
     # submit lock; the failed activity then retries.
@@ -69,10 +63,6 @@ class KgSettings(BaseSettings):
     # A `SecretStr`, for the reason `D-2026-08-26-a-credential-is-a-type-not-a-convention`
     # states: read it with `.get_secret_value()`, and never through an f-string.
     note_webhook_secret: SecretStr = SecretStr("")
-    # Page size for `GET /proposals`. Bounded like every other listing: the review queue is
-    # unbounded in principle, and a surface that asks for "all of it" should page rather than ask
-    # the database for an unbounded scan.
-    proposal_list_limit: int = Field(default=50, ge=1, le=500)
 
     @property
     def knowledge_path(self) -> Path:

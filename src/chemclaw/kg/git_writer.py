@@ -36,21 +36,19 @@ import hashlib
 import logging
 import os
 import re
-import shutil
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.logging import log_event, secret_env_names
-from chemclaw.core.metrics_bridge import degraded
 from chemclaw.kg.graph import invalidate_cache
-from chemclaw.kg.submission import NoteSubmission, NoteSubmitter, SubmissionOutcome
+from chemclaw.kg.record import NoteWrite, NoteWriter, WriteOutcome
 
 log = logging.getLogger(__name__)
 
 # Serializes every submit() in this process — see the module docstring.
-_SUBMIT_LOCK = asyncio.Lock()
+_WRITE_LOCK = asyncio.Lock()
 
 # The advisory-lock file guarding the checkout across processes. It lives under `.git/` because
 # nothing else writes there: no reader's `rglob` reaches it (`knowledge_path` is
@@ -66,7 +64,7 @@ _LOCK_FILE_NAME = "chemclaw-submit.lock"
 # when the remote tip does not carry this trailer. (`--force-with-lease` could never make that
 # distinction: the lease is refreshed by the fetch each submission starts with, so it only guards
 # the fetch-to-push window, not the reviewer's commit that was already there.)
-_GATE_TRAILER = "Chemclaw-PR-Gate: submission"
+_RECORD_TRAILER = "Chemclaw-Note: recorded"
 
 # Where a submission's private worktree lives, beside the lock file and for the same reason: it is
 # the one location inside the repository that no reader and no sync can see. A module constant
@@ -117,14 +115,14 @@ def _checkout_lock(repo_dir: str) -> Iterator[None]:
     the kernel even if this process dies mid-submission.
 
     Raises:
-        GitSubmitError: When another process holds the lock, or the lock file cannot
+        GitWriteError: When another process holds the lock, or the lock file cannot
             be opened (e.g. `repo_dir` is not a git checkout).
     """
     lock_path = _git_dir(repo_dir) / _LOCK_FILE_NAME
     try:
         lock_file = lock_path.open("a")
     except OSError as exc:
-        raise GitSubmitError(f"cannot open submit lock {lock_path}: {exc}") from exc
+        raise GitWriteError(f"cannot open submit lock {lock_path}: {exc}") from exc
     try:
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -140,7 +138,7 @@ def _checkout_lock(repo_dir: str) -> Iterator[None]:
         lock_file.close()
 
 
-class GitSubmitError(ChemclawError):
+class GitWriteError(ChemclawError):
     """The submission flow refused or failed in a way a retry cannot fix.
 
     A `ChemclawError`, so `agent.tool_authz.surface_domain_errors` shows the reason to the model.
@@ -160,10 +158,10 @@ class GitSubmitError(ChemclawError):
     """
 
 
-class GitRemoteError(GitSubmitError):
+class GitRemoteError(GitWriteError):
     """A transient failure — the remote, the network, or a lock another process holds.
 
-    A *subclass*, so every `except GitSubmitError` caller still catches it; a *different name*,
+    A *subclass*, so every `except GitWriteError` caller still catches it; a *different name*,
     because Temporal's `non_retryable_error_types` matches by class name and the whole point is
     that this one is not on the list. `note_publish_retry()`'s bound is what limits the retries.
     """
@@ -200,19 +198,19 @@ def _require_dedicated_checkout(repo_dir: str) -> None:
     rather than here as a clear one.
 
     Raises:
-        GitSubmitError: When `repo_dir` resolves to the process CWD, to the root of the git
+        GitWriteError: When `repo_dir` resolves to the process CWD, to the root of the git
             checkout the process is running from, or to a linked worktree.
     """
     resolved = Path(repo_dir).resolve()
     if resolved == Path.cwd().resolve() or resolved == _process_repo_root():
-        raise GitSubmitError(
+        raise GitWriteError(
             f"note_repo_dir {repo_dir!r} resolves to {resolved} — the checkout this "
             "process is running from. Submissions create and force-push note branches to its "
             "origin, which would publish agent-authored notes into the source repository. "
             "Set CHEMCLAW_NOTE_REPO_DIR to a dedicated clone of the knowledge repo."
         )
     if (resolved / ".git").is_file():
-        raise GitSubmitError(
+        raise GitWriteError(
             f"note_repo_dir {repo_dir!r} is a linked git worktree; the PR-gate needs a clone with "
             "a real .git directory. Set CHEMCLAW_NOTE_REPO_DIR to a dedicated clone."
         )
@@ -227,7 +225,7 @@ def _require_dedicated_checkout(repo_dir: str) -> None:
 # forge returns for a *secondary rate limit* as well as for a denial: GitHub answers
 # `fatal: unable to access '...': The requested URL returned error: 403` for abuse detection and
 # push throttling, both of which clear on their own in seconds to minutes. Classified as auth, that
-# raises `GitSubmitError`, which `durable/publish.py` lists as non-retryable — so a throttle would
+# raises `GitWriteError`, which `durable/publish.py` lists as non-retryable — so a throttle would
 # permanently drop the note proposal instead of backing off, and the PR-gate would quietly stop
 # proposing while every run reported success. The comment above claims this list is "wrong in the
 # safe direction", and those two entries were the only ones that were not.
@@ -246,7 +244,7 @@ def _require_dedicated_checkout(repo_dir: str) -> None:
 # to repository not granted.`, Azure DevOps' `remote: TF401027: You need the Git
 # 'GenericContribute' permission to perform this action.`, and GitHub's own SAML-SSO refusal for a
 # token nobody has authorized for the organisation. Each is permanent until a human changes a
-# permission, which is precisely what `GitSubmitError` means.
+# permission, which is precisely what `GitWriteError` means.
 #
 # Each addition was checked the other way too — none of them appears in a throttle, a 429, a 503,
 # a DNS failure or a non-fast-forward rejection, which is the property that keeps this list wrong
@@ -317,7 +315,7 @@ def _is_auth_failure(stderr: str) -> bool:
     indefinitely retrying workflow whose log says only that a publish failed.
 
     **A bare status code is deliberately not enough.** `403` is what a forge returns for a
-    secondary rate limit as well as for a denial, and `GitSubmitError` is non-retryable — so
+    secondary rate limit as well as for a denial, and `GitWriteError` is non-retryable — so
     classifying a throttle as auth drops the note proposal instead of backing off, and the PR-gate
     stops proposing while every run still reports success. A genuine denial always says so in
     words as well, either with one of the credential phrases or by naming the principal it
@@ -329,7 +327,7 @@ def _is_auth_failure(stderr: str) -> bool:
     return _DENIED_PRINCIPAL.search(stderr) is not None
 
 
-class GitNoteSubmitter:
+class GitNoteWriter:
     """Push a note on a per-note branch via git. Conforms to `NoteSubmitter`."""
 
     def __init__(
@@ -433,7 +431,7 @@ class GitNoteSubmitter:
         if returncode == 0:
             return
         auth = transient and _is_auth_failure(stderr)
-        error = GitRemoteError if transient and not auth else GitSubmitError
+        error = GitRemoteError if transient and not auth else GitWriteError
         log_event(
             log,
             "git.failed",
@@ -466,55 +464,35 @@ class GitNoteSubmitter:
         # this is not simply `_run`.
         return None if returncode != 0 else stdout
 
-    def _contained_note_path(self, relative: str, workdir: Path) -> Path:
-        """Resolve the note path inside `workdir` and refuse anything escaping it.
+    def _contained_note_path(self, relative: str) -> Path:
+        """Resolve the note path inside the notes checkout and refuse anything escaping it.
 
-        Defense in depth behind the `Note` slug validation: even a hand-built
-        `NoteSubmission` must not write outside the tree. Must be called *after*
-        the worktree exists: `resolve()` follows symlinks in the working tree as
-        it is materialized, so checking an unmaterialized tree would let a symlinked
-        directory committed on the base branch redirect the write.
-
-        This is also the reason the worktree is created *with* a checkout rather than with
-        `--no-checkout` + `read-tree`, which would make a submission cost one file write instead of
-        materializing the corpus: with nothing on disk there is no symlink to resolve and this
-        check silently passes. Worth revisiting only if the corpus grows large enough for the
-        per-submission checkout to show up in submission latency — and then with a different
-        containment check, not with this one weakened.
+        Defense in depth behind the `Note` slug validation: even a hand-built `NoteWrite` must not
+        write outside the tree. `resolve()` follows symlinks as they exist on disk, and the tree is
+        materialized here — the writer commits into the checkout readers scan — so the symlink a
+        committed directory could redirect the write through is resolved rather than assumed away.
+        That was a live concern for the worktree this replaces, which had to be created *with* a
+        checkout for the same check to mean anything.
         """
-        root = workdir.resolve()
+        root = Path(self._repo_dir).resolve()
         note_path = (root / relative).resolve()
         if not note_path.is_relative_to(root):
-            raise GitSubmitError(f"note path {relative!r} escapes the checkout {root}")
+            raise GitWriteError(f"note path {relative!r} escapes the checkout {root}")
         return note_path
 
-    def _worktree_root(self) -> Path:
-        """Where this submitter's private worktrees live: `<repo>/.git/chemclaw-worktrees/`."""
-        return _git_dir(self._repo_dir) / _WORKTREE_DIR_NAME
+    async def write(self, write: NoteWrite) -> WriteOutcome:
+        """Write the note's files into the checkout, commit them and push.
 
-    def _workdir_for(self, branch: str) -> Path:
-        """The worktree directory for `branch` — named after it, not after a random id.
-
-        Deterministic so an operator running `git worktree list` after an incident sees
-        `note-job-crash` and knows what it is and where it came from. Uniqueness comes from the
-        two locks and the sweep, not from the name.
-        """
-        return self._worktree_root() / branch.replace("/", "-")
-
-    async def submit(self, submission: NoteSubmission) -> SubmissionOutcome:
-        """Create the branch off the base, write+commit the note, and push it.
-
-        Returns the pushed branch name — the reference a reviewer turns into a PR — with
-        `pushed=False` when the note is byte-identical to what the base branch already contains:
-        there is nothing new to review, so no reviewable ref is (re)created. A `repo_dir` that is
-        the process's own checkout is refused up front (`_require_dedicated_checkout`)
-        — submissions force-push note branches to its origin and need a dedicated clone.
+        Returns the commit that landed, with `written=False` when every file was byte-identical to
+        what the tree already holds: there is nothing to record, so nothing is committed. A
+        `repo_dir` that is the process's own checkout is refused up front
+        (`_require_dedicated_checkout`) — this commits to the base branch and pushes it.
         """
         _require_dedicated_checkout(self._repo_dir)
-        async with _SUBMIT_LOCK:
+        async with _WRITE_LOCK:
             async with self._cluster_lock():
                 with _checkout_lock(self._repo_dir):
-                    return await self._submit_locked(submission)
+                    return await self._write_locked(write)
 
     @contextlib.asynccontextmanager
     async def _cluster_lock(self) -> AsyncIterator[None]:
@@ -571,278 +549,81 @@ class GitNoteSubmitter:
             with contextlib.suppress(Exception):
                 await connection_ctx.__aexit__(None, None, None)
 
-    async def _submit_locked(self, submission: NoteSubmission) -> SubmissionOutcome:
-        """The submission body, called with both the in-process and OS locks held.
+    async def _write_locked(self, write: NoteWrite) -> WriteOutcome:
+        """The write body, called with the in-process, cluster and OS locks held.
 
-        The note branch is checked out into a worktree under `.git/`, which no reader is ever
-        pointed at, so the shared working tree is not switched, not written to, and not restored —
-        there is nothing to restore. That is the whole of the fix for the read window and for the
-        crash that used to leave the tree parked on `note/<id>`: an exposure that lasts as long as
-        the tree is switched cannot be closed by switching it back more reliably.
+        **The checkout is where readers read.** `settings.notes_path` is
+        `note_repo_dir / knowledge_dir`, so unlike the branch-per-note gate this replaces, these
+        files land in the tree `load_notes` scans — which is exactly what makes a recorded note
+        global at once, and also why this fast-forwards first: committing on a stale base would
+        leave the reader a tree missing whatever another pod recorded in the meantime.
 
-        The two steps before the worktree is created are the ones that make this safe to deploy
-        into a repository that has already been through the old behaviour.
+        `--ff-only` rather than a merge or a rebase: a divergence here means somebody committed
+        locally in the notes clone, which is not a state this writer should resolve on its own by
+        rewriting or merging history it did not author. It is raised as retryable because the
+        ordinary cause is a race the next attempt re-fetches past.
         """
+        branch = await self._read("symbolic-ref", "--short", "HEAD")
+        if branch != self._base:
+            raise GitWriteError(
+                f"the notes checkout at {self._repo_dir!r} is on {branch!r}, not the base branch "
+                f"{self._base!r}. Recorded notes are committed to the base branch, and readers "
+                "scan this same tree, so a checkout parked elsewhere would serve the wrong notes."
+            )
         await self._git("fetch", self._remote, self._base, transient=True)
-        # The note branch too, *here* — before anything is written — so the remote-tracking ref
-        # the push's `--force-with-lease` reads is the state of the world this submission started
-        # from. It used to be fetched one line above the push, which set the lease to "whatever
-        # is on the remote right now" and made it a plain `--force` wearing the safe flag's name.
-        # Absence is tolerated: the first submission of a note has no remote branch yet.
-        await self._run(
-            "fetch",
-            self._remote,
-            f"+refs/heads/{submission.branch}:refs/remotes/{self._remote}/{submission.branch}",
-        )
-        await self._require_gate_authored_tip(submission.branch)
-        await self._repair_parked_checkout()
-        await self._sweep_leftover_worktrees()
-        workdir = self._workdir_for(submission.branch)
-        await self._git(
-            "worktree",
-            "add",
-            "-B",
-            submission.branch,
-            str(workdir),
-            f"{self._remote}/{self._base}",
-        )
-        try:
-            return await self._write_and_push(submission, workdir)
-        finally:
-            await self._release_worktree(workdir)
-
-    async def _require_gate_authored_tip(self, branch: str) -> None:
-        """Refuse to replace a proposal branch whose tip this gate did not mint.
-
-        A re-proposal force-pushes `note/<id>`, which is safe exactly while every commit there is
-        the gate's own — and every gate commit carries `_GATE_TRAILER` for this check to read. A
-        tip without it means a human pushed to the proposal branch (a reviewer's fixup is the
-        ordinary case), and discarding their commit silently inside a PR titled as a proposal is
-        the one thing this flow must never do. Non-retryable on purpose: the identical retry
-        would meet the identical foreign commit; resolving it is a decision on the branch, not a
-        second attempt.
-
-        A branch that does not exist on the remote, or whose tip is the base tip, passes — there
-        is nothing there to lose.
-        """
-        ref = f"refs/remotes/{self._remote}/{branch}"
-        branch_tip = await self._read(ref)
-        if branch_tip is None:
-            return
-        base_tip = await self._read(f"refs/remotes/{self._remote}/{self._base}")
-        if base_tip is not None and branch_tip == base_tip:
-            return
-        # `%(trailers…)` would be cleaner, but the message body is what the gate writes and what
-        # survives hosts that rewrite committer identity; a substring over one commit is enough.
-        message = await self._read("log", "-1", "--format=%B", ref)
-        if message is None or _GATE_TRAILER not in message:
-            raise GitSubmitError(
-                f"the remote branch {branch!r} carries a commit this gate did not author — "
-                "someone pushed to the proposal branch, and replacing it would discard their "
-                "work. Resolve the branch in the git host (merge or delete it), then re-propose."
+        returncode, stderr = await self._run("merge", "--ff-only", f"{self._remote}/{self._base}")
+        if returncode != 0:
+            raise GitRemoteError(
+                f"the notes checkout could not fast-forward onto {self._remote}/{self._base}: "
+                f"{stderr}"
             )
+        return await self._write_and_commit(write)
 
-    async def _repair_parked_checkout(self) -> None:
-        """Move the shared tree off a `note/` branch a previous version left it on.
+    async def _write_and_commit(self, write: NoteWrite) -> WriteOutcome:
+        """Write the files **in order**, commit, and push the base branch.
 
-        Migration, and it must exist or this change *entrenches* the finding it closes: with
-        `_return_to_base` gone nothing else would ever move that tree back, and `worktree add -B`
-        would then fail with "already used by worktree" for exactly the note whose submission
-        crashed — the retry most likely to happen next.
+        The order is the caller's and it is load-bearing: `record._build_write` puts dependencies
+        before the subject and retirements after it, so a reader scanning mid-write never sees a
+        note before what it cites. Each path is containment-checked independently — a dependency
+        is no more trusted than the note.
 
-        `checkout -f`, not `reset --hard` + `clean -fd`: it restores tracked files (the unreviewed
-        note is tracked on the note branch, so it goes) without deleting untracked ones, which in
-        the shipped topology are the notes the sync sidecar publishes into this clone and which may
-        not exist in its base commit. Restricted to the `note/` prefix so an operator's own branch
-        is never touched, and it reads `.git/HEAD` directly — one line, the same file
-        `git symbolic-ref` reads — so the check costs nothing in the steady state where it can
-        never fire.
+        **This busts the graph cache, and the gate it replaces deliberately did not.** That was
+        right then and is wrong now for the same reason: the gate wrote to a branch under `.git/`
+        that no reader scanned, so busting would have advertised a tree change that had not
+        happened. These bytes land in the tree readers do scan, so a stale cache is the difference
+        between "global the moment it is learned" and "global within `graph_cache_ttl_seconds`".
         """
-        try:
-            head = (_git_dir(self._repo_dir) / "HEAD").read_text(encoding="utf-8").strip()
-        except OSError:
-            # Swallowed because a repair cannot be a precondition for a submission — but *said*,
-            # because this is the branch on which the repair silently does not happen: the next
-            # `worktree add -B` then fails with "already used by worktree", which names neither
-            # this file nor this function and reads as a git bug rather than an unreadable HEAD.
-            degraded(
-                log,
-                "note_repo",
-                "cannot read %s/HEAD; skipping the parked-worktree repair. A submission "
-                "interrupted on a note/ branch will fail with 'already used by worktree'",
-                self._repo_dir,
-                level=logging.WARNING,
-            )
-            return
-        if not head.startswith("ref: refs/heads/note/"):
-            return
-        branch = head.removeprefix("ref: refs/heads/")
-        log.warning(
-            "note repo %s was left checked out on %s by an interrupted submission; "
-            "returning it to %s",
-            self._repo_dir,
-            branch,
-            self._base,
-        )
-        try:
-            await self._git("checkout", "-f", self._base)
-        finally:
-            # The shared tree changed either way — back to base, or to whatever a failed switch
-            # left — and a cached graph describing the note branch must not outlive it under
-            # `graph_cache_ttl_seconds`. This is the one path in the submitter that still touches
-            # what readers read, and therefore the one that still busts their cache.
-            invalidate_cache()
-
-    async def _sweep_leftover_worktrees(self) -> None:
-        """Remove any worktree a previous submission left behind, before creating this one's.
-
-        `git worktree prune` alone does **not** do this, and assuming it does is the easy mistake:
-        prune removes metadata whose *directory has vanished*, on a three-month default expiry, so
-        against a SIGKILLed submission — which leaves both the directory and the metadata — it is a
-        no-op. The directory sweep is what actually reclaims those; the prune afterwards covers the
-        inverse case, a directory removed out from under git.
-
-        Runs at the start of every submit rather than once at startup, for two reasons: `-B` fails
-        while a leftover still holds `note/<id>`, so the retry of a crashed note stays wedged until
-        this runs; and `default_submitter()` builds a submitter per call, so "startup" names no
-        moment. The cost on the happy path is one `listdir`.
-
-        Safe because it only ever touches children of this submitter's own root — never the main
-        worktree, never an operator's — and because both locks are held, so no concurrent
-        submission can own one of them. That clause is why the flock stays repo-wide.
-        """
-        root = self._worktree_root()
-        if root.is_dir():
-            for leftover in sorted(root.iterdir()):
-                log.warning("removing leftover submission worktree %s", leftover)
-                await self._remove_worktree(leftover)
-        await self._run("worktree", "prune", "--expire", "now")
-
-    async def _release_worktree(self, workdir: Path) -> None:
-        """Dispose of a finished submission's worktree; **never** at the cost of its result.
-
-        This is the `finally` of `_submit_locked`, and it runs *after* the branch is on the remote.
-        Anything that escapes it replaces the pushed branch name with an exception, which is a lie
-        about what happened to the repository — and a consequential one: `propose_note` then records
-        the proposal `failed`, so the reviewer queue shows nothing to review while the branch is on
-        origin, and `close_merged_notes` never moves the row. Under `CancelledError` — a
-        `BaseException`, so `except Exception` around the caller does not see it — there was no
-        durable row at all: a pushed note nothing anywhere knows about.
-
-        So every failure is swallowed here, including cancellation. The obligation is genuinely one
-        sided: the branch is the product of a submission and it already exists, while an unremoved
-        scratch tree costs disk under `.git/` (where no reader looks) until the next submission's
-        sweep reclaims it. Cancellation is swallowed rather than re-raised for the same reason — a
-        caller that must record what was pushed cannot be told the call did not finish. Whoever
-        cancelled gets the return value of an operation that had already succeeded.
-
-        **`BaseException` means every one of them, and two consequences follow that are worth
-        naming rather than discovering.** An operator's Ctrl-C that lands inside this window is
-        logged as a warning and goes no further — the process finishes the submission it was in the
-        middle of recording and exits on the *next* one. And a task cancelled at this instant goes
-        on to run `record_proposal_submitted`: that is a single bounded database write with the
-        connection's statement timeout on it, so a cancelled task cannot hang here, but it does do
-        one more thing after being cancelled. Both are the intended price of the branch never being
-        recorded as `failed`; neither is a way for shutdown to become unbounded.
-        """
-        try:
-            await self._remove_worktree(workdir)
-        except BaseException as exc:
-            log.warning(
-                "could not remove submission worktree %s (%s); leaving it for the "
-                "next submission's sweep",
-                workdir,
-                exc,
-            )
-
-    async def _remove_worktree(self, workdir: Path) -> None:
-        """Remove one worktree: `git worktree remove`, falling back to deleting the directory.
-
-        A different obligation from the `_return_to_base` it replaces: that had to *restore* a
-        shared tree and a failure to do so was unrecoverable, while this disposes of a scratch tree
-        whose only cost, if it survives, is disk — and the next submission's sweep reclaims it. The
-        unreviewed bytes it holds sit under `.git/`, where no reader looks.
-
-        A non-zero git is handled here; anything *raised* is not, and reaches the
-        caller. That is right for `_sweep_leftover_worktrees`, which runs before anything is pushed
-        and where an unremovable leftover should fail the submission loudly rather than let
-        `worktree add -B` fail confusingly later. The post-push caller wraps this in
-        `_release_worktree` instead, because there the same raise would destroy a result.
-
-        Never deletes the branch: the branch is the reviewable unit and the whole product of a
-        submission.
-        """
-        returncode, stderr = await self._run("worktree", "remove", "--force", str(workdir))
-        if returncode == 0:
-            return
-        log.warning("git worktree remove %s failed (%s); removing the directory", workdir, stderr)
-        shutil.rmtree(workdir, ignore_errors=True)
-        await self._run("worktree", "prune", "--expire", "now")
-
-    async def _write_and_push(self, submission: NoteSubmission, workdir: Path) -> SubmissionOutcome:
-        """Write the submission's files into its worktree, commit, and push the branch.
-
-        Every git command here runs with `-C <workdir>`. Objects, remote-tracking refs and config
-        live in the common `.git` directory, so fetch and push behave from a linked worktree
-        exactly as they did from the main one.
-
-        **Deliberately does not bust the graph cache**, and now for a plain reason rather than a
-        subtle one: nothing a reader can see has changed. The note exists only on `note/<id>` and
-        in a directory under `.git/` that no reader scans. Busting would advertise a tree change
-        that did not happen and pay an O(notes) rescan for it. Post-merge freshness never came from
-        here — the sidecar's `rsync` is a different process — and reaches readers through the stat
-        fingerprint within `graph_cache_ttl_seconds` (DA-5).
-        """
-        work = str(workdir)
-        # Every file in the submission, not just the subject note: a note and the notes its links
-        # depend on land together or the links dangle (STO-7, see `NoteSubmission`). Each path is
-        # containment-checked independently — a dependency is no more trusted than the note.
-        # A file marked `overwrite=False` (a machine-rendered dependency) is written only when the
-        # base branch has none: `NoteFile` says why an unconditional write silently reverted a
-        # human's post-merge edits.
         written: list[str] = []
-        for file in submission.files:
-            note_path = self._contained_note_path(file.path, workdir)
+        for file in write.files:
+            note_path = self._contained_note_path(file.path)
             if not file.overwrite and note_path.exists():
                 continue
             note_path.parent.mkdir(parents=True, exist_ok=True)
             note_path.write_text(file.content, encoding="utf-8")
             written.append(file.path)
         if not written:
-            return SubmissionOutcome(reference=submission.branch, pushed=False)
+            return WriteOutcome(reference=self._base, written=False)
         # `--` ends option parsing before the note paths: `_contained_note_path` only checks
-        # containment, and a leading-dash relative path (e.g. `-x`) resolves *inside* the worktree
-        # and would otherwise reach git as an option rather than a pathspec.
-        await self._git("add", "--", *written, cwd=work)
-        # Idempotent: if the note is byte-identical to what the base already has,
-        # there is nothing to commit — re-proposing it is a no-op, not an error.
-        returncode, _ = await self._run("diff", "--cached", "--quiet", cwd=work)
+        # containment, and a leading-dash relative path (e.g. `-x`) resolves *inside* the repo and
+        # would otherwise reach git as an option rather than a pathspec.
+        await self._git("add", "--", *written)
+        # Idempotent: byte-identical content stages nothing, so re-recording is a no-op.
+        returncode, _ = await self._run("diff", "--cached", "--quiet")
         if returncode == 0:
-            return SubmissionOutcome(reference=submission.branch, pushed=False)
-        # The trailer is what `_require_gate_authored_tip` reads on the next re-proposal to tell
-        # this gate's own tip from a human's commit on the branch.
-        await self._git("commit", "-m", submission.title, "-m", _GATE_TRAILER, cwd=work)
-        # The lease was fetched at the start of `_submit_locked`, before anything was written, so
-        # it protects the whole read-decide-push window: a push that lands on the remote between
-        # our fetch and this line fails the lease instead of being clobbered.
-        returncode, stderr = await self._run(
-            "push", "--force-with-lease", "-u", self._remote, submission.branch, cwd=work
-        )
+            return WriteOutcome(reference=self._base, written=False)
+        await self._git("commit", "-m", write.message, "-m", _RECORD_TRAILER)
+        commit = await self._read("rev-parse", "HEAD")
+        returncode, stderr = await self._run("push", self._remote, f"HEAD:refs/heads/{self._base}")
         if returncode != 0:
-            if "stale info" in stderr or "[rejected]" in stderr:
-                # The remote moved during the submission window. Transient in the mechanical
-                # sense — but a blind retry would fetch the mover's commit as its new lease and
-                # overwrite it, so this goes through the *tip guard* instead: the retryable error
-                # here re-runs the submission from the top, where `_require_gate_authored_tip`
-                # decides whether what landed is the gate's own (safe to replace) or a human's
-                # (refused with instructions).
-                raise GitRemoteError(
-                    f"the remote moved while submitting {submission.branch!r}: {stderr}"
-                )
-            raise GitRemoteError(f"git push {submission.branch} failed: {stderr}")
-        return SubmissionOutcome(reference=submission.branch)
+            # The remote moved inside the write window. Retryable: the next attempt fetches and
+            # fast-forwards past it before writing again, and nothing here rewrites what landed.
+            raise GitRemoteError(f"git push to {self._base} failed: {stderr}")
+        # Only after the push, because the bytes are already readable and the cache is what makes
+        # them so — but a failed push means this commit is not the record of anything yet.
+        invalidate_cache()
+        return WriteOutcome(reference=commit or self._base)
 
 
-def default_submitter() -> NoteSubmitter:
-    """The production note submitter (git feature branch). Overridden in tests."""
-    return GitNoteSubmitter()
+def default_writer() -> NoteWriter:
+    """The production note writer: a commit on the notes repo's base branch. Overridden in tests."""
+    return GitNoteWriter()

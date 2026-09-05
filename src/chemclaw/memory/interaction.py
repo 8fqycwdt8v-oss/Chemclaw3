@@ -7,8 +7,7 @@ later retrieval. Any source notes the answer drew on are cited as `[[...]]` back
 """
 
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import propose_note
-from chemclaw.kg.submission import NoteSubmitter
+from chemclaw.kg.record import NoteWriter, record_note
 
 
 def note_from_confirmed_answer(
@@ -53,29 +52,31 @@ def note_from_confirmed_answer(
     )
 
 
-async def propose_confirmed_answer(
+async def record_confirmed_answer_note(
     interaction_id: str,
     question: str,
     answer: str,
     evidence_note_ids: list[str] | None,
-    submitter: NoteSubmitter,
+    writer: NoteWriter,
     corrected_from: str = "",
 ) -> str:
-    """Build the confirmed-answer note and propose it through the PR-gate.
+    """Build the confirmed-answer note and write it into the graph.
 
     The single write path for a captured user answer, reached from the agent tool
     (`chemclaw.agent.memory_tools.record_confirmed_answer`). It stays in `memory/` rather than
     inside that tool because building the note out of an interaction is this layer's job and the
-    tool's job is the surface; `submitter` is injected so tests fake the PR.
+    tool's job is the surface; `writer` is injected so tests fake the commit.
 
     It used to have a second caller, the durable async-approval workflow, and
     `D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold` deleted it — nothing had ever been able to
-    start one. The human decision this note needs is the pull request, which is unchanged.
+    start one. **Nor is there a human decision left to wait for**: a chemist confirming an answer
+    *is* the human in the loop, and `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` is what
+    stopped asking a second one to approve the record of the first.
 
     Returns:
-        The submitter's reference for the opened PR.
+        The writer's reference for what landed.
     """
     note = note_from_confirmed_answer(
         interaction_id, question, answer, evidence_note_ids, corrected_from
     )
-    return await propose_note(note, submitter)
+    return await record_note(note, writer)

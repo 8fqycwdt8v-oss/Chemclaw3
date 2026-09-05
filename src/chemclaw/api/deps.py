@@ -23,12 +23,14 @@ forgotten.
 
 The second half of this module (R3.2) is the resource-level gates the routes in
 `chemclaw/api/routes/` resolve before touching anything: session ownership (`CurrentSession`,
-which also rehydrates a durable session after a restart), proposal visibility, and the reviewer
-check. Both session paths share one refusal — `_refuse_unless_owner`, the "same 404 for unknown
-and not-yours" rule — because they authorize the same way (`_owner_authorizes` against a stored
-owner). Proposal visibility deliberately does **not**: a reviewer may see *any* proposal, a
-privilege a session has no analogue for, and its dev-mode opening comes from `_is_reviewer` rather
-than `_owner_authorizes` — see `_visible_proposal` before you are tempted to unify it.
+which also rehydrates a durable session after a restart) and the reviewer check. Both session
+paths share one refusal — `_refuse_unless_owner`, the "same 404 for unknown and not-yours" rule —
+because they authorize the same way (`_owner_authorizes` against a stored owner).
+
+There used to be a third gate here, proposal visibility, and it was the interesting one: a reviewer
+could see *any* proposal, a privilege a session has no analogue for. It went with the PR-gate
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`) — knowledge is written directly now, so
+there is no queue of other people's pending knowledge to be privileged about.
 """
 
 import logging
@@ -44,16 +46,13 @@ from chemclaw.api.state import LiveSession, SessionOwners, state
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
-from chemclaw.kg.proposal import NoteProposal, read_proposal
 
 logger = logging.getLogger(__name__)
 
-# The resources this module can refuse, as a closed label set. Three, because three is how many
-# kinds of row are gated: a conversation, a knowledge proposal and an experiment design. A source
-# literal at every call site, so `chemclaw_authz_refusals_total` can never grow a series from
-# anything a caller sends.
+# The resources this module can refuse, as a closed label set: a conversation and an experiment
+# design. A source literal at every call site, so `chemclaw_authz_refusals_total` can never grow a
+# series from anything a caller sends.
 _SESSION = "session"
-_PROPOSAL = "proposal"
 #: `POST /protocols/{id}/revisions` and `/status` refuse in their own module, with a 403 rather
 #: than this module's 404, and for a reason that module argues: a design is a shared artifact whose
 #: reads are open, so its id's existence is not the secret. **The record is the same record**, and
@@ -164,14 +163,19 @@ def _refuse_unless_owner(
 
 
 def _is_reviewer(principal: Principal) -> bool:
-    """Whether the caller may see and decide *other people's* proposals.
+    """Whether the caller may reach *other people's* jobs and experiment designs.
 
-    The same role set that guards every write tool (`entra_privileged_roles`), rather than a
-    new one: signing off on machine-written knowledge is the most consequential write in the
-    system, so inventing a second, weaker role for it would be strange. Dev (`entra_required`
-    off) has no real roles and is open, exactly as `authorize_tool` is; a deployment that
-    enables identity and names no privileged role fails closed, also as `authorize_tool` does —
-    a queue nobody can review is a misconfiguration to notice, not one to paper over.
+    The same role set that guards every write tool (`entra_privileged_roles`), rather than a new
+    one. Its first subject was the PR-gate's review queue, and
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted that; what the role now decides
+    is reading somebody else's durable job and writing to somebody else's design. **The role is
+    also what an admin will hold when a skill is proposed** — that ADR puts the one remaining human
+    gate on behaviour rather than on knowledge, and names this role for it, so this is the seam
+    that grows a subject again rather than one that lost its only one.
+
+    Dev (`entra_required` off) has no real roles and is open, exactly as `authorize_tool` is; a
+    deployment that enables identity and names no privileged role fails closed, also as
+    `authorize_tool` does.
     """
     if not settings.entra_required:
         return True
@@ -251,42 +255,3 @@ async def resolve_session(request: Request, session_id: str, principal: CurrentU
 # The caller's own live session for a `{session_id}` route — resolved (and rehydrated if durable
 # ownership allows) before the handler runs, 404ing a non-owner with no existence leak.
 CurrentSession = Annotated[LiveSession, Depends(resolve_session)]
-
-
-async def _visible_proposal(proposal_id: int, principal: Principal) -> NoteProposal:
-    """One proposal the caller may see, or 404 — no existence leak, as with a session.
-
-    **Deliberately not `_refuse_unless_owner`**, though it looks like another copy of that
-    gate. The rule here is different in both halves: a reviewer may see *any* proposal — a
-    privilege a session has no analogue for — and the dev-mode opening comes
-    from `_is_reviewer` (role check), not from `_owner_authorizes` (owner check). Folding it into
-    the shared helper would either grant reviewers session access or lose them proposal access.
-    """
-    proposal = await read_proposal(proposal_id)
-    if proposal is None:
-        raise _refuse(
-            _PROPOSAL, "no such proposal", principal, str(proposal_id), "no such proposal"
-        )
-    if not _is_reviewer(principal) and proposal.actor != principal.oid:
-        raise _refuse(
-            _PROPOSAL,
-            "not the author and not a reviewer",
-            principal,
-            str(proposal_id),
-            "no such proposal",
-        )
-    return proposal
-
-
-async def visible_proposal(proposal_id: int, principal: CurrentUser) -> NoteProposal:
-    """`_visible_proposal` as a FastAPI dependency, for the read route.
-
-    The decision route calls `_visible_proposal` in its body instead: its reviewer (403) and
-    reason (422) refusals must keep running *before* the visibility 404, and a dependency would
-    reorder them.
-    """
-    return await _visible_proposal(proposal_id, principal)
-
-
-# The proposal a `{proposal_id}` read route may show this caller — resolved before the handler.
-VisibleProposal = Annotated[NoteProposal, Depends(visible_proposal)]

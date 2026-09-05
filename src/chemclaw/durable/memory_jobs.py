@@ -28,8 +28,8 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.eln.compound import compound_dependencies
     from chemclaw.ingest.eln.ord import OrdReaction
     from chemclaw.ingest.sources.registry import active_ingest_sources
-    from chemclaw.kg.git_submitter import default_submitter
-    from chemclaw.kg.pr_gate import propose_note
+    from chemclaw.kg.git_writer import default_writer
+    from chemclaw.kg.record import record_note
     from chemclaw.memory.jobs import (
         SynthesisUnit,
         build_campaign_notes,
@@ -169,17 +169,17 @@ async def publish_memory_note_activity(unit: SynthesisUnit, actor: str = "") -> 
     """
     note = unit.note
     if not actor:
-        return await propose_note(
+        return await record_note(
             note,
-            default_submitter(),
+            default_writer(),
             dependencies=compound_dependencies(note),
             superseded=unit.retirements,
         )
     token = set_current_identity(actor, frozenset())
     try:
-        return await propose_note(
+        return await record_note(
             note,
-            default_submitter(),
+            default_writer(),
             dependencies=compound_dependencies(note),
             superseded=unit.retirements,
         )

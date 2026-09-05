@@ -74,7 +74,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate proposals-reconcile synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-template-args live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-template-args live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -145,9 +145,6 @@ schedules-apply:  ## Create/update the Temporal Schedules for the periodic backg
 
 kg-validate:  ## Validate the knowledge graph (schema, duplicate ids, broken links, citations).
 	uv run python -m chemclaw.cli.validate_kg
-
-proposals-reconcile:  ## Report merged proposal rows whose note the corpus does not hold (D-2026-08-27).
-	uv run python -m chemclaw.cli.reconcile_proposals
 
 synthesize:  ## Start a memory-synthesis job: KIND=campaign|playbook|optimization|observation-promotion [FRESH=1].
 	@test -n "$(KIND)" || { echo "usage: make synthesize KIND=<kind> [FRESH=1]"; exit 64; }

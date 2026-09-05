@@ -20,8 +20,8 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.ingest.eln.records import default_record_store
     from chemclaw.ingest.sources.registry import active_retrieve_sources
-    from chemclaw.kg.git_submitter import default_submitter
-    from chemclaw.kg.pr_gate import propose_note
+    from chemclaw.kg.git_writer import default_writer
+    from chemclaw.kg.record import record_note
     from chemclaw.retrieval.evidence import SourceRetriever
     from chemclaw.retrieval.harness import (
         Report,
@@ -111,10 +111,10 @@ async def propose_report(report: Report, requested_by: str = "", correlation_id:
     comment on `ReportRequest.requested_by` claimed both were.
     """
     if not requested_by:
-        return await propose_note(report_note(report), default_submitter())
+        return await record_note(report_note(report), default_writer())
     token = set_current_identity(requested_by, frozenset())
     try:
-        return await propose_note(report_note(report), default_submitter())
+        return await record_note(report_note(report), default_writer())
     finally:
         reset_current_identity(token)
 

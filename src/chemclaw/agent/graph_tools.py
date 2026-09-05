@@ -24,10 +24,10 @@ from chemclaw.core.turn_signals import record_proposal
 from chemclaw.ingest.eln.compound import compound_dependencies
 from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.kg.analytics import GraphGaps, analyze
-from chemclaw.kg.git_submitter import default_submitter
+from chemclaw.kg.git_writer import default_writer
 from chemclaw.kg.graph import build_graph, load_notes, neighborhood, note_in
 from chemclaw.kg.note import Note, Relation, external_record_id, resolves_outside_graph
-from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.record import record_note
 from chemclaw.kg.relations import DEFAULT_RELATION
 from chemclaw.kg.search import query_terms, term_coverage
 from chemclaw.memory.failure import close_refuted_note, failure_note
@@ -408,8 +408,8 @@ async def propose_knowledge_note(
     )
     # A compound note the agent linked is minted into the same PR (STO-7), so the agent can cite
     # the molecule it is writing about without first checking whether that note exists.
-    reference = await propose_note(
-        note, default_submitter(), dependencies=compound_dependencies(note)
+    reference = await record_note(
+        note, default_writer(), dependencies=compound_dependencies(note)
     )
     # Surface the opened branch on the turn's stream (gap RCH-4) — see `core.turn_signals`.
     record_proposal(note.id, reference)
@@ -491,6 +491,6 @@ async def record_failure(
     retirement = (
         [close_refuted_note(refuted, note.id, held_until)] if held_until is not None else []
     )
-    reference = await propose_note(note, default_submitter(), superseded=retirement)
+    reference = await record_note(note, default_writer(), superseded=retirement)
     record_proposal(note.id, reference)
     return reference

@@ -23,10 +23,10 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.ingest.eln.compound import compound_dependencies
-    from chemclaw.kg.git_submitter import default_submitter
+    from chemclaw.kg.git_writer import default_writer
     from chemclaw.kg.graph import load_notes
     from chemclaw.kg.note import Note
-    from chemclaw.kg.pr_gate import propose_note
+    from chemclaw.kg.record import record_note
     from chemclaw.memory.observation_mining import mine_corpus, mine_interactions
     from chemclaw.memory.observations import (
         Observation,
@@ -170,9 +170,9 @@ async def promote_observations_activity() -> list[str]:
             observation.evidence_note_ids,
         )
         references.append(
-            await propose_note(
+            await record_note(
                 note,
-                default_submitter(),
+                default_writer(),
                 dependencies=compound_dependencies(note),
                 superseded=superseded,
             )

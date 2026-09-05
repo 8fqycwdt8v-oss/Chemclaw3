@@ -16,8 +16,8 @@ from chemclaw.agent.framing import defang, frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_proposal
-from chemclaw.kg.git_submitter import default_submitter
-from chemclaw.memory.interaction import propose_confirmed_answer
+from chemclaw.kg.git_writer import default_writer
+from chemclaw.memory.interaction import record_confirmed_answer_note
 from chemclaw.memory.observations import Observation, open_observations
 
 
@@ -47,12 +47,12 @@ async def record_confirmed_answer(
     Returns:
         The submitted PR reference.
     """
-    reference = await propose_confirmed_answer(
+    reference = await record_confirmed_answer_note(
         interaction_id,
         question,
         answer,
         evidence_note_ids,
-        default_submitter(),
+        default_writer(),
         corrected_from,
     )
     # Surface the opened branch on the turn's stream, so the chemist sees their contribution land
