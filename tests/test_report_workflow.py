@@ -105,7 +105,7 @@ def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) ->
                     task_queue=settings.background_task_queue,
                 )
         # The envelope, so `get_durable_job_status` can hand the finished report back in one call.
-        assert result.data["note_ref"].startswith("pr://note/report-")
+        assert result.data["note_ref"].startswith("commit://1")
         assert result.data["sections"] == 2
         assert "Widget development" in result.summary
         body = fake.writes[0].files[0].content
@@ -371,7 +371,7 @@ def test_a_dropped_fan_out_child_still_appears_in_the_draft(
 
     async def _capture_publish(*args: Any, **kwargs: Any) -> str:
         drafted.append(args[1][0])
-        return "pr://note/report-x"
+        return "commit://1"
 
     monkeypatch.setattr(report_workflow, "fan_out", _short_fan_out)
     monkeypatch.setattr(report_workflow, "publish_note", _capture_publish)
@@ -454,7 +454,7 @@ def test_a_report_run_carries_the_turn_that_asked_for_it(monkeypatch: pytest.Mon
 
     async def _capture_publish(*args: Any, **kwargs: Any) -> str:
         published.append(list(args[1]))
-        return "pr://note/report-x"
+        return "commit://1"
 
     monkeypatch.setattr(report_workflow, "fan_out", _capture_fan_out)
     monkeypatch.setattr(report_workflow, "publish_note", _capture_publish)

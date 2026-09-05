@@ -250,7 +250,7 @@ _PRUNABLE: dict[str, tuple[str, str]] = {
 # job and resolving eight unrelated tables in a retention change is not.
 #
 # **Three of those findings were not findings, and that is worth naming rather than quietly
-# fixing.** `plan_approvals` and `turn_costs` each read *nothing bounds it* —
+# fixing.** `note_proposals`, `plan_approvals` and `turn_costs` each read *nothing bounds it* —
 # two of them adding *no decision is on record*, which a first telling of this paragraph attributed
 # to all three — while `agent/leaver.py`'s `_RETAINED` tier had been keeping all three through a
 # data-subject erasure for exactly the reason the four "refused" entries above give — they name who
@@ -398,6 +398,12 @@ _NOT_PRUNED: dict[str, str] = {
     "predictions": "**nothing bounds it** — the calibration ledger's evidence, where pruning a row "
     "changes a calibration rather than reclaiming space; no decision is on record",
     "measurements": "**nothing bounds it** — the calibration ledger's other half, same question",
+    "note_proposals": "refused: the PR-gate's record of what was proposed and who decided it, for "
+    "as long as there was a gate to decide anything "
+    "(`D-2026-09-05-the-gate-is-deleted-not-dormant` retired it and nothing writes a row now). "
+    "**Retired is not disposable**: a deployment that ran the gate holds real sign-offs by real "
+    "people, `leaver._RETAINED` keeps the table through an erasure request, and a clock may not "
+    "take what an erasure may not",
     "plan_approvals": "refused: who authorized a plan to spend anything, kept through erasure "
     "(`leaver._RETAINED`); consumed rows are marked, never removed",
     "turn_costs": "refused: what a person's turns cost, the record an operator bills against — "

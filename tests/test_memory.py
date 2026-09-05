@@ -506,7 +506,7 @@ def test_record_confirmed_answer_tool_uses_gate(monkeypatch: pytest.MonkeyPatch)
             "q-42", "Best solvent?", "Aqueous dioxane at 90 C.", ["reaction-eln-2026-002"]
         )
     )
-    assert ref == "pr://note/interaction-q-42"
+    assert ref == "commit://1"
     submitted = fake.writes[0]
     assert submitted.files[0].path.endswith("interaction/interaction-q-42.md")
     assert "reaction-eln-2026-002" in submitted.files[0].content

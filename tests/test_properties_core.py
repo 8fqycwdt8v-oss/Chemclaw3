@@ -333,10 +333,10 @@ def test_an_already_validated_field_is_refused_before_our_validator(
     directory=st.sampled_from(["knowledge", "kg/notes"]),
 )
 @settings(max_examples=100)
-def test_a_submission_writes_each_note_once_with_its_subject_first(
+def test_a_write_writes_each_note_once_with_its_subject_last(
     note: Note, dependencies: list[Note], directory: str
 ) -> None:
-    """One path per note, subject first — the invariant `_build_write`'s docstring claims.
+    """One path per note, subject **last** — the invariant `_build_write`'s docstring claims.
 
     It argues that a caller "may legitimately list the same dependency twice" and that writing one
     path twice in a commit is "at best noise and at worst two different renderings racing". Both
@@ -344,14 +344,20 @@ def test_a_submission_writes_each_note_once_with_its_subject_first(
     example cannot enumerate: a dependency repeated, a dependency that *is* the subject, and two
     distinct notes that share an id and differ in body — the racing-renderings case, where the
     first occurrence must win rather than the last.
-    """
-    submission = _build_write(note, directory, dependencies)
-    paths = [file.path for file in submission.files]
-    assert len(paths) == len(set(paths)), "a commit that writes one path twice"
-    assert submission.files[0].path.startswith(f"{directory}/{note.type}/{note.id}")
-    assert submission.branch == f"note/{note.id}"
 
-    expected_ids = list(dict.fromkeys([note.id, *(dep.id for dep in dependencies)]))
+    The position assertion is inverted from what this property held under the PR-gate, where
+    `NoteProposal.content` read `files[0]`. Dependencies are written first now, so the subject
+    never reaches the graph before what it cites
+    (`D-2026-09-05-the-gate-is-deleted-not-dormant`) — and the property is worth generating over
+    precisely because a dedup that drops the *subject* instead of a duplicate would still satisfy a
+    length check.
+    """
+    write = _build_write(note, directory, dependencies)
+    paths = [file.path for file in write.files]
+    assert len(paths) == len(set(paths)), "a commit that writes one path twice"
+    assert write.files[-1].path.startswith(f"{directory}/{note.type}/{note.id}")
+
+    expected_ids = list(dict.fromkeys([*(dep.id for dep in dependencies), note.id]))
     assert len(paths) == len(expected_ids)
 
 

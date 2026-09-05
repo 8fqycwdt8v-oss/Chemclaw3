@@ -700,14 +700,9 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(chemclaw_notes_proposed_total[1h]))",
+          "expr": "sum(rate(chemclaw_notes_recorded_total[1h]))",
           "legendFormat": "notes proposed",
           "refId": "A"
-        },
-        {
-          "expr": "sum by (state) (rate(chemclaw_note_proposals_total[1h]))",
-          "legendFormat": "proposals {{state}}",
-          "refId": "B"
         },
         {
           "expr": "sum(rate(chemclaw_notes_unparseable_total[1h]))",

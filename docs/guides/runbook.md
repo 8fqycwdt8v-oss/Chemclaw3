@@ -824,7 +824,8 @@ would be two systems to reconcile.
 written straight into the notes checkout, committed on the base branch and pushed, so it is
 readable by every reader the moment its bytes land. `GET /proposals`, the decision route and the
 post-merge webhook are gone with it, along with the two `CHEMCLAW_PROPOSAL_*` settings that sized
-the queue and its stored failure reasons, and `CHEMCLAW_NOTE_WEBHOOK_SECRET`.
+the queue and its stored failure reasons, and the webhook secret the git host signed its
+post-merge callback with.
 
 **What to watch instead.** `chemclaw_notes_recorded_total` counts notes that reached the graph and
 `chemclaw_notes_publish_failures_total` counts those that could not — the ratio is the health

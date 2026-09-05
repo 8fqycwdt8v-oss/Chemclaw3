@@ -232,23 +232,3 @@ def test_a_swallowed_audit_sink_failure_is_counted() -> None:
     before = METRICS.value("chemclaw_audit_sink_failures_total")
     record_metric(lambda metrics: metrics.increment("chemclaw_audit_sink_failures_total"))
     assert METRICS.value("chemclaw_audit_sink_failures_total") == before + 1
-
-
-def test_a_merge_notification_triggers_a_rebuild_now(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Freshness stops being bounded by the slowest interval (gap SCH-6).
-
-    The whole system was poll-on-a-timer with no inbound event path, so a merged note's worst-case
-    staleness was the reindex interval. This collapses it to seconds.
-    """
-    started: list[str] = []
-
-    async def _fake_reindex() -> str:
-        started.append("called")
-        return "note-reindex-202607250900"
-
-    monkeypatch.setattr("chemclaw.api.app.request_note_reindex", _fake_reindex)
-    with TestClient(create_app()) as client:
-        response = client.post("/events/knowledge-merged")
-    assert response.status_code == 202
-    assert response.json()["workflow_id"].startswith("note-reindex-")
-    assert started == ["called"]

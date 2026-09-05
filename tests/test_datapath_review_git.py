@@ -200,8 +200,11 @@ def test_a_commit_message_a_log_record_could_not_survive_is_refused_at_the_model
     ],
 )
 def test_the_messages_this_repository_actually_mints_are_accepted(message: str) -> None:
-    """The constraint bounds control characters and length; it may not narrow what `_build_write`
-    composes — including the em dash and the parenthesised supporting-note count it really emits."""
+    """The constraint may not narrow what `_build_write` really composes.
+
+    It bounds control characters and length, and nothing else — the em dash and the parenthesised
+    supporting-note count are both in messages this repository mints today.
+    """
     write = NoteWrite(
         files=[NoteFile(path="knowledge/compound/x.md", content="body\n")],
         message=message,

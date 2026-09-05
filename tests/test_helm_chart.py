@@ -390,7 +390,6 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_LLM_API_KEY",
         "CHEMCLAW_POSTGRES_DSN",
         "CHEMCLAW_KNOWLEDGE_REPO_TOKEN",
-        "CHEMCLAW_NOTE_WEBHOOK_SECRET",
     }
     assert set(_VALUES["secrets"]["optionalKeys"].values()) == {
         "CHEMCLAW_BO_MCP_TOKEN",
