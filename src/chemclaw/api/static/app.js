@@ -52,6 +52,13 @@ function openEventStream(id) {
   events = new EventSource(`/sessions/${encodeURIComponent(id)}/events`);
   events.addEventListener("job_completed", (e) => applyEvent(JSON.parse(e.data), null));
   events.addEventListener("job_failed", (e) => applyEvent(JSON.parse(e.data), null));
+  // **`EventSource` dispatches by the SSE `event:` name, so a `case` without a listener is dead
+  // code.** `applyEvent` grew an `awaiting_answer` branch and this line was not added with it, so
+  // the one surface in this repository that renders the event never received one — and
+  // `test_dev_page_handles_every_event_type` could not tell, because it matches `case "…":` as
+  // text and executes no JavaScript. `test_dev_page_subscribes_to_every_pushed_kind` is the half
+  // that checks this line exists.
+  events.addEventListener("awaiting_answer", (e) => applyEvent(JSON.parse(e.data), null));
   // A dropped push-back connection must not be silent: the page would look identical to one where
   // no job ever finished. `EventSource` reconnects on its own, so this reports rather than retries.
   events.onerror = () => add("trace", "… job stream interrupted, reconnecting");
@@ -110,6 +117,31 @@ function applyEvent(evt, answerEl) {
       // A failure lane, not the trace: this retracts a "job started" the reader has already been
       // shown, so it must not scroll past as one more grey line.
       add("warn", `\u2717 job ${evt.job_id} failed \u2014 ${evt.reason || "no reason reported"}`);
+      return answerEl;
+    case "awaiting_answer":
+      // Also push-back, and also a warn lane rather than the trace — but for the opposite reason
+      // to `job_failed`: nothing is retracted, something is *asked*. A durable job has stopped
+      // until a person answers it, `GET /pending` lists it and `POST /pending/{id}/answer`
+      // releases it, and the deadline is the only part with a clock on it. `state` separates the
+      // two pushes: the open (and every reminder) carries the routing, the expiry carries the
+      // subject and how many reminders went unanswered.
+      //
+      // **Both of those last two sentences were wrong, and the rendering followed them.**
+      // `subject` is on BOTH pushes; only `kind`, `asked_of` and `due_at` are open-only. Showing
+      // it solely on the expiry meant the notice a chemist can still act on carried a bare
+      // `stable_hash` id and no statement of what was being asked, while the one they cannot act
+      // on carried the question.
+      add(
+        "warn",
+        evt.state === "expired"
+          ? `⏱ question ${evt.request_id} expired unanswered` +
+              `${evt.subject ? ` — ${evt.subject}` : ""}` +
+              `${evt.reminders ? ` (after ${evt.reminders} reminder(s))` : ""}`
+          : `\u2753 waiting on ${evt.asked_of || "anyone entitled"}` +
+              `${evt.subject ? ` — ${evt.subject}` : ""}` +
+              ` (${evt.kind || "question"} ${evt.request_id})` +
+              `${evt.due_at ? `, due ${evt.due_at}` : ""}`,
+      );
       return answerEl;
     case "capability_degraded":
       // Its own lane, not the trace: this qualifies the answer that follows, and an answer

@@ -111,9 +111,10 @@ from langchain.agents.middleware import (
     ModelRequest,
 )
 from langchain.agents.middleware.context_editing import ContextEdit, TokenCounter
-from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
+from chemclaw.agent.authz import KNOWLEDGE_READ_TOOLS
 from chemclaw.agent.context_budget import (
     MeasureRequestPrefix,
     current_context,
@@ -125,6 +126,7 @@ from chemclaw.agent.repeat_guard import forget_calls
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import degraded, record_metric
+from chemclaw.kg.note import is_note_slug
 
 logger = logging.getLogger(__name__)
 
@@ -159,15 +161,24 @@ _MAX_NAMED_CITATIONS = 12
 
 
 def cited_note_ids(content: object) -> list[str]:
-    """Every note id a tool result cites, in first-seen order, deduplicated.
+    """Every *resolvable* note id a tool result cites, in first-seen order, deduplicated.
 
     Public because `tests/test_compaction.py` asserts against it directly: the property that matters
     is that a cleared evidence sweep still names its sources, and reading that off the rendered
     placeholder would be asserting the formatting rather than the behaviour.
+
+    **Filtered by `is_note_slug`, because the placeholder does not merely list ids — it tells the
+    model to `expand_note` on them.** `EvidenceChunk.source_note_id` is a chunk's *origin* and only
+    sometimes a note: the mounted document share writes `<share>:<doc>#<ordinal>`, the warehouse
+    ELN `<source>:<key>` and a vendored dataset `vendored:<name>:<index>`, none of which names a
+    file in the knowledge graph. Naming one is an instruction that fails at call time, spending a
+    model call and a tool call to be told the note does not exist — and the ids it would have
+    displaced are the ones that would have worked.
     """
     seen: dict[str, None] = {}
     for note_id in _CITED_NOTE_ID.findall(str(content)):
-        seen.setdefault(note_id, None)
+        if is_note_slug(note_id):
+            seen.setdefault(note_id, None)
     return list(seen)
 
 
@@ -241,10 +252,33 @@ class ClearOlderToolResultsEdit(ContextEdit):
         # This is not the "coupling the context policy to the shape of every tool's result" this
         # class declines one docstring up. It reads one field of one first-party model, and one
         # known shape is not every shape.
+        #
+        # **Read only from this repository's own retrieval tools, never from a connector's
+        # result.** The regex matches a string, and a connector's payload is text an external
+        # server wrote: a result containing the literal `source_note_id='playbook-degassing'`
+        # would be summarized by a *system-authored* placeholder as having cited that note, and
+        # the model told to go and read it. Framing does not help — `defang` neutralises
+        # delimiters, not the contents of a field this module happens to grep. Scoping to the
+        # tools that legitimately return `EvidenceChunk`s makes the forgery unrepresentable rather
+        # than merely unlikely, and it costs nothing: nothing else emits that repr.
+        #
+        # The name is taken from the **assistant message that made the call**, not from
+        # `ToolMessage.name`. `ToolNode` does set that field, but every result in this stack passes
+        # through `wrap_tool_call` middlewares that rebuild the message, and a scope that depends
+        # on a field surviving three rewrites fails *open* — silently naming nothing, which is
+        # exactly the shape of the defect this whole citation index exists to prevent. A tool call's
+        # own name is what `newest_batch_size` already reads for the same reason.
+        called = {
+            call["id"]: call["name"]
+            for message in messages
+            if isinstance(message, AIMessage)
+            for call in message.tool_calls
+        }
         citations = {
             message.tool_call_id: cited_note_ids(message.content)
             for message in messages
             if isinstance(message, ToolMessage)
+            and called.get(message.tool_call_id) in KNOWLEDGE_READ_TOOLS
         }
         ClearToolUsesEdit(
             trigger=budget,

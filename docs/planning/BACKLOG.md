@@ -63,62 +63,64 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **The LLM gateway inherits an ambient proxy unless a private CA bundle is configured** — [S],
-  found while collapsing the provider seam (`D-2026-09-04-a-gateway-is-the-only-provider`).
-  `agent/llm_provider._tls_http_client` returns `None` when `llm_tls_ca_bundle` is empty, which
-  leaves `ChatOpenAI` to build its own `httpx` client — and that client reads `HTTPS_PROXY` /
-  `ALL_PROXY` from the environment. So on a publicly-trusted gateway (no bundle), an env var set on
-  the pod redirects every prompt, completion and `Authorization` bearer to a host of the setter's
-  choosing. `core/http.private_ca_transport` states `trust_env=False` and both LLM seams take it,
-  but only on the bundle branch; `evals/live_judge.py` used to pass `trust_env=False`
-  unconditionally for its own client and lost that when it moved onto the seam, which is how this
-  surfaced. The fix is one line — hand a `trust_env=False` client in on the no-bundle branch too —
-  and it is **not** free: `trust_env=False` also stops httpx reading `SSL_CERT_FILE` /
-  `SSL_CERT_DIR`, so a deployment relying on an env-supplied trust store would break. That is a
-  behavioural change for every deployment behind a corporate proxy and wants its own ADR rather
-  than riding along with the collapse.
-  **`core/netguard` is a partial mitigation rather than a bystander, and a first telling of this
-  row said otherwise.** Measured, with the guard armed on `{127.0.0.1, localhost,
-  gateway.internal}`: `evil-proxy.example` and `corp-proxy.internal` are both refused at
-  `getaddrinfo`, and a bare `203.0.113.9:3128` at `connect` — so an `HTTPS_PROXY` naming a host
-  outside the derived allowlist does not get out. What the guard cannot see is a proxy the
-  deployment has *legitimately* allowlisted (`CHEMCLAW_EGRESS_ALLOW`, or a corporate proxy sharing
-  a host with declared infrastructure), where nothing distinguishes the operator's intent from an
-  env var somebody else set. That residual case, plus the guard being disableable
-  (`CHEMCLAW_EGRESS_GUARD_ENABLED=false`), is what keeps this row open.
+- [ ] **A connector can claim a step-template launcher name, and the registry says it cannot** —
+  [S], found 2026-09-05 reviewing the ambient-name guard. `_bound_by_this_process` refuses a bundle
+  that claims an in-process tool, a scratchpad verb, `write_todos` or `task`. Its docstring adds
+  that `run_<name>` template launchers are "a different name space that a bundle has no business
+  claiming either" — and measured, a bundle declaring `run_bond_strength_survey` is **accepted**:
 
-- [ ] **A loopback proxy is outside the egress guard by construction, and a service mesh is exactly
-  that shape** — [M], opened 2026-09-05 by the pass that unified the two loopback predicates onto
-  `core/http.is_loopback_host`. The row above measured that a *named* proxy is refused and
-  concluded the guard is "a partial mitigation"; the half it did not measure is that a proxy on
-  **loopback needs no allowlisting at all**, because `netguard._check` exempts loopback by
-  construction — and must keep exempting it, since the process dials Postgres, Temporal and the
-  calc backend there. Measured with the allowlist deliberately empty, one local HTTP proxy and
-  `httpx` (`_refused` read off the module after each arm):
+  ```
+  NOT REFUSED: a connector may claim the template launcher 'run_bond_strength_survey'
+  ```
 
-  | arm | outcome | `netguard._refused` |
-  | --- | --- | --- |
-  | `proxy=http://proxy.corp:3128` → `http://exfil.example/steal` | refused at `getaddrinfo` | 1 |
-  | `proxy=http://127.0.0.1:<port>` → `http://exfil.example/steal` | **HTTP 200, body returned** | **0** |
-  | no proxy → `http://exfil.example/steal` (the control) | refused at `getaddrinfo` | 1 |
+  The cause is ordering rather than an oversight in the union. `chemclaw_agent
+  ._register_generated_tools` is `[*job_tools(), *template_tools()]`, so `job_tools()` runs the
+  collision check while `registered_tools()` still holds no launcher — measured empty at that
+  moment. The consequence is the one the whole check exists to prevent, one name space out: the
+  bundle's tool wins `tools_by_name` and a chemist asking for a template gets the connector's tool
+  under the launcher's name, with no error.
+  **Not a one-liner, which is why it is a row.** Closing it means either reading
+  `chemclaw.templates.registry` from `connectors/registry` — a new import edge
+  `tests/test_layering.py` would have to be told about, in the direction that module has so far
+  avoided — or moving the collision check to after both registrations, which changes when a
+  misconfiguration is reported. Which registry owns that name space is the decision.
+  The false sentence is corrected in this commit; the gap is not. Anchors:
+  `connectors/registry.py::_bound_by_this_process`, `agent/chemclaw_agent.py::_register_generated_tools`.
 
-  The middle arm is the finding: the request reached its external destination end to end, and the
-  counter never moved — so nothing logs at ERROR, nothing alerts, and `chemclaw_egress_refused_total`
-  reads as a clean pod. This is the *shipped* topology rather than an attacker-only one: an
-  OpenShift service mesh or egress sidecar is a loopback proxy by design, so
-  `HTTPS_PROXY=http://127.0.0.1:15001` on the pod re-terminates TLS for every prompt, completion
-  and `Authorization` bearer and forwards them wherever the sidecar is configured to.
-  `core/http.private_ca_transport` sets `trust_env=False` and closes it for the two LLM seams that
-  take it — on the CA-bundle branch only (the row above), and for no other `httpx`/`requests`
-  client in the tree.
+- [ ] **The JWKS fetch follows an ambient proxy and has no seam to stop it** — [M], opened
+  2026-09-05 by the review of `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
+  `api/auth.py:85` builds a `PyJWKClient`, whose `fetch_data` calls `urllib.request.urlopen` —
+  which resolves proxies from the process-global default opener and has no `trust_env`. Measured
+  with a recorder standing in as the proxy: it received
+  `GET http://login.microsoftonline.com/tenant/discovery/v2.0/keys`. **This is the anchor every
+  bearer token is validated against**, so a proxy that could answer it could serve a key set of its
+  own choosing. Two things bound the severity and neither closes it: a real tenant endpoint is
+  `https`, where a proxy sees a CONNECT tunnel it can only open with a CA the pod already trusts
+  (which is exactly what a TLS-terminating corporate proxy arranges); and the boot refusal added by
+  that ADR stops any deployment that has *not* declared a proxy, which is every shipped one. The
+  residual is a site that has declared one — there the LLM seam refuses it and this one does not,
+  which is an asymmetry that reads as a control and is not.
+  **Not a one-liner, which is why it is a row.** `PyJWKClient` takes `ssl_context` and no opener,
+  so the only in-process fix is
+  `urllib.request.install_opener(build_opener(ProxyHandler({})))` at import — a process-wide side
+  effect on every library that reaches for `urlopen`, which wants its own decision rather than
+  riding along. The alternative is vendoring `fetch_data`, which couples this module to a surface
+  it does not otherwise use (`_match_kid` is already written the long way for that reason).
+  Anchors: `api/auth.py::_client_for`, `core/netguard.py::refuse_proxied_egress`.
 
-  **Not fixable by widening the loopback answer**, which is why this is a row and not a patch: the
-  guard's model is "which *host* may this process dial", and a proxy moves the destination out of
-  the address entirely. Closing it means treating proxy configuration as a destination — reading
-  `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` at arm time and refusing, or requiring the proxy to be
-  named in `CHEMCLAW_EGRESS_ALLOW` even when it is loopback — which changes behaviour for every
-  deployment behind a legitimate mesh and wants the same ADR the `trust_env=False` half of the row
-  above is already deferred to.
+- [ ] **An external vector store's client builds its own httpx and is outside the proxy fix** —
+  [S], opened 2026-09-05 by `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
+  `retrieval/vectors/qdrant.py:118` constructs `AsyncQdrantClient`, which builds its own httpx
+  client internally and takes only `verify` from this repository — so `trust_env` stays at its
+  default and a configured proxy would carry that traffic. It is **not** the LLM seam, so no prompt
+  or bearer is on it; what is on it is embedded note text and the query vectors. Recorded rather
+  than blind-patched for one reason: `qdrant_client` is not in this closure (`pgvector` is the
+  shipped provider), so the claim "passing a client works" would be untested prose, which is the
+  shape this repository keeps deleting. **The boot refusal covers it** in any deployment that has
+  not declared a proxy, which is every shipped one — this is the residual for a site that has
+  declared one *and* runs the non-default vector store. Closing it needs the extra installed, then
+  one measurement of whether the SDK accepts a caller-supplied client. Anchors:
+  `retrieval/vectors/qdrant.py`, `core/http.py::gateway_client_kwargs`.
 
 - [ ] **The gateway boot guard reaches one process, and the worker is the other one** — [M],
   opened by `D-2026-09-04-a-gateway-is-the-only-provider`. `_refuse_unconfigured_llm_gateway` and
@@ -170,25 +172,6 @@ topic).
       for the audit trail, where that question can be answered. What stays open is unchanged: the
       string is still the caller's to choose.
 
-- [ ] **One third of the ambient-name refusal is guarded by nothing** — [S], found reviewing
-      `D-2026-09-04-a-helpers-file-crosses-back-and-stays`. `connectors/registry._bound_by_this_process`
-      unions three sets so a connector cannot claim a name this deployment already binds:
-      `skill_tool_names()` (the six scratchpad file verbs), `subagent_tool_names()` (`task`) and
-      `harness_tool_names()` (`write_todos`). Each set is stamped with its own reason string, and a
-      grep for the three over `src/` and `tests/` is the whole evidence: `"a scratchpad file verb"`
-      is asserted once, by
-      `tests/test_connector_registry.py::test_a_connector_cannot_claim_an_ambient_tool_name`, which
-      drives a bundle declaring `read_file`; `"the subagent spawner"` is now reached by
-      `tests/test_tool_framing.py`'s derived guard; `"a plan-harness tool"` appears **only** at its
-      own definition, `registry.py:664`. Confirmed by deleting each line in turn: the first two turn
-      a test red and the third turns **nothing** red anywhere. So a
-      refactor may silently re-open `write_todos` to a connector, and a connector that claimed it
-      would win `tools_by_name` over the plan harness the gate (`agent/plan_gate.py`) reads. The
-      guard was not added with the other two on purpose: `agent/tool_framing.py` does not sort by
-      that name, so asserting it there would be a control in the wrong file — it belongs beside the
-      registry's own refusal test. Anchors: `connectors/registry.py::_bound_by_this_process`,
-      `tests/test_connector_registry.py`, `agent/plan_gate.py`.
-
 - [ ] **`build_langgraph_agent(connectors=...)` accepts a tool that shadows a first-party name** —
       [S], the residual `D-2026-09-04-a-name-is-one-capability-across-every-namespace` names and
       leaves open, and whose `BACKLOG.md` row was never written. `connectors/registry.py`'s
@@ -201,51 +184,61 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **`retrieval_top_k` cuts silently and the sweep reports `truncated_by=None`** — [M], measured
-      2026-09-04 and the half `D-2026-09-04-a-ranker-that-sorts-alphabetically-is-not-a-ranker`
-      deliberately left. `retrievers.py`'s `[: settings.retrieval_top_k]` discards everything past
-      8, and `research_tools.py`'s `total_before_cap` is computed **after** the merge, so on 5,000
-      matching notes `gather_evidence` reports `chunks=8, total_before_cap=8, truncated_by=None`
-      while 4,992 were dropped inside the leg. The two bounds wired to `truncated_by` cannot bite:
-      max distinct chunks is 8x3 plus the fingerprint leg's 10, against
-      `gather_evidence_max_chunks` 40. `EvidenceSweep` exists precisely so "a cut does not look
-      like a corpus" and this cut is invisible to it. **The fix is a contract change, which is why
-      it is a row rather than a patch**: `Retriever.retrieve` returns `list[EvidenceChunk]`, so the
-      found-count has nowhere to travel — the two shapes that need no protocol change are a mutable
-      attribute on the retriever (unsafe: one instance serves concurrent turns) and the count
-      repeated on every chunk, and both are worse than the gap. Do it as a small result object
-      across all four retrievers, `fanout.sweep_sources`, `harness.gather_section` and their tests.
-      `FingerprintSearch.hits_truncated` is the shape to copy.
+- [ ] **RRF's premise is independent rankers and this system has correlated ones;
+      `retrieval_fusion_k` is not the dial that fixes it** — [M], re-measured 2026-09-05 against
+      current `HEAD`, and **both remedies this row used to propose are measured no-ops**. Keep the
+      numbers here so nobody re-litigates them.
 
-- [ ] **RRF at `k=60` over 8-item lists counts sources rather than ranks, and two of the three are
-      the same ranker** — [M], measured 2026-09-04. With `retrieval_fusion_k` 60 and
-      `retrieval_top_k` 8, rank 1 scores 0.016393 and rank 8 scores 0.014706 — a **1.11x** spread,
-      against **2.00x** for being found twice. A note in two sources at rank *r* beats a one-source
-      rank-1 note whenever `r < 62`, i.e. always, for every list this system produces. Worse than
-      ordinary RRF crowding, because `GraphRetriever` and `LexicalRetriever` apply the *same*
-      boolean rule over the *same* corpus (`vector_index.py` says so), so the agreement bonus
-      rewards redundancy and demotes the only leg with an orthogonal signal: measured, a note found
-      only by the dense leg fuses **last** of nine, and end to end the note answering the query
-      moves from position 2 in `graph` mode to position 9 in `hybrid`. Two candidate fixes and they
-      are not the same decision — set `k` to the scale of the lists (2-10), and/or weight
-      `graph`+`lexical` as one tier via the existing `retrieval_source_weights`. Ship the fused
-      score on the chunk either way; today the `score` the model reads back is the source's own and
-      does not explain the order.
+      The arithmetic stands: at `retrieval_fusion_k` 60 over lists of `retrieval_top_k` 8, the
+      within-source spread is **1.11x** (rank 1 = 1/61, rank 8 = 1/68) against **2.00x** for being
+      found twice, so a two-source note at rank *r* beats a one-source rank-1 note while `r < 62`.
+      End to end on a 35-note corpus with three real legs, the note answering the query sits at
+      position 2 in `graph` mode and **position 9 of 9** in `hybrid`.
 
-- [ ] **The retrieval gold corpus is smaller than `retrieval_top_k`, so the gate cannot see a
-      ranking defect** — [S], measured 2026-09-04. `data/evals/retrieval_corpus` holds **6** notes
-      against a k of 8, so the cut can never engage and 4 of 5 gold cases sit at recall 1.00.
-      Adding 30 ordinary notes whose ids sort earlier, **with no code change**, takes
-      `retrieval-coupling` from 1.00 to 0.25 and `retrieval-suzuki` from 1.00 to 0.50. The module's
-      own docstring says it exists so a change "could not quietly halve recall unnoticed"; it
-      cannot detect the only way recall actually halves. Grow it past `retrieval_top_k` (30-50,
-      most of them distractors matching the query terms) and add one case whose expected note sorts
-      last alphabetically. Related and larger: `data/evals/probes/knowledge.yaml` already names
-      **44** (query, note) pairs against the real corpus in its `direction:` prose, unreadable
-      because `Probe` is `extra="forbid"` — one field would turn a 10-pair fixture gold set into a
-      44-pair one over the product corpus, and `DEFERRED.md`'s claim that "the shipped graph has
-      none" is false.
+      **Neither `k` nor `retrieval_source_weights` can close it, and that is arithmetic rather than
+      tuning**: the agreement term contains no `k`, so a note found at rank 1 by two legs scores
+      `2/(k + 1/w)` against a dense-only rank-1 note's `1/(k+1)` — the first wins for *every*
+      positive `k` and `w`. Measured: lowering `k` to 20 or 10 changes the order on **0 of 7** real
+      queries; at the minimum `k=1` the answer note reaches position 6, still below every two-source
+      note. Tiering `graph`+`lexical` at weight 0.5 leaves it at position 9, inert.
 
+      **The correlation is worse than "two of the three"**: on the real `knowledge/` corpus,
+      `graph ∩ lexical` = 47/55, `graph ∩ vector` = 44/55, `lexical ∩ vector` = 41/53 — because the
+      shipped `embedding_provider` is `hash`, which is token-count hashing, so *all three* legs are
+      term-overlap rankers. The dense leg only becomes orthogonal under `openai_compatible`.
+
+      **What was fixed instead**, because it was a defect rather than a tuning question: the fused
+      list carried each chunk's *finder's* score, monotone with the fused order on **0 of 7**
+      queries. `hybrid.restated_as_position` now reports the rank the fusion actually produced.
+
+      **What would work is "one corpus, one vote"** — `ingest/documents/retriever.py` already fuses
+      its own two legs internally so the share votes once, while the note corpus runs three legs as
+      three votes over one corpus. Expressing that means the data-source manifest saying which
+      sources are one corpus, which is an ADR rather than a setting. Scope note: with three note
+      legs the merge cap never engages (24 chunks against 40), so today the cost is prompt *order*,
+      not recall; it becomes recall at five or more legs. And `retrieval_mode` defaults to `graph`
+      with `CHEMCLAW_DATA_SOURCES=graph,eln-json`, so **no shipped configuration runs RRF over note
+      sources at all** — hybrid staying opt-in is the mitigation until the ADR is taken.
+
+- [ ] **The 44 labelled (query, note) pairs in `knowledge.yaml` are unreadable as data** — [M],
+      measured 2026-09-05. `data/evals/probes/knowledge.yaml` has **19 probes naming
+      real `knowledge/` note ids inside their `direction:` prose, 44 pairs in total** — a labelled
+      gold set against the *product* corpus that no gate can read, because `Probe` is
+      `extra="forbid"` (`evals/probe.py`). `DEFERRED.md`'s claim that "the shipped graph has none"
+      was corrected in the same commit as this row.
+
+      **Score it in the live lane, not offline, and that is the finding.** Measured offline by
+      running `GraphRetriever` on each probe's raw question: mean recall **0.636**, two probes at
+      0.00 — below the gate's floor on day one, because probe questions are conversational chemist
+      prose (10-27 terms) while the live agent reformulates before calling `gather_evidence`.
+      Gating that offline would restate the `retrieval-cross-coupling-literal-miss` case 19 times
+      without the `expect_pass: false` that makes it honest.
+
+      The shape: add `expects_notes: list[str]` to `Probe`, transcribe the 44 pairs, and score it in
+      `evals/live.py` beside `expects_tools` — `returned_ids` is already accumulated there, so it is
+      the same three lines as `live.py:499-500`. Plus a cheap **offline** validator that every
+      `expects_notes` id exists in `knowledge/`, which is the half CI can run. Its own PR: it needs
+      a running front door to verify green.
 - [ ] **The PR-gate's submission is O(corpus) and serialises cluster-wide** — [M], measured
       2026-09-04 against real bare remotes: 0.218 s per proposal at 100 notes, 0.574 s at 1,000,
       **2.916 s at 10,000** — 87% of it `git worktree add -B`, a full checkout of the corpus, in

@@ -242,6 +242,21 @@ def mentioned_ids(text: str) -> list[str]:
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
+def is_note_slug(value: str) -> bool:
+    """Whether `value` could name a note — the predicate half of `require_note_slug`.
+
+    A separate function because one caller is filtering rather than validating:
+    `agent.compaction.cited_note_ids` reads ids out of a cleared tool result and may only name the
+    ones `expand_note` could resolve. An `EvidenceChunk.source_note_id` is not always a note id —
+    the document share writes `<share>:<doc>#<ordinal>`, the warehouse ELN `<source>:<key>`, a
+    vendored dataset `vendored:<name>:<index>` — and a placeholder telling the model to
+    `expand_note` on one of those names a thing that cannot be read. Exception flow is the wrong
+    shape for that question, and restating the rule there would be the second definition this
+    function was extracted to prevent.
+    """
+    return ".." not in value and not value.endswith((".", ".lock")) and bool(_SLUG.fullmatch(value))
+
+
 def require_note_slug(value: str) -> str:
     """Return `value` if it is a safe note slug, else raise `ValueError` naming the rule.
 
@@ -257,7 +272,7 @@ def require_note_slug(value: str) -> str:
     git rejects all three, so an id that passed the schema would otherwise fail later at branch
     creation.
     """
-    if ".." in value or value.endswith((".", ".lock")) or not _SLUG.fullmatch(value):
+    if not is_note_slug(value):
         raise ValueError(
             f"{value!r} is not a safe note slug (allowed: {_SLUG.pattern}; "
             "no '..', trailing '.', or '.lock' suffix)"

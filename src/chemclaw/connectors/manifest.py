@@ -128,11 +128,13 @@ class HttpEndpoint(BaseModel):
     tools: list[str] = Field(default_factory=list)
     state_changing: list[str] = Field(default_factory=list)
     read_only: list[str] = Field(default_factory=list)
+    knowledge_read: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _every_tool_is_classified(self) -> Self:
         """Reject an endpoint that does not classify each of its tools exactly once."""
         _check_classification(self.tools, self.state_changing, self.read_only)
+        _check_knowledge_reads(self.knowledge_read, self.read_only)
         return self
 
     @model_validator(mode="after")
@@ -180,11 +182,13 @@ class StdioEndpoint(BaseModel):
     tools: list[str] = Field(default_factory=list)
     state_changing: list[str] = Field(default_factory=list)
     read_only: list[str] = Field(default_factory=list)
+    knowledge_read: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _every_tool_is_classified(self) -> Self:
         """Reject an endpoint that does not classify each of its tools exactly once."""
         _check_classification(self.tools, self.state_changing, self.read_only)
+        _check_knowledge_reads(self.knowledge_read, self.read_only)
         return self
 
 
@@ -249,6 +253,26 @@ def _check_classification(
         raise ValueError(f"endpoint lists tool(s) {both} as both state_changing and read_only")
 
 
+def _check_knowledge_reads(knowledge_read: list[str], read_only: list[str]) -> None:
+    """Raise unless every declared knowledge read is one of this endpoint's own reads.
+
+    **Optional where the classification above is a partition, and the asymmetry is deliberate.**
+    Getting `state_changing` wrong fails open — a write the plan gate reads as a read — so it may
+    not be left blank. `knowledge_read` decides only what `turn_costs.retrieval_calls` counts, so
+    an omission understates a metric rather than removing a control; requiring every bundle to
+    answer a question most of them answer "none" to would be ceremony a validator has to police.
+
+    What it does refuse is the pair that cannot both be true: a search over the record that this
+    same endpoint calls state-changing. That would count a write as a look.
+    """
+    unknown = sorted(set(knowledge_read) - set(read_only))
+    if unknown:
+        raise ValueError(
+            f"endpoint lists tool(s) {unknown} as knowledge_read but not as read_only; a search "
+            "over the record is a read, and a tool that writes may not be counted as one"
+        )
+
+
 # One connector endpoint, discriminated on `transport`. A new transport is one variant here plus
 # one branch in `connectors.registry._mcp_connection`. Both variants carry `tools` — the
 # agent-facing allow-list — because it is a property of *an endpoint's* surface: nesting it
@@ -263,6 +287,14 @@ def _check_classification(
 # bundle changes what a tool does. There is no such thing as an undeclared tool: `tools` may not be
 # empty and every entry must be classified, because both ways of leaving it blank end at the same
 # place — a write the plan gate reads as a read.
+#
+# `knowledge_read` names the subset of `read_only` that consults **the record** — the reaction
+# corpus, the fingerprint indexes, anything a turn looks at before it answers. It is separate from
+# `read_only` because they answer different questions: `read_only` says a tool may run without an
+# approved plan, and `assemble_evidence_pack` and `ask_clarifying_question` are both read-only
+# while only one of them looks anything up. It is declared by the bundle for the same reason
+# `state_changing` is — whether `substrate_precedent` searches the record is `rxnfp`'s own fact,
+# and core naming other people's tools is the second source of truth D-118 exists to prevent.
 Endpoint = HttpEndpoint | StdioEndpoint
 
 

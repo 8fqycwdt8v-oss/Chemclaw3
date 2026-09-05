@@ -156,7 +156,11 @@ async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
         return {"ranked": [(index, [])], "failed": [name], "skipped": []}
     _record_seconds(name, time.perf_counter() - started)
     _report(name, len(chunks), failed=False)
-    return {"ranked": [(index, list(chunks))], "failed": [], "skipped": []}
+    # **Not `list(chunks)`.** A retriever that cut its own hits returns a `Hits`, which is a list
+    # carrying how many it had *before* that cut; copying it into a plain list here would discard
+    # the one number this branch cannot recompute, three lines from where it was produced. The
+    # channel's declared type is `list[EvidenceChunk]` and a `Hits` is one, so nothing else changes.
+    return {"ranked": [(index, chunks)], "failed": [], "skipped": []}
 
 
 def _record_seconds(name: str, seconds: float) -> None:

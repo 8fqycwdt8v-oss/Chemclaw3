@@ -8,6 +8,7 @@ fingerprint search, analytics) implement it as thin adapters, so adding a source
 external literature — is a new retriever behind this interface, never a change to the core (G6).
 """
 
+from collections.abc import Iterable
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -31,6 +32,12 @@ class EvidenceChunk(BaseModel):
     # the same quantity and the higher scale simply won. Both merge modes now go by rank position,
     # which *is* comparable across sources, and each retriever applies this score inside its own
     # ranking where it means something.
+    #
+    # **What reaches the model is therefore not the finder's number.** `hybrid.restated_as_position`
+    # rewrites this field to `1 / (1 + position)` in the merged list, in both modes, because a
+    # number that contradicts the order it is printed beside is worse than no number. The finder's
+    # own value governs its source's ranking and the cap, and is spent by the time the chunk is
+    # returned; `confidence` below carries the note's confidence as a field of its own.
     #
     # Defaults to a neutral 0.5: every current retriever sets it explicitly, so this only governs a
     # future retriever that forgets to — and neutral keeps such a chunk in the middle of its
@@ -114,11 +121,71 @@ class EvidenceSweep(BaseModel):
     # both halves, so the ratio is alertable across turns while this field stays what a single
     # answer's reader needs.
     sources: dict[str, int] = Field(default_factory=dict)
+    # How many hits a source discarded at **its own** bound, before the merge ever saw them —
+    # by name, and only for the sources that both cut and can say so.
+    #
+    # **`sources` and `truncated_by` together were still not the whole truth.** Both describe the
+    # *merge*: `sources` counts what a leg handed over, `truncated_by` names which of
+    # `gather_evidence_max_chunks`/`_max_chars` cut the merged list. Neither can see a leg that
+    # truncated before handing anything over — and `retrieval_top_k` is 8, so on the shipped
+    # configuration that is the *only* cut that ever bites. Measured on 5,000 matching notes: the
+    # sweep reported `chunks=8, total_before_cap=8, truncated_by=None` while 4,992 were dropped
+    # inside the graph leg. "A cut does not look like a corpus" was true of the merge and false of
+    # the legs.
+    #
+    # A source absent from this dict either cut nothing or **cannot say** — the dense and lexical
+    # legs push `LIMIT k` into the index and do not know what they did not fetch. That is why the
+    # unknown is an absence rather than a zero: a zero here would assert "nothing was cut" on the
+    # one leg that cannot check it.
+    sources_truncated: dict[str, int] = Field(default_factory=dict)
     # Sources that declined the question, by name -> the reason they gave (`RetrieverSkip`).
     # Distinct from `sources_failed` because the fixes differ: a failure is an outage, a skip is
     # a fact about the deployment or the call (an unentitled actor, a filter a source cannot
     # serve, a notes directory with nothing in it).
     sources_skipped: dict[str, str] = Field(default_factory=dict)
+
+
+class Hits(list[EvidenceChunk]):
+    """What one source returned, and how many it had **before its own bound cut them**.
+
+    A `list` subclass rather than a wrapper, and that is the whole design decision. The count has to
+    travel from the retriever that cuts to the fan-out that reports, and the three shapes that could
+    carry it were each worse:
+
+    - **Changing `retrieve`'s return type.** Honest, and it churns 84 call sites of which **81 are
+      tests** — every `len(await r.retrieve(...))` and `assert ... == []` in the suite — for no
+      behavioural gain in any of them. A diff whose signal-to-noise is 3:81 is one nobody reviews.
+    - **A mutable attribute on the retriever.** One instance serves concurrent turns, so the count
+      would be whichever turn wrote last. That is the defect, not a way to report it.
+    - **The count repeated on every chunk.** N copies of one fact, and a source that returns zero
+      chunks then has nowhere to put it — which is exactly the case worth reporting.
+
+    A `Hits` *is* a list, so every existing caller and every test keeps working unchanged; only the
+    retrievers that cut set `found`, and only `fanout` reads it.
+
+    **`found` is `None` when the source cannot say, and that is not the same as "did not cut".**
+    `GraphRetriever` materialises its whole candidate set and then truncates, so it knows both
+    numbers. The dense and lexical legs push `LIMIT k` into the index and genuinely do not know what
+    they did not fetch — reporting `found == len(self)` for them would assert "nothing was cut" on
+    the one leg that cannot check, which is the ambiguous zero
+    `D-2026-08-03-a-metric-must-declare-what-it-can-see` is about. `None` says "unknown"; a reader
+    that wants a total must treat it as unknown rather than as agreement.
+
+    `+` and slicing return plain lists, losing `found`. That is correct rather than unfortunate: a
+    concatenation of two sources' hits has no single pre-cut total to carry.
+    """
+
+    __slots__ = ("found",)
+
+    def __init__(self, chunks: Iterable[EvidenceChunk] = (), *, found: int | None = None) -> None:
+        """Hold `chunks`, recording that `found` existed before this source's own bound."""
+        super().__init__(chunks)
+        self.found: int | None = found
+
+    @property
+    def dropped(self) -> int:
+        """Hits discarded at this source's own bound; 0 when it cut none or cannot say."""
+        return 0 if self.found is None else max(0, self.found - len(self))
 
 
 class RetrieverSkip(Exception):
