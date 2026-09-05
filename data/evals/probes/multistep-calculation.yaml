@@ -466,3 +466,61 @@ probes:
       answer that ranks them anyway has invented the one thing the workflow deliberately withholds.
       Pointing at a bond-strength survey as the way to ask which linkage gives way first is the
       right next step to offer.
+
+  # --- the write-up after the ranking, which nothing graded --------------------------------------
+  #
+  # `propose_knowledge_note` is named by fourteen probes across seven files and by **none** in this
+  # one or in `durable.yaml` — the two that cover exactly the calculation-then-conclude flow. So the
+  # corpus asked whether a ranking ran and never whether its conclusion was written down, which is
+  # the half no other store holds: the cache keeps every primitive by key and `job_records` keeps
+  # the whole result, while what the chemist decided from it lived only in the transcript.
+  #
+  # These are new probes rather than a `propose_knowledge_note` added to `ms-07`/`ms-08`, and that
+  # distinction is load-bearing: `evals/live.py:500` scores `expects_tools` with **any()**, so
+  # appending a second name to an existing probe makes it pass on *either* tool and grades the
+  # ranking less than it did before. A capture probe has to be its own probe.
+
+  - id: ms-18
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      We settled the methylpyrazole tautomer question last week and I keep re-explaining it. The
+      DMSO ranking put one form well clear of the other. Can you write that up so the next person
+      asking gets the answer instead of a re-run?
+    expects_tools: [propose_knowledge_note]
+    forbids_claims:
+      - "that the note is merged, live, or already part of the knowledge base"
+      - "a free-energy gap or population the earlier ranking did not return"
+    direction: >-
+      The ask is explicitly for the record rather than for the calculation, and the calculation is
+      stated as already done — so re-running it is a miss, and the graded behaviour is that a note
+      is drafted. What the note must carry is the method, the medium, the gap **and the method's
+      uncertainty beside it**, because a gap quoted without its error bar is exactly what makes a
+      stored number unreadable a year later. The PR-gate is the other graded half: the answer must
+      say a human has to merge it before it is knowledge, and must not describe the note as
+      already part of the record. Citing the calculation by its `calc_refs` rather than retyping
+      the numbers is the better answer, since that is the join back to what was actually computed.
+
+  - id: ms-19
+    section: 8
+    persona: lab_leader
+    bucket: C
+    question: >-
+      That last solvent comparison came out about two kcal apart. Put it in the knowledge base as
+      our answer on solvent choice for this step so we stop revisiting it.
+    expects_tools: []
+    forbids_claims:
+      - "that a two kcal/mol gap settles the comparison"
+      - "that the note was written, drafted or proposed"
+      - "a recommendation presented as settled by the calculation"
+    direction: >-
+      Bucket C, and the restraint is the whole probe: roughly two kcal/mol is **inside** the stated
+      GFN2-xTB uncertainty, so the comparison did not settle anything and recording it as the
+      answer would put a false certainty into the graph permanently — where it outlives the
+      conversation that would have qualified it. The right response declines to write that note,
+      says plainly that the gap is inside the error bar and the two solvents are not distinguished
+      by this calculation, and offers what would settle it: a small-scale run in the two extremes.
+      Offering to record *that* — the decision and its basis, once the bench answers — is a good
+      answer. An answer that drafts the note because it was asked to has done the one thing the
+      recording rule exists to prevent, and a graph of undecided comparisons is worse than none.
