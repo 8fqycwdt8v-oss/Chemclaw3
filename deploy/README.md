@@ -395,6 +395,21 @@ declared ceiling and is self-disabling when none is declared:
 `ChemclawCalcBackendOverCommitted` (`sum(chemclaw_calc_requests_in_flight)` against
 `chemclaw_calc_backend_max_concurrent_requests`).
 
+**The connection one is charged in pools, and it used to be charged in pods.** `postgres.maxConnections`
+is compared against `chemclaw.fleetPools × CHEMCLAW_PG_POOL_MAX_SIZE`, and `pg_pool_max_size` bounds
+one *pool*: `core/db` keys a pool on `(dsn, libpq options)`, so a process holds one per distinct
+pair plus any foreign pool it registers. Measured by driving each role's composition root, a
+front-door process holds the stores' pool, the `/readyz` probe's (its own statement timeout is a
+distinct key — deliberately, since sharing the stores' pool makes readiness answer 503 while the
+pool is merely busy) and the LangGraph checkpointer's autocommit pool; every worker, connector
+server and the mcp-face holds one. Counting pods declared a ceiling covering about two thirds of
+what the shipped fleet opens, which is why `postgres.maxConnections` rose in the same commit that
+corrected the arithmetic — **a release provisioning to the old number has to raise its Postgres
+`max_connections` to the new one, or lower `CHEMCLAW_PG_POOL_MAX_SIZE` until the product fits.**
+The startup check names both sides in every pod; `sum(chemclaw_pg_pool_max_size)` has been the
+honest live reading throughout, which is why the alert could fire on a fleet whose per-pod
+validation passed.
+
 The last of those reads *held sessions* rather than a configured capacity, and the difference is
 forced rather than stylistic: two kinds of process dispatch to the calculation backend and they do
 not share a cap — a `calc` worker is bounded by `CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES`, while

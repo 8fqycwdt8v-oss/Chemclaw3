@@ -729,19 +729,42 @@ def test_the_connection_budget_is_undeclared_by_default() -> None:
 
 
 def test_a_fleet_exactly_at_its_connection_ceiling_is_allowed() -> None:
-    """`>`, not `>=` — the shipped chart sits exactly on its own number.
+    """`>`, not `>=` — a chart may declare exactly the number it renders.
 
-    `values.yaml` declares 136 against 17 pooled processes × a pool of 8, deliberately, so the
-    ceiling ships as a statement of the current shape rather than as slack. Off by one here and
-    every pod the chart renders refuses to start.
+    The shipped ceiling carries headroom, but nothing about this check should force it to: a
+    release that provisions exactly what it opens is a correct release. Off by one here and every
+    pod it renders refuses to start.
     """
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
-        pg_fleet_pooled_processes=17,
+        pg_fleet_pools=17,
         pg_pool_max_size=8,
         pg_fleet_max_connections=136,
     )
     assert settings.pg_fleet_max_connections == 136
+
+
+def test_a_fleet_that_would_exhaust_the_server_is_refused_by_pools_not_by_pods() -> None:
+    """One front-door process opens 48 connections, and this check used to charge it 16.
+
+    The measured shape (`tests/test_fleet_pools.py`): a front-door process holds three pools — the
+    stores', the `/readyz` probe's own `(dsn, statement timeout)` key, and the LangGraph
+    checkpointer's registered autocommit pool — so at `pg_pool_max_size=16` it opens 48. The
+    validator multiplied `pg_pool_max_size` by a *process* count, so `1 × 16 = 16` cleared a
+    declared ceiling of 40 for a process that exhausts it, in the direction that lets a deployment
+    run the server out of `max_connections`.
+
+    Written against the single-process case deliberately: it is the smallest fleet that fails, so
+    the assertion is about the arithmetic and not about any chart's replica counts.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            pg_fleet_pools=3,  # one front door
+            pg_pool_max_size=16,
+            pg_fleet_max_connections=40,
+        )
+    assert "48 Postgres connections" in str(excinfo.value)
 
 
 def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> None:
@@ -750,19 +773,22 @@ def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> Non
     `core/config/store.py` stated "keep it under the server's max_connections" in prose and nothing
     computed the left-hand side, so the shipped chart ran every pod on the default pool of 16 and
     the fleet's real ceiling was ~272 against the max_connections=100 D-119 measured against. An
-    operator seeing this needs both numbers and both levers, not the name of one setting.
+    operator seeing this needs both numbers and both levers, not the name of one setting — and,
+    since the count moved from pods to pools, the sentence that says a process is not a pool: a
+    reader who reaches this message while looking at 14 pods needs to know why the number is 26.
     """
     with pytest.raises(ValueError) as excinfo:
         Settings(  # type: ignore[call-arg]
             _env_file=None,
-            pg_fleet_pooled_processes=17,
+            pg_fleet_pools=17,
             pg_pool_max_size=16,
             pg_fleet_max_connections=136,
         )
     message = str(excinfo.value)
     assert "272" in message and "136" in message
-    assert "17 pooled process" in message and "16 per pool" in message
+    assert "17 pool(s)" in message and "16 per pool" in message
     assert "pg_fleet_max_connections" in message and "pg_pool_max_size" in message
+    assert "the front door holds three" in message
 
 
 def test_the_calculation_backend_budget_is_undeclared_by_default() -> None:

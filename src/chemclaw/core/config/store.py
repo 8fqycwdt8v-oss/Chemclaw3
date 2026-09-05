@@ -95,10 +95,11 @@ class StoreSettings(BaseSettings):
     # which is how a non-fatal correctness guard got silently disarmed under load.
     #
     # `min_size` connections are kept warm so the first request after an idle period does not pay
-    # a handshake. `max_size` bounds one process; the deployment total is
-    # `max_size × distinct DSNs × processes` (front-door replicas × `service_uvicorn_workers`,
-    # plus the workers), which must stay under the server's `max_connections` — see
-    # `pg_fleet_max_connections` below, which is what turns that sentence into a check.
+    # a handshake. `max_size` bounds **one pool**, not one process — a process holds as many pools
+    # as it has distinct `(dsn, libpq options)` keys, plus any foreign pool it registers. The
+    # deployment total is therefore `max_size × pools`, which must stay under the server's
+    # `max_connections` — see `pg_fleet_pools` below, which is what turns that sentence into a
+    # check.
     pg_pool_min_size: int = Field(default=2, ge=0)
     pg_pool_max_size: int = Field(default=16, gt=0)
     # The two halves of the fleet connection budget
@@ -110,13 +111,31 @@ class StoreSettings(BaseSettings):
     # shape as the admission cap before `service_fleet_max_concurrent_turns`: a per-process bound
     # that is correct in every pod while the fleet total is not, and no single pod can see it.
     #
-    # `pg_fleet_pooled_processes` is how many processes may open a pool at once — every front-door
-    # process, every Temporal worker, every connector server. The chart derives it from the same
-    # values that render those Deployments (`chemclaw.pooledProcesses`), so it cannot disagree with
-    # the pods that exist. `pg_fleet_max_connections` is what the server will actually serve this
-    # deployment; 0 means undeclared and the check is inert, matching how the turn ceiling and the
-    # artifact-eviction budgets ship off until an operator states a number.
-    pg_fleet_pooled_processes: int = Field(default=1, gt=0)
+    # **This counts pools, and it used to count processes.** That is the same defect one level in:
+    # a *process* is not a pool, and the front door holds three — the stores' pool, the readiness
+    # probe's (`api/routes/ops.py` borrows with its own statement timeout, which is a distinct pool
+    # key), and the LangGraph checkpointer's registered autocommit pool (`agent/checkpointer.py`).
+    # Measured by driving the real composition roots on 2026-09-05: front door 3 pools /
+    # 48 connections at `max_size=16`, background worker 1, connector worker 1, connector server 1,
+    # mcp-face 1. So `1 × 16 = 16` was this process's own arithmetic for a process opening 48, and
+    # the shipped chart declared 136 against a real floor of 208 — under-counting by 3x on the one
+    # role that scales, in the direction that lets the server run out. `chemclaw_pg_pool_max_size`
+    # has summed a process's pools since D-2026-08-05, so the *runtime* alert was already honest
+    # and only the startup check was not; the two contradicted each other on the shipped values.
+    #
+    # **A second DSN is a second pool per role, and the chart cannot see one.** `session_store_dsn`
+    # arrives as a Secret, so a deployment that points the session layer at a *different* database
+    # gives every role that touches both an extra `core/db` pool — a front door then holds four —
+    # while the connections split across two servers, which one `pg_fleet_max_connections` cannot
+    # describe. Left as a documented limit rather than a mechanism: nothing in a pod knows the
+    # topology, and the shipped chart leaves that key unset so both DSNs resolve to one string.
+    #
+    # The chart derives the fleet's pool count from the same values that render those Deployments
+    # (`chemclaw.fleetPools`), so it cannot disagree with the pods that exist.
+    # `pg_fleet_max_connections` is what the server will actually serve this deployment; 0 means
+    # undeclared and the check is inert, matching how the turn ceiling and the artifact-eviction
+    # budgets ship off until an operator states a number.
+    pg_fleet_pools: int = Field(default=1, gt=0)
     pg_fleet_max_connections: int = Field(default=0, ge=0)
     # Close a connection idle beyond this, so a burst does not pin `max_size` sockets forever.
     pg_pool_max_idle_seconds: float = Field(default=300.0, gt=0)

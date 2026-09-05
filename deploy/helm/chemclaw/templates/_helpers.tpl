@@ -671,23 +671,36 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- join ":" $names -}}
 {{- end -}}
 
-{{- /* How many processes in this release may open a Postgres pool — the multiplicand in
-       `pg_pool_max_size × processes` that `core/config/store.py` has always stated in prose and
+{{- /* How many Postgres POOLS this release may open — the multiplicand in
+       `pg_pool_max_size × pools` that `core/config/store.py` has always stated in prose and
        nothing computed (D-2026-08-05-the-connection-budget-is-a-fleet-number).
+
+       **Pools, not pods**, and this helper counted pods until 2026-09-05. `pg_pool_max_size`
+       bounds one pool and `core/db` keys a pool on `(dsn, libpq options)`, so a process holds one
+       per distinct pair plus any foreign pool it registers. Measured by driving each role's real
+       composition root: a front door holds THREE — the stores' pool, the `/readyz` probe's (it
+       borrows with its own statement timeout, which is a distinct key, and that isolation is load-
+       bearing: sharing the stores' key answered 503 in 2.005 s against a healthy database with the
+       pool merely busy) and the LangGraph checkpointer's registered autocommit pool. Every other
+       role holds one: background worker, connector worker, connector server, mcp-face. Counting
+       pods put the shipped chart at a declared 136 against a real floor of 208.
 
        Derived from the SAME values that render the Deployments, for the same reason
        `chemclaw.connectorUrls` is: a hand-maintained count is a second declaration of the
        topology, and this chart has watched one of those go stale before. The front door counts at
        its HPA ceiling rather than its floor, exactly as CHEMCLAW_SERVICE_FLEET_REPLICAS does —
-       the budget has to hold at the fleet's largest legal shape, not its smallest. Every worker and
-       connector server pods `replicas` processes and pools once each (`chemclaw.core.db.pooling` in
-       `durable/serve.py` and `connectors/server.py`).
+       the budget has to hold at the fleet's largest legal shape, not its smallest.
 
        One front-door pod is one pooled process, with no uvicorn-worker factor, because `Settings`
        refuses CHEMCLAW_SERVICE_UVICORN_WORKERS above 1 outright (five per-process guarantees break
        across processes). Multiplying by a number that can only ever be 1 would be arithmetic
        nothing can exercise; if that guard is ever lifted, this is the second place to change and
        the validator's message is the first.
+
+       The front door's third pool is the checkpointer's, which only exists under
+       CHEMCLAW_SESSION_STORE=postgres — charged unconditionally rather than switched on that key,
+       because this is a ceiling and over-declaring it is the safe direction; a release on the
+       in-memory store provisions a little more than it uses.
 
        The migration hook Job is deliberately NOT counted: it uses `connect()`, not the pool, and
        it has finished before any app container starts. */ -}}
@@ -698,7 +711,7 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
        floor of 1 would refuse a deployment over work it never does.
 
        A helper rather than an inline `.Values` path down to `workerReplicas`, for the reason
-       `pooledProcesses` below is one: that key is optional (a bundle may size both halves
+       `fleetPools` below is one: that key is optional (a bundle may size both halves
        with `replicas`), and `tests/test_deploy_chart.py::test_every_values_path_exists` refuses a
        template naming a `.Values` path the shipped values do not have — which is the check that
        catches a renamed value rendering as empty. Reading it off a `$cfg` variable asks the same
@@ -712,15 +725,22 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end -}}
 {{- end -}}
 
-{{- define "chemclaw.pooledProcesses" -}}
-{{- $total := .Values.service.replicas | int -}}
+{{- define "chemclaw.fleetPools" -}}
+{{- $frontDoor := .Values.service.replicas | int -}}
 {{- if .Values.service.autoscaling.enabled -}}
-{{- $total = .Values.service.autoscaling.maxReplicas | int -}}
+{{- $frontDoor = .Values.service.autoscaling.maxReplicas | int -}}
 {{- end -}}
+{{- /* Three each, and the only role for which the number is not one — see the header. Written as
+       a literal here and re-derived in `tests/test_deploy_chart.py::_fleet_pools`, which is the
+       existing pattern for this helper: a test that read the template's own answer back would
+       assert nothing. What pins the 3 to reality is neither of those two but
+       `tests/test_fleet_pools.py`, which drives the real front-door composition root and counts
+       the pools it actually opens. */ -}}
+{{- $total := mul $frontDoor 3 -}}
 {{- $total = add $total (.Values.workers.background.replicas | int) -}}
 {{- /* The face too, when it is enabled. It runs `connectors/server.py` over the in-process
        read-only tool set — knowledge search, fingerprint search, precedent lookup — so it opens a
-       pool per replica exactly like the front door does. Omitted here, ten face replicas put 80
+       pool per replica exactly like a connector server does. Omitted here, ten face replicas put 80
        connections on the database that the declared ceiling did not know about, and the startup
        guard checks the *declared* number, so it could not fire: the first sign was the runtime
        `ChemclawFleetAboveItsConnectionCeiling` alert, after the pods were up. */ -}}

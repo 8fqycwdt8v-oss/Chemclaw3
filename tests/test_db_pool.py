@@ -364,8 +364,10 @@ def test_the_reported_per_process_ceiling_counts_pools_and_not_processes(
     on `(dsn, options)` so `/readyz`'s 2 s-bounded connection stays out of the stores' 30 s pool,
     and the LangGraph checkpointer opens a third, autocommit pool that `pool_stats` could not see
     at all. Measured in one process against a live server: three pools, 48 connections, reported as
-    16 — which puts the shipped chart at ~184 real connections against the
-    `postgres.maxConnections: 136` its values file says is exactly what it provisions.
+    16 — which put the shipped chart's real floor at 208 against the `postgres.maxConnections: 136`
+    its values file then provisioned. The same under-count was in the fleet validator, which
+    multiplied processes rather than pools; both are fixed, and the live figures are the ones
+    `tests/test_deploy_chart.py` derives from the rendered chart.
 
     So the gauge sums the `max_size` of every pool this process actually holds, foreign ones
     included, and the checkpointer registers its pool instead of the metrics learning about it
