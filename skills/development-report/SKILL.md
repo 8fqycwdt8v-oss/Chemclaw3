@@ -40,7 +40,7 @@ decompose the request, what to write from the evidence, and — critically — w
 - Where a transferred expectation conflicts with a cited experiment, the experiment wins and the
   conflict is surfaced.
 
-## The draft is a proposal
+## The draft is a reading, not a verdict
 
 - The report is agent-authored and is recorded directly, readable at once: a process chemist
   validates it before it is relied upon. Write so every claim can be checked against its linked

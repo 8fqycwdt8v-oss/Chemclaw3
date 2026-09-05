@@ -26,8 +26,9 @@ merge — `CLAUDE.md` states it, and `tests/test_layering.py` enforces the parts
 
 Skills hold judgment; connectors hold capability (deterministic tools). Anything the agent
 generates enters the graph **directly**, labelled `created_by: agent`, and is corrected rather than
-pre-approved (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). What still waits for a human
-is a change to the agent's own behaviour — a skill — reviewed by an admin.
+pre-approved (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). What the agent cannot touch
+at all is its own behaviour: no path writes a `SKILL.md` (`agent/skill_backend.py`'s
+`SkillsReadOnlyRefusal`), so a skill changes only through a reviewed commit to `skills/` in git.
 
 ## The code: `src/chemclaw/`
 

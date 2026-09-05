@@ -3,9 +3,10 @@
 `api/events.py` has carried `JobStartedEvent` since F2 and the chat UI has rendered it since
 F2-T2, but nothing ever emitted one: a tool that launches a durable job returns a job id *into the
 model's context*, and the runner — which only sees the model's streamed updates — has no way to know
-a job started. The same is true of a PR-gate proposal: `propose_note` opens a branch and returns a
-reference to the model, so the chemist never learns their contribution landed (the "a human
-decides" line lived only in a git host's UI, disconnected from the conversation that produced it).
+a job started. The same is true of a note write: `record_knowledge_note` commits the note and
+returns a reference to the model, so without this the chemist never learns their contribution
+landed — the note is readable by everyone the instant it is written, and the conversation that
+produced it would be the last place to say so.
 
 The carrier is LangGraph's own custom stream (`get_stream_writer()`), which is what the rebuild
 bought here. It was a task-local contextvar buffer the runner drained after every streamed update,
@@ -18,7 +19,7 @@ and the three drains and the reset go with it.
 
 What did *not* change is why a side-channel exists at all: the information must stay out of the
 *model-facing* tool signature, so the model cannot fabricate "a job started" or "a note was
-proposed". A tool returns its job id to the model; it reports the launch to the chemist here.
+recorded". A tool returns its job id to the model; it reports the launch to the chemist here.
 
 **In `core/` rather than `agent/`, since the R2 layering move**: a few pydantic records and one
 publish call, with both ends outside the conversation layer — a connector job or a template step
@@ -31,7 +32,7 @@ transport.
 
 **One sink, not one per kind.** A second mechanism carrying job ids only (`job_events`, a
 Replit-only addition, D-091) was built independently and folded in here rather than kept beside
-this one: two sinks read separately leave the *relative order* of a launched job and a proposed
+this one: two sinks read separately leave the *relative order* of a launched job and a recorded
 note undefined, which is precisely what a transcript must get right. Its four caller-facing names
 survived the fold as aliases and were removed in D-149 — three had never had a caller, and the
 fourth discarded the `kind` this module's whole point is to carry.
@@ -62,8 +63,8 @@ class QuestionSignal(BaseModel):
     options: list[str]
 
 
-class ProposalSignal(BaseModel):
-    """A note a tool proposed through the PR-gate during this turn."""
+class NoteRecordedSignal(BaseModel):
+    """A note a tool wrote into the knowledge graph during this turn."""
 
     note_id: str
     reference: str
@@ -129,7 +130,7 @@ class ToolFailureSignal(BaseModel):
     reason: RefusalReason | None = None
 
 
-Signal = JobSignal | ProposalSignal | QuestionSignal | ToolFailureSignal
+Signal = JobSignal | NoteRecordedSignal | QuestionSignal | ToolFailureSignal
 
 
 # The key a signal rides under in the graph's custom stream. Namespaced because the channel is
@@ -202,9 +203,9 @@ def record_job_started(job_id: str, kind: str) -> None:
     _emit(JobSignal(job_id=job_id, kind=kind, plan_step=plan_step))
 
 
-def record_proposal(note_id: str, reference: str) -> None:
-    """Note that a note was proposed through the PR-gate. A no-op where nothing is streaming."""
-    _emit(ProposalSignal(note_id=note_id, reference=reference))
+def record_note_written(note_id: str, reference: str) -> None:
+    """Note that a note reached the graph. A no-op where nothing is streaming."""
+    _emit(NoteRecordedSignal(note_id=note_id, reference=reference))
 
 
 def record_question(question: str, options: list[str]) -> None:

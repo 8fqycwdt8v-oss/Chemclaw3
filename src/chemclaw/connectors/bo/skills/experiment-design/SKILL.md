@@ -123,13 +123,14 @@ was wrong.
   again about the same problem — with the run you just did added to `observations` — accumulates
   onto the same campaign instead of starting over. That id is how a chemist, or you in a later
   session, picks the thread back up.
-- If the user wants the batch recorded, draft it through `record_knowledge_note` with type
-  `experiment-proposal` so a human approves it via the PR-gate before it becomes plan-of-record.
+- If the user wants the batch recorded, write it through `record_knowledge_note` with type
+  `experiment-proposal`; it is readable at once, and a chemist decides whether it becomes
+  plan-of-record.
   Pass the returned `calc_refs` on that note: the descriptors that shaped the space came from real
   calculations, and citing them is what lets a stale one be traced to the experiments it
   suggested.
   That is the same type a reasoned proposal uses — the note body says which path produced it, and
-  a reviewer approving "run this next" should not have to learn two note kinds for one decision.
+  a chemist reading "run this next" should not have to learn two note kinds for one decision.
   `bo-candidate` is a different thing and is not yours to write: it is what a *durable* campaign
   (`start_optimization_campaign`) mints for itself when a round completes.
 
@@ -238,12 +239,12 @@ run next?" inline, from observations you already have.
 A fully automated loop that proposes, evaluates its own objective, and iterates over many rounds is
 `start_optimization_campaign` — reach for that only when the objective can be computed without a
 human in each round. It is durable and long-running, so it returns a job id immediately; poll it
-with `get_durable_job_status`. Its recommendation is always proposed as a PR-gated note, so a human
-reviews it; you do not decide whether the campaign is recorded.
+with `get_durable_job_status`. Its recommendation is always recorded as an agent note, readable at
+once; a human decides whether to run it, and you do not decide whether the campaign is recorded.
 
 State the campaign's `rationale` in the chemist's terms — the question this campaign should answer
 and what prompted it — not a restatement of the parameter ranges. It is stored with the run and
-printed on the note a reviewer signs, and it is what a session six months from now will read when
+printed on the note it records, and it is what a session six months from now will read when
 it asks `find_past_jobs` whether this optimization has already been done. Before starting a
 campaign, run that search: a near-identical campaign that already ran is evidence to build on
 (seed the new one with its observations), and only an *identical* one rejoins its result for free.

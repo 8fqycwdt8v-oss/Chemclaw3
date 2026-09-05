@@ -7,7 +7,7 @@ already rejected an analogy last week. The identity was available (`Principal.oi
 `session_owners` table); only the layer was missing.
 
 **Why not knowledge-graph notes.** A preference is personal, revisable, and of no interest to anyone
-else. Routing it through the PR-gate would ask a human to review "Anna prefers 2-MeTHF" — noise that
+else. Putting it in the graph would publish "Anna prefers 2-MeTHF" to everyone — noise that
 would erode the seriousness of the gate itself (D-005). The graph holds what the *organisation*
 knows; this holds how one *person* works. That separation is the whole design decision here.
 
@@ -156,8 +156,8 @@ async def remember_preference(key: str, value: str) -> str:
     substantive answer so advice fits how they actually work.
 
     Do **not** use this for chemistry knowledge: a distilled rule, a protocol, or a result belongs
-    in the knowledge graph via `record_knowledge_note`, where a human reviews it. This store is
-    personal and unreviewed, and putting shared knowledge here would route it around the PR-gate.
+    in the knowledge graph via `record_knowledge_note`, where everyone can read it. This store is
+    personal, and putting shared knowledge here would keep it from the people it is for.
 
     Args:
         key: Short stable name, e.g. "project", "preferred_solvent", "units".

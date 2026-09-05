@@ -120,12 +120,12 @@ untried substrate):
 
 - Build it from retrieved evidence and state the reasoning: which past runs and which
   transferable playbook it rests on, and where you are extrapolating.
-- Draft it as an agent note through `record_knowledge_note` — type `experiment-proposal`, the
-  kind for anything you are suggesting be *run* rather than reporting as done. It opens a **PR
-  for a human chemist to approve** — a proposal, never asserted as established fact until merged
-  (D-005). Cite the evidence notes with `[[wikilinks]]`.
+- Record it as an agent note through `record_knowledge_note` — type `experiment-proposal`, the
+  kind for anything you are suggesting be *run* rather than reporting as done. It lands in the
+  knowledge graph immediately, stamped `created_by: agent`, and a chemist decides whether to run
+  it. Cite the evidence notes with `[[wikilinks]]`.
 - Be explicit about the untested assumptions and the risks (safety, selectivity, scale) so the
-  reviewer can judge them.
+  chemist reading it can judge them.
 
 ## Keep integrations dumb, reason here
 

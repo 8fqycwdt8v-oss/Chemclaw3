@@ -4,8 +4,8 @@
 declaration table and written by nothing, so every scrape reported a flat `0`. That is worse than
 omitting them: the module's gauge path explicitly refuses to emit an unbound gauge because "a
 fabricated zero would be indistinguishable from a genuinely idle service", and these counters had
-exactly that failure with no such protection. A PR-gate rejecting every note looked identical to a
-quiet afternoon.
+exactly that failure with no such protection. A write path rejecting every note looked identical
+to a quiet afternoon.
 
 These tests read the registry value before and after, so they fail on the unfixed code. Asserting
 that some function *was called* would have passed against a counter nobody ever read.
@@ -20,11 +20,26 @@ from chemclaw.kg.record import NoteWrite, WriteOutcome, record_note
 
 
 class _Submitter:
-    """A submitter that succeeds, so the count reflects a note that reached the branch."""
+    """A writer that succeeds, so the count reflects a note that reached the graph."""
 
     async def write(self, write: NoteWrite) -> WriteOutcome:
         """Return a stable reference without touching git."""
         return WriteOutcome(reference=f"ref:{write.files[-1].path}")
+
+
+class _NoOpWriter:
+    """A writer that succeeds and changes nothing — the byte-identical re-write.
+
+    `GitNoteWriter` returns `written=False` when every file was already there with the same bytes,
+    and `WriteOutcome`'s own docstring makes that the point of the field: "the counter below means
+    'a note reached the graph', and incrementing it for a no-op would make it count attempts."
+    Nothing drove it. Every other fake here returns the default `written=True`, so `if
+    outcome.written:` -> `if True:` survived the whole record/knowledge set — 112 tests.
+    """
+
+    async def write(self, write: NoteWrite) -> WriteOutcome:
+        """Report the unchanged tree, the way the git writer reports it."""
+        return WriteOutcome(reference="main", written=False)
 
 
 class _FailingSubmitter:
@@ -45,19 +60,19 @@ def _agent_note(note_id: str) -> Note:
     )
 
 
-def test_a_proposed_note_moves_the_counter() -> None:
-    """The count rises by exactly one when a note reaches the branch."""
+def test_a_recorded_note_moves_the_counter() -> None:
+    """The count rises by exactly one when a note reaches the graph."""
     before = METRICS.value("chemclaw_notes_recorded_total")
     asyncio.run(record_note(_agent_note("rev19-ok"), _Submitter()))
     assert METRICS.value("chemclaw_notes_recorded_total") == before + 1
 
 
-def test_a_failed_submission_does_not_move_the_counter() -> None:
-    """A PR-gate that is failing every write must not report healthy.
+def test_a_failed_write_does_not_move_the_counter() -> None:
+    """A write path that is failing every note must not report healthy.
 
-    This is the whole point of the counter, and the reason it is incremented *after* the submitter
-    returns rather than before: counting the attempt would show a busy, working gate during exactly
-    the outage the metric exists to reveal.
+    This is the whole point of the counter, and the reason it is incremented *after* the writer
+    returns rather than before: counting the attempt would show a busy, working system during
+    exactly the outage the metric exists to reveal.
     """
     before = METRICS.value("chemclaw_notes_recorded_total")
     try:
@@ -67,8 +82,21 @@ def test_a_failed_submission_does_not_move_the_counter() -> None:
     assert METRICS.value("chemclaw_notes_recorded_total") == before
 
 
+def test_a_write_that_changed_nothing_does_not_move_the_counter() -> None:
+    """A no-op is not a note reaching the graph, and the counter must not say it was.
+
+    The distinction the field exists for: re-recording the same note byte-for-byte is a legitimate
+    and frequent outcome (a miner re-running over a corpus it has already read), and counting it
+    turns "notes recorded" into "writes attempted" — which `tool_usage` already answers.
+    """
+    before = METRICS.value("chemclaw_notes_recorded_total")
+    reference = asyncio.run(record_note(_agent_note("rev19-noop"), _NoOpWriter()))
+    assert reference == "main", "the caller still gets the writer's reference"
+    assert METRICS.value("chemclaw_notes_recorded_total") == before
+
+
 def test_a_rejected_human_note_does_not_move_the_counter() -> None:
-    """The gate refuses human-authored notes before submitting, so nothing is counted."""
+    """`record_note` refuses human-authored notes before writing, so nothing is counted."""
     human = _agent_note("rev19-human").model_copy(update={"created_by": "human"})
     before = METRICS.value("chemclaw_notes_recorded_total")
     try:

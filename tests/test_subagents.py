@@ -213,7 +213,7 @@ def test_the_set_of_tools_that_speak_to_the_chemist_is_derived_not_remembered() 
     """
     import ast
 
-    writers = {"record_question", "record_job_started", "record_proposal"}
+    writers = {"record_question", "record_job_started", "record_note_written"}
     registered = registered_tool_names()
     speakers: set[str] = set()
     for module in Path("src/chemclaw").rglob("*.py"):

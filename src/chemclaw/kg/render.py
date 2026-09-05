@@ -1,7 +1,8 @@
 r"""Render a Note back to Markdown-with-frontmatter (plan step 2.6).
 
 The inverse of `chemclaw.kg.note.parse_note`: turns a validated `Note` into the exact file
-form the graph stores, so the write path (PR-gate) and the read path share one serialization.
+form the graph stores, so the write path (`kg/record.py`) and the read path share one
+serialization.
 
 **Round-trips: `parse_note(write(render_note(n))) == n`, up to two normalisations of the body**,
 both measured by generating notes rather than assumed (`tests/test_properties_core.py`). The
@@ -18,9 +19,9 @@ whoever hit that looking for a schema bug. Every frontmatter field round-trips e
 
 **Empty-default fields are rendered, deliberately.** `render_note` dumps `exclude_none` but not
 `exclude_defaults`, so every note carries `calc_refs: []`, `tags: []`, `created_by: human` and so
-on. Byte-stability of the rendering is load-bearing: the PR-gate treats "renders byte-identically
-to the merged file" as "no diff, nothing to propose", so tightening the dump would make every
-re-proposal of every existing note a spurious diff. Changing the shape is a corpus migration, not
+on. Byte-stability of the rendering is load-bearing: the writer stages the rendered bytes and
+treats "nothing staged" as "no change, nothing to commit", so tightening the dump would make every
+re-write of every existing note a spurious commit. Changing the shape is a corpus migration, not
 a rendering tweak.
 """
 

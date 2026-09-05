@@ -9,7 +9,14 @@
 -- forward-only — a migration may not drop a table or a column
 -- (`tests/test_migrations_are_additive.py`) — and a deployment that ran the gate holds real
 -- sign-offs by real people, which `agent/leaver.py::_RETAINED` still has to find on an erasure
--- request. `durable/retention.py` no longer refuses it: there is no live record to protect.
+-- request.
+--
+-- **`durable/retention.py` still refuses it, and this comment said otherwise for one commit.** It
+-- read "no longer refuses it: there is no live record to protect", which is exactly backwards from
+-- the sentence above it: the rows a retired gate leaves behind are real decisions by real people,
+-- and a retention clock may not take what an erasure may not. `retention._NOT_PRUNED` names it and
+-- says so. Corrected rather than left, because a migration header is where somebody looks to find
+-- out whether a table is safe to sweep.
 --
 -- The statements below are unchanged; re-running this file on an existing database is a no-op.
 

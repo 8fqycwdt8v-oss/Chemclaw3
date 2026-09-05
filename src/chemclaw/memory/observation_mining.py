@@ -171,11 +171,17 @@ def mine_interactions(notes: list[Note], reactions: list[OrdReaction]) -> list[O
                     f"recorded only in {note.id}."
                 ),
                 scope=f"interaction:{note.id}",
-                # The interaction note *and* the reactions it cited: the interaction is what was
-                # observed, the reactions are what make it cross-project. The `in project_of`
-                # filter is what keeps this list to those two kinds — a citation of an
-                # agent-asserted note is dropped here rather than counted as corroboration.
-                evidence_note_ids=sorted({note.id, *(c for c in cited if c in project_of)}),
+                # **The reactions only — the interaction note names the observation but does not
+                # support it.** It used to be in this list, and that was the self-confirming loop
+                # one level up from the one migration `025` forbids: an `interaction` note is
+                # `created_by: agent`, built from arguments the model chose, and since
+                # `D-2026-09-05-the-gate-is-deleted-not-dormant` it reaches `load_notes` with no
+                # human step at all. Measured, it was the *decisive* unit: two real reactions from
+                # two projects give support 2 and do not promote, and the agent's own note made 3 —
+                # exactly `observation_promote_min_evidence` — so every cross-project interaction
+                # promoted itself on the strength of having been written down. The note is still
+                # named, in `scope` below, which is where a reader looks for what was observed.
+                evidence_note_ids=sorted(c for c in cited if c in project_of),
                 projects_seen=projects,
                 origin="interaction",
             )

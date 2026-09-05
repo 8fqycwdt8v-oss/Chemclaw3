@@ -222,7 +222,7 @@ async def record_job(record: JobRecord) -> None:
     replayed, and a replayed increment would count one expensive run several times — the arithmetic
     error a consumption counter must not make.
 
-    **And it is booked after the write, for exactly the reason `chemclaw_notes_proposed_total` is
+    **And it is booked after the write, for exactly the reason `chemclaw_notes_recorded_total` is
     (`kg/record.py`).** "An activity's side effects happen once per successful execution" is the
     guarantee this counter needs, and it is a guarantee only about the code that runs *after* the
     part which can fail: this activity runs under `BAD_DATA_RETRY`, so an increment at the top is

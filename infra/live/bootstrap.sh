@@ -43,7 +43,7 @@ readonly PGVECTOR_VERSION="${CHEMCLAW_LIVE_PGVECTOR_VERSION:-v0.8.6}"
 # rather than hard-coding the path also means a machine with two clusters uses the one whose
 # `pg_config` is first, which is the same one `pg_isready` and `psql` will talk to.
 readonly PGBIN="$(pg_config --bindir)"
-# Where the PR-gate writes. Never the working checkout — see `ensure_note_repo`.
+# Where the note writer commits. Never the working checkout — see `ensure_note_repo`.
 readonly NOTE_REPO_DIR="${CHEMCLAW_NOTE_REPO_DIR:-$LIVE_DIR/knowledge-repo}"
 # The role/password/database the default DSN in `core/config/store.py` already names, written
 # once. Every admin command below connects over TCP with this password rather than through the
@@ -118,16 +118,17 @@ ensure_note_repo() {
     log "note repo clone already present ($NOTE_REPO_DIR)"
     return
   fi
-  # A *dedicated* clone, because the PR-gate refuses anything else and is right to:
-  # `GitNoteSubmitter` creates `note/<id>` here and force-pushes it to this clone's origin, so
-  # pointing it at the working checkout would publish agent-authored notes into the source
-  # repository. `note_repo_dir` defaults to "." — the checkout — so a lane that does not set this
-  # starts workers whose every note submission is refused before a git command runs (G4).
+  # A *dedicated* clone, because `kg/git_writer.py` refuses anything else and is right to:
+  # a note write commits into this tree and pushes it to this clone's origin, so pointing it at the
+  # working checkout would commit into the running application's own source tree and publish
+  # agent-authored notes into the source repository. `note_repo_dir` defaults to "." — the
+  # checkout — so a lane that does not set this starts workers whose every note write is refused
+  # before a git command runs (G4).
   #
-  # That is not a small subset of the system: the PR-gate is the one path job results, reports and
-  # distilled playbooks all take (D-005), so without this the entire knowledge-contribution half
+  # That is not a small subset of the system: `kg/record.py` is the one path job results, reports
+  # and distilled playbooks all take, so without this the entire knowledge-contribution half
   # of a live run is unreachable. Found by running the ELN sync against a lane that lacked it.
-  log "cloning a dedicated knowledge repo for the PR-gate ($NOTE_REPO_DIR)"
+  log "cloning a dedicated knowledge repo for the note writer ($NOTE_REPO_DIR)"
   mkdir -p "$(dirname "$NOTE_REPO_DIR")"
   git clone --quiet "$REPO_ROOT" "$NOTE_REPO_DIR"
 }
@@ -277,7 +278,7 @@ case "${1:-up}" in
     # `CHEMCLAW_NOTE_REPO_DIR` unconditionally, so both paths need the clone. It used to sit in the
     # native list only — below a hand-off that by definition never returns — so on the branch this
     # file itself calls "the right way", the lane came up with no clone, `note_repo_dir` fell back
-    # to the working checkout, and the PR-gate refused every submission before running a git
+    # to the working checkout, and the writer refused every note before running a git
     # command. That is the whole knowledge-contribution half of a live run (D-005: job results,
     # reports and distilled playbooks all take the gate), silently missing on exactly the machines
     # most likely to run the lane.
