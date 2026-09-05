@@ -204,10 +204,10 @@ def test_a_model_that_cannot_be_built_degrades_the_columns_and_not_the_call(
     process that built clients with no bundle configured would otherwise hand this one its cached
     pair and the raise would never happen.
     """
-    from chemclaw.agent.llm_provider import _tls_http_clients
+    from tests.test_llm_provider import _reset_gateway_clients
 
     monkeypatch.setattr(settings, "llm_tls_ca_bundle", str(tmp_path / "absent-ca-bundle.crt"))
-    _tls_http_clients.cache_clear()
+    _reset_gateway_clients()
     try:
         result = _run(
             [
@@ -217,7 +217,7 @@ def test_a_model_that_cannot_be_built_degrades_the_columns_and_not_the_call(
             None,
         )
     finally:
-        _tls_http_clients.cache_clear()
+        _reset_gateway_clients()
 
     assert all(row.digest_source == "unreadable" for row in result.rows)
     assert result.complete is False, "nothing read these protocols, so this is not complete"

@@ -238,6 +238,27 @@ def test_an_endpoint_that_cannot_report_usage_can_be_told_so(
     assert _openai_compatible_model("m").stream_usage is False
 
 
+def _reset_gateway_clients() -> None:
+    """Close the process-scoped gateway clients, then drop them from the cache.
+
+    `_tls_http_clients` is `@cache`d and now holds a *pair*, so a bare `cache_clear()` orphans two
+    live connection pools instead of one — measured, that alone moved the suite's `ResourceWarning`
+    count by 8. Production never clears the cache (one pair per process is the point), so this is a
+    test concern only, and it is a helper rather than an autouse fixture because the tests that
+    clear are the tests that are *about* the cache: hiding the clear from them would hide what they
+    assert.
+    """
+    from chemclaw.agent.llm_provider import _tls_http_clients
+
+    if _tls_http_clients.cache_info().currsize:
+        sync_client, async_client = _tls_http_clients()
+        sync_client.close()
+        # The async client's pool is closed by its own `__del__`; `aclose()` needs a loop this
+        # helper is not running in, and forcing one here would bind the pool to a loop that ends.
+        del async_client
+    _tls_http_clients.cache_clear()
+
+
 def test_the_gateway_clients_are_built_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
     """A graph is compiled per turn, so an uncached client factory is a per-turn socket leak.
 
@@ -250,7 +271,7 @@ def test_the_gateway_clients_are_built_once_per_process(monkeypatch: pytest.Monk
 
     from chemclaw.agent.llm_provider import _tls_http_clients
 
-    _tls_http_clients.cache_clear()
+    _reset_gateway_clients()
     # A real PEM, because httpx loads the bundle when the client is constructed — a made-up path
     # would fail in `ssl` before reaching the property under test. Which trust store it is does not
     # matter here; that it is a store the client accepts does.
@@ -266,7 +287,7 @@ def test_the_gateway_clients_are_built_once_per_process(monkeypatch: pytest.Monk
             context = client._transport._pool._ssl_context
             assert context.get_ca_certs(), "the configured bundle produced an empty trust store"
     finally:
-        _tls_http_clients.cache_clear()
+        _reset_gateway_clients()
 
 
 def test_both_gateway_clients_exist_and_refuse_the_environment_with_no_bundle(
@@ -291,7 +312,7 @@ def test_both_gateway_clients_exist_and_refuse_the_environment_with_no_bundle(
     """
     from chemclaw.agent.llm_provider import _tls_http_clients
 
-    _tls_http_clients.cache_clear()
+    _reset_gateway_clients()
     monkeypatch.setattr(settings, "llm_tls_ca_bundle", "")
     try:
         sync_client, async_client = _tls_http_clients()
@@ -301,7 +322,7 @@ def test_both_gateway_clients_exist_and_refuse_the_environment_with_no_bundle(
             proxy_mounts = [key for key in client._mounts if key.pattern is not None]
             assert proxy_mounts == [], f"proxy mounts resolved from the environment: {proxy_mounts}"
     finally:
-        _tls_http_clients.cache_clear()
+        _reset_gateway_clients()
 
 
 def test_the_chat_model_is_handed_both_of_this_process_s_clients(
@@ -317,14 +338,14 @@ def test_the_chat_model_is_handed_both_of_this_process_s_clients(
     _openai_endpoint(monkeypatch)
     from chemclaw.agent.llm_provider import _tls_http_clients, build_chat_model
 
-    _tls_http_clients.cache_clear()
+    _reset_gateway_clients()
     try:
         model = build_chat_model()
         sync_client, async_client = _tls_http_clients()
         assert model.root_client._client is sync_client
         assert model.root_async_client._client is async_client
     finally:
-        _tls_http_clients.cache_clear()
+        _reset_gateway_clients()
 
 
 def _openai_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
