@@ -54,8 +54,22 @@ class JobRecord(BaseModel):
     job_id: str = Field(min_length=1)
     connector: str = Field(min_length=1)
     job: str = Field(min_length=1)
-    # Why this run was started, in the requester's terms. The one thing no other store holds.
-    rationale: str = Field(min_length=1)
+    # Why this run was started, in the requester's terms. The one thing no other store holds for a
+    # *connector* job, whose payload is a decision space or a geometry and says nothing about why.
+    #
+    # **Empty means "a declared procedure, launched by name", never that the field was forgotten**
+    # — the same reading `plan_step` and `session_id` already carry. A template run is the case: its
+    # `job` column names a `data/templates/<name>.yaml` whose own `summary` is a reviewed statement
+    # of what the procedure is for, so a rationale here would restate a fact another store holds
+    # while claiming to be the requester's words, which is the shape
+    # `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` is about.
+    #
+    # Relaxing this does **not** weaken the connector-job contract, because that contract was never
+    # enforced here: `connectors/jobs.py` refuses a blank rationale at the launcher, with a message
+    # written for the model, and says in its own comment that the check belongs there. This field
+    # was belt-and-braces over it. `tests/test_template_job_record.py` pins the launcher refusal so
+    # the guarantee is asserted where it actually lives.
+    rationale: str = ""
     requested_by: str = Field(min_length=1)
     session_id: str = ""
     correlation_id: str = ""
