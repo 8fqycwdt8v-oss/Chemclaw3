@@ -209,4 +209,4 @@ reader has when they ask why this protocol looks the way it does.
 - **Reading a series to see where it got to** — `experiment-progression`.
 - **Asserting something new about the world** — a protocol is a proposal to act, so it is a stored
   document rather than a knowledge note. If a *rule* comes out of it later, that is
-  `record_knowledge_note` through the PR-gate, citing the design.
+  `record_knowledge_note`, citing the design.

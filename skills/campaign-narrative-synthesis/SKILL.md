@@ -35,6 +35,7 @@ read and trust.
 
 ## The gate still applies
 
-- The campaign note is agent-authored and enters through the PR-gate (D-005). Write it so a
+- The campaign note is agent-authored and is readable the moment it is written, with nobody
+  reviewing it first (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). Write it so a
   reviewer can verify each claim against the linked reactions in one pass; that is the whole
   point of the citations.

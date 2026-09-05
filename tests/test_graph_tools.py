@@ -10,8 +10,8 @@ import chemclaw.agent.graph_tools as graph_tools
 from chemclaw.agent.graph_tools import (
     expand_note,
     find_notes,
-    record_knowledge_note,
     record_failure,
+    record_knowledge_note,
 )
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -207,7 +207,9 @@ def test_find_notes_declares_a_cut_in_the_value_the_model_reads(
     assert (len(whole.matches), whole.total_matches) == (4, 4)
 
 
-def test_record_knowledge_note_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_record_knowledge_note_writes_through_the_record_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The write tool proposes an agent note through the (fake) PR-gate."""
     fake = FakeWriter()
     monkeypatch.setattr(graph_tools, "default_writer", lambda: fake)
@@ -216,7 +218,7 @@ def test_record_knowledge_note_uses_gate(monkeypatch: pytest.MonkeyPatch) -> Non
             id="reaction-x", type="reaction", body="From [[compound-a]].", source="eln-1"
         )
     )
-    assert ref == "pr://note/reaction-x"
+    assert ref == "commit://1"
     assert fake.writes[0].files[0].path.endswith("reaction/reaction-x.md")
 
 
@@ -245,7 +247,7 @@ def _submitted(submission: NoteWrite, tmp_path: Path) -> dict[str, Note]:
     return parsed
 
 
-def test_record_failure_submits_a_refutation_conflict_detection_can_see(
+def test_record_failure_records_a_refutation_conflict_detection_can_see(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The loop that closes: a chemist's report becomes a note that flags the claim it refutes.
@@ -264,7 +266,7 @@ def test_record_failure_submits_a_refutation_conflict_detection_can_see(
         record_failure("playbook-pd", "Ran it four times at scale; the yield was half.")
     )
 
-    assert ref.startswith("pr://note/failure-")
+    assert ref.startswith("commit://")
     notes = _submitted(fake.writes[0], tmp_path)
     (failure,) = notes.values()
     assert failure.type == "failure-mode"
@@ -353,9 +355,7 @@ def test_record_failure_retires_a_claim_that_stopped_holding_in_the_same_submiss
     # on base — so the retirement was silently dropped on the real git path and the refuted claim
     # stayed served as current. `superseded` marks it overwrite=True. Asserted on the submission
     # because the FakeWriter never runs the skip, which is why this bug survived the old test.
-    retirement_file = next(
-        f for f in fake.writes[0].files if f.path.endswith("playbook-pd.md")
-    )
+    retirement_file = next(f for f in fake.writes[0].files if f.path.endswith("playbook-pd.md"))
     assert retirement_file.overwrite is True
 
 

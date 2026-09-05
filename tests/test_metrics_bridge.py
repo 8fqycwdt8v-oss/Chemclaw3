@@ -16,8 +16,7 @@ from types import SimpleNamespace
 
 from chemclaw.core.metrics import METRICS
 from chemclaw.kg.note import Note
-from chemclaw.kg.record import record_note
-from chemclaw.kg.record import NoteWrite, WriteOutcome
+from chemclaw.kg.record import NoteWrite, WriteOutcome, record_note
 
 
 class _Submitter:

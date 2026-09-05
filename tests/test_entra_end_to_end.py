@@ -488,7 +488,6 @@ def test_the_probes_stay_open_while_everything_else_is_closed() -> None:
         for path in (
             "/sessions",
             "/jobs",
-            "/proposals",
             "/profiles",
             "/schedules",
             "/plans/pending",

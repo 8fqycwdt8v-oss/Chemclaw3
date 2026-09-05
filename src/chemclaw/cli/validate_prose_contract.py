@@ -269,7 +269,16 @@ _METRIC_SELECTOR = re.compile(r"\b(chemclaw_[a-z0-9_]+)\{")
 # the same release valve `_NON_METRIC_NAMES` and `_NON_SETTINGS_ENV` already are. Empty today; an
 # entry is the deliberate act of retiring a series the record still quotes, and it must name a
 # metric no live document depends on, since rule 9 stops checking it everywhere.
-_RETIRED_METRIC_NAMES: frozenset[str] = frozenset()
+_RETIRED_METRIC_NAMES: frozenset[str] = frozenset(
+    {
+        # The PR-gate's by-state series, retired with the gate itself
+        # (`D-2026-09-05-the-gate-is-deleted-not-dormant`). `D-2026-07-31-a-proposal-is-a-record-
+        # not-a-branch` quotes it in selector form and is merged, so this is the remedy the comment
+        # above describes, taken for the first time. No live document depends on it: the runbook's
+        # alert went with the series in the same commit.
+        "chemclaw_note_proposals_total",
+    }
+)
 
 # `chemclaw_`-prefixed names in the operator corpus that are not metrics. One entry, and it is a
 # real namespace collision rather than an exception granted to a mistake: `chemclaw_app` is the

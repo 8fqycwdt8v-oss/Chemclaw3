@@ -5,7 +5,7 @@ description: >-
   impurities), any process detail or observation, or general protocol guidance — by
   composing every data source and tool, and how to draft new conditions/protocols grounded
   in that evidence. Cite everything, separate evidence from analogy, and route anything new
-  through the PR-gate.
+  into the knowledge graph.
 tools:
   - gather_evidence
   - find_notes

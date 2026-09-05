@@ -37,7 +37,9 @@ from chemclaw.agent.authz import AuthorizationError
 from chemclaw.connectors.manifest import JobSpec
 from chemclaw.connectors.registry import ConnectorError, enabled, find_job
 from chemclaw.core.config import _WRAPPER_FINISH_STEPS, settings
+from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
 from chemclaw.core.logging import ContextFilter
+from chemclaw.core.session_context import get_current_session_id
 from chemclaw.durable import template_activities
 from chemclaw.durable.connector_job import (
     _FINISH_STEPS,
@@ -53,8 +55,6 @@ from chemclaw.durable.template_activities import (
     _acting_as,
     authorize_job_step,
 )
-from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
-from chemclaw.core.session_context import get_current_session_id
 from chemclaw.durable.template_job import TemplateWorkflow
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "connectors"
@@ -95,7 +95,8 @@ def test_a_step_runs_under_the_correlation_id_its_run_was_launched_with() -> Non
     `StepIdentity.correlation_id` is `min_length=1` and its comment says it ties the run's audit
     events together; nothing stamped it, so every consumer of the *ambient* id saw none. The two
     asserted here are the ones that hurt: the three ambient getters, which `connectors/jobs.py`
-    reads for the id it hands a launched job, and `ContextFilter`, which puts the id on a log line — it writes `"-"` when there is
+    reads for the id it hands a launched job, and `ContextFilter`, which puts the id on a log
+    line — it writes `"-"` when there is
     none, which is why a paged engineer looking at a running durable job had nothing to grep back to
     the turn behind it. The audit trail is deliberately *not* asserted: `agent/audit.py` falls back
     to the id each step activity passes it explicitly, so its rows were right all along and would
@@ -117,7 +118,11 @@ def test_a_step_runs_under_the_correlation_id_its_run_was_launched_with() -> Non
         (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). The invariant this test holds is
         about the *stamp*, not about that wrapper.
         """
-        return (get_current_actor(), get_current_session_id(), get_current_correlation_id())
+        return (
+            get_current_actor() or "",
+            get_current_session_id() or "",
+            get_current_correlation_id() or "",
+        )
 
     def _stamped() -> str:
         """The correlation id `ContextFilter` puts on a *fresh* record right now.

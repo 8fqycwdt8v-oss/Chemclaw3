@@ -20,9 +20,8 @@ from chemclaw.ingest.eln.compound import compound_dependencies, compound_note
 from chemclaw.kg.crosslink import calc_ref_index, cited_calculations, notes_for_calculation
 from chemclaw.kg.graph import invalidate_cache
 from chemclaw.kg.note import Note
-from chemclaw.kg.record import record_note
+from chemclaw.kg.record import NoteWrite, WriteOutcome, record_note
 from chemclaw.kg.render import render_note
-from chemclaw.kg.record import NoteWrite, WriteOutcome
 from chemclaw.kg.validate import validate
 
 _KEY = "xtb.hess@GFN2-xTB+tblite+0.4.0:ab12cd:34ef56"

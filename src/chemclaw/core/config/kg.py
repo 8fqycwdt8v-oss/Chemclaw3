@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -55,14 +55,6 @@ class KgSettings(BaseSettings):
     # remote, credential prompt) is killed after this, so it can never deadlock the process-wide
     # submit lock; the failed activity then retries.
     git_command_timeout_seconds: float = Field(default=60.0, gt=0)
-    # The shared secret a git host signs its post-merge webhook with (HMAC-SHA256 over the raw
-    # body, sent as `X-Chemclaw-Signature: sha256=<hex>`). Empty means unsigned, which is what
-    # `/events/knowledge-merged` accepted from any authenticated principal before it could close a
-    # proposal — tolerable while it only kicked an idempotent reindex, not once it records a
-    # decision. Set it in any deployment where the webhook may move a proposal to `merged`.
-    # A `SecretStr`, for the reason `D-2026-08-26-a-credential-is-a-type-not-a-convention`
-    # states: read it with `.get_secret_value()`, and never through an f-string.
-    note_webhook_secret: SecretStr = SecretStr("")
 
     @property
     def knowledge_path(self) -> Path:

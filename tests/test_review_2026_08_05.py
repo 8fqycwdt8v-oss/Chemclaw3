@@ -32,8 +32,7 @@ from chemclaw.connectors import jobs as jobs_module
 from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import failure_reason
 from chemclaw.kg.note import Note
-from chemclaw.kg.record import record_note
-from chemclaw.kg.record import WriteOutcome
+from chemclaw.kg.record import WriteOutcome, record_note
 from tests.fakes import fed
 from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 

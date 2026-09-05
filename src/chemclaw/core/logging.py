@@ -657,7 +657,6 @@ _SECRET_SETTINGS = (
     "postgres_dsn",
     "postgres_migration_dsn",
     "session_store_dsn",
-    "note_webhook_secret",
     # Not a credential to an external system, which is why it was missed — but it is the HMAC key
     # `agent/framing.py` derives `ENVELOPE_TAG` from, and the agent instructions say only an
     # envelope carrying exactly that tag marks retrieved content as data. Anyone who learns it and

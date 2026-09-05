@@ -215,7 +215,9 @@ def test_a_write_busts_a_readers_cache_because_it_does_touch_their_tree(
                 files=[
                     NoteFile(
                         path="knowledge/job-result/job-xyz.md",
-                        content="---\nid: job-xyz\ntype: job-result\ncreated_by: agent\n---\nbody\n",
+                        content=(
+                            "---\nid: job-xyz\ntype: job-result\ncreated_by: agent\n---\nbody\n"
+                        ),
                     )
                 ],
                 message="Add job-result note: job-xyz",

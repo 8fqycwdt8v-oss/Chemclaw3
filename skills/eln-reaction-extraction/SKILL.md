@@ -9,7 +9,7 @@ description: >-
 # ELN reaction extraction
 
 Holds the *judgment* for the ELN ingestion capability (`eln.json_adapter` maps entries,
-`eln.validate` checks them, `eln.ingest` indexes + PR-gates them). The adapter and validator
+`eln.validate` checks them, `eln.ingest` indexes them). The adapter and validator
 are deterministic code; this skill governs the one place discretion is needed — recovering
 reaction *conditions and structures from free text* — and the discipline that keeps bad data
 out of the graph.
@@ -50,6 +50,7 @@ out of the graph.
 - Every mapped reaction goes through ELN validation (RDKit parse + atom/mass balance) **before**
   it is indexed or proposed. A reaction whose product contains an element the inputs never
   supply is wrong — reject it and record why; do not "fix" it silently.
-- Ingestion is a proposal, not a fact: the reaction note enters through the PR-gate for human
-  sign-off (D-005), and the fingerprint index is a derived serving copy. Keep provenance
-  (`eln:<operator>`) on every record so a reviewer can trace it back to the source entry.
+- A transcription is data rather than a claim (D-2026-08-25): the entry becomes a row in
+  `reaction_records`, readable the moment it is ingested, and the fingerprint index is a derived
+  serving copy. Keep provenance (`eln:<operator>`) on every record so a reader can trace it back
+  to the source entry.

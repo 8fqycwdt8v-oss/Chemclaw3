@@ -1,7 +1,7 @@
 # `chemclaw.memory` — what past work taught us
 
 **Responsibility:** the memory layers over completed work, built entirely from pieces that already
-existed — fingerprint-keyed structural identity, the canonical reaction schema, and the PR-gate. No
+existed — fingerprint-keyed structural identity, the canonical reaction schema, and the one note-write path. No
 new infrastructure, by design.
 
 - **Episodic** — `campaign.py` and `chains.py` chain experiments where one reaction's product is

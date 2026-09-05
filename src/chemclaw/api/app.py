@@ -481,7 +481,7 @@ def create_app(
         results,
         plan,
         pending,
-            notes,
+        notes,
         jobs,
         protocols,
     ):

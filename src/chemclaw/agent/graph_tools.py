@@ -2,7 +2,8 @@
 
 Read tools (`find_notes`, `expand_note`) let the agent retrieve by graph traversal
 — the capability behind the `knowledge-graph-query` skill. The write tools route an
-agent-authored note through the PR-gate for human review (D-005), never straight to the graph:
+agent-authored note straight into the graph, labelled with its provenance
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`):
 `record_knowledge_note` for new knowledge, `record_failure` for the case that had no path at all
 — knowledge the graph already holds turning out to be wrong. Graph building is file I/O, so
 it runs off the event loop.
@@ -413,9 +414,7 @@ async def record_knowledge_note(
     # A compound note the agent linked is written first (STO-7, and `record._build_write` says why
     # the order is load-bearing now that a reader can see a half-written unit), so the agent can
     # cite the molecule it is writing about without first checking whether that note exists.
-    reference = await record_note(
-        note, default_writer(), dependencies=compound_dependencies(note)
-    )
+    reference = await record_note(note, default_writer(), dependencies=compound_dependencies(note))
     # Surface what landed on the turn's stream (gap RCH-4) — see `core.turn_signals`.
     record_proposal(note.id, reference)
     return reference

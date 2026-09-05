@@ -168,7 +168,7 @@ second resolution — every reader goes through that property — so the chart p
 graph to exactly that path (`chemclaw.knowledgePublishPath` = `knowledge.noteRepoPath` +
 `CHEMCLAW_KNOWLEDGE_DIR`) and the PR-gate submitter branches from the clone around it. Two
 containers therefore write one tree, and the sync takes the submitter's own advisory lock — the
-`flock` under the checkout's git directory that `src/chemclaw/kg/git_submitter.py` already uses to
+`flock` under the checkout's git directory that `src/chemclaw/kg/git_writer.py` already uses to
 exclude a second process — for the duration of each publish. A held lock means a submission is in
 flight, and the publish waits for the next tick.
 

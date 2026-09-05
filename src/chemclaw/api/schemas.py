@@ -403,4 +403,3 @@ def _truncate_for_transcript(value: object) -> str:
     """Render a tool argument or result as one bounded string (see `_TRANSCRIPT_ARG_CHARS`)."""
     text = value if isinstance(value, str) else repr(value)
     return text if len(text) <= _TRANSCRIPT_ARG_CHARS else text[:_TRANSCRIPT_ARG_CHARS] + "…"
-

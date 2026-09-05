@@ -89,9 +89,7 @@ def test_write_tools_are_gated_by_default(monkeypatch: pytest.MonkeyPatch) -> No
 
     denied = set_current_identity("u-6", frozenset({"reader"}))
     try:
-        with pytest.raises(
-            AuthorizationError, match="not authorized to use record_knowledge_note"
-        ):
+        with pytest.raises(AuthorizationError, match="not authorized to use record_knowledge_note"):
             authorize_tool("record_knowledge_note")
         with pytest.raises(AuthorizationError):
             authorize_tool("record_confirmed_answer")

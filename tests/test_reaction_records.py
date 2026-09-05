@@ -103,9 +103,7 @@ def test_ingesting_a_reaction_opens_no_pull_request(monkeypatch: pytest.MonkeyPa
     edit re-introducing the gate fails here instead of quietly costing a reviewer 202 ms of
     serialized git per ELN entry and a human merge per experiment.
     """
-    monkeypatch.setattr(
-        "chemclaw.kg.git_writer.default_writer", lambda: _ExplodingSubmitter()
-    )
+    monkeypatch.setattr("chemclaw.kg.git_writer.default_writer", lambda: _ExplodingSubmitter())
 
     async def _run() -> ReactionRecord:
         rxn, mol, rec = (

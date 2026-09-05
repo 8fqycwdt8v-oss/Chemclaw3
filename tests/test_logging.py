@@ -455,7 +455,7 @@ def test_a_short_or_empty_secret_is_not_matched(monkeypatch: pytest.MonkeyPatch)
     and a substring search for the empty string matches everywhere.
     """
     monkeypatch.setattr("chemclaw.core.config.settings.llm_api_key", SecretStr(""))
-    monkeypatch.setattr("chemclaw.core.config.settings.note_webhook_secret", SecretStr("abc"))
+    monkeypatch.setattr("chemclaw.core.config.settings.live_probe_token", SecretStr("abc"))
     assert _rendered(_record("abc is a fine thing to log")) == "abc is a fine thing to log"
 
 

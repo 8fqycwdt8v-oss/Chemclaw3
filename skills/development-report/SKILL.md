@@ -42,6 +42,6 @@ decompose the request, what to write from the evidence, and — critically — w
 
 ## The draft is a proposal
 
-- The report is agent-authored and enters through the PR-gate (5b.7, D-005): a process chemist
+- The report is agent-authored and is recorded directly, readable at once: a process chemist
   validates it before it is relied upon. Write so every claim can be checked against its linked
   source in one pass — that traceability is the whole point.

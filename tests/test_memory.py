@@ -427,10 +427,7 @@ def test_playbook_distillation_proposes_evidence_backed_notes() -> None:
     refs = asyncio.run(_build_and_propose(build_playbook_notes([ester_x, ester_y]), sub))
     assert len(refs) == 1
     assert sub.writes[0].files[0].path.startswith("knowledge/playbook/playbook-")
-    assert (
-        "proj-x" in sub.writes[0].files[0].content
-        and "proj-y" in sub.writes[0].files[0].content
-    )
+    assert "proj-x" in sub.writes[0].files[0].content and "proj-y" in sub.writes[0].files[0].content
 
 
 def test_every_built_campaign_note_reaches_the_pr_gate() -> None:
