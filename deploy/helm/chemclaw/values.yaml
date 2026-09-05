@@ -521,10 +521,12 @@ postgres:
   # database gives every pooled process one more `core/db` pool — a front door holds four where it
   # held three, because its `/readyz` key and its checkpointer both resolve
   # `session_store_dsn or postgres_dsn` and move there while the stores' session key is new. On the
-  # shipped topology that is 320 connections against the 256 above — a release breaching its own
+  # shipped topology that is 278 connections against the 256 above — a release breaching its own
   # declared ceiling with the startup check passing, which is the `mcpFace` defect `_helpers.tpl`
-  # records, a second time. Split across the two servers it is 112 here and 208 there, so neither
-  # is over on its own and summing them into one ceiling would refuse a legal deployment.
+  # records, a second time. Split across the two servers it is 112 here and 166 there, so neither
+  # is over on its own and summing them into one ceiling would refuse a legal deployment. (320 and
+  # 208 were the uniform-width arithmetic the same commit replaced, which charged every readiness
+  # pool `CHEMCLAW_PG_POOL_MAX_SIZE` where each asks for one connection.)
   #
   # 0 = undeclared, matching `maxConnections`. A release with no split leaves it at 0 and nothing
   # about it applies; setting it *without* a split is refused, because a ceiling for a server that

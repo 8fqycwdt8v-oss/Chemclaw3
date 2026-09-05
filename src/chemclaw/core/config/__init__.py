@@ -215,7 +215,7 @@ def _dial_is_offline(host: str) -> bool:
     return all(part.strip().startswith(("/", "@")) for part in host.split(","))
 
 
-def _pg_endpoint(dsn: str) -> tuple[str, str] | None:
+def pg_endpoint(dsn: str) -> tuple[str, str] | None:
     """The `(host, port)` libpq will dial, or `None` when the string is not parseable.
 
     `hostaddr or host` for the reason `_pg_dial` already measures: libpq *connects* to `hostaddr`
@@ -223,6 +223,29 @@ def _pg_endpoint(dsn: str) -> tuple[str, str] | None:
     server. `None` on an unparseable DSN so the caller can take the strict branch — two DSNs it
     cannot compare are treated as one server, which sums their pools against one ceiling rather
     than checking each against a ceiling that may not exist.
+
+    **This compares strings, so one server spelled two ways reads as two, and that is a known
+    property rather than an accident** — `tests/test_config.py` pins it with the number. Measured,
+    nine plausible spellings of one endpoint split here: an omitted port against `5432`, an
+    uppercased host, a trailing-dot FQDN, a Kubernetes short name against its `svc.cluster.local`
+    form, `localhost`/`127.0.0.1`/`::1`, a socket directory against a TCP host, and a multi-host
+    list. On the shipped chart the consequence is that a split whose two DSNs name one box is
+    charged 112 to a ceiling of 256 and 166 to a server that does not exist, where the *identical*
+    deployment spelled consistently is refused at 278. The direction is exhaustion.
+
+    **It is not normalised and it is not measured, and both refusals are on the record.**
+    Normalising the loopback aliases covers two of those nine and none of the three a cluster
+    actually produces, which is `require_pg_tls`'s own "a second spelling is a second answer" error
+    — a second implementation of libpq's precedence rules, where an omitted port is `PGPORT` before
+    it is 5432. Asking the server (`SELECT system_identifier FROM pg_control_system()`, 0.24 ms and
+    readable by an unprivileged role) answers it exactly, and cannot answer it *here*: `settings =
+    Settings()` runs at module import with no event loop and no pool, and a validator that dialled
+    would make every unit test and every `make *-validate` a network call and every database outage
+    a configuration error in every process. `inet_server_addr()` is not even the right probe —
+    measured, one server answered `NULL` over a socket, `127.0.0.1` over loopback and `172.18.0.2`
+    over the bridge, which is the DSN's own spelling laundered through the kernel. The runtime half
+    is where a measurement could live, and `core/db._session_store_max_connections` deliberately
+    reuses *this* comparison so the two halves cannot disagree about how many servers there are.
 
     Imported lazily for the reason `_pg_dial` gives: `chemclaw.core.config` is imported by the
     datasource manifests' offline validation, which may not have psycopg installed.
@@ -375,7 +398,7 @@ class Settings(
         if not self.session_store_dsn or self.session_store_dsn == self.postgres_dsn:
             return one_dsn, 0
         primary = (self.pg_fleet_pools - 2 * readiness) * self.pg_pool_max_size
-        here, there = _pg_endpoint(self.postgres_dsn), _pg_endpoint(self.session_store_dsn)
+        here, there = pg_endpoint(self.postgres_dsn), pg_endpoint(self.session_store_dsn)
         if here is None or there is None or here == there:
             return primary + one_dsn, 0
         return primary, one_dsn
@@ -720,7 +743,10 @@ class Settings(
         The condition, measured rather than reasoned: with the session layer on a second database
         every pooled process opens one more `core/db` pool, and the front door's `/readyz` and
         checkpointer pools move there, so the shipped chart's 26 declared pools are really 40 and
-        208 of its 320 connections land on a server `pg_fleet_max_connections` was never about.
+        166 of its 278 connections land on a server `pg_fleet_max_connections` was never about.
+        (208 of 320 was the uniform-width arithmetic this same commit replaced — the readiness
+        pools are one connection wide, and `fleet_connections_per_server` and the warning below
+        have said 166 since.)
         `fleet_connections_per_server` now charges each side its own, which leaves exactly one
         thing no pod can derive: what that second server will serve.
 
@@ -738,14 +764,19 @@ class Settings(
         _, session_connections = self.fleet_connections_per_server()
         if session_connections and not self.pg_session_fleet_max_connections:
             logging.getLogger(__name__).warning(
-                "CHEMCLAW_SESSION_STORE_DSN points the session layer at a different server and "
-                "CHEMCLAW_PG_SESSION_FLEET_MAX_CONNECTIONS is undeclared: %d connection(s) land "
-                "there and nothing checks them. The split also adds one pool to every pooled "
-                "process — a front door holds four, not three — which CHEMCLAW_PG_FLEET_POOLS "
-                "cannot show, because the DSN arrives in a Secret the chart never reads. Declare "
-                "the second server's ceiling (Helm: postgres.sessionStoreMaxConnections) so the "
-                "startup check covers both, or point both DSNs at one endpoint and be checked "
-                "once.",
+                "CHEMCLAW_SESSION_STORE_DSN names a different (host, port) from "
+                "CHEMCLAW_POSTGRES_DSN and CHEMCLAW_PG_SESSION_FLEET_MAX_CONNECTIONS is "
+                "undeclared: %d connection(s) are charged there and nothing checks them. The "
+                "split also adds one pool to every pooled process — a front door holds four, not "
+                "three — which CHEMCLAW_PG_FLEET_POOLS cannot show, because the DSN arrives in a "
+                "Secret the chart never reads. **First check that these really are two servers**: "
+                "this compares the two DSN strings, so one box spelled two ways (a short name "
+                "against its FQDN, an omitted port, localhost against 127.0.0.1) reads as two "
+                "here — and declaring a ceiling for the second one would then hide the real "
+                "total from the startup check *and* from "
+                "ChemclawFleetAboveItsConnectionCeiling. If it is one server, spell both DSNs the "
+                "same way and be checked once. If it is genuinely two, declare the second "
+                "server's ceiling (Helm: postgres.sessionStoreMaxConnections).",
                 session_connections,
             )
         return self

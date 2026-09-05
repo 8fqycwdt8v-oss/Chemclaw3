@@ -1291,15 +1291,26 @@ def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do(
     """
     rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
     assert "ChemclawFleetAboveItsConnectionCeiling" in rules
-    assert "sum(chemclaw_pg_pool_max_size) >" in rules
-    # Both ceilings, because `chemclaw_pg_pool_max_size` sums a process's pools across every DSN it
-    # holds and carries no label to tell a split session store's apart. The second gauge is 0
-    # without a split, and a ceiling declared without one is refused at startup, so the sum can
-    # never be two ceilings over a single server.
+    # Each server against its own ceiling, and *not* a sum against a sum: enumerated over 200,000
+    # random draws, `sum(pools) > primary + session` never fired with both servers inside their
+    # ceilings and stayed silent in 49,993 where one was over — it can only miss. It also paged a
+    # healthy split whose second ceiling was undeclared, pointing remediation at the wrong server.
+    # The primary's side is the total minus the split store's; with no split the subtrahend is 0 in
+    # every pod and both branches are exactly the comparison this shipped with.
+    assert (
+        "sum(chemclaw_pg_pool_max_size) - sum(chemclaw_pg_session_pool_max_size)" in rules
+        and "> max(chemclaw_pg_fleet_max_connections)" in rules
+    )
+    assert (
+        "sum(chemclaw_pg_session_pool_max_size)" in rules
+        and "> max(chemclaw_pg_session_fleet_max_connections)" in rules
+    )
+    # Self-disabling on the second ceiling too, or a split with none declared alerts forever.
+    assert "max(chemclaw_pg_session_fleet_max_connections) > 0" in rules
     assert (
         "max(chemclaw_pg_fleet_max_connections) + max(chemclaw_pg_session_fleet_max_connections)"
-        in rules
-    )
+        not in rules
+    ), "the summed comparison is back; it can only miss (see this test's docstring)"
     # Self-disabling, or every deployment that declares no ceiling alerts forever.
     assert "max(chemclaw_pg_fleet_max_connections) > 0" in rules
     assert "ChemclawPgPoolSaturated" in rules
@@ -1314,6 +1325,7 @@ def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do(
     rendered = METRICS.render()
     for gauge in (
         "chemclaw_pg_pool_max_size",
+        "chemclaw_pg_session_pool_max_size",
         "chemclaw_pg_fleet_max_connections",
         "chemclaw_pg_session_fleet_max_connections",
     ):

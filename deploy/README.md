@@ -391,7 +391,8 @@ configuration stays valid. Each alert therefore compares a *live* left-hand side
 declared ceiling and is self-disabling when none is declared:
 `ChemclawFleetAboveItsTurnCeiling` (`sum(chemclaw_turn_capacity)` against
 `chemclaw_fleet_turn_ceiling`), `ChemclawFleetAboveItsConnectionCeiling`
-(`sum(chemclaw_pg_pool_max_size)` against `chemclaw_pg_fleet_max_connections`), and
+(`sum(chemclaw_pg_pool_max_size)` against `chemclaw_pg_fleet_max_connections`, **each server
+separately** — see below), and
 `ChemclawCalcBackendOverCommitted` (`sum(chemclaw_calc_requests_in_flight)` against
 `chemclaw_calc_backend_max_concurrent_requests`).
 
@@ -421,6 +422,18 @@ against; `postgres.maxConnections` bounds `postgres_dsn`'s and `postgres.session
 bounds the split store's. Undeclared while the split is real warns at startup and names the
 connections nobody is checking; declared with no split is refused, because a ceiling for a server
 that does not exist is one the alert would add to the real one.
+
+**The alert checks each server, and it is two comparisons rather than one sum for a reason worth
+knowing.** `sum(pools) > primaryCeiling + sessionCeiling` looks conservative and is the opposite:
+if each server is inside its own ceiling the sum cannot exceed the sum, so it never false-positives
+— and `p₁ > A` with `p₁ + p₂ ≤ A + B` is satisfiable, so it goes silent while one server is over.
+Enumerated over 200,000 random draws: 0 false positives, 25% misses. On this chart's topology with
+the session server declared at 180 it is over from seven front-door replicas and the sum waits
+until thirteen. The same expression also paged a *healthy* split whose second ceiling was
+undeclared — the whole fleet's 278 against `256 + 0` — while the primary sat at 44%.
+`chemclaw_pg_session_pool_max_size` is the part of the live left-hand side that lands on the split
+store, so the primary's side is the difference; with no split it is 0 in every pod and both
+branches are the original comparison.
 
 The last of those reads *held sessions* rather than a configured capacity, and the difference is
 forced rather than stylistic: two kinds of process dispatch to the calculation backend and they do

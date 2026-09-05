@@ -982,10 +982,28 @@ _GAUGES: dict[str, str] = {
     ),
     # The second half of that pair, because one number describes one server: a deployment that
     # points `session_store_dsn` at another server puts a front door's `/readyz` and checkpointer
-    # pools there, and `chemclaw_pg_pool_max_size` carries no DSN label to tell them apart. 0 when
-    # there is no split, which leaves the alert's comparison exactly what it was.
+    # pools there. 0 when there is no split, which leaves the alert's comparison exactly what it
+    # was.
     "chemclaw_pg_session_fleet_max_connections": (
         "Declared ceiling on Postgres connections at a split session store (0 = none)."
+    ),
+    # And the left-hand side that ceiling needs, because a sum against a sum is not two checks.
+    # `sum(pools) > primary_ceiling + session_ceiling` can only *miss*: enumerated over 200,000
+    # random (pools, ceilings) draws it produced 0 firings with neither server over and 49,993
+    # silences with one of them over. Measured on the shipped topology with the session server
+    # declared at 180, it sits at 183 (over its own ceiling) from 7 front-door replicas and the
+    # summed comparison stays silent until 13, by which point it is at **1.58x**. Splitting the
+    # left-hand side rather than labelling `chemclaw_pg_pool_max_size` keeps that gauge a pure
+    # configuration reading: a label carrying a *measured* server identity is unknown until a pool
+    # fills, so the ceiling alert would go silent during exactly the database outage it exists for.
+    #
+    # Which pools land here is the same `pg_endpoint` comparison `fleet_connections_per_server`
+    # makes, read from `core/config` rather than restated — so the startup half and the runtime
+    # half cannot disagree, and the two spellings of one server that config reads as two servers
+    # this reads as two as well. That limit is `pg_endpoint`'s and is pinned there.
+    "chemclaw_pg_session_pool_max_size": (
+        "This process's maximum pooled connections that land on a split session store's own "
+        "server (0 = no split)."
     ),
     # The calculation backend's admission budget (D-2026-08-27-a-per-worker-cap-is-not-a-backend-
     # ceiling), the third pair of this shape. Unlike the two above, the left-hand side is *live*

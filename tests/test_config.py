@@ -1502,33 +1502,37 @@ def test_the_warning_reaches_stderr_with_no_logging_configured(tmp_path: Path) -
     assert done.stdout == ""
 
 
+def _shipped(session_store_dsn: str = "") -> Settings:
+    """The chart's rendered fleet numbers, with the session layer wherever the caller says.
+
+    Module level because two tests below stand on the same rendered topology: one asserting how a
+    real split is charged, one pinning what a *spelling* of one server costs.
+    """
+    return Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        pg_fleet_pools=26,
+        pg_pool_max_size=8,
+        service_fleet_replicas=6,
+        postgres_dsn="postgresql://u:p@primary:5432/chemclaw",
+        session_store_dsn=session_store_dsn,
+    )
+
+
 def test_a_split_session_store_charges_each_server_its_own_pools() -> None:
     """One `pg_fleet_max_connections` describes one server, and a split makes two.
 
     Measured on the real composition roots (`tests/test_fleet_pools.py`), pointing the session
     layer at a second database gives every pooled process one more `core/db` pool: the front door's
     `/readyz` and checkpointer pools move there and the stores' session pool is new. On the shipped
-    chart's numbers that is 320 connections against a declared 256 — and the check passed, because
+    chart's numbers that is 278 connections against a declared 256 — and the check passed, because
     it multiplied a pool count the chart derives on the one-DSN assumption from a Secret it cannot
     read.
 
-    Split correctly it is 112 on `postgres_dsn`'s server and 208 on the session store's, so neither
+    Split correctly it is 112 on `postgres_dsn`'s server and 166 on the session store's, so neither
     is over on its own: summing them into the single ceiling would refuse a deployment that is
     fine. That is why this is two numbers rather than one, and why the second is declared rather
     than derived — the pool count is decidable here, what a second server will serve is not.
     """
-
-    def _shipped(session_store_dsn: str = "") -> Settings:
-        """The chart's rendered fleet numbers, with the session layer wherever the caller says."""
-        return Settings(  # type: ignore[call-arg]
-            _env_file=None,
-            pg_fleet_pools=26,
-            pg_pool_max_size=8,
-            service_fleet_replicas=6,
-            postgres_dsn="postgresql://u:p@primary:5432/chemclaw",
-            session_store_dsn=session_store_dsn,
-        )
-
     assert _shipped().fleet_connections_per_server() == (166, 0)
     assert _shipped("postgresql://u:p@sessions:5432/sessions").fleet_connections_per_server() == (
         112,
@@ -1537,11 +1541,51 @@ def test_a_split_session_store_charges_each_server_its_own_pools() -> None:
 
     # Two DSNs, one endpoint: a site that split *databases* rather than servers has one server and
     # one ceiling, so the pools are summed onto it rather than checked against a ceiling that does
-    # not exist. libpq's own view of the address, so `host` spellings do not decide it.
+    # not exist. libpq's own view of the *dialled* address, so `hostaddr` beats `host` — but it is
+    # a string comparison, so it is one endpoint only when both DSNs spell it the same way. See
+    # `test_one_server_spelled_two_ways_is_charged_as_two` for what that costs.
     assert _shipped("postgresql://u:p@primary:5432/sessions").fleet_connections_per_server() == (
         278,
         0,
     )
+    assert _shipped(
+        "postgresql://u:p@primary:5432/sessions?hostaddr=10.0.0.5"
+    ).fleet_connections_per_server() == (112, 166)
+
+
+def test_one_server_spelled_two_ways_is_charged_as_two() -> None:
+    """`pg_endpoint` compares strings, so a spelling decides how many ceilings exist.
+
+    Pinned rather than fixed, and pinned with the number so it is a known property instead of an
+    accident. The two DSNs below are one physical server. Spelled identically it is refused — 278
+    against a declared 256, which is the assertion above. Spelled differently the primary is
+    charged 112, the remaining 166 is charged to a server that does not exist, and the deployment
+    starts: the direction is exhaustion, of exactly the 22 connections the identical spelling
+    refuses.
+
+    Not normalised, because the loopback aliases are two of nine measured spellings of one endpoint
+    and none of the three a Kubernetes deployment produces (short name against FQDN, omitted port,
+    case) — and resolving them means reimplementing libpq's precedence, which `require_pg_tls`
+    already refused to do for the same reason. Not measured either: `Settings()` is constructed at
+    module import with no loop and no pool, so nothing here can ask a server who it is. What
+    carries the risk instead is the warning this configuration raises, which now says to check the
+    spelling *before* declaring a second ceiling — because declaring one is what silences the
+    runtime alert as well.
+    """
+    same_box = {
+        "one_spelling": "postgresql://u:p@primary:5432/sessions",
+        "short_vs_fqdn": "postgresql://u:p@primary.ns.svc.cluster.local:5432/sessions",
+        "omitted_port": "postgresql://u:p@primary/sessions",
+        "uppercase_host": "postgresql://u:p@PRIMARY:5432/sessions",
+        "trailing_dot_fqdn": "postgresql://u:p@primary.:5432/sessions",
+    }
+    assert _shipped(same_box["one_spelling"]).fleet_connections_per_server() == (278, 0)
+    for name, dsn in list(same_box.items())[1:]:
+        primary, elsewhere = _shipped(dsn).fleet_connections_per_server()
+        assert (primary, elsewhere) == (112, 166), (
+            f"{name}: one server spelled two ways is charged ({primary}, {elsewhere}); the "
+            "identical deployment spelled once is charged (278, 0) and refused against 256"
+        )
 
 
 def test_a_hand_set_pool_count_that_cannot_hold_its_readiness_pools_is_charged_in_full() -> None:
@@ -1582,8 +1626,13 @@ def test_a_split_session_store_with_no_ceiling_for_its_server_warns(
             session_store_dsn="postgresql://u:p@sessions:5432/sessions",
         )
     assert "CHEMCLAW_PG_SESSION_FLEET_MAX_CONNECTIONS" in caplog.text
-    assert "166 connection(s) land there" in caplog.text
+    assert "166 connection(s) are charged there" in caplog.text
     assert "postgres.sessionStoreMaxConnections" in caplog.text
+    # The half that removes the risk rather than naming it. `pg_endpoint` compares strings, so this
+    # warning also fires for one server spelled two ways — and declaring the second ceiling *there*
+    # moves the deployment from the cell where the runtime alert fires into the one where nothing
+    # checks it at all. Telling the operator to declare it unconditionally is what this used to do.
+    assert "check that these really are two servers" in caplog.text
 
     # And silent when the second server is declared, so the warning stays a signal.
     caplog.clear()

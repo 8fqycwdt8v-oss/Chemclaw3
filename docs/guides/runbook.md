@@ -1220,6 +1220,19 @@ process, and averaging hides it.
 `warning`. The same blind spot as the turn ceiling, for connections: the fleet can ask for more than
 the server will serve, which surfaces as connect failures against a database that is not busy.
 
+**Read which server it is about before changing anything.** The rule is two comparisons, not one:
+the primary's live total is `sum(chemclaw_pg_pool_max_size) - sum(chemclaw_pg_session_pool_max_size)`
+against `chemclaw_pg_fleet_max_connections`, and a split session store's is the subtrahend against
+`chemclaw_pg_session_fleet_max_connections`. Run both halves in the console — the alert does not say
+which branch fired, and raising `postgres.maxConnections` when it is the *session* server that is
+over changes nothing. Without a split the second gauge is 0 in every pod and this is one comparison
+again.
+
+If it fires on a deployment whose two DSNs you believe name one server, that is the case
+`CHEMCLAW_PG_SESSION_FLEET_MAX_CONNECTIONS`'s startup warning describes: check the spelling before
+declaring a second ceiling, because a ceiling for a server that does not exist pads the right-hand
+side and turns this alert off.
+
 ### chemclaw.cost
 
 #### ChemclawTokenBurnHigh

@@ -52,7 +52,7 @@ from psycopg import conninfo
 from psycopg.rows import TupleRow
 from psycopg_pool import AsyncConnectionPool, PoolClosed, PoolTimeout
 
-from chemclaw.core.config import settings
+from chemclaw.core.config import pg_endpoint, settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import degraded, record_metric
 
@@ -580,6 +580,9 @@ def bind_pool_metrics() -> None:
         "chemclaw_pg_session_fleet_max_connections",
         lambda: float(settings.pg_session_fleet_max_connections),
     )
+    METRICS.bind_gauge(
+        "chemclaw_pg_session_pool_max_size", lambda: float(_session_store_max_connections())
+    )
 
 
 @asynccontextmanager
@@ -664,6 +667,33 @@ def _process_max_connections() -> int:
     measurement that separates the two.
     """
     return sum(int(pool.max_size) for pool in _all_pools())
+
+
+def _session_store_max_connections() -> int:
+    """The part of `_process_max_connections()` that lands on a split session store's own server.
+
+    Zero unless `session_store_dsn` names a *different* endpoint from `postgres_dsn` — the decision
+    is `Settings.fleet_connections_per_server`'s and is read from it rather than restated, so the
+    startup check and the runtime alert cannot disagree about how many servers this deployment has.
+    Whatever `pg_endpoint` cannot tell apart, neither half tells apart.
+
+    It exists because `chemclaw_pg_pool_max_size` sums every pool a process holds and a *sum* of
+    pools against a *sum* of ceilings is one check, not two: enumerated, that comparison never
+    fires with both servers inside their own ceilings and stays silent for 49,993 of 200,000 draws
+    where one of them is over. On the shipped topology with the session server declared at 180 it
+    is over from seven front-door replicas and the summed alert waits until thirteen — 1.58x.
+
+    Subtracted from the process total rather than labelled onto it, deliberately:
+    `chemclaw_pg_pool_max_size` answers "what may this process open", which is configuration and
+    needs no database. A label carrying a measured cluster identity would be unknown until a pool
+    filled, so the fleet-ceiling alert would lose its series during a database outage.
+    """
+    if not settings.fleet_connections_per_server()[1]:
+        return 0
+    there = pg_endpoint(settings.session_store_dsn)
+    return sum(
+        int(pool.max_size) for pool in _all_pools() if pg_endpoint(str(pool.conninfo)) == there
+    )
 
 
 def pool_stats() -> dict[str, int]:

@@ -19,6 +19,7 @@ import asyncio
 
 import psycopg
 import pytest
+from psycopg import conninfo
 from psycopg_pool import AsyncConnectionPool
 
 from chemclaw.core import db
@@ -196,6 +197,7 @@ _POOL_GAUGES = (
     "chemclaw_pg_pool_available",
     "chemclaw_pg_pool_requests_waiting",
     "chemclaw_pg_pool_max_size",
+    "chemclaw_pg_session_pool_max_size",
     "chemclaw_pg_fleet_max_connections",
 )
 
@@ -418,6 +420,72 @@ def _gauge(rendered: str, name: str) -> float:
         if line.startswith(f"{name} "):
             return float(line.split(" ", 1)[1])
     raise AssertionError(f"{name} is not in the exposition")
+
+
+def test_the_two_pool_ceiling_gauges_partition_this_process_by_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ChemclawFleetAboveItsConnectionCeiling` checks each server, so the gauges have to split.
+
+    A sum of pools against a sum of ceilings is one check and not two: enumerated over 200,000
+    random `(pools, ceilings)` draws, `sum(pools) > primary + session` never fired with both
+    servers inside their own ceilings and stayed **silent in 49,993** where one of them was over.
+    Measured on the shipped topology with the session server declared at 180 it is at 183 from
+    seven front-door replicas and the summed comparison waits until thirteen, by which point it is
+    at 1.58x.
+
+    So `chemclaw_pg_session_pool_max_size` is the part of `chemclaw_pg_pool_max_size` that lands on
+    a split session store's own server, and the alert subtracts it to get the primary's. The two
+    must therefore *partition* the process: this drives the front door's split shape — the stores'
+    pool on `postgres_dsn`, `/readyz`'s one-connection pool and the session pool on the split DSN —
+    and asserts both halves and their sum, so a future pool landing in neither is a failure rather
+    than a silent under-count on whichever ceiling it belongs to.
+
+    Zero without a split, which is what leaves every existing release's alert exactly what it was.
+    """
+    monkeypatch.setattr(settings, "pg_pool_max_size", 8)
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        registry = Metrics()
+        monkeypatch.setattr("chemclaw.core.metrics.METRICS", registry)
+        # A second *endpoint* for the same database. `tests/test_fleet_pools.py` splits on
+        # `application_name`, which is enough to mint a second *pool* and is deliberately not
+        # enough here: these gauges partition by the server `pg_endpoint` says a DSN dials, and
+        # two spellings of one host are exactly the pair that has to land on opposite sides. The
+        # loopback aliases are the one such pair that is also connectable from any runner.
+        host = str(conninfo.conninfo_to_dict(settings.postgres_dsn).get("host") or "").lower()
+        if host not in {"localhost", "127.0.0.1"}:
+            pytest.skip(f"needs a loopback postgres_dsn to spell twice; this one dials {host!r}")
+        split = conninfo.make_conninfo(
+            settings.postgres_dsn, host="127.0.0.1" if host == "localhost" else "localhost"
+        )
+        monkeypatch.setattr(settings, "session_store_dsn", split)
+        async with db.pooling():
+            async with db.connection(settings.postgres_dsn):
+                pass
+            async with db.connection(split, statement_timeout_seconds=2.0, pool_max_size=1):
+                pass
+            async with db.connection(split):
+                pass
+            rendered = registry.render()
+            total = _gauge(rendered, "chemclaw_pg_pool_max_size")
+            elsewhere = _gauge(rendered, "chemclaw_pg_session_pool_max_size")
+
+        assert (total, elsewhere) == (17.0, 9.0), (
+            f"the front door's split shape holds 8 + 1 + 8 = 17 connections, 9 of them on the "
+            f"session store's server; the gauges report {total:.0f} and {elsewhere:.0f}, and the "
+            "alert reads the primary's side as their difference"
+        )
+
+        # And nothing lands on a second server when there is not one.
+        monkeypatch.setattr(settings, "session_store_dsn", "")
+        async with db.pooling():
+            async with db.connection(settings.postgres_dsn):
+                pass
+            assert _gauge(registry.render(), "chemclaw_pg_session_pool_max_size") == 0.0
+
+    asyncio.run(_run())
 
 
 def test_a_sized_pool_is_not_the_pool_the_next_caller_borrows(

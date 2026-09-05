@@ -154,9 +154,68 @@ one connection on both ends, its peak concurrency is one, and a split adds exact
 pooled process — and both mutants were checked: removing `pool_max_size=1` fails two of them,
 removing the single-flight fails the concurrency one and nothing else.
 
+## The alert this first got wrong, and the sentence that hid it
+
+The first version of this change summed: `sum(chemclaw_pg_pool_max_size)` against
+`max(primary ceiling) + max(session ceiling)`. This section used to defend that as "conservative in
+the direction that pages rather than misses". **It is exactly backwards, and the proof is one line
+of algebra.** If each server is inside its own ceiling then `p₁ ≤ A` and `p₂ ≤ B`, so `p₁ + p₂ ≤
+A + B` and the sum *cannot* fire; but `p₁ > A` with `p₁ + p₂ ≤ A + B` is satisfiable, so it can be
+silent while a server is over. Enumerated over 200,000 random `(pools, ceilings)` draws: **0 false
+positives, 50,320 misses — 25%.** A comparison that can only miss is not conservative in the
+paging direction; it is conservative in the other one.
+
+Measured on this chart's own topology with the session server declared at 180, it is over its
+ceiling from **seven** front-door replicas and the summed form waits until **thirteen** — by which
+point that server is at **1.58×** what was declared for it.
+
+**And the same expression paged a healthy deployment forever.** A split whose second ceiling is
+undeclared — which this ADR deliberately permits, warning rather than refusing — makes the
+right-hand side `256 + 0` while the left-hand side is the whole fleet's 278. Verified:
+`ChemclawFleetAboveItsConnectionCeiling` fires from first deploy, `for: 10m`, on a deployment whose
+primary sits at 112 of 256, with a description telling the operator to raise
+`postgres.maxConnections`. That is a page for a server that is at 44%.
+
+So the alert checks each server against its own ceiling, and
+`chemclaw_pg_session_pool_max_size` is the part of the left-hand side that has to be split off for
+that to be possible. The primary's side is the difference. With no split the new gauge is 0 in
+every pod and both branches reduce to the comparison this shipped with, which is what makes it safe
+for every existing release. The expression is checked by `promtool check rules` and exercised by
+`promtool test rules` across both configurations, with a deliberately flipped expectation as a
+negative control.
+
+**Subtracted rather than labelled**, and that choice has a failure mode behind it.
+`chemclaw_pg_pool_max_size` answers "what may this process open" — configuration, needing no
+database. A label carrying a *measured* server identity would be unknown until a pool filled, so
+`on(server)` matching would drop a pod whose pools have not opened, and the fleet-ceiling alert
+would lose its series during exactly the database outage it exists for.
+
 ## What this does not do
 
-`chemclaw_pg_pool_max_size` still carries no DSN label, so the runtime alert sums both servers'
-pools against both servers' ceilings rather than checking each. That is conservative in the
-direction that pages rather than misses, and the startup check is the honest half for a split. A
-labelled gauge is a `BACKLOG.md` row, not a decision taken here.
+**One server spelled two ways is charged as two, and that is now a pinned property rather than an
+accident.** `pg_endpoint` compares `(hostaddr or host, port)` as strings, so nine plausible
+spellings of one endpoint split here — an omitted port, an uppercased host, a trailing-dot FQDN, a
+Kubernetes short name against its `svc.cluster.local` form, the loopback aliases, a socket
+directory against a TCP host, a multi-host list. The consequence is exhaustion: the deployment that
+is *refused* at 278 against 256 when both DSNs are spelled the same way **starts** when they are
+not, charging 112 to the real ceiling and 166 to a server that does not exist.
+
+Three fixes were measured and none is available here. Normalising the loopback aliases covers two
+of those nine and none of the three a cluster actually produces, and an omitted port is `PGPORT`
+before it is 5432 — so "normalising" means a second implementation of libpq's precedence rules,
+which is the error `require_pg_tls` already refused to make. Asking the server answers it exactly
+(`SELECT system_identifier FROM pg_control_system()` — 0.24 ms, readable by an unprivileged role,
+identical across both spellings) and cannot answer it *here*: `settings = Settings()` runs at module
+import with no event loop and no pool, so a validator that dialled would make every unit test and
+every `make *-validate` a network call and every database outage a configuration error in every
+process. `inet_server_addr()` is not even the right probe — one server answered `NULL` over a
+socket, `127.0.0.1` over loopback and `172.18.0.2` over the bridge, which is the DSN's own spelling
+laundered through the kernel.
+
+**What removes the risk instead is the warning.** It used to say, unconditionally, to declare the
+second server's ceiling — and following that on a one-server deployment moves it from the cell where
+the runtime alert fires into the one where *nothing* checks it, because a declared phantom ceiling
+pads the right-hand side. It now says to check the spelling first, and says why. Keying the runtime
+split on a measured cluster identity instead of on `pg_endpoint` would close the config blindness at
+runtime, and is the version that loses its series when the database is down; it is a `BACKLOG.md`
+row, not a decision taken here.
