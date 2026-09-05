@@ -441,9 +441,13 @@ spec:
             description: >-
               A process has more concurrent database work than `CHEMCLAW_PG_POOL_MAX_SIZE` allows,
               so callers wait and then fail as `ConnectionError` after
-              `CHEMCLAW_PG_POOL_TIMEOUT_SECONDS`. Raise the pool (and `postgres.maxConnections`
-              with it — `Settings` refuses a pair that stops agreeing) or lower the concurrency
-              feeding it: `CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` on the front door,
+              `CHEMCLAW_PG_POOL_TIMEOUT_SECONDS`. Raise the pool **and every declared ceiling it is
+              checked against** — `postgres.maxConnections`, and `postgres.sessionStoreMaxConnections`
+              too where `CHEMCLAW_SESSION_STORE_DSN` names a second server, because widening the pool
+              widens both sides of a split and `Settings` refuses the pod at startup otherwise.
+              Measured: raising the pool and only `postgres.maxConnections` on a split deployment
+              refuses identically to raising neither. Or lower the concurrency feeding it:
+              `CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` on the front door,
               `CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES` on a worker.
 
         {{- /* The other direction, and the one no single pod can see: `Settings` refuses a
@@ -464,31 +468,48 @@ spec:
                `chemclaw_pg_session_pool_max_size` is the part of the left-hand side that lands on
                the split store, so subtracting it leaves the primary's. With no split it is 0 in
                every pod and both branches are exactly the original comparison. */}}
+        {{- /* **Each branch gates on its own ceiling.** They shared the primary's `> 0` guard
+               until a review drove it: `postgres.maxConnections: 0` is a documented value meaning
+               "declare no ceiling", and it silenced a *declared* `sessionStoreMaxConnections` as
+               well — measured, a session store at 500 against a declared 180 with nothing firing.
+               Two independent ceilings need two independent guards.
+
+               `or vector(0)` on the subtrahend because `A - B` is a vector join: with no split,
+               `chemclaw_pg_session_pool_max_size` is present-and-zero in every pod today, but a
+               pod that has opened no pool yet publishes neither gauge, and one such pod made the
+               primary comparison return empty — the alert silent while the fleet was over. */}}
         - alert: ChemclawFleetAboveItsConnectionCeiling
           expr: >-
+            (
             max(chemclaw_pg_fleet_max_connections) > 0
-            and (
-            sum(chemclaw_pg_pool_max_size) - sum(chemclaw_pg_session_pool_max_size)
+            and sum(chemclaw_pg_pool_max_size)
+            - sum(chemclaw_pg_session_pool_max_size or vector(0))
             > max(chemclaw_pg_fleet_max_connections)
+            )
             or (
             max(chemclaw_pg_session_fleet_max_connections) > 0
-            and sum(chemclaw_pg_session_pool_max_size)
+            and sum(chemclaw_pg_session_pool_max_size or vector(0))
             > max(chemclaw_pg_session_fleet_max_connections)
-            )
             )
           for: 10m
           labels:
             severity: warning
           annotations:
             runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawfleetaboveitsconnectionceiling
-            summary: The fleet can open more Postgres connections than it is allowed to
+            summary: The fleet can open more Postgres connections than one of its servers will serve
             description: >-
-              More Postgres pools are open than `postgres.maxConnections` accounts for, so the
-              database can be asked for more connections than it will serve — which surfaces as
-              connect failures against a server that is not busy. Pools, not pods: this gauge sums
-              every pool a process holds (a front door holds three), which is why it can fire on a
-              fleet whose per-pod configuration validated. Either scale back or raise
-              `postgres.maxConnections` with a number from the server's own `max_connections`.
+              More Postgres pools are open than a declared ceiling accounts for, so the database can
+              be asked for more connections than it will serve — which surfaces as connect failures
+              against a server that is not busy. Pools, not pods: these gauges sum every pool a
+              process holds (a front door holds three), which is why this can fire on a fleet whose
+              per-pod configuration validated.
+              **Two comparisons, and the alert does not say which fired** — run both before changing
+              anything. `sum(chemclaw_pg_pool_max_size) - sum(chemclaw_pg_session_pool_max_size)`
+              against `postgres.maxConnections` is `CHEMCLAW_POSTGRES_DSN`'s server;
+              `sum(chemclaw_pg_session_pool_max_size)` against
+              `postgres.sessionStoreMaxConnections` is a split session store's. Raising
+              `postgres.maxConnections` when it is the session server that is over changes nothing.
+              Without a split the second gauge is zero everywhere and this is one comparison again.
 
     - name: chemclaw.cost
       rules:
