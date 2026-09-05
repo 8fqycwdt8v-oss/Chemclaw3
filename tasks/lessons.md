@@ -1870,3 +1870,29 @@ file, commit the scrape in the same commit as the figure.**
 asserted "the last draw lands in the final tenth", which is false at n=2 where the correct
 stratified draw is the first probe of each half. **Rule: state the property (each band contributes
 one), never a proxy for it (the last one is near the end).**
+
+**A rule I have written down twice is one I still walked into.** Correcting the connection ceiling,
+I put "26 pools steady, 36 at the peak" and "six pools of headroom" into `values.yaml` — the exact
+file whose prose pin exists because it once said "17 pooled processes" over a render of 14, and the
+pin failed my commit. That is the system working, and it is also the third entry in this log about
+transcribing a measurement into prose. **Rule: before writing any number into a non-test file, ask
+which test would fail if it went stale — if the answer is "none", the number belongs in the test and
+the prose gets the name of the test.** The corollary that would have saved the round: a repository
+with a pin for this class of mistake is a repository that has already made it, so read the pin
+before writing the paragraph, not after it rejects you.
+
+**Deleting on the strength of one falsified claim is as unmeasured as keeping on the strength of
+one asserted claim.** The comment justifying `plan_cache_mode=force_custom_plan` said the dense
+vector query cliffs from a generic plan; it does not, and the measured mechanism (an HNSW index that
+*cannot* order on a parameter) is not how pgvector behaves. The setting looked like dead weight kept
+alive by a plausible story — this repository's own deletion pattern. Measuring the *second* claim in
+the same comment found a real 1.81x regression on a different statement by a different mechanism, so
+the deletion would have removed a control that works. **Rule: a falsified justification licenses
+re-measuring the thing, never removing it; check every claim the comment makes before acting on the
+first one that fails.**
+
+**The line above the line I fixed carried the same defect.** `_invoke`'s at-capacity message was
+corrected for promising a retry that only one of its two callers performs — and the `logger.warning`
+immediately above it went on saying "the job will be retried" through that whole commit and its
+review. **Rule: when a claim is wrong in one place, grep the claim rather than fixing the line;
+the same sentence usually exists two or three times within the same function.**
