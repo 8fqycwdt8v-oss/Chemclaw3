@@ -1026,6 +1026,55 @@ def test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window(
 #: nobody checked.
 CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
 
+#: The thread allowance `agent_context_token_budget`'s default is derived to leave.
+#:
+#: **This existed nowhere until 2026-09-05, and its absence is what let the budget re-open a closed
+#: defect.** `CLEAR_TRIGGER_THREAD_ALLOWANCE` above says in its own comment that a derivation and
+#: an assertion which disagree mean one of them is a claim nobody checked — and the budget had only
+#: the claim. A reviewer collapsed the whole split, setting the budget to 107,000 against a trigger
+#: of 106,000, and the suite passed 150 tests.
+#:
+#: Written here rather than imported, for the same reason as the constant above: this is the
+#: assertion and `core/config/agent.py` is the prose.
+BUDGET_THREAD_ALLOWANCE = 43_000
+
+#: The smallest context window this stack is designed against, in billed tokens.
+#:
+#: `D-2026-09-04-a-budget-that-excludes-the-prefix-is-not-a-budget` used "does the request fit a
+#: 128k model" as its pass/fail criterion and fixed a 137,301-token request. The chart ships
+#: `gpt-oss`, published at 131,072, so 128,000 is the conservative round number rather than the
+#: exact one — and it is the number to design against precisely because `llm_context_window_tokens`
+#: defaults to 0, which reads as "no bound at all".
+SMALLEST_TARGET_WINDOW = 128_000
+
+#: Billed tokens per *estimated* token of prefix, on the worst tokenizer basis measured.
+#:
+#: `effective_trigger` subtracts an **estimated** prefix from a **billed** budget, so a maximal
+#: request bills `budget + (ratio - 1) x prefix` and this is the only place the two units meet.
+#: Three sentences in this tree asserted 1.04 without measuring it on this prefix. Measured
+#: 2026-09-05 over the observed 73,963-token `default` prefix — the system message off the wire
+#: plus every bound schema, against real BPE encodings — it is **0.979** (`o200k_base`) and
+#: **0.9785** (`cl100k_base`): chars/4 *over*-estimates schemas and prose, so on anything a current
+#: gateway serves the term is a credit. The exception is `p50k_base` at **1.0534**, a GPT-3-era
+#: encoding nothing here uses, and the budget is designed to clear the window even on that basis —
+#: a margin that costs ~4,000 tokens of thread and removes the tokenizer from the argument.
+WORST_PREFIX_ESTIMATOR_RATIO = 1.0534
+
+
+def _shipped_prefix() -> int:
+    """The prefix a shipped `default` turn really sends, in estimated tokens.
+
+    Three parts, and leaving any one out is a defect this tree has actually shipped: the system
+    message and in-process tools (`_graph_prefix`, off the wire), the connector bundles this
+    repository serves (`_connector_tools`, from its own manifests), and the bundles served from
+    `Chemclaw3-mcp`, which no test here can measure — so the *bound* stands in for them, which is
+    the conservative direction because the bound is above the measurement.
+    """
+    from tests.test_context_floor import SERVED_ELSEWHERE_ALLOWANCE, _connector_tools
+
+    connectors = estimate_tool_schemas(_connector_tools(get_profile("default")))
+    return _graph_prefix() + connectors + SERVED_ELSEWHERE_ALLOWANCE
+
 
 def test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged() -> None:
     """The lossless edit must have the *band* the derivation claims, not merely a positive one.
@@ -1064,12 +1113,14 @@ def test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged() -> None:
     Both arms are now honest about a different thing, deliberately. The bound arm reads
     `PREFIX_BOUND`, which is the ratchet ceiling *plus* the allowance for the three bundles served
     from `Chemclaw3-mcp` — the half no test here can measure and the half that made the original
-    number wrong. The measured arm binds the connector surface this repository serves, so it fails
-    on a real turn's arithmetic rather than on a fixture's.
+    number wrong. The measured arm binds the connector surface this repository serves **and adds
+    the allowance for the half it does not** (`_shipped_prefix`): its first version added only the
+    in-repo connectors, so it reported ~9,900 tokens more band than a shipped turn has, which is
+    the same "measured against a smaller system" defect one repository further out.
     """
-    from tests.test_context_floor import PREFIX_BOUND, _connector_tools
+    from tests.test_context_floor import PREFIX_BOUND
 
-    prefix = _graph_prefix() + estimate_tool_schemas(_connector_tools(get_profile("default")))
+    prefix = _shipped_prefix()
     trigger = settings.agent_tool_result_clear_trigger
     reset_calibration()
 
@@ -1101,6 +1152,94 @@ def test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged() -> None:
         )
     finally:
         _prefix_var.reset(token)
+
+
+def test_the_shipped_budget_leaves_the_thread_what_its_derivation_claims() -> None:
+    """The budget's half of the split, which was prose on both sides until this existed.
+
+    `agent_context_token_budget` and `agent_tool_result_clear_trigger` are two thresholds an order
+    of magnitude apart in intent: the lossless edit runs early and often, the destructive one is the
+    last resort. The test above pins the trigger's band. Nothing pinned the budget's, so the split
+    could be collapsed without a single test noticing — measured by the reviewer who found it, a
+    budget of 107,000 against a trigger of 106,000 passed **150** tests in this file.
+
+    **Two arms, the same shape as the trigger's.** The bound arm asks whether a surface grown to
+    `PREFIX_BOUND` would still leave the thread what the derivation claims; the measured arm asks it
+    of the prefix a turn sends today. The first is what makes this a ratchet and the second is what
+    makes it about a deployment.
+    """
+    from tests.test_context_floor import PREFIX_BOUND
+
+    budget = settings.agent_context_token_budget
+    reset_calibration()
+
+    assert budget - PREFIX_BOUND >= BUDGET_THREAD_ALLOWANCE, (
+        f"agent_context_token_budget is {budget} against a prefix bound of {PREFIX_BOUND}, so a "
+        f"surface grown to its permitted bound would leave the thread {budget - PREFIX_BOUND} "
+        f"estimated tokens where the derivation claims {BUDGET_THREAD_ALLOWANCE}. The two numbers "
+        "move together or one of them is wrong; say in the pull request which."
+    )
+    prefix = _shipped_prefix()
+    token = _prefix_var.set(prefix)
+    try:
+        allowance = effective_trigger(budget)
+        assert allowance >= BUDGET_THREAD_ALLOWANCE, (
+            f"the shipped budget of {budget} against this deployment's measured {prefix}-token "
+            f"prefix leaves the thread {allowance} estimated tokens, not "
+            f"{BUDGET_THREAD_ALLOWANCE}"
+        )
+        # And the split itself: the free edit still fires strictly first. This is the assertion the
+        # reviewer's 107,000 defeated, and it is here rather than only in the test above because a
+        # collapse can be reached by moving either number.
+        assert effective_trigger(settings.agent_tool_result_clear_trigger) < allowance, (
+            f"the lossless edit and the window now trigger at "
+            f"{effective_trigger(settings.agent_tool_result_clear_trigger)} and {allowance}: the "
+            "split between an edit that costs nothing and an edit that deletes conversation has "
+            "collapsed, which is the single-threshold behaviour it was created to remove"
+        )
+    finally:
+        _prefix_var.reset(token)
+
+
+def test_a_maximal_request_at_the_shipped_budget_fits_the_smallest_window_it_targets() -> None:
+    """The bound the budget had *from above*, which for one commit was nothing at all.
+
+    `D-2026-09-04-a-budget-that-excludes-the-prefix-is-not-a-budget` was written about a request
+    that did not fit a 128k model, and closed it by charging the prefix. Its successor then derived
+    the budget *upwards* from that prefix — `PREFIX_BOUND` plus the thread allowance it wanted to
+    keep — and 133,000 permitted ~131,400 billed tokens: the same failure, reached from the other
+    direction, with `llm_context_window_tokens` (the one guard that could have caught it) defaulting
+    to 0 and set in no file under `deploy/`.
+
+    **A budget with only a lower bound is not a budget**, and this is the upper one. It is asserted
+    against the *worst* tokenizer basis measured rather than the shipped one, so the margin does not
+    depend on which encoding a gateway happens to use — see `WORST_PREFIX_ESTIMATOR_RATIO`.
+
+    **It cannot be replaced by declaring the window**, which is why both were done. The chart now
+    states `CHEMCLAW_LLM_CONTEXT_WINDOW_TOKENS`, and `effective_trigger` clamps against it — but
+    the code default stays 0 (this repository cannot know an endpoint's window), so a deployment
+    that does not set it falls back on this number alone. That is the configuration this asserts.
+    """
+    from tests.test_context_floor import PREFIX_BOUND
+
+    budget = settings.agent_context_token_budget
+    input_ceiling = SMALLEST_TARGET_WINDOW - settings.llm_max_tokens
+    worst_case = budget + int((WORST_PREFIX_ESTIMATOR_RATIO - 1.0) * PREFIX_BOUND)
+
+    assert worst_case <= input_ceiling, (
+        f"a maximal request at the shipped budget of {budget} bills up to {worst_case} tokens "
+        f"(the budget, plus what a {PREFIX_BOUND}-token prefix costs over this system's own "
+        f"estimate of it), against {input_ceiling} of input on a {SMALLEST_TARGET_WINDOW}-token "
+        f"model reserving {settings.llm_max_tokens} for the answer. The provider refuses that "
+        "outright and the whole turn is lost — which is strictly worse than a thread cut early, "
+        "and is the failure D-2026-09-04 closed. Lower the budget, or narrow the prefix."
+    )
+    # Not vacuous: the margin is real but not so large that the assertion could not bite. A budget
+    # 10% higher — which is roughly the raise that caused this — must fail it.
+    assert budget * 1.1 + (WORST_PREFIX_ESTIMATOR_RATIO - 1.0) * PREFIX_BOUND > input_ceiling, (
+        f"a budget 10% above {budget} would still fit {input_ceiling}, so this test has so much "
+        "headroom that it is not the bound it claims to be; tighten it or say why."
+    )
 
 
 # --- a cleared sweep still names its sources ---------------------------------------------------

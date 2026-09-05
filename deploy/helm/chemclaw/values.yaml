@@ -1364,6 +1364,12 @@ retention:
   #     # The drain rate, and why it belongs in the same block as the windows it drains under.
   #     CHEMCLAW_RETENTION_MAX_SESSIONS_PER_PASS: "500"
   #     CHEMCLAW_RETENTION_SCHEDULE_MINUTES: "1440"
+  #     # The third of the drain knobs, and the one an operator has to reconsider rather than
+  #     # inherit: it bounds one age-cutoff `DELETE`, and the right value follows this site's row
+  #     # size and its `CHEMCLAW_PG_STATEMENT_TIMEOUT_SECONDS`. Too large and every attempt is
+  #     # cancelled by that timeout having removed nothing, which is a table that never shrinks
+  #     # while the sweep reports success — see `core/config/memory.py` for the measurement.
+  #     CHEMCLAW_RETENTION_DELETE_BATCH_ROWS: "10000"
   #
   # **The checkpoint window is the one with a volume behind it, and the volume is large.** Upstream's
   # `_dump_blobs` rewrites the *entire* messages channel per superstep, so a thread's storage is
@@ -1382,8 +1388,9 @@ retention:
   # `CHEMCLAW_RETENTION_TIMEOUT_SECONDS` regardless — until the remainder in the sweep's own result
   # reaches zero, then put them back. Leaving them at the defaults on a year-old database is not a
   # failure anybody sees; it is a sweep that never catches up while reporting success every day.
-  # All five, because the example omitted the last one for as long as it existed and an operator
-  # copying it inherits the omission. A table whose key is absent keeps growing —
+  # Every window, and every knob that decides whether a first pass converges, because the example
+  # omitted one for as long as it existed and an operator copying it inherits the omission — twice
+  # now: the last drain knob was still missing after the other two were added. A table whose key is absent keeps growing —
   # `durable/retention.py`'s `_PRUNABLE` is the set with a window, and `_NOT_PRUNED` says what
   # bounds everything else.
   #

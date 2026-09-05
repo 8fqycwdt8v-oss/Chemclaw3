@@ -708,13 +708,37 @@ class RetentionOutcome(BaseModel):
     rows_deferred: int = 0
 
     def has_tail(self) -> bool:
-        """Whether a branch stopped at its cap with work left — what makes the pass sweep again."""
+        """Whether a branch stopped at its cap with work left.
+
+        **A tail is a reason to consider sweeping again, and on its own it is not a reason to do
+        it** — see `made_progress` below, which is the other half. This asks only whether work was
+        left behind, and a sweep can leave work behind while being unable to remove any of it.
+        """
         return bool(
             self.sessions_deferred
             or self.threads_deferred
             or self.owners_deferred
             or self.rows_deferred
         )
+
+    def made_progress(self) -> bool:
+        """Whether this sweep actually disposed of anything.
+
+        **The pass continues on progress, not on a tail, because a tail alone spins.** A session
+        can be selected and then deleted from by nothing: `_prune_session_messages` skips a row it
+        cannot read, and skips one whose tool-call pairing straddles the cutoff — while the deferred
+        count still reports a tail, because a further expired session exists beyond the cap. The
+        selection is `ORDER BY session_id LIMIT cap`, so the *same* sessions are re-read every
+        sweep. Measured before this condition existed: **177 sweeps in three seconds, deleting
+        nothing**, ending only because the clock stopped it, and reporting success with a zero in
+        every table.
+
+        `agent/message_pairing.py` calls the straddling case "harmless and self-correcting", and it
+        was — when a pass was one sweep and the next pass came a day later. Making a pass a loop is
+        what turned that sentence into the trigger, which is the kind of thing only composition
+        shows: neither half changed and the pair became a spin.
+        """
+        return any(count for count in self.deleted.values())
 
 
 class _Budget:
@@ -841,7 +865,9 @@ async def _prune_expired_rows() -> RetentionOutcome:
         total.threads_deferred = outcome.threads_deferred
         total.owners_deferred = outcome.owners_deferred
         total.rows_deferred = outcome.rows_deferred
-        if not outcome.has_tail() or not budget.affords_more():
+        # Progress *and* a tail *and* budget. Dropping the first is what let a sweep that removed
+        # nothing be asked to run again for as long as the clock allowed.
+        if not outcome.made_progress() or not outcome.has_tail() or not budget.affords_more():
             return total
 
 

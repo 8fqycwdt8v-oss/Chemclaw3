@@ -315,6 +315,73 @@ def test_a_hung_up_client_stops_charging_admission_for_a_turn_nobody_is_watching
     )
 
 
+def _gauge(exposition: str, name: str) -> float:
+    """One unlabelled gauge's value out of a Prometheus exposition."""
+    for line in exposition.splitlines():
+        if line.startswith(f"{name} "):
+            return float(line.split(" ", 1)[1])
+    raise AssertionError(f"{name} is not in the exposition")
+
+
+def test_the_in_flight_gauge_counts_demand_and_can_exceed_the_permit_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`chemclaw_turns_in_flight` is leases, not permits — the HPA's signal, named honestly.
+
+    The gauge is bound to `app.state.active_turns` (`api/app.py`), which `_claim_turn_slot`
+    populates at POST — *before* admission — and which a detached turn keeps after `_release_permit`
+    has given its permit back. So the series is `permits held + turns queued for admission + turns
+    running detached`, and `sum(in_flight) / sum(capacity)` is a **demand** ratio that may exceed
+    1.0 rather than an occupancy fraction that cannot.
+
+    Three documents asserted the opposite in the present tense — the HPA template's "the quantity
+    is permits held per pod", `values.yaml`'s occupancy prose and this suite's own HPA test — while
+    `api/detach.py` said the true thing one directory away. Prose is not what settles it, so this
+    drives the state: two turns detached and one live, against a cap of two, must read **3** with
+    every permit but one free.
+
+    Keeping demand rather than switching to a permits gauge is
+    `D-2026-09-05-a-lease-is-demand-and-a-permit-is-occupancy`: the queued term is the leading half
+    of the signal an autoscaler wants, and a detached turn is a turn still spending this pod's CPU,
+    its model tokens and its database connection — the permit came back as fairness to a *waiting
+    client*, not because the work stopped.
+    """
+    monkeypatch.setattr(settings, "service_max_concurrent_turns", 2)
+    agent = _SlowerThanAdmission()
+
+    with _Served(_app(agent)) as served, httpx.Client(base_url=served.base, timeout=30) as client:
+        abandoned = [client.post("/sessions").json()["session_id"] for _ in range(2)]
+        for session_id in abandoned:
+            _hang_up_mid_turn(client, session_id)
+        live = client.post("/sessions").json()["session_id"]
+        # A second connection, because the scrape has to happen *while* the third turn's stream is
+        # open and the first client is blocked reading it.
+        with (
+            httpx.Client(base_url=served.base, timeout=30) as scraper,
+            client.stream(
+                "POST", f"/sessions/{live}/messages", json={"message": "a real question"}
+            ) as response,
+        ):
+            for line in response.iter_lines():
+                if line.startswith("data:"):
+                    break
+            exposition = scraper.get("/metrics").text
+            contended = served.app.state.turn_semaphore.locked()
+        for session_id in (*abandoned, live):
+            served.wait_for_slot_release(session_id)
+
+    in_flight = _gauge(exposition, "chemclaw_turns_in_flight")
+    capacity = _gauge(exposition, "chemclaw_turn_capacity")
+    assert (in_flight, capacity) == (3.0, 2.0), (
+        f"chemclaw_turns_in_flight read {in_flight} against a capacity of {capacity}; two detached "
+        "turns plus one live one is three leases against two permits, and any reading of this "
+        "series as an occupancy fraction is wrong by exactly the detached turns"
+    )
+    assert not contended, (
+        "the semaphore was contended, so this run did not distinguish leases from permits"
+    )
+
+
 def test_shutdown_waits_for_the_turns_detaching_promised_to_finish() -> None:
     """A rolling update must not destroy exactly the work detaching exists to preserve.
 

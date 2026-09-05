@@ -1975,3 +1975,40 @@ def test_the_ownership_sweep_works_a_bounded_batch_and_reports_the_rest() -> Non
     assert outcome.owners_deferred == 1, (
         "the sweep stopped at its cap and reported nothing left, which reads as a bounded table"
     )
+
+
+def test_a_sweep_that_removes_nothing_ends_the_pass() -> None:
+    """A tail is not a reason to sweep again; progress is.
+
+    **The defect this pins was a spin, and it reported success.** `_prune_session_messages` can
+    select a session and delete from it nothing at all — it skips a row it cannot read, and skips
+    one whose tool-call pairing straddles the cutoff — while `sessions_deferred` still reports a
+    tail because a further expired session exists past the cap. The selection is
+    `ORDER BY session_id LIMIT cap`, so the same sessions come back every sweep. Measured before
+    `made_progress` existed: **177 sweeps in three seconds, deleting nothing**, ending only when
+    the clock ran out, and returning a zero in every table with no error.
+
+    Driven on the outcome rather than on a live database because the property is the loop's, not
+    the query's: an outcome carrying a tail and no deletions must not be asked to continue. The
+    live half is covered by `test_one_sweep_works_a_bounded_batch_and_reports_the_rest` above.
+    """
+    spinning = RetentionOutcome(
+        deleted={"session_messages": 0, "session_owners": 0},
+        skipped=[],
+        sessions_deferred=1,
+    )
+    assert spinning.has_tail(), "the fixture must carry a tail, or it proves nothing"
+    assert not spinning.made_progress()
+
+    progressing = RetentionOutcome(
+        deleted={"session_messages": 3, "session_owners": 0},
+        skipped=[],
+        sessions_deferred=1,
+    )
+    assert progressing.has_tail()
+    assert progressing.made_progress(), "a sweep that deleted rows has progressed"
+
+    # And the empty case: no tail, no progress, nothing to continue for.
+    drained = RetentionOutcome(deleted={"session_messages": 0}, skipped=[])
+    assert not drained.has_tail()
+    assert not drained.made_progress()

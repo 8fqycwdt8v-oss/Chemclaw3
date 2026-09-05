@@ -76,6 +76,8 @@ from functools import cache
 from typing import Any
 from urllib.parse import urlsplit
 
+import certifi
+
 
 def is_loopback_host(host: str | None) -> bool:
     """Whether `host` is unreachable from the network — decided by parsing, never by name.
@@ -147,17 +149,31 @@ def default_ssl_context() -> ssl.SSLContext:
     45-50 concurrent opens the client's own CPU exceeds `connector_open_timeout_seconds`, healthy
     connectors are recorded unreachable, and the pod then serves turns with no tools at all.
 
-    **Sharing one context between clients is safe and is what httpx documents.** A context is
-    read-only in use, carries no per-connection state, and holds the same trust decision every
-    caller here wants: the system trust store as certifi sees it. A caller needing a *different*
-    trust decision — a private CA — passes its own `verify=` and does not come here; the embedding
-    client already does exactly that.
+    **`cafile=certifi.where()` is not decoration — without it this changes what the fleet trusts.**
+    The first version of this function returned a bare `ssl.create_default_context()`, and that is
+    not the context httpx would have built: `verify=True` passes `cafile=certifi.where()`, while a
+    bare call loads the *operating system* store. Measured in this environment, **138 roots against
+    109 — 42 CAs newly trusted and 13 dropped** on every connector call and the bearer token it
+    carries; on a hardened image with no `ca-certificates` package it loads **zero** roots and every
+    `https://` connector fails at handshake. Both call sites also pass `trust_env=False` to refuse
+    ambient environment, and a bare context silently defeats that too, because `load_default_certs`
+    reads `SSL_CERT_FILE`/`SSL_CERT_DIR` where `verify=True` does not — measured, an `SSL_CERT_FILE`
+    pointing at a one-certificate bundle took httpx's 118 roots down to **1**. A performance fix is
+    not a licence to move a trust boundary.
+
+    **Sharing one context between clients is safe, but not for the reason first written here.** The
+    original said "a context is read-only in use", and that is false: `httpcore` calls
+    `set_alpn_protocols` on it at every TLS connect. It is safe because every client in this process
+    writes the *same* ALPN list — nothing here sets `http2=True` — so the write is idempotent. If a
+    caller ever enables HTTP/2, that stops being true and this has to become a per-profile context.
+    A caller needing a different *trust* decision passes its own `verify=` and does not come here;
+    `private_ca_transport` below already does exactly that.
 
     Most endpoints this is handed to are plain in-cluster `http://`, where the context is never
     consulted at all. That is not a reason to skip it: the cost was paid on construction, not on
     use, which is precisely why it was invisible.
     """
-    return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 def private_ca_transport(ca_bundle: str) -> dict[str, Any] | None:
