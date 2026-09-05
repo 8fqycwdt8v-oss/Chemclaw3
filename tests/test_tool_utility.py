@@ -170,3 +170,52 @@ def test_the_control_arm_asks_the_front_door_for_its_profile_by_name() -> None:
     # And the transcript says which arm it came from, so the two halves stay tellable apart once
     # they are files rather than variables.
     assert (control_profile, default_profile) == ("no-tools", "")
+
+
+def test_a_sample_is_spread_across_the_corpus_rather_than_its_first_n() -> None:
+    r"""`--sample N` must draw across every section, at every N — including N above half.
+
+    The claim is the point of the flag: the corpus loads in file order, which is section order, so
+    a draw that is really `probes[:N]` asks one or two user stories' questions and reports them as
+    a reading of the corpus. The first implementation was `probes[::len(probes) // n][:n]`, which
+    is that exact anti-pattern for every `n > len/2` — an integer stride of 1 makes the slice a
+    no-op — and dropped the tail sections below it, because truncating a strided list cuts from the
+    end. Both ends and the degenerate middle are asserted here rather than the value that motivated
+    the fix, per this repository's own lesson about testing a bound at one end only.
+    """
+    from chemclaw.cli.live_probes import _systematic_sample
+
+    corpus = list(range(221))
+    for n in (1, 2, 50, 110, 111, 150, 220):
+        drawn = _systematic_sample(corpus, n)
+
+        assert len(drawn) == n, f"n={n} drew {len(drawn)}"
+        assert len(set(drawn)) == n, f"n={n} drew a duplicate"
+        assert drawn == sorted(drawn), f"n={n} lost corpus order"
+        # **Every stratum is represented, which is the property rather than a proxy for it.** Cut
+        # the corpus into `n` equal-width bands and each must contribute exactly one probe — that
+        # is what "spread across every section" means, and it is what the strided version broke at
+        # both ends (stride 1 put every draw in the first bands; truncation emptied the last).
+        # A first attempt asserted "the last draw is in the final tenth" instead and was simply
+        # wrong at n=2, where the correct stratified draw is the first probe of each half.
+        bands = [int(i * len(corpus) / n) for i in range(n + 1)]
+        for low, high, picked in zip(bands[:-1], bands[1:], drawn, strict=True):
+            assert low <= picked < high, f"n={n}: {picked} is outside its band [{low}, {high})"
+        # And it is never literally the first n — the failure this test exists for.
+        if 1 < n < len(corpus) - 1:
+            assert drawn != corpus[:n], f"n={n} collapsed to the first {n} probes"
+
+
+def test_a_sample_is_reproducible_and_larger_than_the_corpus_is_the_corpus() -> None:
+    """A sample is reproducible, and one larger than the corpus is the corpus.
+
+    Two runs of one `--sample` ask the same questions, which is what makes a re-run a comparison;
+    and asking for more probes than exist is not an error, it is everything.
+    """
+    from chemclaw.cli.live_probes import _systematic_sample
+
+    corpus = list(range(37))
+
+    assert _systematic_sample(corpus, 9) == _systematic_sample(corpus, 9)
+    assert _systematic_sample(corpus, 37) == corpus
+    assert _systematic_sample(corpus, 99) == corpus

@@ -347,8 +347,10 @@ topic).
       half — lint and type now run in parallel in `static` — and deliberately left this one open,
       because the evidence for it is a *reading* rather than a measurement.
       **What the reading says**: the suite looks parallel-safe already. `tests/pg.py` suffixes its
-      `TEST_SCHEMA` with `os.getpid()` at import time, so an xdist worker gets its own
-      Postgres schema with no change at all, and the two files that use Temporal go through
+      `TEST_SCHEMA` with a fresh `uuid4` at import time (it was `os.getpid()` until 2026-09-04, and
+      this row went on naming the pid for a day after the commit that removed it), so an xdist
+      worker — its own process, re-importing the module — draws its own Postgres schema with no
+      change at all, and the two files that use Temporal go through
       `start_time_skipping()`, which binds an ephemeral port per environment. `pytest-cov` combines
       across workers natively, so the 84% floor survives.
       **Why it is not done**: "looks safe" is not a number, and the sandbox this was reviewed in ran
@@ -666,11 +668,14 @@ only holds defects can only ever restore the system to what it already intended 
       was blocked on is a re-run rather than a new instrument.
 
 - [ ] **Half the probe corpus tests one tool** — [S], and only the *concentration* half is still
-      open. `gather_evidence` is in `expects_tools` for **125 of 288** probes (re-counted
-      2026-08-29; 124/261 on 2026-08-27, 116/232 on 2026-08-25 — the corpus keeps growing and the
-      concentration is not shrinking with it, 43% against 47%); `find_notes` 96; `expand_note` 60;
-      bucket C is **48** probes against bucket A's 169; the tail is thin. So the corpus still mostly
-      measures one retrieval path, and widening it is what remains here.
+      open. `gather_evidence` is in `expects_tools` for **125 of 292** probes (re-counted
+      2026-09-05 — the numerator is unchanged and the **denominator was stale**, 292 top-level
+      probes today rather than 288, so the concentration is 43%; 124/261 on 2026-08-27, 116/232 on
+      2026-08-25, and the corpus keeps growing while the concentration does not shrink with it);
+      `find_notes` 96; `expand_note` 60; bucket C is **48** probes against bucket A's **173** — 169
+      was this row's own figure and is the *paired* count from the A/B run below, four short of the
+      corpus, which is a different quantity wearing the same sentence. The tail is thin. So the
+      corpus still mostly measures one retrieval path, and widening it is what remains here.
 
       **The second consequence is closed and it was the one blocked on a credential.**
       `D-2026-09-04-tools-help-a-third-of-the-time-and-hurt-a-quarter` builds the arm

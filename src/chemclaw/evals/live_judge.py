@@ -152,7 +152,7 @@ async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
     import httpx
     from anthropic import AsyncAnthropic
 
-    from chemclaw.agent.llm_provider import _tls_http_client
+    from chemclaw.agent.llm_provider import tls_verify
 
     # Honour the deployment's LLM destination rather than defaulting to the public Anthropic API,
     # and never inherit an ambient proxy (trust_env=False): the judge prompt embeds the probe
@@ -163,14 +163,25 @@ async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
     # **And it honours the same private CA the agent does.** Half of that posture was missing:
     # `llm_base_url` was read and `llm_tls_ca_bundle` was not, so a deployment pointing the judge
     # at exactly the internal gateway this setting exists for — the documented production target —
-    # could not verify its certificate and every grading call failed at TLS. Reusing
-    # `_tls_http_client` rather than restating it is the point: the agent's client and the judge's
-    # now trust the same store by construction, and a bundle added for one is not silently absent
-    # from the other. With no bundle configured this is exactly the old client.
+    # could not verify its certificate and every grading call failed at TLS. Taking the policy
+    # from `tls_verify` rather than restating it is the point: the agent and the judge trust the
+    # same store by construction, and a bundle added for one is not silently absent from the other.
+    #
+    # **The policy, never the agent's client.** `_tls_http_client` is a process-wide singleton the
+    # agent holds for its whole life, and `AsyncAnthropic` stores a caller-supplied `http_client`
+    # unwrapped and `aclose()`s it from its own `close()`/`__aexit__` — so handing it that
+    # singleton would arm one idiomatic `async with` here to close the agent's client for the rest
+    # of the process, in exactly the private-CA configuration this change exists to fix. An
+    # `SSLContext` has no such owner. `verify=None` is not a valid httpx argument, so the two
+    # cases are constructed apart rather than folded into one call with a None default.
     base_url = settings.llm_base_url or None
-    client = AsyncAnthropic(
-        base_url=base_url, http_client=_tls_http_client() or httpx.AsyncClient(trust_env=False)
+    verify = tls_verify()
+    http_client = (
+        httpx.AsyncClient(verify=verify, trust_env=False)
+        if verify is not None
+        else httpx.AsyncClient(trust_env=False)
     )
+    client = AsyncAnthropic(base_url=base_url, http_client=http_client)
     response = await client.messages.create(
         model=settings.live_probe_judge_model,
         # Generous on purpose. At 1024 the judge ran out of budget mid-JSON on long answers, the

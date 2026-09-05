@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TypeVar
 
 import httpx
 import yaml
@@ -60,6 +62,9 @@ logger = logging.getLogger(__name__)
 #: The profile the A/B's control arm talks to. A constant rather than a flag: it names a file this
 #: repository ships (`data/evals/profiles/no-tools.yaml`), and a run that could point the control
 #: arm at any profile would produce reports whose "baseline" means something different each time.
+#: Index-only helpers below are generic over what they select; see `_systematic_sample`.
+_T = TypeVar("_T")
+
 _AB_BASELINE_PROFILE = "no-tools"
 
 _M12_SUITES: dict[str, str] = {
@@ -440,13 +445,36 @@ async def _assert_baseline_profile(base_url: str | None) -> None:
     """
     async with _client(base_url) as client:
         try:
-            await open_session(client, profile=_AB_BASELINE_PROFILE)
+            session_id = await open_session(client, profile=_AB_BASELINE_PROFILE)
         except httpx.HTTPStatusError as exc:
             raise SystemExit(
                 f"the front door does not accept profile {_AB_BASELINE_PROFILE!r} ({exc}). "
                 "Start it with CHEMCLAW_PROFILES_DIR=data/profiles:data/evals/profiles — "
                 "the control arm is a profile, and without it the two arms would be one agent."
             ) from exc
+        # The probe session is not a probe result: nothing is ever asked in it, and on a durable
+        # deployment it would otherwise leave one `session_owners` row per A/B run for a
+        # conversation that never had a turn. Best-effort, because a front door that cannot
+        # delete a session it just created is not a reason to refuse a measurement it just
+        # proved it can run.
+        with contextlib.suppress(httpx.HTTPError):
+            (await client.delete(f"/sessions/{session_id}")).raise_for_status()
+
+
+def _systematic_sample(probes: list[_T], count: int) -> list[_T]:
+    """`count` items spread evenly across `probes`, in corpus order; everything if it is smaller.
+
+    A function rather than three lines inline because it is the one arithmetic in this suite that
+    can be wrong while every arm of the measurement still runs and reports — see
+    `tests/test_tool_utility.py` for the two ends and the middle it is pinned at.
+
+    Generic because the arithmetic is over *indices* and knows nothing about a probe, which is what
+    lets its test drive it with integers: a test that had to build 221 `Probe` objects to check a
+    band boundary would be testing the fixture as much as the bound.
+    """
+    if count >= len(probes):
+        return probes
+    return [probes[i * len(probes) // count] for i in range(count)]
 
 
 async def _run_ab(args: argparse.Namespace) -> int:
@@ -462,14 +490,14 @@ async def _run_ab(args: argparse.Namespace) -> int:
         probes = [p for p in probes if p.id in wanted or str(p.section) in wanted]
     if args.limit:
         probes = probes[: args.limit]
-    if args.sample and args.sample < len(probes):
+    if args.sample:
         # A systematic sample, not the first N. The corpus is loaded in file order, which is
         # section order, so `[:N]` would ask N questions from one or two user stories and report
-        # them as a reading of the corpus. A stride spreads the draw across every section for the
-        # same money, and it is reproducible without a seed — two runs of the same `--sample` over
-        # the same corpus ask the same questions, which is what makes a second run a comparison.
-        stride = len(probes) // args.sample
-        probes = probes[::stride][: args.sample]
+        # them as a reading of the corpus. Evenly spaced indices spread the draw across every
+        # section for the same money, and they are reproducible without a seed — two runs of the
+        # same `--sample` over the same corpus ask the same questions, which is what makes a
+        # second run a comparison.
+        probes = _systematic_sample(probes, args.sample)
     if not probes:
         logger.error("--buckets/--only/--limit/--sample selected no probes")
         return 2

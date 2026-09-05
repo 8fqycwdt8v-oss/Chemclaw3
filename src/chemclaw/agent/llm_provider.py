@@ -552,6 +552,40 @@ def _require_anthropic_key() -> None:
         )
 
 
+def tls_verify() -> Any | None:
+    """The TLS verification policy a client to the internal endpoint must use, or None.
+
+    Split out of `_tls_http_client` so that the *policy* can be shared without sharing the
+    *connection pool*. The judge (`evals/live_judge.py`) needs the same private CA and must not
+    have the same client: `_tls_http_client` is a process-wide singleton the agent keeps for its
+    whole life, and the Anthropic SDK stores a caller-supplied `http_client` unwrapped and
+    `aclose()`s it from its own `close()`/`__aexit__` — so one idiomatic `async with
+    AsyncAnthropic(...)` in the judge would close the agent's client for the rest of the process.
+    Sharing the context has none of that: an `SSLContext` is immutable configuration, not a
+    resource with an owner.
+
+    None means the system trust store, which is right for a publicly-trusted endpoint; only a
+    private-CA internal endpoint needs the explicit bundle.
+
+    **Deliberately not `@cache`d, unlike the client below.** A second cache keyed off the same
+    setting is a second thing every test that swaps `llm_tls_ca_bundle` has to clear, and the two
+    caches disagreeing is a stale CA — which is what happened the moment this function was split
+    out with `@cache` on it: `test_the_private_ca_client_is_built_once_per_process` passed alone
+    and failed in file order, because its neighbour cleared one cache and not the other. The
+    per-turn cost this saves lives in `_tls_http_client`'s cache, which is where it was measured;
+    building a context per *grading call* is one file read against a network round trip.
+    """
+    if not settings.llm_tls_ca_bundle:
+        return None
+    import ssl
+
+    # An `SSLContext`, not `verify="<path>"`: httpx deprecated the string form ("`verify=<str>` is
+    # deprecated. Use `verify=ssl.create_default_context(cafile=...)`"), and building the context
+    # here is also the only form that says what the bundle *is* — a CA file to verify the peer
+    # against, rather than a path httpx has to guess the meaning of.
+    return ssl.create_default_context(cafile=settings.llm_tls_ca_bundle)
+
+
 @cache
 def _tls_http_client() -> Any | None:
     """An httpx client pinned to the internal CA when one is configured, else None (system store).
@@ -574,18 +608,13 @@ def _tls_http_client() -> Any | None:
 
     Process-scoped, so the pool binds to the first loop that uses it. Production runs one loop.
     """
-    if not settings.llm_tls_ca_bundle:
+    verify = tls_verify()
+    if verify is None:
         return None
-    import ssl
-
     import httpx
 
-    # An `SSLContext`, not `verify="<path>"`: httpx deprecated the string form ("`verify=<str>` is
-    # deprecated. Use `verify=ssl.create_default_context(cafile=...)`"), and building the context
-    # here is also the only form that says what the bundle *is* — a CA file to verify the peer
-    # against, rather than a path httpx has to guess the meaning of.
     return httpx.AsyncClient(
-        verify=ssl.create_default_context(cafile=settings.llm_tls_ca_bundle),
+        verify=verify,
         # Never inherit an ambient proxy: HTTPS_PROXY/ALL_PROXY set on the pod would otherwise
         # redirect every prompt, completion and the Authorization bearer to a host of the env
         # setter's choosing, past the private-CA pinning above (the proxy re-terminates TLS).

@@ -1830,3 +1830,39 @@ believing the row is what kept the defect alive. A fixer found it by checking th
 them dangerously (`ABANDON` as a parent-close policy is worse than the default it replaces, not
 better). **Rule: a finding's diagnosis and its proposed remedy are two separate claims and the
 second is usually the less tested one.**
+
+## 2026-09-05 — four reviewers over one day's measurement
+
+From `D-2026-09-05-four-reviews-of-one-days-measurement`, reviewing my own #308.
+
+**A comment that disclaims an anti-pattern is not a defence against writing it.** I wrote
+`probes[::len // n][:n]` under a paragraph explaining why `probes[:n]` would be wrong, and for every
+n above half the corpus those are the same expression. The comment made the code *look* considered
+and stopped me checking. **Rule: when a comment says "not X", compute the case where the code most
+resembles X and assert the difference.**
+
+**I shipped an arithmetic bound with no test at all, in a change whose whole subject was
+measurement.** Every other piece of #308 got tests; `--sample` got a paragraph. **Rule: a selection
+or sampling rule is the one thing in a measurement that can be wrong while every arm still runs and
+reports — it gets a test before it gets a comment.**
+
+**Delegating a fix does not delegate the claim.** The false "CI never installed helm" narrative and
+the unmeasured "33" came from a subagent's work I accepted because its evidence for the *mechanism*
+was good. Its evidence for the *story around the mechanism* was a BACKLOG row. **Rule: when a
+subagent reports a fix, re-derive the numbers and the causal claim separately from the diff — they
+are two claims and only one of them was tested.**
+
+**A claim is checkable against `main`, not against the branch point.** The ADR contradicting my helm
+rationale merged while I was working. I never re-read `main` before merging. **Rule: before merging,
+re-read what landed on the base branch since the branch point, specifically for claims my prose
+makes about the same subsystem.**
+
+**Committing the result and not the artifact behind it is how a number becomes unre-derivable.** I
+committed 442 transcripts and left the token counters in `/tmp`, so the one table nobody could check
+was the cost table. **Rule: if a figure comes from a scrape, a counter or a clock rather than from a
+file, commit the scrape in the same commit as the figure.**
+
+**And the correction to a wrong assertion can be wrong.** My first fix for the sampling test
+asserted "the last draw lands in the final tenth", which is false at n=2 where the correct
+stratified draw is the first probe of each half. **Rule: state the property (each band contributes
+one), never a proxy for it (the last one is near the end).**
