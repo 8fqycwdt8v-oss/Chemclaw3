@@ -109,15 +109,21 @@ def test_the_durable_page_is_the_exact_top_k_not_an_approximation() -> None:
     order, pass every similarity assertion in this file, and quietly answer a different question.
 
     That is a decision (a structural search that may silently miss a precedent) rather than a
-    refactor, so it belongs in an ADR — and this test is what makes taking it deliberate.
+    refactor, so it belongs in an ADR — and this test is what makes taking it deliberate. It pins
+    the *contract*, not the plan: at 200 rows the planner would not choose an index anyway, so the
+    assertion bites wherever a restructure makes an index-ordered candidate set the answer, which
+    is every corpus large enough for the change to be worth making.
     """
 
     async def _run() -> None:
         store = await _store_or_skip()
         mem_store = InMemoryFingerprintStore(definition=molecule_definition())
-        # One structure unique to this test, so a 0.99 threshold isolates these rows from every
-        # other fixture in the shared table and the whole page is a tie.
-        structure = "CCCCCCCCCCCCO"
+        # A structure with no near neighbour among this suite's fixtures, so a 0.99 threshold
+        # isolates these rows from every other row in the shared table and the whole page is one
+        # tie. A long alkanol is *not* usable here even though it looks unique: ECFP4 over a chain
+        # of identical CH2 environments makes C8-ol and C13-ol tie at 1.0, and the sibling test's
+        # octanol rows then take two slots in this page.
+        structure = "Clc1ccc(cc1)C(=O)Nc1ccc(cc1)S(=O)(=O)N"
         ids = [f"pg-exact-{index:03d}" for index in range(200)]
         records = [record_for(cid, structure) for cid in ids]
         await store.add_many(records)

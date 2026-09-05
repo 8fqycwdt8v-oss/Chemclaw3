@@ -326,14 +326,35 @@ async def run_turn(
                 # turn-end flush below needs the object to drain. Same sink either way —
                 # `default_audit_sink()` is exactly what the builder would have called.
                 audit_sink = default_audit_sink()
-                graph = graph_factory(
+                # **Built off the loop.** Compiling the graph is ~42.5 ms of pure-Python work —
+                # every bound tool's schema, the middleware chain, and the helper roster, which is
+                # 18.8 ms of it on its own — and it ran on the one event loop this process has.
+                # There are no workers to absorb it (`service_uvicorn_workers > 1` is refused), so
+                # at the shipped admission cap that was a per-turn stall of every other chemist's
+                # stream and both probes.
+                #
+                # **It does not take all of that off the loop, and the honest number is the point.**
+                # A thread buys no parallelism — the GIL is held between switch intervals — so what
+                # this buys is the loop being *scheduled* during the build rather than after it.
+                # Measured on build-shaped work, medians of five runs with a 2 ms heartbeat:
+                # worst-case loop stall **52.2 ms -> 16.6 ms**, a 3.1x reduction rather than an
+                # elimination, and the build's own wall clock is unchanged (43.9 -> 44.3 ms). A
+                # single run showed the build 38% slower and that was noise; the residual 16.6 ms
+                # is the switch interval and is not removable here.
+                #
+                # The two awaits are hoisted rather than moved into the thread, because acquiring a
+                # pooled connection is the loop's to do.
+                checkpointer = await _turn_checkpointer()
+                store = await _turn_store()
+                graph = await asyncio.to_thread(
+                    graph_factory,
                     profile=profile,
                     actor=actor or "",
                     correlation_id=ledger.correlation_id,
                     audit_sink=audit_sink,
                     connectors=turn_tools,
-                    checkpointer=await _turn_checkpointer(),
-                    store=await _turn_store(),
+                    checkpointer=checkpointer,
+                    store=store,
                 )
                 # `turn_config`, not a bare `configurable`: it also carries the graph's step
                 # ceiling, which nothing here had ever chosen — the framework bakes 9999, and

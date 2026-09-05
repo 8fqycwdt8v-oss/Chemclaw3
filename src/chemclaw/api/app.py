@@ -84,7 +84,7 @@ from chemclaw.connectors.health import check_connectors_at_startup, probe_connec
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
-from chemclaw.core.executor import install_default_executor
+from chemclaw.core.executor import front_door_reserved, install_default_executor
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.job_record import search_job_records
@@ -163,10 +163,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # one pool, and the loop's stock default is `min(32, cpu_count + 4)`: 8 on a 4-CPU pod, the
     # same number as `service_max_concurrent_turns`, so the admission cap could fill it on its own
     # and authentication queued behind chemistry. See `core/executor.py` for the measurement.
-    install_default_executor(
-        component="front-door",
-        reserved=settings.service_max_concurrent_turns + settings.attachment_max_concurrent_parses,
-    )
+    #
+    # The width is `front_door_reserved()` rather than the sum written here before, because the sum
+    # was not the ceiling: an admitted turn may fan out to `agent_max_parallel_tool_calls`
+    # concurrent tool calls and each may hold a thread, so the caps permit 98 simultaneous offloads
+    # where this asked for 14. Measured, one short call behind 96 offloads waited 762.7 ms at the
+    # old width and 123.2 ms at this one.
+    install_default_executor(component="front-door", reserved=front_door_reserved())
 
     # Before serving, for the reason `connectors_required` raises here: a judge endpoint that
     # cannot enforce structured output degrades *every* verified answer silently, and refusing to
