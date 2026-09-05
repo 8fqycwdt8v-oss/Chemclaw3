@@ -536,9 +536,11 @@ def bind_pool_metrics() -> None:
     """Expose this process's pool gauges, so pool saturation is visible wherever a pool exists.
 
     Called by `pooling()` rather than by any one process's startup code, which is the whole point:
-    all three of these gauges used to be bound in the front door's `create_app`, so the eleven of
-    the shipped chart's seventeen pooled processes that are *not* the front door — every Temporal
-    worker, every connector server — served a `/metrics` surface with no pool reading on it at all.
+    all three of these gauges used to be bound in the front door's `create_app`, so every pooled
+    process that is *not* the front door — every Temporal worker, every connector server — served a
+    `/metrics` surface with no pool reading on it at all. (How many that is is rendered, not
+    written here: two counts in this file said "seventeen pooled processes" while the chart
+    rendered fourteen, which is the same drift `values.yaml` already records against itself.)
     `requests_waiting` is the signal D-119 introduced to make "the pool is too small" legible, and
     it was absent from exactly the processes that do the long database work (the retention sweep,
     the reindex, the chain verification). Binding it where the pool is opened means a process
@@ -555,11 +557,13 @@ def bind_pool_metrics() -> None:
     stores do not share
     connections, and the checkpointer registers a third — and measured against a live server that
     was three pools and 48 connections reported as 16. That under-count reached the fleet
-    validator too, which multiplied *processes* rather than pools: the shipped chart's real floor
-    is **208** where its values file provisioned 136. Both are fixed —
-    `pg_fleet_pools` counts pools and `postgres.maxConnections` provisions 256 — and the figure to
-    trust is whichever `tests/test_deploy_chart.py` derives from the rendered chart, not this
-    sentence.
+    validator too, which multiplied *processes* rather than pools: the shipped chart's floor was
+    **208** against the 136 its values file then provisioned. Both are fixed — `pg_fleet_pools`
+    counts pools, the readiness probe's pool is charged the one connection it asks for, and
+    `postgres.maxConnections` provisions 256 — and the figure to trust is whichever
+    `tests/test_deploy_chart.py` derives from the rendered chart, not this sentence. It has moved
+    twice since it was written: 208 was the product, 166 is the sum, and a sentence stating either
+    goes stale the next time a replica count does.
 
     Imported inside the function: `core/metrics.py` is a sibling of this module and `core` keeps
     its no-module-scope-sibling-import rule (`tests/test_layering.py`), the same lazy exception

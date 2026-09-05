@@ -224,9 +224,7 @@ def test_a_job_that_waits_on_a_person_is_unbounded_as_a_template_step_too(
     connector, job = find_job(fixture_bundle)
     waiting = job.model_copy(update={"awaits_answer": True})
     monkeypatch.setattr(template_activities, "find_job", lambda _name: (connector, waiting))
-    monkeypatch.setattr(
-        settings, "connector_jobs_awaiting_answer", f"{connector}.{waiting.name}"
-    )
+    monkeypatch.setattr(settings, "connector_jobs_awaiting_answer", f"{connector}.{waiting.name}")
     resolved = asyncio.run(authorize_job_step(_step(fixture_bundle, subject="benzene")))
     assert resolved.awaits_answer is True
     assert child_execution_timeout(resolved.timeout_seconds, resolved.awaits_answer) is None, (

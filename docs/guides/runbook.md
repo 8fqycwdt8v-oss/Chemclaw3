@@ -1235,10 +1235,19 @@ which branch fired, and raising `postgres.maxConnections` when it is the *sessio
 over changes nothing. Without a split the second gauge is 0 in every pod and this is one comparison
 again.
 
-If it fires on a deployment whose two DSNs you believe name one server, that is the case
-`CHEMCLAW_PG_SESSION_FLEET_MAX_CONNECTIONS`'s startup warning describes: check the spelling before
-declaring a second ceiling, because a ceiling for a server that does not exist pads the right-hand
-side and turns this alert off.
+**Declaring the second ceiling never silences this alert — it is the only thing that checks the
+session server at all.** This paragraph said the opposite, and following it during an incident
+would have been exactly wrong. Driven through `promtool`: with the session server over its
+would-be ceiling, an undeclared `CHEMCLAW_PG_SESSION_FLEET_MAX_CONNECTIONS` is **silent** and a
+declared one **fires**. The claim was true of a summed expression that never shipped past its own
+pull request, and it outlived the expression into five documents.
+
+What *is* worth checking first is the spelling. Both this alert's left-hand side and the startup
+check split the fleet by comparing the two DSN strings, so one server named two ways is measured as
+two servers that are each inside their own ceiling — and neither net sees the real total, declared
+or not. Note that the released expression *before* the split gauge existed would have caught that
+case, because it compared one sum against one ceiling. Spell both DSNs the same way and be checked
+once.
 
 ### chemclaw.cost
 

@@ -627,12 +627,15 @@ spec:
               and this is the only one that says so.
 {{- if .Values.monitoring.temporalSdkMetrics.enabled }}
 
-        {{- /* The gap the worker's own probes leave open on purpose. `/readyz` is the worker's
-               `is_running` and is deliberately *not* wired to liveness (`chemclaw.workerProbes`):
-               restarting on a lost broker connection would turn an ordinary Temporal reconnect into
-               a crash loop. The cost of that correct decision is that a worker can sit not-ready
-               indefinitely with nothing saying so — it still serves `/metrics`, so `up` is 1, and
-               no first-party counter moves when a poll loop is simply not polling.
+        {{- /* The gap the worker's own probes leave open on purpose, and it is narrower than this
+               comment used to say. `/readyz` is `worker_ready` — `is_running` **and**
+               `broker_seen_recently()` since 2026-09-04 — and is deliberately *not* wired to
+               liveness (`chemclaw.workerProbes`): restarting on a lost broker connection would turn
+               an ordinary Temporal reconnect into a crash loop. So a severed worker does go
+               not-ready, which the `is_running`-only predicate this described did not. What remains
+               is the worker that is polling and getting nothing it should be running — it still
+               serves `/metrics`, so `up` is 1, and no first-party counter moves when a poll loop is
+               simply not polling the queue anyone is waiting on.
 
                The SDK's own exporter is what closes it: a worker with no pollers is not asking the
                broker for work, whatever its process state looks like. Rendered only when that

@@ -355,6 +355,25 @@ class Settings(
             return self.note_reindex_enabled
         return bool(NOTE_INDEX_SOURCES & set(self.data_source_list))
 
+    def _fleet_pool_widths(self) -> tuple[int, int]:
+        """`(one-connection pools, `pg_pool_max_size` pools)` on `postgres_dsn`'s server.
+
+        The decomposition the refusal above prints, derived through the same branches as
+        `fleet_connections_per_server` so the two cannot disagree — `wide * pg_pool_max_size +
+        narrow` is that function's first element by construction. Under a split the primary keeps
+        one full pool per pooled process and none of the readiness pools, which is why `narrow` is
+        zero there: they move to the session store with the checkpointer.
+        """
+        primary, session = self.fleet_connections_per_server()
+        if session:
+            return 0, primary // self.pg_pool_max_size
+        narrow = (
+            self.service_fleet_replicas
+            if self.pg_fleet_pools >= 3 * self.service_fleet_replicas
+            else 0
+        )
+        return narrow, self.pg_fleet_pools - narrow
+
     def fleet_connections_per_server(self) -> tuple[int, int]:
         """`(connections on postgres_dsn's server, connections on the split session store's)`.
 
@@ -562,46 +581,63 @@ class Settings(
         primary_connections, session_connections = self.fleet_connections_per_server()
         if self.pg_session_fleet_max_connections and not session_connections:
             # Refused rather than ignored, and it is the one branch here that can be: the setting
-            # is new, so nothing has it set yet and no upgrade can trip on it. Left inert it would
-            # be a ceiling for a server that does not exist — which the runtime alert *adds* to the
-            # real one, so a fleet could sit above its actual limit with nothing firing. A knob
-            # whose referent is absent is the `map_to_hpc_identity` shape this tree deletes.
+            # is new, so nothing has it set yet and no upgrade can trip on it. A ceiling for a
+            # server this deployment does not have is a knob with no referent — the runtime alert's
+            # second branch would compare an always-zero gauge against it and never fire — which is
+            # the `map_to_hpc_identity` shape this tree deletes.
+            #
+            # (This comment used to say the alert *adds* the two ceilings, so a declared phantom
+            # would silence it. That was true of the summed expression this same change replaced,
+            # and it survived into five documents describing the two-branch one. Driven: with the
+            # session server over, an undeclared ceiling is **silent** and a declared one **fires**.
+            # Declaring can only ever add a firing condition.)
             raise ValueError(
                 "pg_session_fleet_max_connections declares a ceiling for a split session store "
                 "and there is none: session_store_dsn is unset, equal to postgres_dsn, or names "
-                "the same endpoint, so every pool lands on one server and pg_fleet_max_connections "
-                "is the only ceiling that means anything. Unset it, or point session_store_dsn at "
-                "the second server it is describing."
+                "an endpoint that cannot be told apart from postgres_dsn's, so every pool lands on "
+                "one server and pg_fleet_max_connections is the only ceiling that means anything. "
+                "Unset it, or point session_store_dsn at the second server it is describing — "
+                "spelled differently from postgres_dsn, since the two are compared as strings."
             )
-        if self.pg_fleet_max_connections:
+        if self.pg_fleet_max_connections and primary_connections > self.pg_fleet_max_connections:
             # **Pools, not processes, and not every pool is `pg_pool_max_size` wide.** A process
             # holds one pool per distinct `(dsn, libpq options, requested max_size)` key plus any
             # foreign pool it registers, so a front door holds three — stores, `/readyz`'s own
             # statement timeout, the checkpointer's autocommit pool — of which the middle one asks
             # for a single connection. Multiplying by processes said `1 × 16 = 16` for a process
             # measured at 48; multiplying by pools said 208 for a fleet that opens 166.
-            if primary_connections > self.pg_fleet_max_connections:
-                raise ValueError(
-                    f"this deployment may open {primary_connections} Postgres connections "
-                    f"({self.pg_fleet_pools} pool(s), {self.service_fleet_replicas} of them one "
-                    f"connection wide and the rest {self.pg_pool_max_size}) against a declared "
-                    f"server ceiling of {self.pg_fleet_max_connections}. A process holds one pool "
-                    "per distinct DSN and statement timeout, plus the checkpointer's — the front "
-                    "door holds three. Lower pg_pool_max_size or the number of pooled processes, "
-                    "or raise pg_fleet_max_connections if the server's max_connections can serve "
-                    "it."
-                )
-            if session_connections and self.pg_session_fleet_max_connections:
-                if session_connections > self.pg_session_fleet_max_connections:
-                    raise ValueError(
-                        f"this deployment may open {session_connections} Postgres connections on "
-                        f"the session store's own server against a declared ceiling of "
-                        f"{self.pg_session_fleet_max_connections}. session_store_dsn splits the "
-                        "session layer onto a second server, and a front door puts three of its "
-                        "four pools there — the stores' session pool, /readyz's and the "
-                        "checkpointer's. Lower pg_pool_max_size or the replica count, or raise "
-                        "pg_session_fleet_max_connections if that server can serve it."
-                    )
+            #
+            # The breakdown is printed from the terms this figure was actually built from. It used
+            # to print the raw settings, which only added up on the unsplit path: a split said 112
+            # beside a decomposition summing to 166, and a hand-set inconsistent pair said 32
+            # beside one summing to -13. An operator is told what to lower; the arithmetic they are
+            # shown has to reach the number they are refused over.
+            narrow, wide = self._fleet_pool_widths()
+            raise ValueError(
+                f"this deployment may open {primary_connections} Postgres connections on "
+                f"{'postgres_dsn' if session_connections else 'its Postgres server'} "
+                f"({wide} pool(s) of {self.pg_pool_max_size} plus {narrow} of one) against a "
+                f"declared ceiling of {self.pg_fleet_max_connections}. A process holds one pool "
+                "per distinct DSN and statement timeout, plus the checkpointer's — the front "
+                "door holds three, one of them the readiness probe's single connection. Lower "
+                "pg_pool_max_size or the number of pooled processes, or raise "
+                "pg_fleet_max_connections if the server's max_connections can serve it."
+            )
+        # **Its own `if`, not nested under the primary's.** `postgres.maxConnections: 0` is a
+        # documented value meaning "declare no ceiling", and nesting made it silence a *declared*
+        # session ceiling too: measured, a session store charged 500 against a declared 180 built
+        # without a word. Two independent ceilings need two independent checks, and the runtime
+        # alert's branches were un-shared in the same change for the same reason.
+        if session_connections > self.pg_session_fleet_max_connections > 0:
+            raise ValueError(
+                f"this deployment may open {session_connections} Postgres connections on the "
+                f"session store's own server against a declared ceiling of "
+                f"{self.pg_session_fleet_max_connections}. session_store_dsn splits the session "
+                "layer onto a second server, and a front door puts three of its four pools there "
+                "— the stores' session pool, /readyz's and the checkpointer's. Lower "
+                "pg_pool_max_size or the replica count, or raise "
+                "pg_session_fleet_max_connections if that server can serve it."
+            )
         if self.calc_backend_max_concurrent_requests:
             # Three factors, not two: a solvent screen fans out inside one activity under
             # `asyncio.Semaphore(calc_screen_max_parallel)` and each branch holds its own

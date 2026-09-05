@@ -4,7 +4,8 @@ This is the number `pg_fleet_pools` multiplies and `chemclaw.fleetPools` renders
 2026-09-05 nothing measured it: `Settings` computed `pooled_processes × pg_pool_max_size`, which
 charged a front-door process 16 connections for the 48 it opens, and the shipped chart declared 136
 against a real floor of 208. A *process* is not a pool — `core/db` keys a pool on
-`(loop, dsn, libpq options)` and a process may also register a foreign one — so the only honest way
+`(loop, dsn, libpq options, requested max_size)` and a process may also register a foreign one — so
+the only honest way
 to know the multiplier is to drive each role's composition root and count what it holds.
 
 Postgres-backed and skipped offline (`tests/pg.py`), because a pool that never opens is a pool this

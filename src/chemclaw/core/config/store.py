@@ -143,10 +143,11 @@ class StoreSettings(BaseSettings):
     # connector server 1 → 2 — one more per pooled process, uniformly, because the front door's
     # `/readyz` and checkpointer pools both resolve `session_store_dsn or postgres_dsn` and *move*
     # there while the stores' session pool is new. On the shipped chart that is 40 real pools
-    # against 26 declared, and **320 connections against a `postgres.maxConnections` of 256** — a
+    # against 26 declared, and **278 connections against a `postgres.maxConnections` of 256** — a
     # release breaching its own declared ceiling with the startup check passing, caught only by the
     # `for: 10m` runtime alert once the pods were up. Which is exactly the `mcpFace` defect
-    # `_helpers.tpl` records, a second time.
+    # `_helpers.tpl` records, a second time. (320 was the uniform-width arithmetic this same commit
+    # replaced, and it survived here while `values.yaml` and the validator both carried 278.)
     #
     # **The pool count is decidable here; the second server's ceiling is not.** That is why this is
     # two settings and not one documented limit — the comment here used to say "nothing in a pod

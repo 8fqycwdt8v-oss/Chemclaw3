@@ -906,7 +906,10 @@ def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> Non
         )
     message = str(excinfo.value)
     assert "257" in message and "136" in message
-    assert "17 pool(s)" in message and "1 of them one connection wide" in message
+    # The decomposition is printed from the terms the figure was built from, not from the raw
+    # settings — see `test_the_refusal_prints_a_breakdown_that_reaches_its_own_number`, which is
+    # what keeps 16 x 16 + 1 equal to the 257 this message refuses over.
+    assert "16 pool(s) of 16 plus 1 of one" in message
     assert "pg_fleet_max_connections" in message and "pg_pool_max_size" in message
     assert "the front door holds three" in message
 
@@ -1700,3 +1703,92 @@ def test_the_session_stores_ceiling_is_refused_when_it_is_exceeded_and_when_ther
             pg_session_fleet_max_connections=256,
         )
     assert "declares a ceiling for a split session store and there is none" in str(unsplit.value)
+
+
+def test_a_declared_session_ceiling_is_checked_whether_or_not_the_primary_one_is() -> None:
+    """Two independent ceilings, two independent checks — they used to share one `if`.
+
+    `postgres.maxConnections: 0` is a documented value meaning "declare no ceiling", and nesting
+    the session check inside `if self.pg_fleet_max_connections:` made it silence a ceiling the
+    operator *did* declare. Measured before the split: a session store charged 500 connections
+    against a declared 180 constructed without a word — no refusal, and no warning either, because
+    the warning fires only when the second ceiling is missing.
+
+    The runtime alert had the identical hole and lost the shared guard in the same change, so a
+    deployment in this configuration was unchecked at startup and unwatched at runtime.
+    """
+    split = {
+        "_env_file": None,
+        "pg_fleet_pools": 80,
+        "pg_pool_max_size": 8,
+        "service_fleet_replicas": 20,
+        "postgres_dsn": "postgresql://u:p@primary:5432/chemclaw",
+        "session_store_dsn": "postgresql://u:p@sessions:5432/sessions",
+    }
+    with pytest.raises(ValueError, match="on the session store's own server"):
+        Settings(**split, pg_fleet_max_connections=0, pg_session_fleet_max_connections=180)  # type: ignore[arg-type]
+
+    # And the primary's own check still self-disables at 0, which is what that value is for.
+    settings = Settings(**split, pg_fleet_max_connections=0)  # type: ignore[arg-type]
+    assert settings.fleet_connections_per_server() == (320, 500)
+
+
+def test_the_refusal_prints_a_breakdown_that_reaches_its_own_number() -> None:
+    """An operator is told what to lower; the arithmetic shown has to reach the figure refused.
+
+    The message printed the raw settings rather than the terms the number was built from, so it
+    added up on exactly one of three paths: a split said 112 beside a decomposition summing to 166,
+    and a hand-set pair too small to hold its readiness pools said 32 beside one summing to **-13**
+    — three narrow pools out of two. `_fleet_pool_widths` derives the split through the same
+    branches as `fleet_connections_per_server`, so `wide × pg_pool_max_size + narrow` is that
+    function's own answer by construction.
+    """
+    import re
+
+    def _refusal(**kwargs: object) -> str:
+        with pytest.raises(ValueError) as excinfo:
+            Settings(_env_file=None, postgres_dsn="postgresql://u:p@primary:5432/c", **kwargs)  # type: ignore[arg-type]
+        return str(excinfo.value)
+
+    for label, kwargs in (
+        (
+            "split",
+            {
+                "pg_fleet_pools": 26,
+                "pg_pool_max_size": 8,
+                "service_fleet_replicas": 6,
+                "pg_fleet_max_connections": 100,
+                "session_store_dsn": "postgresql://u:p@sessions:5432/s",
+            },
+        ),
+        (
+            "no split",
+            {
+                "pg_fleet_pools": 26,
+                "pg_pool_max_size": 8,
+                "service_fleet_replicas": 6,
+                "pg_fleet_max_connections": 100,
+            },
+        ),
+        (
+            "pair too small for its readiness pools",
+            {
+                "pg_fleet_pools": 2,
+                "pg_pool_max_size": 16,
+                "service_fleet_replicas": 3,
+                "pg_fleet_max_connections": 10,
+            },
+        ),
+    ):
+        message = _refusal(**kwargs)
+        total, wide, per_pool, narrow = (
+            int(n)
+            for n in re.search(
+                r"may open (\d+) Postgres connections on .*?\((\d+) pool\(s\) of (\d+) plus (\d+) of one\)",
+                message,
+            ).groups()
+        )
+        assert wide * per_pool + narrow == total, (
+            f"{label}: the refusal says {total} and shows {wide}x{per_pool} + {narrow} = "
+            f"{wide * per_pool + narrow}"
+        )
