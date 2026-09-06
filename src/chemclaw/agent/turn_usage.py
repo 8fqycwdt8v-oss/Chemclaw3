@@ -37,13 +37,20 @@ ledger below is what that call books itself into — task-local for the same rea
 absent off the request path, where nothing is metering anyway).
 """
 
+import logging
 from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.callbacks import AsyncCallbackHandler
+from langchain_core.messages import SystemMessage
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.outputs import LLMResult
+
+from chemclaw.agent.context_budget import estimator_ratio, prefix_tokens
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -240,6 +247,86 @@ class _OffStreamMeter(AsyncCallbackHandler):
         ledger = _ledger.get()
         if ledger is not None:
             ledger.add(llm_result_usage(response))
+
+
+class InFlightPrompts(AsyncCallbackHandler):
+    """What the model calls still in flight have already committed this turn to paying.
+
+    **A turn torn down mid-message metered zero, and nothing here could see it.** The stream
+    accumulates usage as chunks arrive, and a gateway reports usage on the *terminal* frame only
+    (`stream_options.include_usage`) — so a turn cancelled before that frame booked 0 against a
+    request the gateway had already been paid for. Measured 2026-09-06 against a real
+    OpenAI-compatible endpoint: a turn killed after 12 streamed chunks wrote a `turn_costs` row of
+    `('abandoned', 0, 0)` beside an identical completed turn's `900/120`, and six such turns under
+    a 1,000-token per-user cap refused nothing. That makes "drop the connection just before the
+    answer" the cheapest attack on the runaway-cost guard, and it is the same failure
+    `agent/llm_provider.py` names in full: *a runaway-cost guard that meters zero is not
+    conservative, it is disarmed.*
+
+    So the prompt is estimated when the call *starts*, held while it is in flight, and dropped the
+    moment the provider's own numbers arrive — a call that finishes is metered, never estimated,
+    and only what nobody was ever billed for through this stream is left here at teardown.
+
+    **The estimate is the whole request, including the bound tool schemas.** Counting only the
+    message list would repeat the defect `D-2026-09-04-a-budget-that-excludes-the-prefix-is-not-a-
+    budget` closed: the schemas are the larger half of what a gateway bills for on this deployment.
+    `prefix_tokens()` is the ambient measurement `agent/context_budget.MeasureRequestPrefix`
+    publishes for the call in flight — system message plus schemas — so the system message is
+    subtracted out of it before the message list is counted, and each half is counted once.
+
+    **It is an estimate and is booked as one.** `estimator_ratio()` converts this system's chars/4
+    estimator into billed tokens using the ratio measured from the provider's own `input_tokens`,
+    clamped so it can only tighten; the streamed output already produced is not added, because it
+    is a rounding error beside a prompt that carries every tool schema. A cancelled turn is
+    therefore billed slightly low rather than not at all, and it stays *separable*: the caller books
+    it against the budget, where a guard has to see the whole bill, and publishes it as its own
+    `estimated_tokens` field rather than adding it to the measured token counters.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing in flight — one instance per turn, held by that turn's ledger."""
+        self._pending: dict[Any, int] = {}
+
+    async def on_chat_model_start(
+        self, serialized: Any, messages: Any, *, run_id: Any = None, **kwargs: Any
+    ) -> None:
+        """Record what the call about to be made will cost if it is never billed to us."""
+        self._pending[run_id] = _prompt_estimate(messages)
+
+    async def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
+        """Forget a call the provider has reported on: its real usage rode the stream."""
+        self._pending.pop(kwargs.get("run_id"), None)
+
+    async def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
+        """Forget a call that raised — nothing was streamed and the turn will report the failure.
+
+        A gateway that rejects a request bills nothing for it, and a gateway that dies mid-response
+        is not a spend this system can distinguish from the failure it already records.
+        """
+        self._pending.pop(kwargs.get("run_id"), None)
+
+    @property
+    def unbilled_tokens(self) -> int:
+        """Estimated billed tokens for every call started under this turn and never reported."""
+        estimated = sum(self._pending.values())
+        return int(estimated * estimator_ratio()) if estimated else 0
+
+
+def _prompt_estimate(messages: Any) -> int:
+    """One model call's whole request in estimated tokens: its messages plus its tool schemas.
+
+    `messages` is upstream's `list[list[BaseMessage]]` — a list per prompt, of which a chat call
+    makes exactly one. Anything else meters 0 rather than raising: this runs on the callback path
+    of every model call, and an accounting estimate must never be able to end a turn.
+    """
+    try:
+        prompt = list(messages[0]) if messages else []
+        system = prompt[:1] if prompt and isinstance(prompt[0], SystemMessage) else []
+        schemas = max(prefix_tokens() - int(count_tokens_approximately(system)), 0)
+        return int(count_tokens_approximately(prompt)) + schemas
+    except Exception:
+        logger.warning("could not estimate a model call's prompt; it books zero if abandoned")
+        return 0
 
 
 def off_stream_metering() -> dict[str, Any]:

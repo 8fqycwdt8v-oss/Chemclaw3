@@ -43,8 +43,12 @@ there is no second config source.
 
 ```sh
 # The front-door chat service (FastAPI + SSE). Browse to the served page, start a
-# session, watch a plan + tool use, get a cited answer.
-uvicorn chemclaw.api.app:create_app --factory --host 127.0.0.1 --port 8000
+# session, watch a plan + tool use, get a cited answer. Both hosts, deliberately:
+# `--host` is the socket, `CHEMCLAW_SERVICE_HOST` is what the app is told about it,
+# and with no identity provider configured the app refuses to serve a request that
+# arrives on anything but loopback (see `src/chemclaw/api/middleware.py`).
+CHEMCLAW_SERVICE_HOST=127.0.0.1 \
+  uvicorn chemclaw.api.app:create_app --factory --host 127.0.0.1 --port 8000
 
 # Durable workers (separate processes; need Temporal + Postgres from `make up`).
 python -m chemclaw.durable.background_worker    # background-jobs (ELN sync, reports, memory)

@@ -25,8 +25,15 @@ from jwt import PyJWKClient
 from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
 from pydantic import BaseModel, Field
 
-from chemclaw.api.middleware import bind_request_actor, route_template
+from chemclaw.api.middleware import (
+    AT_CAPACITY,
+    arrived_over_the_network,
+    bind_request_actor,
+    note_network_exposure,
+    route_template,
+)
 from chemclaw.api.rate_limit import RateLimited, enforce_request_budget
+from chemclaw.api.state import state
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import GROUP_ROLE_PREFIX
 from chemclaw.core.metrics_bridge import record_metric
@@ -240,7 +247,9 @@ async def require_principal(request: Request) -> Principal:
     every SSE stream and health probe on one event loop — a fetch stall on the loop would freeze
     them all.
     """
+    _shed_if_the_database_is_known_down(request)
     if not settings.entra_required:
+        _refuse_exposed_dev_principal(request)
         return _bind(
             request, _within_budget(Principal(oid=_DEV_PRINCIPAL_OID, upn="dev@localhost"))
         )
@@ -283,8 +292,79 @@ async def require_principal(request: Request) -> Principal:
     return _bind(request, _within_budget(principal))
 
 
+def _shed_if_the_database_is_known_down(request: Request) -> None:
+    """Answer at once when the readiness probe has just found Postgres unreachable.
+
+    **A fact the process already holds, which every request was re-buying at the pool's price.**
+    Measured 2026-09-06 against a dead Postgres: `/readyz` answered in 2.03 s and cached it, while
+    `POST /sessions` and `GET /sessions` each spent the full `pg_pool_timeout_seconds` — ten
+    seconds, per request — to reach the same conclusion. That is not merely slow: each of those
+    requests occupies a connection slot and a concurrency slot for the whole window, so a dead
+    database turns into a queue on a service that could have said so immediately.
+
+    **Only a *fresh* verdict sheds.** Nothing re-probes on its own — `_probe_database` runs inside
+    the readiness route — so a reading older than `service_readiness_cache_seconds` is history, and
+    treating it as current would keep shedding after the database came back. Past the window the
+    request goes and finds out for itself, which is exactly the behaviour this replaces.
+
+    **Where it lives is what exempts the probes.** `/healthz`, `/readyz` and `/metrics` do not
+    depend on `require_principal`, so they are untouched by construction rather than by a path list
+    — and that matters more here than for the rate limiter beside it: `/readyz` is the only thing
+    that can *clear* this verdict, so shedding it would make one outage permanent.
+
+    The cost, stated: a route that needs no database (`GET /profiles`) is shed too. That is
+    accepted rather than overlooked — the pod is already failing readiness and has been pulled out
+    of the Route, and a per-route "does this touch Postgres" map is a second thing to keep true.
+
+    The wording is `_database_unavailable`'s, unchanged, for the reason that handler gives: the
+    client behaviour is identical either way, and which dependency is down is the operator's
+    business rather than the caller's.
+
+    Raises:
+        HTTPException: 503, when a current readiness probe says the database is unreachable.
+    """
+    front = state(request)
+    window = settings.service_readiness_cache_seconds
+    if front.database_reachable or time.monotonic() - front.database_probed_at > window:
+        return
+    record_metric(lambda m: m.increment("chemclaw_db_unavailable_total"))
+    raise HTTPException(status_code=503, detail=AT_CAPACITY)
+
+
+def _refuse_exposed_dev_principal(request: Request) -> None:
+    """Refuse to mint the dev principal for a request that arrived from the network.
+
+    **This is the boot guard's other half, and it is here because this is where the principal is
+    minted.** `_refuse_unauthenticated_exposure` reads `settings.service_host` — an intention —
+    while uvicorn binds `--host`, and the two agree only on the container path. Measured against a
+    real uvicorn: `CHEMCLAW_SERVICE_HOST=127.0.0.1 uvicorn --host 0.0.0.0` booted silently and
+    answered an off-box `POST /sessions` with 200 and `dev-user`, every authorization gate open.
+    `arrived_over_the_network` reads the socket the request actually landed on, so what is refused
+    here is what happened rather than what was configured.
+
+    It sits on the *dev* branch only. With `entra_required` on there is no stand-in principal to
+    leak and an off-box request is an ordinary 401; answering 503 there would hide every real
+    authentication failure behind an availability error.
+
+    `service_allow_insecure=true` remains the conscious opt-out, exactly as at boot — one decision,
+    honoured in both places.
+
+    503 rather than 401 because the caller cannot fix this: no credential would help, the *service*
+    is misconfigured, and a retry against a corrected deployment is the right client behaviour.
+
+    Raises:
+        HTTPException: 503, when an unauthenticated deployment is serving the network.
+    """
+    if settings.service_allow_insecure or not arrived_over_the_network(request.scope):
+        return
+    server = request.scope.get("server") or ("", None)
+    _count_auth_failure("network_exposed")
+    note_network_exposure(str(server[0]))
+    raise HTTPException(status_code=503, detail="service misconfigured; refusing to serve")
+
+
 def _count_auth_failure(reason: str) -> None:
-    """Book one refused authentication under its reason — a closed, three-value label set.
+    """Book one refused authentication under its reason — a closed, four-value label set.
 
     Through `record_metric` rather than `METRICS` directly, for the reason the group-claim overage
     beside it does: this module is imported by processes that do not own the registry.

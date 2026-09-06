@@ -23,7 +23,7 @@ from chemclaw.api.budget import BudgetExceeded
 from chemclaw.api.deps import CurrentSession, CurrentUser
 from chemclaw.api.detach import DetachableTurn
 from chemclaw.api.events import ErrorEvent, QueuedEvent
-from chemclaw.api.middleware import _AT_CAPACITY
+from chemclaw.api.middleware import AT_CAPACITY
 from chemclaw.api.runner import failure_event, run_turn
 from chemclaw.api.schemas import MessageIn, session_title
 from chemclaw.api.state import (
@@ -211,10 +211,10 @@ async def post_message(
                     # under one code, on a taxonomy whose whole contract is that each member is a
                     # different thing for the user to do. A surface switching on `code` could not
                     # tell "we are busy, retry in a moment" from "your budget is gone, stop
-                    # retrying". `_AT_CAPACITY` was already the one literal for this condition;
+                    # retrying". `AT_CAPACITY` was already the one literal for this condition;
                     # now the code names the same thing the wording does.
                     shed = ErrorEvent(
-                        message=_AT_CAPACITY,
+                        message=AT_CAPACITY,
                         code="at_capacity",
                         retryable=True,
                         correlation_id=correlation_id,

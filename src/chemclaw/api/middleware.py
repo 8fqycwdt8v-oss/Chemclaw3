@@ -6,6 +6,7 @@ route, which is the line that separates this module from `chemclaw/api/routes/` 
 pure ASGI for the streaming-safety reason its docstring carries.
 """
 
+import ipaddress
 import json
 import logging
 import re
@@ -44,7 +45,11 @@ logger = logging.getLogger(__name__)
 # said in two shapes — an error *event* on an already-open turn stream (D-166) and a 503 body from
 # `_database_unavailable` — and the client behaviour it asks for is the same either way: back off
 # and retry. A browser has no business learning which piece of infrastructure was full.
-_AT_CAPACITY = "server at capacity; retry shortly"
+#
+# Public because it now has three readers across two modules (`routes/turns.py` says it on an open
+# stream, `auth.py` sheds with it before a request reaches a pool), and a name imported through the
+# underscore is a private name only by spelling.
+AT_CAPACITY = "server at capacity; retry shortly"
 
 # CSP for the self-served chat UI (SEC-5): everything is same-origin except the one inline
 # <style> block in index.html (so style-src needs 'unsafe-inline') and data: images; app.js is
@@ -77,14 +82,14 @@ async def _database_unavailable(request: Request, exc: Exception) -> Response:
     connection that was *available* and could not be handed to them, which is the same event-loop
     starvation that used to show up as a connect timeout.
 
-    Answered with the admission path's wording on purpose (`_AT_CAPACITY`): it is what a shed turn
+    Answered with the admission path's wording on purpose (`AT_CAPACITY`): it is what a shed turn
     already says, the client behaviour is identical (back off and retry), and a browser has no
     business learning which piece of infrastructure is behind it — while a misconfigured DSN still
     names itself loudly in the log line below.
     """
     METRICS.increment("chemclaw_db_unavailable_total")
     logger.warning("shedding %s %s: %s", request.method, request.url.path[:256], exc)
-    return JSONResponse(status_code=503, content={"detail": _AT_CAPACITY})
+    return JSONResponse(status_code=503, content={"detail": AT_CAPACITY})
 
 
 async def _subsystem_unavailable(request: Request, exc: Exception) -> Response:
@@ -118,6 +123,75 @@ async def _subsystem_unavailable(request: Request, exc: Exception) -> Response:
         "shedding %s %s: %s", request.method, request.url.path[:256], exc, exc_info=exc.__cause__
     )
     return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+#: Server addresses already reported by `arrived_over_the_network`, so the SECURITY line below is
+#: said once per distinct socket rather than once per request. Bounded for `_REPORTED_FLOORS`'
+#: reason: the value is an address an *unauthenticated* caller's connection chose to land on, and an
+#: unbounded set would be a memory cost anyone able to reach the pod could impose.
+_REPORTED_EXPOSURES: set[str] = set()
+_MAX_REPORTED_EXPOSURES = 8
+
+
+def arrived_over_the_network(scope: Scope) -> bool:
+    """Whether this request landed on an address reachable from outside the machine.
+
+    **The socket, not the setting** — which is the whole reason this exists beside
+    `_refuse_unauthenticated_exposure`. That guard reads `settings.service_host`, and uvicorn binds
+    whatever `--host` it was given; the two agree only on the container path, where
+    `deploy/entrypoint.sh` derives one from the other. Measured against a real uvicorn on
+    2026-09-06: `CHEMCLAW_SERVICE_HOST=127.0.0.1 uvicorn --host 0.0.0.0` booted with no warning of
+    any kind and answered an off-box `POST /sessions` with 200 and the shared dev principal, while
+    the loopback command `README.md` prints verbatim refused to boot. A control whose bypass is
+    "start the server the way the README says" is not a control.
+
+    `scope["server"]` is filled by uvicorn from the accepted connection's own `sockname`, so it is
+    per-connection rather than per-bind: on a socket bound to `0.0.0.0` a request from the host
+    itself reads `127.0.0.1` and one from the network reads the interface it arrived on. That is
+    the fact this decides on, and it is strictly narrower than the bind address.
+
+    **A `server` that is not an IP address is not judged.** Starlette's test client puts the base
+    URL's *name* there (`testserver`), and an in-process ASGI call has no accepted connection and
+    therefore no `sockname` at all — there is no exposure to observe, and refusing it would refuse
+    every caller that has no socket rather than every caller that has an exposed one. What a name
+    cannot rule out, the boot guard still covers: the configuration is the only thing knowable
+    before a request exists, so the two checks are a pair rather than a duplication.
+
+    Args:
+        scope: The ASGI scope of the request being served.
+
+    Returns:
+        True only when the request demonstrably arrived on a routable address.
+    """
+    server = scope.get("server") or ()
+    host = str(server[0]) if server and server[0] else ""
+    try:
+        ipaddress.ip_address(host.strip("[]").split("%", 1)[0])
+    except ValueError:
+        # A name, a unix socket path, or nothing at all: no address was observed.
+        return False
+    return not is_loopback_host(host)
+
+
+def note_network_exposure(host: str) -> None:
+    """Say once, loudly, that an unauthenticated request arrived from the network.
+
+    Once per distinct address rather than once per request: this is a *deployment* fault — it is
+    true of every request that socket will ever accept — and a per-request WARNING is a log volume
+    an unauthenticated caller controls, on the one interpreter that serves every SSE stream.
+    """
+    if len(_REPORTED_EXPOSURES) >= _MAX_REPORTED_EXPOSURES or host in _REPORTED_EXPOSURES:
+        return
+    _REPORTED_EXPOSURES.add(host)
+    logger.warning(
+        "SECURITY: refusing a request that arrived on %r while entra_required is False — every "
+        "request served here would run as the shared dev principal with all authorization gates "
+        "OPEN. Set CHEMCLAW_ENTRA_REQUIRED=true for any shared/exposed deployment, bind a loopback "
+        "interface for local dev (both CHEMCLAW_SERVICE_HOST and the server's own --host), or set "
+        "CHEMCLAW_SERVICE_ALLOW_INSECURE=true to explicitly accept an unauthenticated, "
+        "network-exposed service.",
+        host,
+    )
 
 
 def _refuse_unauthenticated_exposure() -> None:

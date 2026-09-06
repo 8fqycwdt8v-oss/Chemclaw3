@@ -71,7 +71,12 @@ from chemclaw.agent.spend_cap import (
 from chemclaw.agent.state import turn_config
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
-from chemclaw.agent.turn_usage import TurnUsage, reset_turn_usage, set_turn_usage
+from chemclaw.agent.turn_usage import (
+    InFlightPrompts,
+    TurnUsage,
+    reset_turn_usage,
+    set_turn_usage,
+)
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
     AnswerEvent,
@@ -369,6 +374,14 @@ async def run_turn(
                 # same config, so the continuation runs under the same bound as the run it
                 # continues.
                 graph_config = turn_config(session.session_id)
+                # **The meter for a call that is never reported on.** Attached to the *turn's* own
+                # invocation, which is what makes it reach every model call the graph makes — a
+                # node's call inherits the run's callbacks through LangChain's contextvar, and so
+                # does one a tool body starts (`agent/turn_usage`'s module docstring measures both).
+                # Attaching it at an inner call site instead would *replace* the inherited handlers
+                # and take that call off the stream this turn meters, which is the same trap
+                # `off_stream_metering` documents.
+                graph_config["callbacks"] = [ledger.prompts]
                 # The graph drives itself and emits the contract directly
                 # (`chemclaw.api.graph_stream`), so everything from here to the end of the stream is
                 # that module's job rather than this loop's. What stays here is the whole rest of
@@ -543,6 +556,12 @@ class _TurnLedger:
 
     correlation_id: str
     usage: TurnUsage
+    # **What the calls still in flight have committed this turn to paying**, which `usage` cannot
+    # know: a gateway reports usage on the terminal frame only, so a turn torn down mid-message
+    # metered zero against a request it had already been billed for (`InFlightPrompts`). Held on
+    # the ledger because it is per turn and because `_book_turn_spend` — the one function that runs
+    # on every path a turn can take — is the reader.
+    prompts: InFlightPrompts = field(default_factory=InFlightPrompts)
     # Started at construction, which is `run_turn`'s first statement, so the duration this books is
     # the whole turn rather than the part after setup.
     started: float = field(default_factory=time.perf_counter)
@@ -917,10 +936,28 @@ async def _stream_into(events: AsyncIterator[Event], ledger: _TurnLedger) -> Asy
     **`not event.agent` is the whole filter, and it is load-bearing.** A specialist's tokens stream
     to the surface for the trace and are *not* the answer. Concatenating them would interleave one
     agent's working prose with the supervisor's, in the durable transcript as well as on screen.
+
+    **The supervisor's own tool call ends the paragraph, because prose written before a tool ran is
+    not an answer to anything.** The parts used to be joined across every model call of the turn,
+    with no separator: measured end to end on 2026-09-06 against a gateway that narrates and then
+    calls a tool, the `answer` event read `'Let me look that up.THE FINAL ANSWER IS 42.'` and
+    `GET /sessions/{id}/messages` carried the preamble twice — once as its own assistant row, once
+    inside the answer row. Joining on a blank line would have fixed the run-on and neither of the
+    other two, and it would have left the preamble in the string
+    `runner_answer.build_answer_event` grades: `unsupported_claims` was being computed over "Let me
+    look that up", which nothing grounds and nothing could. So the earlier prose stays exactly what
+    it already is — a streamed `token` event and its own transcript row — and the answer is the
+    last model call's.
+
+    A *helper's* call is not the supervisor's, and the same `not event.agent` filter says so: a
+    helper runs its tools inside the `task` call the supervisor is still waiting on, so cutting on
+    those would delete the answer of every turn that delegated.
     """
     async for event in events:
         if isinstance(event, TokenEvent) and not event.agent:
             ledger.answer_parts.append(event.text)
+        elif isinstance(event, ToolCallEvent) and not event.agent:
+            ledger.answer_parts.clear()
         # The turn record's counts and its time-to-first-token, taken here because this is the one
         # point every event of both streams passes through — see `_TurnLedger.note_event`.
         ledger.note_event(event)
@@ -1480,8 +1517,20 @@ def _book_turn_spend(
     # frame usually runs under with its own exception. `budget.record` is a dict write and the
     # thing a runaway is metered by; it goes first, and the record is then settled where a failure
     # costs one row's precision instead of the row.
+    # **What the provider never got to report, estimated rather than dropped.** A gateway puts
+    # usage on the terminal frame only, so a turn cancelled mid-message — a disconnect under
+    # `survives_disconnect=false`, the Stop button, the wall-clock deadline — metered exactly 0
+    # against a prompt it had already been billed for (measured: 0/0 beside an identical completed
+    # turn's 900/120). Booking it makes "drop the connection just before the answer" cost what it
+    # costs. Zero on every ordinary turn, because a call that finishes is metered rather than
+    # estimated; `InFlightPrompts` carries the arithmetic and its limits.
+    #
+    # **Ahead of `budget.record` because it is an *input* to it**, which is the one thing the rule
+    # below permits in front of the booking: it is a sum of ints times a clamped float, with no
+    # derivation in it that can fail, unlike the three that were moved out from under it.
+    estimated = ledger.prompts.unbilled_tokens
     if budget is not None:
-        budget.record(session.session_id, actor, ledger.usage.total)
+        budget.record(session.session_id, actor, ledger.usage.total + estimated)
     outcome = "unknown"
     model = ""
     context = None
@@ -1575,6 +1624,15 @@ def _book_turn_spend(
         ttft_seconds=None if ledger.ttft_seconds is None else round(ledger.ttft_seconds, 3),
         input_tokens=ledger.usage.input,
         output_tokens=ledger.usage.output,
+        # **Beside the measured pair, never summed into it.** The budget is metered on the sum,
+        # because a cost guard has to bind on the whole bill; what is *published* keeps the two
+        # apart, so an inferred number can never pass for a provider's. It lands here rather than
+        # on a counter for the reason `agent/compaction._announce` gives about its own two edits:
+        # a distinction a declared counter's label set cannot carry belongs in a structured record,
+        # where it is a field rather than a series nobody declared a reader for. `turn_costs` has
+        # no column for it either — adding one is a migration, and this is the line that makes an
+        # abandoned turn's real spend legible until there is.
+        estimated_tokens=estimated,
         tool_calls=ledger.tool_calls,
         tool_failures=ledger.tool_failures,
         tool_refusals=ledger.tool_refusals,

@@ -116,20 +116,29 @@ class ScriptedTurn(ABC):
         return build_langgraph_agent(_ReplayingChatModel(turn=self), **build_kwargs)
 
 
-def _graph_chunk(chunk: Chunk) -> AIMessageChunk:
-    """One piece as a LangChain message chunk, with usage in the shape that adapter reports it.
+def _usage_chunk(usage: Chunk) -> AIMessageChunk:
+    """The reply's terminal frame: no content, carrying what the whole call reported.
+
+    **This is the shape the wire has, and the fake used to have another one.** Every chunk carried
+    its own `usage_metadata`, which no OpenAI-compatible endpoint produces: `stream_usage=True` maps
+    to `stream_options.include_usage`, and that delivers one `usage` block on the *final* frame —
+    `chemclaw.cli.mock_llm._chat_stream` says so in as many words, and the three purpose-built
+    gateways the 2026-09-06 front-door review drove agreed. The difference was not cosmetic. It was
+    load-bearing under `tests/test_turn_cancellation.py`, whose whole subject is a turn torn down
+    *before* the reply finished: on the per-chunk shape such a turn had already metered tokens, so
+    the assertion that it books them passed, and on a real gateway it books nothing at all. A fake
+    that meters earlier than any provider can is a fake that hides exactly the accounting hole the
+    test in front of it exists to find.
 
     No `input_token_details`, deliberately: this fake reports no caching, so `graph_usage_tokens`
     subtracts nothing and the split it produces is the split the chunk stated.
     """
-    if not chunk.tokens:
-        return AIMessageChunk(content=chunk.text)
     return AIMessageChunk(
-        content=chunk.text,
+        content="",
         usage_metadata={
-            "input_tokens": chunk.input_tokens,
-            "output_tokens": chunk.output_tokens,
-            "total_tokens": chunk.tokens,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "total_tokens": usage.tokens,
         },
     )
 
@@ -166,9 +175,22 @@ class _ReplayingChatModel(BaseChatModel):
         run_manager: AsyncCallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
-        """Replay the turn's pieces as this reply's chunks."""
+        """Replay the turn's pieces as this reply's chunks, then the usage frame the wire sends.
+
+        The counts a `Chunk` declares are *summed* rather than reported where they were written:
+        a test still says which piece cost what — which is how a turn's spend stays readable beside
+        the text that caused it — while the reply on the wire meters where a gateway meters it, at
+        the end. A turn abandoned before that frame therefore meters nothing here, exactly as it
+        does in production, which is the property `_usage_chunk` was written for.
+        """
+        total = Chunk()
         async for piece in self.turn.stream(_last_human_text(messages)):
-            yield ChatGenerationChunk(message=_graph_chunk(_chunk(piece)))
+            chunk = _chunk(piece)
+            total.input_tokens += chunk.input_tokens
+            total.output_tokens += chunk.output_tokens
+            yield ChatGenerationChunk(message=AIMessageChunk(content=chunk.text))
+        if total.tokens:
+            yield ChatGenerationChunk(message=_usage_chunk(total))
 
     def _generate(
         self,

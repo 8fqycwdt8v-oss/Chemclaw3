@@ -517,8 +517,10 @@ _COUNTERS: dict[str, str] = {
         "(answered 404 to avoid an existence leak, so this counter is the only trace)."
     ),
     "chemclaw_auth_failures_total": (
-        "Requests refused at authentication, by reason (missing / invalid / provider_unavailable) "
-        "— a client sending no header at all used to be indistinguishable from a healthy service."
+        "Requests refused at authentication, by reason (missing / invalid / provider_unavailable / "
+        "network_exposed) — a client sending no header at all used to be indistinguishable from a "
+        "healthy service, and the last of those is the service refusing to hand its dev principal "
+        "to a request that arrived from the network."
     ),
     "chemclaw_request_validation_failures_total": (
         "Requests rejected with 422 by request-body validation, by route template. Nothing logged "

@@ -28,5 +28,8 @@ A turn is a request. Anything long-running is a Temporal job: the tool returns a
 immediately and the result arrives later, pushed back into the session (F3). If it survives a pod
 restart, it is in `durable/`; if it dies with the connection, it belongs here.
 
-Run it: `uvicorn chemclaw.api.app:create_app --factory --port 8080`, or `make chat` for the
-terminal path to the same agent.
+Run it: `CHEMCLAW_SERVICE_HOST=127.0.0.1 uvicorn chemclaw.api.app:create_app --factory --host
+127.0.0.1 --port 8080`, or `make chat` for the terminal path to the same agent. The env var and
+`--host` are two different facts — what the app is told and what the socket is — and unauthenticated
+dev needs both on loopback: `create_app` refuses to boot on the first, and `require_principal`
+refuses a request that arrived on the second.
