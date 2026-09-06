@@ -1,6 +1,6 @@
 """A credential-free walkthrough of the agent's research loop (no live LLM).
 
-The MAF agent needs a provider API key to actually converse, which this sandbox does not have.
+The agent needs a provider endpoint to actually converse, which this sandbox does not have.
 This script instead drives the *same tools the agent calls* over a seeded in-memory corpus, so
 you can watch the loop turn a question into a cited, computed, and optimization-backed answer
 without any credentials or database. It answers one concrete question end to end:
@@ -35,6 +35,7 @@ import chemclaw.connectors.calc.server.tools as calc_tools
 import chemclaw.connectors.rxnfp.server.tools as rxnfp_tools
 from chemclaw.agent.research_tools import gather_evidence
 from chemclaw.connectors.bo.server.tools import suggest_next_experiment
+from chemclaw.connectors.calc.remote import CalcServerError
 from chemclaw.connectors.calc.server.tools import predict_solubility
 from chemclaw.connectors.rxnfp.server.tools import similar_reactions
 from chemclaw.core.config import settings
@@ -173,4 +174,16 @@ def run_demo() -> str:
 
 
 if __name__ == "__main__":
-    print(run_demo())
+    try:
+        print(run_demo())
+    except CalcServerError as exc:
+        # The one live dependency, refused in one line rather than as a traceback. The docstring
+        # above promises this walkthrough "refuses rather than inventing a number" when the calc
+        # server is absent, and an unhandled exception through `asyncio.run` is a crash, not a
+        # refusal — 30 lines of stack for a missing service, to a reader who came here to see how
+        # the pieces fit.
+        raise SystemExit(
+            f"{exc}\n\nThis walkthrough needs the calc server from `Chemclaw3-mcp` at "
+            f"CHEMCLAW_CALC_SERVER_URL (currently {settings.calc_server_url!r}). Everything else "
+            "here runs in memory."
+        ) from exc

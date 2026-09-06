@@ -9,6 +9,7 @@ tools:
   - predict_pka
   - predict_pka_ensemble
   - predict_solubility
+  - find_notes
 ---
 
 # Ionization and partitioning

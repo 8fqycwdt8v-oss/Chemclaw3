@@ -17,6 +17,18 @@ tools:
   - describe_topology
   - compute_reaction_energy
   - compute_thermochemistry
+  - compute_electronic_properties
+  - optimize_geometry
+  - predict_pka
+  - predict_site_reactivity
+  - run_bond_strength_survey
+  - run_degradant_triage
+  - run_ensemble_free_energy
+  - run_microspecies_profile
+  - run_regioselectivity_in_conformer
+  - run_stereoisomer_ranking
+  - run_tautomer_resolution
+  - scan_coordinate
 tags:
   - computation
 ---

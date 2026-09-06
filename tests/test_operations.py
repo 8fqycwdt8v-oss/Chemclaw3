@@ -220,6 +220,42 @@ def test_a_window_bound_at_construction_excludes_a_row_written_after_it() -> Non
     asyncio.run(_run())
 
 
+def test_an_outcome_outside_the_vocabulary_is_counted_in_a_column() -> None:
+    """`calls` must stay the sum of the outcome columns, whatever the trail holds.
+
+    `OUTCOMES` says in as many words that a reader of history must not be bounded by today's
+    producer — `audit_events.outcome` is bare `TEXT` with no `CHECK`, and `agent/audit.py` expects
+    the vocabulary to grow. The code under it was bounded anyway: a row outside the four was added
+    to `calls` and to no column, so a reading measured `1 + 1 + 0 + 0` against `calls = 3` with
+    nothing saying why. `authorship`, forty lines further down the same file, already had `other`.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        tool = "ops_probe_unknown_outcome_tool"
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("DELETE FROM audit_events WHERE correlation_id LIKE 'c-vocab-%'")
+            for index, outcome in enumerate(("ok", "refused", "a_later_revisions_outcome")):
+                await conn.execute(
+                    "INSERT INTO audit_events (correlation_id, actor, tool, arguments, outcome,"
+                    " detail, latency_ms) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (f"c-vocab-{index}", "u-vocab", tool, "{}", outcome, "", 1.0),
+                )
+            await conn.commit()
+        try:
+            reading = await tool_usage(Window.trailing(1), tool=tool)
+            use = {row.tool: row for row in reading.tools}[tool]
+            assert use.calls == 3
+            assert use.other == 1
+            assert use.calls == use.ok + use.refused + use.error + use.cancelled + use.other
+        finally:
+            async with await connect(settings.postgres_dsn) as conn:
+                await conn.execute("DELETE FROM audit_events WHERE correlation_id LIKE 'c-vocab-%'")
+                await conn.commit()
+
+    asyncio.run(_run())
+
+
 def test_a_hallucinated_tool_name_never_reaches_a_reader_verbatim() -> None:
     """The column the free-text test could not fail on, because it seeded that column safely.
 

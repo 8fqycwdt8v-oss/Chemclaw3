@@ -11,6 +11,10 @@ tools:
   - compute_electronic_properties
   - compute_atomic_descriptors
   - compute_surface_potential
+  - calculator_trust
+  - render_structure
+  - report_measurement
+  - sample_conformers
 ---
 
 # Reactivity descriptors

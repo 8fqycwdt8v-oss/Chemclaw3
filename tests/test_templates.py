@@ -104,6 +104,67 @@ def test_a_reference_nested_inside_arguments_is_still_checked() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "${step.one.result}",  # the manifest module's own docstring example
+        "${steps.one.output}",
+        "${inputs.smiles.canonical}",
+        "${input.smiles}",
+        "${steps.One.result}",
+        "${ inputs.smiles }",
+    ],
+)
+def test_a_malformed_reference_is_refused_rather_than_passed_through(bad: str) -> None:
+    """A typo is not a literal string, and being strict about the *form* did not make it fail.
+
+    `_REFERENCE` finds references; a span it cannot match is therefore not a bad reference but no
+    reference at all, so every rule built on `references()` saw nothing to check. All six of these
+    validated clean and `resolve` handed the tool the literal text — the same confident wrong
+    answer as a null, with a stranger cause. `make template-validate` cannot catch it either: it
+    checks argument *keys*, never values.
+    """
+    with pytest.raises(ValidationError, match="malformed reference"):
+        _template(
+            inputs=[{"name": "smiles", "type": "string", "description": "the molecule"}],
+            steps=[
+                {"id": "one", "kind": "tool", "tool": "screen_hazards", "arguments": {}},
+                {
+                    "id": "two",
+                    "kind": "tool",
+                    "tool": "screen_hazards",
+                    "arguments": {"smiles": bad},
+                },
+            ],
+        )
+
+
+def test_a_malformed_reference_in_an_agent_prompt_is_refused() -> None:
+    """The worst landing site: a prompt is prose, so a literal `${…}` is invisible to the model."""
+    with pytest.raises(ValidationError, match="malformed reference"):
+        _template(
+            steps=[
+                {"id": "one", "kind": "tool", "tool": "screen_hazards", "arguments": {}},
+                {"id": "two", "kind": "agent", "prompt": "summarize ${steps.one.output}"},
+            ]
+        )
+
+
+def test_a_malformed_reference_nested_inside_arguments_is_still_refused() -> None:
+    """Same reach as the resolution check — both walk the whole argument tree, once."""
+    with pytest.raises(ValidationError, match="malformed reference"):
+        _template(
+            steps=[
+                {
+                    "id": "one",
+                    "kind": "tool",
+                    "tool": "screen_hazards",
+                    "arguments": {"smiles": [{"deep": "${input.smiles}"}]},
+                }
+            ]
+        )
+
+
 def test_duplicate_step_ids_are_refused() -> None:
     """Two steps with one id makes `${steps.<id>.result}` ambiguous."""
     with pytest.raises(ValidationError, match="duplicate step"):
@@ -340,6 +401,41 @@ def test_the_name_lives_in_the_filename_only(
     monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(tmp_path))
     with pytest.raises(TemplateError, match="name is its filename"):
         discovered()
+
+
+def test_two_templates_generating_one_tool_name_fail_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`tool_name` folds a hyphen to an underscore, so distinct files can claim one tool.
+
+    Neither the name check nor the validator saw it, and the consequence is not a mis-run
+    template: `register_tool` raises the first time the agent is built, so every turn fails with a
+    message naming neither file. Driven here through `discovered`, which is where both files are
+    still in hand.
+    """
+    body = "summary: x\nsteps:\n  - {id: one, kind: agent, prompt: hi}\n"
+    (tmp_path / "probe-x.yaml").write_text(body, encoding="utf-8")
+    (tmp_path / "probe_x.yaml").write_text(body, encoding="utf-8")
+    monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(tmp_path))
+
+    with pytest.raises(TemplateError, match="generates tool 'run_probe_x'"):
+        discovered()
+
+
+def test_the_gate_reports_the_tool_name_collision_rather_than_passing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And `make template-validate` is where a human sees it — it printed the green line before."""
+    from chemclaw.cli.validate_templates import validate_templates
+
+    body = "summary: x\nsteps:\n  - {id: one, kind: agent, prompt: hi}\n"
+    (tmp_path / "probe-x.yaml").write_text(body, encoding="utf-8")
+    (tmp_path / "probe_x.yaml").write_text(body, encoding="utf-8")
+    monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(tmp_path))
+
+    problems = validate_templates()
+
+    assert any("run_probe_x" in problem for problem in problems)
 
 
 def test_the_validator_catches_a_step_naming_a_tool_that_does_not_exist(

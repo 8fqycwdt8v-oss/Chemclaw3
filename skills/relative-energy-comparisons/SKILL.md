@@ -8,6 +8,7 @@ tools:
   - compute_xtb_energy
   - optimize_geometry
   - compute_reaction_energy
+  - compute_thermochemistry
 ---
 
 # Relative energy comparisons

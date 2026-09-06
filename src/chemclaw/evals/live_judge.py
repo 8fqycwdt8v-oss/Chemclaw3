@@ -27,7 +27,7 @@ import json
 import logging
 from collections.abc import Mapping
 from functools import cache
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
@@ -252,10 +252,26 @@ async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
         payload = json.loads(text[start : end + 1])
     except json.JSONDecodeError as exc:
         return Judgement(probe_id=probe.id, verdict="ungraded", reason=f"judge JSON error: {exc}")
+    # A verdict outside the vocabulary is the same *kind* of failure as an unparseable reply — the
+    # judge did not grade — and it degrades the same way rather than raising. Without this the
+    # `Literal` field raises `ValidationError` out of `judge_outcome`, and the three call sites
+    # gather without `return_exceptions=True` and report after the gather, so one `"Served"` in a
+    # 190-probe run discards every grade in it. The raw value goes into `reason` because a grader
+    # that answered off-vocabulary is worth seeing, not merely worth surviving. Note the two fields
+    # beside it were already coerced with `str(...)`; only `verdict` was taken on trust.
+    verdict = payload.get("verdict")
+    reason = str(payload.get("reason", ""))
+    if verdict not in get_args(Verdict):
+        logger.warning("judge returned verdict %r for %s", verdict, probe.id)
+        return Judgement(
+            probe_id=probe.id,
+            verdict="ungraded",
+            reason=f"judge returned no known verdict ({verdict!r}): {reason[:200]}",
+        )
     return Judgement(
         probe_id=probe.id,
-        verdict=payload.get("verdict", "ungraded"),
-        reason=str(payload.get("reason", "")),
+        verdict=verdict,
+        reason=reason,
         fabricated_claims=[str(c) for c in payload.get("fabricated_claims", [])][:10],
     )
 

@@ -83,8 +83,18 @@ def _load(path: Path) -> Template:
 
 @cache
 def discovered() -> dict[str, Template]:
-    """Every discovered template by name, validated. Cached for the process, like connectors."""
+    """Every discovered template by name, validated. Cached for the process, like connectors.
+
+    Two distinctness rules, because the file name and the *tool* name are different namespaces and
+    only the second is the one a turn uses. `tool_name` folds a hyphen to an underscore, so
+    `probe-x.yaml` and `probe_x.yaml` are two templates and one `run_probe_x` — distinct by the
+    first rule, colliding under the second. Left to be discovered at build time, that is not a
+    mis-run template but a dead deployment: `register_tool` raises the first time the agent is
+    built, so **every** turn fails, with a message naming neither file. It is refused here instead,
+    where both files can be named.
+    """
     found: dict[str, Template] = {}
+    claimed: dict[str, str] = {}
     for directory in settings.templates_dirs:
         root = Path(directory)
         if not root.is_dir():
@@ -93,6 +103,15 @@ def discovered() -> dict[str, Template]:
             template = _load(path)
             if template.name in found:
                 raise TemplateError(f"{path}: template {template.name!r} is already defined")
+            generated = tool_name(template)
+            if generated in claimed:
+                raise TemplateError(
+                    f"{path}: template {template.name!r} generates tool {generated!r}, which "
+                    f"template {claimed[generated]!r} already claims — a hyphen and an underscore "
+                    "are the same character in a tool name, and the second registration raises "
+                    "on every turn"
+                )
+            claimed[generated] = template.name
             found[template.name] = template
     return found
 
@@ -117,6 +136,9 @@ def tool_name(template: Template) -> str:
     Prefixed rather than bare so a template cannot collide with a tool or a connector job — those
     share one namespace (it is the authorization key), and a template named `screen_hazards`
     silently shadowing the real screen is not a failure anyone would enjoy debugging.
+
+    It is **not** injective over template names: the hyphen-to-underscore fold means two distinct
+    templates can generate one tool. `discovered` is where that is refused.
     """
     return f"run_{template.name.replace('-', '_')}"
 

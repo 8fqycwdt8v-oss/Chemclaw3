@@ -95,7 +95,15 @@ class Coverage(BaseModel):
 
 
 class ToolUse(BaseModel):
-    """One tool's use over a window, split by outcome."""
+    """One tool's use over a window, split by outcome.
+
+    `calls` is the sum of the outcome columns, and `other` is what keeps that true: the trail holds
+    rows written by every revision that ever ran, `audit_events.outcome` is bare `TEXT` with no
+    `CHECK`, and `chemclaw.agent.audit` expects the vocabulary to grow. Without a catch-all a row
+    outside `OUTCOMES` was counted in `calls` and in no column at all, so a reader could not tell
+    an undercount from a genuine zero — the same argument `KnowledgeWrites` already made one
+    reading further down this file, and the same fix.
+    """
 
     tool: str
     calls: int = 0
@@ -103,6 +111,9 @@ class ToolUse(BaseModel):
     refused: int = 0
     error: int = 0
     cancelled: int = 0
+    #: Calls whose outcome is not one of `OUTCOMES` — an older revision's vocabulary, or a newer
+    #: one this reader has not learned yet.
+    other: int = 0
     #: Distinct actors seen invoking it, and a **lower bound** rather than a count. A count, never
     #: the ids: "who has used this" is answered by how many, because naming colleagues in an
     #: aggregate is a different disclosure from naming the actor on a row that person can already
@@ -332,8 +343,10 @@ async def tool_usage(window: Window, *, tool: str | None = None) -> ToolUsage:
         use = per_tool.setdefault(safe, ToolUse(tool=safe))
         use.calls += int(calls)
         scanned += int(calls)
-        if str(outcome) in OUTCOMES:
-            setattr(use, str(outcome), getattr(use, str(outcome)) + int(calls))
+        # An outcome with no column lands in `other` rather than nowhere, so `calls` stays the sum
+        # of the columns — the reading `authorship` already makes, for the reason `OUTCOMES` states.
+        bucket = str(outcome) if str(outcome) in OUTCOMES else "other"
+        setattr(use, bucket, getattr(use, bucket) + int(calls))
         # The per-(tool, outcome) distinct count cannot be summed into a per-tool one — the same
         # person appears under two outcomes — so the maximum is taken as the honest lower bound and
         # the field says "distinct actors seen", not "distinct actors".

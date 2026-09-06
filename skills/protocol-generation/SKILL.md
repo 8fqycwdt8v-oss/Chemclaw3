@@ -40,6 +40,7 @@ tools:
   - predict_forward_reaction
   - classify_reaction
   - ask_clarifying_question
+  - record_knowledge_note
 ---
 
 # Writing a protocol

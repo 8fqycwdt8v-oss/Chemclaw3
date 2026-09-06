@@ -12,6 +12,8 @@ tools:
   - optimize_geometry
   - compute_thermochemistry
   - compute_xtb_energy
+  - compute_reaction_energy
+  - describe_topology
 ---
 
 # Conformational analysis

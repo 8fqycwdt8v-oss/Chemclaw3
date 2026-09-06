@@ -12,6 +12,8 @@ tools:
   - compute_thermochemistry
   - find_notes
   - gather_evidence
+  - render_structure
+  - sample_conformers
 ---
 
 # Atropisomer assessment
