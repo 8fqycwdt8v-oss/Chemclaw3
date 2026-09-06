@@ -69,7 +69,7 @@ from collections.abc import Sequence
 from typing import Annotated, Any, NotRequired
 
 from langchain.agents.middleware.todo import PlanningState
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.channels.untracked_value import UntrackedValue
 
 from chemclaw.core.config import settings
@@ -272,13 +272,30 @@ def turn_config(thread_id: str | None = None) -> dict[str, Any]:
     return config
 
 
+def _text_of(message: AIMessage) -> str:
+    """One assistant message's content as text, joined across blocks and coerced for any shape.
+
+    Named apart from `answer_text` because emptiness is what that function now selects on: asking
+    "did this message say anything" has to be the same flattening as "what did it say", or a message
+    could count as prose and then be answered with `""`.
+    """
+    content = message.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content
+        )
+    return str(content)
+
+
 def answer_text(result: Any) -> str:
     """The final assistant text out of a graph turn — the output side of `turn_input`.
 
     The graph returns its whole message list rather than a single `response.text`, so the answer is
-    the last *assistant* message's content. Joined across content blocks because a model may answer
-    in parts, and coerced with `str` so a caller never fails on a shape the model managed to
-    produce.
+    the last *assistant* message that said anything. Joined across content blocks because a model
+    may answer in parts, and coerced with `str` so a caller never fails on a shape the model managed
+    to produce.
 
     **The last `AIMessage`, not the last message, and the difference is a whole class of turn.**
     Both caps end the run from `before_model` — which runs *after* the tool node — so a turn stopped
@@ -288,8 +305,23 @@ def answer_text(result: Any) -> str:
     compiled graph, a capped turn answered `'No files found'` — the `ls` body — which `cli/chat.py`
     printed to the chemist and `durable/template_activities.run_agent_step` interpolated into every
     later step of its template as `${steps.<id>.result}`. A `ToolMessage` is never the agent's
-    answer, so a capped turn yields the last assistant text it managed, or `""` when that iteration
+    answer, so a capped turn yields the last assistant text it managed, or `""` when the turn
     produced none — which both callers already settle as an empty answer.
+
+    **The last assistant message *with text*, and that qualifier is the same class of turn again.**
+    A provider's tool-calling turn routinely carries `content=""` — the call is the whole message —
+    so the last `AIMessage` in a capped thread is usually the content-less one that issued the final
+    tool call, and taking it unconditionally threw away the prose the earlier iterations produced:
+    the answer went out as `""`, which is precisely the outcome `agent/loop_cap.py` says ending the
+    run rather than raising exists to avoid. The reference behaviour is upstream's own —
+    `SubAgentMiddleware` builds a report from the last **non-empty** `AIMessage` — and the first
+    test written for the capped path could not see the difference, because its fake put prose on
+    every tool-calling turn and so made the two readings name the same message.
+
+    **The walk stops at the turn's own user message.** `result["messages"]` is the whole
+    checkpointed thread, so a turn that produced no assistant text at all would otherwise answer
+    with the *previous* turn's answer — a stale answer presented as this turn's is worse than none,
+    and a follow-up question is exactly where it would land.
 
     **One definition, because there were two.** `cli/chat.py` and `durable/template_activities.py`
     each carried a byte-identical copy — the only exact structural clone in the tree — so the
@@ -297,17 +329,9 @@ def answer_text(result: Any) -> str:
     import this module for `turn_input`/`turn_config`, which is why the shared home is here and not
     a new one: this is the third function about the shape of a turn.
     """
-    messages = result.get("messages") or []
-    answer = next(
-        (message for message in reversed(messages) if isinstance(message, AIMessage)), None
-    )
-    if answer is None:
-        return ""
-    content = answer.content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(
-            str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content
-        )
-    return str(content)
+    for message in reversed(result.get("messages") or []):
+        if isinstance(message, HumanMessage):
+            break
+        if isinstance(message, AIMessage) and (text := _text_of(message)):
+            return text
+    return ""

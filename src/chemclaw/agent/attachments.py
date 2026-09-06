@@ -24,6 +24,7 @@ other machine-written note — routing uploads straight into the graph would byp
 import asyncio
 import logging
 import re
+import sys
 from collections import deque
 from collections.abc import Callable
 from functools import partial
@@ -301,6 +302,24 @@ async def parse_attachment_off_loop(
         ) from exc
 
 
+def _resident_bytes(items: list[Attachment]) -> int:
+    """What a session's parsed text costs the pod, in bytes rather than in characters.
+
+    `attachment_store_max_bytes` is a *memory* bound — its own comment reasons in percentages of the
+    pod's 1 GiB limit — and `len(str)` counts codepoints, which is the same number only for ASCII.
+    CPython stores a string at 1, 2 or 4 bytes per codepoint by its widest character, so the budget
+    silently permitted 128 MB resident on CJK text and 256 MB on astral: a quarter of the pod, for a
+    setting whose whole purpose is to stay well inside it. Measured at 1 M characters: 1,000,049
+    bytes ASCII, 2,000,074 CJK, 4,000,076 emoji.
+
+    `sys.getsizeof` rather than `len(text.encode())` because resident bytes is the unit that decides
+    whether the pod is OOM-killed, and because encoding would allocate a second copy of up to 64 MB
+    of text on every upload just to measure it. The per-object header it includes is tens of bytes
+    against a budget of tens of megabytes, and it errs the safe way.
+    """
+    return sum(sys.getsizeof(item.text) for item in items)
+
+
 class AttachmentStore:
     """Session-scoped attachments, bounded per session, in sessions and in bytes.
 
@@ -322,21 +341,38 @@ class AttachmentStore:
         """
         self._by_session: BoundedLru[str, list[Attachment]] = BoundedLru(
             lambda: settings.service_max_live_sessions,
-            weight=lambda items: sum(len(item.text) for item in items),
+            weight=_resident_bytes,
             max_weight=lambda: settings.attachment_store_max_bytes,
         )
 
     def add(self, session_id: str, attachment: Attachment) -> None:
         """Attach a file to a session, evicting the least-recently-used sessions past either bound.
 
-        Both bounds are the map's: too many sessions, or too many bytes across all of them.
+        Both map bounds apply: too many sessions, or too many bytes across all of them.
+
+        **The session's own list is bounded in both units too, and the byte half is what keeps one
+        session from exceeding the whole map's budget.** `attachment_max_bytes` (2 MB) bounds the
+        *compressed upload*; the text stored here is the parsed expansion, bounded only by
+        `document_max_expanded_bytes` (64 MiB) — which is larger than
+        `attachment_store_max_bytes` — so two or three legal spreadsheet uploads used to make one
+        entry heavier than the entire store. Nothing else can be evicted to make room for an entry
+        like that, so the map simply held it (`core/bounded.py` explains why it no longer empties
+        itself trying). Dropping this session's oldest attachments instead keeps the excess to at
+        most the one upload just made — the same "the newest is never the victim" rule the map
+        applies to entries, applied to one entry's contents. The residual is bounded and named: a
+        *single* attachment whose parsed text alone exceeds the budget is kept, because silently
+        discarding the file a chemist just uploaded is the worse failure and its size is bounded by
+        `document_max_expanded_bytes` — one document, not a session's worth.
         """
         items = self._by_session.get(session_id)  # an upload marks the session recently active
         if items is None:
             items = []
         items.append(attachment)
-        # Per-session bound: a chemist who uploads all morning must not fill the pod's memory.
-        while len(items) > settings.attachment_max_per_session:
+        # Per-session bounds: a chemist who uploads all morning must not fill the pod's memory,
+        # in either unit. Oldest first, and never down past the upload just made.
+        while len(items) > settings.attachment_max_per_session or (
+            len(items) > 1 and _resident_bytes(items) > settings.attachment_store_max_bytes
+        ):
             items.pop(0)
         self._by_session.put(session_id, items)  # inserting evicts the LRU session past the cap
 

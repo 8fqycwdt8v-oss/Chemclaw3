@@ -78,6 +78,27 @@ ConnectorState = Literal["healthy", "unreachable", "unpolled", "unknown", "unpro
 #: another is two definitions of "down" (D-2026-08-27).
 UNHEALTHY_STATES: frozenset[ConnectorState] = frozenset({"unreachable", "unpolled"})
 
+#: Worst first — the order `_folded` resolves two verdicts about one connector in. Membership in
+#: `UNHEALTHY_STATES` is what counts and gates; this is only a tie-break, so the two down states may
+#: sit in either order and do. Down before undetermined before healthy, because a half that could
+#: not be asked is not evidence that the bundle is fine — the same reason `unknown` exists at all —
+#: while `unprobed` is last so it can only ever be the state of a bundle with nothing to ask.
+_SEVERITY: tuple[ConnectorState, ...] = (
+    "unreachable",
+    "unpolled",
+    "unknown",
+    "healthy",
+    "unprobed",
+)
+
+#: `_SEVERITY` as a lookup, so ranking a state cannot raise. It is a hand-written restatement of
+#: `ConnectorState`'s members, and `tuple.index` raised `ValueError` on anything missing from it —
+#: out of `probe_connectors`, whose docstring promises it never raises and whose callers are the
+#: boot gate and `/readyz`. A sixth state added to the `Literal` would have taken the front door
+#: down rather than reported one connector oddly. `tests/test_connector_health.py` pins the two
+#: together so the drift is caught in CI; this keeps the promise in the meantime.
+_SEVERITY_RANK: dict[str, int] = {state: rank for rank, state in enumerate(_SEVERITY)}
+
 
 class ConnectorHealth(BaseModel):
     """One enabled connector's reachability, as the readiness route reports it."""
@@ -296,31 +317,22 @@ def _folded(verdicts: list[ConnectorHealth]) -> list[ConnectorHealth]:
 
     A bundle with an endpoint *and* jobs is probed twice and is only as usable as its worse half,
     so that is the state reported: a healthy MCP pod does not make a queue nobody polls reachable,
-    and neither does a polled queue make a dark endpoint dialable. Down before undetermined before
-    healthy, because a half that could not be asked is not evidence that the bundle is fine — the
-    same reason `unknown` exists at all — while `unprobed` is last so it can only ever be the state
-    of a bundle with nothing to ask.
+    and neither does a polled queue make a dark endpoint dialable. `_SEVERITY` is the order that
+    resolves the two, and carries the reasoning for it.
 
     The details are joined rather than picked, because both halves' reasons are what an operator
     acts on and they name different deployments: one is a server pod, the other a worker fleet.
     A connector with a single half folds to itself, unchanged.
     """
-    #: Worst first. Membership in `UNHEALTHY_STATES` is what counts and gates; this is only the
-    #: order two verdicts about one connector are resolved in, so the two down states may sit in
-    #: either order and do.
-    severity: tuple[ConnectorState, ...] = (
-        "unreachable",
-        "unpolled",
-        "unknown",
-        "healthy",
-        "unprobed",
-    )
     halves: dict[str, list[ConnectorHealth]] = {}
     for verdict in verdicts:
         halves.setdefault(verdict.name, []).append(verdict)
     folded = []
     for name, both in halves.items():
-        both.sort(key=lambda health: severity.index(health.state))
+        # A state `_SEVERITY` has not been taught sorts with `unknown`: it is not evidence the
+        # bundle is fine, and it is not something `UNHEALTHY_STATES` gates on, which is what
+        # `unknown` already means. The default is what keeps this total — see `_SEVERITY_RANK`.
+        both.sort(key=lambda health: _SEVERITY_RANK.get(health.state, _SEVERITY_RANK["unknown"]))
         folded.append(
             ConnectorHealth(
                 name=name,

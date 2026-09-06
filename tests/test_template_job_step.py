@@ -704,12 +704,24 @@ def test_the_configs_restatement_of_the_wrapper_ceiling_cannot_drift() -> None:
     used to compare. Two restatements can agree with each other and both be wrong about the
     wrapper; what cannot drift is whether `Settings` actually refuses a run ceiling that a `job`
     step can outlive, so that is what is asked — with the live function supplying the number.
+
+    **Both arms, because one of them is only half a pin and this test's name claims a whole one.**
+    The validator refuses exactly when `template_run_timeout_seconds <= job_step`, so asking only
+    that it refuses the wrapper's own value pins `job_step >= wrapper` — an *over*-statement is
+    invisible. Measured: with the restatement grown by 1,000 s, every site config in
+    (38,130, 39,130] would be refused at startup naming a ceiling no `job` step carries, and this
+    test would still be green. The second arm closes the interval from above: one second past the
+    wrapper must be accepted, which is `job_step <= wrapper`, and the pair is equality.
     """
     from chemclaw.core.config import Settings
 
+    wrapper = wrapper_execution_timeout().total_seconds()
+
     with pytest.raises(ValidationError) as caught:
-        Settings(template_run_timeout_seconds=wrapper_execution_timeout().total_seconds())
+        Settings(template_run_timeout_seconds=wrapper)
     assert "template_run_timeout_seconds" in str(caught.value)
+
+    Settings(template_run_timeout_seconds=wrapper + 1)
 
 
 def test_a_failed_template_step_wakes_the_session_and_names_which_step(

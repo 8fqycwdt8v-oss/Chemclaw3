@@ -184,16 +184,28 @@ class MemorySettings(BaseSettings):
     attachment_max_per_session: int = Field(default=10, ge=1)
     # ...and in the third direction, which the two above do not cover: what every live session's
     # attachments cost *together*. The store's other bound is `service_max_live_sessions` (1000),
-    # a count — and a count of entries that each hold up to `attachment_max_per_session ×
-    # attachment_max_bytes` of parsed text is a 20 GB ceiling in a pod the chart limits to 1 GiB
+    # a count — and a count of entries that each hold up to `attachment_max_per_session` parsed
+    # documents is a many-GB ceiling in a pod the chart limits to 1 GiB
     # (`deploy/helm/chemclaw/values.yaml`, `resources.service.limits.memory`). Measured, ~20 MB of
     # text is retained per fully-loaded session, so the shipped pod is over its limit at ~25 of
     # them — 2.5 % of the count bound, reachable inside the shipped rate limit by one authenticated
     # chemist. This is the bound in the unit that actually kills the pod: past it the
     # least-recently-used *sessions* lose their attachments (working material, recoverable by
     # re-uploading), instead of the pod losing every in-flight turn to an OOM kill. 64 MB is 6 % of
-    # the shipped limit and three fully-loaded sessions; raise it with the pod's memory limit, not
-    # with `service_max_live_sessions`.
+    # the shipped limit and about three fully-loaded sessions; raise it with the pod's memory limit,
+    # not with `service_max_live_sessions`.
+    #
+    # **Bytes as the pod counts them, not characters**, and the difference is not a rounding one:
+    # `agent/attachments._resident_bytes` measures with `sys.getsizeof`, because CPython stores a
+    # string at 1, 2 or 4 bytes per codepoint and a `len()` budget therefore permitted 128 MB
+    # resident on CJK text and 256 MB on astral. The sizing above is what a *byte* bound buys.
+    #
+    # It is deliberately **smaller than `document_max_expanded_bytes`** (64 MiB), which is what one
+    # parsed upload may weigh: that ceiling is sized against the *parse*, which happens twice
+    # concurrently at most, while this one is sized against what is *retained* for every live
+    # session at once. The consequence — a single attachment can outweigh the whole store — is held
+    # by `AttachmentStore.add`, which drops that session's older files first, and by
+    # `core/bounded.py`, which no longer empties the map for an entry that cannot fit it.
     attachment_store_max_bytes: int = Field(default=64_000_000, gt=0)
     # Parsing an upload is CPU-bound work over untrusted bytes in third-party libraries, so it runs
     # in a worker thread with these two bounds rather than inline on the request's event loop
