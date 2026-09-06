@@ -84,11 +84,34 @@ async def _seed() -> None:
                 "note-1",
             ),
         )
-        await conn.execute(
-            "INSERT INTO turn_costs (correlation_id, actor, input_tokens, output_tokens,"
-            " duration_seconds, tool_calls) VALUES (%s, %s, %s, %s, %s, %s)",
-            ("ops-turn-1", PROBE_ACTOR, 100, 20, 1.5, 3),
-        )
+        # Three turns, because the `spend` reading understated two whole populations while it
+        # summed two of six columns: a *cached* turn and an *abandoned* one. `turn_id` is spelled
+        # out because it is the primary key since migration 088
+        # (`D-2026-09-06-an-id-a-caller-chooses-is-not-a-key`).
+        for turn_id, inp, out, cache_read, cache_write, estimated, completed, calls in (
+            ("ops-turn-1", 100, 20, 0, 0, 0, True, 3),
+            ("ops-turn-cached", 600, 250, 400, 300, 0, True, 0),
+            ("ops-turn-abandoned", 0, 0, 0, 0, 43_506, False, 0),
+        ):
+            await conn.execute(
+                "INSERT INTO turn_costs (turn_id, correlation_id, actor, input_tokens,"
+                " output_tokens, cache_read_tokens, cache_write_tokens, estimated_tokens,"
+                " completed, duration_seconds, tool_calls)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    turn_id,
+                    turn_id,
+                    PROBE_ACTOR,
+                    inp,
+                    out,
+                    cache_read,
+                    cache_write,
+                    estimated,
+                    completed,
+                    1.5 if turn_id == "ops-turn-1" else 0.0,
+                    calls,
+                ),
+            )
         await conn.commit()
 
 
@@ -136,7 +159,25 @@ def test_the_readings_answer_from_rows_that_were_written() -> None:
 
         spent = await spend(window)
         actor = {row.actor: row for row in spent.actors}[PROBE_ACTOR]
-        assert (actor.turns, actor.input_tokens, actor.tool_calls) == (1, 100, 3)
+        assert (actor.turns, actor.input_tokens, actor.tool_calls) == (3, 700, 3)
+        # **Every spend column, because reading two of six answered 1.9% of the question.**
+        # Measured 2026-09-06 on exactly these three rows, this reading reported 850 tokens for an
+        # actor who cost ~45,000: `cache_read_tokens`, `cache_write_tokens` and `estimated_tokens`
+        # were in the table, in `TurnCost` and on their own counters, and in no query — so it
+        # understated precisely the two populations an operator reads it to find, a deployment
+        # that caches heavily and turns abandoned late.
+        assert (actor.cache_read_tokens, actor.cache_write_tokens) == (400, 300)
+        assert actor.billed_tokens == 1670, "the priced total is not the sum of its four parts"
+        assert actor.billed_tokens == (
+            actor.input_tokens
+            + actor.output_tokens
+            + actor.cache_read_tokens
+            + actor.cache_write_tokens
+        )
+        # Inferred spend stays beside the measured total and never inside it — the same rule
+        # `TurnCost.estimated_tokens` states about the column this reads.
+        assert actor.estimated_tokens == 43_506
+        assert actor.completed_turns == 2
 
     asyncio.run(_run())
 

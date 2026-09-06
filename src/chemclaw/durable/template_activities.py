@@ -748,12 +748,17 @@ def _book_step_spend(
     that produce them were wired up: both caps end a turn by *returning*, so a capped step booked
     `answered` like any other.
 
-    **The cost row's key is the run's correlation id plus the step id.** `turn_costs` upserts on
-    `correlation_id` (`agent/turn_cost_store.py`) — deliberately, so a retried write replaces rather
-    than doubles — and every step of a template run shares the run's id, which is what ties them
-    together in the audit trail. Booking each step under the bare run id would therefore have made
-    a five-`agent`-step template report the *last* step's spend as the whole run's. The prefix keeps
-    the join to `audit_events` a prefix match rather than an equality, which is the smaller loss.
+    **The step id in the correlation id is no longer what keeps these rows apart.** It was:
+    `turn_costs` upserted on `correlation_id`, every step of a template run shares the run's id, and
+    without the suffix a five-`agent`-step template reported the *last* step's spend as the whole
+    run's. `D-2026-09-06-an-id-a-caller-chooses-is-not-a-key` moved the key to a server-minted
+    `turn_id` — because a *caller* supplying the correlation id could otherwise collapse two turns
+    into one row, which is a ledger the billed party can erase — and the same change makes this
+    path's collapse structurally impossible rather than avoided by a naming convention.
+
+    The suffix stays, and is now only what it always read as: the thing that tells a human which
+    step a row belongs to, and keeps the join to `audit_events` a prefix match. Retry-idempotence
+    is unaffected — it is scoped to the record now, which is what a retry actually repeats.
 
     Args:
         step: The step whose turn just ended — its profile labels the spend, its identity bills it.

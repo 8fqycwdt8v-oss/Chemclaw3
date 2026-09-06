@@ -658,6 +658,18 @@ def test_the_cache_separates_a_hit_a_miss_and_a_shared_computation() -> None:
     assert 'chemclaw_calc_cache_total{outcome="miss"} 1' in rendered
     assert 'chemclaw_calc_cache_total{outcome="shared"} 1' in rendered
     assert 'chemclaw_calc_cache_total{outcome="hit"} 1' in rendered
+    # **And what the two avoided computations were worth**, which nothing counted until
+    # 2026-09-06. A count answers "how often did the cache answer" and cannot answer "is it
+    # earning its keep": a thousand avoided millisecond lookups and one avoided nineteen-minute
+    # CREST search move it by 1,000 and 1. `compute_seconds` was on the row, selected on every hit
+    # (`postgres_store._SELECT`) and thrown away. Asserted as a bound rather than a figure —
+    # `_slow` sleeps 0.05 s and a loaded machine can only overshoot — and as *twice* it, because
+    # the `shared` waiter saved a whole computation exactly as the later hit did.
+    saved = metrics.value("chemclaw_calc_cache_seconds_saved_total")
+    assert saved >= 0.10, (
+        f"two avoided computations of ~0.05 s each credited {saved:.4f} s — a cache hit is "
+        "counted and never valued"
+    )
 
 
 # --------------------------------------------------------------------------------------------

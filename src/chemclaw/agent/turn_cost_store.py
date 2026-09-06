@@ -4,9 +4,19 @@ Kept separate from `chemclaw.agent.turn_cost` for the reason `audit_store` is ke
 `audit`: the module the front door imports on every turn carries no database dependency, so a
 memory-store process never pulls psycopg for a store it will not use.
 
-The write is an **upsert on `correlation_id`**, not an append. The row is booked from a task that
-outlives its turn, and the one arithmetic error a cost ledger must never make is counting a turn
-twice — so a retry, or a second write under the same correlation id, replaces rather than adds.
+The write is an **upsert on `turn_id`**, not an append and no longer on the correlation id. The row
+is booked from a task that outlives its turn, and the one arithmetic error a cost ledger must never
+make is counting a turn twice — so a retried write of the same record replaces rather than adds.
+
+**The other arithmetic error is counting one turn zero times, and keying on the correlation id made
+that reachable from outside.** The front door adopts a caller's `X-Chemclaw-Correlation-Id` when it
+is well formed, deliberately (`api/middleware._request_correlation_id`), so with `ON CONFLICT
+(correlation_id)` a client that repeated one header overwrote its own history: measured 2026-09-06,
+two turns of 900,000 and 1,000 input tokens for one actor left **one row reading 1,000**, while
+`chemclaw_tokens_total` and `api/budget.py` still saw both. `turn_id` is minted per record by
+`core/turn_cost.TurnCost` and crosses no wire; `correlation_id` stays on the row and stays indexed,
+so every join it served still resolves (`D-2026-09-06-an-id-a-caller-chooses-is-not-a-key`,
+migration `infra/sql/088_turn_cost_identity.sql`).
 
 **Write-only from *this* module, and the ledger's one reader lives elsewhere.** There was a
 `read_spend_by_actor` here whose docstring called itself "the whole point of the table"; it had no
@@ -32,6 +42,7 @@ from chemclaw.core.config import settings
 # `DO UPDATE` list below are derived from it rather than being three hand-kept copies — the shape
 # in which the previous ten-column version was already one edit away from a mismatch.
 _COLUMNS = (
+    "turn_id",
     "correlation_id",
     "session_id",
     "actor",
@@ -60,13 +71,14 @@ _COLUMNS = (
     "notes_cited",
 )
 
-# `correlation_id` is the conflict target, so it is the one column the update must not re-set.
+# `turn_id` is the conflict target, so it is the one column the update must not re-set — and it is
+# deliberately first in `_COLUMNS`, so the slice below cannot drift from the `ON CONFLICT` clause.
 _UPDATED = ",\n        ".join(f"{name} = EXCLUDED.{name}" for name in _COLUMNS[1:])
 
 _UPSERT = f"""
     INSERT INTO turn_costs ({", ".join(_COLUMNS)})
     VALUES ({", ".join(["%s"] * len(_COLUMNS))})
-    ON CONFLICT (correlation_id) DO UPDATE SET
+    ON CONFLICT ({_COLUMNS[0]}) DO UPDATE SET
         {_UPDATED},
         recorded_at = now()
 """
@@ -81,7 +93,7 @@ class PostgresTurnCostSink:
     """Writes each completed turn's cost to `turn_costs`, one connection per row."""
 
     async def record(self, cost: TurnCost) -> None:
-        """Insert the cost, replacing any existing row for the same correlation id."""
+        """Insert the cost, replacing any existing row for the *same record* (see the module)."""
         async with _connect() as conn:
             await conn.execute(
                 _UPSERT,

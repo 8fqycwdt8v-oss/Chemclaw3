@@ -21,7 +21,12 @@ from chemclaw.agent.authz import (
     knowledge_read_tools,
     side_effecting_tools,
 )
-from chemclaw.api.events import AnswerEvent, JobStartedEvent, ToolCallEvent
+from chemclaw.api.events import (
+    AnswerEvent,
+    JobStartedEvent,
+    ToolCallEvent,
+    ToolFailedEvent,
+)
 
 
 def _ledger() -> object:
@@ -251,3 +256,60 @@ def test_the_declared_reads_of_every_enabled_bundle_reach_the_counted_set() -> N
     counted = knowledge_read_tools()
     assert KNOWLEDGE_READ_TOOLS <= counted
     assert frozenset(knowledge_read_tool_names()) <= counted
+
+
+def test_a_refused_or_failed_call_is_not_a_consultation() -> None:
+    """These count consultations, not attempts — the field's own question is what was *read*.
+
+    Both counts are taken on the `ToolCallEvent`, which is where the tool's name is classified, and
+    nothing took them back when the call did not happen. Measured 2026-09-06 through a real turn:
+    one successful `find_notes`, one repeat-refused `find_notes` and one `expand_note` that raised
+    booked `retrieval_calls = 3` while the record was consulted **once**. For the 0-vs-nonzero
+    reading the column exists for that is harmless; for any rate built on it — "how often does the
+    retrieval obligation actually move a turn" — it is a threefold overstatement, and the repeat
+    refusal is the clearest case of all, since it is refused *because* an identical call already
+    happened and was already counted.
+
+    `tool_calls`, `tool_failures` and `tool_refusals` are asserted alongside, because those three
+    are attempt counts and must **not** move: the correction belongs to the two knowledge fields
+    only, and folding it into the tool counters would break the invariant that a refusal is the
+    control working rather than a call that never occurred.
+    """
+    ledger = _ledger()
+    ledger.note_event(ToolCallEvent(tool="find_notes", arguments=""))  # type: ignore[attr-defined]
+    ledger.note_event(ToolCallEvent(tool="find_notes", arguments=""))  # type: ignore[attr-defined]
+    ledger.note_event(  # type: ignore[attr-defined]
+        ToolFailedEvent(tool="find_notes", message="already asked", reason="repeat")
+    )
+    ledger.note_event(ToolCallEvent(tool="expand_note", arguments=""))  # type: ignore[attr-defined]
+    ledger.note_event(  # type: ignore[attr-defined]
+        ToolFailedEvent(tool="expand_note", message="no such note")
+    )
+    assert ledger.retrieval_calls == 1, (  # type: ignore[attr-defined]
+        "a refused and a raised call were counted as consultations of the record"
+    )
+    assert ledger.tool_calls == 3  # type: ignore[attr-defined]
+    assert ledger.tool_refusals == 1  # type: ignore[attr-defined]
+    assert ledger.tool_failures == 1  # type: ignore[attr-defined]
+
+
+def test_a_write_that_was_refused_is_not_a_capture_either() -> None:
+    """The same correction in the write direction, and the floor under it.
+
+    `capture_calls` answers "did this turn write anything back", so a refused write must not read
+    as one — a plan-gate refusal is precisely the case where nothing was written. The second half
+    is the floor: a failure event may arrive for a call this ledger never saw start (a subagent's,
+    a resumed run's), and the count must not go negative on it.
+    """
+    ledger = _ledger()
+    ledger.note_event(  # type: ignore[attr-defined]
+        ToolCallEvent(tool="record_knowledge_note", arguments="")
+    )
+    ledger.note_event(  # type: ignore[attr-defined]
+        ToolFailedEvent(tool="record_knowledge_note", message="not approved", reason="plan_gate")
+    )
+    assert ledger.capture_calls == 0  # type: ignore[attr-defined]
+    ledger.note_event(  # type: ignore[attr-defined]
+        ToolFailedEvent(tool="record_knowledge_note", message="orphan", reason="plan_gate")
+    )
+    assert ledger.capture_calls == 0, "an unpaired failure drove the count below zero"  # type: ignore[attr-defined]

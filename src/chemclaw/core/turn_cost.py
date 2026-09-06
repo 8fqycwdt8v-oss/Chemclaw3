@@ -17,6 +17,7 @@ the reason the reuse is worth having: a case file's shape would then be free to 
 ledger actually produces, and nothing would say so.
 """
 
+import uuid
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,13 +28,29 @@ __all__ = ["TurnCost"]
 class TurnCost(BaseModel):
     """What one completed turn spent, and the identity to bill it to.
 
-    `correlation_id` is the key rather than a fresh id because it already identifies the turn
-    uniquely, already keys `audit_events`, and is already on every log line — so the ledger joins to
-    the trail and the logs with no new correspondence to maintain.
+    **`turn_id` is the key and `correlation_id` is the join**, which used to be one field doing
+    both (`D-2026-09-06-an-id-a-caller-chooses-is-not-a-key`). The correlation id already identifies
+    a turn, already keys `audit_events` and is already on every log line — all true, and all true of
+    an id *this system mints*. The front door also **adopts** one off the request when the caller
+    sends a well-formed `X-Chemclaw-Correlation-Id`, on purpose, so a click is traceable from the
+    browser inwards; with the ledger keyed on it and written `ON CONFLICT … DO UPDATE`, a caller
+    that repeated one header collapsed its whole history to one row. Measured: two turns of 900,000
+    and 1,000 input tokens left a single row reading 1,000.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    # **Minted here, per record, and never read off a request.** A `default_factory` rather than a
+    # required argument because the identity is not the caller's to supply: there is no argument a
+    # writer could pass that would be more correct than a fresh one, and both producers
+    # (`api/runner._book_turn_spend` and `durable/template_activities._book_step_spend`) build
+    # exactly one of these per turn. What the upsert protects is therefore unchanged in the case it
+    # was written for — a *retried write of this record* still replaces rather than doubles,
+    # because it carries this id — and gone in the case it was never meant to cover, two different
+    # turns sharing a label.
+    turn_id: str = Field(default_factory=lambda: uuid.uuid4().hex, min_length=1)
+    # The turn's correlation id: the join to `audit_events`, `session_messages` and every log line,
+    # and possibly a string the caller chose. Indexed, not unique (migration 088).
     correlation_id: str = Field(min_length=1)
     session_id: str = ""
     actor: str = ""
@@ -89,6 +106,16 @@ class TurnCost(BaseModel):
     # Calls a governance gate stopped (the plan gate today) — the control working, which must not
     # be read as a failure.
     tool_refusals: int | None = Field(default=None, ge=0)
+    # **The jobs this turn left *running*, which is not what the name says and not what
+    # `chemclaw_jobs_started_total` counts.** It is fed by `JobStartedEvent`, and
+    # `connectors/jobs.py` announces one only when the run is still going after the inline wait —
+    # deliberately, because an announcement for a finished run draws a surface row no
+    # `job_completed` will clear. So a job that answers inside its turn moves the counter and not
+    # this, and a rejoined run still going moves this and not the counter (measured 2026-09-06,
+    # both directions). Five of the seven declared jobs carry `inline_wait_seconds`, so on a
+    # calc-heavy deployment the first case is the common one. The column keeps its name because
+    # this schema does not rename (D-2026-08-04-the-schema-only-goes-forward); renaming it is a
+    # decision with a migration behind it, and until then the meaning is written here.
     jobs_started: int | None = Field(default=None, ge=0)
     # Seconds to the turn's first streamed token — the latency a chemist actually experiences, as
     # opposed to `duration_seconds`, which includes every tool call after it. `None` when the turn
@@ -121,6 +148,13 @@ class TurnCost(BaseModel):
     # `retrieval_calls == 0` on a turn that made a claim about this programme's chemistry is the
     # signal the retrieval obligation in the system prompt exists to move, and the only way to
     # know whether it worked. `capture_calls` is the same question in the write direction.
+    #
+    # **Consultations, not attempts.** Both used to count the `ToolCallEvent` and stop there, so a
+    # refused or raised call counted as a reading: measured, a turn with one successful
+    # `find_notes`, one repeat-refused `find_notes` and one `expand_note` that raised booked 3
+    # while the record was consulted once. `api/runner._TurnLedger.note_event` takes a failed or
+    # refused call back out, which leaves the 0-vs-nonzero reading unchanged and makes any *rate*
+    # built on these mean what its name says.
     retrieval_calls: int = 0
     capture_calls: int = 0
     # `score_answer` computes these on **every** production turn and they were streamed to the

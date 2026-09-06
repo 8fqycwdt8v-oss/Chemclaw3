@@ -271,3 +271,115 @@ def test_a_chunk_with_no_usage_meters_nothing_and_is_not_called_unreadable() -> 
     """
     assert graph_usage_tokens(SimpleNamespace()).total == 0
     assert graph_usage_tokens(SimpleNamespace()).unreadable == 0
+
+
+def test_a_service_tier_does_not_turn_every_cached_token_into_fresh_input() -> None:
+    """The cache split survives a service tier, because the tier renames the keys.
+
+    `_create_usage_metadata` prefixes both cache keys when a tier is in play —
+    `priority_cache_read`, `flex_cache_creation` — and `_create_chat_result` reads that tier off
+    the **response**, so no request parameter and no setting in this repository has to exist for it
+    to happen: a gateway that stamps `service_tier` decides it. `graph_usage_tokens` read the bare
+    names, so measured 2026-09-06 the same 1,000-prompt / 400-cached reply booked
+    `input 500, cache_read 400, cache_write 100` untiered and `input 1,000, cache_read 0,
+    cache_write 0` on `priority` — every cached token priced as fresh input, and
+    `chemclaw_cache_read_tokens_total` flat on the one deployment whose caching it is the only way
+    to see. The total is unaffected, so the budget still binds and only the price split breaks.
+
+    Driven through `_create_usage_metadata` itself rather than through a hand-written key list,
+    because the thing being asserted is that this reader survives *upstream's* renaming, and a
+    literal here would only assert that it survives mine.
+    """
+    from langchain_core.messages import AIMessage
+    from langchain_openai.chat_models.base import _create_usage_metadata
+
+    served = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 250,
+        "total_tokens": 1250,
+        "prompt_tokens_details": {"cached_tokens": 400, "cache_write_tokens": 100},
+    }
+    split = {
+        tier: graph_usage_tokens(
+            AIMessage(content="", usage_metadata=_create_usage_metadata(dict(served), tier))
+        )
+        for tier in (None, "priority", "flex")
+    }
+    for tier, usage in split.items():
+        assert (usage.input, usage.cache_read, usage.cache_write, usage.total) == (
+            500,
+            400,
+            100,
+            1250,
+        ), f"service_tier={tier!r} changed how a cached token is priced"
+
+
+def test_a_judge_reply_that_fails_validation_still_books_what_the_gateway_served() -> None:
+    """The verifier's documented degrade path spent real tokens and booked zero.
+
+    With `method="json_schema"` the reply is validated inside the OpenAI SDK, called from
+    `langchain_openai._agenerate` — so a reply missing a required field raises before
+    `_agenerate_with_cache` returns, `on_llm_end` never fires, and `_OffStreamMeter` books nothing.
+    Measured 2026-09-06 end to end: the same turn twice against a gateway serving 6,600 tokens both
+    times booked **6,600** with a valid verdict and **1,100** with one missing `confidence`, with
+    `estimated_tokens` at 0 as well — 5,500 billed, nothing recorded anywhere, on the path
+    `agent/verifier.py` degrades through on every schema drift.
+
+    Asserted through the callback the meter actually implements, handed the `LLMResult` shape
+    `langchain_core._generate_response_from_error` builds — raw HTTP body under
+    `response_metadata["body"]` — because that shape is the whole mechanism: it is what makes this
+    the provider's measured number rather than an estimate.
+    """
+    import asyncio
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    from chemclaw.agent.turn_usage import TurnUsage, off_stream_metering, set_turn_usage
+
+    served = LLMResult(
+        generations=[
+            [
+                ChatGeneration(
+                    message=AIMessage(
+                        content="",
+                        response_metadata={
+                            "status_code": 200,
+                            "body": {
+                                "usage": {
+                                    "prompt_tokens": 5000,
+                                    "completion_tokens": 500,
+                                    "total_tokens": 5500,
+                                    "prompt_tokens_details": {"cached_tokens": 1000},
+                                }
+                            },
+                        },
+                    )
+                )
+            ]
+        ]
+    )
+    refused = LLMResult(generations=[])
+
+    async def _run() -> tuple[TurnUsage, TurnUsage]:
+        billed, unbilled = TurnUsage(), TurnUsage()
+        for ledger, response in ((billed, served), (unbilled, refused)):
+            token = set_turn_usage(ledger)
+            try:
+                meter = off_stream_metering()["callbacks"][0]
+                await meter.on_llm_error(ValueError("no structured VerificationResult"),
+                                         response=response, run_id="r")
+            finally:
+                from chemclaw.agent.turn_usage import reset_turn_usage
+
+                reset_turn_usage(token)
+        return billed, unbilled
+
+    billed, unbilled = asyncio.run(_run())
+    assert billed.total == 5500, "a reply the gateway served and we could not parse booked nothing"
+    assert (billed.input, billed.output, billed.cache_read) == (4000, 500, 1000), (
+        "the failed call's usage is booked through the same four-way split as any other"
+    )
+    # A request the gateway never answered has no usage block, and must book nothing — the test
+    # for "were we billed" is the gateway's own block, not a classification of the exception.
+    assert unbilled.total == 0 and unbilled.unreadable == 0

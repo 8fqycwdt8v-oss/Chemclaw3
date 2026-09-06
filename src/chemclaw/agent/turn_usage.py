@@ -121,6 +121,18 @@ def graph_usage_tokens(chunk: Any) -> TurnUsage:
     gateways — an OpenAI-compatible endpoint caches implicitly and many report no write count at
     all — and read `chemclaw_cache_read_tokens_total` for whether caching is happening.
 
+    **Both cache keys are read by *suffix*, because a service tier renames them and the tier is
+    the response's, not the request's.** `_create_usage_metadata` prefixes the pair when a tier is
+    in play — `priority_cache_read`, `flex_cache_creation` — and `_create_chat_result` takes that
+    tier off the **response body**, so no setting in this repository has to exist for it to
+    happen: a gateway that stamps `service_tier` decides it. `tests/test_upstream_surface.py`
+    pinned this as latent and said fixing it "would be a guess about a tier nobody here can
+    select"; measured 2026-09-06 against a gateway that reports `service_tier: "priority"`, a
+    response of 1,000 prompt tokens with 400 cached booked **input 1,000, cache_read 0** — every
+    cached token priced as fresh input, with `chemclaw_cache_read_tokens_total` flat on the one
+    deployment whose caching it is the only way to see. The total is unaffected, so the budget
+    still binds; what breaks is the whole REV-10 price split.
+
     **`unreadable` is the difference between "nobody reported usage" and "usage was reported and we
     could not read it".** Duck-typing on a provider's key names is the right shape — a provider
     that reports nothing must meter 0 rather than fail a turn — but it makes an upstream rename
@@ -139,8 +151,8 @@ def graph_usage_tokens(chunk: Any) -> TurnUsage:
         return TurnUsage()
     nested = details.get("input_token_details")
     cache = nested if isinstance(nested, Mapping) else {}
-    cache_read = int(cache.get("cache_read") or 0)
-    cache_write = int(cache.get("cache_creation") or 0)
+    cache_read = _cache_detail(cache, "cache_read")
+    cache_write = _cache_detail(cache, "cache_creation")
     reported_input = int(details.get("input_tokens") or 0)
     total = details.get("total_tokens")
     if total is None:
@@ -155,6 +167,82 @@ def graph_usage_tokens(chunk: Any) -> TurnUsage:
         # chunk, or the keys moved under us — see the docstring for what the second one costs.
         unreadable=0 if total else 1,
     )
+
+
+def _cache_detail(details: Mapping[str, Any], name: str) -> int:
+    """One cache dimension out of `input_token_details`, whatever tier prefix it carries.
+
+    `langchain_openai._create_usage_metadata` publishes `cache_read`/`cache_creation` bare, and
+    prefixes **both** with the service tier when there is one (`priority_cache_read`). Reading the
+    bare names only was correct for exactly as long as the tier was believed to be a request
+    parameter this repository never sets; it is taken off the response, so a gateway alone can
+    trigger it, and then every cached token is priced as fresh input. Summed rather than
+    first-match because the shape does not forbid two prefixes and silently dropping one is the
+    failure being fixed.
+    """
+    return sum(
+        int(value or 0) for key, value in details.items() if key == name or key.endswith(f"_{name}")
+    )
+
+
+def error_result_usage(response: Any) -> TurnUsage:
+    """What a model call that **raised after the gateway answered** was billed for.
+
+    **The judge's documented degrade path spent real tokens and booked zero.** With
+    `method="json_schema"` the reply is validated inside the OpenAI SDK, from
+    `langchain_openai`'s own `_agenerate`, so a reply that misses a field raises *before*
+    `_agenerate_with_cache` returns: `on_llm_end` never fires and `_OffStreamMeter` never books.
+    Measured 2026-09-06, the same turn twice against a gateway serving 6,600 tokens both times —
+    a valid verdict booked 6,600, one missing `confidence` booked **1,100**, with
+    `estimated_tokens` at 0 as well. `agent/verifier.py` degrades to the citation gate and carries
+    on, so this is the common case rather than an edge: a routed model that drifts from the schema
+    turns every turn into ~5k tokens of invisible spend.
+
+    **Measured, not estimated, and that is what the `response=` kwarg buys.** `langchain_core`'s
+    `_generate_response_from_error` puts the failing call's raw HTTP body on the message's
+    `response_metadata["body"]` before calling `on_llm_error`, and a gateway's body carries its own
+    `usage` block. So the numbers booked here are the provider's, and they go to the measured
+    ledger rather than to `estimated_tokens`, which is reserved for what nobody was billed
+    *through* (`InFlightPrompts`).
+
+    **The usage block is also the test for whether anything was billed at all.** A request the
+    gateway refused or never received has no `usage` in its body — an error body or no body — so
+    this returns zero without having to classify the exception, which is the fragile version of
+    the same question. `tests/test_upstream_surface.py` pins both halves of the shape.
+
+    Args:
+        response: The `LLMResult` `on_llm_error` was handed, or anything else, in which case this
+            books nothing rather than raising — it runs on an error path and must not add one.
+
+    Returns:
+        What that call reported, or an empty `TurnUsage`.
+    """
+    usage = TurnUsage()
+    try:
+        from langchain_core.messages import AIMessage
+        from langchain_openai.chat_models.base import _create_usage_metadata
+
+        for generation in getattr(response, "generations", None) or []:
+            for candidate in generation:
+                metadata = getattr(getattr(candidate, "message", None), "response_metadata", None)
+                body = metadata.get("body") if isinstance(metadata, Mapping) else None
+                served = body.get("usage") if isinstance(body, Mapping) else None
+                if not isinstance(served, Mapping):
+                    continue
+                usage.add(
+                    graph_usage_tokens(
+                        AIMessage(
+                            content="",
+                            usage_metadata=_create_usage_metadata(
+                                dict(served), body.get("service_tier")
+                            ),
+                        )
+                    )
+                )
+    except Exception:
+        logger.warning("could not read the usage of a failed model call; it books zero")
+        return TurnUsage()
+    return usage
 
 
 def llm_result_usage(response: LLMResult) -> TurnUsage:
@@ -234,6 +322,12 @@ class _OffStreamMeter(AsyncCallbackHandler):
 
     The ledger is mutated rather than rebound, for the reason `agent/loop_cap.py` gives: a call
     driven from a task of its own still books into the ledger its caller is holding.
+
+    **`on_llm_end` is not enough, and the gap was the verifier's documented degrade path.** With
+    `method="json_schema"` the parse that `include_raw=True` was rejected for happens inside the
+    OpenAI SDK anyway — measured, `include_raw=True` still raises from `_agenerate` and still
+    fires no `on_llm_end` — so a reply that fails validation books zero against a request the
+    gateway served in full. `on_llm_error` below closes it with the provider's own numbers.
     """
 
     async def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
@@ -247,6 +341,23 @@ class _OffStreamMeter(AsyncCallbackHandler):
         ledger = _ledger.get()
         if ledger is not None:
             ledger.add(llm_result_usage(response))
+
+    async def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
+        """Book what a call that raised *after being served* was billed for — see the class.
+
+        The one that reaches here is the judge's structured reply failing validation, which the
+        verifier documents as its normal degrade path. Nothing else in this repository is a model
+        call made outside the graph.
+
+        Args:
+            error: The exception, unused — `error_result_usage` asks the gateway's own body
+                whether it billed us, which is a better question than what kind of failure this is.
+            kwargs: The callback contract; `response` carries the `LLMResult` built from the
+                failing call's raw HTTP body.
+        """
+        ledger = _ledger.get()
+        if ledger is not None:
+            ledger.add(error_result_usage(kwargs.get("response")))
 
 
 class InFlightPrompts(AsyncCallbackHandler):
