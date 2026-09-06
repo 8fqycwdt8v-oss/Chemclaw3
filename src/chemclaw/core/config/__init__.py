@@ -383,7 +383,7 @@ class Settings(
         )
         return longest
 
-    def _fleet_pool_widths(self) -> tuple[int, int]:
+    def _fleet_pool_widths(self, *, at_rollout_peak: bool = False) -> tuple[int, int]:
         """`(one-connection pools, `pg_pool_max_size` pools)` on `postgres_dsn`'s server.
 
         The decomposition the refusal above prints, derived through the same branches as
@@ -391,18 +391,23 @@ class Settings(
         narrow` is that function's first element by construction. Under a split the primary keeps
         one full pool per pooled process and none of the readiness pools, which is why `narrow` is
         zero there: they move to the session store with the checkpointer.
+
+        `at_rollout_peak` travels with it for the same reason the flag exists at all: the refusal
+        quotes this decomposition beside the total it refused, and a message describing the steady
+        fleet under a total taken at the peak is a message that sends its reader to the wrong
+        arithmetic.
         """
-        primary, session = self.fleet_connections_per_server()
+        primary, session = self.fleet_connections_per_server(at_rollout_peak=at_rollout_peak)
+        pools, replicas = self.pg_fleet_pools, self.service_fleet_replicas
+        if at_rollout_peak and self.pg_fleet_pools_at_rollout_peak:
+            pools = self.pg_fleet_pools_at_rollout_peak
+            replicas = self.service_fleet_replicas_at_rollout_peak or self.service_fleet_replicas
         if session:
             return 0, primary // self.pg_pool_max_size
-        narrow = (
-            self.service_fleet_replicas
-            if self.pg_fleet_pools >= 3 * self.service_fleet_replicas
-            else 0
-        )
-        return narrow, self.pg_fleet_pools - narrow
+        narrow = replicas if pools >= 3 * replicas else 0
+        return narrow, pools - narrow
 
-    def fleet_connections_per_server(self) -> tuple[int, int]:
+    def fleet_connections_per_server(self, *, at_rollout_peak: bool = False) -> tuple[int, int]:
         """`(connections on postgres_dsn's server, connections on the split session store's)`.
 
         The one place the fleet's Postgres spend is added up, and it is a sum rather than a product
@@ -429,6 +434,22 @@ class Settings(
         Both figures are ceilings, not readings: `chemclaw_pg_pool_max_size` is what a process
         actually holds, and `tests/test_fleet_pools.py` is what pins the per-role pool counts these
         two lines of arithmetic stand on.
+
+        **`at_rollout_peak` reads the same arithmetic against both generations.** A rolling update
+        runs the old pods and the new ones together, so for the length of an upgrade the fleet holds
+        every surging Deployment's pools twice — and the readiness term surges with it, because
+        that pool is one *per front-door pod*. Both inputs therefore move together
+        (`pg_fleet_pools_at_rollout_peak`, `service_fleet_replicas_at_rollout_peak`), rendered by
+        the chart because only it knows how many Deployments there are to surge. Substituting one
+        and not the other would charge a peak's pools against a steady replica count and
+        under-declare the narrow term, which is the direction that exhausts a server.
+
+        Undeclared (0, the code default) falls back to the steady pair, so a CLI, a test and any
+        hand-rolled deployment keep exactly today's answer.
+
+        Args:
+            at_rollout_peak: Charge both generations of every surging Deployment, as an upgrade
+                does, instead of the steady state it settles at.
         """
         # The narrow pools are the front doors' `/readyz` ones, one apiece — but only if the
         # declared total can actually contain them: a front door holds three pools, so fewer than
@@ -438,13 +459,21 @@ class Settings(
         # readiness pool that is not there and declare **1** connection for a process holding 16 —
         # an under-declaration, which is the direction that exhausts a server rather than starving
         # one. `tests/test_fleet_pools.py` is what pins the three.
-        consistent = self.pg_fleet_pools >= 3 * self.service_fleet_replicas
-        readiness = self.service_fleet_replicas if consistent else 0
-        full = self.pg_fleet_pools - readiness
+        pools, replicas = self.pg_fleet_pools, self.service_fleet_replicas
+        if at_rollout_peak and self.pg_fleet_pools_at_rollout_peak:
+            pools = self.pg_fleet_pools_at_rollout_peak
+            # Both or neither: the peak replica count is what makes the readiness term below match
+            # the pools above. A chart that rendered one key and not the other is a chart whose two
+            # halves describe different fleets, so the steady count is the safe read of a pair that
+            # is only half declared.
+            replicas = self.service_fleet_replicas_at_rollout_peak or self.service_fleet_replicas
+        consistent = pools >= 3 * replicas
+        readiness = replicas if consistent else 0
+        full = pools - readiness
         one_dsn = full * self.pg_pool_max_size + readiness
         if not self.session_store_dsn or self.session_store_dsn == self.postgres_dsn:
             return one_dsn, 0
-        primary = (self.pg_fleet_pools - 2 * readiness) * self.pg_pool_max_size
+        primary = (pools - 2 * readiness) * self.pg_pool_max_size
         here, there = pg_endpoint(self.postgres_dsn), pg_endpoint(self.session_store_dsn)
         if here is None or there is None or here == there:
             return primary + one_dsn, 0
@@ -637,7 +666,14 @@ class Settings(
                 "merely busy — killing every turn in flight on it. Raise "
                 "service_max_connections, or lower the stream/turn caps it has to cover."
             )
-        primary_connections, session_connections = self.fleet_connections_per_server()
+        # **The peak, because that is the number the server is actually asked for.** A rolling
+        # update runs both generations, so an upgrade is when the fleet holds the most connections
+        # it ever holds — and a ceiling that covers only the steady state is one a release breaches
+        # on the way to being correct, with every pod's own configuration valid. Undeclared, this
+        # is the steady figure and nothing changes.
+        primary_connections, session_connections = self.fleet_connections_per_server(
+            at_rollout_peak=True
+        )
         if self.pg_session_fleet_max_connections and not session_connections:
             # Refused rather than ignored, and it is the one branch here that can be: the setting
             # is new, so nothing has it set yet and no upgrade can trip on it. A ceiling for a
@@ -671,7 +707,7 @@ class Settings(
             # beside a decomposition summing to 166, and a hand-set inconsistent pair said 32
             # beside one summing to -13. An operator is told what to lower; the arithmetic they are
             # shown has to reach the number they are refused over.
-            narrow, wide = self._fleet_pool_widths()
+            narrow, wide = self._fleet_pool_widths(at_rollout_peak=True)
             raise ValueError(
                 f"this deployment may open {primary_connections} Postgres connections on "
                 f"{'postgres_dsn' if session_connections else 'its Postgres server'} "

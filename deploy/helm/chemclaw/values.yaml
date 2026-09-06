@@ -2,6 +2,23 @@
 # becomes one CHEMCLAW_-prefixed env var on the pods — the single pydantic Settings is the only
 # config source in-cluster (no second config system). Secrets are referenced, never inlined.
 
+# How many extra pods of one Deployment a rolling update may run beside the old generation.
+#
+# **Declared rather than inherited, because the connection budget multiplies by it.** Kubernetes
+# defaults `maxSurge` to 25% rounded up; a bound the chart's arithmetic depends on has to be a bound
+# the chart states, or `postgres.maxConnections` is checked against a number no file here holds.
+#
+# Not 0. Every connector here is a single-replica Deployment, so a zero surge means the capability
+# is *down* during its own upgrade — an availability property traded for connections that are
+# already provisioned. The background worker is the one role that surges to nothing, and
+# `deployment-workers.yaml` says why: two of it race on a host-local knowledge checkout, which is a
+# correctness problem rather than a budget one.
+#
+# What it costs is checked rather than argued: `Settings` refuses a fleet whose *peak* exceeds
+# `postgres.maxConnections`, and `tests/test_deploy_chart.py` prints both sides.
+rollout:
+  maxSurgePods: 1
+
 image:
   repository: image-registry.openshift-image-registry.svc:5000/chemclaw/chemclaw
   tag: "0.1.0"

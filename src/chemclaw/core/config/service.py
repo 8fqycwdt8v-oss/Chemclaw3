@@ -167,6 +167,12 @@ class ServiceSettings(BaseSettings):
     # deploy time instead of silently at 3am. 0 = undeclared, which is the code default for the same
     # reason `budget_enabled` and the rate limiter are off in code: a dev run has no fleet.
     service_fleet_replicas: int = Field(default=1, gt=0)
+    # The same count during a rolling update, when both generations are up: the chart's
+    # `chemclaw.frontDoorProcessesAtRolloutPeak`. It exists because the connection budget's
+    # readiness term is one pool *per front-door pod*, so a peak charged with the steady replica
+    # count mixes two bases in one formula. 0 = undeclared, and the budget then falls back to the
+    # steady figures — which is what a CLI, a test and any hand-rolled deployment get.
+    service_fleet_replicas_at_rollout_peak: int = Field(default=0, ge=0)
     service_fleet_max_concurrent_turns: int = Field(default=0, ge=0)
     # Per-principal request budget (`api/rate_limit.py`), spent inside `require_principal` so it
     # covers every authenticated route and none of the probes. The two guards above are scoped to

@@ -89,6 +89,13 @@
          `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` exists to catch. Derived, it is the same
          number the HPA obeys. When the HPA is off, the fixed replica count is that number. */}}
   CHEMCLAW_SERVICE_FLEET_REPLICAS: {{ include "chemclaw.frontDoorProcesses" . | quote }}
+  {{- /* The same two counts at a rolling update's peak, which is what `Settings` checks
+         `postgres.maxConnections` against: an upgrade runs both generations, so it is when the
+         fleet holds the most connections it ever holds. Both, always together — the connection
+         sum charges one narrow `/readyz` pool per front-door pod, so peak pools against a steady
+         replica count would under-declare that term. */}}
+  CHEMCLAW_SERVICE_FLEET_REPLICAS_AT_ROLLOUT_PEAK: {{ include "chemclaw.frontDoorProcessesAtRolloutPeak" . | quote }}
+  CHEMCLAW_PG_FLEET_POOLS_AT_ROLLOUT_PEAK: {{ include "chemclaw.fleetPoolsAtRolloutPeak" . | quote }}
   {{- /* The connection budget's inputs, derived for the same reason as the line above: a
          hand-written count is a second copy of the topology. `chemclaw.fleetPools` counts POOLS
          rather than pods — a front-door process holds three (the stores', `/readyz`'s own

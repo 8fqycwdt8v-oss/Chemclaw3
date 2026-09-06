@@ -739,6 +739,72 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end -}}
 {{- end -}}
 
+{{- /* The surge, validated: pods, not a percentage, and not a negative one.
+
+       Helm's `int` is `toInt64`, which parses a leading integer and yields 0 for anything it
+       cannot read — so `maxSurgePods: 25%`, the single most likely thing to write given that
+       Kubernetes' own default is 25%, would render `maxSurge: 0` on every pool-holding Deployment
+       *and* count no surge at all: silently the one alternative `values.yaml` rejects by name. A
+       negative renders a Deployment the API server refuses and lowers the declared peak, loosening
+       the guard and the alert together.
+
+       Both numeric kinds are accepted because the same value arrives as two types depending on how
+       it was set — `float64` from `values.yaml`, `int64` from `--set`. */ -}}
+{{- define "chemclaw.rolloutSurgePods" -}}
+{{- $surge := .Values.rollout.maxSurgePods -}}
+{{- if not (or (kindIs "float64" $surge) (kindIs "int64" $surge)) -}}
+{{- fail (printf "rollout.maxSurgePods must be a whole number of pods, not %q (%s). The connection budget multiplies by it, so a percentage renders maxSurge: 0 and counts nothing." (toString $surge) (kindOf $surge)) -}}
+{{- end -}}
+{{- if lt ($surge | int) 0 -}}
+{{- fail (printf "rollout.maxSurgePods is %v; a negative surge renders a Deployment the API server refuses and lowers the declared peak, loosening the guard and the alert together" $surge) -}}
+{{- end -}}
+{{- $surge | int -}}
+{{- end -}}
+
+{{- /* The rollout strategy every pool-holding Deployment shares, so the surge the budget counts is
+       the surge the cluster is told. `maxUnavailable` is left to Kubernetes: this is a statement
+       about the *upper* bound on concurrent pods, which is the only half a connection budget can
+       see. */ -}}
+{{- define "chemclaw.rolloutStrategy" -}}
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: {{ include "chemclaw.rolloutSurgePods" . }}
+{{- end -}}
+
+{{- /* Front-door processes at a rolling update's peak. Its own definition because the connection
+       sum charges one narrow `/readyz` pool per front-door *pod*, so this has to move with
+       `chemclaw.fleetPoolsAtRolloutPeak` below or the two terms describe different fleets. */ -}}
+{{- define "chemclaw.frontDoorProcessesAtRolloutPeak" -}}
+{{- add (include "chemclaw.frontDoorProcesses" . | int) (include "chemclaw.rolloutSurgePods" . | int) -}}
+{{- end -}}
+
+{{- /* Pools at that same peak: the steady count plus one surge's worth per Deployment that rolls.
+
+       A rolling update runs both generations, and connections are the one resource the new one
+       takes from the old — `deployment-workers.yaml` reasoned about that overlap and concluded "an
+       overlap is only capacity", which is true of turns and false of this. Every role surges except
+       the background worker, which is `Recreate`.
+
+       Derived here rather than in `Settings` because only the chart knows how many Deployments
+       there are; `Settings` takes the two numbers and applies the same arithmetic it applies to the
+       steady pair. */ -}}
+{{- define "chemclaw.fleetPoolsAtRolloutPeak" -}}
+{{- $surge := include "chemclaw.rolloutSurgePods" . | int -}}
+{{- /* The front door surges as one Deployment holding three pools each. */ -}}
+{{- $total := add (include "chemclaw.fleetPools" . | int) (mul $surge 3) -}}
+{{- if .Values.mcpFace.enabled -}}
+{{- $total = add $total $surge -}}
+{{- end -}}
+{{- range $name, $cfg := .Values.connectors -}}
+{{- if $cfg.enabled -}}
+{{- if and $cfg.server (not $cfg.url) -}}{{- $total = add $total $surge -}}{{- end -}}
+{{- if $cfg.worker -}}{{- $total = add $total $surge -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $total -}}
+{{- end -}}
+
 {{- define "chemclaw.fleetPools" -}}
 {{- $frontDoor := include "chemclaw.frontDoorProcesses" . | int -}}
 {{- /* Three each, and the only role for which the number is not one — see the header. A pool is
