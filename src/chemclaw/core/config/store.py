@@ -165,6 +165,11 @@ class StoreSettings(BaseSettings):
     # variable is new, and raising would fail every existing split deployment on the `helm upgrade`
     # that introduces it.
     pg_fleet_pools: int = Field(default=1, gt=0)
+    # The same count at a rolling update's peak (`chemclaw.fleetPoolsAtRolloutPeak`), which the
+    # chart derives because only it knows how many Deployments there are to surge. Paired with
+    # `service_fleet_replicas_at_rollout_peak` so the two terms of the connection sum come from one
+    # base; 0 = undeclared, and the budget uses the steady pair.
+    pg_fleet_pools_at_rollout_peak: int = Field(default=0, ge=0)
     pg_fleet_max_connections: int = Field(default=0, ge=0)
     pg_session_fleet_max_connections: int = Field(default=0, ge=0)
     # Close a connection idle beyond this, so a burst does not pin `max_size` sockets forever.

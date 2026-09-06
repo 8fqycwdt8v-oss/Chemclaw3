@@ -15,6 +15,7 @@ metadata:
     app.kubernetes.io/component: mcp-face
 spec:
   replicas: {{ .Values.mcpFace.replicas }}
+  {{- include "chemclaw.rolloutStrategy" . | nindent 2 }}
   selector:
     matchLabels:
       {{- include "chemclaw.selectorLabels" . | nindent 6 }}

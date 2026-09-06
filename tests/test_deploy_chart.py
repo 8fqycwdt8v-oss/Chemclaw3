@@ -3679,6 +3679,134 @@ def _declared_fleet_pools(*overrides: str) -> int:
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_connection_ceiling_covers_the_rollout_peak_and_not_only_the_steady_state() -> None:
+    """The declared ceiling must contain what an *upgrade* opens, not what the fleet settles at.
+
+    A rolling update runs both generations, so for its duration every surging Deployment holds its
+    pools twice and the fleet holds the most connections it ever holds. Nothing charged the ceiling
+    for that: `chemclaw.fleetPools` counted one generation, and the first sign of the gap would be
+    `ChemclawFleetAboveItsConnectionCeiling` — which reads a *live* sum — firing on a correct
+    deployment while every pod's own configuration validated.
+
+    Driven through the real `Settings` against a real render rather than re-implemented here, so
+    this asserts the arithmetic the pods run. Measured on the shipped chart: 26 pools steady and 36
+    at the peak, 6 front-door processes and 7, giving **166 connections steady and 239 at the peak**
+    against a declared 256.
+
+    **The peak already fits, which is the finding.** An earlier version of this work multiplied the
+    old `pools × pg_pool_max_size` product by the surge and asked for 336 — a 31% provisioning rise.
+    That product charged every narrow `/readyz` pool the full width; `fleet_connections_per_server`
+    charges it the one connection it asks for, and against *that* arithmetic the same surge costs 73
+    connections rather than 128 and lands inside the ceiling already declared. The guard is what
+    this adds; the ask is nothing.
+    """
+    values = _values()
+    rendered = _render()
+    assert rendered.returncode == 0, rendered.stderr
+    config = _rendered_config(rendered.stdout)
+
+    from chemclaw.core.config import Settings
+
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        pg_fleet_pools=int(config["CHEMCLAW_PG_FLEET_POOLS"]),
+        pg_fleet_pools_at_rollout_peak=int(config["CHEMCLAW_PG_FLEET_POOLS_AT_ROLLOUT_PEAK"]),
+        service_fleet_replicas=int(config["CHEMCLAW_SERVICE_FLEET_REPLICAS"]),
+        service_fleet_replicas_at_rollout_peak=int(
+            config["CHEMCLAW_SERVICE_FLEET_REPLICAS_AT_ROLLOUT_PEAK"]
+        ),
+        pg_pool_max_size=int(config["CHEMCLAW_PG_POOL_MAX_SIZE"]),
+    )
+    steady = settings.fleet_connections_per_server()[0]
+    peak = settings.fleet_connections_per_server(at_rollout_peak=True)[0]
+    declared = int(values["postgres"]["maxConnections"])
+
+    assert peak > steady, (
+        f"the rollout peak ({peak}) is not above the steady state ({steady}); either every "
+        "Deployment stopped surging or the peak keys are not reaching the pods, and this test "
+        "would then pass for a fleet that never had the exposure it exists to bound"
+    )
+    assert peak <= declared, (
+        f"a rolling update opens {peak} connections against a declared ceiling of {declared}. "
+        "Raise postgres.maxConnections to cover the peak, lower CHEMCLAW_PG_POOL_MAX_SIZE, or "
+        "lower rollout.maxSurgePods — the startup check refuses this in every pod, so it is a "
+        "CrashLoop on first deploy rather than a surprise during the next upgrade"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_every_pool_holding_deployment_surges_by_the_number_the_budget_counts() -> None:
+    """The peak arithmetic multiplies by a surge; this is what makes that surge real.
+
+    `chemclaw.fleetPoolsAtRolloutPeak` adds one surge per rolling Deployment. That is only true if
+    the Deployments actually carry it — and with no strategy declared, Kubernetes defaults
+    `maxSurge` to 25% rounded up, which at `maxReplicas: 6` is *two* front-door pods rather than
+    one and puts the real peak above the counted one.
+
+    So both halves are asserted. Every rolling pool-holder renders exactly `rollout.maxSurgePods`,
+    and the background worker is the only role that opts out — `Recreate`, because two of it race on
+    a host-local knowledge checkout, which is why the peak arithmetic leaves exactly its term
+    unsurged.
+
+    And every Deployment whose pods read this release's config — which is what carries the DSN, so
+    it is what opens a pool — is a role the arithmetic has a term for. That third direction is the
+    one that costs connections: a Deployment can carry the surge correctly and still be absent from
+    the count.
+    """
+    rendered = _render("--set", "mcpFace.enabled=true")
+    assert rendered.returncode == 0, rendered.stderr
+    surge = int(_values()["rollout"]["maxSurgePods"])
+
+    rolling: dict[str, Any] = {}
+    recreate: set[str] = set()
+    pooled: set[str] = set()
+    for doc in yaml.safe_load_all(rendered.stdout):
+        if not doc or doc.get("kind") != "Deployment":
+            continue
+        strategy = doc["spec"].get("strategy") or {}
+        name = doc["metadata"]["name"]
+        if strategy.get("type") == "Recreate":
+            recreate.add(name)
+        else:
+            rolling[name] = strategy
+        containers = doc["spec"]["template"]["spec"].get("containers") or []
+        if any(
+            source.get("configMapRef", {}).get("name", "").startswith("chemclaw")
+            for container in containers
+            for source in container.get("envFrom") or []
+        ):
+            pooled.add(name)
+
+    assert recreate == {"chemclaw-background-worker"}, (
+        f"the roles that never overlap generations are {sorted(recreate)}; the peak arithmetic "
+        "leaves exactly the background worker's term unsurged, so any other Recreate makes it "
+        "over-count and a background worker that starts rolling makes it under-count"
+    )
+    assert rolling, "no rolling Deployment rendered — the extraction is broken"
+    for name, strategy in sorted(rolling.items()):
+        assert strategy.get("rollingUpdate", {}).get("maxSurge") == surge, (
+            f"{name} renders {strategy!r}; the peak is counted against "
+            f"rollout.maxSurgePods={surge}, and a Deployment that surges by anything else "
+            "(Kubernetes defaults to 25% rounded up) peaks above the number the budget checked"
+        )
+
+    counted = {
+        "chemclaw-service",
+        "chemclaw-background-worker",
+        "chemclaw-mcp-face",
+        *(
+            f"chemclaw-connector-{half}{name}"
+            for name in _values()["connectors"]
+            for half in ("", "worker-")
+        ),
+    }
+    assert pooled <= counted, (
+        f"{sorted(pooled - counted)} read this release's config — so each pod opens a Postgres "
+        "pool — and neither chemclaw.fleetPools nor its peak counts a term for it"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_turning_on_a_pooled_component_moves_the_declared_connection_budget() -> None:
     """`mcp-face` opens a Postgres pool like every other pooled process and was counted by nobody.
 
