@@ -434,8 +434,11 @@ process, which the chart cannot see because that DSN lives in an operator-manage
 reads. `Settings.fleet_connections_per_server` places each pool on the server it will be opened
 against; `postgres.maxConnections` bounds `postgres_dsn`'s and `postgres.sessionStoreMaxConnections`
 bounds the split store's. Undeclared while the split is real warns at startup and names the
-connections nobody is checking; declared with no split is refused, because a ceiling for a server
-that does not exist is one the alert would add to the real one.
+connections nobody is checking; declared with no split is refused, because it is a knob with no
+referent — the alert's second branch would compare an always-zero gauge against it and never fire.
+(It is *not* that a phantom ceiling silences anything: declaring one can only add a firing
+condition. That sentence described a summed expression which never shipped past its own pull
+request.)
 
 **The alert checks each server, and it is two comparisons rather than one sum for a reason worth
 knowing.** `sum(pools) > primaryCeiling + sessionCeiling` looks conservative and is the opposite:

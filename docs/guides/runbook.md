@@ -1264,10 +1264,19 @@ which branch fired, and raising `postgres.maxConnections` when it is the *sessio
 over changes nothing. Without a split the second gauge is 0 in every pod and this is one comparison
 again.
 
-If it fires on a deployment whose two DSNs you believe name one server, that is the case
-`CHEMCLAW_PG_SESSION_FLEET_MAX_CONNECTIONS`'s startup warning describes: check the spelling before
-declaring a second ceiling, because a ceiling for a server that does not exist pads the right-hand
-side and turns this alert off.
+**Declaring the second ceiling never silences this alert — it is the only thing that checks the
+session server at all.** This paragraph said the opposite, and following it during an incident
+would have been exactly wrong. Driven through `promtool`: with the session server over its
+would-be ceiling, an undeclared `CHEMCLAW_PG_SESSION_FLEET_MAX_CONNECTIONS` is **silent** and a
+declared one **fires**. The claim was true of a summed expression that never shipped past its own
+pull request, and it outlived the expression into five documents.
+
+What *is* worth checking first is the spelling. Both this alert's left-hand side and the startup
+check split the fleet by comparing the two DSN strings, so one server named two ways is measured as
+two servers that are each inside their own ceiling — and neither net sees the real total, declared
+or not. Note that the released expression *before* the split gauge existed would have caught that
+case, because it compared one sum against one ceiling. Spell both DSNs the same way and be checked
+once.
 
 ### chemclaw.cost
 
@@ -1552,6 +1561,25 @@ kubectl -n <ns> get configmap chemclaw-config -o yaml   # this is the newer rele
 
 Prefer rolling *forward* across that boundary. Note the cost the annotation buys this with:
 `helm uninstall` now leaves those two objects behind, which is what the older chart did.
+
+### `make helm-validate` says a binary is "not installed - see docs/guides/runbook.md"
+
+It meant this section, which did not exist: the Makefile has pointed here for three binaries the
+runbook never named, so the message read as "this cannot run here" and every session that hit it
+treated the chart gate as CI's job. It is not — all three install in under a minute and the whole
+target then passes locally.
+
+```
+helm         # https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz
+kubeconform  # https://github.com/yannh/kubeconform/releases  (linux-amd64 tarball)
+promtool     # https://github.com/prometheus/prometheus/releases  (bundled in the tarball)
+```
+
+Drop each on `PATH` and `make helm-validate` renders the chart, checks 31 and 35 manifests against
+the Kubernetes schemas, and runs `promtool check rules` over both monitoring arms. This is the same
+lesson the "sandbox is not offline" note in `CLAUDE.md` records about Docker: a tool that is merely
+*absent* reads exactly like a tool that is unavailable, and believing the second costs coverage in
+silence. The chart half of this repository's gate is the half a unit test cannot reach.
 
 ### `helm upgrade` refuses: "exists and cannot be imported into the current release"
 

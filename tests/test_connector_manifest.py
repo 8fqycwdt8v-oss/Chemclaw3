@@ -353,23 +353,43 @@ def test_a_manifest_cannot_take_the_operators_ceiling_off_its_own_job(
     no setting changed, in a tree that refuses `transport: stdio` by default on the stated grounds
     that a manifest is data.
 
-    Asserted through `build_job_tool` rather than through the model, because that is the one
-    function both `registry.job_tools` and `make connector-validate` go through: an ungated
-    declaration has to be a red validator rather than a workflow that has already started.
+    **Asserted on the shared pre-flight, and this test used to assert the wrong function.** It
+    drove `build_job_tool`, on that function's own claim to be "the one function both
+    `registry.job_tools` and `make connector-validate` go through". The template workflow's job
+    step is a third launcher and builds no tool: it resolves through `authorize_job_step` ->
+    `prepare_job_launch`, which is the function D-168 made shared *because* there is more than one
+    launcher. So the gate covered one of two paths and the suite pinned that as correct.
+    `require_funded_ceiling` now lives in the pre-flight, and building a tool refuses nothing —
+    which also bounds a mis-set allowlist to the job being launched instead of taking every
+    launcher `job_tools()` rebuilds down on every turn.
     """
-    from chemclaw.connectors.jobs import ConnectorJobError, build_job_tool
+    from chemclaw.connectors.jobs import (
+        ConnectorJobError,
+        prepare_job_launch,
+        require_funded_ceiling,
+    )
 
     job = JobSpec.model_validate({**_JOB, "awaits_answer": True})
     with pytest.raises(ConnectorJobError, match="because a manifest is data"):
-        build_job_tool("acme", job)
+        require_funded_ceiling("acme", job)
+    # Through the pre-flight, which is what both launchers actually call.
+    with pytest.raises(ConnectorJobError, match="because a manifest is data"):
+        prepare_job_launch("acme", job, {})
 
     # The shipped bundle keeps the shape, which is what makes this a gate and not a removal.
     monkeypatch.setattr(settings, "connector_jobs_awaiting_answer", f"acme.{job.name}")
-    assert build_job_tool("acme", job) is not None
+    require_funded_ceiling("acme", job)
 
     # And an ordinary job is untouched by the gate whatever it is set to.
     monkeypatch.setattr(settings, "connector_jobs_awaiting_answer", "")
-    assert build_job_tool("acme", JobSpec.model_validate(_JOB)) is not None
+    require_funded_ceiling("acme", JobSpec.model_validate(_JOB))
+
+    # Building a tool is not where this is decided any more: a mis-set allowlist must not refuse
+    # the launchers of every *other* bundle, which is what `job_tools()` rebuilding through a
+    # raising `build_job_tool` did — reported to the chemist as `bad_tool_arguments`, per turn.
+    from chemclaw.connectors.jobs import build_job_tool
+
+    assert build_job_tool("acme", job) is not None
 
 
 def test_a_bad_ceiling_in_a_real_manifest_names_the_file_it_is_in(tmp_path: Path) -> None:

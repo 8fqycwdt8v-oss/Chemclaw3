@@ -590,8 +590,10 @@ postgres:
   # pool `CHEMCLAW_PG_POOL_MAX_SIZE` where each asks for one connection.)
   #
   # 0 = undeclared, matching `maxConnections`. A release with no split leaves it at 0 and nothing
-  # about it applies; setting it *without* a split is refused, because a ceiling for a server that
-  # does not exist is one the runtime alert would add to the real one.
+  # about it applies; setting it *without* a split is refused, because it is a knob with no
+  # referent — the alert's second branch would compare an always-zero gauge against it and never
+  # fire. Declaring it never silences anything: each branch gates on its own ceiling, so a
+  # declaration can only add a firing condition.
   sessionStoreMaxConnections: 0
 
 # The pre-install/pre-upgrade migration hook (D-034).

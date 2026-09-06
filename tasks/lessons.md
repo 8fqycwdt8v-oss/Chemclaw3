@@ -2206,6 +2206,51 @@ the touched files at `--workers=1`, where all 44 pass.
 This is the same shape as the finding this session's ADR is about, applied to me: a green line whose
 basis is narrower than the claim it is used to support.
 
+**Six tests I wrote to prove six fixes were vacuous, and they were vacuous the same way.** A
+fresh-context agent ran 30 mutations against the tests from one day's work: 23 caught, 7 survived.
+Every survivor is a test asserting *the shape of a thing rather than its effect* —
+
+- a **pool count** instead of which server each pool dials (`/readyz` probing the wrong DSN charged
+  33 connections to the wrong server, 4 pools either way, green);
+- a **substring of a PromQL rule** instead of what the rule computes (`or` → `and` between the two
+  per-server branches makes the alert unfireable; all seven assertions still true);
+- a **difference between two renders** instead of the number rendered (a `+5` inside
+  `chemclaw.fleetPools` declared 31 pools for a topology of 26; both sides moved together);
+- **three of a chart's four** fleet inputs fed to `Settings` (the fourth non-zero fails every pod at
+  startup, suite green);
+- **two sweep points on the same side** of the constant they exist to pin (`3 × replicas` → `2 ×`);
+- a **docstring naming a composition root the body never touches** (`serve_worker`) — its sibling
+  drives the real root and caught the identical mutation, which is the contrast that proves it.
+
+The last one is the tell for the whole set: the sibling test was written by the same session in the
+same hour and is not vacuous, because it drives the thing instead of describing it.
+
+**Rule: after writing a test for a fix, mutate the fix and watch the test fail — before writing the
+commit message.** Not the whole suite; just the one line the test is about. I already had this rule
+in the form "a test that substitutes its own copy of the thing under test proves nothing", and it
+did not fire, because none of these substitutes anything: they observe the real object and ask it
+the wrong question. The sharper form is that **a test and the fix it guards, written together, share
+a blind spot** — the only thing that finds it is changing the code and seeing what stays green.
+
+One of the six was a test I had already repaired once that same day, for a *different* vacuity, and
+it went green again on a mutation I had not thought to try.
+
+**"`kubeconform` not installed" is not "kubeconform cannot be installed", and I read it as the
+second for a whole session.** `make helm-validate` was the one gate step I never ran locally, on the
+strength of that message; I deferred it to CI eight times and said so each time as though it were a
+property of the sandbox. It took one `curl` and a `cp`. The target then passed on the first run —
+31 and 35 manifests valid, both PromQL arms clean — which means every chart change this session was
+verified only by a remote job I could have reproduced in a minute.
+
+The Makefile's message points at `docs/guides/runbook.md`, and the runbook named none of the three
+binaries, so the pointer was dangling and the misreading was the natural one. That section exists
+now.
+
+**Rule: before recording a gate step as unavailable, try to make it available once.** `CLAUDE.md`
+already carries exactly this argument about Docker — "that message describes a default, not a
+limit" — and I re-derived the same mistake against a different tool in the same session, having read
+that paragraph at session start.
+
 **A rule I have written down twice is one I still walked into.** Correcting the connection ceiling,
 I put "26 pools steady, 36 at the peak" and "six pools of headroom" into `values.yaml` — the exact
 file whose prose pin exists because it once said "17 pooled processes" over a render of 14, and the
