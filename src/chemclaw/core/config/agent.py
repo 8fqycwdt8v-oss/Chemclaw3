@@ -182,25 +182,30 @@ class AgentSettings(BaseSettings):
     # **So the derivation runs the other way now: the window is the input and the thread allowance
     # is what is left over.** 128,000 is the smallest window this stack targets (the chart ships
     # `gpt-oss`, published at 131,072, and `D-2026-09-04` argues every figure against 128k), less
-    # `llm_max_tokens` = 4,096 reserved for the answer, leaving **123,904** of input. A maximal
-    # request bills `budget + (r - 1) x prefix`, where `r` is what the *prefix* costs per estimated
-    # token — the term exists because `effective_trigger` subtracts an *estimated* prefix from a
-    # *billed* budget, so the two units meet exactly here and nowhere else.
+    # `llm_max_tokens` = 4,096 reserved for the answer, leaving **123,904** of input, and 119,000
+    # is inside it by 4,904.
     #
-    # `r` was asserted at 1.04 in three places and nothing had measured it on this prefix. Measured
-    # 2026-09-05 over the real 73,963-token `default` prefix — the observed system message plus
-    # every bound schema, against real BPE tokenizers — it is **0.979** (`o200k_base`) and
-    # **0.9785** (`cl100k_base`): chars/4 *over*-estimates prose and JSON schemas, so on any
-    # tokenizer a current gateway uses the term is a credit and a maximal request bills less than
-    # this number. The one basis where it is not is `p50k_base` at **1.0534**, a GPT-3-era encoding
-    # nothing here serves — and 119,000 is chosen so the criterion holds even there, at the
-    # *permitted* prefix bound rather than today's: 119,000 + 0.0534 x 76,000 = 123,058, inside
-    # 123,904 by 846. At the ratio a real gateway tokenizes with, the same request bills ~117,400
-    # and clears by ~6,500.
+    # **That criterion used to need a tokenizer constant and no longer does, which is the point.**
+    # It was written as "a maximal request bills `budget + (r - 1) x prefix`", with `r` a
+    # hand-transcribed 1.0534 for `p50k_base` — the residue of `effective_trigger` subtracting an
+    # *estimated* prefix from a *billed* budget, so that the two units met in this one term. That
+    # subtraction is gone (`agent/context_budget.effective_trigger` converts the budget whole), and
+    # with it the term: once the process is calibrated, a maximal request bills the budget, so the
+    # bound is the plain comparison `budget <= window - llm_max_tokens` and no encoding appears in
+    # it. The constant is deleted rather than corrected; measured 2026-09-06 it was 1.0538 against
+    # the 1.0534 that was written down, which is the third time a transcribed figure in this
+    # subsystem has been low by the time anybody re-ran it.
+    #
+    # **What is left uncovered is named**: the one model call of a process that precedes its first
+    # calibration sample bills `r x budget` for whatever `r` its own content has, and no constant
+    # bounds that either. `agent_context_calibration_min_calls` is what shortens it to one call;
+    # see its own comment below.
     #
     # **What it costs, stated because it is a behavioural change**: the thread allowance falls from
-    # the 57,000 the paragraph above held fixed to **43,000** at the prefix bound (45,037 at
-    # today's measured prefix), and the band between this and the lossless edit's trigger falls
+    # the 57,000 the paragraph above held fixed to **43,000** at the prefix bound (more at today's
+    # measured prefix, which sits below the bound — `tests/test_compaction.py` measures it, and this
+    # line does not, because the figure it carried moved by 507 tokens between two measurements a
+    # day apart), and the band between this and the lossless edit's trigger falls
     # from 27,000 to 13,000. That band is squeezed by the prefix, not by this number: at a
     # 76,000-token prefix bound and a 128k window the whole policy has 43,000 tokens of thread to
     # divide between two edits. The instrument for wanting more is a narrower prefix.
@@ -289,12 +294,14 @@ class AgentSettings(BaseSettings):
     agent_tool_result_clear_trigger: int = Field(default=106_000, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
-    # dependent in one direction. Measured against a real BPE tokenizer on this repository's own
-    # payloads: the static prefix is 1.04x, tool schemas 1.00x, a markdown note 1.01x — and a
-    # connector JSON result is **0.45x**, an xyz geometry 0.47x. So the estimate is good for prose
-    # and schemas and roughly half of the truth for exactly the payload class these two triggers
-    # exist to reclaim, which put a thread the policy believed was at 100,000 tokens at ~224,000
-    # billed ones.
+    # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed
+    # `default` prefix and on results called from `Chemclaw3-mcp`'s own `chem` server: the prefix
+    # bills **0.985x** its estimate on `o200k_base`, a markdown note 0.996x — and the connector
+    # results **1.24x to 1.67x**, 1.34x concatenated. So the estimate is within 2% for prose and
+    # schemas and undercounts by a quarter to two thirds for exactly the payload class these two
+    # triggers exist to reclaim. **The 0.45x this paragraph used to carry (2.2x billed per
+    # estimated) does not reproduce on any payload the fleet returns**; the direction it claimed is
+    # right and the magnitude was 33-45% high.
     #
     # No constant corrects that, because the error is a property of the *content* and runs in both
     # directions. What does correct it is the number the provider returns: `input_tokens` on every
@@ -303,26 +310,50 @@ class AgentSettings(BaseSettings):
     # therefore read as a **billed**-token budget and converted into the estimator's unit by that
     # measured ratio — which is 1.0, and so changes nothing, until enough calls have been observed.
     #
-    # `min_calls` is the sample floor before the ratio is believed: one unusual first turn must not
-    # move a budget. The factor only ever *tightens* the trigger (it is clamped at 1.0 below), so
-    # the worst a mismeasurement can do is compact earlier than needed — never send a request the
-    # policy thinks is smaller than it is, which is the failure being closed.
+    # The factor only ever *tightens* the trigger (it is clamped at 1.0 below), so the worst a
+    # mismeasurement of the *ratio* can do is compact earlier than needed. **That was written as
+    # "never send a request the policy thinks is smaller than it is", and for a year it was false**
+    # — the clamp bounds the ratio, not the operand it was spent on, and `effective_trigger`
+    # converted only the part of the request the ratio had not been measured over. See
+    # `agent/context_budget.effective_trigger`; the conversion is whole-request now, which is what
+    # makes that sentence true rather than intended.
     #
-    # **The sample floor and the prefix subtraction do not interact, and that is worth stating
-    # because it looks as though they must.** For the first `min_calls` model calls of a process
-    # the ratio reads 1.0, so the *thread* half of both triggers is uncalibrated — but the prefix
-    # comes off *before* the division and is therefore exact from the first call. Whether a trigger
-    # floors at all is likewise all but ratio-free: the condition is `configured - prefix < ratio`,
-    # so the two answers can only differ inside a band as wide as the ratio itself, which the clamp
-    # caps at 4 tokens (swept, at a 43,175-token prefix only 43,176..43,179 flip). So a pod restart
-    # no longer means "the largest single component of the request is unbudgeted until call 21"; it
-    # means the thread's unit conversion warms up, over a smaller thread than before. Measured, the
-    # warm-up swing in the thread allowance shrinks with it: 100,000 -> 45,454 tokens between an
-    # uncalibrated and a 2.2x-calibrated process before, 56,825 -> 25,829 after.
+    # **The sample floor was a gate on the safe direction only, and it shipped at 20.** This
+    # comment used to argue that the floor and the prefix subtraction "do not interact", which is
+    # true as stated — the prefix is exact from call 1 — and is not the question. The question is
+    # what the *thread's* conversion is doing meanwhile, and the answer was: nothing, for twenty
+    # calls. Measured 2026-09-06 on a compiled graph with the connector surface bound, a dense
+    # connector-JSON thread and these very defaults, every one of a process's first twenty model
+    # calls went out at **164,989** billed tokens against the 123,904 a 128k model accepts. That is
+    # not a warm-up in a derived quantity; it is the largest overrun this subsystem produces, and it
+    # arrives on every pod restart and every scale-up.
+    #
+    # **A floor cannot protect anything here, because believing a sample can only tighten.**
+    # `estimator_ratio` is clamped at 1.0 from below, so the failure the floor was written against
+    # — "one unusual first call must not move a budget" — can only ever move it *down*: earlier
+    # compaction, one conversation group lost, the trade `agent/context_budget.py` prices
+    # explicitly. The floor's only real effect was to hold the loose end for twenty calls. So the
+    # default is 1, and `_ALPHA` (a ~20-call memory) is the actual smoothing.
+    #
+    # **What makes 1 worth having is the bias correction beside it**, and the two are one change.
+    # An EWMA seeded at 1.0 is mostly its seed for the first `1/_ALPHA` samples, so lowering the
+    # floor alone barely moves anything: measured on the same arm, model calls sent over the 128k
+    # input ceiling were **20** at the shipped floor, **19** with the floor at 1 and the seed left
+    # in, and **1** with the seed divided back out. That last one is the process's very first call,
+    # before any sample exists — which no policy can bound, and which is the honest residue here.
+    #
+    # **What it costs**: a process's second model call is budgeted against a single observation, so
+    # a first turn that happened to be one geometry compacts the next turn harder than the converged
+    # mix would. Measured on the arm above the overshoot is one call and ~28% of the thread
+    # allowance, and it relaxes within five.
     agent_context_calibration_enabled: bool = True
-    agent_context_calibration_min_calls: int = Field(default=20, ge=1)
-    # Ceiling on the factor, so a pathological sample cannot collapse the budget. 4.0 is well above
-    # the 2.2x the worst measured payload class produces and still bounds the arithmetic.
+    agent_context_calibration_min_calls: int = Field(default=1, ge=1)
+    # Ceiling on the factor, so a pathological sample cannot collapse the budget — and it carries
+    # more weight now that a single sample is believed. **4.0 rests on a re-measurement rather than
+    # on the 2.2x it used to cite**: called against `Chemclaw3-mcp`'s own `chem` server on
+    # 2026-09-06 and tokenized with `o200k_base`, the worst single result bills **1.67x** its
+    # chars/4 estimate (`enumerate_bond_cleavages`), 2.01x on the GPT-3-era `p50k_base` nothing here
+    # serves. So this is ~2x the observed extreme rather than ~1.8x an unreproducible one.
     agent_context_calibration_max_factor: float = Field(default=4.0, ge=1.0)
     # **Ceiling on what one model call's tool results may put in front of the model**, and the one
     # bound that was missing entirely. `connector_max_request_bytes` caps what this system *sends* a
@@ -337,7 +368,11 @@ class AgentSettings(BaseSettings):
     # is the newest *batch*. Per-result, each of N parallel calls was separately inside the ceiling
     # while the request was N times over it: measured on a compiled graph against a 100,000-token
     # budget, 164,229 estimated request tokens at 8 parallel calls and 345,735 at 20, with the
-    # compaction counter at 0 throughout; 58,605 and 59,175 once the number is a batch's. A lone
+    # compaction counter at 0 throughout. Once the number is a batch's, the batch is exactly
+    # `agent_max_tool_result_chars` at every width — the two request totals that used to be quoted
+    # here (58,605 and 59,175) predate the prefix being charged and are stale by it, so what is
+    # named is the invariant `tests/test_tool_result_size.py` asserts rather than a request size
+    # that moves with the tool surface. A lone
     # call — which is nearly every call — still gets the whole number, so the common case is
     # unchanged and only a fan-out shares.
     #
@@ -455,8 +490,9 @@ class AgentSettings(BaseSettings):
     # is not switching the runaway guard off.
     #
     # Billed rather than estimated tokens, because this is a *cost* ceiling and the estimator is
-    # measured at 0.45x on exactly the payload class a runaway turn is made of
-    # (`agent/context_budget.py`). No conversion is needed here and none is done: the number the
+    # measured to undercount by a quarter to two thirds on exactly the payload class a runaway turn
+    # is made of (`agent/context_budget.py` carries the 2026-09-06 re-measurement; the 0.45x this
+    # line used to name did not reproduce). No conversion is needed here and none is done: the
     # provider reports is the number this compares.
     agent_max_turn_billed_tokens: int = Field(default=0, ge=0)
 

@@ -5,11 +5,16 @@ with that, and all three are properties of the arithmetic rather than of the edi
 
 **The unit was not the unit anybody meant.** Both triggers count with
 `count_tokens_approximately` — chars/4 — and that estimator is content dependent in one direction.
-Measured against a real BPE tokenizer over this repository's own payloads: the static prefix 1.04x,
-tool schemas 1.00x, a knowledge-graph note 1.01x, an ELN export 0.80x — and a connector JSON result
-**0.45x**, an xyz geometry 0.47x. So it is right about prose and schemas and roughly half of the
-truth about structured chemistry, which is precisely the payload class the two triggers exist to
-reclaim. Measured end to end: a thread the policy put at 100,077 tokens billed ~224,000.
+Re-measured 2026-09-06 against real BPE encodings (`o200k_base`, the family a current gateway
+serves) over payloads this system actually handles: the observed `default` prefix bills **0.985**
+estimated tokens' worth per estimated token, a knowledge-graph note **0.996** — and results called
+from `Chemclaw3-mcp`'s own `chem` server bill **1.24x** (`describe_sites`, 8.4 kB) to **1.67x**
+(`enumerate_bond_cleavages`), **1.34x** over all of them concatenated. So chars/4 is within 2% on
+prose and schemas and undercounts structured chemistry by a quarter to two thirds, which is
+precisely the payload class the two triggers exist to reclaim. The figures this paragraph used to
+carry — "0.45x", i.e. 2.2x billed per estimated — do not reproduce against the fleet's real
+results, and `agent_context_calibration_max_factor` was justified by them; `core/config/agent.py`
+carries what that ceiling now rests on.
 
 No constant fixes that, because the error is a property of the content. What does is the number the
 provider already returns: `usage_metadata["input_tokens"]` is the billed size of the request this
@@ -31,21 +36,25 @@ and `effective_trigger` caps the budget at `window - output reservation` when it
 
 **The prefix has to be measured per request, which is why there is a contextvar here, and it is
 charged whether or not a window is declared.** The system message, the skills listing and every
-bound tool schema are part of the request the provider bills and are not in the thread — 43,175
-estimated tokens on the `default` profile, measured 2026-09-04 — so a budget that does not charge
-them bounds nothing the provider sees. Charging it only under a declared window, which is what
-D-2026-08-28 shipped, meant charging it against nothing in every real deployment: measured end to
-end, a thread the policy cut to its 90,030-token budget left as a 137,301-token request. So
-`effective_trigger` subtracts it unconditionally, and `agent_context_token_budget` is therefore a
-bound on **request** spend rather than on thread spend. A `ContextEdit` cannot see the prefix:
-upstream's protocol hands `apply` a message list and a counter and nothing else. A middleware can,
-so `MeasureRequestPrefix` publishes it and the edits read it — the same shape `agent/turn_flags.py`
-and `agent/repeat_guard.py` already use for a fact that belongs to the call in flight.
+bound tool schema are part of the request the provider bills and are not in the thread — a figure
+no line here may hold, because it moves on any tool-schema merge in this repository *or* in
+`Chemclaw3-mcp`, and this paragraph shipped carrying 43,175, the connector-less number the
+2026-09-05 sweep corrected in five other places and missed here. What a shipped `default` turn
+sends is what `tests/test_context_floor.py` measures, bounded by its ceiling — so a budget that
+does not charge it bounds nothing the provider sees. Charging it only under a declared window,
+which is what D-2026-08-28 shipped, meant charging it against nothing in every real deployment:
+measured end to end, a thread the policy cut to its 90,030-token budget left as a 137,301-token
+request. So `effective_trigger` subtracts it unconditionally, and `agent_context_token_budget` is
+therefore a bound on **request** spend rather than on thread spend. A `ContextEdit` cannot see the
+prefix: upstream's protocol hands `apply` a message list and a counter and nothing else. A
+middleware can, so `MeasureRequestPrefix` publishes it and the edits read it — the same shape
+`agent/turn_flags.py` and `agent/repeat_guard.py` already use for a fact that belongs to the call
+in flight.
 
 **What that costs, stated rather than discovered.** At a fixed configured budget every deployment's
 thread allowance falls by the prefix, and a configured budget *below* the prefix leaves a trigger of
-1, which means "reduce on every model call". `agent_tool_result_clear_trigger` shipped at 30,000
-against a 43,175-token prefix, which put the default configuration in exactly that state and is why
+1, which means "reduce on every model call". `agent_tool_result_clear_trigger` has twice shipped in
+exactly that state — once against a prefix measured with no connector bound — and that is why
 `_note_floored_trigger` exists — the floor has to be said rather than arrive silently. The same
 commit that charged the prefix raised the default above the prefix, and it is **derived** from
 `tests/test_context_floor.PREFIX_BOUND` — that file's ratchet ceiling plus the allowance for the
@@ -135,10 +144,26 @@ class _Calibration:
     deployment's traffic shifts between prose turns and evidence sweeps, and the ratio for those is
     1.0 against 2.2. A mean over the life of a process would keep answering with last week's mix.
 
-    **A sample floor before it is believed.** One unusual first call must not move a budget, and a
-    single sample of a turn that happened to be one geometry is exactly that. Below
-    `agent_context_calibration_min_calls` the ratio reads 1.0, which is the uncalibrated behaviour
-    this repository shipped.
+    **The average is of the samples, not of the samples and a fiction.** An EWMA seeded at 1.0 is
+    `(1-a)^n` parts seed after `n` samples, so with `a = 0.1` a process's first twenty calls answer
+    with a number that is mostly the initial guess — and that guess is the *unsafe* end, because
+    the clamp below means believing a sample can only tighten. Dividing the seed back out
+    (`(ewma - (1-a)^n) / (1 - (1-a)^n)`, the standard bias correction) makes this the properly
+    weighted average of what has actually been observed, and nothing else: one sample answers with
+    that sample, twenty answer with their weighted mean. Measured 2026-09-06 on a compiled graph
+    with the connector surface bound, a dense connector-JSON thread and the shipped budget, the
+    number of model calls that went out over a 128k model's input ceiling: **20** with the seed
+    left in and the sample floor at 20, **19** with the floor alone lowered to 1, **1** with both —
+    and that one is the process's very first call, before any sample exists, which no policy can
+    bound.
+
+    **The sample floor stays as a setting and its default is 1**, because there is nothing left for
+    it to protect against. The fear it was written for — "one unusual first call must not move a
+    budget" — is the fear of a *loose* budget, and `ratio` is clamped at 1.0 from below, so a
+    single sample can only make the policy compact earlier. Its actual effect was to hold every
+    pod's first twenty model calls at the uncalibrated end; measured on that arm, those calls billed
+    164,989 against 123,904 of permitted input. `_ALPHA` is the real sample floor: one sample of a
+    thread that happened to be one geometry moves the answer by its own weight and then decays.
 
     Per process rather than per session: it is a property of the *tokenizer*, which is a property
     of the endpoint, and a per-session estimate would spend every session's first turns learning
@@ -171,14 +196,24 @@ class _Calibration:
             self._ratio = (1 - self._ALPHA) * self._ratio + self._ALPHA * sample
 
     def ratio(self) -> float:
-        """The factor to divide a billed-token budget by, clamped so it can only tighten."""
+        """The factor to divide a billed-token budget by, clamped so it can only tighten.
+
+        The seed is divided back out before the clamp — see the class docstring: `_ratio` carries
+        `(1 - _ALPHA) ** calls` of the 1.0 it started at, and returning that blend is what kept a
+        fresh process budgeting at the uncalibrated end for twenty calls. `calls >= 1` is
+        guaranteed by the floor above (`agent_context_calibration_min_calls` is `ge=1`), so the
+        divisor is never 0; a run of samples below the seed can make the numerator negative, and
+        the clamp turns that into 1.0, which is the same answer an over-estimate always gets.
+        """
         if not settings.agent_context_calibration_enabled:
             return 1.0
         with self._lock:
             calls, ratio = self._calls, self._ratio
         if calls < settings.agent_context_calibration_min_calls:
             return 1.0
-        return min(max(ratio, 1.0), settings.agent_context_calibration_max_factor)
+        seed = (1.0 - self._ALPHA) ** calls
+        observed = (ratio - seed) / (1.0 - seed)
+        return min(max(observed, 1.0), settings.agent_context_calibration_max_factor)
 
     def reset(self) -> None:
         """Forget every sample — for tests, which must not inherit another test's traffic."""
@@ -224,7 +259,7 @@ _FLOOR_LOCK = threading.Lock()
 _MAX_REPORTED_FLOORS = 64
 
 
-def _note_floored_trigger(configured: int, prefix: int, window: int) -> None:
+def _note_floored_trigger(configured: int, prefix: int, window: int, ratio: float) -> None:
     """Say, once, that a configured budget left the thread nothing and the trigger floored at 1.
 
     **A trigger of 1 is not a budget, it is "reduce on every model call".** The edit reading it
@@ -233,12 +268,13 @@ def _note_floored_trigger(configured: int, prefix: int, window: int) -> None:
     conversation window cuts back to its newest group. That is a defensible thing for a deployment
     to have asked for and an indefensible thing for it to arrive at silently — which is precisely
     what happens when the prefix is charged unconditionally and a configured budget is smaller than
-    the prefix. That was the shipped default's own state — 30,000 against a `default` profile prefix
-    measured at 43,175 on 2026-09-04 — until the default rose above the prefix in the same commit
-    (derived from `tests/test_context_floor.PREFIX_BOUND` plus 30,000 of thread rather than written
-    down here); this now fires
-    for a deployment that configures a budget under its own prefix, which is a corner that stays
-    reachable because the prefix grows with every bound tool.
+    the prefix. That was the shipped default's own state twice — the second time because the prefix
+    it was derived from had been measured with no connector bound — until it was re-derived from
+    `tests/test_context_floor.PREFIX_BOUND` plus 30,000 of thread, which is where a live figure
+    comes from and why none is written here. It now fires for a deployment that configures a budget
+    under its own prefix, a corner that stays reachable because the prefix grows with every bound
+    tool — and, since the conversion moved onto the whole budget, for one whose *calibrated* budget
+    falls under it, which is why the line names the ratio too.
 
     WARNING rather than a counter, and the choice is about what an operator can do with it. The
     condition is static — the same for every turn of a process, decided by two settings and the
@@ -250,6 +286,13 @@ def _note_floored_trigger(configured: int, prefix: int, window: int) -> None:
         configured: The configured budget in billed tokens, as passed to `effective_trigger`.
         prefix: This request's measured prefix in estimated tokens, 0 off the request path.
         window: `llm_context_window_tokens`, 0 when the deployment declares none.
+        ratio: `estimator_ratio()` at the moment of the floor. It is named in the line but is
+            deliberately **not** in the key: since the conversion moved onto the whole budget it is
+            a third way to reach the floor (a budget above the prefix still floors once
+            `budget / ratio` falls under it), and a float in the key would mint a distinct triple
+            per call, which is the growth `_MAX_REPORTED_FLOORS` exists to refuse. Keyed on the
+            static three, a calibration-driven floor is said once and the number that caused it is
+            in the message.
     """
     key = (configured, prefix, window)
     with _FLOOR_LOCK:
@@ -259,17 +302,20 @@ def _note_floored_trigger(configured: int, prefix: int, window: int) -> None:
     log_event(
         logger,
         "context.trigger_floored",
-        "a configured context budget of %d billed tokens leaves nothing for the thread once this "
-        "request's %d-token prefix (and a declared window of %d) is charged against it, so the "
-        "trigger floors at 1 and the edit reading it reduces on every model call: raise the "
-        "setting above the prefix, or shrink the bound tool surface",
+        "a configured context budget of %d billed tokens leaves nothing for the thread once it is "
+        "converted at the measured %.3f billed tokens per estimated one and this request's "
+        "%d-token prefix (with a declared window of %d) is charged against it, so the trigger "
+        "floors at 1 and the edit reading it reduces on every model call: raise the setting above "
+        "the prefix, or shrink the bound tool surface",
         configured,
+        ratio,
         prefix,
         window,
         level=logging.WARNING,
         configured_tokens=configured,
         prefix_tokens=prefix,
         window_tokens=window,
+        estimator_ratio=ratio,
     )
 
 
@@ -303,19 +349,49 @@ def effective_trigger(configured: int) -> int:
     rather than an extra one is that both numbers are in the same request: what the provider counts
     is `prefix + thread`, and only one of the two was ever budgeted.
 
-    **How big the prefix is is not written here, because the figure this paragraph used to carry —
-    43,175, "43% of the shipped 100,000" — was measured on a graph compiled with no connector
-    bound.** A shipped `default` turn binds eight connector bundles and sends **75,695** estimated
-    tokens, so the subtraction was two thirds of what it is, and both compaction defaults were
-    derived from the short number. The ratchet is the place a live figure comes from
-    (`tests/test_context_floor.py`) and `core/config/agent.py` carries the derivation; a number
-    repeated here is a third copy that can go stale on its own.
+    **How big the prefix is is not written here, and the last two attempts to write it here were
+    both wrong.** The first carried 43,175 — a graph compiled with no connector bound. The second
+    replaced it with "eight connector bundles and 75,695 estimated tokens", which was a bundle
+    count nobody re-derived (`connector_specs(get_profile("default"))` returns **seven**) beside a
+    token figure that goes stale on a sibling repository's merge schedule. The ratchet is the place
+    a live figure comes from (`tests/test_context_floor.py`, whose ceiling is the only figure worth
+    quoting) and `core/config/agent.py` carries the derivation; a number repeated here is a third
+    copy that can go stale on its own, which is exactly what both of them did.
 
-    The prefix is counted in the estimator's unit and subtracted from a budget in the provider's.
-    That is deliberate rather than sloppy: the prefix is instructions, a skills listing and tool
-    schemas, and those are the content on which the two units agree — 1.04x measured over the whole
-    default prefix. The thread is where they do not, and the thread is exactly what is left after
-    the subtraction, so dividing by the ratio afterwards converts the half that needs converting.
+    **The order of those last two is the whole arithmetic, and it was wrong.** This function used
+    to compute `(budget - prefix) / ratio`: subtract an *estimated* prefix from a *billed* budget,
+    then convert only the remainder. Its own docstring defended that as "deliberate rather than
+    sloppy", on the ground that the prefix is the content where the two units agree — and that
+    ground is the part that was never measured on this prefix. It converts to
+    `prefix * 1 + thread * ratio <= budget`, which is true only if the prefix bills at exactly one
+    billed token per estimated token. `note_model_call` measures `ratio` over the **whole**
+    request, so spending it on the remainder alone credits the prefix's over-estimate against the
+    thread's under-estimate and then lets the thread grow into the credit. Measured 2026-09-06 on a
+    compiled graph with the connector surface bound, shipped defaults, a 128k window declared and a
+    thread of real `chem.enumerate_bond_cleavages` results, billed by `o200k_base` over the whole
+    113-tool surface a shipped turn binds: the converged request billed **133,803** against a
+    119,000 budget and the 123,904 such a model accepts, with `chemclaw_context_unreducible_total`
+    flat on all 40 turns — because the prefix is 63% of that request and bills at 0.985, the thread
+    bills at 1.675, and the blend the policy divided by was 1.208.
+
+    So the budget is converted **once, whole**, and the prefix is subtracted in the estimator's own
+    unit afterwards. Then `billed = ratio * (prefix + thread) <= ratio * (budget / ratio) = budget`
+    identically, with no assumption about how the two populations differ — the ratio is applied to
+    exactly the quantity it was measured over, which is the property the split could not have. On
+    the same arm: **118,589 billed**, inside the budget by 411. It costs that thread ~9,000
+    estimated tokens, which is the trade the budget exists to make.
+
+    **It is a near-identity rather than an identity, and the residue is measured rather than
+    assumed away.** The conversion uses the ratio as it stands *before* the call it is about, so a
+    request is budgeted against a slightly stale average of a sequence the trigger itself steers.
+    Driven to a fixed point that lag shows as a two-state cycle a fraction of a percent over the
+    budget — `tests/test_compaction._TRACKING_SLACK` measures it and holds the bound, and the
+    criterion that matters (does the request fit the model) clears by thousands of tokens.
+
+    **This can only tighten**, so it needs no second safety argument: `budget/ratio - prefix` is
+    below `(budget - prefix)/ratio` for every `ratio >= 1`, and the ratio is clamped at 1.0 from
+    below. At `ratio == 1.0` — an uncalibrated process — the two are the same number, which is why
+    every unit test of this function passed either way and only an end-to-end drive can see it.
 
     Args:
         configured: The configured budget, in billed tokens (`agent_context_token_budget` or
@@ -334,9 +410,10 @@ def effective_trigger(configured: int) -> int:
     if window:
         budget = min(budget, float(window - settings.llm_max_tokens))
     prefix = prefix_tokens()
-    trigger = int((budget - float(prefix)) / estimator_ratio())
+    ratio = estimator_ratio()
+    trigger = int(budget / ratio) - prefix
     if trigger < 1:
-        _note_floored_trigger(configured, prefix, window)
+        _note_floored_trigger(configured, prefix, window, ratio)
         return 1
     return trigger
 
@@ -383,10 +460,17 @@ def estimate_tool_schemas(tools: Sequence[Any]) -> int:
 #: **Process-scoped, because the middleware that reads it is per turn.** `MeasureRequestPrefix` is
 #: constructed inside the compaction group of a graph that `langgraph_agent` compiles per turn, so
 #: an instance memo is cold at every turn's first model call and the whole `convert_to_openai_tool`
-#: sweep ran again on the front door's one event loop. Measured 2026-09-06 on the `default` profile
-#: with connectors bound (92 tools), a fresh graph per turn and a 1 ms heartbeat: **~100 ms** of
-#: uninterrupted loop time for the process's first surface, **~20 ms** for every turn after it, and
-#: **210 ms** for the 12 turns `service_max_concurrent_turns` admits together.
+#: sweep ran again on the front door's one event loop.
+#:
+#: **How long that is, is not stated here any more.** This comment carried "~100 ms for the
+#: process's first surface, ~20 ms for every turn after it, 210 ms for 12 concurrent turns", and
+#: the sweep re-measured on the same 92-tool `default` surface on 2026-09-06 takes **16 ms** cold
+#: and **0.01 ms** warm. Neither figure is *provably* wrong, because the conditions the originals
+#: were taken under — loop occupancy rather than wall time, a 1 ms heartbeat, twelve turns racing
+#: — are not recoverable from the text, and that is the defect: a duration nothing re-runs is a
+#: claim about a machine, not about this code. What is asserted, and is what the memo is for, is
+#: the **count**: `tests/test_context_budget.py` drives many turns over one surface and requires
+#: exactly one sweep, and drives a cold burst and requires the loop to stay schedulable through it.
 #:
 #: A process serves one profile set over one connector fleet, so the distinct surfaces it ever sees
 #: are its profiles times the bundles that happen to be reachable — a bounded handful of entries,
@@ -489,19 +573,16 @@ class MeasureRequestPrefix(AgentMiddleware[Any, Any, Any]):
         **Off the loop because a memo miss is pure CPU over every bound tool schema and this
         process has one loop.** The front door pins itself to one uvicorn worker, so that loop
         carries every SSE stream, both kubelet probes and the submission side of every token
-        validation, and the sweep ran to completion on it. Measured 2026-09-06 on the `default`
-        profile with connectors bound (92 tools), a fresh graph per turn and a 1 ms heartbeat, for
-        the 12 turns `service_max_concurrent_turns` admits together: **210 ms** of uninterrupted
-        loop time before, **~2 ms** once the memo above is warm, which is what every turn of a
-        running pod now costs.
+        validation, and the sweep ran to completion on it.
 
-        **The one case this line buys, and what it does not buy, measured rather than assumed.** A
-        burst that misses together — a pod's first turns, or a bundle whose tools have just come
-        back under new names — still does the work: 100-126 ms across three runs, against 210 ms on
-        the loop. It is a halving rather than an elimination, because a thread buys no parallelism
-        (the GIL is held between switch intervals) and twelve CPU-bound threads on a 4-CPU pod
-        starve the loop thread of it for much of the burst. `api/runner.py` makes the same trade
-        for the graph build and measured the same shape.
+        **What this line buys and what it does not, stated as a shape rather than as milliseconds**
+        — see `_SCHEMA_TOKENS` for why the figures that used to be here are gone. A burst that
+        misses together (a pod's first turns, or a bundle whose tools have come back under new
+        names) still does the work: `asyncio.to_thread` is a halving rather than an elimination,
+        because a thread buys no parallelism against the GIL and CPU-bound threads starve the loop
+        thread of it for much of the burst. What is asserted is that the loop stays schedulable
+        through such a burst (`tests/test_context_budget.py`), not a duration. `api/runner.py`
+        makes the same trade for the graph build.
         """
         token = self._publish(await asyncio.to_thread(self._measured, request))
         try:

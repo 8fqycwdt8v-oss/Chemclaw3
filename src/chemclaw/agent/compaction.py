@@ -790,10 +790,18 @@ def _record_overrun(request: ModelRequest[Any], sent: int) -> None:
 
     **The window-aware arm this function was once going to grow is still not built, and for a
     better reason than before.** Swept over (window, prefix, reservation, budget, ratio),
-    `sent <= effective_trigger(budget)` implies `prefix + sent * ratio <= budget` — and, where a
+    `sent <= effective_trigger(budget)` implies `(prefix + sent) * ratio <= budget` — and, where a
     window is declared, that the request fits it — in every combination except the degenerate corner
     where the prefix exhausts the budget outright, where the trigger floors at 1 so any real thread
     ticks anyway. `tests/test_context_budget.py` holds that sweep.
+
+    **That invariant used to be written `prefix + sent * ratio <= budget`, and both the sweep and
+    `effective_trigger` agreed with each other because both said it.** The ratio is measured over
+    the *whole* request, so charging it to the thread alone assumes the prefix bills at exactly 1.0
+    — an assumption nothing measured, and false: measured 2026-09-06, this repository's `default`
+    prefix bills 0.985 and a connector-JSON thread ~1.6, and the request the policy read as clean
+    billed 140,500 against a 119,000 budget. `agent/context_budget.effective_trigger` now converts
+    the budget whole, which is what makes the parenthesis above true rather than assumed.
 
     Once per turn, for the same reason every other number here is high-water marked: the edits are
     non-destructive, so a standing overrun is re-derived on every model call of the turn.
@@ -829,8 +837,10 @@ def _note_billing(request: ModelRequest[Any], response: Any) -> None:
 
     **The one place both numbers exist.** The estimate is computed here to decide whether a
     reduction happened; the bill arrives on the response of the very call this middleware wraps.
-    Nothing compared them, so the budget stayed denominated in a unit measured to be 2.2x off on
-    the payload class it governs (`agent/context_budget.py` carries the measurement).
+    Nothing compared them, so the budget stayed denominated in a unit that undercounts the payload
+    class it governs by a quarter to two thirds (`agent/context_budget.py` carries the
+    measurement, re-taken 2026-09-06 against the fleet's own results; the 2.2x this sentence used
+    to name does not reproduce).
 
     The estimate is the *whole* request — the ambient prefix plus the messages actually sent —
     because `input_tokens` counts the whole request and half a comparison is not one.

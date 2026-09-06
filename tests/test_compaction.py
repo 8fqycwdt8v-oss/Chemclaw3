@@ -18,6 +18,8 @@ Three things are worth proving here and they are not the same thing:
 """
 
 import asyncio
+import json
+import re
 from typing import Any
 
 import pytest
@@ -31,6 +33,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.outputs import ChatGeneration, ChatResult
 
 from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS
 from chemclaw.agent.compaction import (
@@ -357,10 +360,30 @@ def _graph_prefix() -> int:
     Measured rather than written down, because the prefix moves whenever a bound tool's schema
     changes (`tests/test_context_floor.py` is the ratchet that bounds it), and a constant here would
     make these tests fail on somebody else's tool-schema edit.
+
+    **With `connectors=`, and for eleven weeks without it.** This function compiled its graph with
+    no connector bound, so every budget in this file was written around **43,497** estimated tokens
+    where a shipped turn binds **64,586** of in-repo surface alone — the exact defect
+    `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` closed in
+    `tests/test_context_floor.py`, still live one file over five days later. It matters most for
+    the two end-to-end tests below, whose only guard was `open_prefix > 0.3 * budget` — true at
+    43,497 and true at 64,586, so nothing told them which system they had measured.
+
+    Every graph in this file that is budgeted through `_request_budget` binds the same surface, for
+    the reason `_turn_sending` states: a budget written as "prefix plus n" is wrong by the whole
+    difference if the graph driven binds a different prefix than the one measured here.
+
+    The surface comes from `tests/test_context_floor._connector_tools`, which is production's own
+    narrowing over this repository's own manifests; the bundles served from `Chemclaw3-mcp` stay
+    out of reach here and `_shipped_prefix` is where their allowance is added.
     """
     if not _PREFIX:
+        from tests.test_context_floor import _connector_tools
+
         model = _CapturingModel(messages=iter([AIMessage(content="done")]))
-        graph = build_langgraph_agent(model=model)
+        graph = build_langgraph_agent(
+            model=model, connectors=_connector_tools(get_profile("default"))
+        )
         asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="hello")]}))
         system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
         _PREFIX.append(_count(system) + estimate_tool_schemas(_BOUND))
@@ -381,8 +404,18 @@ def _turn_sending(thread: list[AnyMessage]) -> tuple[list[Any], dict[str, Any]]:
     a field of its own, so neither edit can reach it however far over budget the thread runs. Every
     caller below is asking about the conversation, so it gets the conversation.
     """
+    from tests.test_context_floor import _connector_tools
+
     _Recording.seen = []
-    graph = build_langgraph_agent(model=_Recording(messages=iter([AIMessage(content="done")])))
+    # The same surface `_graph_prefix` measured. A budget written as `_request_budget(n)` is
+    # "the prefix plus n", so if this graph binds a *different* prefix than that function measured,
+    # every such budget is off by the difference — measured, 21,089 tokens, which turned a trigger
+    # written as 1 into one of 21,090 and stopped the lossless edit firing at all. Two graphs, one
+    # arithmetic: they have to bind the same tools.
+    graph = build_langgraph_agent(
+        model=_Recording(messages=iter([AIMessage(content="done")])),
+        connectors=_connector_tools(get_profile("default")),
+    )
     state = asyncio.run(graph.ainvoke({"messages": [*thread, HumanMessage(content="and now?")]}))
     assert _Recording.seen, "the model was never called"
     sent = _Recording.seen[0]
@@ -866,11 +899,17 @@ def test_an_unreducible_thread_is_counted(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def _drive(window: int, thread: list[AnyMessage]) -> tuple[int, int, float]:
-    """Run one thread through a compiled graph at `window`; return prefix, thread, counter delta."""
+    """Run one thread through a compiled graph at `window`; return prefix, thread, counter delta.
+
+    With the connector surface bound, for `_graph_prefix`'s reason: without it the two tests below
+    asserted against a prefix no deployment sends, and the prefix is the term they are about.
+    """
+    from tests.test_context_floor import _connector_tools
+
     reset_calibration()
     settings.llm_context_window_tokens = window
     model = _CapturingModel(messages=iter([AIMessage(content="done")]))
-    graph = build_langgraph_agent(model=model)
+    graph = build_langgraph_agent(model=model, connectors=_connector_tools(get_profile("default")))
     before = METRICS.value("chemclaw_context_unreducible_total")
     asyncio.run(graph.ainvoke({"messages": list(thread)}))
     system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
@@ -918,6 +957,8 @@ def test_the_prefix_is_charged_whether_or_not_a_window_is_declared(
     monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", _request_budget(1_000_000))
     monkeypatch.setattr(settings, "llm_max_tokens", 4_096)
     monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
+    from tests.test_context_floor import _connector_tools, _tool_name
+
     budget = settings.agent_context_token_budget
     thread: list[AnyMessage] = [HumanMessage(content="q" + "y" * 60_000) for _ in range(8)]
 
@@ -927,6 +968,18 @@ def test_the_prefix_is_charged_whether_or_not_a_window_is_declared(
     assert open_prefix > 0.3 * budget, (
         f"the prefix is {open_prefix} tokens against a {budget} budget — small enough that "
         "charging it or not is not a difference this test can see"
+    )
+    # **And it is the prefix a deployment sends, which the assertion above cannot tell.** That
+    # guard passed at 43,497 (no connector bound) and passes at 64,586 (the shipped surface), so
+    # for eleven weeks it said nothing about which system was measured — the same defect
+    # `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` closed one file
+    # over. This names the surface instead of bounding its size.
+    bound = {_tool_name(tool) for tool in _BOUND}
+    expected = {_tool_name(tool) for tool in _connector_tools(get_profile("default"))}
+    assert expected and expected <= bound, (
+        f"{len(expected - bound)} of the {len(expected)} connector tools a shipped turn binds were "
+        "not on this request, so every number in this test describes a smaller system than the one "
+        "that ships"
     )
     assert open_prefix + open_sent <= budget, (
         f"a {open_prefix + open_sent}-token request left against a {budget}-token budget with no "
@@ -1047,18 +1100,49 @@ BUDGET_THREAD_ALLOWANCE = 43_000
 #: defaults to 0, which reads as "no bound at all".
 SMALLEST_TARGET_WINDOW = 128_000
 
-#: Billed tokens per *estimated* token of prefix, on the worst tokenizer basis measured.
+# `WORST_PREFIX_ESTIMATOR_RATIO = 1.0534` used to live here, and the test below multiplied
+# `PREFIX_BOUND` by it to bound a maximal request from above. It is gone for two reasons and the
+# second is the real one.
+#
+# It was a hand-transcribed literal about text that moves on every tool-schema merge in this
+# repository *and* in `Chemclaw3-mcp`, nothing in the suite measured it, and re-measured 2026-09-06
+# over the observed `default` prefix it is **1.0538** (`p50k_base`; 0.985 on `o200k_base` and on
+# `cl100k_base`) — low by the time anybody re-ran it, which is this repository's own
+# `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` with a constant in place of the prose.
+#
+# But correcting it would have kept the shape, and the shape was the defect. That term existed only
+# because `effective_trigger` subtracted an *estimated* prefix from a *billed* budget, so the two
+# units met in one place and one constant had to carry the difference. The conversion is
+# whole-request now, so a calibrated maximal request bills the budget and the bound is the plain
+# comparison the test below makes. No encoding appears in it.
+
+#: The whole-request billed/estimated ratio a pod serving evidence traffic settles at.
 #:
-#: `effective_trigger` subtracts an **estimated** prefix from a **billed** budget, so a maximal
-#: request bills `budget + (ratio - 1) x prefix` and this is the only place the two units meet.
-#: Three sentences in this tree asserted 1.04 without measuring it on this prefix. Measured
-#: 2026-09-05 over the observed 73,963-token `default` prefix — the system message off the wire
-#: plus every bound schema, against real BPE encodings — it is **0.979** (`o200k_base`) and
-#: **0.9785** (`cl100k_base`): chars/4 *over*-estimates schemas and prose, so on anything a current
-#: gateway serves the term is a credit. The exception is `p50k_base` at **1.0534**, a GPT-3-era
-#: encoding nothing here uses, and the budget is designed to clear the window even on that basis —
-#: a margin that costs ~4,000 tokens of thread and removes the tokenizer from the argument.
-WORST_PREFIX_ESTIMATOR_RATIO = 1.0534
+#: Measured 2026-09-06, driven to convergence on a compiled graph with all 113 tools a shipped turn
+#: binds, a thread of real `chem.enumerate_bond_cleavages` results and `o200k_base` as the meter:
+#: **1.208** on the arithmetic that shipped and **1.168** on this commit's, the difference being
+#: that a correctly bounded thread is smaller and so the request is more prefix-dominated. The
+#: higher of the two is used here, because the tighter allowance is the conservative arm.
+_EVIDENCE_TRAFFIC_RATIO = 1.208
+
+
+def _observe_evidence_traffic(calls: int = 40) -> None:
+    """Calibrate the process the way a pod serving that traffic calibrates itself."""
+    from chemclaw.agent.context_budget import note_model_call
+
+    for _ in range(calls):
+        note_model_call(10_000, int(10_000 * _EVIDENCE_TRAFFIC_RATIO))
+
+
+def _unreclaimable_batch_tokens() -> int:
+    """Estimated tokens of the newest tool batch, which neither edit may touch.
+
+    `agent_keep_last_tool_groups` carves the newest results out of `ClearToolUsesEdit` and the
+    conversation window cannot cut past the newest group, so this is the floor under any thread —
+    and `agent_max_tool_result_chars` is the ceiling on it (`agent/tool_result_size.py` shares that
+    number across a whole parallel batch, so it bounds the batch and not one result).
+    """
+    return settings.agent_max_tool_result_chars // 4
 
 
 def _shipped_prefix() -> int:
@@ -1070,10 +1154,9 @@ def _shipped_prefix() -> int:
     `Chemclaw3-mcp`, which no test here can measure — so the *bound* stands in for them, which is
     the conservative direction because the bound is above the measurement.
     """
-    from tests.test_context_floor import SERVED_ELSEWHERE_ALLOWANCE, _connector_tools
+    from tests.test_context_floor import SERVED_ELSEWHERE_ALLOWANCE
 
-    connectors = estimate_tool_schemas(_connector_tools(get_profile("default")))
-    return _graph_prefix() + connectors + SERVED_ELSEWHERE_ALLOWANCE
+    return _graph_prefix() + SERVED_ELSEWHERE_ALLOWANCE
 
 
 def test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged() -> None:
@@ -1150,7 +1233,26 @@ def test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged() -> None:
             f"{effective_trigger(settings.agent_context_token_budget)}, so the free edit no longer "
             "runs first"
         )
+        # **And on a warm pod, which is the third arm and the one nothing had.** Both arms above
+        # run after `reset_calibration()`, so they measure a process that has served no traffic —
+        # the one state these settings were not sized for. Not a fraction of
+        # `CLEAR_TRIGGER_THREAD_ALLOWANCE`: that constant is *billed* tokens and this is estimated,
+        # so no proportion between them is a property of anything. What the lossless edit must not
+        # do is floor, because clearing every reclaimable result on every model call is a state a
+        # deployment may choose and must not arrive at.
+        _observe_evidence_traffic()
+        warm = effective_trigger(trigger)
+        assert warm < allowance, (
+            "calibration did not tighten the allowance at all, so this arm is not measuring the "
+            "state it exists to measure"
+        )
+        assert warm > 1, (
+            f"a pod calibrated on evidence traffic floors the lossless edit's trigger: {trigger} "
+            f"billed tokens converted at {_EVIDENCE_TRAFFIC_RATIO} leaves less than the "
+            f"{prefix}-token prefix, so every reclaimable tool result is cleared on every call"
+        )
     finally:
+        reset_calibration()
         _prefix_var.reset(token)
 
 
@@ -1197,8 +1299,227 @@ def test_the_shipped_budget_leaves_the_thread_what_its_derivation_claims() -> No
             "split between an edit that costs nothing and an edit that deletes conversation has "
             "collapsed, which is the single-threshold behaviour it was created to remove"
         )
+        # **The warm arm, and the floor that means something.** `BUDGET_THREAD_ALLOWANCE` is billed
+        # tokens and this is estimated, so asserting a proportion between them would be asserting
+        # the ratio itself. What has a consequence is whether the thread the window leaves can
+        # still hold the one thing neither edit may reclaim — the newest tool batch. Below that,
+        # every evidence turn is over the budget and unreducible.
+        _observe_evidence_traffic()
+        warm = effective_trigger(budget)
+        assert warm < allowance, "calibration did not tighten the allowance at all"
+        assert warm > _unreclaimable_batch_tokens(), (
+            f"a pod calibrated on evidence traffic leaves the window edit {warm} estimated tokens "
+            f"of thread, under the {_unreclaimable_batch_tokens()} one maximal tool batch occupies "
+            "and that neither edit may touch — so every such turn is unreducible. Lower "
+            "agent_max_tool_result_chars, raise agent_context_token_budget, or narrow the prefix."
+        )
+        # And the split survives calibration, which neither constant implies: both triggers divide
+        # by the same ratio but the prefix is subtracted after, so a large enough ratio could close
+        # the gap.
+        assert effective_trigger(settings.agent_tool_result_clear_trigger) < warm, (
+            "the split between the two edits collapsed once the process was calibrated"
+        )
     finally:
+        reset_calibration()
         _prefix_var.reset(token)
+
+
+#: A word-and-punctuation tokenizer, standing in for a provider's meter.
+#:
+#: **Deterministic and network-free, which a real BPE encoding is not** — `tiktoken` downloads its
+#: merge table on first use, and a test that bounds the shipped budget must not be skippable by an
+#: egress rule. What it has to reproduce is not a particular gateway's numbers but the *shape* the
+#: defect below lives in: chars/4 is close on prose and schemas and far off on dense structured
+#: chemistry. Measured 2026-09-06, this function bills the fixture below at **2.18x** its chars/4
+#: estimate and this repository's system message at ~1.0x, against 1.24-1.67x and 0.985x for
+#: `o200k_base` over the real `chem` server's results. Same shape, sharper.
+_WORDS = re.compile(r"\w+|[^\w\s]")
+
+
+def _billed(text: str) -> int:
+    """What this stand-in provider charges for `text`."""
+    return len(_WORDS.findall(text))
+
+
+def _dense_chemistry(records: int = 24) -> str:
+    """A block of the payload class the two triggers exist to reclaim, shaped like a real result.
+
+    Modelled on `chem.enumerate_bond_cleavages` — SMILES, keys, floats, no prose. It is written
+    here rather than fetched so this test needs no server, and the ratio it produces is measured by
+    `_WORDS` above rather than asserted by construction.
+    """
+    return json.dumps(
+        [
+            {
+                "bond": f"C{index % 7}-O{index % 5}",
+                "smiles": "CC(=O)Oc1ccccc1C(=O)O",
+                "bde_kcal_mol": round(72.5 + (index % 23) * 0.37, 3),
+                "fragments": ["CC(=O)[O]", "[c]1ccccc1C(=O)O"],
+                "homolytic": bool(index % 2),
+            }
+            for index in range(records)
+        ],
+        separators=(",", ":"),
+    )
+
+
+class _BillingModel(GenericFakeChatModel):
+    """`_CapturingModel` that also reports what it would have charged, which closes the loop.
+
+    The calibration reads `usage_metadata["input_tokens"]` off the response of the call it wrapped,
+    so a fake model that reports nothing teaches the budget nothing — and every other end-to-end
+    test in this file therefore runs permanently uncalibrated, at the one ratio (1.0) where the old
+    arithmetic and the new one are the same number. This one meters the whole request the way the
+    provider does: the system message, the thread, and the bound tool schemas, which are on the
+    wire and are more than half of it.
+    """
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        """Record the surface and stay unbound — the fake model has no tool-calling path."""
+        _BOUND[:] = list(tools)
+        return self
+
+    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any) -> Any:
+        """Record the request, bill it, and answer as the fake model would."""
+        from tests.test_context_floor import _tool_schema
+
+        _RECEIVED[:] = list(messages)
+        billed = _billed(
+            "".join(str(getattr(message, "content", "")) for message in messages)
+        ) + _billed("".join(_tool_schema(tool) for tool in _BOUND))
+        _BILLED.append(billed)
+        message = AIMessage(
+            content="done",
+            usage_metadata={
+                "input_tokens": billed,
+                "output_tokens": 1,
+                "total_tokens": billed + 1,
+            },
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+#: What the stand-in provider charged for each model call of the drive below, newest last.
+_BILLED: list[int] = []
+
+#: How far past the configured budget a *converged* process may bill, as a fraction.
+#:
+#: **Not a fudge factor: the tracking error of a feedback loop, measured.** `effective_trigger`
+#: converts the budget with the ratio as it stands *before* the call, and the call it is about then
+#: bills at its own composition — so the two differ by however far the running average lags the
+#: sequence it is averaging, and that sequence is steered by the trigger itself. Traced over 30
+#: turns on the fixture below the fixed point is a two-state cycle, 115,800 and 119,089 against a
+#: 119,000 budget: a **0.075%** overshoot. This is 13x that, and the assertion beside it — that the
+#: request fits the model — has 4,815 tokens of room at the same point, so nothing rests on this
+#: being tight. What it must not do is admit the defect: reverting `effective_trigger` alone puts
+#: the fixed point at 148,690 on this fixture, 25% over.
+_TRACKING_SLACK = 0.01
+
+
+def test_a_calibrated_process_does_not_bill_past_its_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shipped budget is a bound on what the provider is charged, driven rather than derived.
+
+    **This is the test the file was missing, and its absence is why the defect it closes survived
+    three ADRs about this arithmetic.** Every other end-to-end test here drives a fake model that
+    reports no usage, so the calibration never learns anything and every request goes out at
+    `ratio == 1.0`. Every unit test of `effective_trigger` runs off the request path, where the
+    prefix is 0. Those are the two values at which `(budget - prefix) / ratio` and
+    `budget / ratio - prefix` agree, so between them the suite could not tell the two apart, and
+    shipped the first.
+
+    **Measured on this fixture, 2026-09-06** — compiled graph, `default` profile with the connector
+    surface bound, shipped `agent_context_token_budget` and `agent_tool_result_clear_trigger`, a
+    128k window declared (the value `deploy/helm/chemclaw/values.yaml` states, i.e. the *best*
+    case), and a thread of dense connector-shaped JSON:
+
+    ==========================================  ==============  ==============
+    arm                                         converged bill  vs 119,000
+    ==========================================  ==============  ==============
+    as shipped                                         140,500  **+21,500**
+    old arithmetic, this commit's calibration          148,690  **+29,690**
+    this commit                                        119,089  +89
+    ==========================================  ==============  ==============
+
+    The first two rows are over the 123,904 a 128k model accepts, by 16,596 and 24,786, with
+    `chemclaw_context_unreducible_total` flat on every turn. The middle row is what this test sees
+    if only `effective_trigger` is reverted, and it is *worse* than the first because the
+    calibration beside it now converges — a better-measured ratio spent on the wrong operand is a
+    bigger error, which is the clearest statement of what the defect was.
+
+    Driven to convergence rather than asserted at one turn, because the ratio is a running average
+    and the property is about its fixed point: the request the policy permits is the request that
+    is measured, which is what makes `billed <= budget` a near-identity rather than a coincidence.
+    **Near, and by how much is measured rather than waved at — see `_TRACKING_SLACK`.**
+    """
+    from tests.test_context_floor import _connector_tools
+
+    monkeypatch.setattr(settings, "llm_context_window_tokens", SMALLEST_TARGET_WINDOW)
+    budget = settings.agent_context_token_budget
+    body = _dense_chemistry()
+    thread: list[AnyMessage] = []
+    for index in range(60):
+        filler = (body * (6_000 // len(body) + 1))[:6_000]
+        thread.append(HumanMessage(content=f"batch {index}: {filler}"))
+        thread.append(AIMessage(content="noted."))
+    thread.append(HumanMessage(content="so which conditions held?"))
+
+    # The calibration is process-wide by design, so a test that leaves it warm changes every test
+    # after it. Reset on the way out as well as on the way in.
+    reset_calibration()
+    connectors = _connector_tools(get_profile("default"))
+    try:
+        for _ in range(12):
+            _BILLED.clear()
+            model = _BillingModel(messages=iter([AIMessage(content="done")]))
+            graph = build_langgraph_agent(model=model, connectors=connectors)
+            asyncio.run(graph.ainvoke({"messages": list(thread)}))
+        billed = _BILLED[-1]
+        system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
+        prefix = _count(system) + estimate_tool_schemas(_BOUND)
+        sent = _count([m for m in _RECEIVED if not isinstance(m, SystemMessage)])
+    finally:
+        reset_calibration()
+
+    # The fixture has to be the case the budget is for: over the trigger, cut by the policy, and
+    # dense enough that the two units disagree. All three are asserted, because a fixture that
+    # quietly stopped being any of them would leave the bound below passing for no reason.
+    assert _count(thread) > budget - prefix, (
+        f"the thread is {_count(thread)} estimated tokens against a trigger of at most "
+        f"{budget - prefix} (the budget less this request's prefix, before any conversion), so it "
+        "is inside the budget and proves nothing"
+    )
+    assert sent < _count(thread), "nothing was cut, so no bound was exercised"
+    assert prefix > 0.4 * billed, (
+        f"the prefix is {prefix} of a {billed}-token request, so this thread cannot show a "
+        "difference between charging the ratio to the request and charging it to the thread"
+    )
+    assert _billed(body) > 1.5 * _count([HumanMessage(content=body)]), (
+        "the fixture no longer bills above its chars/4 estimate, so the defect this test is about "
+        "cannot appear in it"
+    )
+
+    # The criterion `D-2026-09-04` set, and the one the old arithmetic failed by 16,596: does the
+    # request fit the model it is going to.
+    assert billed <= SMALLEST_TARGET_WINDOW - settings.llm_max_tokens, (
+        f"a converged process sent a request the provider bills at {billed}, against "
+        f"{SMALLEST_TARGET_WINDOW - settings.llm_max_tokens} of input on the smallest window this "
+        f"stack targets, with a {prefix}-token prefix and a thread cut to {sent}. The provider "
+        "refuses that outright and the whole turn is lost."
+    )
+    # And the budget itself, within the calibration's tracking error.
+    assert billed <= budget * (1.0 + _TRACKING_SLACK), (
+        f"a converged process billed {billed} against a configured budget of {budget} — "
+        f"{billed - budget} over, {(billed / budget - 1.0) * 100:.2f}% — with a {prefix}-token "
+        f"prefix and a thread cut to {sent}. The budget is a bound on the request, so the measured "
+        "billed/estimated ratio has to be applied to the whole request and not to the part of it "
+        "left after the prefix comes off."
+    )
+    assert billed > 0.9 * budget, (
+        f"the request billed {billed} against a {budget} budget: the policy cut far past what it "
+        "was asked to, so this test would pass on an arithmetic that reclaims everything"
+    )
 
 
 def test_a_maximal_request_at_the_shipped_budget_fits_the_smallest_window_it_targets() -> None:
@@ -1211,34 +1532,47 @@ def test_a_maximal_request_at_the_shipped_budget_fits_the_smallest_window_it_tar
     direction, with `llm_context_window_tokens` (the one guard that could have caught it) defaulting
     to 0 and set in no file under `deploy/`.
 
-    **A budget with only a lower bound is not a budget**, and this is the upper one. It is asserted
-    against the *worst* tokenizer basis measured rather than the shipped one, so the margin does not
-    depend on which encoding a gateway happens to use — see `WORST_PREFIX_ESTIMATOR_RATIO`.
+    **A budget with only a lower bound is not a budget**, and this is the upper one.
+
+    **It used to carry a tokenizer constant and does not any more**, and that is a simplification
+    the arithmetic earned rather than one this test chose. While `effective_trigger` subtracted an
+    estimated prefix from a billed budget, a maximal request billed `budget + (r - 1) x prefix` and
+    `r` had to be pinned for the worst encoding anybody might serve. The conversion is
+    whole-request now, so at the fixed point a maximal request bills the *budget* —
+    `ratio x (prefix + thread)` where `thread <= budget/ratio - prefix` — and what remains to
+    compare is two numbers this repository already holds.
+    `test_a_calibrated_process_does_not_bill_past_its_budget` drives that identity end to end.
+
+    **What this cannot bound is named rather than left implied**: the one model call a process
+    makes before it has a calibration sample. There the ratio reads 1.0, so a maximal request is
+    `budget` *estimated* tokens and bills whatever its own content costs. No constant bounds that;
+    `agent_context_calibration_min_calls` shortening the exposure to a single call is the whole of
+    the remedy, and `tests/test_context_budget.py` is where it is pinned.
 
     **It cannot be replaced by declaring the window**, which is why both were done. The chart now
     states `CHEMCLAW_LLM_CONTEXT_WINDOW_TOKENS`, and `effective_trigger` clamps against it — but
     the code default stays 0 (this repository cannot know an endpoint's window), so a deployment
     that does not set it falls back on this number alone. That is the configuration this asserts.
     """
-    from tests.test_context_floor import PREFIX_BOUND
-
     budget = settings.agent_context_token_budget
     input_ceiling = SMALLEST_TARGET_WINDOW - settings.llm_max_tokens
-    worst_case = budget + int((WORST_PREFIX_ESTIMATOR_RATIO - 1.0) * PREFIX_BOUND)
 
-    assert worst_case <= input_ceiling, (
-        f"a maximal request at the shipped budget of {budget} bills up to {worst_case} tokens "
-        f"(the budget, plus what a {PREFIX_BOUND}-token prefix costs over this system's own "
-        f"estimate of it), against {input_ceiling} of input on a {SMALLEST_TARGET_WINDOW}-token "
-        f"model reserving {settings.llm_max_tokens} for the answer. The provider refuses that "
-        "outright and the whole turn is lost — which is strictly worse than a thread cut early, "
-        "and is the failure D-2026-09-04 closed. Lower the budget, or narrow the prefix."
+    assert budget <= input_ceiling, (
+        f"a maximal request at the shipped budget bills up to {budget} tokens once the process is "
+        f"calibrated, against {input_ceiling} of input on a {SMALLEST_TARGET_WINDOW}-token model "
+        f"reserving {settings.llm_max_tokens} for the answer. The provider refuses that outright "
+        "and the whole turn is lost — which is strictly worse than a thread cut early, and is the "
+        "failure D-2026-09-04 closed. Lower the budget, or narrow the prefix."
     )
-    # Not vacuous: the margin is real but not so large that the assertion could not bite. A budget
-    # 10% higher — which is roughly the raise that caused this — must fail it.
-    assert budget * 1.1 + (WORST_PREFIX_ESTIMATOR_RATIO - 1.0) * PREFIX_BOUND > input_ceiling, (
+    # Not vacuous, and this arm is what stops the one above being a tautology: a budget 10% higher
+    # — roughly the raise that caused the original defect — must fail it.
+    assert budget * 1.1 > input_ceiling, (
         f"a budget 10% above {budget} would still fit {input_ceiling}, so this test has so much "
         "headroom that it is not the bound it claims to be; tighten it or say why."
+    )
+    assert input_ceiling - budget == 4_904, (
+        "the margin under the smallest window this stack targets moved; say which of the two "
+        "numbers changed and why"
     )
 
 
