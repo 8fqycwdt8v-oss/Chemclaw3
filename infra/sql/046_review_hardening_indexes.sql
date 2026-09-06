@@ -7,6 +7,16 @@
 -- session's pruned history"), so every session list, for every user, for the life of the
 -- deployment, has been a sequential scan over a table that only grows.
 --
+-- **And this index did not remove that scan until the predicate was rewritten**, which is a fact
+-- about the statement rather than about the DDL below, so it is recorded here rather than in a
+-- second migration. `IS NOT DISTINCT FROM` is not btree-searchable — the same fact
+-- `039_note_index_embedding_key.sql` states about `IS DISTINCT FROM` seven files earlier — so this
+-- index served nothing and cost a write per session created, measured as an unchanged `Seq Scan`
+-- at 200,000 rows even under `enable_seqscan = off`. `_OWNER_LIST` now spells the NULL-safe match
+-- as `(o.owner = %s OR (o.owner IS NULL AND %s::text IS NULL))`, which plans as a bitmap index
+-- scan on this index; `tests/test_session_store.py` pins that shape, since the index is only
+-- useful while the statement keeps it.
+--
 -- `molecule_fingerprints_definition_idx` / `reaction_fingerprints_definition_idx` — both tables
 -- carry `definition` specifically so "similarity search filters to one definition" (002, 003), and
 -- 004 shows two definitions legitimately coexisting during a rollout. `science.fingerprints.store`

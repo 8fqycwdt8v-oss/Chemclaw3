@@ -1,0 +1,42 @@
+-- `LabelStore.current_version()` reads one string and scans the whole corpus to find it.
+--
+-- `science/labels/store.py::current_version()` runs
+-- `SELECT labeller_version FROM reaction_labels WHERE labelled_at IS NOT NULL
+--  ORDER BY labelled_at DESC, source, reaction_id LIMIT 1`, and none of the table's four indexes
+-- leads with `labelled_at` (`reaction_labels_pkey (source, reaction_id)`,
+-- `reaction_labels_staleness_idx (labeller_version, source, reaction_id)`, and the two partial
+-- indexes on `named_reaction` / `rxno_id` added by 051). So the statement is a parallel sequential
+-- scan plus a top-N sort over every row, to return a single version string.
+--
+-- **It is on the turn path, not on a background one.** All six of the rxnfp connector's tools call
+-- it first (`connectors/rxnfp/server/tools.py`), so a chemist's turn pays it once per tool call,
+-- holding a pooled connection while it runs — and the table is sized by the corpus rather than by
+-- usage (`infra/sql/README.md` classes it derived and rebuildable; the first live integration is
+-- Pistachio, millions of reactions).
+--
+-- Measured on 1 000 000 rows (224 MB), PostgreSQL 16.15, same statement, warm:
+--
+--   before: Limit -> Gather Merge -> Sort (top-N) -> Parallel Seq Scan on reaction_labels,
+--           118 ms, 11 455 buffers, 3 CPUs, growing linearly with the corpus
+--   after:  Limit -> Index Scan using reaction_labels_current_version_idx,
+--           0.018 ms, 4 buffers
+--
+-- **All three columns, and the tiebreaks are not decoration.** A one-column
+-- `(labelled_at DESC)` index is half the size (21 MB against 47 MB at 1M rows) and plans as an
+-- Incremental Sort, which is only cheap while few rows share the newest timestamp — and they do
+-- not: `_STORE_LABELS` writes `labelled_at = now()`, which is transaction time, so one labelling
+-- batch stamps its whole batch identically. Measured against a corpus whose largest group is
+-- 86 400 rows, the one-column index read 40 469 rows and took 21 ms where this one reads 1 and
+-- takes 0.035 ms. The three-column form satisfies the `ORDER BY` exactly and has no such cliff.
+--
+-- Partial on `labelled_at IS NOT NULL` because that is the statement's own filter and because an
+-- unlabelled row is the ordinary state of a freshly drained corpus: the index then covers the
+-- labelled subset rather than every row, and the planner needs no separate filter step. Change
+-- either half of the `ORDER BY` in `PostgresLabelIndex._CURRENT_VERSION` and the plan falls back to
+-- the scan above; `tests/test_label_index.py` fails instead, in both the statement text and the
+-- plan.
+--
+-- Applied by `make db-migrate` (idempotent).
+CREATE INDEX IF NOT EXISTS reaction_labels_current_version_idx
+    ON reaction_labels (labelled_at DESC, source, reaction_id)
+    WHERE labelled_at IS NOT NULL;

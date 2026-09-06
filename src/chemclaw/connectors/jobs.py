@@ -36,6 +36,7 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
+from chemclaw.agent.tool_framing import defanged_payload
 from chemclaw.connectors.manifest import JobParamType, JobSpec
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.config import settings
@@ -666,6 +667,20 @@ async def _await_briefly(
     so answered the identical bad result with a raw pydantic `ValidationError`, which
     `_sanitize_tool_errors` passes through as a written domain message because it is a `ValueError`.
     Two collectors, one bad input, two different things said to the chemist.
+
+    **And it is neutralised before it is handed back**, because this return value *is* a tool
+    result: a job that answers inside the turn goes straight into the model's context, and the
+    launcher carries no `SERVED_BY` stamp, so `agent/tool_framing.frame_connector_results` leaves
+    it exactly as it came — measured, a summary spelling a live `</retrieved-note-…>` reached the
+    model with the delimiter intact. Five of the shipped jobs declare an `inline_wait_seconds`, so
+    that is the common path rather than the exotic one. The text is third-party twice over: the
+    bundle composes the summary in another process, and what it interpolates is the requester's own
+    spec. Neutralised and not framed, for `defanged_payload`'s stated reason — the envelope is
+    `agent/durable_tools.py`'s to put around the two spans a citation can name.
+
+    Done on the *only* function that awaits, which is this docstring's own argument one paragraph
+    up: the two call sites in `launch` are a freshly-started run and a rejoined one, and a guard
+    written at one of them is the defect that paragraph records.
     """
     try:
         finished = await asyncio.wait_for(handle.result(), budget)
@@ -687,4 +702,4 @@ async def _await_briefly(
         raise ConnectorJobError(
             f"the {job_name!r} job ran and failed: {failure_reason(exc.__cause__ or exc)}"
         ) from exc
-    return envelope_from_result(workflow_id, finished)
+    return defanged_payload(envelope_from_result(workflow_id, finished))

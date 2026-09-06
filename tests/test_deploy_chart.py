@@ -1798,7 +1798,7 @@ _POSTURE_CASES: dict[str, tuple[str, bool, bool]] = {
     ),
     "listed": (
         "networkPolicy:\n  egressDestinations:\n    - ipBlock: {cidr: 10.0.0.0/8}\n"
-        "retention:\n  windows:\n    CHEMCLAW_RETENTION_AUDIT_DAYS: 30\n",
+        "retention:\n  windows:\n    CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS: 30\n",
         True,
         True,
     ),
@@ -3263,6 +3263,83 @@ def test_the_shipped_defaults_still_render() -> None:
     assert result.returncode == 0, result.stderr
     assert "terminationGracePeriodSeconds: 615" in result.stdout
     assert "terminationGracePeriodSeconds: 150" in result.stdout
+
+
+def _retention_env_names() -> set[str]:
+    """Every `CHEMCLAW_RETENTION_*` env name that names a real field, from `Settings` itself.
+
+    Derived rather than listed, because a list here would be a second copy of the chart's list and
+    the two only have to *agree* — which is the whole defect this pair of tests exists to catch.
+    """
+    from chemclaw.core.config import Settings
+
+    return {
+        f"CHEMCLAW_{name.upper()}"
+        for name in Settings.model_fields
+        if name.startswith("retention_")
+    }
+
+
+def _render_windows(*keys: str) -> subprocess.CompletedProcess[str]:
+    """`helm template` with `retention.windows` stated, instead of unbounded growth accepted.
+
+    `_render` states the *other* retention posture and the gate refuses when both are set, so the
+    escape hatch is overridden back to `false` rather than dropped: `--set` is last-wins, which
+    leaves exactly one posture stated — the one under test.
+    """
+    return _render(
+        "--set",
+        "retention.unboundedGrowthAccepted=false",
+        *(arg for key in keys for arg in ("--set", f"retention.windows.{key}=30")),
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_retention_window_naming_no_setting_refuses_to_render() -> None:
+    """A misspelled window key used to *satisfy* the posture gate and disable every window.
+
+    `retention.windows` is rendered into the ConfigMap key by key, and pydantic-settings ignores an
+    unknown prefixed environment variable — so a typo installed cleanly, put
+    `CHEMCLAW_RETENTION_ENABLED: "true"` in front of the operator, and left all five windows at
+    their disabled default. The sweep then ran on schedule and skipped every table
+    (`durable/retention.py` treats a window of `0` as off) while every signal said retention was
+    on: unbounded growth reached through the escape hatch of the gate that exists to prevent it.
+
+    `CHEMCLAW_RETENTION_AUDIT_DAYS` is the misspelling this drives because it is the one that
+    actually happened — it was the worked example in `_POSTURE_CASES` above, in this repository's
+    own guard, and there is no `retention_audit_days` field.
+
+    Both directions, through a real render rather than a model of one. Re-deriving the chart is how
+    the existing guard missed this: `test_chart_config_keys_have_a_consumer` in
+    `tests/test_helm_chart.py` is exactly the right check and cannot see `retention.windows`,
+    because the shipped `values.yaml` leaves it `{}` and the windows arrive at install time,
+    where nothing looked.
+    """
+    typo = _render_windows("CHEMCLAW_RETENTION_AUDIT_DAYS")
+    assert typo.returncode != 0, (
+        "a window key naming no setting still renders; retention reports on and prunes nothing:\n"
+        f"{typo.stdout[:2000]}"
+    )
+    assert "CHEMCLAW_RETENTION_AUDIT_DAYS" in typo.stderr, typo.stderr
+
+    # Derived, so the chart's list cannot fall behind `Settings`: a retention field added next year
+    # is refused by the chart the day it exists, and this arm is what says so.
+    settable = sorted(_retention_env_names() - {"CHEMCLAW_RETENTION_ENABLED"})
+    assert len(settable) == 9, f"the retention field set moved: {settable}"
+    stated = _render_windows(*settable)
+    assert stated.returncode == 0, stated.stderr
+    for key in settable:
+        assert f'{key}: "30"' in stated.stdout, f"the chart drops a real retention setting: {key}"
+    assert 'CHEMCLAW_RETENTION_ENABLED: "true"' in stated.stdout, (
+        "stating a window no longer derives the enable switch"
+    )
+
+    # The switch is derived from the block, so writing it *into* the block renders the key twice
+    # and every parser silently keeps the last — a duplicate this chart already refuses elsewhere
+    # (`test_no_values_key_is_declared_twice`), reached here through a values file instead.
+    by_hand = _render_windows("CHEMCLAW_RETENTION_ENABLED")
+    assert by_hand.returncode != 0, by_hand.stdout[:2000]
+    assert "CHEMCLAW_RETENTION_ENABLED" in by_hand.stderr, by_hand.stderr
 
 
 # What a switch needs *besides itself* to render the branch it gates. The only literal here, and it

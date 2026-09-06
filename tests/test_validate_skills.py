@@ -15,13 +15,27 @@ from pathlib import Path
 
 import pytest
 
-from chemclaw.cli.validate_skills import validate_skills
+from chemclaw.cli.validate_skills import main, validate_skills
 from chemclaw.core.config import settings
 
 
-def test_shipped_skills_are_valid() -> None:
-    """Every real SKILL.md under the configured skills dir passes validation."""
-    assert validate_skills(settings.skills_dirs) == []
+def test_shipped_skills_are_valid(capsys: pytest.CaptureFixture[str]) -> None:
+    """Every shipped SKILL.md passes the gate — driven through `main`, which assembles the corpus.
+
+    **Through `main([])` rather than `validate_skills(settings.skills_dirs)`, and that is the whole
+    fix.** `make skill-validate` validates `[*settings.skills_dirs, *connector_skills_dirs()]`, and
+    three shipped skills live only in the second half (`connectors/bo`, `connectors/safety`,
+    `connectors/calc`). Measured on 2026-09-06: breaking the `description:` key in
+    `connectors/bo/skills/experiment-design/SKILL.md` left this file at 12 passed while
+    `python -m chemclaw.cli.validate_skills` exited 1 — so `make lint type test`, the gate a step is
+    declared done against, stayed green over a broken shipped skill.
+
+    Calling the entry point rather than restating its argument is deliberate: a test that rebuilds
+    the corpus expression is a second place to keep in step with it, which is the same defect one
+    level up. `test_validate_connectors.py` and `test_templates.py` already assert the call `main`
+    makes.
+    """
+    assert main([]) == 0, capsys.readouterr().out
 
 
 def test_missing_description_is_reported(tmp_path: Path) -> None:

@@ -1414,7 +1414,13 @@ securityContext:
 retention:
   # The windows, as the CHEMCLAW_RETENTION_* environment keys `core/config/memory.py` reads,
   # rendered into the ConfigMap with CHEMCLAW_RETENTION_ENABLED derived `true` — so stating a
-  # window and forgetting the switch cannot happen. For example:
+  # window and forgetting the switch cannot happen. **A key here must name one of those fields**,
+  # or the render refuses naming the nine that exist: the map is emitted key by key and
+  # pydantic-settings ignores an unknown prefixed environment variable, so a typo used to satisfy
+  # the posture gate above, put `CHEMCLAW_RETENTION_ENABLED: "true"` in front of the operator, and
+  # leave every window at 0 — retention reported on, and nothing ever pruned. Writing
+  # CHEMCLAW_RETENTION_ENABLED here is refused for its own reason: it is derived below, and by hand
+  # it renders the key twice. For example:
   #   windows:
   #     CHEMCLAW_RETENTION_CHECKPOINTS_DAYS: "30"
   #     CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS: "365"

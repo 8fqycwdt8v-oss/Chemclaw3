@@ -182,6 +182,19 @@ class MemorySettings(BaseSettings):
     # are session-scoped working material, so they are lost with the pod by design.
     attachment_max_bytes: int = Field(default=2_000_000, gt=0)
     attachment_max_per_session: int = Field(default=10, ge=1)
+    # ...and in the third direction, which the two above do not cover: what every live session's
+    # attachments cost *together*. The store's other bound is `service_max_live_sessions` (1000),
+    # a count — and a count of entries that each hold up to `attachment_max_per_session ×
+    # attachment_max_bytes` of parsed text is a 20 GB ceiling in a pod the chart limits to 1 GiB
+    # (`deploy/helm/chemclaw/values.yaml`, `resources.service.limits.memory`). Measured, ~20 MB of
+    # text is retained per fully-loaded session, so the shipped pod is over its limit at ~25 of
+    # them — 2.5 % of the count bound, reachable inside the shipped rate limit by one authenticated
+    # chemist. This is the bound in the unit that actually kills the pod: past it the
+    # least-recently-used *sessions* lose their attachments (working material, recoverable by
+    # re-uploading), instead of the pod losing every in-flight turn to an OOM kill. 64 MB is 6 % of
+    # the shipped limit and three fully-loaded sessions; raise it with the pod's memory limit, not
+    # with `service_max_live_sessions`.
+    attachment_store_max_bytes: int = Field(default=64_000_000, gt=0)
     # Parsing an upload is CPU-bound work over untrusted bytes in third-party libraries, so it runs
     # in a worker thread with these two bounds rather than inline on the request's event loop
     # (`chemclaw.agent.attachments.parse_attachment_off_loop`). The concurrency cap is what keeps

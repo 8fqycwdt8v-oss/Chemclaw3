@@ -380,8 +380,10 @@ _OWNER_INSERT = (
 # (REV-14 — a profile can only attenuate, so losing it is never the safe direction).
 _OWNER_SELECT = "SELECT owner, profile FROM session_owners WHERE session_id = %s"
 # Newest first: a session list is read as "what was I just working on", and the caller pages from
-# the top. `owner IS NOT DISTINCT FROM %s` rather than `=` so the shared dev principal (a real NULL
-# owner) matches itself instead of dropping every row to SQL's three-valued logic.
+# the top. The owner match is NULL-safe rather than a bare `=`, so the shared dev principal (a real
+# NULL owner) matches itself instead of dropping every row to SQL's three-valued logic — spelled out
+# as two arms rather than with `IS NOT DISTINCT FROM`, for the indexability reason `_OWNER_LIST`
+# gives below.
 #
 # "Newest" is the last message now, not the row's `created_at`, which is when the session was
 # *started*. The two diverge exactly where it matters: a session opened last Tuesday and abandoned
@@ -420,12 +422,34 @@ _OWNER_SELECT = "SELECT owner, profile FROM session_owners WHERE session_id = %s
 # paying a serialized checkpointer read to find nothing. It is already on the row, and one listing
 # both surfaces read is one listing they cannot disagree about — a second query filtered on
 # `profile` would be a second answer to "which sessions does this person have".
+#
+# **The owner predicate is spelled out rather than written `IS NOT DISTINCT FROM`, and the reason is
+# that the index exists.** `IS NOT DISTINCT FROM` is not a btree-searchable operator, so
+# `session_owners_owner_idx` — added by `046_review_hardening_indexes.sql` for *this* statement,
+# quoting it verbatim — could not serve it, and every `GET /sessions` stayed the sequential scan the
+# migration was written to remove while paying the index's write cost on every session created.
+# Measured at 200,000 ownership rows: `Seq Scan … Rows Removed by Filter: 196000`, 21 ms, 1,274
+# buffers, and unchanged under `enable_seqscan = off` because there was no alternative plan to fall
+# back to; the form below plans as a `Bitmap Index Scan` with 5 index buffers, and the whole
+# statement goes from 47 ms to 25 ms. `039_note_index_embedding_key.sql` had already recorded the
+# same fact about `IS DISTINCT FROM` seven files earlier.
+#
+# The NULL-safety is not given up, which is what the operator was there for: `owner` is nullable
+# (013 — the shared dev principal has no Entra oid), and a bare `=` would list none of its sessions.
+# The second arm restores exactly that match, and it is indexable too — a btree stores NULLs, so
+# `owner IS NULL` is an index condition. Both arms were checked against the same data (2 rows for
+# the NULL principal, 4,000 for a named one, identical to the old predicate) and both plan as index
+# scans, including under `plan_cache_mode = force_generic_plan`, where the planner cannot see which
+# arm is dead and takes a `BitmapOr` of the two.
+#
+# The owner is therefore bound twice, which is the shape this statement already uses for the
+# self-disabling cursor arm below it rather than a new one.
 _OWNER_LIST = (
     "SELECT o.session_id, o.created_at, m.updated_at, o.title, o.profile FROM session_owners o "
     "JOIN LATERAL ("
     "  SELECT max(created_at) AS updated_at FROM session_messages WHERE session_id = o.session_id"
     ") m ON m.updated_at IS NOT NULL "
-    "WHERE o.owner IS NOT DISTINCT FROM %s "
+    "WHERE (o.owner = %s OR (o.owner IS NULL AND %s::text IS NULL)) "
     "  AND (%s::timestamptz IS NULL "
     "       OR (m.updated_at, o.session_id) < (%s::timestamptz, %s::text)) "
     "ORDER BY m.updated_at DESC, o.session_id DESC LIMIT %s"
@@ -551,8 +575,8 @@ def encode_session_cursor(updated_at: datetime, session_id: str) -> str:
     anything: an id-plus-timestamp pair spelled in the clear invites a client to construct one, and
     a constructed cursor is a client that breaks the day the ordering gains a third component.
     It is deliberately **not** signed. A cursor is not a capability — every page is re-scoped to
-    the caller's own sessions by `owner IS NOT DISTINCT FROM`, so the worst a forged one can do is
-    move the forger around their own list.
+    the caller's own sessions by the NULL-safe owner match in `_OWNER_LIST`, so the worst a forged
+    one can do is move the forger around their own list.
 
     Args:
         updated_at: The row's last-activity timestamp, exactly as the listing ordered by it.
@@ -876,7 +900,7 @@ class SessionOwnerStore:
             async with conn.cursor() as cur:
                 await cur.execute(
                     _OWNER_LIST,
-                    (owner, stamp, stamp, last_id, settings.service_max_listed_sessions),
+                    (owner, owner, stamp, stamp, last_id, settings.service_max_listed_sessions),
                 )
                 rows = await cur.fetchall()
         return [(row[0], row[1], row[2], row[3], row[4]) for row in rows]

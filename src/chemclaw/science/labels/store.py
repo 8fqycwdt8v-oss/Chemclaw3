@@ -417,6 +417,18 @@ class PostgresLabelIndex(LabelIndex):
 
     _COUNT = "SELECT count(*) FROM reaction_labels"
 
+    # The newest labelling's version. A class constant rather than a literal inside the method, for
+    # the reason `_SELECT_OPEN` in `memory/observations.py` is one: the statement and the index
+    # underneath it are a single decision, and a test can only pin a shape it can read.
+    # `086_reaction_labels_current_version.sql` is `(labelled_at DESC, source, reaction_id) WHERE
+    # labelled_at IS NOT NULL`, which is this `WHERE` and this `ORDER BY` exactly — change either
+    # and the plan silently falls back to the parallel sequential scan plus top-N sort that
+    # migration measures at 118 ms over a million rows, once per rxnfp tool call, inside a turn.
+    _CURRENT_VERSION = (
+        "SELECT labeller_version FROM reaction_labels WHERE labelled_at IS NOT NULL "
+        "ORDER BY labelled_at DESC, source, reaction_id LIMIT 1"
+    )
+
     def __init__(self, dsn: str | None = None) -> None:
         """Bind to the configured DSN (or an explicit one, for tests against a scratch database)."""
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
@@ -539,12 +551,14 @@ class PostgresLabelIndex(LabelIndex):
         return int(row[0]) if row else 0
 
     async def current_version(self) -> str | None:
-        """The version of the most recently labelled row."""
+        """The version of the most recently labelled row.
+
+        Served by `reaction_labels_current_version_idx` (086) rather than by a scan: every rxnfp
+        tool calls this before it does anything else, so it is paid once per tool call on the turn
+        path, over a table sized by the corpus.
+        """
         async with self._connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                "SELECT labeller_version FROM reaction_labels WHERE labelled_at IS NOT NULL "
-                "ORDER BY labelled_at DESC, source, reaction_id LIMIT 1"
-            )
+            await cur.execute(self._CURRENT_VERSION)
             row = await cur.fetchone()
         return str(row[0]) if row and row[0] is not None else None
 

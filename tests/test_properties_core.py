@@ -139,6 +139,44 @@ def test_bounded_lru_keeps_what_it_last_touched(capacity: int, keys: list[int]) 
 
 
 @given(
+    max_weight=st.integers(min_value=1, max_value=64),
+    items=st.lists(
+        st.tuples(st.integers(min_value=0, max_value=32), st.integers(min_value=1, max_value=32)),
+        min_size=1,
+        max_size=200,
+    ),
+)
+@settings(max_examples=200)
+def test_bounded_lru_never_exceeds_its_weight_bound(
+    max_weight: int, items: list[tuple[int, int]]
+) -> None:
+    """The byte bound holds for every insertion order, the same property the count bound has.
+
+    The attachment store needs this one and not the count: its entries differ in size by orders of
+    magnitude, so a map that is under its entry cap can still be holding twenty times the pod.
+    The single exception is the entry just put — never the victim (module docstring), so a value
+    heavier than the whole budget is held alone rather than dropped on arrival.
+    """
+    lru: BoundedLru[int, int] = BoundedLru(
+        1_000_000, weight=lambda value: value, max_weight=max_weight
+    )
+    for key, weight in items:
+        lru.put(key, weight)
+        assert lru.total_weight() <= max(max_weight, weight)
+
+
+def test_bounded_lru_refuses_half_a_weight_bound() -> None:
+    """Half a bound reads as a bound that is not there.
+
+    A weight nothing enforces, or a budget with no way to measure an entry.
+    """
+    with pytest.raises(ValueError, match="pass both or neither"):
+        BoundedLru[int, int](8, weight=lambda value: value)
+    with pytest.raises(ValueError, match="pass both or neither"):
+        BoundedLru[int, int](8, max_weight=16)
+
+
+@given(
     st.lists(st.text(alphabet="abcdefghijklmnopqrstuvwxyz-", min_size=1, max_size=12), max_size=6)
 )
 def test_cited_ids_finds_every_wikilink_it_is_given(ids: list[str]) -> None:

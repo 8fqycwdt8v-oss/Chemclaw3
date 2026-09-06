@@ -84,11 +84,22 @@ async def assemble_evidence_pack(session_id: str = "") -> dict[str, object]:
     pack = await assemble(target)
     payload = pack.model_dump(mode="json")
     # A rationale and a job summary are text a person wrote and a tool returned; they reach the
-    # model exactly as a retrieved chunk does. The rest of the pack is identifiers, outcomes and
-    # timestamps from bounded vocabularies.
+    # model exactly as a retrieved chunk does. So are two fields this loop used to walk straight
+    # past while the comment beside it called the rest "identifiers, outcomes and timestamps from
+    # bounded vocabularies": a failed run's `failure_reason` is the far side's own sentence —
+    # `durable/connector_job.failure_reason` walks the Temporal chain and returns whatever the
+    # connector said, its own worked example being a tblite message quoting a solvent name the
+    # model supplied — and an effect's `external_ref` is a handle a *foreign* system chose. Neither
+    # is this deployment's text, and both landed in the pack raw.
+    #
+    # `ToolCall.detail` stays out of it deliberately: `evidence_pack.py` restricts that column to
+    # `outcome == "refused"`, which is this system's own refusal wording.
     for job in payload.get("jobs", []):
         job["rationale"] = defang(str(job.get("rationale", "")))
         job["summary"] = defang(str(job.get("summary", "")))
+        job["failure_reason"] = defang(str(job.get("failure_reason", "")))
+    for effect in payload.get("effects", []):
+        effect["external_ref"] = defang(str(effect.get("external_ref", "")))
     payload["empty"] = pack.is_empty
     # A lower bound when the section was truncated, and said so rather than implied: a count of
     # refusals over a prefix reads as "there were none" to anyone who does not know about the cap,

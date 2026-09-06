@@ -24,6 +24,13 @@ Semantics, stated once so the four callers cannot drift again:
   caller, and dropping it would leave a live handle writing outside the cache.
 - `capacity` may be a fixed int or a zero-argument callable, so a config-backed bound stays
   live/ENV-overridable without the caller re-reading settings itself.
+- `weight`/`max_weight` (optional, both or neither) add a *second* bound in the caller's own unit —
+  bytes, for the attachment store, whose entries differ in size by six orders of magnitude and
+  whose entry count therefore says nothing about what it holds (a 1000-session cap over 10 files of
+  2 MB is a 20 GB ceiling in a 1 GiB pod). An entry's weight is measured at `put`, so a caller that
+  mutates a stored value must `put` it back — which is what the eviction contract already requires.
+  A single entry heavier than `max_weight` is still held: it is the entry just put, which is never
+  the victim, exactly as with `pinned`.
 - `pinned` (optional) names keys eviction must skip right now — consulted at eviction time, not
   stored per entry, so a pin needs no bookkeeping to clear. When every candidate is pinned the map
   briefly holds more than `capacity`; the caller that passes a pin has decided that honoring the
@@ -49,15 +56,36 @@ class BoundedLru(Generic[K, V]):
         capacity: int | Callable[[], int],
         *,
         pinned: Callable[[K], bool] | None = None,
+        weight: Callable[[V], int] | None = None,
+        max_weight: int | Callable[[], int] | None = None,
     ) -> None:
         """Create the map with `capacity` (fixed, or a callable read at each eviction pass).
 
         `pinned` says which keys must not be evicted right now (default: none) — see the module
         docstring for the over-capacity trade that implies.
+
+        `weight` and `max_weight` are one bound and must be passed together: `weight` measures an
+        entry in the caller's unit at each `put`, `max_weight` is the total that unit may reach
+        before the least-recently-used entries are evicted. Omit both and the map is bounded by
+        entry count alone, which is what every caller but the attachment store wants.
+
+        Raises:
+            ValueError: if exactly one of `weight`/`max_weight` is given — a weight nothing bounds
+                is bookkeeping with no effect, and a budget with no way to measure an entry cannot
+                be enforced. Either half alone reads as a bound that is not there.
         """
+        if (weight is None) != (max_weight is None):
+            raise ValueError("weight and max_weight are one bound: pass both or neither")
         self._capacity: Callable[[], int] = capacity if callable(capacity) else (lambda: capacity)
         self._pinned: Callable[[K], bool] = pinned if pinned is not None else (lambda _key: False)
+        self._weight: Callable[[V], int] | None = weight
+        self._max_weight: Callable[[], int] | None = (
+            None
+            if max_weight is None
+            else (max_weight if callable(max_weight) else (lambda: max_weight))
+        )
         self._entries: OrderedDict[K, V] = OrderedDict()
+        self._weights: dict[K, int] = {}
 
     def __len__(self) -> int:
         """How many entries are held — what a caller's gauge or bound assertion reads."""
@@ -82,15 +110,32 @@ class BoundedLru(Generic[K, V]):
         """
         return self._entries.get(key)
 
+    def total_weight(self) -> int:
+        """The summed weight of everything held — 0 when the map has no weight bound.
+
+        What a caller's budget assertion or gauge reads, in the unit `weight` measures.
+        """
+        return sum(self._weights.values())
+
+    def _over_bounds(self) -> bool:
+        """Whether a bound is breached: entry count, or total weight where one is configured."""
+        if len(self._entries) > self._capacity():
+            return True
+        return self._max_weight is not None and self.total_weight() > self._max_weight()
+
     def put(self, key: K, value: V) -> None:
-        """Insert or refresh `key` as most-recently-used, then evict past capacity.
+        """Insert or refresh `key` as most-recently-used, then evict past either bound.
 
         Eviction takes the least-recently-used entry that is neither pinned nor the key just put;
         when no candidate remains the map briefly holds over capacity (see the module docstring).
+        The entry's weight, where the map has one, is (re-)measured here — so a caller that mutates
+        a stored value in place must `put` it back for the byte budget to see the change.
         """
         self._entries[key] = value
         self._entries.move_to_end(key)
-        while len(self._entries) > self._capacity():
+        if self._weight is not None:
+            self._weights[key] = self._weight(value)
+        while self._over_bounds():
             victim = next(
                 (
                     candidate
@@ -102,3 +147,4 @@ class BoundedLru(Generic[K, V]):
             if victim is None:
                 break
             del self._entries[victim]
+            self._weights.pop(victim, None)

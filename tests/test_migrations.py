@@ -20,6 +20,7 @@ import asyncio
 import re
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from chemclaw.core.config import settings
@@ -31,7 +32,9 @@ from chemclaw.core.migrate import (
     _read_sql_files,
     _statements,
     migrate,
+    migration_dsn,
 )
+from tests.pg import migrated_db_or_skip
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -171,8 +174,15 @@ def test_editing_a_comment_does_not_count_as_drift() -> None:
     assert _checksum(recommented) == _checksum(_APPLIED)
 
 
-def test_changing_a_statement_still_counts_as_drift() -> None:
-    """The guard has to keep the power the fix above could have cost it."""
+def test_changing_a_statement_changes_the_checksum() -> None:
+    """The hash has to keep the power the fix above could have cost it.
+
+    This is a property of `_checksum` and nothing more — it was named
+    `test_changing_a_statement_still_counts_as_drift`, which promised the *guard*, and measured on
+    2026-09-06 `elif row[0] != checksum:` could be replaced with `elif False:` with this file and
+    every other migration test green. What counts as drift is decided in `migrate`, against a row
+    that exists, and that is asserted in "the ledger row `migrate` finds" below.
+    """
     altered = _APPLIED.replace("id BIGSERIAL PRIMARY KEY", "id TEXT PRIMARY KEY")
     assert _checksum(altered) != _checksum(_APPLIED)
 
@@ -188,27 +198,39 @@ def test_a_trailing_comment_is_left_alone_rather_than_stripped_unsafely() -> Non
     assert "INSERT INTO t VALUES ('a -- b')" in _statements("INSERT INTO t VALUES ('a -- b')\n")
 
 
-def test_a_ledger_row_written_before_the_fix_is_upgraded_rather_than_rejected() -> None:
-    """The fix must not declare every deployed database drifted on its first run.
+def test_the_legacy_hash_and_the_statement_hash_are_different_values() -> None:
+    """The two hashes disagree, which is why the upgrade path has to exist at all.
 
-    Every existing `schema_migrations` row holds a whole-file hash. Without recognising it, the
-    change that fixes an outage would cause a bigger one, so the runner accepts the legacy value
-    once and rewrites the row — verified against the live database, where `036`'s row went from the
-    file hash to the statement hash and the run reported "already up to date".
+    Every `schema_migrations` row written before the guard became statement-only holds a
+    whole-file hash, so without an upgrade path the change that fixed an outage would declare
+    every deployed database drifted. That the runner *takes* that path is asserted below, against
+    a ledger row rather than here: this test used to end
+    `assert _legacy_checksum(_APPLIED) == _legacy_checksum(_APPLIED)`, a `sha256` call compared to
+    itself, which is a line that cannot fail.
     """
     assert _legacy_checksum(_APPLIED) != _checksum(_APPLIED)
-    assert _legacy_checksum(_APPLIED) == _legacy_checksum(_APPLIED)
 
 
 # --- the two locks (a readiness-review finding) ---------------------------------------------
 
 
 class _RecordingCursor:
-    """Enough of a psycopg cursor for `migrate`'s one query: "has this file been applied?"."""
+    """Enough of a psycopg cursor for `migrate`'s one query: "has this file been applied?".
 
-    async def fetchone(self) -> None:
-        """Nothing is applied yet, so every file is new."""
-        return None
+    `row` is what the ledger holds for the file just asked about: `None` where nothing is applied
+    yet — which is what the lock tests below want, every file new — and a one-column tuple where
+    the behaviour under test is what `migrate` does with a row that *already exists*. That second
+    case was unreachable for as long as this double could only answer `None`, and both arms of
+    `migrate`'s `if row is not None:` went untested with it.
+    """
+
+    def __init__(self, row: tuple[str] | None = None) -> None:
+        """Hold the one row this cursor will hand back (`None` = this file is not applied)."""
+        self.row = row
+
+    async def fetchone(self) -> tuple[str] | None:
+        """The recorded ledger row for the file just queried."""
+        return self.row
 
 
 class _RecordingConnection:
@@ -221,14 +243,18 @@ class _RecordingConnection:
     CI database would never catch.
     """
 
-    def __init__(self) -> None:
-        """Start with an empty log; `statements` is what the assertions read."""
+    def __init__(self, ledger: dict[str, str] | None = None) -> None:
+        """Start with an empty log and a `{filename: recorded checksum}` ledger (empty = fresh)."""
         self.statements: list[tuple[str, tuple[object, ...] | None]] = []
         self.committed = False
+        self.ledger = dict(ledger or {})
 
     async def execute(self, sql: str, params: tuple[object, ...] | None = None) -> _RecordingCursor:
-        """Log the statement and hand back a cursor that reports nothing applied."""
+        """Log the statement; the ledger lookup is answered from `ledger`, the rest with `None`."""
         self.statements.append((sql, params))
+        if "FROM schema_migrations" in sql and params:
+            recorded = self.ledger.get(str(params[0]))
+            return _RecordingCursor(None if recorded is None else (recorded,))
         return _RecordingCursor()
 
     async def commit(self) -> None:
@@ -242,13 +268,19 @@ class _RecordingConnection:
         return None
 
 
-def _run_against_recorder(monkeypatch: pytest.MonkeyPatch) -> _RecordingConnection:
-    """Drive `migrate` against a recording connection and return what it issued."""
+def _run_against_recorder(
+    monkeypatch: pytest.MonkeyPatch, ledger: dict[str, str] | None = None
+) -> _RecordingConnection:
+    """Drive `migrate` against a recording connection and return what it issued.
+
+    `ledger` is what `schema_migrations` already holds, as `{filename: checksum}`; the default is
+    an empty ledger, i.e. a database nothing has ever been applied to.
+    """
     import asyncio
 
     from chemclaw.core import migrate as module
 
-    conn = _RecordingConnection()
+    conn = _RecordingConnection(ledger)
 
     async def _connect(_dsn: str) -> _RecordingConnection:
         return conn
@@ -327,3 +359,117 @@ def test_the_run_still_takes_no_statement_timeout(monkeypatch: pytest.MonkeyPatc
         "the migration connection took a statement timeout, which bounds an index build rather "
         "than the lock wait it was meant to bound"
     )
+
+
+# --- the ledger row `migrate` finds ------------------------------------------------------------
+#
+# Both arms of `migrate`'s `if row is not None:` — refuse an edited file, upgrade a legacy row —
+# were unreached by this suite until 2026-09-06: the only harness for `migrate` was the recorder
+# above, whose `fetchone` answered `None` to everything, and the two tests that carried these
+# names asserted hash arithmetic instead. Measured, `elif row[0] != checksum:` → `elif False:` and
+# `if row[0] == _legacy_checksum(text):` → `if False and ...` each left the migration corpus at
+# 227 passed. So these drive `migrate` itself, once against a doubled connection (which runs
+# everywhere) and once against the real ledger in Postgres (which proves the row is actually
+# rewritten).
+
+
+def _first_tracked_migration() -> tuple[str, str]:
+    """The first real migration after the ledger bootstrap, as `(filename, text)`.
+
+    Read off `infra/sql` rather than named here, so this does not become a second place that has
+    to be edited when `001_*` is renamed — and `migrate` walks the files in the same sorted order.
+    """
+    sql_dir = _REPO_ROOT / settings.sql_migrations_dir
+    names = sorted(path.name for path in sql_dir.glob("*.sql") if path.name != _LEDGER_FILE)
+    assert names, f"no tracked migrations in {sql_dir}"
+    return names[0], (sql_dir / names[0]).read_text()
+
+
+def test_migrate_refuses_a_file_that_was_edited_after_it_was_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ledger row whose checksum disagrees stops the run, naming the file.
+
+    This is the whole point of the ledger: an applied migration's effect never changes, so an
+    in-place edit has to become a new file. The failure this catches is a schema diverging from
+    the ledger that claims to describe it, silently, on every database that already ran the file.
+    """
+    name, _text = _first_tracked_migration()
+    with pytest.raises(MigrationError, match=re.escape(name)):
+        _run_against_recorder(monkeypatch, ledger={name: "0" * 64})
+
+
+def test_migrate_upgrades_a_legacy_ledger_row_rather_than_rejecting_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row holding the pre-fix whole-file hash is accepted once and rewritten, not refused.
+
+    Three things have to be true, and only the first is visible from an exception that did not
+    happen: the run does not raise, the row is rewritten to the *statement* hash (so the next run
+    needs no legacy branch), and the file itself is **not** re-applied — the `continue` is what
+    keeps an already-applied `CREATE TABLE` from running a second time.
+    """
+    name, text = _first_tracked_migration()
+    conn = _run_against_recorder(monkeypatch, ledger={name: _legacy_checksum(text)})
+    updates = [
+        params
+        for sql, params in conn.statements
+        if sql.startswith("UPDATE schema_migrations SET checksum")
+    ]
+    assert updates == [(_checksum(text), name)], "the legacy row was not upgraded in place"
+    assert (text, None) not in conn.statements, "an already-applied migration was re-applied"
+
+
+def test_the_live_ledger_refuses_a_drifted_row_and_upgrades_a_legacy_one() -> None:
+    """The same two behaviours against a real `schema_migrations`, not a double.
+
+    The recorder proves what `migrate` *decides*; this proves what the database ends up holding —
+    the `UPDATE` actually lands, and the run that follows it reports the file as already applied.
+    Restored in a `finally` because a drifted row left behind would fail every later test that
+    calls `migrated_db_or_skip`.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        name, text = _first_tracked_migration()
+        dsn = migration_dsn()
+        conn = await psycopg.AsyncConnection.connect(dsn)
+        try:
+            cursor = await conn.execute(
+                "SELECT checksum FROM schema_migrations WHERE filename = %s", (name,)
+            )
+            row = await cursor.fetchone()
+            assert row is not None, f"{name} is not in the ledger after a migration run"
+            recorded = str(row[0])
+
+            async def set_checksum(value: str) -> None:
+                await conn.execute(
+                    "UPDATE schema_migrations SET checksum = %s WHERE filename = %s", (value, name)
+                )
+                await conn.commit()
+
+            async def current_checksum() -> str:
+                read = await conn.execute(
+                    "SELECT checksum FROM schema_migrations WHERE filename = %s", (name,)
+                )
+                got = await read.fetchone()
+                assert got is not None
+                return str(got[0])
+
+            # An edited file: the run refuses, and the ledger is left as it was.
+            await set_checksum("0" * 64)
+            with pytest.raises(MigrationError, match=re.escape(name)):
+                await migrate(dsn)
+
+            # A row written before the guard became statement-only: accepted and rewritten.
+            await set_checksum(_legacy_checksum(text))
+            assert await migrate(dsn) == [], "a legacy row made the runner re-apply files"
+            assert await current_checksum() == _checksum(text), "the legacy row was not rewritten"
+        finally:
+            await conn.execute(
+                "UPDATE schema_migrations SET checksum = %s WHERE filename = %s", (recorded, name)
+            )
+            await conn.commit()
+            await conn.close()
+
+    asyncio.run(_run())

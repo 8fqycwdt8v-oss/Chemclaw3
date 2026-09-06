@@ -295,7 +295,7 @@ By default one credential does everything, and `infra/sql/006` describes `audit_
 "append-only by contract" — a contract nothing enforced and nothing prevented breaking. To make it
 append-only in fact (D-2026-08-05-append-only-by-grant-not-by-contract):
 
-1. Create a login role the application runs as, owning nothing:
+1. Create a login role the application runs as, owning none of the migrated schema:
    `CREATE ROLE chemclaw_app LOGIN PASSWORD '…';`
 2. Point `CHEMCLAW_POSTGRES_DSN` at it, and put the schema owner's DSN in
    `CHEMCLAW_POSTGRES_MIGRATION_DSN` — in the chart, `secrets.migrationKeys`, which is mounted on
@@ -308,6 +308,19 @@ rewrite the trail — this narrows who holds that power and for how long, it doe
 the grant is the whole of the guarantee. The role also needs no `CREATE EXTENSION` right;
 that stays with the migrator, which is where `vector` already required superuser on most managed
 Postgres.
+
+**It does need `CREATE` on schema `public`, and step 3 is what gives it.** This step used to read
+"owning nothing", and a role provisioned to that description could not take a single turn: the eight
+tables LangGraph keeps its turn state in are created by the *application*, on first use
+(`AsyncPostgresSaver.setup()`, `AsyncPostgresStore.setup()`), and no migration in `infra/sql`
+declares them. Under PostgreSQL 15+ `PUBLIC` holds no `CREATE` on `public`, so both setups failed
+with `permission denied for schema public` and `checkpointer()` has no fallback to fall back to.
+`app_privileges.sql` now grants it, so following these steps in order is enough — but a deployment
+that provisions its role by hand, or that locks the schema down after `make db-grants`, has to keep
+it: upstream issues `CREATE TABLE IF NOT EXISTS` on **every process start**, and Postgres checks the
+schema ACL before it checks existence, so the privilege is permanent rather than first-install only.
+Pre-creating the tables does not substitute for it. Verify with
+`SELECT has_schema_privilege('chemclaw_app', 'public', 'CREATE');` → `t`.
 
 **`job_records` is the one table a chemist's answers now depend on** (023, D-157): every finished
 connector job writes what it ran, on what arguments, its whole result, and the reason it was

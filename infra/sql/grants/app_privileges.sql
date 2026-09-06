@@ -41,6 +41,35 @@ BEGIN
     EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', app_role);
     EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', app_role);
 
+    -- **CREATE, and it is the one privilege here that is not about a row.** The eight tables
+    -- LangGraph creates for itself (granted at the bottom of this file) are created *by the
+    -- application*, on first use, in the process that takes the turn — `AsyncPostgresSaver.setup()`
+    -- and `AsyncPostgresStore.setup()`. Under PostgreSQL 15+ `PUBLIC` no longer holds `CREATE` on
+    -- schema `public`, so a role created the way `docs/guides/runbook.md` describes cannot issue
+    -- that DDL, `checkpointer()` has no fallback when `session_store = postgres`, and **every turn
+    -- fails on a fresh split-principal install** — measured end to end on a database migrated and
+    -- granted by the runbook's own steps: `InsufficientPrivilege: permission denied for schema
+    -- public`, from both setups.
+    --
+    -- **Pre-creating the tables in a numbered migration does not remove the need**, which is why
+    -- this is a grant and not an `infra/sql/086_*.sql`. Postgres checks the schema ACL *before* it
+    -- checks existence, so `CREATE TABLE IF NOT EXISTS` on a table that already exists still raises
+    -- `permission denied for schema public` (measured, PostgreSQL 16.15) — and both setups issue
+    -- exactly that statement unconditionally on **every process start**: upstream's
+    -- `AsyncPostgresSaver.setup()` executes `MIGRATIONS[0]` before it reads the version ledger, and
+    -- `AsyncPostgresStore.setup()` does the same inside `_get_version`. So the privilege is needed
+    -- for the life of the deployment, not once at install.
+    --
+    -- The cost is stated rather than hidden: the runtime role may create objects in `public`. It
+    -- still cannot read, write or drop anything it does not own — every table privilege in this
+    -- file is enumerated below, and `audit_events` stays INSERT-only. What is given up is "the app
+    -- role creates nothing", which was never true anyway: `D-2026-08-16-a-revoke-reaches-tables-
+    -- the-grants-never-name` measured `owner of checkpoints: chemclaw_app` on a working
+    -- deployment. The narrower posture — the runtime's own schema in a schema of its own, or a
+    -- migrator-side `setup()` so the app never issues DDL — needs a decision and code outside this
+    -- file; it is recorded, not silently taken here.
+    EXECUTE format('GRANT CREATE ON SCHEMA public TO %I', app_role);
+
     -- Read is uniform: every table the application reads, it may read. The interesting half is
     -- write, below.
     EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA public TO %I', app_role);
@@ -179,7 +208,10 @@ BEGIN
     -- **Why this block has to exist, and why it is guarded.** `REVOKE ALL ON ALL TABLES` two dozen
     -- lines up is indiscriminate — it reaches these too — and `GRANT SELECT ON ALL TABLES` then
     -- hands back read and nothing else. The first install survives that because the tables do not
-    -- exist yet when this file runs: the app pods create them lazily, as owner, on first turn. The
+    -- exist yet when this file runs: the app pods create them lazily, as owner, on first turn —
+    -- which is a sentence about *this* file, since it is the `GRANT CREATE ON SCHEMA public` above
+    -- that makes "the app pods create them" possible at all. Before that grant existed the first
+    -- install did not survive: the pods could not create them, and every turn failed. The
     -- *second* `helm upgrade` re-runs this file (`migrate-job.yaml`, every release, deliberately)
     -- with the tables present, and the REVOKE materialises an ACL that strips even the owner's own
     -- DML. Every turn then fails at its first checkpoint write, and so do `agent/leaver`'s erasure

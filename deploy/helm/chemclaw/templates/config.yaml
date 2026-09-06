@@ -7,6 +7,31 @@
 {{- if eq (empty .Values.retention.windows) (empty .Values.retention.unboundedGrowthAccepted) }}
 {{- fail "retention: set exactly one of `retention.windows` (the CHEMCLAW_RETENTION_* day windows this release keeps history for) or `retention.unboundedGrowthAccepted: true` (the durable tables grow forever, which is not a safe end state but is now a stated one). Neither is set, or both are." }}
 {{- end }}
+{{- /* And a stated window must name a setting something reads.
+
+       `retention.windows` is a free-form map rendered straight into the ConfigMap, so a misspelled
+       key *satisfied* the gate above: the release states a posture, `helm install` succeeds, the
+       ConfigMap says `CHEMCLAW_RETENTION_ENABLED: "true"` — and pydantic-settings ignores an
+       unknown prefixed environment variable, so every window stays at its disabled default. The
+       sweep then runs on schedule and prunes nothing while every signal reports retention on,
+       which is the failure the posture gate exists to prevent, reached through its own escape
+       hatch. `CHEMCLAW_RETENTION_AUDIT_DAYS` was the instance: it is not a setting, and it had
+       been the worked example in this repository's own test since the gate shipped.
+
+       The names are the `retention_*` fields of `core/config/memory.py`, upper-cased under the
+       `CHEMCLAW_` prefix, minus `_ENABLED` which is derived below.
+       `tests/test_deploy_chart.py::test_a_retention_window_naming_no_setting_refuses_to_render`
+       renders this chart against that field set, both ways, so the list cannot fall behind the
+       settings it mirrors. */ -}}
+{{- $retentionSettings := list "CHEMCLAW_RETENTION_CHECKPOINTS_DAYS" "CHEMCLAW_RETENTION_DELETE_BATCH_ROWS" "CHEMCLAW_RETENTION_MAX_SESSIONS_PER_PASS" "CHEMCLAW_RETENTION_RESULT_PUBLICATIONS_DAYS" "CHEMCLAW_RETENTION_SCHEDULE_MINUTES" "CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS" "CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS" "CHEMCLAW_RETENTION_TIMEOUT_SECONDS" "CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS" -}}
+{{- range $key, $value := .Values.retention.windows }}
+{{- if eq $key "CHEMCLAW_RETENTION_ENABLED" }}
+{{- fail "retention.windows: CHEMCLAW_RETENTION_ENABLED is derived from this block rather than written into it — stating a window is what turns retention on. Written by hand it renders the key twice, and every parser silently keeps the last. Remove it." }}
+{{- end }}
+{{- if not (has $key $retentionSettings) }}
+{{- fail (printf "retention.windows: %q is not a retention setting, so it would render into the ConfigMap and be read by nothing — a release that states a retention posture and prunes nothing. Use one of: %s" $key (join ", " $retentionSettings)) }}
+{{- end }}
+{{- end }}
 {{- /* **This file renders the configuration twice, and the duplication is the fix.**
 
        All of it used to be a single `pre-install,pre-upgrade` hook. Helm does not record hook

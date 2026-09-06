@@ -572,8 +572,15 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: the allowance for what it cannot see.
 #:
 #: This is the number `core/config/agent.py` derives both compaction thresholds from — the trigger
-#: is `PREFIX_BOUND + 30,000` and the budget `PREFIX_BOUND + 57,000` — and
-#: `tests/test_compaction.py` asserts that relation rather than restating either figure. It is here
+#: is `PREFIX_BOUND + 30,000` and the budget `PREFIX_BOUND + 43,000` — and
+#: `tests/test_compaction.py` asserts that relation rather than restating either figure, as
+#: `CLEAR_TRIGGER_THREAD_ALLOWANCE` and `BUDGET_THREAD_ALLOWANCE`; read those, not this sentence,
+#: for the live allowances. This one said `+ 57,000` against a shipped `+ 43,000` for as long as
+#: the budget's own derivation ran the other way: the *window* is the input now, and the thread
+#: allowance is what is left over once the prefix is paid, so holding 57,000 fixed is exactly the
+#: arithmetic `core/config/agent.py` reverted for permitting a request a 128k model rejects. Both
+#: assertions are inequalities, so the shipped defaults passed under either sentence — which is why
+#: this one drifted silently and why the constants, not the prose, are the claim. It is here
 #: rather than in the config because the ceiling is here: two numbers that must move together
 #: belong in one place, and the previous arrangement (a config comment quoting a ceiling by value)
 #: is exactly how the connector-less ceiling propagated into two settings that were floored for

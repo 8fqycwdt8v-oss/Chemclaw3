@@ -18,6 +18,8 @@ handed, which is where the defects were:
 
 import asyncio
 import logging
+import time
+from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
@@ -25,6 +27,7 @@ from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from chemclaw.agent.context_budget import (
+    _SCHEMA_TOKENS,
     MeasureRequestPrefix,
     _prefix,
     begin_context_watch,
@@ -460,4 +463,154 @@ def test_a_clean_overrun_reading_means_the_request_fits_its_budget(
         "about the corner the unconditional subtraction newly opens — a configured budget below "
         "the prefix, which is what a deployment reaches by lowering either context setting under "
         "its own bound tool surface"
+    )
+
+
+class _NamedTool:
+    """The only thing `_tool_name` and a fake conversion need of a bound tool: its name."""
+
+    def __init__(self, name: str) -> None:
+        """Name it, because the memo below is keyed by exactly this."""
+        self.name = name
+
+
+def _costly_conversion(
+    per_tool_seconds: float, converted: list[str]
+) -> Callable[[Any], dict[str, Any]]:
+    """`convert_to_openai_tool` with its real cost made explicit and its real shape kept.
+
+    A busy-wait rather than a `sleep`, because what the two tests below measure is a *CPU* block on
+    the event loop and a sleeping stand-in would release the loop exactly where the real one does
+    not. Every call is recorded, so "how often was the surface swept" is a count rather than a
+    timing inference.
+    """
+
+    def convert(tool: Any) -> dict[str, Any]:
+        converted.append(getattr(tool, "name", repr(tool)))
+        deadline = time.perf_counter() + per_tool_seconds
+        while time.perf_counter() < deadline:
+            pass
+        return {"type": "function", "function": {"name": tool.name, "description": "x" * 400}}
+
+    return convert
+
+
+def _tool_request(tools: list[Any]) -> Any:
+    """A `ModelRequest` carrying a bound tool surface, which `_request` above deliberately omits."""
+    from langchain.agents.middleware import ModelRequest
+
+    return ModelRequest(
+        model=GenericFakeChatModel(messages=iter([AIMessage(content="x")])),
+        messages=[HumanMessage(content="hello")],
+        system_message=SystemMessage(content="you are a process chemist."),
+        tools=tools,
+        state={"messages": []},
+        runtime=None,
+    )
+
+
+def test_the_tool_schema_sweep_runs_once_per_process_not_once_per_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The memo outlives the middleware, because the middleware is per turn and the answer is not.
+
+    `MeasureRequestPrefix` is constructed inside the compaction group of a graph `langgraph_agent`
+    compiles **per turn**, so an instance memo is cold at every turn's first model call: measured
+    2026-09-06 on the `default` profile with connectors bound (92 tools), every turn paid ~20 ms of
+    `convert_to_openai_tool` over a surface that had not changed since the process started, and the
+    process's first turn paid ~100 ms.
+
+    Counted rather than timed, because the claim is about how often the sweep runs. The prefix each
+    turn publishes is asserted too: a memo that returns the wrong number is worse than no memo.
+    """
+    _SCHEMA_TOKENS.clear()
+    converted: list[str] = []
+    monkeypatch.setattr(
+        "langchain_core.utils.function_calling.convert_to_openai_tool",
+        _costly_conversion(0.0, converted),
+    )
+    tools = [_NamedTool(f"tool_{i}") for i in range(8)]
+    published: list[int] = []
+
+    def handler(_request: Any) -> str:
+        published.append(prefix_tokens())
+        return "done"
+
+    turns = 12
+    for _ in range(turns):
+        MeasureRequestPrefix().wrap_model_call(_tool_request(tools), handler)
+
+    assert len(converted) == len(tools), (
+        f"the {len(tools)}-tool surface was converted {len(converted)} times over {turns} turns: "
+        "the memo is per middleware, and a middleware is per turn, so every turn re-measures a "
+        "surface this process has already measured"
+    )
+    assert len(set(published)) == 1 and published[0] > 0, (
+        f"turns disagreed about the same surface's prefix: {sorted(set(published))}"
+    )
+
+
+def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> None:
+    """The front door has one event loop, and a memo miss must not own it.
+
+    One uvicorn worker carries every SSE stream, both kubelet probes and the submission side of
+    every token validation, and `service_max_concurrent_turns` turns may take their first model
+    call together — a pod rollout, a UI reconnect storm, several chemists hitting send. On a cold
+    process every one of those misses the memo, so what is asserted here is the *gap*: with the
+    measurement on the loop the 12 sweeps ran back to back in one iteration and the 1 ms heartbeat
+    was not serviced once for the whole of it (measured: worst gap equal to the total work).
+
+    A ratio rather than a wall clock, and a generous one: offloading buys no parallelism — the GIL
+    is held between switch intervals — so what it buys is the loop being *scheduled* during the
+    work, which `api/runner.py` measured at 3.1x for the graph build. Anything at or near 1.0 is
+    the block this test exists to keep out.
+    """
+    _SCHEMA_TOKENS.clear()
+    converted: list[str] = []
+    per_tool = 0.004
+    tools = [_NamedTool(f"tool_{i}") for i in range(8)]
+    turns = 12
+    work = turns * len(tools) * per_tool
+
+    async def handler(_request: Any) -> str:
+        return "done"
+
+    async def heartbeat(stop: asyncio.Event, gaps: list[float]) -> None:
+        last = time.perf_counter()
+        while not stop.is_set():
+            await asyncio.sleep(0.001)
+            now = time.perf_counter()
+            gaps.append(now - last)
+            last = now
+
+    async def burst() -> tuple[float, float]:
+        gaps: list[float] = []
+        stop = asyncio.Event()
+        beat = asyncio.create_task(heartbeat(stop, gaps))
+        await asyncio.sleep(0.05)
+        gaps.clear()
+        started = time.perf_counter()
+        await asyncio.gather(
+            *(
+                MeasureRequestPrefix().awrap_model_call(_tool_request(tools), handler)
+                for _ in range(turns)
+            )
+        )
+        wall = time.perf_counter() - started
+        stop.set()
+        await beat
+        return max(gaps), wall
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "langchain_core.utils.function_calling.convert_to_openai_tool",
+            _costly_conversion(per_tool, converted),
+        )
+        worst, wall = asyncio.run(burst())
+
+    assert converted, "nothing was measured, so this run says nothing about the loop"
+    assert worst < work / 3, (
+        f"one uninterrupted {worst * 1000:.0f} ms gap on the event loop against {work * 1000:.0f} "
+        f"ms of prefix measurement (wall {wall * 1000:.0f} ms): the sweep is running on the loop "
+        "that serves every other turn's stream and both kubelet probes"
     )

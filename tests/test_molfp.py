@@ -12,7 +12,9 @@ from collections.abc import Callable, Sequence
 
 import psycopg
 import pytest
+from rdkit import Chem
 
+from chemclaw.core.chem import substructure_pattern
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp import search
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
@@ -482,6 +484,107 @@ def test_substructure_match_does_not_block_the_event_loop(
 
     asyncio.run(_run())
     assert ticks == 20  # the concurrent task ran to completion during the blocking match
+
+
+# A hyperbranched C121 dendrimer and a 48-character SMARTS ending in an atom no organic record
+# carries. The pattern can be matched almost to the end and never completes, which is the shape
+# that makes subgraph isomorphism expensive: measured at ~116 ms *per molecule* on this pair,
+# against ~6 microseconds for the same pattern on caffeine. It is the trigger the wave-2 review
+# looked for and could not find, and it is what makes an orphaned scan thread cost minutes rather
+# than milliseconds. Not a stand-in: this is RDKit doing real work on a real molecule.
+#
+# Nothing below asserts that cost. The tests measure one record's match first and derive their
+# deadline from it, so a faster machine or a cheaper RDKit changes the numbers and not the
+# property — the reason `_sleeping_scan` above exists is that a *fixed* pathological cost is what
+# does not reproduce across versions.
+def _hyperbranched(depth: int) -> str:
+    """A tri-branched all-carbon dendrimer: 121 atoms at depth 4."""
+    if depth == 0:
+        return "C"
+    return f"C({_hyperbranched(depth - 1)})({_hyperbranched(depth - 1)}){_hyperbranched(depth - 1)}"
+
+
+def _binary_query(depth: int) -> str:
+    """A symmetric binary-tree SMARTS: 15 atoms at depth 3, every bond `any`."""
+    if depth == 0:
+        return "C"
+    return f"C(~{_binary_query(depth - 1)})~{_binary_query(depth - 1)}"
+
+
+_DENDRIMER = _hyperbranched(4)
+_UNMATCHABLE = _binary_query(3) + "~[Si]"
+
+
+def _dendrimer_records(count: int) -> list[FingerprintRecord]:
+    """`count` distinct records of the pathological molecule above."""
+    return [record_for(f"dendrimer-{index}", _DENDRIMER) for index in range(count)]
+
+
+def _one_match_seconds() -> float:
+    """What one such match costs here, so a deadline can be expressed in records rather than ms."""
+    molecule = Chem.MolFromSmiles(_DENDRIMER)
+    pattern = substructure_pattern(_UNMATCHABLE)
+    started = time.perf_counter()
+    molecule.HasSubstructMatch(pattern)
+    return time.perf_counter() - started
+
+
+def test_a_scan_past_its_deadline_stops_instead_of_matching_the_rest_of_the_corpus() -> None:
+    """The wall-clock bound has to reach the worker thread, not only the caller.
+
+    `asyncio.wait_for` releases the caller and cannot stop a thread, so before this the scan went
+    on matching every remaining record in the background — at the shipped 5 000-record cap and the
+    per-molecule cost measured above, ~10 minutes of one CPU per timed-out request, taken from the
+    loop's default executor, which is also where `chemclaw.api.auth` validates every bearer token.
+    """
+    pattern = substructure_pattern(_UNMATCHABLE)
+    per_record = _one_match_seconds()
+    records = _dendrimer_records(16)
+
+    started = time.perf_counter()
+    with pytest.raises(TimeoutError):
+        search._scan_for_matches(records, pattern, time.monotonic() + per_record * 2)
+    bounded = time.perf_counter() - started
+
+    started = time.perf_counter()
+    outcome = search._scan_for_matches(records, pattern, time.monotonic() + 3600)
+    unbounded = time.perf_counter() - started
+
+    assert outcome.hits == []  # unmatchable, so the unbounded run really did examine all 16
+    assert bounded < unbounded / 4, (
+        f"the scan ran {bounded:.3f}s of an unbounded {unbounded:.3f}s past its deadline"
+    )
+
+
+def test_a_timed_out_substructure_search_leaves_no_thread_matching_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same property end to end, observed where an orphaned thread is impossible to miss.
+
+    `asyncio.run` shuts the default executor down before returning, so it *waits* for whatever the
+    abandoned scan is still doing. That wait is the orphan: on the unbounded scan it was the rest
+    of the corpus, long after the caller's own `FingerprintError` had arrived.
+    """
+    per_record = _one_match_seconds()
+    monkeypatch.setattr(settings, "substructure_match_timeout_seconds", per_record * 2)
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        for record in _dendrimer_records(16):
+            await store.add(record)
+        with pytest.raises(FingerprintError, match="exceeded"):
+            await find_substructure_matches(store, _UNMATCHABLE)
+
+    started = time.perf_counter()
+    asyncio.run(_run())
+    elapsed = time.perf_counter() - started
+
+    # One molecule's match is the residue RDKit's lack of an interruption hook leaves; sixteen of
+    # them is the corpus the old scan ran out after the caller had already been refused.
+    assert elapsed < per_record * 8, (
+        f"the process waited {elapsed:.3f}s for a scan the caller abandoned "
+        f"({elapsed / per_record:.1f} records' worth)"
+    )
 
 
 def test_agent_supplied_top_k_is_clamped(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -206,6 +206,10 @@ half-written.
   now refuses to render unless exactly one of `retention.windows` (the day windows, rendered into
   the ConfigMap with `CHEMCLAW_RETENTION_ENABLED` derived) or
   `retention.unboundedGrowthAccepted: true` is stated; the Makefile's renders pass the latter.
+  **And a stated window must name a setting**: the map is rendered into the ConfigMap key by key
+  and pydantic-settings ignores an unknown prefixed environment variable, so a typo used to satisfy
+  the gate, report retention on, and leave every window disabled. A key that is not one of the nine
+  `CHEMCLAW_RETENTION_*` fields now refuses to render, naming the set it is not in.
 - **`/metrics` is on the public host, and the NetworkPolicy is not what bounds it.** The Route
   declares no `spec.path`, and neither a Route nor a NetworkPolicy filters by path — the ingress
   rule must allow the router, and the router publishes every path. What makes an unauthenticated

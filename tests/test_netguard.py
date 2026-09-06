@@ -5,7 +5,7 @@ import os
 import pathlib
 import re
 import socket
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -395,6 +395,196 @@ def test_a_blocked_name_never_reaches_connect() -> None:
     with pytest.raises(netguard.EgressForbidden):
         socket.getaddrinfo("blocked.example", 443)
     assert netguard._resolved_ips == before, "a refused resolution still recorded an IP"
+
+
+# --- The wiring, not the decision -------------------------------------------------------------
+#
+# Everything above asks `netguard._check(...)` whether an address is refused. That is the
+# *decision*, and the decision was never the weak half: measured on 2026-09-06, deleting the
+# `_check(address)` line from the patched `connect` — and, one at a time, from `connect_ex`,
+# `sendto`, `sendmsg`, `gethostbyname`, `gethostbyname_ex`, `getnameinfo` and `gethostbyaddr` —
+# left `test_netguard.py test_egress.py test_no_egress.py test_leak_probe.py` at **86 passed**.
+# Only `getaddrinfo` was wired end to end, because two tests call `socket.getaddrinfo` itself.
+#
+# The one test that looked socket-level did not reach the hook it named: `socket.create_connection`
+# calls `getaddrinfo` even for an IP literal, so the refusal it observed came from the resolver
+# patch and `socket.socket.connect` was never entered. That is this repository's own recorded
+# `loop_cap` failure — "the hook ran, counted correctly, decided correctly, and was wired to
+# nothing" — in the module whose blast radius is prompt exfiltration.
+#
+# So the tests below dial the *real* `socket` surface under the armed guard, one per patched entry
+# point, at an address no allowed name ever resolved to. They observe the patch, not the predicate.
+
+# TEST-NET-2 (RFC 5737). Never on the allowlist, never in `_resolved_ips` — so it is the
+# direct-to-IP bypass, which is the whole reason `_resolved_ips` exists.
+_BLOCKED_IP = "198.51.100.7"
+_BLOCKED_NAME = "blocked.example"
+
+_SocketFactory = Callable[[int], socket.socket]
+
+
+@pytest.fixture
+def open_socket() -> Iterator[_SocketFactory]:
+    """A short-timeout socket factory whose sockets are closed when the test ends.
+
+    The timeout is load-bearing only when the guard is *broken*: with a `_check` deleted the call
+    falls through to the real syscall, and a guard whose failure mode is a two-minute hang is a
+    guard nobody re-runs. Under the armed guard nothing is dialled at all.
+    """
+    opened: list[socket.socket] = []
+
+    def factory(kind: int = socket.SOCK_STREAM) -> socket.socket:
+        sock = socket.socket(socket.AF_INET, kind)
+        sock.settimeout(0.25)
+        opened.append(sock)
+        return sock
+
+    yield factory
+    for sock in opened:
+        sock.close()
+
+
+def _dial_connect(open_socket: _SocketFactory) -> None:
+    open_socket(socket.SOCK_STREAM).connect((_BLOCKED_IP, 443))
+
+
+def _dial_connect_ex(open_socket: _SocketFactory) -> None:
+    open_socket(socket.SOCK_STREAM).connect_ex((_BLOCKED_IP, 443))
+
+
+def _dial_sendto(open_socket: _SocketFactory) -> None:
+    open_socket(socket.SOCK_DGRAM).sendto(b"leak", (_BLOCKED_IP, 443))
+
+
+def _dial_sendto_with_flags(open_socket: _SocketFactory) -> None:
+    # The three-argument spelling, so the address is read off the *end* of the arguments rather
+    # than off a fixed position.
+    open_socket(socket.SOCK_DGRAM).sendto(b"leak", 0, (_BLOCKED_IP, 443))
+
+
+def _dial_sendmsg(open_socket: _SocketFactory) -> None:
+    # Positional, so the guard's `len(args) >= 4` branch is the one charged — a datagram socket
+    # never calls `connect`, which is why this entry point is patched at all.
+    open_socket(socket.SOCK_DGRAM).sendmsg([b"leak"], [], 0, (_BLOCKED_IP, 443))
+
+
+def _dial_getaddrinfo(open_socket: _SocketFactory) -> None:
+    socket.getaddrinfo(_BLOCKED_NAME, 443)
+
+
+def _dial_gethostbyname(open_socket: _SocketFactory) -> None:
+    socket.gethostbyname(_BLOCKED_NAME)
+
+
+def _dial_gethostbyname_ex(open_socket: _SocketFactory) -> None:
+    socket.gethostbyname_ex(_BLOCKED_NAME)
+
+
+def _dial_getnameinfo(open_socket: _SocketFactory) -> None:
+    # Numeric flags, so that a *broken* guard returns immediately instead of doing a reverse
+    # lookup: the address still left this process for the resolver to see, which is the point.
+    socket.getnameinfo((_BLOCKED_IP, 443), socket.NI_NUMERICHOST | socket.NI_NUMERICSERV)
+
+
+def _dial_gethostbyaddr(open_socket: _SocketFactory) -> None:
+    socket.gethostbyaddr(_BLOCKED_IP)
+
+
+# One row per entry point `arm()` patches. `bind`/`listen`/`accept` are deliberately not patched
+# (the front door and the worker still serve), so they are not here.
+_PATCHED_ENTRY_POINTS: list[tuple[str, Callable[[_SocketFactory], None]]] = [
+    ("socket.connect", _dial_connect),
+    ("socket.connect_ex", _dial_connect_ex),
+    ("socket.sendto", _dial_sendto),
+    ("socket.sendto/flags", _dial_sendto_with_flags),
+    ("socket.sendmsg", _dial_sendmsg),
+    ("getaddrinfo", _dial_getaddrinfo),
+    ("gethostbyname", _dial_gethostbyname),
+    ("gethostbyname_ex", _dial_gethostbyname_ex),
+    ("getnameinfo", _dial_getnameinfo),
+    ("gethostbyaddr", _dial_gethostbyaddr),
+]
+
+
+@contextmanager
+def _nothing_allowed() -> Iterator[None]:
+    """An empty allowlist and no recorded resolutions, both restored afterwards.
+
+    `_resolved_ips` is process-wide and outlives a test, so a run that resolved the blocked
+    address earlier would otherwise permit it here — the fixture at the top of this file restores
+    `_allowed` and says nothing about the other half of the decision.
+    """
+    resolved = set(netguard._resolved_ips)
+    netguard._reset_for_tests([])
+    netguard._resolved_ips.clear()
+    try:
+        yield
+    finally:
+        netguard._resolved_ips.clear()
+        netguard._resolved_ips.update(resolved)
+
+
+@pytest.mark.parametrize(
+    ("dial",),
+    [(dial,) for _, dial in _PATCHED_ENTRY_POINTS],
+    ids=[name for name, _ in _PATCHED_ENTRY_POINTS],
+)
+def test_every_patched_entry_point_refuses_through_the_socket_module(
+    dial: Callable[[_SocketFactory], None], open_socket: _SocketFactory
+) -> None:
+    """Each entry point `arm()` patches refuses a non-allowlisted destination, driven for real.
+
+    Nothing here calls `_check`. Delete the `_check(...)` line from any one of the nine wrappers
+    and exactly one of these rows goes red, naming it — which is the property the corpus lacked.
+    """
+    before = netguard._refused
+    with _nothing_allowed(), pytest.raises(netguard.EgressForbidden):
+        dial(open_socket)
+    assert netguard._refused == before + 1, "the refusal was not counted"
+
+
+def test_the_patched_connect_still_dials_a_permitted_destination(
+    open_socket: _SocketFactory,
+) -> None:
+    """The wrapper delegates: a permitted `connect` reaches the real one and completes.
+
+    Without this, the row above is satisfied by a `connect` that refuses *everything* — and this
+    process dials Postgres, Temporal and the calc backend on loopback every run.
+    """
+    server = open_socket(socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    with _nothing_allowed():
+        open_socket(socket.SOCK_STREAM).connect(server.getsockname())
+
+
+def test_the_guard_patched_every_entry_point_it_says_it_patched() -> None:
+    """`arm()` installed a wrapper over each name, so a *removed* patch is a failing test too.
+
+    The rows above catch a hollowed-out wrapper; this catches a wrapper that stopped being
+    installed — the `socket.getaddrinfo = getaddrinfo` line disappearing rather than the check
+    inside it. `arm()` is idempotent and armed at config import, so the live `socket` module is
+    the only place this can be observed.
+    """
+    import chemclaw.core.config  # noqa: F401  (the import is the arming)
+
+    installed = {
+        "socket.connect": socket.socket.connect,
+        "socket.connect_ex": socket.socket.connect_ex,
+        "socket.sendto": socket.socket.sendto,
+        "socket.sendmsg": socket.socket.sendmsg,
+        "getaddrinfo": socket.getaddrinfo,
+        "gethostbyname": socket.gethostbyname,
+        "gethostbyname_ex": socket.gethostbyname_ex,
+        "getnameinfo": socket.getnameinfo,
+        "gethostbyaddr": socket.gethostbyaddr,
+    }
+    unpatched = sorted(
+        name
+        for name, entry in installed.items()
+        if getattr(entry, "__module__", None) != netguard.__name__
+    )
+    assert unpatched == [], f"{unpatched} are the stdlib's own, so the guard never sees the call"
 
 
 def _proxy_env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
