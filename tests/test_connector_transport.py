@@ -1052,3 +1052,61 @@ def _probe_tool() -> BaseTool:
         return "ok"
 
     return probe
+
+
+def test_both_client_factories_share_one_ssl_context() -> None:
+    """No client this system builds parses the CA bundle for itself.
+
+    `httpx.AsyncClient` with no `verify=` constructs a fresh `ssl.SSLContext` and loads certifi
+    into it. A turn opens one client per connector, so the shipped seven-connector deployment paid
+    that seven times per turn on the one event loop serving every user on the pod — measured at
+    ~110 ms against 0.26 ms with the context shared, a 400x difference, and it is *blocking* CPU
+    rather than await time.
+
+    Both factories are asserted here because they are the two independent places a client is built
+    and they drifted together once already: the fix has to hold at both or a turn still pays it at
+    whichever one was missed. Identity (`is`) rather than equality, because a *copy* of the context
+    costs exactly what this test exists to prevent.
+    """
+    from chemclaw.connectors.registry import connector_http_client
+    from chemclaw.core.http import default_ssl_context
+    from chemclaw.core.mcp_session import short_connect_client
+
+    shared = default_ssl_context()
+
+    def context_of(client: httpx.AsyncClient) -> object:
+        return client._transport._pool._ssl_context  # type: ignore[attr-defined]
+
+    endpoint = _endpoint("http://127.0.0.1:8815/mcp", "relax_structure")
+    assert context_of(connector_http_client("calc", endpoint)) is shared
+    assert context_of(short_connect_client(read_bound_seconds=30.0)()) is shared
+
+
+def test_the_shared_context_trusts_exactly_what_httpx_would_have() -> None:
+    """The shared context is httpx's trust decision, not the operating system's.
+
+    **Identity is not the property that matters here; content is.** The first version of
+    `default_ssl_context` returned a bare `ssl.create_default_context()`, which loads the OS store,
+    while `httpx`'s own `verify=True` passes `cafile=certifi.where()`. Measured when that shipped:
+    138 roots against 109 — **42 CAs newly trusted and 13 dropped** on every connector call and the
+    bearer token it carries, and on an image with no `ca-certificates` package, zero roots and a
+    handshake failure on every `https://` connector.
+
+    The existing test above asserts both factories share one object, which a bare context satisfies
+    perfectly. Nothing asserted *what* the shared object trusts, so a performance fix moved a trust
+    boundary and the suite stayed green. This is that assertion.
+    """
+    import ssl
+
+    import certifi
+
+    from chemclaw.core.http import default_ssl_context
+
+    def roots(context: ssl.SSLContext) -> set[tuple[str, str]]:
+        return {(str(c.get("serialNumber")), str(c.get("issuer"))) for c in context.get_ca_certs()}
+
+    httpx_would_build = ssl.create_default_context(cafile=certifi.where())
+    assert roots(default_ssl_context()) == roots(httpx_would_build), (
+        "the shared context does not trust what httpx would have trusted — a bare "
+        "ssl.create_default_context() loads the OS store instead of certifi's"
+    )

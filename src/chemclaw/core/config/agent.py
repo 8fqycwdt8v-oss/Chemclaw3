@@ -130,7 +130,7 @@ class AgentSettings(BaseSettings):
     # on every model call were budgeted against nothing: measured 2026-09-04, a thread the policy
     # cut to its 90,030-token budget left as a 137,301-token request at a 128k model.
     #
-    # What that costs an existing deployment is the prefix, exactly: at the 100,000 below and a
+    # What that costs an existing deployment is the prefix, exactly: at a 100,000 budget and a
     # 43,175-token prefix the thread gets **56,825** estimated tokens where it used to get 100,000,
     # so a session that never compacted may now compact, and one that compacted may compact
     # earlier. That is the intended trade — the alternative is a bound that does not bound — but it
@@ -143,7 +143,75 @@ class AgentSettings(BaseSettings):
     # says how. This sentence went on claiming the floored state after the same commit fixed it,
     # eighteen lines from the paragraph that contradicts it, which is why the derivation lives in
     # one place and this one points at it.
-    agent_context_token_budget: int = Field(default=100_000, ge=1)
+    #
+    # **133,000 as of 2026-09-05, and the ~43,000 above is why: it was the prefix of a turn nobody
+    # runs.** `tests/test_context_floor.py` compiled its graph with no `connectors=` argument while
+    # every shipped turn binds the enabled bundles, so the figure this paragraph was derived from
+    # omitted 31 endpoint tools. Re-measured on the surface a turn actually binds: **64,099** for
+    # the bundles this repository serves itself, plus **9,538** over 21 tools for the three served
+    # from `Chemclaw3-mcp` — a ~73,600-token prefix against a 100,000 budget. So the 56,825 of
+    # thread this setting was documented as delivering was never delivered: the real allowance was
+    # ~26,400, and the trigger below was floored at 1 on every shipped deployment — the state the
+    # paragraph above and `tests/test_compaction.py` both asserted was not happening, asserted
+    # against the same connector-less fixture that caused it.
+    #
+    # **Nothing about what a chemist needs changed, so the thread allowance was held fixed and the
+    # request bound was what moved.** That gave 133,000 = `tests/test_context_floor.PREFIX_BOUND`
+    # (the ratchet ceiling, 65,000, plus 11,000 for the bundles that ratchet cannot see) + the
+    # 57,000 of thread the paragraph above intended. Leaving this at 100,000 would not have saved
+    # the prefix — it is sent either way — it would only have kept halving the conversation to pay
+    # for it. **That derivation had no upper bound and 133,000 was past one**; the paragraph two
+    # below is what replaced it, and the thread allowance is now the dependent number.
+    #
+    # **What it costs is a bigger worst case, and that is the honest half.** A request may now go
+    # out at up to this many billed tokens where the bound said 100,000 (though more than the
+    # floored behaviour actually sent, which was prefix plus the newest tool batch). The instrument
+    # for wanting that number lower is a narrower prefix — profile routing, or
+    # `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas — not a budget
+    # that pretends the prefix is smaller than it is.
+    #
+    # **119,000, and 133,000 re-opened the defect `D-2026-09-04` closed.** That ADR's whole
+    # pass/fail criterion was "does the request fit a 128k model", and it fixed a measured 137,301
+    # down to 100,000. Holding the *thread* allowance fixed at 57,000 and letting the request bound
+    # follow the prefix put it back at 133,000 — a maximal request of ~131,400 billed at the real
+    # prefix, over 128,000 again, with the only guard that could have caught it
+    # (`llm_context_window_tokens`) defaulting to 0 and set in no deployment file. A budget whose
+    # own arithmetic permits a request the provider rejects outright is not a budget; the whole
+    # turn is lost, which is strictly worse than a thread cut early.
+    #
+    # **So the derivation runs the other way now: the window is the input and the thread allowance
+    # is what is left over.** 128,000 is the smallest window this stack targets (the chart ships
+    # `gpt-oss`, published at 131,072, and `D-2026-09-04` argues every figure against 128k), less
+    # `llm_max_tokens` = 4,096 reserved for the answer, leaving **123,904** of input. A maximal
+    # request bills `budget + (r - 1) x prefix`, where `r` is what the *prefix* costs per estimated
+    # token — the term exists because `effective_trigger` subtracts an *estimated* prefix from a
+    # *billed* budget, so the two units meet exactly here and nowhere else.
+    #
+    # `r` was asserted at 1.04 in three places and nothing had measured it on this prefix. Measured
+    # 2026-09-05 over the real 73,963-token `default` prefix — the observed system message plus
+    # every bound schema, against real BPE tokenizers — it is **0.979** (`o200k_base`) and
+    # **0.9785** (`cl100k_base`): chars/4 *over*-estimates prose and JSON schemas, so on any
+    # tokenizer a current gateway uses the term is a credit and a maximal request bills less than
+    # this number. The one basis where it is not is `p50k_base` at **1.0534**, a GPT-3-era encoding
+    # nothing here serves — and 119,000 is chosen so the criterion holds even there, at the
+    # *permitted* prefix bound rather than today's: 119,000 + 0.0534 x 76,000 = 123,058, inside
+    # 123,904 by 846. At the ratio a real gateway tokenizes with, the same request bills ~117,400
+    # and clears by ~6,500.
+    #
+    # **What it costs, stated because it is a behavioural change**: the thread allowance falls from
+    # the 57,000 the paragraph above held fixed to **43,000** at the prefix bound (45,037 at
+    # today's measured prefix), and the band between this and the lossless edit's trigger falls
+    # from 27,000 to 13,000. That band is squeezed by the prefix, not by this number: at a
+    # 76,000-token prefix bound and a 128k window the whole policy has 43,000 tokens of thread to
+    # divide between two edits. The instrument for wanting more is a narrower prefix.
+    #
+    # **And the second bound is now real.** `llm_context_window_tokens` stays 0 in code — this
+    # repository cannot know an endpoint's window — but `deploy/helm/chemclaw/values.yaml` states
+    # it beside the model it names, so the shipped release clamps rather than relying on this
+    # number alone. Both halves are asserted in `tests/test_compaction.py`
+    # (`BUDGET_THREAD_ALLOWANCE`, `SMALLEST_TARGET_WINDOW`), because the reviewer who found this
+    # collapsed the split to 107,000 and got 150 passing tests.
+    agent_context_token_budget: int = Field(default=119_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=0, ge=0)
     # `agent_tool_result_clear_trigger` is the *lossless* edit's own threshold, and splitting it
@@ -158,7 +226,7 @@ class AgentSettings(BaseSettings):
     # loses nothing, so it should run early and often; every token it reclaims early is a
     # conversation group the window never has to reach for. Anthropic's own composition separates
     # them by an order of magnitude for this reason (30k against 180k in the cookbook's research
-    # agent), and the default here is the same shape against this repository's 100k budget.
+    # agent), and the default here is the same shape against this repository's request budget.
     #
     # Above the budget it would be pointless — the window would already have fired — so the
     # validator in `Settings` refuses that rather than letting a deployment set a number that
@@ -201,7 +269,24 @@ class AgentSettings(BaseSettings):
     # and a rate would carry nothing a line does not. `tests/test_compaction.py` asserts both the
     # floor and this default's clearance above the ratchet ceiling, so the day a tool surface grows
     # past it, that test says so instead of the behaviour changing quietly.
-    agent_tool_result_clear_trigger: int = Field(default=74_500, ge=1)
+    #
+    # **106,000 as of 2026-09-05, and 74,500 was floored at 1 in every shipped deployment.** The
+    # derivation above was right and its input was not: the ratchet's ceiling described a graph
+    # compiled with **no connector bound**, so "ceiling + 30,000 of thread" cleared a prefix of
+    # ~43,000 and not the ~73,600 a turn actually sends. The paragraph above, this file's sibling
+    # paragraph on the budget, and the test that exists to catch exactly this all agreed with each
+    # other because all three read the same connector-less number — which is
+    # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` with a fixture in place of the
+    # prose.
+    #
+    # **Same derivation, honest input**: `tests/test_context_floor.PREFIX_BOUND` — the ratchet
+    # ceiling with the connector surface in its basis (65,000) plus 11,000 for the three bundles
+    # served from `Chemclaw3-mcp` that no test here can measure — plus the same 30,000 of thread
+    # this setting has always intended. It is still a translation rather than a retuning; what
+    # moved is the size of the thing being translated. The 11,000 is a *bound* and belongs beside
+    # the ceiling it extends, so it lives in `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE`
+    # where the assertion can read it, not as a second number here that would drift away from it.
+    agent_tool_result_clear_trigger: int = Field(default=106_000, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Measured against a real BPE tokenizer on this repository's own
@@ -492,15 +577,20 @@ class AgentSettings(BaseSettings):
     # **The default is the old 7,200 s plus the one bound it never counted.** Eight steps at the
     # step budget is what sized 7,200, and that arithmetic silently assumed every step is an
     # activity. A `job` step is a child workflow bounded by `wrapper_execution_timeout()` =
-    # `connector_job_timeout_seconds` + 4 × `activity_timeout_seconds` = 18,120 s, two and a half
+    # `connector_job_timeout_seconds` + 4 × `activity_timeout_seconds`, which was two and a half
     # times the whole run it sat inside, so seven of the nine shipped templates could end as a
-    # silent TIMED_OUT. 18,120 + 7,200 = 25,320: one `job` step at the ceiling it actually carries,
-    # and the entire eight-ordinary-step allowance this setting used to be, beside it. Every
-    # shipped template is one `job` step plus at most two ordinary ones, so the margin is real
-    # rather than nominal. Stated as a literal rather than derived, because a default that moved
-    # with `connector_job_timeout_seconds` would hide the relation the validator exists to make
-    # loud — a site that raises the job ceiling is refused at startup and told to raise this too.
-    template_run_timeout_seconds: float = Field(default=25320.0, gt=0)
+    # silent TIMED_OUT. That bound plus the entire eight-ordinary-step allowance this setting used
+    # to be: 25,320 + 7,200 = 32,520. Every shipped template is one `job` step plus at most two
+    # ordinary ones, so the margin is real rather than nominal. Stated as a literal rather than
+    # derived, because a default that moved with `connector_job_timeout_seconds` would hide the
+    # relation the validator exists to make loud — a site that raises the job ceiling is refused at
+    # startup and told to raise this too.
+    #
+    # **Which is exactly what happened to this number.** The job ceiling went 18,000 -> 25,200 so
+    # that a bundle activity's queue wait could be its headroom rather than a fraction of it
+    # (`durable/publish.py::connector_queue_wait_timeout`), which moved the `job` step's bound to
+    # 25,320 — equal to this default, and equality is what the validator calls the defect.
+    template_run_timeout_seconds: float = Field(default=32520.0, gt=0)
 
     @property
     def templates_dirs(self) -> list[str]:

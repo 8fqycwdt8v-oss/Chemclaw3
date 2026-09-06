@@ -1,0 +1,31 @@
+-- The substructure scan's "bounded, deterministic slice" is a whole-table sort, because the
+-- ordering it is deterministic *by* is not the one the primary key is in.
+--
+-- `science/fingerprints/store.py::all_records(limit=...)` runs
+-- `... ORDER BY id COLLATE "C" LIMIT %(limit)s`, and the `COLLATE "C"` is load-bearing: it is what
+-- makes the durable backend order identically to the in-memory one, whose sort is Python's
+-- code-point order (a database's default collation puts `a1` before `B1`). But
+-- `molecule_fingerprints_pkey` is a btree in the *database's* collation, so it cannot satisfy that
+-- ordering — and with no index in the C collation the planner sorts every row in the table before
+-- taking the first `substructure_scan_max_records + 1` of them.
+--
+-- Measured on 200 000 `bit(2048)` rows, PostgreSQL 16.15, at the shipped cap of 5 000:
+--
+--   before: Gather Merge -> Sort (Sort Key: id COLLATE "C", external merge, 136 MB to disk),
+--           2 228 ms, 103 466 temp blocks written
+--   after:  Index Scan using molecule_fingerprints_id_c_idx, 10.7 ms, no temp at all   (208x)
+--
+-- The cost is the shape rather than the size: the sort is over the whole table while the result is
+-- capped, so it grows with the corpus that the cap exists to protect the process from. At 1M rows
+-- it is minutes and gigabytes of temp I/O, on a path the agent calls
+-- (`molfp.find_substructure_matches`).
+--
+-- **`molecule_fingerprints` only, deliberately.** `all_records(limit=...)` has exactly one caller
+-- in `src/` and it is the molecule substructure scan; `reaction_fingerprints` and the two
+-- `corpus_*` tables use the same class and never take that path, so an index there would be a
+-- control with no reader — the shape this repository deletes on sight. It belongs beside them the
+-- day something scans them in key order.
+--
+-- 6 MB per 200 000 rows, and one more btree to maintain on a table written by ingest in batches.
+CREATE INDEX IF NOT EXISTS molecule_fingerprints_id_c_idx
+    ON molecule_fingerprints (id COLLATE "C");

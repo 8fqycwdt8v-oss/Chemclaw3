@@ -139,7 +139,26 @@ class ConnectorSettings(BaseSettings):
     # not either. A job that exhausts its whole budget and is retried is bounded by this ceiling,
     # so the retry is cut short; a deployment that wants the retry budget to be reachable raises
     # this above `activity_max_attempts * xtb_job_timeout_seconds`.
-    connector_job_timeout_seconds: float = Field(default=18_000.0, gt=0)
+    #
+    # **It funds the queue wait as well as the work, which is what sets the default.** A bundle
+    # activity's `schedule_to_start_timeout` is this ceiling's *headroom* —
+    # `connector_queue_wait_timeout()` = this minus `longest_bundle_activity` minus
+    # `activity_timeout_seconds` — because the wait precedes the work and the ceiling has to
+    # contain both (`durable/publish.py` carries the arithmetic and what it replaced). So the
+    # number is the sum of three measured quantities rather than one budget plus a round hour:
+    #
+    #     15,000  one CREST search at `xtb_job_timeout_seconds`, the longest activity a child runs
+    #         30  the child's own overhead, `activity_timeout_seconds`
+    #     10,170  the queue wait that leaves, ~1.4x the measured p95 backpressure on
+    #             `connector-calc` at target load (p50 ~3,744 s, p95 ~7,128 s)
+    #     ------
+    #     25,200  = 7 h
+    #
+    # Lower it and the queue bound tightens with it, which is the honest direction: a site that
+    # funds less runtime is also declaring less patience for a job that never gets a slot. Raise
+    # it and `template_run_timeout_seconds` must rise too, or startup refuses the pair
+    # (`_the_template_run_ceiling_covers_one_step`).
+    connector_job_timeout_seconds: float = Field(default=25_200.0, gt=0)
 
     # Hard ceiling on a connector's request body, refused with 413 before anything reads it
     # (`connectors.server.connector_app`, `core.asgi.BodySizeLimit`). A connector's own setting

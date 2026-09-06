@@ -411,7 +411,12 @@ class FakeCalcServer:
         try:
             return _Result(self._answer(name, arguments))
         except ValueError as error:
-            return _Result({"detail": str(error)}, is_error=True)
+            # The wire's own shape for a refused call: FastMCP's `Tool.run` raises
+            # `ToolError(f"Error executing tool {name}: {e}")` and `_make_error_result` sends
+            # `str(e)` as one plain text block. Not JSON, and the prefix is not decoration — the
+            # client tells a full pod and a broken server from a domain refusal by a marker at the
+            # *head* of this string (`core/mcp_session.server_marked`).
+            return _Result(f"Error executing tool {name}: {error}", is_error=True)
 
     def _answer(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Dispatch one call, honouring an override the test installed."""
@@ -790,13 +795,17 @@ class FakeCalcServer:
 
 
 class _Result:
-    """The `CallToolResult` shape the client reads: `isError` plus text content."""
+    """The `CallToolResult` shape the client reads: `isError` plus text content.
 
-    def __init__(self, payload: dict[str, Any], is_error: bool = False) -> None:
+    A failed call carries plain text rather than JSON — see `call_tool` above, which builds it the
+    way the transport does.
+    """
+
+    def __init__(self, payload: dict[str, Any] | str, is_error: bool = False) -> None:
         import json
 
         self.isError = is_error
-        self.content = [_Text(json.dumps(payload))]
+        self.content = [_Text(payload if isinstance(payload, str) else json.dumps(payload))]
 
 
 class _Text:

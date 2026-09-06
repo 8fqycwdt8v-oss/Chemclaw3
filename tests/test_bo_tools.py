@@ -561,3 +561,178 @@ def test_a_directly_built_suggestion_claims_no_shortfall() -> None:
     )
     assert suggestion.requested == 0
     assert "could be proposed" not in suggestion.summary
+
+
+# --- the schema the model reads: a model docstring is a prompt, once per tool that uses it ------
+
+
+def _served_input_schema(tool_name: str) -> dict[str, object]:
+    """One `bo` tool's `inputSchema` exactly as the MCP handshake publishes it."""
+    served = {tool.name: tool for tool in asyncio.run(bo_tools.server.list_tools())}
+    return dict(served[tool_name].inputSchema)
+
+
+def _described(node: object) -> list[str]:
+    """Every `description` string anywhere in a JSON schema, innermost order irrelevant."""
+    found: list[str] = []
+    if isinstance(node, dict):
+        text = node.get("description")
+        if isinstance(text, str):
+            found.append(text)
+        for value in node.values():
+            found.extend(_described(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_described(value))
+    return found
+
+
+def _properties(node: object, names: set[str]) -> None:
+    """Collect every `properties` key anywhere in a JSON schema, including under `$defs`."""
+    if isinstance(node, dict):
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            names.update(str(key) for key in properties)
+        for value in node.values():
+            _properties(value, names)
+    elif isinstance(node, list):
+        for value in node:
+            _properties(value, names)
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["suggest_next_experiment", "campaign_progress", "predict_outcome"],
+)
+def test_every_field_of_the_decision_space_is_still_reachable_from_the_schema(
+    tool_name: str,
+) -> None:
+    """Narrowing the descriptions must not have narrowed the surface a chemist can express.
+
+    The `OptimizationProblem` closure is 1,029 tokens per copy and is carried by five tool schemas
+    on every turn, so its prose is worth cutting — and cutting prose is exactly the change that can
+    silently take a *field* with it. The field names are read off the pydantic models rather than
+    transcribed, so a model that loses a field fails here rather than agreeing with a list somebody
+    wrote at the same time.
+    """
+    from chemclaw.science.bo.problem import (
+        ExcludeConstraint,
+        LinearConstraint,
+    )
+
+    declared: set[str] = set()
+    for model in (
+        OptimizationProblem,
+        ContinuousParameter,
+        CategoricalParameter,
+        Objective,
+        LinearConstraint,
+        ExcludeConstraint,
+        Observation,
+    ):
+        declared.update(model.model_fields)
+
+    published: set[str] = set()
+    _properties(_served_input_schema(tool_name), published)
+    missing = sorted(declared - published)
+    assert not missing, (
+        f"{tool_name} no longer publishes {missing}: a caller cannot fill a field the schema does "
+        "not name, so this is a capability removed rather than a prompt narrowed"
+    )
+
+
+def test_the_decision_space_still_explains_itself_where_the_model_reads_it() -> None:
+    """The guidance moved out of the developer rationale; it did not leave the schema.
+
+    The 2026-09-05 narrowing cut ~680 tokens per copy out of the five inlined
+    `OptimizationProblem` schemas by moving design rationale — ADR ids, BoFire internals, why a
+    discriminated union has two members rather than five — into `#` comments. **The load-bearing
+    half stayed**, and that is what this asserts: a chemist-facing model has to be told when to
+    reach for `structures`, that a one-parameter limit is a bound rather than a constraint, and
+    that an exclusion needs an all-categorical problem. A narrowing that dropped any of those
+    would cost more in one failed call than the tokens it saved.
+
+    Asserted over the served `inputSchema` rather than over the Python docstrings, for the reason
+    `test_the_tool_the_model_sees_states_what_is_and_is_not_supported` gives: that is what travels.
+    """
+    # Whitespace-normalised, because a docstring's *line wrapping* is not part of what travels: the
+    # sentence this asserts sits across a line break in `LinearConstraint`, so a literal `in` over
+    # the raw text fails on where the source happens to wrap and passes again on a reflow nobody
+    # meant as a change. The property is that the sentence is in the schema, not that it is on one
+    # line — and this is exactly the arm that was red when the tests were first written.
+    prose = " ".join(" ".join(_described(_served_input_schema("suggest_next_experiment"))).split())
+    # A categorical whose options are molecules is worth featurizing, and `descriptors` is not the
+    # model's to fill.
+    assert "structures" in prose and "SMILES" in prose
+    assert "descriptors" in prose
+    # A limit on one parameter is that parameter's bound.
+    assert "bound, not a constraint" in prose
+    # Both constraint shapes still say what they are for and where they do not apply.
+    assert "continuous parameters" in prose.lower()
+    assert "all-categorical" in prose
+    # And the rationale really did leave — these are the sentences that cost five copies a turn.
+    assert "comprehensibility regression" not in prose
+    assert "(W4)" not in prose and "(U1)" not in prose and "gate G4" not in prose
+
+
+def test_a_problem_using_every_narrowed_model_still_round_trips_as_wire_dicts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole decision space, as the plain JSON a tool call actually delivers.
+
+    Every model whose docstring was cut is exercised in one call — a continuous parameter, a
+    categorical carrying `structures` (so featurization runs), two objectives, and a linear
+    constraint — through `model_validate` on dicts rather than on constructed models, because the
+    wire format has no model concept and that coercion is the boundary the narrowing touched.
+    """
+    monkeypatch.setattr(bo_tools, "default_store", InMemoryStore)
+    install(monkeypatch, FakeCalcServer())
+    problem = {
+        "parameters": [
+            {"kind": "continuous", "name": "temperature", "lower": 20.0, "upper": 120.0},
+            {"kind": "continuous", "name": "equivalents", "lower": 1.0, "upper": 3.0},
+            {
+                "kind": "categorical",
+                "name": "base",
+                "categories": ["NEt3", "pyridine"],
+                "structures": {"NEt3": "CCN(CC)CC", "pyridine": "c1ccncc1"},
+            },
+        ],
+        "objectives": [
+            {"name": "yield", "direction": "maximize"},
+            {"name": "impurity", "direction": "minimize"},
+        ],
+        "constraints": [
+            {
+                "kind": "linear",
+                "parameters": ["temperature", "equivalents"],
+                "coefficients": [0.01, 1.0],
+                "relation": "<=",
+                "rhs": 4.0,
+            }
+        ],
+    }
+    observations = [
+        {
+            "params": {"temperature": 40.0, "equivalents": 1.5, "base": "NEt3"},
+            "value": 55.0,
+            "values": {"yield": 55.0, "impurity": 4.0},
+        },
+        {
+            "params": {"temperature": 80.0, "equivalents": 2.0, "base": "pyridine"},
+            "value": 78.0,
+            "values": {"yield": 78.0, "impurity": 2.0},
+            "provenance": "measured",
+        },
+    ]
+    suggestion = asyncio.run(suggest_next_experiment(problem, observations))
+    assert suggestion.candidates
+    candidate = suggestion.candidates[0]
+    assert candidate.params["base"] in {"NEt3", "pyridine"}
+    assert 20.0 <= float(candidate.params["temperature"]) <= 120.0
+    # The constraint was honoured and the categorical really was featurized.
+    assert (
+        0.01 * float(candidate.params["temperature"]) + float(candidate.params["equivalents"])
+        <= 4.0 + 1e-6
+    )
+    assert suggestion.calc_refs

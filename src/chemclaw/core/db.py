@@ -154,8 +154,53 @@ def _redact(dsn: str) -> str:
     return conninfo.make_conninfo("", **parts)
 
 
-def _merged_options(dsn: str, statement_timeout_seconds: float | None) -> str | None:
-    """Return the libpq `options` to connect with: the DSN's own, plus our statement timeout.
+# **Never let this pool serve a query from a generic plan.** psycopg auto-prepares a statement at
+# `prepare_threshold=5`, so the sixth execution is the first *prepared* one — and Postgres's own
+# plancache then serves five custom plans before it will consider a generic one, so the first
+# generic execution is the **eleventh** overall. Measured both ways on one skewed table: with
+# auto-prepare, flat 38 ms through execution 10 and 83 ms from 11; with `prepare=True`, which
+# forces preparation from the first call, the same jump lands at 6. A probe that passes
+# `prepare=True` is measuring a client this code is not.
+#
+# **The statement at risk is the dense vector one, and the deciding variable is the embedding
+# width.** `_dense` in `retrieval/vector_index.py` renders `::vector(N)` from `embedding_dim`,
+# which `core/config` *raises* unless it equals the `vector(1536)` column migration 012 declares.
+# At 1536, `EXPLAIN (GENERIC_PLAN)` on that exact shape is `Seq Scan on note_index` under a `Sort`,
+# and serving it costs **1,762 ms against 0.93 ms** — about 1,890x. At 384 the same statement plans
+# as an HNSW `Index Scan` and measures 0.64 ms either way, which is why a probe at that width finds
+# nothing and concludes the risk is imaginary. It is not imaginary; it is a width no deployment
+# here can have.
+#
+# **What is true today is that `auto` does not take that plan, and that is a cost estimate rather
+# than a guarantee.** At 100k rows the generic plan *estimates* 5,915 against the custom plan's
+# 2,334, so `auto` keeps the custom one — while the plan it declined to use is three orders of
+# magnitude slower in reality. The safety margin is an estimate that is wrong in the fortunate
+# direction, and estimates move with statistics, row counts and a planner upgrade. This setting is
+# what makes the outcome not depend on that.
+#
+# `science/calc/postgres_store`, `ingest/documents/index.py`, `external_index.py` and
+# `science/labels/store.py` carry the same `IS NULL OR` shape; measured on the calc browse
+# statement, `force_generic_plan` is 59 ms against `force_custom_plan`'s 0.95 ms, and `auto`
+# likewise declines it. Same insurance, four more statements.
+#
+# The remedy is the server's own, and it is set here rather than per statement so that a query
+# added next year inherits it: `force_custom_plan` keeps the prepared statement — the parse is
+# still cached — and re-plans each execution with the parameters in hand. **Measured cost on the
+# queries that do not need it**: a point lookup goes 263 µs to 288 µs, about 25 µs.
+#
+# **The checkpointer pool (`agent/checkpointer.py`) is deliberately excluded, and not because its
+# statements are primary-key lookups.** LangGraph's own SQL carries
+# `(%s::text IS NULL OR checkpoint_id < %s)` and two `= ANY(%s)` clauses. What makes it safe is
+# *where* the OR sits: behind `thread_id = %s AND checkpoint_ns = %s`, so the generic plan is an
+# `Index Scan Backward using checkpoints_pkey` with both equalities in the `Index Cond` and the OR
+# filtering one thread's checkpoints rather than a corpus. Measured at 200k rows across 2,000
+# threads, ~0.4 ms either way — nothing to buy. The property to preserve when adding a statement
+# there is that one, not "it is a primary-key lookup".
+_FORCE_CUSTOM_PLAN = "-c plan_cache_mode=force_custom_plan"
+
+
+def _merged_options(dsn: str, statement_timeout_seconds: float | None) -> str:
+    """Return the libpq `options` to connect with: the DSN's own, our plan mode, our timeout.
 
     psycopg merges a keyword argument *over* the connection string, so passing `options=` would
     silently discard any `options` the DSN already carries — and only on the connections that ask
@@ -164,12 +209,19 @@ def _merged_options(dsn: str, statement_timeout_seconds: float | None) -> str | 
     would lose it non-deterministically depending on the call site. Concatenating instead keeps
     both; libpq reads the last occurrence of a repeated `-c` setting, so our timeout still wins if
     the DSN happens to set one too.
+
+    This never returns `None` any more, because `_FORCE_CUSTOM_PLAN` above is ours to add on every
+    connection whether or not a statement timeout was asked for. That widens the pool key
+    (`_pool_for` keys on the merged options) by a constant, which merges and splits nothing: every
+    pool gains the same suffix.
     """
-    if not statement_timeout_seconds:
-        return None  # nothing of ours to add; the DSN's own `options` passes through untouched
     # libpq statement_timeout is in milliseconds; passed as a server option so it applies to
     # every statement on the connection without an extra round trip.
-    ours = f"-c statement_timeout={int(statement_timeout_seconds * 1000)}"
+    ours = (
+        f"{_FORCE_CUSTOM_PLAN} -c statement_timeout={int(statement_timeout_seconds * 1000)}"
+        if statement_timeout_seconds
+        else _FORCE_CUSTOM_PLAN
+    )
     try:
         existing = conninfo.conninfo_to_dict(dsn).get("options")
     except psycopg.ProgrammingError:
@@ -180,7 +232,7 @@ def _merged_options(dsn: str, statement_timeout_seconds: float | None) -> str | 
             logger,
             "db_dsn",
             "the configured DSN cannot be parsed by libpq; any `options` it carries are dropped "
-            "and only the statement timeout is applied",
+            "and only our own plan mode and statement timeout are applied",
             level=logging.WARNING,
         )
         return ours

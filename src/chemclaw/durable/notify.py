@@ -23,7 +23,11 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.session_events import record_session_event
     from chemclaw.core.config import settings
     from chemclaw.core.metrics_bridge import record_metric
-    from chemclaw.durable.publish import BAD_DATA_RETRY
+    from chemclaw.durable.publish import (
+        BAD_DATA_RETRY,
+        activity_failure_reason,
+        light_write_queue_wait_timeout,
+    )
     from chemclaw.durable.registry import durable_activity
 
 
@@ -97,9 +101,25 @@ async def notify_session(session_id: str, kind: str, payload: dict[str, Any]) ->
         # result is already done" was instead holding it open indefinitely, and the `except
         # ActivityError` below was unreachable in precisely the case it exists for.
         #
-        # Doubled rather than a new setting: the wait is one small insert plus whatever queue delay
-        # a healthy fleet has, and a second knob would be one more pair to keep in step.
-        schedule_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds * 2),
+        # **It was bounded by `schedule_to_close_timeout = activity_timeout_seconds * 2`, and that
+        # is the wrong quantity — a *total* budget spent almost entirely on a wait this call does
+        # not control.** `background-jobs` also carries 900 s template agent steps, 300 s report
+        # sections and the hourly sweeps, on eight slots. Measured on the real broker: with those
+        # slots held by long activities a 50 ms activity waited 41.6 s, and the shipped shape (30 s
+        # start-to-close, 60 s schedule-to-close, 5 attempts) behind eight 120 s activities was
+        # dropped at 60.1 s with `ActivityError: Activity task timed out`. At target load the
+        # expected wait for a slot is ~150 s, so *essentially every* completion push-back was
+        # dropped and the chemist's session showed "running" forever — a queue-pressure reopening
+        # of the exact defect `D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` closed.
+        #
+        # So the two quantities are separated, which is what Temporal has these timeouts for: the
+        # bound above is the *work* (one small insert), and the bound below is the *wait*. The
+        # retry budget comes back with it — schedule-to-close capped all five attempts together, so
+        # a single slow pickup spent the lot. It is `light_write_queue_wait_timeout` rather than
+        # core's hour because this call is at the *end* of a job: an hour of patience here is an
+        # hour in which a finished job has told nobody. `durable/publish.py` states the number and
+        # what it is derived from.
+        schedule_to_start_timeout=light_write_queue_wait_timeout(),
         retry_policy=BAD_DATA_RETRY,
     )
 
@@ -119,8 +139,16 @@ async def notify_session_best_effort(session_id: str, kind: str, payload: dict[s
     """
     try:
         await notify_session(session_id, kind, payload)
-    except ActivityError:
-        workflow.logger.warning("session push-back failed for %s", session_id)
+    except ActivityError as exc:
+        # **Named, not just counted.** Every drop used to read the same whatever caused it, so the
+        # two states an operator has to tell apart — "the background queue is unserved" and "the
+        # insert failed" — arrived as one line. `TimeoutType.SCHEDULE_TO_START` is the first one,
+        # and it is the one no amount of retrying inside this workflow can help: it means nothing
+        # is polling `background-jobs`, so the chemist's completion is lost for a fleet reason and
+        # the fix is a worker, not a redelivery.
+        workflow.logger.warning(
+            "session push-back failed for %s: %s", session_id, activity_failure_reason(exc)
+        )
         # Counted, because the log line above is workflow-scoped and swallowed by every caller: a
         # fleet-wide push-back outage — a dead background queue, a full mailbox table — was
         # invisible on any dashboard while every job's completion silently reached nobody. Guarded

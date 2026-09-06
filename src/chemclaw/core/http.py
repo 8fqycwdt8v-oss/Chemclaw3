@@ -51,6 +51,12 @@ else's HTTP endpoint" and exists only to stop a second copy appearing:
   in both directions (`::ffff:127.0.0.1` is loopback, `::ffff:8.8.8.8` is not) — `ipaddress` does
   that itself, and this docstring said the opposite until `tests/test_netguard.py` was run.
 
+- **`default_ssl_context`** — one TLS trust store for the whole process, shared by every
+  *connector* client. Building one is not cheap and httpx builds a fresh one per client, so a
+  seven-connector turn paid it seven times on the loop that serves every user on the pod
+  (156.1 ms against 0.4 ms). It is deliberately not the gateway's context: that one is
+  `gateway_client_kwargs` below, which answers a different question about trust.
+
 - **`gateway_client_kwargs`** — the decisions a client reaching the model gateway must take,
   stated once. Both LLM seams need them and neither may own them: the chat client
   (`agent/llm_provider._tls_http_clients`) and the embedding client
@@ -72,8 +78,12 @@ error body again should write it back with the caller that needs it, not before.
 """
 
 import ipaddress
+import ssl
+from functools import cache
 from typing import Any
 from urllib.parse import urlsplit
+
+import certifi
 
 
 def is_loopback_host(host: str | None) -> bool:
@@ -124,6 +134,53 @@ def is_loopback_url(url: str) -> bool:
     except ValueError:
         return False
     return is_loopback_host(host)
+
+
+@cache
+def default_ssl_context() -> ssl.SSLContext:
+    """The process's one TLS trust store, built once.
+
+    **Why this exists at all: constructing it is not cheap, and httpx does it per client.** An
+    `httpx.AsyncClient` with no `verify=` builds a fresh `ssl.SSLContext` and parses the whole
+    certifi CA bundle into it. A turn opens one client per connector, so the shipped seven-connector
+    deployment paid that seven times *per turn*, on the single event loop that serves every user on
+    the pod, before any tool ran. Measured in this project's environment:
+
+        7 default clients (one turn): 156.1 ms
+        7 shared-context clients    :   0.4 ms
+
+    — a 390x difference, and `load_verify_locations` was the largest single entry in a cProfile of
+    connector setup (0.433 s of 1.371 s). It is *blocking* CPU rather than await time, so it does
+    not merely slow the turn that pays it: at the shipped eight-turn admission cap it stalled every
+    other user's stream on the pod for over a second, and there is a cliff behind that — around
+    45-50 concurrent opens the client's own CPU exceeds `connector_open_timeout_seconds`, healthy
+    connectors are recorded unreachable, and the pod then serves turns with no tools at all.
+
+    **`cafile=certifi.where()` is not decoration — without it this changes what the fleet trusts.**
+    The first version of this function returned a bare `ssl.create_default_context()`, and that is
+    not the context httpx would have built: `verify=True` passes `cafile=certifi.where()`, while a
+    bare call loads the *operating system* store. Measured in this environment, **138 roots against
+    109 — 42 CAs newly trusted and 13 dropped** on every connector call and the bearer token it
+    carries; on a hardened image with no `ca-certificates` package it loads **zero** roots and every
+    `https://` connector fails at handshake. Both call sites also pass `trust_env=False` to refuse
+    ambient environment, and a bare context silently defeats that too, because `load_default_certs`
+    reads `SSL_CERT_FILE`/`SSL_CERT_DIR` where `verify=True` does not — measured, an `SSL_CERT_FILE`
+    pointing at a one-certificate bundle took httpx's 118 roots down to **1**. A performance fix is
+    not a licence to move a trust boundary.
+
+    **Sharing one context between clients is safe, but not for the reason first written here.** The
+    original said "a context is read-only in use", and that is false: `httpcore` calls
+    `set_alpn_protocols` on it at every TLS connect. It is safe because every client in this process
+    writes the *same* ALPN list — nothing here sets `http2=True` — so the write is idempotent. If a
+    caller ever enables HTTP/2, that stops being true and this has to become a per-profile context.
+    A caller needing a different *trust* decision passes its own `verify=` and does not come here;
+    `private_ca_transport` below already does exactly that.
+
+    Most endpoints this is handed to are plain in-cluster `http://`, where the context is never
+    consulted at all. That is not a reason to skip it: the cost was paid on construction, not on
+    use, which is precisely why it was invisible.
+    """
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 def gateway_client_kwargs(ca_bundle: str = "") -> dict[str, Any]:

@@ -8,6 +8,8 @@ past run by the words a chemist would actually remember — the *reason* it was 
 
 import asyncio
 
+from chemclaw.core import db
+from chemclaw.core.config import settings
 from chemclaw.durable.job_record import JobRecord
 from chemclaw.durable.job_record_store import (
     PostgresJobRecordSink,
@@ -139,6 +141,73 @@ def test_a_past_run_is_found_by_the_reason_it_was_run() -> None:
         assert len(recent) == 1
 
     asyncio.run(_run())
+
+
+def test_the_search_is_a_substring_search_and_the_index_serves_that_predicate() -> None:
+    """What `081` accelerated, and the semantics it must not have changed.
+
+    `_SEARCH` is a leading-wildcard `ILIKE` over `rationale`, `summary` and `job`, and the agent
+    calls it. A leading wildcard is unindexable by a btree, so a term that matches *nothing* reads
+    the whole table while holding one of `pg_pool_max_size` connections: measured at 500 000 rows
+    through psycopg with the shipped statement, 1 036 ms and 19 920 buffers, against 1.09 ms once
+    `gin_trgm_ops` indexes are present — and 0.89 ms either way for a term that hits, because the
+    `completed_at` index lets a hit stop early. That asymmetry is why nothing ever saw this: an
+    agent inventing a phrase produces the miss, and every test and demo produces the hit.
+
+    **Trigrams accelerate the same predicate; a `tsvector` would answer a different question.** The
+    docstring of `search_job_records` promises words looked for *in* the reason, the summary or the
+    job name, and the four cases below are what that means and what a stemmed, `websearch`-widened
+    rewrite would break: a match inside a word, a phrase that must be contiguous, case
+    insensitivity, and a two-word query that is not two independent terms. They are asserted
+    against the live statement rather than against a plan, because a plan at fixture scale is a
+    sequential scan whatever indexes exist — so the index itself is checked in the catalog, where
+    the fact is scale-free.
+    """
+
+    async def _run() -> tuple[list[list[str]], set[str]]:
+        sink = await _sink_or_skip()
+        await sink.record(
+            _CAMPAIGN.model_copy(
+                update={
+                    "job_id": "pg-trgm-1",
+                    "rationale": "the polymorph screen needs a Class 2 antisolvent",
+                    "summary": "3 forms, Form II stable above 40 C",
+                }
+            )
+        )
+        found = [
+            # A substring inside a word: `ILIKE '%morph%'` matches "polymorph", a stem-based
+            # search does not.
+            [m.job_id for m in await read_job_record_summaries("morph", "", 50)],
+            # A phrase is contiguous: these three words all appear, in this order, apart.
+            [m.job_id for m in await read_job_record_summaries("screen antisolvent", "", 50)],
+            # Case-insensitive, which is the `I` in ILIKE and not a property of the index.
+            [m.job_id for m in await read_job_record_summaries("POLYMORPH SCREEN", "", 50)],
+            # A miss stays a miss — the case that used to cost a full table read.
+            [m.job_id for m in await read_job_record_summaries("no such run anywhere", "", 50)],
+        ]
+        async with db.connection(settings.postgres_dsn) as conn:
+            cursor = await conn.execute(
+                "SELECT a.attname FROM pg_index x "
+                "JOIN pg_class i ON i.oid = x.indexrelid "
+                "JOIN pg_class t ON t.oid = x.indrelid "
+                "JOIN pg_am m ON m.oid = i.relam "
+                "JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(x.indkey) "
+                "WHERE t.relname = 'job_records' AND m.amname = 'gin' "
+                "AND t.relnamespace = current_schema()::regnamespace"
+            )
+            indexed = {str(row[0]) for row in await cursor.fetchall()}
+        return found, indexed
+
+    (inside_word, phrase, upper, miss), indexed = asyncio.run(_run())
+    assert "pg-trgm-1" in inside_word, "a substring inside a word stopped matching"
+    assert phrase == [], "the search matched a phrase whose words are not contiguous"
+    assert "pg-trgm-1" in upper, "the search stopped being case-insensitive"
+    assert miss == [], "a term nothing carries came back with a hit"
+    assert {"rationale", "summary", "job"} <= indexed, (
+        "the three searched columns are not all covered by a GIN index, so the OR of three ILIKEs "
+        f"cannot be planned as a BitmapOr and a miss scans the table; GIN covers {sorted(indexed)}"
+    )
 
 
 def test_an_unknown_job_id_reads_as_absent_rather_than_raising() -> None:

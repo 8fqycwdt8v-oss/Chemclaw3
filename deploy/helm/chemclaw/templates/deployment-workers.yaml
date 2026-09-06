@@ -27,8 +27,10 @@ spec:
 
          `Recreate` rather than `maxSurge: 0`: a singleton worker has no availability to protect —
          Temporal redelivers an activity whose worker went away — so the honest statement is that
-         the old process is gone before the new one starts. The connector workers below keep the
-         default on purpose; nothing on their queues is host-local, so an overlap is only capacity. */}}
+         the old process is gone before the new one starts.
+
+The connector workers below keep the default on purpose;
+         nothing on their queues is host-local, so an overlap is only capacity. */}}
   strategy:
     type: Recreate
   selector:

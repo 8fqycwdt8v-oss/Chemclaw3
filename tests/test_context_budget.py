@@ -225,14 +225,18 @@ def test_a_budget_the_prefix_exhausts_floors_at_one_and_says_so(
 
     **It is reachable from a plain misconfiguration now, not only from the window corner.** Before
     the prefix was charged unconditionally it took a declared window narrower than its own prefix;
-    it now takes any configured budget below the prefix — ~43,000 tokens of instructions, skills
-    listing and tool schemas on the `default` profile, and growing with every bound tool. The
-    shipped `agent_tool_result_clear_trigger` was 30,000 for the one commit between the two
-    changes and is now derived to clear that prefix with a band above it, which
-    `tests/test_compaction.py::test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged`
-    asserts end to end — the **opposite** state to the one this test drives, and this docstring
-    named the shipped default as an example of the floored one long after it had been raised out
-    of it.
+    it now takes any configured budget below the prefix — which is where the shipped
+    `agent_tool_result_clear_trigger` sat, unnoticed, for as long as the number was derived from a
+    prefix measured with no connector bound. Both defaults were re-derived on 2026-09-05 from the
+    honest prefix, and
+    `tests/test_compaction.py::test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged` is
+    what asserts the shipped configuration is out of this state — the **opposite** state to the one
+    this test drives — against a prefix that includes the connector surface, which is the half that
+    made the previous assertion vacuous.
+
+    No shipped figure is restated here beyond that, deliberately: this test is about the mechanism,
+    and a default quoted in it is a claim about a commit
+    (`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`).
 
     Once per distinct `(configured, prefix, window)`, because the condition is static: it is the
     same on every model call of every turn, so a line per call would be noise in exactly the

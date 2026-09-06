@@ -294,13 +294,20 @@ def effective_trigger(configured: int) -> int:
 
     **That last subtraction changes what `agent_context_token_budget` means, deliberately.** It was
     a bound on *thread* spend; it is now a bound on *request* spend, and the difference is the
-    prefix — 43,175 estimated tokens on the `default` profile on 2026-09-04, which is 43% of the
-    shipped 100,000. `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` charged it only
-    `if window:`, and no deployment declares one, so in the shipped configuration the prefix was
-    charged against nothing: measured end to end, a thread the policy cut to 90,030 estimated
-    tokens went out as a 137,301-token request with the overrun indicator flat. The reason this is
-    the right subtraction rather than an extra one is that both numbers are in the same request:
-    what the provider counts is `prefix + thread`, and only one of the two was ever budgeted.
+    prefix. `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` charged it only `if window:`,
+    and no deployment declares one, so in the shipped configuration the prefix was charged against
+    nothing: measured end to end, a thread the policy cut to 90,030 estimated tokens went out as a
+    137,301-token request with the overrun indicator flat. The reason this is the right subtraction
+    rather than an extra one is that both numbers are in the same request: what the provider counts
+    is `prefix + thread`, and only one of the two was ever budgeted.
+
+    **How big the prefix is is not written here, because the figure this paragraph used to carry —
+    43,175, "43% of the shipped 100,000" — was measured on a graph compiled with no connector
+    bound.** A shipped `default` turn binds eight connector bundles and sends **75,695** estimated
+    tokens, so the subtraction was two thirds of what it is, and both compaction defaults were
+    derived from the short number. The ratchet is the place a live figure comes from
+    (`tests/test_context_floor.py`) and `core/config/agent.py` carries the derivation; a number
+    repeated here is a third copy that can go stale on its own.
 
     The prefix is counted in the estimator's unit and subtracted from a budget in the provider's.
     That is deliberate rather than sloppy: the prefix is instructions, a skills listing and tool

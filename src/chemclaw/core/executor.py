@@ -22,6 +22,14 @@ calls that are microseconds long and must never wait: token validation, a readin
 reconnect. Sizing the shared pool is what closes the measured gap; a dedicated executor for token
 validation, so it cannot queue behind chemistry even in principle, is a further step nobody needs
 yet.
+
+**"How many threads a cap can hold" is not the cap, and for the front door it was off by 8x.**
+An admitted *turn* is not one offload: `agent_max_parallel_tool_calls` becomes `max_concurrency` on
+the turn's config (`agent/state.py`), so one turn may run that many tool calls at once and several
+of the tools a turn reaches offload — `agent/graph_tools.py` threads `build_graph`/`load_notes`,
+`retrieval/retrievers.py` threads the embedding. A permit is a licence to fan out, so the ceiling
+is the product. `front_door_reserved` below is that arithmetic, stated once where the pool it sizes
+is built.
 """
 
 import asyncio
@@ -70,3 +78,40 @@ def install_default_executor(*, component: str, reserved: int) -> ThreadPoolExec
         settings.service_thread_pool_headroom,
     )
     return executor
+
+
+def front_door_reserved() -> int:
+    """How many threads the front door's own admission caps can occupy at the same time.
+
+    **A separate function because the number is not the sum of the caps, and reading it as one is
+    the defect.** `api/app.py` passed `service_max_concurrent_turns + attachment_max_concurrent_
+    parses` — 14 at the shipped defaults — while an admitted turn may fan out to
+    `agent_max_parallel_tool_calls` concurrent tool calls, each of which may hold a thread. The
+    true ceiling is `turns x parallel tool calls + parses`: **98**, so the pool was sized for a
+    seventh of what the process's own caps permit, and the headroom that exists so a token
+    validation never queues behind chemistry was the first thing a fan-out consumed.
+
+    Measured on a 4-core sandbox, 96 offloads of 200 ms each (half GIL-holding parse, half file
+    I/O — the shape of a corpus read) with one short call submitted behind them: at the shipped
+    width the short call waited **762.7 ms** at worst; at this width, **123.2 ms**. The median is
+    1.2 ms either way, which is why only the tail is quoted: the failure is one authentication
+    stalling behind a fan-out, not a slower service.
+
+    **It does not multiply the parses.** `attachment_max_concurrent_parses` is already a count of
+    simultaneous *offloads* — its own semaphore bounds the threads, not the requests holding them —
+    so it enters the sum as it stands. Only the turn cap is a licence to fan out.
+
+    **`max(1, ...)` because 0 means *no* bound on the fan-out**, and no finite pool covers that: a
+    literal multiplication would then charge a turn nothing and hand back a width smaller than the
+    sum this function exists to replace. The honest floor at that setting is one thread per admitted
+    turn, with the headroom left best-effort — which is what removing the bound asks for.
+
+    Returns:
+        The `reserved` argument `install_default_executor` should be given in the front door. Read
+        at call time rather than at import, because `Settings` is constructed once per process and
+        a test that overrides a cap must see the width change with it.
+    """
+    return (
+        settings.service_max_concurrent_turns * max(1, settings.agent_max_parallel_tool_calls)
+        + settings.attachment_max_concurrent_parses
+    )

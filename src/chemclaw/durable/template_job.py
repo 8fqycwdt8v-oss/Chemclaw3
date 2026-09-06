@@ -50,7 +50,12 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
     from chemclaw.templates.resolve import resolve
 
-from chemclaw.durable.publish import BAD_DATA_RETRY, agent_step_retry, queue_wait_timeout
+from chemclaw.durable.publish import (
+    BAD_DATA_RETRY,
+    agent_step_retry,
+    light_write_queue_wait_timeout,
+    queue_wait_timeout,
+)
 from chemclaw.durable.registry import durable_workflow
 
 
@@ -291,14 +296,19 @@ class TemplateWorkflow:
                 # below, the first version of this method hung the whole suite rather than failing
                 # it, which is the same wedge in miniature.
                 #
-                # The stricter `schedule_to_close` rather than `queue_wait_timeout()`, matching
-                # `connector_job._record_run` exactly and for its reason: this write is best-effort
-                # by construction — the `except` below swallows it and the run carries on — so it
-                # wants the bound that caps every attempt together, and pays for it with a shorter
-                # retry budget on a row nothing downstream reads synchronously.
-                schedule_to_close_timeout=timedelta(
-                    seconds=settings.job_record_timeout_seconds * 2
-                ),
+                # **`light_write_queue_wait_timeout()`, the same bound `connector_job._record_run`
+                # and `durable/notify.py` pass, and for the same measured reason.** This was a
+                # `schedule_to_close_timeout` at twice the work budget — 60 s — on the claim that
+                # it matched the connector wrapper "exactly"; it stopped matching when that pair
+                # was fixed and this third call site was missed. Schedule-to-close is a *total*,
+                # spent almost entirely on a queue this call does not control: `background-jobs`
+                # also carries 900 s template agent steps and the hourly sweeps across eight slots,
+                # measured at 41.6 s of queueing for a 50 ms activity and ~150 s expected at target
+                # load, so the row was simply lost — and it capped all five attempts together,
+                # deleting the retry budget as well. Splitting the two quantities is what these
+                # timeouts are for: the bound above is the work, this one is the wait, and it is
+                # the *light* wait rather than core's hour because it sits at the end of a run.
+                schedule_to_start_timeout=light_write_queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
         except Exception:
