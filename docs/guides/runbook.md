@@ -115,12 +115,11 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   Leaving it unset outside Helm is the quieter failure: `knowledge-sync.sh` logs
   `CHEMCLAW_NOTE_REPO_DIR unset — no submitter clone provisioned` and skips the clone, so the
   first note submission is the thing that discovers it.
-- **Note submission is serialized per host.** Keep the background worker at one replica (see
-  `deploy/helm/chemclaw/values.yaml`); the PR-gate's checkout lock is host-local, so a second
-  replica needs the distributed lock still open in `docs/planning/BACKLOG.md`. Per-submission
-  worktrees did not change this — they buy isolation from *readers*, not throughput — and the lock
-  matters more than it did: each submission sweeps leftover worktrees under the shared clone, which
-  is safe only because the lock guarantees no sibling submission owns one. On a filesystem where
+- **Note writing is serialized per host.** Keep the background worker at one replica (see
+  `deploy/helm/chemclaw/values.yaml`); the writer's checkout lock is host-local, and the
+  cross-pod half is the Postgres advisory lock, which is taken only under
+  `CHEMCLAW_SESSION_STORE=postgres` (the chart sets it). Two writers on one `note_repo_dir` share
+  one working tree and one index, so the second stages its files into the first's in-flight commit. On a filesystem where
   `flock` is not honoured (some NFS/ReadWriteMany setups) that assumption fails, and the blast
   radius is a live worktree deleted mid-submission rather than two interleaved branches.
 
@@ -182,11 +181,11 @@ whether the audit chain still verifies. Nothing is scored from prose. The report
 
 **Two prerequisites the corpus layer needs, or the probes measure an empty database.** `make
 reindex` fills `note_index`; the fingerprint tables are filled only as a side effect of the ELN
-sync, so start `ElnSyncWorkflow` on `background-jobs` once. The PR-gate needs a *dedicated* clone —
-`bootstrap.sh` creates `.live/knowledge-repo` and `processes.sh` points `CHEMCLAW_NOTE_REPO_DIR` at
-it, because `note_repo_dir` defaults to the working checkout and every submission force-pushes a
-note branch to that clone's origin, so the gate refuses it (G4) and the whole
-knowledge-contribution half of a run silently disappears.
+sync, so start `ElnSyncWorkflow` on `background-jobs` once. The note writer needs a *dedicated*
+clone — `bootstrap.sh` creates `.live/knowledge-repo` and `processes.sh` points
+`CHEMCLAW_NOTE_REPO_DIR` at it, because `note_repo_dir` defaults to the working checkout and a write
+commits into the tree it is handed and pushes it to that clone's origin, so the writer refuses it
+(G4) and the whole knowledge-contribution half of a run silently disappears.
 
 **`make live-storm` is the third stage, and it needs no model at all.** The shipped default already
 points the lane at the mock (`CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`,
@@ -400,13 +399,13 @@ connectors/<name>/
 
 1. Create the folder with a `connector.yaml`. For an MCP capability, declare an `endpoint:` and the
    `tools:` the agent may call — read/compute only; `make connector-validate` refuses a mutating
-   name, because mutation belongs on the job path or on a core PR-gate tool.
+   name, because mutation belongs on the job path or on a core knowledge-writing tool.
 2. For a long-running capability, declare a `jobs:` entry naming the Temporal **workflow type**. The
    queue is *not* declared — it is `connector-<name>`, derived at dispatch, because a bundle's worker
    serves only what the bundle's own modules registered (D-150). Its workflow returns a
    `ConnectorJobResult`
    (`summary`, `data`, optional `Note`); core's `ConnectorJobWorkflow` supplies the idempotent job
-   id, the actor attribution, the PR-gate publish and the session push-back. A job declares its
+   id, the actor attribution, the note write and the session push-back. A job declares its
    arguments inline (`params:`) or by reference (`params_model: module:Model`) when the input is a
    structured domain object. Mark it `expensive: true` to require a privileged role
    (`CHEMCLAW_ENTRA_PRIVILEGED_ROLES`) before any durable work starts — the declaration is what the
@@ -517,9 +516,9 @@ set so adding to it is a reviewed edit:
 - **Conversation plumbing** — anything reading or writing the turn's own state
   (`ask_clarifying_question`, attachments, preferences, watches). Another process does not have the
   turn.
-- **The two PR-gate writers** (`propose_knowledge_note`, `record_confirmed_answer`) — the review
-  boundary. A connector reaches the gate only by returning a note in a job envelope, for core to
-  publish.
+- **The two knowledge writers** (`record_knowledge_note`, `record_confirmed_answer`) — the one
+  write path. A connector reaches the graph only by returning a note in a job envelope, for core to
+  write; `tests/test_knowledge.py` asserts no bundle holds a second way in.
 - **The knowledge-graph reads** (`find_notes`, `expand_note`, `find_knowledge_gaps`, and the
   `gather_evidence` sweep over them). The graph is core's *data layer*, not a capability: thirteen
   core modules import `kg`, so a bundle would move three thin tools and leave every one of those
@@ -631,14 +630,13 @@ and reported as `… export file(s) arrived after the sync cursor but carry an o
 Start the sync with `since` set before those entries' timestamps to pull them in.
 
 **A steady ingest count is not proof anything landed.** `IngestSummary.ingested` counts entries
-whose note this run *proposed* — the PR-gate is where a human merges it — so an entry whose branch
-is simply unreviewed is proposed again on
-every run, indefinitely. Those entries are listed in `IngestSummary.awaiting_merge` (a subset of
-`ingested`) and logged as `eln sync proposed N entry/entries whose notes are still unmerged`. A
-count that does not fall between runs is a review queue nobody is working, not a source producing
-new data: open the branches those entries named, and merge or reject them. Note that an entry's
-*first* sync can appear here too when its export landed late — it sits inside the replay window,
-so it will indeed be re-proposed next run.
+whose note this run wrote. There is no review step to wait on any more, so the failure this
+paragraph used to describe — an entry re-proposed on every run because nobody merged its branch —
+is gone with `awaiting_merge` itself (`ingest/eln/sync.py` records why). What a steady count now
+means is a source producing
+new data. Note that an entry's *first* sync can appear here too when its export landed late — it
+sits inside the replay window, so it is written again next run, which is idempotent: a byte-
+identical re-write stages nothing and reports the unchanged tree.
 
 ## (vi) Change a fingerprint definition (ECFP radius/bits or DRFP bits)
 
@@ -817,46 +815,33 @@ these counters. They still carry `profile` rather than model, deliberately (D-15
 ledger already holds per-turn model attribution, and a second, lossier answer as a counter label
 would be two systems to reconcile.
 
-## (ix) Work the PR-gate review queue
+## (ix) Where agent-authored knowledge goes now
 
-Agent-authored notes never land directly; each is pushed to `note/<id>` and waits for a human
-(D-005). Until D-2026-07-31-a-proposal-is-a-record-not-a-branch the only way to find one was to
-browse `note/*` refs in the git host, and a rejection left no trace at all. Both are now routes.
+**There is no review queue, and that is the current design rather than a gap.**
+`D-2026-09-05-the-gate-is-deleted-not-dormant` deleted the PR-gate: an agent-authored note is
+written straight into the notes checkout, committed on the base branch and pushed, so it is
+readable by every reader the moment its bytes land. `GET /proposals`, the decision route and the
+post-merge webhook are gone with it, along with the two `CHEMCLAW_PROPOSAL_*` settings that sized
+the queue and its stored failure reasons, and the webhook secret the git host signed its
+post-merge callback with.
 
-- **What is waiting**: `GET /proposals?state=open`. Paged newest-first by row id; pass the last id
-  you saw as `before_id` for the next page (`CHEMCLAW_PROPOSAL_LIST_LIMIT` bounds a page). A
-  reviewer — anyone holding a role in `CHEMCLAW_ENTRA_PRIVILEGED_ROLES` — sees every proposal;
-  everyone else sees their own. With `CHEMCLAW_ENTRA_REQUIRED=false` (dev) everything is visible.
-- **What it says**: `GET /proposals/{id}` returns the rendered note exactly as it would land in the
-  tree, plus the `session_id` and `correlation_id` of the turn that produced it — so
-  `make explain SESSION=<session-id>` reaches the conversation behind a proposal (D-166).
-- **Decide**: `POST /proposals/{id}/decision` with `{"approved": true}` or
-  `{"approved": false, "reason": "…"}`. A rejection **must** state why; that is the record's whole
-  purpose. Deciding twice is a `409`, not a silent overwrite — the first decision stands.
-- **Merges close themselves** when something calls `POST /events/knowledge-merged` with
-  `{"note_ids": ["…"]}`, signed as
-  `X-Chemclaw-Signature: sha256=<HMAC-SHA256 of the raw body under CHEMCLAW_NOTE_WEBHOOK_SECRET>`.
-  Without the secret configured the route still forces a reindex for an operator running it by
-  hand, and refuses to close anything.
-  **That "something" is not a git host directly — a translation step is required, and this page
-  used to imply otherwise.** GitHub signs under `X-Hub-Signature-256` and posts a whole
-  pull-request payload; GitLab sends `X-Gitlab-Token`, which is the raw secret rather than an HMAC;
-  Azure DevOps uses Basic auth. None of them emits a `note_ids` list, because only this system
-  knows which note ids a merged branch carried. So wire the host's post-merge hook to a small proxy
-  or a CI job that reads the merged branch, collects the note ids, and re-signs the body for this
-  endpoint. The contract here is deliberately ours; the mapping is the operator's, and it is one
-  step rather than a missing feature.
+**What to watch instead.** `chemclaw_notes_recorded_total` counts notes that reached the graph and
+`chemclaw_notes_publish_failures_total` counts those that could not — the ratio is the health
+signal, and a flat recorded count with a rising failure count is a git credential or a wedged
+notes checkout, not an idle system. `chemclaw_fan_out_children_dropped_total` covers the memory
+fan-out, which does not go through the best-effort publisher.
 
-**If the queue only ever grows**, the webhook is the first thing to check: `curl` it with a signed
-body naming a note you know was merged and read `proposals_closed` in the response. A `401` means
-the signature does not match — the secret differs between the host and
-`CHEMCLAW_NOTE_WEBHOOK_SECRET`, or the host signed a re-serialized body rather than the bytes it
-sent.
+**What an operator does when a note is wrong.** Nothing at write time; there is no queue to hold it
+in. The controls are downstream and a chemist reaches all three from the conversation: the note
+carries `created_by: agent` on every retrieved chunk, `record_failure` writes a `contradicts` edge
+that `kg/conflicts.py` surfaces, and a newer finding supersedes it with the old one's window closed.
+A note whose *file* must go is an ordinary commit in the notes repo by a human with push rights.
 
-**The metric to watch is `chemclaw_note_proposals_total{state}`.** A rising `open` against a flat
-`merged` is a queue nobody is working. A non-zero `failed` means submissions are not reaching git
-at all — the note is still recoverable, because a `failed` row keeps the rendered content:
-`SELECT note_id, content FROM note_proposals WHERE state = 'failed';`.
+**If a write fails.** The note is on disk in the checkout and uncommitted or unpushed — the writer
+fast-forwards and retries on the next write, so the usual repair is to fix the remote or the
+credential and let the next note carry it. `git -C $CHEMCLAW_NOTE_REPO_DIR status` is what tells
+you which state you are in, and the checkout must be on the base branch or the writer refuses.
+
 
 ## (ix-b) Who may change an experiment design
 
@@ -1114,13 +1099,13 @@ workers: `ChemclawTargetDown` covers the pods, this covers the thing they dial. 
 #### ChemclawKnowledgeNotesLost
 `critical`. Knowledge is being dropped silently — the publish is best-effort so a dead remote cannot
 fail a finished calculation. Usual causes are a dead git remote, an expired push credential, or two
-processes sharing one `note_repo_dir`. §(ix) is the PR-gate queue; the notes lost here never reached
-it.
+processes sharing one `note_repo_dir`. §(ix) says where an agent-authored note goes; the notes lost
+here never got there.
 
 #### ChemclawKnowledgeCorpusStale
 `warning`, and **only rendered when `monitoring.alerts.knowledgeCorpusStaleSeconds` is non-zero** —
 the chart ships it at 0 because the threshold is how often *your* chemists merge notes. The same
-failure as the alert above in the other direction: notes reach the PR-gate and stop reaching the
+failure as the alert above in the other direction: notes are written and stop reaching the other
 pods. `knowledge-sync.sh`'s `loop` swallows a failed refresh on purpose (a dead remote must not kill
 the pod), so the pod serves the frozen snapshot indefinitely and every answer keeps citing it.
 `chemclaw_knowledge_sync_age_seconds` is the age of the newest note on that pod's tree; **-1 means
@@ -1783,7 +1768,7 @@ config rather than from code. What is fixed is the **set of gates** that read th
 
 | Setting | What it gates | Shape |
 | --- | --- | --- |
-| `CHEMCLAW_ENTRA_PRIVILEGED_ROLES` | expensive jobs (`expensive: true` in any `connector.yaml`), and who sees the whole PR-gate review queue rather than only their own proposals | comma list of role values |
+| `CHEMCLAW_ENTRA_PRIVILEGED_ROLES` | expensive jobs (`expensive: true` in any `connector.yaml`) and the other privileged actions (cancelling a durable run) | comma list of role values |
 | `CHEMCLAW_TOOL_ROLE_GATES` | one named tool → the roles that may call it | JSON `{"tool": ["role"]}` |
 | `CHEMCLAW_SKILL_ROLE_GATES` | one skill's *visibility* — a caller holding none of its roles never sees it | JSON `{"skill": ["role"]}` |
 | `CHEMCLAW_ENTRA_EXPENSIVE_ACTIONS` | anything expensive that **no** manifest declares; a bundle's own `expensive: true` needs no entry here | comma list of tool names |

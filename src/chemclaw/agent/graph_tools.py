@@ -2,8 +2,9 @@
 
 Read tools (`find_notes`, `expand_note`) let the agent retrieve by graph traversal
 — the capability behind the `knowledge-graph-query` skill. The write tools route an
-agent-authored note through the PR-gate for human review (D-005), never straight to the graph:
-`propose_knowledge_note` for new knowledge, `record_failure` for the case that had no path at all
+agent-authored note straight into the graph, labelled with its provenance
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`):
+`record_knowledge_note` for new knowledge, `record_failure` for the case that had no path at all
 — knowledge the graph already holds turning out to be wrong. Graph building is file I/O, so
 it runs off the event loop.
 """
@@ -20,14 +21,14 @@ from chemclaw.agent.framing import frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
-from chemclaw.core.turn_signals import record_proposal
+from chemclaw.core.turn_signals import record_note_written
 from chemclaw.ingest.eln.compound import compound_dependencies
 from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.kg.analytics import GraphGaps, analyze
-from chemclaw.kg.git_submitter import default_submitter
+from chemclaw.kg.git_writer import default_writer
 from chemclaw.kg.graph import build_graph, load_notes, neighborhood, note_in
 from chemclaw.kg.note import Note, Relation, external_record_id, resolves_outside_graph
-from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.record import record_note
 from chemclaw.kg.relations import DEFAULT_RELATION
 from chemclaw.kg.search import query_terms, term_coverage
 from chemclaw.memory.failure import close_refuted_note, failure_note
@@ -346,7 +347,7 @@ async def find_knowledge_gaps() -> GraphGaps:
 
 
 @tool
-async def propose_knowledge_note(
+async def record_knowledge_note(
     id: str,
     type: str,
     body: str,
@@ -360,11 +361,15 @@ async def propose_knowledge_note(
     valid_from: date | None = None,
     valid_to: date | None = None,
 ) -> str:
-    """Propose a new knowledge-graph note for human review via the PR-gate.
+    """Record a new note in the knowledge graph, readable by everyone at once.
 
-    The note is authored as `agent`, so it lands on a feature branch as a PR and a
-    human must approve it before it becomes trusted knowledge. Relate it to other
-    notes with `[[wikilinks]]` in the body.
+    The note is authored as `agent` and is written straight into the graph — there is no review
+    step and nothing to wait for. It arrives labelled with that provenance, so a chemist reading it
+    as evidence can see it is machine-written, and it can be corrected: `record_failure` writes a
+    `contradicts` edge, and a later finding supersedes it. Write what the record actually shows and
+    cite it; do not state a conclusion the evidence does not carry, because nobody is going to
+    catch it before it is served to the next person. Relate it to other notes with `[[wikilinks]]`
+    in the body.
 
     Args:
         id: Stable, unique, human-readable note id (e.g. "reaction-suzuki-x").
@@ -389,7 +394,7 @@ async def propose_knowledge_note(
             not expire on its own, it is superseded.
 
     Returns:
-        The submitted PR reference.
+        A reference to what landed — the commit the note was recorded in.
     """
     note = Note(
         id=id,
@@ -406,13 +411,12 @@ async def propose_knowledge_note(
         valid_to=valid_to,
         created_by="agent",
     )
-    # A compound note the agent linked is minted into the same PR (STO-7), so the agent can cite
-    # the molecule it is writing about without first checking whether that note exists.
-    reference = await propose_note(
-        note, default_submitter(), dependencies=compound_dependencies(note)
-    )
-    # Surface the opened branch on the turn's stream (gap RCH-4) — see `core.turn_signals`.
-    record_proposal(note.id, reference)
+    # A compound note the agent linked is written first (STO-7, and `record._build_write` says why
+    # the order is load-bearing now that a reader can see a half-written unit), so the agent can
+    # cite the molecule it is writing about without first checking whether that note exists.
+    reference = await record_note(note, default_writer(), dependencies=compound_dependencies(note))
+    # Surface what landed on the turn's stream (gap RCH-4) — see `core.turn_signals`.
+    record_note_written(note.id, reference)
     return reference
 
 
@@ -424,7 +428,7 @@ async def record_failure(
     confidence: float | None = None,
     held_until: date | None = None,
 ) -> str:
-    """Record that something the knowledge graph says did **not** hold in practice (PR-gated).
+    """Record that something the knowledge graph says did **not** hold in practice.
 
     Call this when a chemist reports that a note is wrong, misfired, or no longer matches the
     lab — the counterpart to `record_confirmed_answer`, which can only capture an answer that was
@@ -434,7 +438,7 @@ async def record_failure(
 
     The edge is `contradicts` and never `supersedes`: a failure report says the old claim is wrong,
     not that this note is the new right answer — it does not contain one. When you *do* know the
-    replacement, write it with `propose_knowledge_note` and give it a `supersedes` relation.
+    replacement, write it with `record_knowledge_note` and give it a `supersedes` relation.
 
     Args:
         refutes: The id of the note that did not hold. It must already be in the graph; find it
@@ -452,7 +456,8 @@ async def record_failure(
             keeps the disputed note visible and marked.
 
     Returns:
-        The submitted PR reference. Nothing changes in the graph until a human merges it.
+        A reference to what landed. **The refutation is live immediately** — it is readable by
+        everyone as soon as this returns, so write only what the evidence carries.
 
     Raises:
         ChemclawError: When `refutes` names no note, when `held_until` predates that note's own
@@ -491,6 +496,6 @@ async def record_failure(
     retirement = (
         [close_refuted_note(refuted, note.id, held_until)] if held_until is not None else []
     )
-    reference = await propose_note(note, default_submitter(), superseded=retirement)
-    record_proposal(note.id, reference)
+    reference = await record_note(note, default_writer(), superseded=retirement)
+    record_note_written(note.id, reference)
     return reference

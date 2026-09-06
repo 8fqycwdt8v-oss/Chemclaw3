@@ -27,7 +27,7 @@ from chemclaw.science.bo.problem import (
     Observation,
     OptimizationProblem,
 )
-from tests.conftest import FakeSubmitter
+from tests.conftest import FakeWriter
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
 # Taken from the registry rather than written out, for the reason the registry exists: a
@@ -209,9 +209,9 @@ def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPa
     hung past 100 s; with it, the campaign completed in well under the 180 s global cap. So the
     override is gone too — this test does not need one.
     """
-    fake = FakeSubmitter()
+    fake = FakeWriter()
     # The gate is core's now, so the submitter is patched where core publishes from.
-    monkeypatch.setattr(memory_jobs, "default_submitter", lambda: fake)
+    monkeypatch.setattr(memory_jobs, "default_writer", lambda: fake)
 
     async def _run() -> None:
         from chemclaw.science.bo.benchmarks.reizman_suzuki import build_problem, load_dataset
@@ -259,8 +259,8 @@ def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPa
                     id="bo-publish-test",
                     task_queue=settings.background_task_queue,
                 )
-        assert len(fake.submissions) == 1  # the recommendation was proposed as a note
-        assert fake.submissions[0].files[0].path.startswith("knowledge/bo-candidate/bo-")
+        assert len(fake.writes) == 1  # the recommendation was proposed as a note
+        assert fake.writes[0].files[0].path.startswith("knowledge/bo-candidate/bo-")
 
     asyncio.run(_run())
 

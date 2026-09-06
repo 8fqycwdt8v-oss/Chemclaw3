@@ -9,7 +9,7 @@ approval mean anything afterwards, and a live pass found the consequence (DARK-1
     approve a four-item plan               → mode flips to execute, a plan_approvals row is written
     ask a completely different question    → new plan_hash, approved=false, mode still execute,
                                              and the turn autonomously ran compute_xtb_energy and
-                                             propose_knowledge_note — a knowledge-graph write
+                                             record_knowledge_note — a knowledge-graph write
 
 `PlanApprovalStore.decision` was read in exactly one place: the front door's **display** route. No
 execution path consulted it. The only thing gating the loop was MAF's session mode, `grant_execute`
@@ -437,7 +437,7 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     has to close itself.** `ToolNode` builds every call's runtime from one `_extract_state` and then
     `asyncio.gather`s them, so a `write_todos` in the *same assistant message* has not landed yet
     when this runs. Reproduced against the real graph: turn 1 writes plan A and a chemist approves
-    it; turn 2 emits `write_todos(plan B)` and `propose_knowledge_note(...)` together; the gate sees
+    it; turn 2 emits `write_todos(plan B)` and `record_knowledge_note(...)` together; the gate sees
     plan A, the approval stands, and the write executes under an approval given for a different
     plan. That is the DARK-1 sequence this module exists to prevent.
 

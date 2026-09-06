@@ -26,11 +26,13 @@ support — and how to present it later without overstating it.
   substrates), not the substrate-specific detail. If only one condition actually generalizes,
   the playbook is about that one condition — say so, narrowly.
 
-## Approval is a process chemist's call
+## Nobody approves it, which raises the bar rather than lowering it
 
-- Playbook notes carry more authority than episodic ones (they will steer future work), so the
-  PR-gate reviewer for a playbook is a process chemist, not just any human. Write for that
-  reader: conservative, evidenced, explicit about the boundary of the claim.
+- Playbook notes carry more authority than episodic ones — they will steer future work — and
+  since `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` there is no reviewer between the
+  distillation and the next chemist reading it. The process chemist who used to sign one off now
+  meets it as evidence instead, so write for that reader with the judgment that reviewer would
+  have applied: conservative, evidenced, explicit about the boundary of the claim.
 
 ## Retrieval: keep evidenced and analogy visibly separate (5.6)
 

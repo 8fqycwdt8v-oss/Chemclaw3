@@ -164,7 +164,7 @@ def test_a_helper_holds_nothing_that_changes_anything(helper: Any) -> None:
     The defect this closes was not a hole in a gate — every gate held — but a surface that did not
     match its own description. The `task` tool told the model a helper was for isolation and
     parallel reading while the helper held its caller's nine `run_*` durable job launchers,
-    `propose_knowledge_note`, `start_optimization_campaign` and `request_external_input`: a brief
+    `record_knowledge_note`, `start_optimization_campaign` and `request_external_input`: a brief
     the *model* wrote could open a pull request against the knowledge graph, spend hours of pod
     time, and put a durable question into somebody's inbox, from a context the chemist never sees.
 
@@ -213,7 +213,7 @@ def test_the_set_of_tools_that_speak_to_the_chemist_is_derived_not_remembered() 
     """
     import ast
 
-    writers = {"record_question", "record_job_started", "record_proposal"}
+    writers = {"record_question", "record_job_started", "record_note_written"}
     registered = registered_tool_names()
     speakers: set[str] = set()
     for module in Path("src/chemclaw").rglob("*.py"):
@@ -246,14 +246,14 @@ def test_a_helper_inherits_the_narrowing_of_a_caller_that_already_narrowed() -> 
     actually resolved, so the two narrowings compose in the only direction they can.
     """
     narrow = AgentProfile(
-        name="narrow", tool_names=frozenset({"find_notes", "propose_knowledge_note"})
+        name="narrow", tool_names=frozenset({"find_notes", "record_knowledge_note"})
     )
     caller = build_langgraph_agent(model=_model(), profile=narrow)
     helper = build_langgraph_agent(model=_model(), profile=narrow, helper=True)
 
-    assert {"find_notes", "propose_knowledge_note"} <= _tool_names(caller)
+    assert {"find_notes", "record_knowledge_note"} <= _tool_names(caller)
     assert "find_notes" in _tool_names(helper)
-    assert "propose_knowledge_note" not in _tool_names(helper)
+    assert "record_knowledge_note" not in _tool_names(helper)
     assert "gather_evidence" not in _tool_names(helper), (
         "the helper reached a read its caller does not advertise, so the derivation read the "
         "registry rather than the caller"

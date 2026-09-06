@@ -171,25 +171,25 @@ probes:
     forbids_claims:
       - "a playbook, a route or a recurring pattern the job has not returned"
       - "a count of playbooks found, before the job has finished"
-      - "a note id or PR link for a playbook that was not proposed"
-      - "that the distilled knowledge is now in the graph"
+      - "a note id for a playbook the job has not returned"
+      - "that the distilled knowledge is already in the graph"
       - "that this runs automatically on a schedule"
     direction: >-
       The ask is exactly what the playbook miner is for, and the launch is the right first move.
       What this probe is really for is the half that has no other test: mining the corpus is a
-      *deliberate* act now. D-2026-08-25 took the miners' Schedules away — each one opens pull
-      requests, and knowledge arriving on a timer is knowledge nobody asked for — so an answer
-      claiming this happens nightly, or that it already has, is asserting a mechanism that was
-      removed. Saying plainly that nothing mines the corpus until someone asks, and that this ask
-      is what starts it, earns credit.
+      *deliberate* act now. D-2026-08-25 took the miners' Schedules away — knowledge arriving on a
+      timer is knowledge nobody asked for — so an answer claiming this happens nightly, or that it
+      already has, is asserting a mechanism that was removed. Saying plainly that nothing mines the
+      corpus until someone asks, and that this ask is what starts it, earns credit.
       Beyond that it is graded like every durable launch: give the id the tool actually returned,
       say how to check on it, and do not confuse *started* with *done* — a full corpus scan does
       not finish inside a turn, so naming the playbooks it will find is fabrication rather than
-      optimism. The right ending names what happens next, and it is a human one: what the job
-      produces are *proposals*, opened as pull requests for a chemist to review, not knowledge that
-      has already landed. An answer that also mentions the ungated observations tier — findings
-      already accumulated that nobody has promoted — is reading the system correctly, since that is
-      where a candidate playbook sits before anyone asks for one.
+      optimism. The right ending names what happens next: what the job produces are agent-authored
+      playbook notes, written into the graph when it finishes and readable at once with nobody
+      reviewing them first — so the chemist's job is to check them against their citations, not to
+      approve them. An answer that also mentions the observations tier — findings already
+      accumulated that nobody has promoted — is reading the system correctly, since that is where a
+      candidate playbook sits before anyone asks for one.
 
   # ------------------------------------------- naming a bond before spending anything on rotating it
   - id: du-07

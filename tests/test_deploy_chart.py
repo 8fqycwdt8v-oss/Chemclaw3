@@ -271,12 +271,146 @@ def test_image_installs_the_binaries_the_knowledge_layer_shells_out_to() -> None
     assert {"git", "rsync"} <= _dnf_installed_packages()
 
 
+def _git(*args: str, cwd: Path) -> None:
+    """One git command in `cwd`, with a committer identity and no interactive prompt."""
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, env=env, capture_output=True)
+
+
+def _note(note_id: str) -> str:
+    """A minimal parseable note body."""
+    return f"---\nid: {note_id}\ntype: reaction\ncreated_by: agent\n---\n\nbody\n"
+
+
+def test_a_locally_recorded_note_survives_the_sidecar(tmp_path: Path) -> None:
+    """The sidecar must not delete a note this pod recorded but has not pushed.
+
+    **This is the coupling `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` created.** Until
+    the gate was deleted, `kg/git_writer.py` committed inside a private worktree and this script
+    was the only writer of the tree readers scan, so publishing a read replica over it with
+    `rsync --delete` could only remove notes that had genuinely left the base branch. The writer
+    commits *there* now, and `tests/test_knowledge.py` asserts that a push which fails still leaves
+    the note committed and readable — which the next sync tick then deleted, permanently: it stays
+    in the local `HEAD`, so no later path-limited `git add` restores it.
+
+    Driven end to end against real git repositories rather than by reading the script, because the
+    shape assertions below all passed on the broken version. The pod is set up the way the chart
+    sets it up — a writer's clone with the notes directory inside it — carrying one note the remote
+    does not have. After a sync it is still there, and what the remote holds has arrived.
+
+    The *diverged* case is its own test below, because the right behaviour there is different.
+    """
+    if not shutil.which("flock"):  # pragma: no cover - present on every Linux CI image
+        pytest.skip("flock is not installed")
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(seed)], check=True)
+    (seed / "knowledge" / "reaction").mkdir(parents=True)
+    (seed / "knowledge" / "reaction" / "from-the-remote.md").write_text(_note("from-the-remote"))
+    _git("add", "-A", cwd=seed)
+    _git("commit", "-qm", "seed", cwd=seed)
+    _git("remote", "add", "origin", str(remote), cwd=seed)
+    _git("push", "-q", "origin", "main", cwd=seed)
+
+    note_repo = tmp_path / "note-repo"
+    subprocess.run(
+        ["git", "clone", "-q", "--branch", "main", str(remote), str(note_repo)], check=True
+    )
+    # What `kg/git_writer.py` leaves behind when the push fails: committed here, not on the remote.
+    (note_repo / "knowledge" / "reaction" / "stranded.md").write_text(_note("stranded"))
+    _git("add", "-A", cwd=note_repo)
+    _git("commit", "-qm", "Add reaction note: stranded", cwd=note_repo)
+
+    result = _sync(tmp_path, remote, note_repo)
+    assert result.returncode == 0, result.stderr
+
+    served = {path.name for path in (note_repo / "knowledge" / "reaction").iterdir()}
+    assert "stranded.md" in served, (
+        "the sidecar deleted a note this pod recorded and had not pushed — the note is still in "
+        f"the local HEAD, so nothing will ever restore it. Served: {sorted(served)}"
+    )
+    assert "from-the-remote.md" in served, "the refresh no longer delivers what the remote holds"
+
+
+def test_a_diverged_checkout_warns_rather_than_crash_looping_the_pod(tmp_path: Path) -> None:
+    """A stranded note *and* a moved remote is a warning, and the pod keeps serving.
+
+    `once` is an init container. Returning non-zero on a divergence would crash-loop the pod on a
+    note whose push failed — trading a stale graph for no graph at all. Resolving the divergence is
+    `kg/git_writer.py`'s job (it replays its own unpushed commits on the next write, see
+    `tests/test_knowledge.py`); this script's job until then is to serve what the pod holds and say
+    so. What it must never do is silently drop the local note, which is the assertion below.
+    """
+    if not shutil.which("flock"):  # pragma: no cover - present on every Linux CI image
+        pytest.skip("flock is not installed")
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(seed)], check=True)
+    (seed / "knowledge" / "reaction").mkdir(parents=True)
+    (seed / "knowledge" / "reaction" / "from-the-remote.md").write_text(_note("from-the-remote"))
+    _git("add", "-A", cwd=seed)
+    _git("commit", "-qm", "seed", cwd=seed)
+    _git("remote", "add", "origin", str(remote), cwd=seed)
+    _git("push", "-q", "origin", "main", cwd=seed)
+
+    note_repo = tmp_path / "note-repo"
+    subprocess.run(
+        ["git", "clone", "-q", "--branch", "main", str(remote), str(note_repo)], check=True
+    )
+    (note_repo / "knowledge" / "reaction" / "stranded.md").write_text(_note("stranded"))
+    _git("add", "-A", cwd=note_repo)
+    _git("commit", "-qm", "Add reaction note: stranded", cwd=note_repo)
+    # Somebody else pushes, so the pod's clone is now genuinely diverged rather than merely behind.
+    (seed / "knowledge" / "reaction" / "pushed-elsewhere.md").write_text(_note("pushed-elsewhere"))
+    _git("add", "-A", cwd=seed)
+    _git("commit", "-qm", "elsewhere", cwd=seed)
+    _git("push", "-q", "origin", "main", cwd=seed)
+
+    result = _sync(tmp_path, remote, note_repo)
+    assert result.returncode == 0, f"a divergence crash-loops the pod:\n{result.stdout}"
+    assert "WARNING" in result.stdout and "push failed" in result.stdout, result.stdout
+    served = {path.name for path in (note_repo / "knowledge" / "reaction").iterdir()}
+    assert "stranded.md" in served, f"the local note was dropped: {sorted(served)}"
+
+
+def _sync(tmp_path: Path, remote: Path, note_repo: Path) -> "subprocess.CompletedProcess[str]":
+    """One `knowledge-sync.sh once`, configured the way the chart configures the sidecar."""
+    return subprocess.run(
+        ["bash", str(DEPLOY / "knowledge-sync.sh"), "once"],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CHEMCLAW_KNOWLEDGE_REPO_URL": str(remote),
+            "CHEMCLAW_KNOWLEDGE_SYNC_DIR": str(tmp_path / "replica"),
+            "CHEMCLAW_NOTE_REPO_DIR": str(note_repo),
+            "CHEMCLAW_KNOWLEDGE_DIR": "knowledge",
+            "CHEMCLAW_KNOWLEDGE_PUBLISH_DIR": str(note_repo / "knowledge"),
+            "GIT_TERMINAL_PROMPT": "0",
+        },
+    )
+
+
 def test_the_sync_never_deletes_what_it_is_about_to_replace() -> None:
-    """The publish step must fail loudly rather than empty the directory the app is reading.
+    """The replica publish must fail loudly rather than empty the directory the app is reading.
 
     Guarding the *shape* and not just the missing package: reintroducing any `rm -rf` of the publish
     directory reintroduces the outage even with rsync present, because the destructive branch is
     reachable on any rsync failure (a dead remote, a full disk, a permission change).
+
+    This covers the replica path, which is now reached only by a pod with no writable clone. The
+    path a pod *with* one takes is asserted behaviourally above, because that is where the
+    `--delete` did real damage.
     """
     script = (DEPLOY / "knowledge-sync.sh").read_text()
     destructive = [
@@ -286,7 +420,7 @@ def test_the_sync_never_deletes_what_it_is_about_to_replace() -> None:
     ]
     assert not destructive, f"knowledge-sync.sh must never rm -rf the published tree: {destructive}"
 
-    publish = script.split("Publish into the directory")[1]
+    publish = script.split("A plain copy (not a symlink)")[1]
     assert "command -v rsync" in publish, "a missing rsync must be detected, not swallowed"
     assert "rsync -a --delete" in publish and "2>/dev/null" not in publish.split("rsync -a")[1], (
         "rsync must run with its stderr visible, or a missing binary looks like a transfer error"
@@ -491,7 +625,7 @@ def test_knowledge_volume_is_mounted_on_every_reading_component() -> None:
 
 
 def test_note_repo_clone_exists_wherever_notes_are_submitted() -> None:
-    """The front door and the background worker both call `propose_note`, so both need a clone."""
+    """The front door and the background worker both call `record_note`, so both need a clone."""
     for template in ("deployment-service.yaml", "deployment-workers.yaml"):
         text = (CHART / "templates" / template).read_text()
         assert 'include "chemclaw.noteRepoInit"' in text, template

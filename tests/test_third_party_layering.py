@@ -257,7 +257,6 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
         "the outbox is a table, and the shipped SQL driver reaches a Postgres results store"
     ),
     ("chemclaw.publish", "httpx"): "the shipped HTTP driver POSTs records to a results service",
-    ("chemclaw.kg", "postgres"): "the note-proposal store",
     ("chemclaw.protocols", "postgres"): (
         "a design and its append-only revision history are two tables (migration 073)"
     ),

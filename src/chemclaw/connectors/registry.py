@@ -692,7 +692,7 @@ def _declared_tool_names() -> dict[str, tuple[str, str]]:
 
     **A first-party name is claimed too, and by whoever holds it** (`_bound_by_this_process`).
     The rule was always stated in general terms — one name is one capability — and checked in one
-    direction only, which is how a bundle came to be able to take over `propose_knowledge_note`
+    direction only, which is how a bundle came to be able to take over `record_knowledge_note`
     with every gate still firing on the name and the note body going to the connector's server.
 
     Raises:

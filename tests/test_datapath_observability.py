@@ -35,7 +35,7 @@ from chemclaw.ingest.documents.index import InMemoryDocumentIndex
 from chemclaw.ingest.documents.sync import reembed_stale, sync_share
 from chemclaw.ingest.eln import cursor as eln_cursor
 from chemclaw.kg import graph as kg_graph
-from chemclaw.kg.git_submitter import GitNoteSubmitter, GitRemoteError, _is_auth_failure
+from chemclaw.kg.git_writer import GitNoteWriter, GitRemoteError, _is_auth_failure
 from chemclaw.publish import outbox
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 from chemclaw.retrieval.fanout import record_kept_chunks, sweep_sources
@@ -579,8 +579,8 @@ def test_git_stderr_reaches_the_log_at_the_raise(
     `git` process, because what is being checked is that git's own words survive.
     """
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    submitter = GitNoteSubmitter(repo_dir=str(tmp_path))
-    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_submitter"):
+    submitter = GitNoteWriter(repo_dir=str(tmp_path))
+    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_writer"):
         with pytest.raises(GitRemoteError):
             asyncio.run(submitter._git("push", "no-such-remote", "main", transient=True))
 
@@ -604,7 +604,7 @@ def test_an_authentication_failure_is_classified_apart_from_a_partition() -> Non
 def test_a_bare_403_stays_transient_because_a_forge_throttles_with_one() -> None:
     """The status line alone must not make a note proposal permanent.
 
-    `GitSubmitError` is in `durable/publish.py`'s `non_retryable_error_types`, so classifying a
+    `GitWriteError` is in `durable/publish.py`'s `non_retryable_error_types`, so classifying a
     push failure as auth *drops* the proposal rather than backing off. GitHub answers a bare
     `The requested URL returned error: 403` for secondary rate limits and abuse detection — both
     of which clear on their own — so treating the code as a credential fact would let a throttle

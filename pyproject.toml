@@ -394,7 +394,8 @@ source_paths = [
     "src/chemclaw/core/fulltext.py",
     "src/chemclaw/core/quantities.py",
     "src/chemclaw/kg/note.py",
-    "src/chemclaw/kg/pr_gate.py",
+    "src/chemclaw/kg/record.py",
+    "src/chemclaw/kg/git_writer.py",
     "src/chemclaw/science/calc/store.py",
     "src/chemclaw/templates/resolve.py",
 ]
@@ -463,16 +464,16 @@ pytest_add_cli_args_test_selection = [
     "tests/test_runner.py",
     "tests/test_disconnect_teardown.py",
     "tests/test_note.py",
-    "tests/test_note_proposals.py",
     # Kills 24 of `note.py`'s mutants on its own — every typed-link (`split_link`) and `outgoing_*`
     # one, including the 12 the previous list reported as covered by no test at all.
     "tests/test_relations.py",
-    # Kills the five `record_metric(... "chemclaw_notes_proposed_total")` mutants in `pr_gate.py`:
-    # it is the declared-metrics contract test, not a `pr_gate` test, which is why it was missed.
+    # Kills the `record_metric(... "chemclaw_notes_recorded_total")` mutants in `record.py`,
+    # including the `if outcome.written:` guard: it is the declared-metrics contract test rather
+    # than a write-path test, which is why it was missed.
     "tests/test_metrics_bridge.py",
     "tests/test_properties_core.py",
-    "tests/test_pr_gate.py",
-    "tests/test_pr_gate_read_window.py",
+    "tests/test_knowledge.py",
+    "tests/test_note_visibility.py",
     "tests/test_store.py",
     "tests/test_postgres_store.py",
 ]

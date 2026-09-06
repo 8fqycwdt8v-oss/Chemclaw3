@@ -137,7 +137,7 @@ spec:
               range window after one increment, so a `for:` under 10m would have paged on the blip
               anyway, five minutes late.
 
-        {{- /* The PR-gate publish is best-effort by design (a dead git remote must not fail a
+        {{- /* A durable note write is best-effort by design (a dead git remote must not fail a
                finished calculation), so this counter is the only signal that knowledge is being
                dropped. Nothing else distinguishes it from an idle system. */}}
         - alert: ChemclawKnowledgeNotesLost
@@ -147,15 +147,15 @@ spec:
             severity: critical
           annotations:
             runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawknowledgenoteslost
-            summary: Knowledge notes are failing to reach the PR-gate
+            summary: Knowledge notes are failing to reach the graph
             description: >-
-              A note could not be opened on a branch and the failure was swallowed so the job could
-              complete. The knowledge is lost. Usual causes are a dead git remote, an expired push
-              credential, or two processes sharing one `note_repo_dir` (the submit lock).
+              A note could not be written and the failure was swallowed so the job could complete.
+              The knowledge is lost. Usual causes are a dead git remote, an expired push
+              credential, or two processes sharing one `note_repo_dir` (the write lock).
 {{- if gt (int .Values.monitoring.alerts.knowledgeCorpusStaleSeconds) 0 }}
 
         {{- /* The same failure in the other direction, and the rule this series exists for. The
-               alert above covers a note failing to reach the PR-gate; nothing covered the merged
+               alert above covers a note failing to be written; nothing covered the shared
                corpus failing to reach a *pod*, because `knowledge-sync.sh`'s loop swallows a
                refresh failure on purpose (a dead remote must not kill the pod) and then serves the
                frozen snapshot indefinitely while every answer keeps citing it.

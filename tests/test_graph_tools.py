@@ -10,16 +10,16 @@ import chemclaw.agent.graph_tools as graph_tools
 from chemclaw.agent.graph_tools import (
     expand_note,
     find_notes,
-    propose_knowledge_note,
     record_failure,
+    record_knowledge_note,
 )
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.kg.conflicts import find_conflicts
 from chemclaw.kg.note import Note, parse_note
-from chemclaw.kg.submission import NoteSubmission
-from tests.conftest import FakeSubmitter
+from chemclaw.kg.record import NoteWrite
+from tests.conftest import FakeWriter
 
 
 def _seed(tmp_path: Path) -> None:
@@ -207,17 +207,19 @@ def test_find_notes_declares_a_cut_in_the_value_the_model_reads(
     assert (len(whole.matches), whole.total_matches) == (4, 4)
 
 
-def test_propose_knowledge_note_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_record_knowledge_note_writes_through_the_record_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The write tool proposes an agent note through the (fake) PR-gate."""
-    fake = FakeSubmitter()
-    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+    fake = FakeWriter()
+    monkeypatch.setattr(graph_tools, "default_writer", lambda: fake)
     ref = asyncio.run(
-        propose_knowledge_note(
+        record_knowledge_note(
             id="reaction-x", type="reaction", body="From [[compound-a]].", source="eln-1"
         )
     )
-    assert ref == "pr://note/reaction-x"
-    assert fake.submissions[0].files[0].path.endswith("reaction/reaction-x.md")
+    assert ref == "commit://1"
+    assert fake.writes[0].files[0].path.endswith("reaction/reaction-x.md")
 
 
 def _seed_playbook(tmp_path: Path, **frontmatter: str) -> None:
@@ -229,7 +231,7 @@ def _seed_playbook(tmp_path: Path, **frontmatter: str) -> None:
     )
 
 
-def _submitted(submission: NoteSubmission, tmp_path: Path) -> dict[str, Note]:
+def _submitted(submission: NoteWrite, tmp_path: Path) -> dict[str, Note]:
     """Parse every file in a submission back off disk, keyed by note id.
 
     Round-tripping through the parser rather than reading the model in memory is the point: what
@@ -245,7 +247,7 @@ def _submitted(submission: NoteSubmission, tmp_path: Path) -> dict[str, Note]:
     return parsed
 
 
-def test_record_failure_submits_a_refutation_conflict_detection_can_see(
+def test_record_failure_records_a_refutation_conflict_detection_can_see(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The loop that closes: a chemist's report becomes a note that flags the claim it refutes.
@@ -257,15 +259,15 @@ def test_record_failure_submits_a_refutation_conflict_detection_can_see(
     """
     _seed_playbook(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    fake = FakeSubmitter()
-    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+    fake = FakeWriter()
+    monkeypatch.setattr(graph_tools, "default_writer", lambda: fake)
 
     ref = asyncio.run(
         record_failure("playbook-pd", "Ran it four times at scale; the yield was half.")
     )
 
-    assert ref.startswith("pr://note/failure-")
-    notes = _submitted(fake.submissions[0], tmp_path)
+    assert ref.startswith("commit://")
+    notes = _submitted(fake.writes[0], tmp_path)
     (failure,) = notes.values()
     assert failure.type == "failure-mode"
     merged = [parse_note(tmp_path / "playbook.md"), failure]
@@ -284,8 +286,8 @@ def test_record_failure_attributes_the_report_to_the_authenticated_user(
     """
     _seed_playbook(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    fake = FakeSubmitter()
-    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+    fake = FakeWriter()
+    monkeypatch.setattr(graph_tools, "default_writer", lambda: fake)
 
     tokens = set_current_identity("chemist-oid-42", frozenset())
     try:
@@ -293,7 +295,7 @@ def test_record_failure_attributes_the_report_to_the_authenticated_user(
     finally:
         reset_current_identity(tokens)
 
-    (failure,) = _submitted(fake.submissions[0], tmp_path).values()
+    (failure,) = _submitted(fake.writes[0], tmp_path).values()
     assert failure.source == "feedback:chemist-oid-42"
     assert "chemist-oid-42" in failure.body
 
@@ -309,12 +311,12 @@ def test_record_failure_leaves_the_refuted_note_current_by_default(
     """
     _seed_playbook(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    fake = FakeSubmitter()
-    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+    fake = FakeWriter()
+    monkeypatch.setattr(graph_tools, "default_writer", lambda: fake)
 
     asyncio.run(record_failure("playbook-pd", "the yield was half"))
 
-    assert len(fake.submissions[0].files) == 1
+    assert len(fake.writes[0].files) == 1
     assert parse_note(tmp_path / "playbook.md").valid_to is None
 
 
@@ -329,8 +331,8 @@ def test_record_failure_retires_a_claim_that_stopped_holding_in_the_same_submiss
     """
     _seed_playbook(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    fake = FakeSubmitter()
-    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+    fake = FakeWriter()
+    monkeypatch.setattr(graph_tools, "default_writer", lambda: fake)
 
     asyncio.run(
         record_failure(
@@ -340,7 +342,7 @@ def test_record_failure_retires_a_claim_that_stopped_holding_in_the_same_submiss
         )
     )
 
-    notes = _submitted(fake.submissions[0], tmp_path)
+    notes = _submitted(fake.writes[0], tmp_path)
     amended = notes["playbook-pd"]
     failure = next(note for note in notes.values() if note.type == "failure-mode")
     assert amended.valid_to == date(2026, 3, 1)
@@ -352,10 +354,8 @@ def test_record_failure_retires_a_claim_that_stopped_holding_in_the_same_submiss
     # marked overwrite=False (a `dependencies` entry) is skipped by `_write_and_push` when it exists
     # on base — so the retirement was silently dropped on the real git path and the refuted claim
     # stayed served as current. `superseded` marks it overwrite=True. Asserted on the submission
-    # because the FakeSubmitter never runs the skip, which is why this bug survived the old test.
-    retirement_file = next(
-        f for f in fake.submissions[0].files if f.path.endswith("playbook-pd.md")
-    )
+    # because the FakeWriter never runs the skip, which is why this bug survived the old test.
+    retirement_file = next(f for f in fake.writes[0].files if f.path.endswith("playbook-pd.md"))
     assert retirement_file.overwrite is True
 
 
@@ -370,14 +370,14 @@ def test_record_failure_refuses_to_reclose_an_already_retired_note(
     """
     _seed_playbook(tmp_path, valid_to="2025-01-01")
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    fake = FakeSubmitter()
-    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+    fake = FakeWriter()
+    monkeypatch.setattr(graph_tools, "default_writer", lambda: fake)
 
     with pytest.raises(ChemclawError, match="already retired on 2025-01-01"):
         asyncio.run(
             record_failure("playbook-pd", "still does not work", held_until=date(2026, 3, 1))
         )
-    assert fake.submissions == [], "nothing is filed when the dates disagree"
+    assert fake.writes == [], "nothing is filed when the dates disagree"
 
 
 def test_record_failure_without_a_date_still_works_on_a_retired_note(
@@ -386,12 +386,12 @@ def test_record_failure_without_a_date_still_works_on_a_retired_note(
     """The refusal above is about the *date*, not the note: a plain refutation is always allowed."""
     _seed_playbook(tmp_path, valid_to="2025-01-01")
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    fake = FakeSubmitter()
-    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+    fake = FakeWriter()
+    monkeypatch.setattr(graph_tools, "default_writer", lambda: fake)
 
     asyncio.run(record_failure("playbook-pd", "still does not work"))
 
-    assert len(fake.submissions[0].files) == 1  # the failure note only
+    assert len(fake.writes[0].files) == 1  # the failure note only
 
 
 def test_record_failure_on_an_unknown_note_says_so_to_the_model(
@@ -404,12 +404,12 @@ def test_record_failure_on_an_unknown_note_says_so_to_the_model(
     """
     _seed_playbook(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    fake = FakeSubmitter()
-    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+    fake = FakeWriter()
+    monkeypatch.setattr(graph_tools, "default_writer", lambda: fake)
 
     with pytest.raises(ChemclawError, match="no note with id 'playbook-typo'"):
         asyncio.run(record_failure("playbook-typo", "the yield was half"))
-    assert fake.submissions == []
+    assert fake.writes == []
 
 
 def test_record_failure_refuses_an_end_date_before_the_note_began(
@@ -418,12 +418,12 @@ def test_record_failure_refuses_an_end_date_before_the_note_began(
     """A backwards window is rejected with both dates, not clamped into a date nobody asked for."""
     _seed_playbook(tmp_path, valid_from="2026-05-01")
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    fake = FakeSubmitter()
-    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+    fake = FakeWriter()
+    monkeypatch.setattr(graph_tools, "default_writer", lambda: fake)
 
     with pytest.raises(ChemclawError, match="only became valid on 2026-05-01"):
         asyncio.run(record_failure("playbook-pd", "no good", held_until=date(2026, 3, 1)))
-    assert fake.submissions == []
+    assert fake.writes == []
 
 
 def _seed_typed(tmp_path: Path) -> None:

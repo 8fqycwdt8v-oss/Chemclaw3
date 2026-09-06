@@ -18,7 +18,7 @@ tool stay in core by rule, and each is a rule rather than a backlog item:
 
 1. **Conversation plumbing** — anything that reads or writes the *turn's* own state (attachments,
    preferences, watches, clarifying questions). Another process does not have the turn.
-2. **The PR-gate writers** (`propose_knowledge_note`, `record_confirmed_answer`). The gate is the
+2. **The PR-gate writers** (`record_knowledge_note`, `record_confirmed_answer`). The gate is the
    review boundary; a connector reaches it only by returning a `Note` in a job envelope, which is a
    proposal core decides to publish. That asymmetry is the point.
 3. **Core's own data layer — the knowledge graph.** This one is worth stating because it looks like
@@ -411,7 +411,7 @@ class JobSpec(BaseModel):
     nothing from one. It was for a while a marker that authorized nothing, because the gate
     consulted only `entra_expensive_actions`; `tests/test_authz.py` now cross-checks every declared
     job against the effective set. `publish_to_graph` lets core PR-gate a `Note` the job's result
-    carries — the write still goes through `chemclaw.kg.pr_gate`, never through the connector.
+    carries — the write still goes through `chemclaw.kg.record`, never through the connector.
 
     **A bundle may lower its own runtime ceiling and may not raise it** (`timeout_seconds`). The
     deployment keeps the maximum — the effective ceiling is the *lower* of the declared number and

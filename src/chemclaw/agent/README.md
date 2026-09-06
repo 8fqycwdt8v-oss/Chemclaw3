@@ -30,7 +30,7 @@ An agent tool that starts a long job returns immediately with a `job_id`; the
 work runs as a Temporal workflow (see `durable/README.md`, and each bundle's own `workflows.py`).
 See `docs/reference/architektur.md` §1 and CLAUDE.md's four-layer rule.
 
-**Current tools:** knowledge-graph read + PR-gated write (`graph_tools`), cross-source
+**Current tools:** knowledge-graph read + write (`graph_tools`), cross-source
 evidence (`research_tools`), condensing many whole protocols into one comparison
 (`protocol_tools`, over `agent/condense.py`), confirmed-answer capture (`memory_tools`), and the durable
 report launcher plus the one status tool every durable job is collected with

@@ -50,7 +50,7 @@ def test_a_turn_that_searched_the_record_is_distinguishable_from_one_that_did_no
 def test_a_write_is_counted_as_capture_rather_than_as_retrieval() -> None:
     """The two sides are separate questions and must not be summed into "tool calls"."""
     ledger = _ledger()
-    ledger.note_event(ToolCallEvent(tool="propose_knowledge_note", arguments=""))  # type: ignore[attr-defined]
+    ledger.note_event(ToolCallEvent(tool="record_knowledge_note", arguments=""))  # type: ignore[attr-defined]
 
     assert ledger.capture_calls == 1  # type: ignore[attr-defined]
     assert ledger.retrieval_calls == 0  # type: ignore[attr-defined]

@@ -166,9 +166,9 @@ in none of them.
 One directory, not two. `Settings.knowledge_path` is `note_repo_dir / knowledge_dir` and there is no
 second resolution — every reader goes through that property — so the chart publishes the synced
 graph to exactly that path (`chemclaw.knowledgePublishPath` = `knowledge.noteRepoPath` +
-`CHEMCLAW_KNOWLEDGE_DIR`) and the PR-gate submitter branches from the clone around it. Two
+`CHEMCLAW_KNOWLEDGE_DIR`) and the note writer commits into that same clone. Two
 containers therefore write one tree, and the sync takes the submitter's own advisory lock — the
-`flock` under the checkout's git directory that `src/chemclaw/kg/git_submitter.py` already uses to
+`flock` under the checkout's git directory that `src/chemclaw/kg/git_writer.py` already uses to
 exclude a second process — for the duration of each publish. A held lock means a submission is in
 flight, and the publish waits for the next tick.
 
@@ -256,7 +256,7 @@ case — there is no retry for a chemist's turn — which is why it gets the who
 
 `policy/v1` PodDisruptionBudget covers the front door only (`maxUnavailable: 1`, its own toggle in
 case a PDB ever wedges a cluster upgrade). The workers get none: `workers.background.replicas: 1` is
-a singleton (the PR-gate checkout lock is host-local, D-069), and over a singleton `minAvailable: 1`
+a singleton (the note-writer checkout lock is host-local, D-069), and over a singleton `minAvailable: 1`
 makes the pod un-evictable and blocks every drain in the cluster forever, while `maxUnavailable: 1`
 permits exactly what no PDB permits.
 
@@ -344,7 +344,7 @@ whose default is `sys.stderr`; three documents including this one said stdout).
 collects the Services (the front door and each connector's MCP server, by their `http` port name);
 `templates/podmonitor.yaml` collects the pods that have none — core's background worker and each
 bundle's — by the `metrics` port they declare. Until D-2026-08-01 the ServiceMonitor selected the
-front door alone, so everything the workers counted (durable jobs launched, PR-gate proposals and
+front door alone, so everything the workers counted (durable jobs launched, notes written and
 their failures, lost audit records) was recorded in each worker's own registry and read by nobody.
 `monitoring.additionalLabels` is for a **self-managed Prometheus Operator**, whose `Prometheus`
 resource carries a `serviceMonitorSelector`/`podMonitorSelector` these labels have to match. It is

@@ -3,7 +3,7 @@
 The defect these tests exist for was reproduced live, not hypothesised. With `harness_enabled` and
 `harness_autonomy="plan_only"`: approve a four-item plan, then ask a *completely different*
 question in the same session, and the turn autonomously ran `compute_xtb_energy` and
-`propose_knowledge_note` — a knowledge-graph write — while `GET /sessions/{id}/plan` reported the
+`record_knowledge_note` — a knowledge-graph write — while `GET /sessions/{id}/plan` reported the
 new plan as `approved=false`. The approval had authorized the session, not the plan.
 
 The first test below is that sequence, reduced to its mechanism. The tests around it pin the
@@ -151,12 +151,12 @@ def test_an_approved_plan_does_not_authorize_the_next_one(
         session = _Session("dark-1")
         await _set_plan(session, ["screen the species", "find precedent"])
         await _approve(approvals, session)
-        approved_write = await _call("propose_knowledge_note", session)
+        approved_write = await _call("record_knowledge_note", session)
 
         # A completely different question: the model rewrites its own todo list mid-session.
         await _set_plan(session, ["compute the energy of every candidate"])
         with pytest.raises(PlanNotApprovedError):
-            await _call("propose_knowledge_note", session)
+            await _call("record_knowledge_note", session)
         # No mode to check. Under MAF an approval also flipped a session mode, and that mode
         # outlived the approval — so this asserted the demotion as well. The gate reads the plan
         # and the durable decision, and nothing else says "may this session act".
@@ -170,14 +170,14 @@ def test_an_approved_plan_does_not_authorize_the_next_one(
 def test_both_tools_the_unapproved_turn_ran_are_gated() -> None:
     """The live turn ran two things it should not have, and they are gated by different routes.
 
-    `propose_knowledge_note` is an in-process write, listed in `STATE_CHANGING_TOOLS`.
+    `record_knowledge_note` is an in-process write, listed in `STATE_CHANGING_TOOLS`.
     `compute_xtb_energy` is a `calc` **endpoint** tool — not a job — so it is covered only because
     a bundle declares its own `state_changing` subset. That distinction is the point of this test:
     a gated set built from in-process names plus declared jobs looks complete, passes every test
     anyone would think to write, and still misses half of the finding it was written for.
     """
     gated = side_effecting_tools()
-    assert "propose_knowledge_note" in gated
+    assert "record_knowledge_note" in gated
     assert "compute_xtb_energy" in gated
     # A declared job, gated structurally — no bundle has to remember to list one.
     assert "sample_conformers" in gated
@@ -208,7 +208,7 @@ def test_a_session_with_no_plan_cannot_write(approvals: InMemoryPlanApprovalStor
     async def _run() -> None:
         session = _Session("no-plan")
         with pytest.raises(PlanNotApprovedError):
-            await _call("propose_knowledge_note", session)
+            await _call("record_knowledge_note", session)
 
     asyncio.run(_run())
 
@@ -220,10 +220,10 @@ def test_a_rejection_after_an_approval_revokes_it(approvals: InMemoryPlanApprova
         session = _Session("revoked")
         await _set_plan(session, ["do the thing"])
         await _approve(approvals, session)
-        assert await _call("propose_knowledge_note", session)
+        assert await _call("record_knowledge_note", session)
         await approvals.record(session.session_id, _hash(session), "chemist-1", False)
         with pytest.raises(PlanNotApprovedError):
-            await _call("propose_knowledge_note", session)
+            await _call("record_knowledge_note", session)
 
     asyncio.run(_run())
 
@@ -234,7 +234,7 @@ def test_no_session_means_no_gate(approvals: InMemoryPlanApprovalStore) -> None:
     A template activity's tool step and a one-shot CLI call land here. They are not ungoverned:
     `enforce_tool_authz` and `authorize_trigger` still decide, which is what governs them.
     """
-    assert asyncio.run(_call("propose_knowledge_note", None))
+    assert asyncio.run(_call("record_knowledge_note", None))
 
 
 def _proceed(result: Any) -> bool:
@@ -363,11 +363,11 @@ def test_an_approval_is_spent_by_the_turn_that_used_it(
         # is driven with, so both halves ask about one plan.
         monkeypatch.setattr(plan_gate_module, "session_todos", lambda _sid, **_kw: _titles(session))
         await _approve(approvals, session)
-        during = await _call("propose_knowledge_note", session)
+        during = await _call("record_knowledge_note", session)
         await consume_turn_approval(session.session_id)  # the turn ends
         after = False
         try:
-            after = await _call("propose_knowledge_note", session)
+            after = await _call("record_knowledge_note", session)
         except PlanNotApprovedError:
             after = False
         # Re-approving the same unchanged plan is a person saying "yes, again" — and recording it
@@ -375,7 +375,7 @@ def test_an_approval_is_spent_by_the_turn_that_used_it(
         # fresh decision is an unspent one. It used to need a separate `rearm_plan` call against
         # session state, which every future writer of a decision path had to remember.
         await _approve(approvals, session)
-        again = await _call("propose_knowledge_note", session)
+        again = await _call("record_knowledge_note", session)
         return during, after, again
 
     during, after, again = asyncio.run(_run())
@@ -469,7 +469,7 @@ def test_the_empty_plan_is_not_an_approvable_identity(
         # Recorded directly, as a row written before this was refused (or by any other path):
         # the gate must not depend on the decision route having filtered it out.
         await _record(approvals, session)
-        return await _try_call("propose_knowledge_note", session)
+        return await _try_call("record_knowledge_note", session)
 
     assert not asyncio.run(_run()), "an approval of the empty plan authorized a knowledge write"
 
@@ -493,12 +493,12 @@ def test_a_spent_approval_stays_spent_across_a_rehydrate(
     async def _run() -> tuple[bool, bool]:
         session = _Session("evicted")
         await _record(approvals, session)
-        before = await _try_call("propose_knowledge_note", session)
+        before = await _try_call("record_knowledge_note", session)
         await consume_turn_approval(session.session_id)
 
         rehydrated = _Session("evicted")  # the LRU evicted it; its plan is gone with it
         assert not rehydrated.titles, "a rehydrated session has no plan by construction"
-        return before, await _try_call("propose_knowledge_note", rehydrated)
+        return before, await _try_call("record_knowledge_note", rehydrated)
 
     before, after = asyncio.run(_run())
     assert not before, "the empty plan authorized a write even before the eviction"
@@ -541,7 +541,7 @@ def _batch(*calls: dict[str, Any]) -> AIMessage:
 
 
 _WRITE_TODOS = {"name": "write_todos", "args": {"todos": []}, "id": "c-plan"}
-_GATED = {"name": "propose_knowledge_note", "args": {"type": "insight"}, "id": "c-write"}
+_GATED = {"name": "record_knowledge_note", "args": {"type": "insight"}, "id": "c-write"}
 
 
 def test_a_gated_call_beside_a_plan_rewrite_is_refused_even_with_a_live_approval(
@@ -550,7 +550,7 @@ def test_a_gated_call_beside_a_plan_rewrite_is_refused_even_with_a_live_approval
     """DARK-1's remaining shape, and the branch nothing exercised.
 
     Turn 1 writes plan A and a chemist approves it. Turn 2 emits `write_todos(plan B)` and
-    `propose_knowledge_note(...)` in **one** assistant message. `request.state` is the snapshot
+    `record_knowledge_note(...)` in **one** assistant message. `request.state` is the snapshot
     taken before the whole batch, so the gate sees plan A, the approval stands, and the note is
     pushed to the knowledge repository under an approval given for a different plan — and
     `consume_turn_approval` then hashes plan B, finds no decision, and leaves the approval unspent
@@ -567,11 +567,11 @@ def test_a_gated_call_beside_a_plan_rewrite_is_refused_even_with_a_live_approval
         await _set_plan(session, ["screen the species", "find precedent"])
         await _approve(approvals, session)
         # The control: alone in its own message, this exact call is allowed right now.
-        assert await _call_with_messages("propose_knowledge_note", session, [_batch(_GATED)])
+        assert await _call_with_messages("record_knowledge_note", session, [_batch(_GATED)])
 
         with pytest.raises(PlanNotApprovedError):
             await _call_with_messages(
-                "propose_knowledge_note", session, [_batch(_WRITE_TODOS, _GATED)]
+                "record_knowledge_note", session, [_batch(_WRITE_TODOS, _GATED)]
             )
 
     asyncio.run(_run())
@@ -596,7 +596,7 @@ def test_a_drifted_plans_old_approval_is_spent_at_turn_end(
         await consume_turn_approval(session.session_id)
         # A later turn drifts back to plan A. Its old approval must be spent, not waiting.
         await _set_plan(session, ["plan A step"])
-        return await _try_call("propose_knowledge_note", session)
+        return await _try_call("record_knowledge_note", session)
 
     assert not asyncio.run(_run()), (
         "a mid-turn reword left the old plan's approval live past the turn that ran under it"
@@ -633,7 +633,7 @@ def test_ticking_a_step_beside_the_steps_own_call_is_allowed(
             "id": "c-plan",
         }
         assert await _call_with_messages(
-            "propose_knowledge_note", session, [_batch(tick, _GATED)]
+            "record_knowledge_note", session, [_batch(tick, _GATED)]
         ), "a status-flip write_todos beside the step's own call was refused — the livelock shape"
 
         # A *content* rewrite in the same shape is a different plan, and refuses on its own hash.
@@ -643,7 +643,7 @@ def test_ticking_a_step_beside_the_steps_own_call_is_allowed(
             "id": "c-plan-2",
         }
         with pytest.raises(PlanNotApprovedError):
-            await _call_with_messages("propose_knowledge_note", session, [_batch(reword, _GATED)])
+            await _call_with_messages("record_knowledge_note", session, [_batch(reword, _GATED)])
 
     asyncio.run(_run())
 
@@ -660,11 +660,11 @@ def test_an_unanswerable_batch_rewrite_still_refuses(
         two = {"name": "write_todos", "args": {"todos": []}, "id": "c-plan-b"}
         with pytest.raises(PlanNotApprovedError):
             await _call_with_messages(
-                "propose_knowledge_note", session, [_batch(_WRITE_TODOS, two, _GATED)]
+                "record_knowledge_note", session, [_batch(_WRITE_TODOS, two, _GATED)]
             )
         garbled = {"name": "write_todos", "args": {"todos": "not-a-list"}, "id": "c-plan-c"}
         with pytest.raises(PlanNotApprovedError):
-            await _call_with_messages("propose_knowledge_note", session, [_batch(garbled, _GATED)])
+            await _call_with_messages("record_knowledge_note", session, [_batch(garbled, _GATED)])
 
     asyncio.run(_run())
 
@@ -685,7 +685,7 @@ def test_the_same_call_is_allowed_in_the_message_after_the_plan_was_rewritten(
         await _set_plan(session, ["compute the barrier"])
         await _approve(approvals, session)
         messages = [_batch(_WRITE_TODOS), _batch(_GATED)]
-        assert await _call_with_messages("propose_knowledge_note", session, messages), (
+        assert await _call_with_messages("record_knowledge_note", session, messages), (
             "a re-issued call in the next message was refused; the batch rule has overrun into "
             "the retry it exists to leave open"
         )
@@ -713,7 +713,7 @@ def test_a_teardown_spend_lands_without_awaiting(
         # Let the spend task run; the caller never awaits it, the loop does.
         await asyncio.sleep(0)
         await asyncio.sleep(0)
-        return await _try_call("propose_knowledge_note", session)
+        return await _try_call("record_knowledge_note", session)
 
     assert not asyncio.run(_run()), (
         "an abandoned turn's approval stayed live; 'drop the connection after the tools ran' "

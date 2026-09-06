@@ -19,7 +19,7 @@ import pytest
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
-from chemclaw.kg.git_submitter import GitNoteSubmitter
+from chemclaw.kg.git_writer import GitNoteWriter
 from tests.pg import migrated_db_or_skip
 from tests.test_datapath_observability import _counter, _events, _series
 
@@ -82,7 +82,7 @@ def test_the_submit_lock_names_the_thing_it_holds_a_connection_for(
     before = _series_or_none("chemclaw_db_query_duration_seconds_count", operation=operation) or 0.0
 
     async def run() -> None:
-        submitter = GitNoteSubmitter(repo_dir=".", base_branch="main", remote="origin")
+        submitter = GitNoteWriter(repo_dir=".", base_branch="main", remote="origin")
         async with submitter._cluster_lock():
             pass
 

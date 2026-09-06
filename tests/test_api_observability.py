@@ -584,9 +584,9 @@ def test_the_turn_record_separates_a_tool_failure_from_a_governance_refusal() ->
     ledger = _ledger()
     for event in (
         ToolCallEvent(tool="predict_pka", arguments="{}"),
-        ToolCallEvent(tool="propose_note", arguments="{}"),
+        ToolCallEvent(tool="record_note", arguments="{}"),
         ToolFailedEvent(tool="predict_pka", message="boom"),
-        ToolFailedEvent(tool="propose_note", message="refused", reason="plan_gate"),
+        ToolFailedEvent(tool="record_note", message="refused", reason="plan_gate"),
         JobStartedEvent(job_id="j-1", kind="calc"),
         TokenEvent(text="hello"),
     ):
@@ -635,7 +635,7 @@ def test_a_refusal_is_classified_from_the_exception_not_from_its_wording() -> No
     from chemclaw.agent.plan_gate import PLAN_GATE_REASON, plan_approval_refusal
     from chemclaw.agent.tool_authz import DryRunRefusal, UndeclaredWriteRefusal
 
-    assert refusal_reason(plan_approval_refusal("propose_note")) == PLAN_GATE_REASON
+    assert refusal_reason(plan_approval_refusal("record_note")) == PLAN_GATE_REASON
     assert refusal_reason(DryRunRefusal("you asked me not to")) == "dry_run"
     assert refusal_reason(UndeclaredWriteRefusal("never given it")) == "undeclared_write"
     # A genuine fault is not a refusal, whatever it says about itself.

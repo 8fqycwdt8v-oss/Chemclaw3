@@ -659,7 +659,7 @@
     {
       "id": 15,
       "type": "graph",
-      "title": "The PR-gate queue",
+      "title": "Knowledge notes written",
       "datasource": "prometheus",
       "gridPos": {
         "h": 8,
@@ -700,14 +700,9 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(chemclaw_notes_proposed_total[1h]))",
-          "legendFormat": "notes proposed",
+          "expr": "sum(rate(chemclaw_notes_recorded_total[1h]))",
+          "legendFormat": "notes recorded",
           "refId": "A"
-        },
-        {
-          "expr": "sum by (state) (rate(chemclaw_note_proposals_total[1h]))",
-          "legendFormat": "proposals {{state}}",
-          "refId": "B"
         },
         {
           "expr": "sum(rate(chemclaw_notes_unparseable_total[1h]))",

@@ -23,19 +23,19 @@ from datetime import UTC, datetime, timedelta
 #: **The reason first written here was false, and the number outlived it.** It said `audit_events`
 #: and `turn_costs` "are pruned by `durable/retention.py`, so a window older than any retained row
 #: would answer 'nothing happened' about a period whose rows were deleted". Both tables are in
-#: `retention._NOT_PRUNED`, explicitly *refused* — as are `job_records`, `note_proposals`,
-#: `plan_approvals` and `effects`. **None of the six tables this package reads has any configured
-#: retention**, so the honesty bound it claimed to be was guarding against a deletion that does not
-#: happen, and the clamp silently truncated a legitimate three-year question against rows that are
-#: still there.
+#: `retention._NOT_PRUNED`, explicitly *refused* — as are `job_records`, `plan_approvals` and
+#: `effects`. **None of the five tables this package reads has any configured retention**, so the
+#: honesty bound it claimed to be was guarding against a deletion that does not happen, and the
+#: clamp silently truncated a legitimate three-year question against rows that are still there.
 #:
 #: **The replacement reason was wrong too, in the same direction, and this is the third attempt.**
-#: It said "every read here is an unindexed-range aggregate", which is false for three of the four
-#: tables `Window` governs: `audit_events (ts)`, `job_records (completed_at DESC)` and
+#: It said "every read here is an unindexed-range aggregate", which is false for every table
+#: `Window` now governs: `audit_events (ts)`, `job_records (completed_at DESC)` and
 #: `turn_costs (recorded_at DESC)` all have a leading-column index on exactly the column the range
-#: is over, and `EXPLAIN` returns an index scan for each. Only `note_proposals.submitted_at` has
-#: none. The docstring this replaced said "the indexes carry far more than this", which was the
-#: accurate half, and deleting it was the mistake.
+#: is over, and `EXPLAIN` returns an index scan for each. (The one exception was
+#: `note_proposals.submitted_at`, and that table left this package with its producer.) The
+#: docstring this replaced said "the indexes carry far more than this", which was the accurate
+#: half, and deleting it was the mistake.
 #:
 #: So the honest reason is narrow: it is a bound on how much a single request may aggregate, on
 #: tables that only grow and are never pruned, under `db.connection`'s statement timeout. Two years

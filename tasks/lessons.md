@@ -2123,6 +2123,89 @@ construction sites of an interface I had given two required fields — because I
 `vitest` and `eslint` on the files I touched. **Rule: after changing a shared type, run the whole
 typecheck, not the tests of the files that changed.**
 
+**A deletion's blast radius is a measurement, not an estimate — take it before planning.** Ungating
+knowledge sounded like editing nine call sites. Measured first: 348 files mentioned the gate, 15
+imported it, 11 of 11 eval probe files graded the agent on its behaviour, and — the finding that
+changed the whole shape — *all nine callers were knowledge*, so the change deleted a subsystem
+rather than rewiring one. **Rule: before planning a removal, grep for importers, for prose mentions,
+and for tests/evals that assert the behaviour, and report the three numbers. The one that reframes
+the task is usually the third.**
+
+**When a removal leaves a subsystem with no caller, that is the user's decision, not a detail to
+resolve while editing.** "Delete it" and "keep it dormant for the decided-but-unbuilt subject" are
+both defensible and cost very different things. I put it to the owner with the line count and both
+costs. **Rule: if finishing a task as specified would delete or orphan a working subsystem the spec
+did not name, stop and ask — the spec's author usually did not know it was in scope.**
+
+**A test that fails after a redesign is sometimes reporting a regression, not staleness.** The
+poisoned-index test failed because the gate's linked worktree had its own index and my writer shares
+one — so a plain `git commit` swept unrelated staged files into the note's commit. The reflex of
+"the design changed, update the assertion" would have shipped that. **Rule: for every test that
+fails after a redesign, name which of the two it is — the assertion is obsolete, or the guarantee
+it encoded is one I just broke — and say so in the commit.**
+
+**Prose that cites a symbol is code that can dangle.** `test_docstring_paths` found 22 files
+pointing at modules I had deleted, and `prose-validate` found seven more including a setting name
+inside my own replacement text explaining that the setting was gone. **Rule: after any rename or
+deletion, run the repository's own prose validators before believing the sweep is done — a
+docstring pointer is not caught by mypy, ruff or the test suite.**
+
+## A deleted producer leaves readers that pass their own tests (2026-09-05)
+
+**What happened.** Five fresh-context reviews of the PR-gate deletion found nine defects. Four were
+the same shape and I had not looked for it: `operations.authorship` and the evidence pack both still
+read `note_proposals`, a table the deletion left standing and emptied of any producer. Neither is
+broken in a way anything reports — they return `0` and `[]`, which is what an idle system returns.
+`kg-validate` and `backfill_corpus` were the prose version: each rested its stated purpose on a
+review step that no longer happens.
+
+**Why I missed it.** I grepped for the removed *thing* — `pr_gate`, `propose_note`,
+`proposal_store` — and fixed every hit. That finds the writers. A reader names a table, a column or
+a concept and survives the grep entirely.
+
+**The rule.** *When deleting a subsystem, enumerate the tables, columns, metrics and config keys it
+was the only writer of, and then find every reader of each one.* For each, ask: **who writes what
+this reads now?** If the answer is "nobody", the reader is a defect even though it is green — and it
+is worse than a crash, because a plausible zero is indistinguishable from a quiet afternoon. This is
+`D-2026-09-05-a-reader-with-no-caller-passes-its-own-tests` one level out: that was about a
+component nothing *calls*, this is about one whose *input* nothing produces.
+
+**The corollary that cost the most.** A deletion also invalidates arguments made by the code that
+stays. The sidecar's `rsync --delete` was safe for exactly as long as the writer committed
+elsewhere; moving the writer into that tree turned it into silent, permanent data loss, and nothing
+in either file mentioned the other. So: when a component moves, re-read what was safe *because* of
+where it used to be.
+
+**And: my own edits are part of the bill.** Rewriting tool docstrings for correctness moved
+`tests/test_context_floor.py`'s measured prefix by 56 tokens. I re-recorded the figures rather than
+raising the ceiling. A docstring is prompt, and prose that costs tokens is a change like any other.
+
+## `vitest` green is not `npm run test:e2e` green (2026-09-05)
+
+**What happened.** In the companion PR I edited three `e2e/*.spec.ts` files, ran `lint`,
+`tsc -b`, `format:check` and `vitest`, reported "110 files, 991 tests green" and pushed. CI failed:
+`e2e/routing.spec.ts` — a fourth e2e file I had not opened — clicked through the sidebar into a
+proposal sheet the same PR deleted.
+
+**Why I missed it.** I read the four `npm run` scripts I happened to know and treated their union as
+"the gate". The gate is the CI workflow, and it has a `Browser tests` step running `npm run test:e2e`
+that none of those four covers. I had *edited files that only that step runs* and still did not run
+it.
+
+**The rule.** *Before claiming a change is verified, read the CI workflow and run the steps that
+cover the files the diff touches* — not the commands habit supplies. If a diff touches `e2e/`, the
+e2e suite is part of the verification, and there is no version of "green" that excludes it.
+
+**Second-order, and worth the two extra minutes it costs.** When the e2e run then failed locally in
+a way that looked catastrophic (92 tests failing in 3 ms), the answer was not "my change broke
+everything": the browser binary was at a different path, and after fixing that, the remaining
+failures were 2-worker contention in this sandbox — the same files pass 6/6 in isolation. Check
+whether a failure is *yours* before either believing it or dismissing it. I confirmed by re-running
+the touched files at `--workers=1`, where all 44 pass.
+
+This is the same shape as the finding this session's ADR is about, applied to me: a green line whose
+basis is narrower than the claim it is used to support.
+
 **Six tests I wrote to prove six fixes were vacuous, and they were vacuous the same way.** A
 fresh-context agent ran 30 mutations against the tests from one day's work: 23 caught, 7 survived.
 Every survivor is a test asserting *the shape of a thing rather than its effect* —

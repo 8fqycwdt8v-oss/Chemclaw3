@@ -2,7 +2,7 @@
 
 Why this exists: before connectors, four bespoke adapters (`agents/qm_tools.py`,
 `agent/durable_tools.py`) each re-implemented the same shape — derive a deterministic id, stamp the
-actor, start a named workflow, map its status, publish a note through the PR-gate, push back to the
+actor, start a named workflow, map its status, write a note into the graph, push back to the
 launching session — and each imported its workflow class directly, which forced every durable
 capability into core's own worker lists (`durable/background_worker.py`).
 
@@ -19,10 +19,11 @@ core owns the obligations that must never vary per capability:
   down to the child on its **memo**, not in its argument, so a bundle whose backend runs under a
   shared service identity (a calculation backend) can still name the user without the actor
   becoming a field the model could author.
-- **The PR-gate** — a job that produces knowledge returns a `Note` and core publishes it through
-  `chemclaw.kg.pr_gate` (via the existing `publish_memory_note_activity`). A connector never writes
-  to the
-  graph itself, so "the agent proposes, a human decides" cannot be bypassed by adding a connector.
+- **The write path** — a job that produces knowledge returns a `Note` and core writes it through
+  `chemclaw.kg.record` (via the existing `publish_memory_note_activity`). A connector never writes
+  to the graph itself, so the path validation, the `created_by` refusal and the write ordering
+  cannot be bypassed by adding a connector. `tests/test_knowledge.py` asserts that no bundle holds
+  a second way in.
 - **Session push-back** — the launching chat is woken through the one existing channel (F3-T3), so
   a connector job surfaces in the UI exactly as a QM job does, with no per-connector plumbing.
 - **The durable record** — what ran, on what arguments, what came out, and *why it was asked for*
@@ -248,7 +249,7 @@ class ConnectorJobResult(BaseModel):
     # `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` shape exactly.
     external_ref: str = ""
     # The calculation keys this run rested on, so a conclusion drawn from it can cite them
-    # (D-2026-08-21). `propose_knowledge_note`'s `calc_refs` argument has told the model to "get
+    # (D-2026-08-21). `record_knowledge_note`'s `calc_refs` argument has told the model to "get
     # them from a job's result envelope" since D-133 and no envelope carried any: the only
     # producers in `src/` were the BO featurizer and the QM workflow's own note, neither of which
     # an agent drafting a note from a calculation it just ran can reach. Without them a stale
@@ -946,13 +947,13 @@ class ConnectorJobWorkflow:
             # The same PR-gate activity the memory-synthesis jobs use — one write path into the
             # graph, on the light background queue, bounded retries, never failing the job. The
             # note is stamped with the run and its reason on the way through, here rather than in
-            # each connector, so no bundle can forget and every merged note answers "why was this
+            # each connector, so no bundle can forget and every recorded note answers "why was this
             # done" as well as "what came out".
-            # `job.requested_by` travels with the note so the proposal is recorded against the
-            # chemist who launched the job. Without it `ambient_provenance()` yields `actor=""`,
-            # the row is invisible in that chemist's own review queue, and the PR opened on their
-            # behalf is one they cannot find — while the input carrying their identity sits one
-            # frame above, required and unused.
+            # `job.requested_by` travels with the note so the write is *attributed* to the
+            # chemist who launched the job. It was the PR-gate's `NoteProposal.actor` until
+            # `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`; what reads it now is the log
+            # filter, so without it a durable note write has no line joining it to the person who
+            # asked — while the input carrying their identity sits one frame above, unused.
             await publish_note_best_effort(
                 publish_memory_note_activity,
                 [

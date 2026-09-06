@@ -84,7 +84,7 @@ service:
 # anonymously.
 #
 # It serves reads only: the advertised set is derived from `agent.authz.READ_ONLY_TOOLS` minus the
-# ones `WITHHELD` names, so nothing here can launch a job, propose a note or settle a wait — and
+# ones `WITHHELD` names, so nothing here can launch a job, record a note or settle a wait — and
 # nothing here answers a question about this deployment's *people* rather than its chemistry, which
 # is the second predicate and the one that was originally wrong.
 mcpFace:
@@ -109,7 +109,7 @@ workers:
   background:
     # Keep at 1 — but no longer for the checkout lock. That reason is closed: submissions to one
     # remote are serialized across pods by a Postgres advisory lock
-    # (`kg/git_submitter.py::_cluster_lock`), and the host-local `flock` now only guards this pod's
+    # (`kg/git_writer.py::_cluster_lock`), and the host-local `flock` now only guards this pod's
     # own worktree sweep.
     #
     # The reason that is still live is `NoteReindexWorkflow`
@@ -158,7 +158,7 @@ knowledge:
     # fetch can never leave the directory the app reads in a half-written state; the publish copies
     # from here into the tree below.
     checkoutPath: /app/knowledge-repo
-  # The PR-gate submitter's writable clone (gap DEP-2) — and, at its `CHEMCLAW_KNOWLEDGE_DIR`
+  # The note writer's writable clone (gap DEP-2) — and, at its `CHEMCLAW_KNOWLEDGE_DIR`
   # subdirectory, the tree the application reads. There is no separate `publishPath` value, and that
   # is the fix rather than an omission: `Settings.knowledge_path` is `note_repo_dir / knowledge_dir`
   # and nothing else, so a second declared path could only ever agree with it by hand — and did not,
@@ -811,7 +811,7 @@ config:
   # On in production, off in code, for the same reason `BUDGET_ENABLED` is (REV-16): a CLI, a test
   # and a single-user dev run have no reason to be throttled, and a deployment serving real users
   # over a shared endpoint has no reason not to be. The turn guards above bound what reaches the
-  # LLM; this bounds everything else — `/proposals`, `/jobs`, `/schedules`, `/sessions` — which was
+  # LLM; this bounds everything else — `/jobs`, `/schedules`, `/sessions` — which was
   # entirely unmetered, so a loop with no LLM call in it cost nothing to run.
   # 120/min sustained with a burst of 30: far above a chemist clicking through a UI, far below what
   # a script can do. Per process, so `service.autoscaling.maxReplicas` multiplies the real ceiling —
@@ -869,14 +869,9 @@ secrets:
   keys:
     llmApiKey: "CHEMCLAW_LLM_API_KEY"
     postgresDsn: "CHEMCLAW_POSTGRES_DSN"
-    # Push credential for the knowledge repo (gap DEP-2). Without it the PR-gate cannot open a
-    # branch for any agent-authored note, so every knowledge write fails at push in-cluster.
+    # Push credential for the knowledge repo (gap DEP-2). Without it the note writer cannot push
+    # the base branch, so every knowledge write fails at push in-cluster.
     knowledgeRepoToken: "CHEMCLAW_KNOWLEDGE_REPO_TOKEN"
-    # The shared secret the git host signs its post-merge webhook with. Without it
-    # `/events/knowledge-merged` can still force a reindex but may not close a proposal as merged
-    # (D-2026-07-31-a-proposal-is-a-record-not-a-branch), so every reviewed note would stay in the
-    # queue forever — a review surface that only ever grows is one nobody works.
-    noteWebhookSecret: "CHEMCLAW_NOTE_WEBHOOK_SECRET"
   # Secrets that are safe when unset, rendered with `optional: true` so naming a new one does not
   # take an existing release down on upgrade (see `chemclaw.env` in `_helpers.tpl`).
   optionalKeys:

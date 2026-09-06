@@ -32,9 +32,19 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
 - **The audit trail.** `src/chemclaw/agent/audit.py` logs every agent tool call once (correlation id, actor,
   truncated args, outcome, latency) via a single middleware, with an optional append-only Postgres
   `audit_events` sink (default log-only).
-- **The PR-gate.** Anything the agent generates (job results, notes, reports, distilled playbooks)
-  enters the knowledge graph only through a human-reviewed pull request. The agent can *propose*
-  truth; it cannot *merge* it — the agent proposes, a human decides.
+- **Provenance, not pre-approval, on knowledge.** Anything the agent generates (job results,
+  notes, reports, distilled playbooks) enters the knowledge graph directly, stamped
+  `created_by: agent` and served beside its own citations, and is corrected by a `contradicts`
+  edge or a supersession rather than reviewed before it lands
+  (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). **What this is not**: it is not a
+  control that stops a wrong machine-written claim being served — it is what makes one visible as
+  machine-written and reversible once seen. The line that remains is on *behaviour*: a skill
+  changes every later answer with no citation trail, so **no agent path writes one at all** —
+  `agent/skill_backend.SkillsReadOnlyRefusal` refuses every write through the skills surface, and
+  `skills/` is git-resident, so a change to it is an ordinary reviewed commit by a person with
+  push rights. Stated as the refusal rather than as "an admin reviews it", because the refusal is
+  the part this system implements; the review is the repository's, and a deployment that grants
+  push rights widely has weakened it without any code changing.
 - **Transport identity (non-Entra bridges).** Identity rides *inside* the workflow payload, so the
   transports are authenticated separately: Temporal by mTLS (`temporal_tls_*`) or a Cloud API key,
   and every MCP endpoint by a mounted bearer token (F4-T6). No backend component mints an outbound

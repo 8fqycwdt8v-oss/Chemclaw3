@@ -398,8 +398,12 @@ _NOT_PRUNED: dict[str, str] = {
     "predictions": "**nothing bounds it** — the calibration ledger's evidence, where pruning a row "
     "changes a calibration rather than reclaiming space; no decision is on record",
     "measurements": "**nothing bounds it** — the calibration ledger's other half, same question",
-    "note_proposals": "refused: the PR-gate's record of what was proposed and who decided it — "
-    "`leaver._RETAINED` keeps it through an erasure request, so a clock may not take it either",
+    "note_proposals": "refused: the PR-gate's record of what was proposed and who decided it, for "
+    "as long as there was a gate to decide anything "
+    "(`D-2026-09-05-the-gate-is-deleted-not-dormant` retired it and nothing writes a row now). "
+    "**Retired is not disposable**: a deployment that ran the gate holds real sign-offs by real "
+    "people, `leaver._RETAINED` keeps the table through an erasure request, and a clock may not "
+    "take what an erasure may not",
     "plan_approvals": "refused: who authorized a plan to spend anything, kept through erasure "
     "(`leaver._RETAINED`); consumed rows are marked, never removed",
     "turn_costs": "refused: what a person's turns cost, the record an operator bills against — "

@@ -143,7 +143,7 @@ topic).
   a hash of the todo *contents* — but it never compares the *tool being called* to anything in the
   plan. So once a human approves a one-line read-only plan ("look up the melting point of aspirin"),
   every tool in `authz.side_effecting_tools()` executes for the rest of that turn:
-  `propose_knowledge_note` (a knowledge-graph write / git push), `synthesize_memory`, every durable
+  `record_knowledge_note` (a knowledge-graph write / git push), `synthesize_memory`, every durable
   calc/BO launch. Combined with the unframed injection surfaces (connector output, `find_past_jobs`
   `plan_step`, ELN notes) this is the injection amplifier — untrusted text that reaches the model
   during an approved turn reaches the full write surface while the chemist believes they approved a
@@ -175,7 +175,7 @@ topic).
 - [ ] **`build_langgraph_agent(connectors=...)` accepts a tool that shadows a first-party name** —
       [S], the residual `D-2026-09-04-a-name-is-one-capability-across-every-namespace` names and
       leaves open, and whose `BACKLOG.md` row was never written. `connectors/registry.py`'s
-      `_declared_tool_names` refuses a *manifest* claiming `propose_knowledge_note`, and that is
+      `_declared_tool_names` refuses a *manifest* claiming `record_knowledge_note`, and that is
       the path a deployment takes; the `connectors` keyword is the one that bypasses it, because
       `agent/langgraph_agent.py`'s `bound = [*(as_structured_tool(fn) for fn in tools),
       *(connectors or [])]` concatenates the two lists with no name check at all. Closed in
@@ -293,6 +293,15 @@ topic).
 - [ ] **`make kg-validate`'s two store-backed arms have no input in the shipped corpus** — [S], same
       review. 0 reaction citations and 0 `calc_refs` in the committed knowledge corpus, so the half
       of the validator its own docstring says CI runs is dead on every CI run.
+
+- [ ] **The `note_proposed` SSE event is not a proposal, and the name is a two-repo contract** —
+      [S], found 2026-09-05 in the gate-deletion review. Nothing reviews a note, so the accurate
+      name is `note_recorded`; the literal is switched on by `Chemclaw3_ui`
+      (`state/types.ts`, `chatStore.ts`, `TracePanel.tsx`, `chem/entities.ts`, `turnActivity.ts`)
+      and by `evals/live.py`, so renaming it is a coordinated deploy with a skew window in which
+      one side drops the event silently. The internal names and the text a chemist reads are
+      already fixed; only the wire literal is left. Needs a rollout order (accept both, then emit
+      the new one, then drop the old), which is why it is a row rather than part of that fix.
 
 - [ ] **The detached settle of a cancelled `AwaitAnswerWorkflow` is racy** — [M], found 2026-09-04
       while fixing the stranded-row HIGH. `ParentClosePolicy.REQUEST_CANCEL` is strictly better than
@@ -949,7 +958,7 @@ only holds defects can only ever restore the system to what it already intended 
       objective plus a sidecar list (W3)"* — and Pydantic turns a class docstring into the schema
       `description`, so `convert_to_openai_tool` ships them. Measured 2026-08-25 on the `default`
       profile: `start_optimization_campaign` is 8,063 chars of schema, 4,392 of it description and
-      **3,047 of that elaboration past the first paragraph**; `propose_knowledge_note` 4,259/2,262/663.
+      **3,047 of that elaboration past the first paragraph**; `record_knowledge_note` 4,259/2,262/663.
       Those two are 25% of the profile's 12,536-token tool budget between them, and both are already
       in `tests/test_context_floor.py::KNOWN_OVERSIZED`.
 
@@ -1107,7 +1116,10 @@ only holds defects can only ever restore the system to what it already intended 
       (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): knowledge is global the moment it
       is learned and ungated; a skill is **live for its own user before review** and reaches the
       shared tree only after an **admin** merges it, so the end user never waits on a gate and no
-      unreviewed instruction reaches a second person. What is open here is now the generator alone —
+      unreviewed instruction reaches a second person. The knowledge half of that is **built** —
+      `D-2026-09-05-the-gate-is-deleted-not-dormant` deleted the PR-gate outright (all nine callers
+      were knowledge, so ungating left it with no subject) and `kg/record.py` is the one write path.
+      What is open here is now the generator alone —
       plus the per-actor skills directory that tier needs, which is blocked on the same generator
       (nothing writes one until a distiller exists) and whose invariants that ADR states — plus the follow-up that ADR names and does not claim shipped: the
       direct write path that actually ungates agent-asserted notes, which owes D-161 migration
@@ -1274,15 +1286,19 @@ Both change what a `Component` is, so this wants its own ADR and its own measure
 partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
 by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
 
-## The PR-gate costs 1.81 s per proposed note, and a backfill is one note per record
+## A note write costs ~1.8 s, and a backfill is one write per record
 
-Measured over the ORD backfill: 103 records per 3.1 minutes, steady, with the cost in the PR-gate's
-git branch-and-commit cycle rather than in mapping (the whole 10,011-record corpus maps in 0.3 s).
-That is a little over two hours for the mock's 4,251 ingestible records and 4,251 branches in the
-note repository. A real deployment's first sync is a decade of records, where this is days and a
-repository nobody can list. Nothing is broken — every proposal genuinely is a reviewable unit — but
-a backfill and an incremental sync arguably want different submission shapes (one branch per batch,
-or a bulk proposal a reviewer expands). Found by the 2026-08-18 corpus-fidelity pass.
+Measured over the ORD backfill: 103 records per 3.1 minutes, steady, with the cost in the
+commit-and-push cycle rather than in mapping (the whole 10,011-record corpus maps in 0.3 s). That is
+a little over two hours for the mock's 4,251 ingestible records. A real deployment's first sync is a
+decade of records, where this is days.
+
+**Half of this closed itself and half did not.**
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the branch per note, so the
+"4,251 branches in a repository nobody can list" half is gone. What remains is the serialized
+commit-and-push, which is the same 1.8 s: a backfill and an incremental sync still want different
+write shapes (one commit per batch for the first, one per note for the second). Found by the
+2026-08-18 corpus-fidelity pass, re-scoped 2026-09-05.
 
 ## The labelling client is the one MCP leg with no identity or trace on the wire
 

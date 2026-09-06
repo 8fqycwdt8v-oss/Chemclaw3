@@ -657,7 +657,6 @@ _SECRET_SETTINGS = (
     "postgres_dsn",
     "postgres_migration_dsn",
     "session_store_dsn",
-    "note_webhook_secret",
     # Not a credential to an external system, which is why it was missed — but it is the HMAC key
     # `agent/framing.py` derives `ENVELOPE_TAG` from, and the agent instructions say only an
     # envelope carrying exactly that tag marks retrieved content as data. Anyone who learns it and
@@ -732,7 +731,7 @@ def _named_token_env_vars() -> frozenset[str]:
     `_SECRET_ENV_SETTINGS` was added for the log filter and `secret_env_names()` went on deriving
     from `_SECRET_SETTINGS` alone — so the calculation backend's bearer, the labelling server's and
     the read-only MCP face's were scrubbed from every log line and handed, in the clear, to every
-    `git` child `kg/git_submitter.py` starts, which is the exact class `_git_child_env` exists to
+    `git` child `kg/git_writer.py` starts, which is the exact class `_git_child_env` exists to
     withhold. Two docstrings said the sets "cannot drift"; reading one list from both places is what
     makes that a property of the code rather than a claim about it.
 
@@ -749,7 +748,7 @@ def secret_env_names() -> frozenset[str]:
     value, and `_SECRET_ENV_SETTINGS`, whose fields hold the *name* of a variable a bearer lives in
     (`_named_token_env_vars`). A credential added to either is scrubbed from a subprocess
     environment by the same edit rather than a second one that can drift. The use is least
-    privilege: a child process (today, the KG git commands in `kg/git_submitter.py`) has no need of
+    privilege: a child process (today, the KG git commands in `kg/git_writer.py`) has no need of
     this process's LLM credential, database DSNs, Temporal key, the framing-envelope HMAC or the
     three bearers it sends to its own backends, and a git remote, credential helper or hook that
     reads its environment must not find them there.

@@ -21,7 +21,6 @@ from pydantic import BaseModel, Field, field_validator
 
 from chemclaw.api.tool_results import content_address
 from chemclaw.core.config import settings
-from chemclaw.kg.proposal import NoteProposal
 
 # How much of a tool's arguments or result the transcript carries. The same bound the audit trail
 # applies for the same reason: a tool argument can be a whole optimization problem or an evidence
@@ -152,80 +151,6 @@ class TranscriptMessage(BaseModel):
     role: str
     text: str
     tool_calls: list[TranscriptToolCall] = []
-
-
-class ProposalSummary(BaseModel):
-    """One note proposal as the review queue shows it — everything but the note body.
-
-    A second shape rather than the whole `NoteProposal`, for the reason `JobRecordSummary` is one:
-    a queue may hold dozens of rows and a rendered note is a document, so handing them all back
-    would spend a page of transfer to answer "what is waiting for me". The body is one lookup away
-    by id once a proposal is worth opening.
-    """
-
-    id: int
-    note_id: str
-    note_type: str
-    state: str
-    branch: str
-    reference: str
-    actor: str
-    submitted_at: datetime | None
-    decided_at: datetime | None
-    decided_by: str
-    reason: str
-
-
-class ProposalFile(BaseModel):
-    """One further file the submission would write beside its subject note."""
-
-    path: str
-    content: str
-
-
-class ProposalDetail(ProposalSummary):
-    """A proposal with everything it would write, exactly as it would land in the tree.
-
-    The bytes rather than a summary of them: a reviewer signing off on machine-written knowledge is
-    signing off on the bytes, and a paraphrase is the one thing a review must not be given.
-
-    `dependencies` is the rest of the submission — the `compound` note a `job-result` cites, say —
-    and it is here because without it the sentence above was false for exactly the submissions that
-    need review most. A note and the notes its links depend on are one reviewable unit (D-133);
-    showing one file of it invited a reviewer to approve a link they could not see the far end of.
-    """
-
-    content: str
-    dependencies: list[ProposalFile] = Field(default_factory=list)
-    session_id: str
-    correlation_id: str
-    # Every *other* recorded version of this note, oldest first. `ProposalSummary` rather than a
-    # shape of its own because it already carries exactly what a history entry is — the decision,
-    # who took it and why — and carries no body, which is the property that matters here: a
-    # reviewer is being shown what was decided, not handed a second document to read.
-    history: list[ProposalSummary] = Field(default_factory=list)
-
-
-class ProposalDecisionIn(BaseModel):
-    """The human decision on one open proposal, with the reason it went that way.
-
-    `reason` is required on a rejection and optional on a merge, because "why was this refused" is
-    the question a rejected proposal exists to answer — before this table there was no record of a
-    rejection at all, and a record that says only "no" would reproduce that gap one level up.
-    """
-
-    approved: bool
-    reason: str = ""
-
-
-class KnowledgeMergedIn(BaseModel):
-    """The notes a git host reports as merged, so their proposals can be closed.
-
-    Optional: an operator calling this by hand to force a reindex still may, and an empty list
-    keeps exactly the pre-existing behaviour (rebuild the index, decide nothing).
-    """
-
-    note_ids: list[str] = []
 
 
 class PlanDecisionIn(BaseModel):
@@ -481,20 +406,3 @@ def _truncate_for_transcript(value: object) -> str:
     """Render a tool argument or result as one bounded string (see `_TRANSCRIPT_ARG_CHARS`)."""
     text = value if isinstance(value, str) else repr(value)
     return text if len(text) <= _TRANSCRIPT_ARG_CHARS else text[:_TRANSCRIPT_ARG_CHARS] + "…"
-
-
-def _proposal_summary(proposal: NoteProposal) -> ProposalSummary:
-    """Project a stored proposal onto the listing shape."""
-    return ProposalSummary(
-        id=proposal.id,
-        note_id=proposal.note_id,
-        note_type=proposal.note_type,
-        state=proposal.state.value,
-        branch=proposal.branch,
-        reference=proposal.reference,
-        actor=proposal.actor,
-        submitted_at=proposal.submitted_at,
-        decided_at=proposal.decided_at,
-        decided_by=proposal.decided_by,
-        reason=proposal.reason,
-    )

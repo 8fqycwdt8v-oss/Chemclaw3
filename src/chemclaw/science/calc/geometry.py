@@ -47,7 +47,7 @@ _GEOMETRY_FIELDS = ("elements", "positions")
 # What survives a projection, beyond the address. Each answers a question a chemist asks of a
 # geometry they cannot see: *of what molecule* (`smiles`), *in what electronic state*
 # (`charge`/`multiplicity`), and *produced by what* (`origin`, the key of the calculation that
-# relaxed it — which is also what `propose_knowledge_note` takes as a `calc_ref`).
+# relaxed it — which is also what `record_knowledge_note` takes as a `calc_ref`).
 _KEPT_FIELDS = ("smiles", "charge", "multiplicity", "origin")
 
 # The values of those fields that say nothing, and are therefore omitted. A neutral closed-shell

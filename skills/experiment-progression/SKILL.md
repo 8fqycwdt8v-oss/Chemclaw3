@@ -17,7 +17,7 @@ tools:
   - compute_xtb_energy
   - predict_site_reactivity
   - screen_hazards
-  - propose_knowledge_note
+  - record_knowledge_note
 ---
 
 # Experiment progression
@@ -111,9 +111,9 @@ Keep the proposal inside what the lab can actually do. If the obvious next exper
 equipment or material that has never appeared in the series, say so instead of quietly assuming
 it exists.
 
-## 6. Record it through the gate
+## 6. Record it
 
-Write the proposal as an `experiment-proposal` note via `propose_knowledge_note`, so tomorrow's
+Write the proposal as an `experiment-proposal` note via `record_knowledge_note`, so tomorrow's
 session knows what was suggested and can compare it against what actually happened:
 
 - Link the run it responds to with `[[follows:reaction-<id>]]` — that edge is the line of enquiry,
@@ -121,8 +121,9 @@ session knows what was suggested and can compare it against what actually happen
   yours.
 - Cite the evidence runs and any campaign note with plain `[[wikilinks]]`, and name the computed
   values you used.
-- It is a **proposal**: a human decides whether to run it (D-005). Write it so the reviewer can
-  see the reasoning and reject the premise, not just the conditions.
+- It is a **proposal**: it is recorded the moment you write it, and a human decides whether to
+  run it. Write it so the chemist can see the reasoning and reject the premise, not just the
+  conditions.
 
 Safety is not optional in a proposal. If the suggestion moves into a regime the series has not
 been in — a higher temperature, a new oxidant, a change of scale — run `screen_hazards` on it

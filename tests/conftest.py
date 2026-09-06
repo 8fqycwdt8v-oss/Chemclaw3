@@ -1,7 +1,7 @@
 """Shared pytest fixtures and test fakes.
 
-`FakeSubmitter` is the one PR-gate test double: every test that exercises a
-"propose a note" path imports it (`from tests.conftest import FakeSubmitter`)
+`FakeWriter` is the one note-write test double: every test that exercises a
+"record a note" path imports it (`from tests.conftest import FakeWriter`)
 instead of redefining an identical fake per file (DRY).
 
 `_fresh_discovery_caches` clears the connector and template `@cache`d discovery seams around
@@ -36,7 +36,7 @@ from chemclaw.connectors.registry import discovered as _connectors_discovered
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.warehouse.connect import forget_open_warehouses as _forget_warehouses
 from chemclaw.ingest.sources.registry import discovered as _sources_discovered
-from chemclaw.kg.submission import NoteSubmission, SubmissionOutcome
+from chemclaw.kg.record import NoteWrite, WriteOutcome
 from chemclaw.retrieval.vectors.registry import forget_vector_store as _forget_vector_store
 from chemclaw.templates.registry import discovered as _templates_discovered
 from tests.pg import create_test_schema, drop_test_schema, schema_dsn
@@ -54,17 +54,17 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-class FakeSubmitter:
-    """Records PR-gate submissions instead of touching git, returning a stub PR ref."""
+class FakeWriter:
+    """Captures note writes instead of touching git, returning a stub commit reference."""
 
     def __init__(self) -> None:
-        """Start with no captured submissions."""
-        self.submissions: list[NoteSubmission] = []
+        """Start with no captured writes."""
+        self.writes: list[NoteWrite] = []
 
-    async def submit(self, submission: NoteSubmission) -> SubmissionOutcome:
-        """Capture the submission and return a fake PR reference."""
-        self.submissions.append(submission)
-        return SubmissionOutcome(reference=f"pr://{submission.branch}")
+    async def write(self, write: NoteWrite) -> WriteOutcome:
+        """Capture the write and return a fake commit reference."""
+        self.writes.append(write)
+        return WriteOutcome(reference=f"commit://{len(self.writes)}")
 
 
 @pytest.fixture(scope="session", autouse=True)

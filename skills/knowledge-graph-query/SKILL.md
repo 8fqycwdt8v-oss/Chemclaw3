@@ -37,7 +37,7 @@ to use it and how to weigh what it returns.
 
 - Respect `confidence` and the `valid_from`/`valid_to` window — do not present a
   low-confidence or expired note as established fact.
-- Distinguish `created_by: human` (reviewed) from `created_by: agent` (proposed);
-  an unmerged agent note is not yet trusted knowledge.
+- Distinguish `created_by: human` from `created_by: agent`: both are readable knowledge, but an
+  agent note is only as good as the citations it carries, so check them before leaning on it.
 - **Cite the source note id** for every claim so the answer is traceable. If the
   graph has no note supporting a claim, say so rather than inventing one.

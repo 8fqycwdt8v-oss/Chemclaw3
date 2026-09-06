@@ -168,27 +168,6 @@ def test_a_secret_str_hides_its_value_from_the_shapes_that_leak() -> None:
     assert holder.llm_api_key.get_secret_value() == "sk-real-value"
 
 
-def test_the_webhook_signature_is_computed_over_the_real_secret(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An HMAC over `**********` verifies against itself, so both sides agree and neither is signed.
-
-    The worst shape of this failure: a signature check that passes for the caller who holds the
-    same wrapper and rejects the caller who holds the actual secret — a control that keeps working
-    while protecting nothing.
-    """
-    import hashlib
-    import hmac
-
-    from chemclaw.api.routes.proposals import _webhook_signature_ok
-
-    monkeypatch.setattr(settings, "note_webhook_secret", SecretStr("s3cret"))
-    body = b'{"note_id":"n-1"}'
-    signature = "sha256=" + hmac.new(b"s3cret", body, hashlib.sha256).hexdigest()
-    assert _webhook_signature_ok(body, signature)
-    assert not _webhook_signature_ok(body, "sha256=" + "0" * 64)
-
-
 def test_the_envelope_nonce_is_derived_from_the_real_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

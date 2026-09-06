@@ -132,12 +132,12 @@ def _call(tool: str) -> bool:
 def test_a_dry_run_refuses_every_write_not_just_the_three_that_remembered() -> None:
     """The gate is the control; three tools checking for themselves was three that happened to.
 
-    `propose_knowledge_note` is the case that made this necessary: it pushes a branch to the
+    `record_knowledge_note` is the case that made this necessary: it pushes a branch to the
     knowledge repository and had no dry-run check at all, so `dry_run: true` mutated the graph.
     """
     token = set_dry_run(True)
     try:
-        for tool in ("propose_knowledge_note", "record_confirmed_answer", "remember_preference"):
+        for tool in ("record_knowledge_note", "record_confirmed_answer", "remember_preference"):
             with pytest.raises(DryRunRefusal):
                 _call(tool)
         # And the three that did check are still refused, now by the same gate.
@@ -159,7 +159,7 @@ def test_a_dry_run_leaves_reads_alone() -> None:
 
 def test_a_normal_turn_is_untouched() -> None:
     """A no-op off a dry run — including off the request path, where the flag is always False."""
-    assert _call("propose_knowledge_note") is True
+    assert _call("record_knowledge_note") is True
 
 
 def test_the_refusal_can_never_be_mistaken_for_a_real_result() -> None:
@@ -172,7 +172,7 @@ def test_the_refusal_can_never_be_mistaken_for_a_real_result() -> None:
     token = set_dry_run(True)
     try:
         with pytest.raises(DryRunRefusal) as refusal:
-            _call("propose_knowledge_note")
+            _call("record_knowledge_note")
     finally:
         reset_dry_run(token)
     message = str(refusal.value)

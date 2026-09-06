@@ -399,7 +399,7 @@ def collecting() -> Iterator[list[str]]:
     for one consumer at the top.
 
     The consumer is the durable job, which puts them on its envelope so a note drafted from the run
-    can cite what it rested on (D-2026-08-21). `propose_knowledge_note` has advertised exactly that
+    can cite what it rested on (D-2026-08-21). `record_knowledge_note` has advertised exactly that
     since D-133 — "get them from a job's result envelope" — against an envelope that carried none.
 
     De-duplicated, order preserved: a reaction relaxes a shared species once and the key is reached

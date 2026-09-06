@@ -2,10 +2,19 @@
 
 **Assembly, not capture.** Every component of this exists and has since it was written — the audit
 trail records every tool call with its actor, outcome and latency; `job_records` records what a
-durable run was asked for and what it returned; `note_proposals` records what the agent proposed
-and who decided; `plan_approvals` records who approved a plan and which one; `effects` records what
-was changed outside this deployment and who approved it. Nothing here is new capture. What was
-missing is the *read* that puts them beside each other.
+durable run was asked for and what it returned, including the note it recorded; `plan_approvals`
+records who approved a plan and which one; `effects` records what was changed outside this
+deployment and who approved it. Nothing here is new capture. What was missing is the *read* that
+puts them beside each other.
+
+**There used to be a fifth section and there is not.** `proposals` read `note_proposals` — the
+note the agent submitted to the PR-gate and who decided it. That gate is gone
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): nothing writes that table, so the
+section would have been permanently empty on any session recorded since, which under this pack's
+own `limits` reads as "this system recorded nothing" rather than as "this reading is dead". What a
+pack shows instead is the `record_knowledge_note` call in `tool_calls` with its actor, outcome and
+timestamp, and `PackJob.note_id` for a note a durable run recorded. The note *id* of a note written
+inside a turn is the one thing lost, and it is named in `LIMITS` rather than left to be noticed.
 
 ## Why this and not the hash chain
 
@@ -55,6 +64,9 @@ LIMITS: tuple[str, ...] = (
     "having happened — a window outside retention reads identically.",
     "A section named in `truncated` is a prefix, not the whole of it: this pack reads a bounded "
     "number of rows per store, oldest first. Read the counts as lower bounds there.",
+    "A knowledge note written inside a turn appears here as the tool call that wrote it, not by "
+    "its note id: nothing stores the id of a note against the session that wrote it. A note a "
+    "durable run recorded does carry its id, on that job.",
 )
 
 
@@ -94,17 +106,6 @@ class PackJob(BaseModel):
     completed_at: str = ""
 
 
-class PackProposal(BaseModel):
-    """One knowledge note the agent proposed, and what a human decided about it."""
-
-    note_id: str
-    note_type: str
-    state: str
-    actor: str
-    decided_by: str = ""
-    decided_at: str = ""
-
-
 class PackEffect(BaseModel):
     """One change made in a system this deployment does not own."""
 
@@ -139,7 +140,6 @@ class EvidencePack(BaseModel):
     session_id: str
     tool_calls: list[ToolCall] = Field(default_factory=list)
     jobs: list[PackJob] = Field(default_factory=list)
-    proposals: list[PackProposal] = Field(default_factory=list)
     effects: list[PackEffect] = Field(default_factory=list)
     approvals: list[PackApproval] = Field(default_factory=list)
     limits: tuple[str, ...] = LIMITS
@@ -172,9 +172,7 @@ class EvidencePack(BaseModel):
         abandoned the turn left a row in `plan_approvals` and nothing in the other four, so the pack
         reported "nothing recorded" for a session in which a human authorized spending.
         """
-        return not (
-            self.tool_calls or self.jobs or self.proposals or self.effects or self.approvals
-        )
+        return not (self.tool_calls or self.jobs or self.effects or self.approvals)
 
 
 async def _rows(sql: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
@@ -191,12 +189,12 @@ def _stamp(value: Any) -> str:
 
 
 async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
-    """Build the pack for one session from the five stores that already hold it.
+    """Build the pack for one session from the four stores that already hold it.
 
-    Five reads rather than one join: the stores are independent by design — an effect is recorded
-    whether or not a note was proposed, and a proposal survives the session's messages being pruned
-    — and a join would silently drop a row whose partner had been disposed of under a different
-    retention rule.
+    Four reads rather than one join: the stores are independent by design — an effect is recorded
+    whether or not a job ran, and a job record survives the session's messages being pruned — and a
+    join would silently drop a row whose partner had been disposed of under a different retention
+    rule.
     """
     calls = [
         ToolCall(
@@ -251,21 +249,6 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
             )
         )
     ]
-    proposals = [
-        PackProposal(
-            note_id=str(note_id),
-            note_type=str(note_type),
-            state=str(state),
-            actor=str(actor),
-            decided_by=str(decided_by or ""),
-            decided_at=_stamp(decided_at),
-        )
-        for note_id, note_type, state, actor, decided_by, decided_at in await _rows(
-            "SELECT note_id, note_type, state, actor, decided_by, decided_at FROM note_proposals "
-            "WHERE session_id = %s ORDER BY submitted_at LIMIT %s",
-            (session_id, limit),
-        )
-    ]
     effects = [
         PackEffect(
             effect_id=str(effect_id),
@@ -300,7 +283,6 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
     sections: list[tuple[str, int]] = [
         ("tool_calls", len(calls)),
         ("jobs", len(jobs)),
-        ("proposals", len(proposals)),
         ("effects", len(effects)),
         ("approvals", len(approvals)),
     ]
@@ -308,7 +290,6 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
         session_id=session_id,
         tool_calls=calls,
         jobs=jobs,
-        proposals=proposals,
         effects=effects,
         approvals=approvals,
         truncated=tuple(name for name, count in sections if count >= limit),

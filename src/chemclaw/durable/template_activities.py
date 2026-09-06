@@ -195,7 +195,7 @@ def _acting_as(identity: StepIdentity) -> Iterator[None]:
     `agent/audit.py` falls back to the correlation id each step activity passes it explicitly, so
     its rows were right. Everything that reads the ambient instead was not — `core/logging.py`'s
     `ContextFilter` wrote `correlation_id="-"` on every line a durable step logged,
-    `kg/proposal.py::ambient_provenance` recorded an empty id on every note a template proposed, and
+    the ambient correlation id was empty on every note a template recorded, and
     `connectors/jobs.py` handed `ConnectorJobInput.correlation_id=""` to every job a template
     launched — so a paged engineer had no grep path from a running job back to the turn behind it.
 

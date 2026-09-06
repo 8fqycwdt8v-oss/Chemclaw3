@@ -53,9 +53,9 @@ def strip_links(text: str) -> str:
     a typed edge reads `[[precursor-of:compound-x]]`, and substituting the raw group would drop
     `precursor-of:compound-x` into prose a person reads.
 
-    **Retrieved text is what this is for.** A chunk's content becomes a bullet inside a PR-gated
-    report, and a `[[link]]` surviving that interpolation is not decoration — it is a real outgoing
-    edge on a note a human is about to merge, pointing at something no retriever returned. A share
+    **Retrieved text is what this is for.** A chunk's content becomes a bullet inside a report, and
+    a `[[link]]` surviving that interpolation is not decoration — it is a real outgoing edge on a
+    note about to be written, pointing at something no retriever returned. A share
     or warehouse document is written by whoever wrote it; the report's citations must come from the
     report.
     """
@@ -148,7 +148,7 @@ def note_relative_path(note_type: str, note_id: str) -> str:
     """Where a note lives inside the knowledge directory: `<type>/<id>.md`.
 
     The one filename shape the whole system depends on, and until this it was an f-string in the
-    PR-gate (`chemclaw.kg.pr_gate`) that three other places re-derived by hand — including
+    write path (`chemclaw.kg.record`) that three other places re-derived by hand — including
     `chemclaw.kg.graph.note_file_fingerprints`, which reads a note's id back out of `path.stem`,
     and the warehouse retriever, which spelled the layout *and* the literal type `"reaction"` into
     a `stat` call. A layout that lives in four places is a layout one of them will get wrong.
@@ -233,8 +233,8 @@ def mentioned_ids(text: str) -> list[str]:
     return list(ordered)
 
 
-# `id` and `type` become file-path segments (`knowledge/<type>/<id>.md`) and a git
-# branch (`note/<id>`) in the PR-gate, and ELN entry ids flow in from external JSON.
+# `id` and `type` become file-path segments (`knowledge/<type>/<id>.md`) and reach `git add` as a
+# pathspec, and ELN entry ids flow in from external JSON.
 # Constraining them to a plain slug at the model is the traversal/ref-injection
 # barrier: no `/`, no leading `.`, nothing git or the filesystem could reinterpret.
 # `_` is included because BO note ids embed registry objective names (e.g.
@@ -342,11 +342,12 @@ def _walk_encodable(model: BaseModel, prefix: str) -> None:
 # retrieval filter keyed on type (the committed `retrieval-coupling-playbook-filter` eval case does
 # exactly this) then missed with no error (gap KNW-6).
 #
-# Enforced by `kg-validate` rather than by this schema, and that placement is deliberate: the agent
-# may legitimately propose a genuinely new type, and a hard schema rejection would block that at the
-# tool. The PR-gate is where a new type belongs — a human sees it, and `kg-validate` runs on that
-# same PR, so an unknown type cannot reach the graph unreviewed while an intended one costs one
-# line here.
+# Enforced by `kg-validate` rather than by this schema, and that placement is deliberate: a
+# deployment may legitimately be extending its vocabulary, and a hard schema rejection would fail
+# the agent's write at the tool. CI names an unknown type over the whole corpus instead, once,
+# while an intended one costs one line here. (This paragraph used to end "a human sees it at the
+# PR-gate"; there is no gate, so the placement is now bought by what it costs a *write* rather than
+# by what a reviewer sees.)
 KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
     {
         "reaction",  # one ELN experiment (eln/note.py)
@@ -360,8 +361,8 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         # while the `qm` bundle's `publish_to_graph` job was the thing that minted it; with that
         # bundle removed (`D-2026-08-26-semiempirical-is-the-whole-tier`) no bundle mints one, and
         # the rule that put it there says where it goes instead. A type a bundle *mints* belongs to
-        # that bundle; this one is now written only through core's own PR-gate
-        # (`propose_knowledge_note`), about results the corpus in `knowledge/job-result/` already
+        # that bundle; this one is now written only through core's own write path
+        # (`record_knowledge_note`), about results the corpus in `knowledge/job-result/` already
         # holds — so it is core's vocabulary again. `bo-candidate` stays in `connectors/bo/`,
         # because `bo` still mints it.
         "job-result",
@@ -535,9 +536,12 @@ class ProcessConditions(BaseModel):
 class Note(TemporalWindow):
     """One knowledge-graph note: its frontmatter metadata plus its Markdown body.
 
-    `created_by` is the provenance line: `agent`-authored notes must pass the
-    PR-gate before merge (D-005). `confidence` (0–1) and `valid_from`/`valid_to`
-    let a later query weigh and time-scope evidence.
+    `created_by` is the provenance line, and since
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` it is the *whole* of it: an
+    `agent`-authored note is readable the moment it is written, with nobody reviewing it first, so
+    this field and the citations beside it are what lets a chemist tell machine-written knowledge
+    from curated knowledge at the point of use. `confidence` (0–1) and `valid_from`/`valid_to` let
+    a later query weigh and time-scope evidence.
 
     Frozen: a note is an immutable value object. The graph indexer caches parsed notes and
     hands the same instances to every reader (KM-14); immutability makes that sharing safe —
