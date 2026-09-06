@@ -767,6 +767,41 @@ def test_a_complete_judge_reply_is_graded_on_its_verdict(monkeypatch: pytest.Mon
     assert "4.76" in prompt[1].content
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"verdict": "Served", "reason": "ok"}',  # right word, wrong case
+        '{"verdict": "pass", "reason": "ok"}',  # a vocabulary the prompt never offered
+        '{"verdict": null, "reason": "ok"}',
+        '{"reason": "ok"}',  # no verdict at all
+    ],
+)
+def test_a_verdict_outside_the_vocabulary_is_ungraded_rather_than_a_crash(
+    monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    """A judge that answers off-vocabulary did not grade — the same failure as an unparseable reply.
+
+    Every other grader failure here already degrades to `ungraded`: the token ceiling, a reply with
+    no JSON object, a `JSONDecodeError`. This one raised `ValidationError` straight out of
+    `judge_outcome` on the `Literal` field, and the three callers gather without
+    `return_exceptions=True` and report *after* the gather — so one `"Served"` among 190 probes
+    discarded every grade in the run.
+    """
+    from langchain_core.messages import AIMessage
+
+    from chemclaw.evals import live_judge
+
+    reply = AIMessage(content=body, response_metadata={"finish_reason": "stop"})
+    monkeypatch.setattr(live_judge, "_judge_client", lambda: _ScriptedJudge(reply))
+
+    judgement = asyncio.run(live_judge.judge_outcome(*_graded_probe()))
+
+    assert judgement.verdict == "ungraded"
+    # The raw value is carried, not merely survived: a grader answering off-vocabulary is a defect
+    # to see, and an `ungraded` with no reason is indistinguishable from a token ceiling.
+    assert "no known verdict" in judgement.reason
+
+
 def test_an_unrouted_judge_says_it_is_grading_with_the_model_under_test(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

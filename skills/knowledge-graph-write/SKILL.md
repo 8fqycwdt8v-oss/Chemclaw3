@@ -6,6 +6,7 @@ description: >-
 tools:
   - record_knowledge_note
   - record_confirmed_answer
+  - suggest_next_experiment
 ---
 
 # Knowledge-graph write

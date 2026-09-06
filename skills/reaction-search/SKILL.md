@@ -16,6 +16,7 @@ tools:
   - reactions_making_substructure
   - workup_precedent
   - condense_protocols
+  - expand_note
 ---
 
 # Reaction / structure search

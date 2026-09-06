@@ -36,12 +36,13 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool as tool_decorator
 from temporalio.testing import ActivityEnvironment
 
 from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.chemclaw_agent import advertised_tool_names
+from chemclaw.agent.state import answer_text
 from chemclaw.agent.turn_cost import TurnCost
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
@@ -929,6 +930,68 @@ def _looping(turns: int, usage: dict[str, Any] | None = None) -> list[AIMessage]
         )
         for index in range(turns)
     ]
+
+
+def _quiet_looping(turns: int) -> list[AIMessage]:
+    """One assistant turn that says something, then `turns - 1` tool calls carrying no text.
+
+    The shape `_looping` cannot express and a real provider produces constantly: a tool-calling
+    turn whose whole message *is* the call, with `content=""`. Because `_looping` puts prose on
+    every turn, "the last `AIMessage`" and "the last assistant text" name the same message there —
+    so a reader that takes the former passes it while answering `''` on every thread that looks
+    like this one. Here the two differ, and only the text the turn actually produced is a pass.
+    """
+    said = AIMessage(
+        content="Here is what I found so far: CCO is ethanol.",
+        tool_calls=[{"name": "ls", "args": {"path": "."}, "id": "call-0"}],
+    )
+    silent = [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "ls", "args": {"path": "."}, "id": f"call-{index}"}],
+        )
+        for index in range(1, turns)
+    ]
+    return [said, *silent]
+
+
+def test_a_capped_step_answers_with_the_last_text_rather_than_the_last_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cap that fires after some silent tool calls still hands back the prose the turn managed.
+
+    The regression this pins: taking the last `AIMessage` unconditionally makes the answer the
+    content-less message that issued the final tool call, so the chemist and every later
+    `${steps.<id>.result}` get `''` — the partial answer the cap exists to preserve, thrown away by
+    the fix that stopped the tool body being returned in its place.
+    """
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 3)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+
+    step = _drive(monkeypatch, _step(), _quiet_looping(8))
+
+    assert step.answer == "Here is what I found so far: CCO is ethanol."
+    assert [row.outcome for row in step.costs] == ["loop_capped"]
+
+
+def test_a_turn_that_said_nothing_does_not_answer_with_the_previous_turn_s_answer() -> None:
+    """The walk back for prose stops at this turn's own user message.
+
+    `result["messages"]` is the whole checkpointed thread, so an unbounded search for the last
+    non-empty assistant message would reach across the turn boundary and hand a follow-up question
+    the answer to the question before it — a stale answer worn as a current one, which is worse than
+    the empty string a caller already settles.
+    """
+    thread = [
+        HumanMessage(content="what is CCO?"),
+        AIMessage(content="Ethanol."),
+        HumanMessage(content="and its boiling point?"),
+        AIMessage(content="", tool_calls=[{"name": "ls", "args": {}, "id": "c1"}]),
+        ToolMessage(content="No files found", tool_call_id="c1"),
+    ]
+
+    assert answer_text({"messages": thread}) == ""
+    assert answer_text({"messages": thread[:2]}) == "Ethanol."
 
 
 def test_a_loop_capped_step_answers_with_prose_and_is_booked_as_capped(

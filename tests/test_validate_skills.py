@@ -146,6 +146,36 @@ def test_a_taught_tool_that_is_not_declared_is_reported(tmp_path: Path) -> None:
     assert any("gather_evidence" in p and "does not declare it" in p for p in problems)
 
 
+def test_a_backticked_taught_tool_that_is_not_declared_is_reported(tmp_path: Path) -> None:
+    """The form skills actually use — `` `predict_pka` `` — must count as teaching it.
+
+    This is the whole rule's reach, not a variant of it: the shipped corpus names tools that way
+    almost everywhere, and while the extractor could see only a call form and a bare token, 35
+    taught tools across 11 skills were undeclared with the gate reporting none. An under-declared
+    skill is hidden from precisely the agent that can run what it teaches, so a rule blind to the
+    common spelling was the defect wearing the fix's clothes.
+    """
+    root = _skill(tmp_path, "probe", "Reach for `gather_evidence` before answering.")
+
+    problems = validate_skills([str(root)])
+
+    assert any("gather_evidence" in p and "does not declare it" in p for p in problems)
+
+
+def test_a_backticked_name_that_is_not_a_tool_is_not_reported(tmp_path: Path) -> None:
+    """And the loose pattern stays quiet, because `available_tool_names()` is the filter.
+
+    The reason the widening is safe here and was rejected for the prose gate (D-2026-08-05):
+    asking whether a *known* name is present tolerates a loose pattern, asking whether an unknown
+    one is absent does not. Over the shipped corpus this pattern matches 75 spans that are not
+    tools — result fields like `yield_percent` — and every one of them drops out here. Without
+    that intersection this rule would demand a declaration for each.
+    """
+    root = _skill(tmp_path, "probe", "Read `yield_percent` and `valid_from` off the record.")
+
+    assert validate_skills([str(root)]) == []
+
+
 def test_a_taught_tool_that_is_declared_passes(tmp_path: Path) -> None:
     """The same skill with the declaration filled in is clean — the rule is satisfiable."""
     root = _skill(

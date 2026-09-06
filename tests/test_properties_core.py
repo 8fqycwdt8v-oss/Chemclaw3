@@ -139,7 +139,7 @@ def test_bounded_lru_keeps_what_it_last_touched(capacity: int, keys: list[int]) 
 
 
 @given(
-    max_weight=st.integers(min_value=1, max_value=64),
+    max_weight=st.integers(min_value=32, max_value=64),
     items=st.lists(
         st.tuples(st.integers(min_value=0, max_value=32), st.integers(min_value=1, max_value=32)),
         min_size=1,
@@ -154,15 +154,47 @@ def test_bounded_lru_never_exceeds_its_weight_bound(
 
     The attachment store needs this one and not the count: its entries differ in size by orders of
     magnitude, so a map that is under its entry cap can still be holding twenty times the pod.
-    The single exception is the entry just put — never the victim (module docstring), so a value
-    heavier than the whole budget is held alone rather than dropped on arrival.
+
+    Every generated value fits the budget on its own (`max_weight >= 32`, the widest weight), which
+    is what makes this the *exact* bound rather than a bound with an exception in it. The entry that
+    does not fit is its own case below, because what the map does then is a different decision.
     """
     lru: BoundedLru[int, int] = BoundedLru(
         1_000_000, weight=lambda value: value, max_weight=max_weight
     )
     for key, weight in items:
         lru.put(key, weight)
-        assert lru.total_weight() <= max(max_weight, weight)
+        assert lru.total_weight() <= max_weight
+
+
+def test_bounded_lru_does_not_empty_itself_for_an_entry_that_cannot_fit() -> None:
+    """An entry heavier than the whole budget is held, and nothing is evicted to make room for it.
+
+    The entry just put is never the victim, so when it alone exceeds `max_weight` no eviction can
+    reach the bound — and the loop that ran until the bound was met or no candidate was left did
+    neither: measured, ten entries destroyed and the map still five times over budget. Paying every
+    other caller's data for a bound that stays breached is strictly worse than holding the one entry
+    alone, which is what the attachment store's shipped defaults made reachable
+    (`document_max_expanded_bytes` exceeds `attachment_store_max_bytes`, so one chemist's upload
+    evicted every other session's files).
+
+    The excess is not permanent, which is the other half of the bound: the next entry that *can*
+    fit resumes eviction and takes the oversized one with it.
+    """
+    lru: BoundedLru[str, int] = BoundedLru(1_000_000, weight=lambda value: value, max_weight=100)
+    for index in range(10):
+        lru.put(f"k{index}", 5)
+
+    lru.put("big", 500)
+
+    assert len(lru) == 11
+    assert lru.peek("k0") == 5
+    assert lru.total_weight() == 550
+
+    lru.put("next", 5)
+
+    assert lru.total_weight() <= 100
+    assert "big" not in lru
 
 
 def test_bounded_lru_refuses_half_a_weight_bound() -> None:

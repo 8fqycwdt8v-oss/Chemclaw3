@@ -26,19 +26,26 @@ model in the middle of the one execution mode whose purpose is to keep it out
 """
 
 import re
+from collections.abc import Iterator
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # A reference to an input, to an earlier step's result, or to a field inside that result. Anchored
-# and closed: a typo like `${step.x.result}` fails validation rather than being passed through as a
-# literal. The field path is a dotted attribute walk and nothing else — no indexing, no wildcards,
-# no expressions — which keeps the "deliberately not a template language" line exactly where the
-# module docstring draws it while letting a step chain a value the run already holds
+# and closed. The field path is a dotted attribute walk and nothing else — no indexing, no
+# wildcards, no expressions — which keeps the "deliberately not a template language" line exactly
+# where the module docstring draws it while letting a step chain a value the run already holds
 # (D-2026-08-21-a-geometry-is-an-address-not-a-payload).
 _REFERENCE = re.compile(
     r"\$\{(inputs\.[a-z][a-z0-9_]*|steps\.[a-z][a-z0-9_-]*\.result(?:\.[a-z][a-z0-9_]*)*)\}"
 )
+# Anything shaped like a reference, well-formed or not. This exists because being strict about what
+# a reference *is* does not, on its own, reject a typo: `_REFERENCE` **finds** references, so a
+# span it cannot match is not a bad reference but no reference at all — nothing to check, nothing
+# to fail, and `resolve` then hands the tool the literal text `"${step.x.result}"`. That is a
+# strictly worse version of the failure this module's docstring says the resolver is strict to
+# prevent, so `_references_are_well_formed` compares the two patterns and refuses the difference.
+_ANY_REFERENCE = re.compile(r"\$\{[^}]*\}")
 # The step whose result a reference names, dropping any field path after it. The *step* is what
 # validation can check; whether the field exists depends on what the tool returns at run time, and
 # a manifest check that pretended otherwise would be guessing.
@@ -129,20 +136,41 @@ class AgentStep(_Step):
 Step = Annotated[ToolStep | JobStep | AgentStep, Field(discriminator="kind")]
 
 
-def references(value: Any) -> set[str]:
-    """Every `${…}` reference inside a value, recursing through lists and dicts.
+def _strings(value: Any) -> Iterator[str]:
+    """Every string inside an argument tree, recursing through lists and dicts.
 
     Recursive because arguments are arbitrary JSON: a reference is as likely to be the third element
     of a list as a top-level value, and a resolver that only looked at the top level would silently
-    pass `${inputs.smiles}` through as a literal string.
+    pass `${inputs.smiles}` through as a literal string. One walker rather than one per pattern, so
+    a reference and a *malformed* reference can never be looked for in different places.
     """
     if isinstance(value, str):
-        return set(_REFERENCE.findall(value))
-    if isinstance(value, dict):
-        return {ref for item in value.values() for ref in references(item)}
-    if isinstance(value, list):
-        return {ref for item in value for ref in references(item)}
-    return set()
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def references(value: Any) -> set[str]:
+    """Every well-formed `${…}` reference inside a value."""
+    return {ref for text in _strings(value) for ref in _REFERENCE.findall(text)}
+
+
+def malformed_references(value: Any) -> set[str]:
+    """Every `${…}` span inside a value that is *not* a legal reference.
+
+    The complement of `references`, and the two must be read together: what `references` returns
+    is what validation can resolve, and what this returns is what it would otherwise never see.
+    """
+    return {
+        span
+        for text in _strings(value)
+        for span in _ANY_REFERENCE.findall(text)
+        if not _REFERENCE.fullmatch(span)
+    }
 
 
 class Template(BaseModel):
@@ -175,6 +203,28 @@ class Template(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _references_are_well_formed(self) -> Self:
+        """Reject a `${…}` span that is not a reference at all — a typo, not a literal.
+
+        This has to run as its own rule rather than fall out of the resolution check below,
+        because the two see different things: `_references_resolve_and_point_backwards` asks
+        whether every reference it *found* can resolve, and a misspelled one (`${step.x.result}`,
+        `${steps.x.output}`, `${ inputs.x }`) is found by nothing. Left unchecked it survives
+        validation, survives `make template-validate` — which reads argument keys, never values —
+        and is handed to the tool as the literal ten-character string, which is the same wrong
+        answer as a null with a more confusing cause.
+        """
+        for step in self.steps:
+            malformed = sorted(malformed_references(_step_value(step)))
+            if malformed:
+                raise ValueError(
+                    f"template {self.name!r} step {step.id!r} has malformed reference(s) "
+                    f"{malformed}; the only legal forms are ${{inputs.<name>}} and "
+                    "${steps.<id>.result} with an optional dotted field path"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _references_resolve_and_point_backwards(self) -> Self:
         """Reject a reference to an unknown input, an unknown step, or a step that has not run yet.
 
@@ -201,8 +251,11 @@ class Template(BaseModel):
         return self
 
 
+def _step_value(step: Step) -> Any:
+    """The part of a step that may carry references — its prompt, or its arguments."""
+    return step.prompt if isinstance(step, AgentStep) else step.arguments
+
+
 def _step_references(step: Step) -> set[str]:
     """Every reference one step makes, whichever kind it is."""
-    if isinstance(step, AgentStep):
-        return references(step.prompt)
-    return references(step.arguments)
+    return references(_step_value(step))

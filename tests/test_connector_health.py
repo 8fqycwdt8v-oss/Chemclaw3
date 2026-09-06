@@ -21,7 +21,7 @@ import logging
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 import pytest
 from temporalio.api.taskqueue.v1 import PollerInfo
@@ -32,8 +32,11 @@ from temporalio.api.workflowservice.v1 import (
 from temporalio.service import RPCError, RPCStatusCode, WorkflowService
 
 from chemclaw.connectors.health import (
+    _SEVERITY,
     ConnectorHealth,
+    ConnectorState,
     ConnectorsUnavailable,
+    _folded,
     check_connectors_at_startup,
     probe_connectors,
 )
@@ -613,3 +616,38 @@ def test_a_dark_endpoint_still_decides_when_the_queue_half_is_the_healthy_one(
 
     assert item.state == "unreachable"
     assert item.detail, "the endpoint's reason is what an operator acts on"
+
+
+def test_the_severity_order_names_every_state_a_connector_can_be_in() -> None:
+    """`_SEVERITY` is a hand-written restatement of `ConnectorState`, and nothing pinned it.
+
+    The fold ranked a state by looking it up in that tuple, so a sixth member added to the `Literal`
+    would have raised `ValueError` out of `probe_connectors` — a function whose docstring promises
+    it never raises, called by the boot gate (`api/app.py`) and `/readyz`. The consequence of the
+    drift was not "one connector reported oddly"; it was the front door refusing to come up, for a
+    change to an unrelated enum.
+    """
+    assert set(_SEVERITY) == set(get_args(ConnectorState))
+
+
+def test_a_state_the_severity_order_has_not_been_taught_still_folds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runtime half of the same guard: ranking is total, so the promise holds through a drift.
+
+    The test above catches the drift in CI; this one says what happens in the window before someone
+    runs CI. The rank map is emptied of everything but `unknown` — exactly the shape of a `Literal`
+    that has gained members this ordering has not — and the fold must still produce its one row
+    rather than take the process's readiness route with it.
+    """
+    monkeypatch.setattr("chemclaw.connectors.health._SEVERITY_RANK", {"unknown": 0})
+
+    folded = _folded(
+        [
+            ConnectorHealth(name="calc", state="healthy", detail="endpoint up"),
+            ConnectorHealth(name="calc", state="unreachable", detail="queue dark"),
+        ]
+    )
+
+    assert [health.name for health in folded] == ["calc"]
+    assert "queue dark" in folded[0].detail

@@ -30,7 +30,13 @@ Semantics, stated once so the four callers cannot drift again:
   2 MB is a 20 GB ceiling in a 1 GiB pod). An entry's weight is measured at `put`, so a caller that
   mutates a stored value must `put` it back — which is what the eviction contract already requires.
   A single entry heavier than `max_weight` is still held: it is the entry just put, which is never
-  the victim, exactly as with `pinned`.
+  the victim, exactly as with `pinned`. **And nothing else is evicted for it**: an over-weight entry
+  used to drain the map on its way in — ten entries gone and the bound still breached fivefold,
+  measured — because the loop ran until the budget was met or no candidate was left, and neither
+  ever happened. Evicting every other caller's data to make room for something that does not fit is
+  strictly worse than holding it alone: it costs the data *and* leaves the bound breached. So weight
+  eviction stops when it cannot reach the bound. The count bound is unaffected — it is always
+  reachable, because dropping entries always reduces a count.
 - `pinned` (optional) names keys eviction must skip right now — consulted at eviction time, not
   stored per entry, so a pin needs no bookkeeping to clear. When every candidate is pinned the map
   briefly holds more than `capacity`; the caller that passes a pin has decided that honoring the
@@ -117,25 +123,37 @@ class BoundedLru(Generic[K, V]):
         """
         return sum(self._weights.values())
 
-    def _over_bounds(self) -> bool:
-        """Whether a bound is breached: entry count, or total weight where one is configured."""
+    def _should_evict(self, key: K) -> bool:
+        """Whether another eviction is both needed and *useful*, with `key` the entry just put.
+
+        Needed: a bound is breached — entry count, or total weight where one is configured.
+
+        Useful: the breach is one eviction can actually close. `key` is never the victim, so when
+        it alone weighs more than `max_weight`, no sequence of evictions reaches the budget — and
+        running the loop anyway empties the map for nothing. A count breach is always closable,
+        which is why only the weight arm carries the test.
+        """
         if len(self._entries) > self._capacity():
             return True
-        return self._max_weight is not None and self.total_weight() > self._max_weight()
+        if self._max_weight is None:
+            return False
+        limit = self._max_weight()
+        return self.total_weight() > limit and self._weights.get(key, 0) <= limit
 
     def put(self, key: K, value: V) -> None:
         """Insert or refresh `key` as most-recently-used, then evict past either bound.
 
         Eviction takes the least-recently-used entry that is neither pinned nor the key just put;
-        when no candidate remains the map briefly holds over capacity (see the module docstring).
-        The entry's weight, where the map has one, is (re-)measured here — so a caller that mutates
-        a stored value in place must `put` it back for the byte budget to see the change.
+        when no candidate remains, or when no eviction could close the weight breach anyway, the map
+        briefly holds over its bound (see the module docstring). The entry's weight, where the map
+        has one, is (re-)measured here — so a caller that mutates a stored value in place must `put`
+        it back for the byte budget to see the change.
         """
         self._entries[key] = value
         self._entries.move_to_end(key)
         if self._weight is not None:
             self._weights[key] = self._weight(value)
-        while self._over_bounds():
+        while self._should_evict(key):
             victim = next(
                 (
                     candidate

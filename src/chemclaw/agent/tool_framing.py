@@ -105,6 +105,7 @@ middleware as an exception and is converted above it, so it is never seen either
 """
 
 from collections.abc import Callable
+from enum import Enum
 from typing import Any, TypeVar, cast
 
 from langchain.agents.middleware import wrap_tool_call
@@ -132,29 +133,74 @@ def defanged_payload(payload: _Payload) -> _Payload:
     Anything that is not a string, a model or a container is returned as it came: escaping is a
     property of text, and a float, a date or an enum has no delimiter to spell.
 
+    **Four of those words were false when measured, and all four are now true rather than narrated
+    away.** An enum was the load-bearing one: `class Kind(str, Enum)` is a `str`, so it hit the
+    string branch *before* the "returned as it came" fallback and came back a plain `str` — the
+    field stopped being an enum, `model_dump` warned, and `isinstance(x, Kind)` downstream went
+    False. The tree has seven `StrEnum`s. An enum member is a vocabulary the code declares rather
+    than text a server sent, so it is returned as it came, which is what the sentence above already
+    promised. The other three were holes rather than downgrades: `model_config extra="allow"`
+    extras live in `__pydantic_extra__` and not in `model_fields`, so a delimiter in one travelled
+    through *live*; `set`/`frozenset` members fell to the identity branch and did the same; and
+    `model_copy(update=…)` widens `model_fields_set`, so a consumer dumping the copy with
+    `exclude_unset=True` got a different document from the one it would have got for the original.
+    None was reachable at today's three call sites — that is why they survived — but this function's
+    whole contract is "pass it anything structured", and a claim nobody can rely on is worse here
+    than a narrower one, because the module docstring makes it a review rule.
+
     A model is rebuilt with `model_copy`, which does not re-validate. That is deliberate rather
     than incidental: a `Note` reaching here has already passed the graph's validators, and
     re-running them on the escaped copy would let a defang turn a readable result into a raised
-    `ValidationError` at the model's edge.
+    `ValidationError` at the model's edge — and it is also why `model_fields_set` is restored by
+    hand afterwards: the copy is meant to be the same document with safer text in it, not a
+    document that has answered a different set of questions.
     """
     return cast(_Payload, _defanged(payload))
 
 
 def _defanged(value: Any) -> Any:
-    """The untyped half of `defanged_payload`, where the recursion actually happens."""
+    """The untyped half of `defanged_payload`, where the recursion actually happens.
+
+    `Enum` is tested before `str` because a `str`-subclass enum is both, and the string branch is
+    the one that would silently downgrade it — see `defanged_payload` for what that cost.
+    """
+    if isinstance(value, Enum):
+        return value
     if isinstance(value, str):
         return defang(value)
     if isinstance(value, BaseModel):
-        return value.model_copy(
-            update={name: _defanged(getattr(value, name)) for name in type(value).model_fields}
-        )
+        return _defanged_model(value)
     if isinstance(value, dict):
         return {_defanged(key): _defanged(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_defanged(item) for item in value]
     if isinstance(value, tuple):
         return tuple(_defanged(item) for item in value)
+    if isinstance(value, frozenset):
+        return frozenset(_defanged(item) for item in value)
+    if isinstance(value, set):
+        return {_defanged(item) for item in value}
     return value
+
+
+def _defanged_model(value: BaseModel) -> BaseModel:
+    """One model, rebuilt with every field *and* every `extra="allow"` extra neutralised.
+
+    `model_fields` names only the declared fields, so a payload that carries extras — which the
+    connector seam's own result models are free to — kept a live delimiter in one. `model_copy`
+    then reports every updated name as explicitly set, so `model_fields_set` is put back to what
+    the original carried: the copy differs from its source in the text of its strings and in
+    nothing else.
+    """
+    extra = value.__pydantic_extra__ or {}
+    copy = value.model_copy(
+        update={
+            **{name: _defanged(getattr(value, name)) for name in type(value).model_fields},
+            **{name: _defanged(item) for name, item in extra.items()},
+        }
+    )
+    copy.__pydantic_fields_set__ = set(value.__pydantic_fields_set__)
+    return copy
 
 
 def served_by(request: Any) -> str:

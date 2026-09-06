@@ -19,6 +19,7 @@ reversal, which prose in `DEFERRED.md` could not.
 """
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -264,6 +265,65 @@ def test_attachments_are_bounded_in_bytes_across_sessions_not_only_in_sessions()
     # LRU, not "refuse the newest": the conversation being worked on keeps its working material.
     assert len(store.for_session(f"s{sessions - 1}")) == settings.attachment_max_per_session
     assert store.for_session("s0") == []
+
+
+def test_one_oversized_session_does_not_take_every_other_session_s_attachments() -> None:
+    """The byte budget is shared, and it used to be drainable by a single upload.
+
+    `document_max_expanded_bytes` (64 MiB) — the ceiling on one parsed upload — is *larger* than
+    `attachment_store_max_bytes`, so a couple of legal spreadsheet uploads made one session's entry
+    heavier than the entire store. The map then evicted everything else trying to make room for
+    something that could not fit, kept it anyway, and ended over budget with one session's data left
+    standing: measured on the LRU alone, ten entries gone and the bound breached fivefold. One
+    authenticated chemist silently taking every other conversation's working material away.
+    """
+    store = AttachmentStore()
+    for session in range(5):
+        store.add(
+            f"s{session}",
+            Attachment(name="small.csv", content_type="text/csv", text="x" * 1000, rows=1),
+        )
+    # One session uploading files whose parsed text is legal individually and, together, heavier
+    # than the whole store.
+    per_file = settings.attachment_store_max_bytes // 3
+    for index in range(3):
+        store.add(
+            "hog",
+            Attachment(
+                name=f"big{index}.csv", content_type="text/csv", text="x" * per_file, rows=1
+            ),
+        )
+
+    assert [store.for_session(f"s{session}") != [] for session in range(5)] == [True] * 5
+    # ...and the hog is bounded by the same budget rather than parked over it: its own oldest file
+    # goes first, and the upload just made is never the one dropped.
+    assert [a.name for a in store.for_session("hog")] == ["big1.csv", "big2.csv"]
+
+
+def test_the_attachment_budget_is_bytes_rather_than_characters() -> None:
+    """`attachment_store_max_bytes` is a memory bound, and `len(str)` is not a memory measurement.
+
+    CPython stores a string at 1, 2 or 4 bytes per codepoint, so a budget counting codepoints
+    permitted 2x the stated bound on CJK text and 4x on astral — 256 MB resident against a setting
+    sized at 6 % of a 1 GiB pod. Every fixture in this file is ASCII, which is exactly why nothing
+    saw it.
+    """
+    store = AttachmentStore()
+    sessions = ("s1", "s2", "s3")
+    codepoints = settings.attachment_store_max_bytes // 5
+    for session in sessions:
+        store.add(
+            session,
+            Attachment(name="a.csv", content_type="text/csv", text="\u4e2d" * codepoints, rows=1),
+        )
+
+    # Three entries of 40 % of the budget each. Counted as codepoints they read as 60 % and nothing
+    # is evicted; counted as bytes they are 120 % and the least-recently-used session goes.
+    resident = sum(
+        sys.getsizeof(a.text) for session in sessions for a in store.for_session(session)
+    )
+    assert resident <= settings.attachment_store_max_bytes
+    assert store.for_session("s1") == []
 
 
 # --- IDEA-6: corpus backfill ------------------------------------------------------------------

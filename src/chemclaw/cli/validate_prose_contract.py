@@ -116,7 +116,7 @@ Run via `make prose-validate`; gated in CI beside `kg-validate` and `skill-valid
 import argparse
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, available_tool_names
@@ -142,6 +142,14 @@ _WORKFLOW = re.compile(r"`([A-Za-z][A-Za-z0-9]*Workflow)`")
 # parameter rather than a tool (`similar_reactions(reaction_smiles)`). The lookahead skips a
 # trailing `(`, which is rule 1's pattern, so the two rules never double-report one name.
 _BARE = re.compile(r"(?<![\w`/.,(-])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?![\w(])")
+# A whole backticked `snake_case` span — `` `predict_pka` ``, the form a skill body actually uses
+# to name a tool, and the one neither rule above can see. It is deliberately **not** part of
+# `referenced_tool_names`: measured over this corpus it matches 152 spans of which 75 are not
+# tools at all (`yield_percent`, `valid_from`, `structure_id`), so a rule asking "is this an
+# unknown tool?" would be wrong more often than the prose it checks — the widening
+# D-2026-08-05 measured and rejected. `taught_tool_names` asks the other question, and the
+# asymmetry that ADR names is what makes the loose pattern safe there.
+_TICKED = re.compile(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`")
 # `type `x`` / `types `x``: the one phrasing that means "write a note of this kind". Deliberately
 # anchored on the word rather than matching every backticked slug, which in this prose is mostly
 # tools, fields and chemistry — the narrowness is what keeps the rule true instead of noisy, at
@@ -170,6 +178,26 @@ def referenced_tool_names(text: str) -> set[str]:
     """
     names = set(_CALL.findall(text)) | set(_BARE.findall(text))
     return names - _ALLOWED_NON_TOOLS
+
+
+def taught_tool_names(text: str, known: Collection[str]) -> set[str]:
+    """Every tool in `known` that `text` teaches, in any of the three forms prose names one.
+
+    The counterpart to `referenced_tool_names`, and the difference is the direction of the
+    question rather than the corpus. `referenced_tool_names` asks whether a name prose invents
+    resolves to a tool, so an *unknown* name is the finding and the patterns must be strict.
+    This asks whether a tool the system really has is named at all, so `known` does the filtering
+    and a loose pattern costs nothing: a result field like `yield_percent` is not in `known` and
+    simply drops out. That asymmetry — **checking that a known name is present is safe with a
+    loose pattern; checking that an unknown name is absent needs a strict one** — is
+    D-2026-08-05's, which measured the widening and rejected it for rule 2 alone.
+
+    `known` is a parameter rather than a call to `available_tool_names()` here so the filter is
+    part of the contract instead of a caller's afterthought: there is no way to use this
+    extractor without one.
+    """
+    ticked = set(_TICKED.findall(text))
+    return (referenced_tool_names(text) | ticked) & set(known)
 
 
 # Repo root, derived from this file rather than from the cwd so the check behaves the same under

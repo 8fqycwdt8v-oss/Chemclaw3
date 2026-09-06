@@ -16,8 +16,8 @@ Beyond that shape check, this gate closes the loop between a skill's *judgment* 
   indistinguishable from an honest one, and since D-2026-08-05 the list decides whether the skill
   is advertised at all (`chemclaw.agent.skill_access.ToolScopedSkills`) — an under-declared
   skill would be hidden from an agent that can do exactly what it teaches. The body is read with
-  `chemclaw.cli.validate_prose_contract.referenced_tool_names`, the same extractor the prose gate
-  uses, so the two cannot disagree about what a skill says.
+  `chemclaw.cli.validate_prose_contract.taught_tool_names`, which lives beside the prose gate's own
+  extractor and shares its patterns, so the two cannot disagree about what a skill says.
 
 Two configured maps are checked the same way, because both name skills and neither fails loudly at
 run time:
@@ -45,7 +45,7 @@ from pydantic import ValidationError
 from chemclaw.agent import chemclaw_agent as _agent  # noqa: F401 — imported for tool registration
 from chemclaw.agent.chemclaw_agent import available_tool_names
 from chemclaw.agent.skill_manifest import SKILL_FILENAME, SkillManifest
-from chemclaw.cli.validate_prose_contract import referenced_tool_names
+from chemclaw.cli.validate_prose_contract import taught_tool_names
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core.config import settings
 
@@ -140,18 +140,20 @@ def _undeclared_problems(skill_file: Path, manifest: SkillManifest, body: str) -
     is hidden from precisely the agent that can do what it teaches, which is the failure mode of
     the fix rather than of the defect.
 
-    The body is read with `referenced_tool_names`, the same extractor `make prose-validate` uses,
-    so the two gates cannot disagree about what a skill says. That extractor is deliberately narrow
-    — it sees a call form (`` `gather_evidence(` ``) and a bare `snake_case` token, but not a
-    backticked name with no parentheses, because in this corpus that form is mostly result-field
-    names and matching it produced far more false positives than findings. So this rule is a floor,
-    not a proof: it catches the names the prose gate can already resolve, and the rest is caught by
-    `_dependency_problems` the moment a declared tool disappears.
+    The body is read with `taught_tool_names`, which lives in the prose gate's module and shares
+    its patterns, so the two gates cannot disagree about what a skill says. It sees all three
+    forms prose names a tool in — the call form (`` `gather_evidence(` ``), a bare `snake_case`
+    token, and a whole backticked span (`` `predict_pka` ``) — the last of which the prose gate's
+    own `referenced_tool_names` deliberately cannot: over this corpus half the spans it matches are
+    result-field names, which is fatal to a rule reporting *unknown* names and harmless to this
+    one, where `available_tool_names()` is the filter. Leaving it out was not a floor but a hole:
+    the backticked form is the one skills actually use, and 35 taught tools across 11 shipped
+    skills were undeclared while this gate reported none.
 
     Names the extractor finds that are not tools at all are ignored here rather than reported —
     that is the prose gate's rule 1/2, and reporting it twice would make one typo two CI failures.
     """
-    taught = referenced_tool_names(body) & available_tool_names()
+    taught = taught_tool_names(body, available_tool_names())
     undeclared = sorted(taught - set(manifest.tools))
     return [
         f"{skill_file}: teaches {tool!r} but does not declare it in `tools:` — an incomplete "

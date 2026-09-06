@@ -27,6 +27,11 @@ tools:
   - sample_conformers
   - predict_developability_profile
   - predict_logd
+  - get_durable_job_status
+  - run_bond_strength_survey
+  - run_microspecies_profile
+  - run_tautomer_resolution
+  - screen_hazards
 ---
 
 # Calculation selection

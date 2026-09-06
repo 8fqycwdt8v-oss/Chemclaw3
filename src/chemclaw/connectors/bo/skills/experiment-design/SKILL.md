@@ -18,6 +18,11 @@ tools:
   - predict_outcome
   - record_knowledge_note
   - similar_reactions
+  - compute_electronic_properties
+  - find_past_jobs
+  - get_durable_job_status
+  - predict_site_reactivity
+  - start_optimization_campaign
 ---
 
 # Experiment design
