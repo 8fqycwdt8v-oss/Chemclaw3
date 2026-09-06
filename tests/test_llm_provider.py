@@ -38,7 +38,7 @@ _CLIENT_SEAMS: dict[str, str] = {
     "core/embeddings.py": (
         "the parallel embedding seam. It cannot go through `build_chat_model` — that builds a "
         "*chat* model and `ChatOpenAI` cannot embed — so it builds `openai.OpenAI` against the "
-        "same gateway, with the same transport rule (`core/http.private_ca_transport`)"
+        "same gateway, with the same transport rule (`core/http.gateway_client_kwargs`)"
     ),
 }
 
@@ -238,45 +238,128 @@ def test_an_endpoint_that_cannot_report_usage_can_be_told_so(
     assert _openai_compatible_model("m").stream_usage is False
 
 
-def test_the_private_ca_client_is_built_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+def _reset_gateway_clients() -> None:
+    """Close the process-scoped gateway clients, then drop them from the cache.
+
+    `_tls_http_clients` is `@cache`d and now holds a *pair*, so a bare `cache_clear()` orphans two
+    live connection pools where it used to orphan one. Closing what you orphan is the whole reason
+    — and the reason is **not** a `ResourceWarning` count, which is what the commit introducing
+    this claimed.
+
+    **That claim was measured wrong and is corrected here rather than left standing.** It read the
+    suite's warning total across full runs (129 → 137) as this change's effect. Those runs differ
+    for unrelated reasons: the totals across four consecutive green runs were 129, 141, 137 and
+    143, and the run *after* this helper landed was the highest of the four. Driven directly, three
+    runs of this file and `test_protocol_condense.py` emit **0** `ResourceWarning`s with the helper
+    and **0** without it — the warnings the grep found belong to `test_connector_identity.py`. A
+    number that moves without the code moving is not evidence about the code, which is
+    `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` with a noisy instrument instead of a
+    stale one.
+
+    So the justification is hygiene, stated plainly: a test that takes a live connection pool out of
+    the only reference holding it should close it first. Production never clears the cache (one pair
+    per process is the point), so this is a test concern only, and it is a helper rather than an
+    autouse fixture because the tests that clear are the tests that are *about* the cache — hiding
+    the clear from them would hide what they assert.
+    """
+    from chemclaw.agent.llm_provider import _tls_http_clients
+
+    if _tls_http_clients.cache_info().currsize:
+        sync_client, async_client = _tls_http_clients()
+        sync_client.close()
+        # The async client's pool is closed by its own `__del__`; `aclose()` needs a loop this
+        # helper is not running in, and forcing one here would bind the pool to a loop that ends.
+        del async_client
+    _tls_http_clients.cache_clear()
+
+
+def test_the_gateway_clients_are_built_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
     """A graph is compiled per turn, so an uncached client factory is a per-turn socket leak.
 
-    `build_chat_model` runs on every graph build, and with a private CA bundle — the documented
-    production target — it reaches `_tls_http_client`. Uncached, that built a
-    fresh `AsyncClient` (its own pool, its own TLS context) per question asked, and nothing ever
-    closed one. The verifier and challenge clients already pay `@cache` for exactly this on colder
-    paths; this was the hot one.
+    `build_chat_model` runs on every graph build and reaches `_tls_http_clients`. Uncached, that
+    built a fresh `AsyncClient` (its own pool, its own TLS context) per question asked, and nothing
+    ever closed one. The verifier client already pays `@cache` for exactly this on a colder path;
+    this is the hot one.
     """
     import certifi
 
-    from chemclaw.agent.llm_provider import _tls_http_client
+    from chemclaw.agent.llm_provider import _tls_http_clients
 
-    _tls_http_client.cache_clear()
+    _reset_gateway_clients()
     # A real PEM, because httpx loads the bundle when the client is constructed — a made-up path
     # would fail in `ssl` before reaching the property under test. Which trust store it is does not
     # matter here; that it is a store the client accepts does.
     monkeypatch.setattr(settings, "llm_tls_ca_bundle", certifi.where())
     try:
-        first = _tls_http_client()
-        assert first is not None, "a configured bundle must produce a pinned client"
-        assert _tls_http_client() is first, "a second turn must reuse the process's client"
+        first = _tls_http_clients()
+        assert _tls_http_clients() is first, "a second turn must reuse the process's clients"
+        # The bundle is still reaching the context, asserted here because this file is the only
+        # place that says so: an earlier version checked `is not None` against a factory that
+        # returned `None` without one, and dropping that left the *configured* bundle pinned
+        # nowhere but `tests/test_protocol_condense.py`'s unrelated `FileNotFoundError` path.
+        for client in first:
+            context = client._transport._pool._ssl_context
+            assert context.get_ca_certs(), "the configured bundle produced an empty trust store"
     finally:
-        _tls_http_client.cache_clear()
+        _reset_gateway_clients()
 
 
-def test_no_bundle_leaves_the_sdk_its_own_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The other half of the cache: caching must not turn "no bundle" into a client.
+def test_both_gateway_clients_exist_and_refuse_the_environment_with_no_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shipped configuration is the no-bundle one, and it used to be the unprotected one.
 
-    A publicly-trusted endpoint wants the SDK's own default, which is what `None` asks for.
+    **This test is the inverse of the one it replaces.** `test_no_bundle_leaves_the_sdk_its_own
+    _client` asserted that no bundle yields `None` — "a publicly-trusted endpoint wants the SDK's
+    own default" — which is true about TLS and was the whole defect about proxies. `None` means
+    the SDK builds the client, and an SDK-built httpx client carries `trust_env=True`: measured on
+    that configuration with `HTTP_PROXY` naming a local recorder, the recorder received
+    `POST /v1/chat/completions` with the prompt body and the gateway `Authorization` bearer, on
+    both `invoke` and `ainvoke`, while `netguard._refused` stayed at 0. A guard cannot see a
+    proxied call, because the destination has left the address
+    (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`).
+
+    So both clients are ours on every branch, and the bundle decides only *verification*. Asserted
+    on the sync client as well as the async one because the sync one was never passed at all —
+    `ChatOpenAI` got `http_async_client=` alone, so `invoke` went out on a client this repository
+    had never seen.
     """
-    from chemclaw.agent.llm_provider import _tls_http_client
+    from chemclaw.agent.llm_provider import _tls_http_clients
 
-    _tls_http_client.cache_clear()
+    _reset_gateway_clients()
     monkeypatch.setattr(settings, "llm_tls_ca_bundle", "")
     try:
-        assert _tls_http_client() is None
+        sync_client, async_client = _tls_http_clients()
+        assert sync_client is not None and async_client is not None
+        for client in (sync_client, async_client):
+            assert client.trust_env is False, "a client that trusts the env follows HTTP(S)_PROXY"
+            proxy_mounts = [key for key in client._mounts if key.pattern is not None]
+            assert proxy_mounts == [], f"proxy mounts resolved from the environment: {proxy_mounts}"
     finally:
-        _tls_http_client.cache_clear()
+        _reset_gateway_clients()
+
+
+def test_the_chat_model_is_handed_both_of_this_process_s_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What the model is *built with*, not what the factory returns — the gap the defect lived in.
+
+    The factory could be perfect and the constructor still pass one of its two results, which is
+    exactly what happened: `http_async_client=` alone, so every `invoke` used an SDK-built client.
+    Reads the objects off the constructed `ChatOpenAI` rather than the call, so an argument dropped
+    in a refactor fails here.
+    """
+    _openai_endpoint(monkeypatch)
+    from chemclaw.agent.llm_provider import _tls_http_clients, build_chat_model
+
+    _reset_gateway_clients()
+    try:
+        model = build_chat_model()
+        sync_client, async_client = _tls_http_clients()
+        assert model.root_client._client is sync_client
+        assert model.root_async_client._client is async_client
+    finally:
+        _reset_gateway_clients()
 
 
 def _openai_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:

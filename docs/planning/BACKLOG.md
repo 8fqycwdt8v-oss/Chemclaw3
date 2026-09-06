@@ -63,62 +63,64 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **The LLM gateway inherits an ambient proxy unless a private CA bundle is configured** — [S],
-  found while collapsing the provider seam (`D-2026-09-04-a-gateway-is-the-only-provider`).
-  `agent/llm_provider._tls_http_client` returns `None` when `llm_tls_ca_bundle` is empty, which
-  leaves `ChatOpenAI` to build its own `httpx` client — and that client reads `HTTPS_PROXY` /
-  `ALL_PROXY` from the environment. So on a publicly-trusted gateway (no bundle), an env var set on
-  the pod redirects every prompt, completion and `Authorization` bearer to a host of the setter's
-  choosing. `core/http.private_ca_transport` states `trust_env=False` and both LLM seams take it,
-  but only on the bundle branch; `evals/live_judge.py` used to pass `trust_env=False`
-  unconditionally for its own client and lost that when it moved onto the seam, which is how this
-  surfaced. The fix is one line — hand a `trust_env=False` client in on the no-bundle branch too —
-  and it is **not** free: `trust_env=False` also stops httpx reading `SSL_CERT_FILE` /
-  `SSL_CERT_DIR`, so a deployment relying on an env-supplied trust store would break. That is a
-  behavioural change for every deployment behind a corporate proxy and wants its own ADR rather
-  than riding along with the collapse.
-  **`core/netguard` is a partial mitigation rather than a bystander, and a first telling of this
-  row said otherwise.** Measured, with the guard armed on `{127.0.0.1, localhost,
-  gateway.internal}`: `evil-proxy.example` and `corp-proxy.internal` are both refused at
-  `getaddrinfo`, and a bare `203.0.113.9:3128` at `connect` — so an `HTTPS_PROXY` naming a host
-  outside the derived allowlist does not get out. What the guard cannot see is a proxy the
-  deployment has *legitimately* allowlisted (`CHEMCLAW_EGRESS_ALLOW`, or a corporate proxy sharing
-  a host with declared infrastructure), where nothing distinguishes the operator's intent from an
-  env var somebody else set. That residual case, plus the guard being disableable
-  (`CHEMCLAW_EGRESS_GUARD_ENABLED=false`), is what keeps this row open.
+- [ ] **A connector can claim a step-template launcher name, and the registry says it cannot** —
+  [S], found 2026-09-05 reviewing the ambient-name guard. `_bound_by_this_process` refuses a bundle
+  that claims an in-process tool, a scratchpad verb, `write_todos` or `task`. Its docstring adds
+  that `run_<name>` template launchers are "a different name space that a bundle has no business
+  claiming either" — and measured, a bundle declaring `run_bond_strength_survey` is **accepted**:
 
-- [ ] **A loopback proxy is outside the egress guard by construction, and a service mesh is exactly
-  that shape** — [M], opened 2026-09-05 by the pass that unified the two loopback predicates onto
-  `core/http.is_loopback_host`. The row above measured that a *named* proxy is refused and
-  concluded the guard is "a partial mitigation"; the half it did not measure is that a proxy on
-  **loopback needs no allowlisting at all**, because `netguard._check` exempts loopback by
-  construction — and must keep exempting it, since the process dials Postgres, Temporal and the
-  calc backend there. Measured with the allowlist deliberately empty, one local HTTP proxy and
-  `httpx` (`_refused` read off the module after each arm):
+  ```
+  NOT REFUSED: a connector may claim the template launcher 'run_bond_strength_survey'
+  ```
 
-  | arm | outcome | `netguard._refused` |
-  | --- | --- | --- |
-  | `proxy=http://proxy.corp:3128` → `http://exfil.example/steal` | refused at `getaddrinfo` | 1 |
-  | `proxy=http://127.0.0.1:<port>` → `http://exfil.example/steal` | **HTTP 200, body returned** | **0** |
-  | no proxy → `http://exfil.example/steal` (the control) | refused at `getaddrinfo` | 1 |
+  The cause is ordering rather than an oversight in the union. `chemclaw_agent
+  ._register_generated_tools` is `[*job_tools(), *template_tools()]`, so `job_tools()` runs the
+  collision check while `registered_tools()` still holds no launcher — measured empty at that
+  moment. The consequence is the one the whole check exists to prevent, one name space out: the
+  bundle's tool wins `tools_by_name` and a chemist asking for a template gets the connector's tool
+  under the launcher's name, with no error.
+  **Not a one-liner, which is why it is a row.** Closing it means either reading
+  `chemclaw.templates.registry` from `connectors/registry` — a new import edge
+  `tests/test_layering.py` would have to be told about, in the direction that module has so far
+  avoided — or moving the collision check to after both registrations, which changes when a
+  misconfiguration is reported. Which registry owns that name space is the decision.
+  The false sentence is corrected in this commit; the gap is not. Anchors:
+  `connectors/registry.py::_bound_by_this_process`, `agent/chemclaw_agent.py::_register_generated_tools`.
 
-  The middle arm is the finding: the request reached its external destination end to end, and the
-  counter never moved — so nothing logs at ERROR, nothing alerts, and `chemclaw_egress_refused_total`
-  reads as a clean pod. This is the *shipped* topology rather than an attacker-only one: an
-  OpenShift service mesh or egress sidecar is a loopback proxy by design, so
-  `HTTPS_PROXY=http://127.0.0.1:15001` on the pod re-terminates TLS for every prompt, completion
-  and `Authorization` bearer and forwards them wherever the sidecar is configured to.
-  `core/http.private_ca_transport` sets `trust_env=False` and closes it for the two LLM seams that
-  take it — on the CA-bundle branch only (the row above), and for no other `httpx`/`requests`
-  client in the tree.
+- [ ] **The JWKS fetch follows an ambient proxy and has no seam to stop it** — [M], opened
+  2026-09-05 by the review of `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
+  `api/auth.py:85` builds a `PyJWKClient`, whose `fetch_data` calls `urllib.request.urlopen` —
+  which resolves proxies from the process-global default opener and has no `trust_env`. Measured
+  with a recorder standing in as the proxy: it received
+  `GET http://login.microsoftonline.com/tenant/discovery/v2.0/keys`. **This is the anchor every
+  bearer token is validated against**, so a proxy that could answer it could serve a key set of its
+  own choosing. Two things bound the severity and neither closes it: a real tenant endpoint is
+  `https`, where a proxy sees a CONNECT tunnel it can only open with a CA the pod already trusts
+  (which is exactly what a TLS-terminating corporate proxy arranges); and the boot refusal added by
+  that ADR stops any deployment that has *not* declared a proxy, which is every shipped one. The
+  residual is a site that has declared one — there the LLM seam refuses it and this one does not,
+  which is an asymmetry that reads as a control and is not.
+  **Not a one-liner, which is why it is a row.** `PyJWKClient` takes `ssl_context` and no opener,
+  so the only in-process fix is
+  `urllib.request.install_opener(build_opener(ProxyHandler({})))` at import — a process-wide side
+  effect on every library that reaches for `urlopen`, which wants its own decision rather than
+  riding along. The alternative is vendoring `fetch_data`, which couples this module to a surface
+  it does not otherwise use (`_match_kid` is already written the long way for that reason).
+  Anchors: `api/auth.py::_client_for`, `core/netguard.py::refuse_proxied_egress`.
 
-  **Not fixable by widening the loopback answer**, which is why this is a row and not a patch: the
-  guard's model is "which *host* may this process dial", and a proxy moves the destination out of
-  the address entirely. Closing it means treating proxy configuration as a destination — reading
-  `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` at arm time and refusing, or requiring the proxy to be
-  named in `CHEMCLAW_EGRESS_ALLOW` even when it is loopback — which changes behaviour for every
-  deployment behind a legitimate mesh and wants the same ADR the `trust_env=False` half of the row
-  above is already deferred to.
+- [ ] **An external vector store's client builds its own httpx and is outside the proxy fix** —
+  [S], opened 2026-09-05 by `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`.
+  `retrieval/vectors/qdrant.py:118` constructs `AsyncQdrantClient`, which builds its own httpx
+  client internally and takes only `verify` from this repository — so `trust_env` stays at its
+  default and a configured proxy would carry that traffic. It is **not** the LLM seam, so no prompt
+  or bearer is on it; what is on it is embedded note text and the query vectors. Recorded rather
+  than blind-patched for one reason: `qdrant_client` is not in this closure (`pgvector` is the
+  shipped provider), so the claim "passing a client works" would be untested prose, which is the
+  shape this repository keeps deleting. **The boot refusal covers it** in any deployment that has
+  not declared a proxy, which is every shipped one — this is the residual for a site that has
+  declared one *and* runs the non-default vector store. Closing it needs the extra installed, then
+  one measurement of whether the SDK accepts a caller-supplied client. Anchors:
+  `retrieval/vectors/qdrant.py`, `core/http.py::gateway_client_kwargs`.
 
 - [ ] **The gateway boot guard reaches one process, and the worker is the other one** — [M],
   opened by `D-2026-09-04-a-gateway-is-the-only-provider`. `_refuse_unconfigured_llm_gateway` and
@@ -141,7 +143,7 @@ topic).
   a hash of the todo *contents* — but it never compares the *tool being called* to anything in the
   plan. So once a human approves a one-line read-only plan ("look up the melting point of aspirin"),
   every tool in `authz.side_effecting_tools()` executes for the rest of that turn:
-  `propose_knowledge_note` (a knowledge-graph write / git push), `synthesize_memory`, every durable
+  `record_knowledge_note` (a knowledge-graph write / git push), `synthesize_memory`, every durable
   calc/BO launch. Combined with the unframed injection surfaces (connector output, `find_past_jobs`
   `plan_step`, ELN notes) this is the injection amplifier — untrusted text that reaches the model
   during an approved turn reaches the full write surface while the chemist believes they approved a
@@ -170,72 +172,73 @@ topic).
       for the audit trail, where that question can be answered. What stays open is unchanged: the
       string is still the caller's to choose.
 
-- [ ] **One third of the ambient-name refusal is guarded by nothing** — [S], found reviewing
-      `D-2026-09-04-a-helpers-file-crosses-back-and-stays`. `connectors/registry._bound_by_this_process`
-      unions three sets so a connector cannot claim a name this deployment already binds:
-      `skill_tool_names()` (the six scratchpad file verbs), `subagent_tool_names()` (`task`) and
-      `harness_tool_names()` (`write_todos`). Each set is stamped with its own reason string, and a
-      grep for the three over `src/` and `tests/` is the whole evidence: `"a scratchpad file verb"`
-      is asserted once, by
-      `tests/test_connector_registry.py::test_a_connector_cannot_claim_an_ambient_tool_name`, which
-      drives a bundle declaring `read_file`; `"the subagent spawner"` is now reached by
-      `tests/test_tool_framing.py`'s derived guard; `"a plan-harness tool"` appears **only** at its
-      own definition, `registry.py:664`. Confirmed by deleting each line in turn: the first two turn
-      a test red and the third turns **nothing** red anywhere. So a
-      refactor may silently re-open `write_todos` to a connector, and a connector that claimed it
-      would win `tools_by_name` over the plan harness the gate (`agent/plan_gate.py`) reads. The
-      guard was not added with the other two on purpose: `agent/tool_framing.py` does not sort by
-      that name, so asserting it there would be a control in the wrong file — it belongs beside the
-      registry's own refusal test. Anchors: `connectors/registry.py::_bound_by_this_process`,
-      `tests/test_connector_registry.py`, `agent/plan_gate.py`.
+- [ ] **`build_langgraph_agent(connectors=...)` accepts a tool that shadows a first-party name** —
+      [S], the residual `D-2026-09-04-a-name-is-one-capability-across-every-namespace` names and
+      leaves open, and whose `BACKLOG.md` row was never written. `connectors/registry.py`'s
+      `_declared_tool_names` refuses a *manifest* claiming `record_knowledge_note`, and that is
+      the path a deployment takes; the `connectors` keyword is the one that bypasses it, because
+      `agent/langgraph_agent.py`'s `bound = [*(as_structured_tool(fn) for fn in tools),
+      *(connectors or [])]` concatenates the two lists with no name check at all. Closed in
+      practice and open in the type: the check belongs beside that concatenation, over the names
+      the first list already declares.
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **`retrieval_top_k` cuts silently and the sweep reports `truncated_by=None`** — [M], measured
-      2026-09-04 and the half `D-2026-09-04-a-ranker-that-sorts-alphabetically-is-not-a-ranker`
-      deliberately left. `retrievers.py`'s `[: settings.retrieval_top_k]` discards everything past
-      8, and `research_tools.py`'s `total_before_cap` is computed **after** the merge, so on 5,000
-      matching notes `gather_evidence` reports `chunks=8, total_before_cap=8, truncated_by=None`
-      while 4,992 were dropped inside the leg. The two bounds wired to `truncated_by` cannot bite:
-      max distinct chunks is 8x3 plus the fingerprint leg's 10, against
-      `gather_evidence_max_chunks` 40. `EvidenceSweep` exists precisely so "a cut does not look
-      like a corpus" and this cut is invisible to it. **The fix is a contract change, which is why
-      it is a row rather than a patch**: `Retriever.retrieve` returns `list[EvidenceChunk]`, so the
-      found-count has nowhere to travel — the two shapes that need no protocol change are a mutable
-      attribute on the retriever (unsafe: one instance serves concurrent turns) and the count
-      repeated on every chunk, and both are worse than the gap. Do it as a small result object
-      across all four retrievers, `fanout.sweep_sources`, `harness.gather_section` and their tests.
-      `FingerprintSearch.hits_truncated` is the shape to copy.
+- [ ] **RRF's premise is independent rankers and this system has correlated ones;
+      `retrieval_fusion_k` is not the dial that fixes it** — [M], re-measured 2026-09-05 against
+      current `HEAD`, and **both remedies this row used to propose are measured no-ops**. Keep the
+      numbers here so nobody re-litigates them.
 
-- [ ] **RRF at `k=60` over 8-item lists counts sources rather than ranks, and two of the three are
-      the same ranker** — [M], measured 2026-09-04. With `retrieval_fusion_k` 60 and
-      `retrieval_top_k` 8, rank 1 scores 0.016393 and rank 8 scores 0.014706 — a **1.11x** spread,
-      against **2.00x** for being found twice. A note in two sources at rank *r* beats a one-source
-      rank-1 note whenever `r < 62`, i.e. always, for every list this system produces. Worse than
-      ordinary RRF crowding, because `GraphRetriever` and `LexicalRetriever` apply the *same*
-      boolean rule over the *same* corpus (`vector_index.py` says so), so the agreement bonus
-      rewards redundancy and demotes the only leg with an orthogonal signal: measured, a note found
-      only by the dense leg fuses **last** of nine, and end to end the note answering the query
-      moves from position 2 in `graph` mode to position 9 in `hybrid`. Two candidate fixes and they
-      are not the same decision — set `k` to the scale of the lists (2-10), and/or weight
-      `graph`+`lexical` as one tier via the existing `retrieval_source_weights`. Ship the fused
-      score on the chunk either way; today the `score` the model reads back is the source's own and
-      does not explain the order.
+      The arithmetic stands: at `retrieval_fusion_k` 60 over lists of `retrieval_top_k` 8, the
+      within-source spread is **1.11x** (rank 1 = 1/61, rank 8 = 1/68) against **2.00x** for being
+      found twice, so a two-source note at rank *r* beats a one-source rank-1 note while `r < 62`.
+      End to end on a 35-note corpus with three real legs, the note answering the query sits at
+      position 2 in `graph` mode and **position 9 of 9** in `hybrid`.
 
-- [ ] **The retrieval gold corpus is smaller than `retrieval_top_k`, so the gate cannot see a
-      ranking defect** — [S], measured 2026-09-04. `data/evals/retrieval_corpus` holds **6** notes
-      against a k of 8, so the cut can never engage and 4 of 5 gold cases sit at recall 1.00.
-      Adding 30 ordinary notes whose ids sort earlier, **with no code change**, takes
-      `retrieval-coupling` from 1.00 to 0.25 and `retrieval-suzuki` from 1.00 to 0.50. The module's
-      own docstring says it exists so a change "could not quietly halve recall unnoticed"; it
-      cannot detect the only way recall actually halves. Grow it past `retrieval_top_k` (30-50,
-      most of them distractors matching the query terms) and add one case whose expected note sorts
-      last alphabetically. Related and larger: `data/evals/probes/knowledge.yaml` already names
-      **44** (query, note) pairs against the real corpus in its `direction:` prose, unreadable
-      because `Probe` is `extra="forbid"` — one field would turn a 10-pair fixture gold set into a
-      44-pair one over the product corpus, and `DEFERRED.md`'s claim that "the shipped graph has
-      none" is false.
+      **Neither `k` nor `retrieval_source_weights` can close it, and that is arithmetic rather than
+      tuning**: the agreement term contains no `k`, so a note found at rank 1 by two legs scores
+      `2/(k + 1/w)` against a dense-only rank-1 note's `1/(k+1)` — the first wins for *every*
+      positive `k` and `w`. Measured: lowering `k` to 20 or 10 changes the order on **0 of 7** real
+      queries; at the minimum `k=1` the answer note reaches position 6, still below every two-source
+      note. Tiering `graph`+`lexical` at weight 0.5 leaves it at position 9, inert.
 
+      **The correlation is worse than "two of the three"**: on the real `knowledge/` corpus,
+      `graph ∩ lexical` = 47/55, `graph ∩ vector` = 44/55, `lexical ∩ vector` = 41/53 — because the
+      shipped `embedding_provider` is `hash`, which is token-count hashing, so *all three* legs are
+      term-overlap rankers. The dense leg only becomes orthogonal under `openai_compatible`.
+
+      **What was fixed instead**, because it was a defect rather than a tuning question: the fused
+      list carried each chunk's *finder's* score, monotone with the fused order on **0 of 7**
+      queries. `hybrid.restated_as_position` now reports the rank the fusion actually produced.
+
+      **What would work is "one corpus, one vote"** — `ingest/documents/retriever.py` already fuses
+      its own two legs internally so the share votes once, while the note corpus runs three legs as
+      three votes over one corpus. Expressing that means the data-source manifest saying which
+      sources are one corpus, which is an ADR rather than a setting. Scope note: with three note
+      legs the merge cap never engages (24 chunks against 40), so today the cost is prompt *order*,
+      not recall; it becomes recall at five or more legs. And `retrieval_mode` defaults to `graph`
+      with `CHEMCLAW_DATA_SOURCES=graph,eln-json`, so **no shipped configuration runs RRF over note
+      sources at all** — hybrid staying opt-in is the mitigation until the ADR is taken.
+
+- [ ] **The 44 labelled (query, note) pairs in `knowledge.yaml` are unreadable as data** — [M],
+      measured 2026-09-05. `data/evals/probes/knowledge.yaml` has **19 probes naming
+      real `knowledge/` note ids inside their `direction:` prose, 44 pairs in total** — a labelled
+      gold set against the *product* corpus that no gate can read, because `Probe` is
+      `extra="forbid"` (`evals/probe.py`). `DEFERRED.md`'s claim that "the shipped graph has none"
+      was corrected in the same commit as this row.
+
+      **Score it in the live lane, not offline, and that is the finding.** Measured offline by
+      running `GraphRetriever` on each probe's raw question: mean recall **0.636**, two probes at
+      0.00 — below the gate's floor on day one, because probe questions are conversational chemist
+      prose (10-27 terms) while the live agent reformulates before calling `gather_evidence`.
+      Gating that offline would restate the `retrieval-cross-coupling-literal-miss` case 19 times
+      without the `expect_pass: false` that makes it honest.
+
+      The shape: add `expects_notes: list[str]` to `Probe`, transcribe the 44 pairs, and score it in
+      `evals/live.py` beside `expects_tools` — `returned_ids` is already accumulated there, so it is
+      the same three lines as `live.py:499-500`. Plus a cheap **offline** validator that every
+      `expects_notes` id exists in `knowledge/`, which is the half CI can run. Its own PR: it needs
+      a running front door to verify green.
 - [ ] **The PR-gate's submission is O(corpus) and serialises cluster-wide** — [M], measured
       2026-09-04 against real bare remotes: 0.218 s per proposal at 100 notes, 0.574 s at 1,000,
       **2.916 s at 10,000** — 87% of it `git worktree add -B`, a full checkout of the corpus, in
@@ -291,6 +294,15 @@ topic).
       review. 0 reaction citations and 0 `calc_refs` in the committed knowledge corpus, so the half
       of the validator its own docstring says CI runs is dead on every CI run.
 
+- [ ] **The `note_proposed` SSE event is not a proposal, and the name is a two-repo contract** —
+      [S], found 2026-09-05 in the gate-deletion review. Nothing reviews a note, so the accurate
+      name is `note_recorded`; the literal is switched on by `Chemclaw3_ui`
+      (`state/types.ts`, `chatStore.ts`, `TracePanel.tsx`, `chem/entities.ts`, `turnActivity.ts`)
+      and by `evals/live.py`, so renaming it is a coordinated deploy with a skew window in which
+      one side drops the event silently. The internal names and the text a chemist reads are
+      already fixed; only the wire literal is left. Needs a rollout order (accept both, then emit
+      the new one, then drop the old), which is why it is a row rather than part of that fix.
+
 - [ ] **The detached settle of a cancelled `AwaitAnswerWorkflow` is racy** — [M], found 2026-09-04
       while fixing the stranded-row HIGH. `ParentClosePolicy.REQUEST_CANCEL` is strictly better than
       the alternatives (all three measured against a live broker), but the settle is scheduled from
@@ -314,6 +326,39 @@ topic).
       `parse_document` offers an interruption hook, so a hostile document still burns a worker to
       completion in the background. The only real fix is a killable subprocess, with pickling and a
       new child-OOM failure mode to classify (~150-250 lines).
+
+- [ ] **Nothing checks the client half of a wire contract, and it has drifted twice** — [L], the
+      row `D-2026-09-04-a-contract-has-two-halves-and-a-server-test-sees-one` says it is queuing
+      and which was never written. `tests/fixtures/turn_events_contract.json` pins what this
+      repository *sends*; nothing pins what a client accepts, so the `at_capacity` error code and
+      `PendingPlansResponse.truncated` both shipped here and reached `Chemclaw3_ui` as an
+      unhandled default — the second without anyone recording that it had not. The hand-written
+      case in `tests/test_protocol_routes.py` is the only cross-repo assertion in the tree, and
+      that ADR says plainly it does not scale to four repos. What it needs is one artefact both
+      sides read: a published fixture, a generated types package, or a job in `make ci` that
+      fetches the client's own declaration and diffs it against the fixture.
+
+- [ ] **The awaiting collapse keeps the oldest frame of each state, not the newest** — [S], found
+      2026-09-05 measuring `D-2026-09-05-a-push-nobody-claims-is-not-a-push`'s own collapse. That
+      change is right — fifteen `waiting` frames for a closed question is the defect it was written
+      for — but `awaiting_reported` suppresses a repeat of a state *already reported*, and the rows
+      arrive oldest-first, so the frame that survives is the first of each run. Replayed against
+      the backlog its ADR measured (one open, fourteen chases, an expiry) it emits
+      `waiting reminders=0` then `expired`, never the `reminders=14` that was true at connect; the
+      rows are consumed on that first claim, so the count never corrects on this channel.
+      `GET /pending` still answers it. Emitting the newest needs a batch boundary
+      `agent/session_events.stream_new_events` does not expose — it yields row by row — so the fix
+      is either a batched yield or a one-frame hold flushed per poll, and neither belongs in a
+      passing edit. Anchors: `api/routes/streams.py`, `agent/session_events.py`.
+
+- [ ] **`JsonCommitmentExport` cannot run a destructive sweep, and the grant for one already
+      exists** — [S], the row `ingest/commitments/json_export.py`'s `snapshot` attribute says is
+      queued and which was never written. It is hard-coded `False`, so a commitment withdrawn at
+      the site is never withdrawn here; the `DELETE` privilege was granted ahead of it
+      deliberately, so the enabling half is the only part unbuilt. Not a flag flip: `snapshot`
+      licenses deleting every commitment a pass did not see, so it is the operator's assertion
+      that the export directory was complete — which makes it a `datasource.yaml` key defaulting
+      to false, not a class attribute.
 
 ## 4 — Operating it
 
@@ -704,6 +749,18 @@ topic).
       row. Raised by the 2026-08-27 deployment-monitoring review, which checked the PDB's argument
       and found it sound; the singleton underneath it is the defect.
 
+- [ ] **A background-worker rollout that never becomes Ready is invisible until someone looks** —
+      [S], the detection `8b23067` named as missing after measuring the review's proposed fix as
+      worse than the status quo, and which was never written down as a row. `deployment-workers.yaml`
+      ships `Recreate` because the singleton underneath it forbids two replicas, so the old process
+      is gone before the new one starts; a new pod that never becomes Ready therefore leaves the
+      `background-jobs` queue with no consumer while the release reports deployed. `--atomic` is
+      not the fix and is refused elsewhere for its own reason (`migrate-job.yaml`). What is missing
+      is an alert, expressible from what is already scraped —
+      `kube_deployment_status_replicas_unavailable` on that Deployment, or the staleness of the
+      worker's own `chemclaw_jobs_in_flight` — and it belongs beside `ChemclawWorkerNotPolling` in
+      `prometheusrule.yaml`.
+
 ---
 
 - [ ] **The `stated`-quote ambient reads the whole table's tail on every turn once a database has
@@ -826,7 +883,7 @@ only holds defects can only ever restore the system to what it already intended 
       objective plus a sidecar list (W3)"* — and Pydantic turns a class docstring into the schema
       `description`, so `convert_to_openai_tool` ships them. Measured 2026-08-25 on the `default`
       profile: `start_optimization_campaign` is 8,063 chars of schema, 4,392 of it description and
-      **3,047 of that elaboration past the first paragraph**; `propose_knowledge_note` 4,259/2,262/663.
+      **3,047 of that elaboration past the first paragraph**; `record_knowledge_note` 4,259/2,262/663.
       Those two are 25% of the profile's 12,536-token tool budget between them, and both are already
       in `tests/test_context_floor.py::KNOWN_OVERSIZED`.
 
@@ -971,6 +1028,56 @@ only holds defects can only ever restore the system to what it already intended 
       class); the command prints the verdict itself. Run 2026-08-27: 0 sessions, 0 turns, not
       greenlit. The day a deployment has sessions, this row is one command to check.
 
+      **That instrument was blind to half the signal, and now has two arms**
+      (`D-2026-09-05-a-census-that-counts-only-success-is-blind-to-half-the-signal`). Its definition
+      of recurrence is an identical tool-name *sequence*, which is the shape SkillRL and SkillForge
+      abstract; a recurring **failure** produces divergent sequences that end badly, so a corpus
+      dense in repeated mistakes reported zero. The second arm counts tools that errored across
+      sessions and the subset where an earlier session recovered before a later one failed again
+      (≥3 classes / ≥3 sessions / ≥1 repeat). `generator_greenlit` is unchanged; read
+      `any_greenlit`. Both still report zero on 0 sessions, so the block is unchanged.
+
+      **The tier question this row implied is settled and is no longer part of it**
+      (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): knowledge is global the moment it
+      is learned and ungated; a skill is **live for its own user before review** and reaches the
+      shared tree only after an **admin** merges it, so the end user never waits on a gate and no
+      unreviewed instruction reaches a second person. The knowledge half of that is **built** —
+      `D-2026-09-05-the-gate-is-deleted-not-dormant` deleted the PR-gate outright (all nine callers
+      were knowledge, so ungating left it with no subject) and `kg/record.py` is the one write path.
+      What is open here is now the generator alone —
+      plus the per-actor skills directory that tier needs, which is blocked on the same generator
+      (nothing writes one until a distiller exists) and whose invariants that ADR states — plus the follow-up that ADR names and does not claim shipped: the
+      direct write path that actually ungates agent-asserted notes, which owes D-161 migration
+      `025`'s self-confirmation guard.
+
+      **Review scaling and convergence, ideated 2026-09-05 and mostly not built.** The owner asked
+      how an admin avoids drowning in near-identical proposals, and how local and global skills stay
+      convergent. `D-2026-09-05-a-rejection-nobody-reads-is-a-decision-taken-twice` built the one
+      part that is real today — the reviewer now sees every earlier version of the note in front of
+      them, so a rejection is not re-derived or accidentally overturned. The rest waits on the
+      distiller and is recorded there rather than here in full: promotion thresholds on skills
+      (used N times **and** by ≥ 2 distinct chemists — D-161's two-threshold shape, and the single
+      most effective flood control available); duplicate suppression in the **generator** rather
+      than the queue (propose an edit to the nearest existing skill unless none is close — a
+      queue-side deduplicator is a bandage on a generator that should not have produced them);
+      cluster review over `cluster_by_similarity`; benefit-ranked triage over `evals/ab.py`, with
+      the machine ordering and the human still deciding, which is why it does not re-open
+      `D-2026-08-16`; and the convergence half — global-wins-on-conflict with the conflict
+      surfaced, promotion retiring the local variants that fed it via `memory/supersede.py`, expiry
+      on disuse read as a signal about the *distiller* rather than about review capacity, and
+      `skill-validate` run on local skills at write time so form converges even where content does
+      not. One constraint binds all of it: `D-2026-08-25` ends with **no Temporal Schedule opens a
+      pull request**, so a reconciliation job may cluster, measure and report, and a human opens the
+      proposal.
+
+      **Two findings from the reviewed framework (WikiSkill, arXiv 2608.27454) are recorded because
+      they contradict the obvious design and cost nothing to carry**: giving the *executing* agent
+      the accumulated experience measured **worse** than not (63.7% → 60.9%), while giving it to the
+      *proposer* was the largest ablation (+15.0pp) — so experience is compiled into skills, never
+      injected into the turn; and rejected proposals were load-bearing input, which this tree
+      already retains (`kg/proposal.py::rejected_version`, and `durable/retention.py` refuses to
+      prune `note_proposals`) and nothing reads back.
+
 ### The upstream-capability register — what our pinned dependencies now ship that we build ourselves
 
 *Re-derived 2026-08-25, and re-derive it whenever a dependency is bumped.* `make upstream-check` and
@@ -1104,15 +1211,19 @@ Both change what a `Component` is, so this wants its own ADR and its own measure
 partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
 by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
 
-## The PR-gate costs 1.81 s per proposed note, and a backfill is one note per record
+## A note write costs ~1.8 s, and a backfill is one write per record
 
-Measured over the ORD backfill: 103 records per 3.1 minutes, steady, with the cost in the PR-gate's
-git branch-and-commit cycle rather than in mapping (the whole 10,011-record corpus maps in 0.3 s).
-That is a little over two hours for the mock's 4,251 ingestible records and 4,251 branches in the
-note repository. A real deployment's first sync is a decade of records, where this is days and a
-repository nobody can list. Nothing is broken — every proposal genuinely is a reviewable unit — but
-a backfill and an incremental sync arguably want different submission shapes (one branch per batch,
-or a bulk proposal a reviewer expands). Found by the 2026-08-18 corpus-fidelity pass.
+Measured over the ORD backfill: 103 records per 3.1 minutes, steady, with the cost in the
+commit-and-push cycle rather than in mapping (the whole 10,011-record corpus maps in 0.3 s). That is
+a little over two hours for the mock's 4,251 ingestible records. A real deployment's first sync is a
+decade of records, where this is days.
+
+**Half of this closed itself and half did not.**
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the branch per note, so the
+"4,251 branches in a repository nobody can list" half is gone. What remains is the serialized
+commit-and-push, which is the same 1.8 s: a backfill and an incremental sync still want different
+write shapes (one commit per batch for the first, one per note for the second). Found by the
+2026-08-18 corpus-fidelity pass, re-scoped 2026-09-05.
 
 ## The labelling client is the one MCP leg with no identity or trace on the wire
 

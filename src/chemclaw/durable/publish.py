@@ -1,7 +1,7 @@
-"""Shared workflow-side pieces of the PR-gated note publish (gate G4/DRY).
+"""Shared workflow-side pieces of the durable note write (gate G4/DRY).
 
 Why this exists: three workflows (QM job, BO campaign, development report) end by
-writing an agent note through the PR-gate. The retry discipline is identical for
+writing an agent note into the graph. The retry discipline is identical for
 all of them — run on the light background queue, bound the attempts so a broken
 git remote gives up instead of retrying forever, and (for best-effort publishes)
 never let a failed note write fail the completed scientific result. Before this
@@ -44,7 +44,7 @@ with workflow.unsafe.imports_passed_through():
 _DECLARED_RETRYABLE = frozenset(
     {
         # `kg.git_submitter.GitRemoteError`: a dead remote, a timed-out git command, a contended
-        # submit lock. The transient half `GitSubmitError` used to cover with one name — which
+        # submit lock. The transient half `GitWriteError` used to cover with one name — which
         # made `note_write_max_attempts` dead for exactly the failures it was configured for.
         "GitRemoteError",
     }
@@ -108,7 +108,7 @@ _BAD_DATA_TYPES = [
     # go unregistered unnoticed.
     "SkillsReadOnlyRefusal",
     "ConnectorJobError",
-    "GitSubmitError",
+    "GitWriteError",
     "CalculationDomainError",
     "ConnectorError",
     "DataSourceError",
@@ -247,10 +247,10 @@ BAD_DATA_RETRY = RetryPolicy(
 
 
 def note_publish_retry() -> RetryPolicy:
-    """Bounded retries for a PR-gate note write (config `note_write_max_attempts`).
+    """Bounded retries for a note write (config `note_write_max_attempts`).
 
     Shares the bad-data type list so a bad note (`NoteError`, `ValidationError`) or a structural
-    gate refusal (`GitSubmitError` — a mis-pointed checkout, a proposal branch a human pushed to)
+    refusal (`GitWriteError` — a mis-pointed checkout, a note a human authored at that path)
     fails fast instead of burning the transient-retry budget. `GitRemoteError` — a dead remote, a
     timed-out command, a contended lock — is the retryable subclass: Temporal matches these names
     exactly, so the subclass's different name is what makes `note_write_max_attempts` real. This
@@ -271,7 +271,7 @@ def agent_step_retry() -> RetryPolicy:
     Every other activity is safe to retry: it recomputes, and recomputing costs time. A template's
     **agent** step is not, because a Temporal retry replays the turn from the prompt — an activity
     has no checkpointer behind it — so every tool the failed attempt already ran runs again with
-    its side effects. Measured: one provider 503 produced two PR-gate branches and two audit rows
+    its side effects. Measured: one provider 503 produced two note commits and two audit rows
     for one logical note.
 
     Same bad-data type list as every policy here, deliberately and without exception: an outer
@@ -547,8 +547,8 @@ async def publish_note_best_effort(activity: Any, args: list[Any], label: str) -
     the science is done and cached, so a broken git remote must not fail the job.
 
     Swallowing is right for the *job* and was wrong for the *knowledge*. A warning inside a
-    workflow log is not something anyone watches, and `chemclaw_notes_proposed_total` counts only
-    successes — so a dead git remote produced no proposals and no signal, which is byte-for-byte
+    workflow log is not something anyone watches, and `chemclaw_notes_recorded_total` counts only
+    successes — so a dead git remote produced no notes and no signal, which is byte-for-byte
     what an idle deployment produces. The counter below is the difference between those two states.
     Guarded on `is_replaying` for the same reason Temporal's own workflow logger is: a replayed
     history would otherwise re-count every failure the workflow has ever seen.

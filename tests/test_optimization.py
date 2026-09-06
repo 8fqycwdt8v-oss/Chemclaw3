@@ -11,7 +11,7 @@ import re
 from datetime import date
 
 from chemclaw.ingest.eln.ord import Component, Impurity, OrdReaction, Role
-from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.record import record_note
 from chemclaw.memory.jobs import build_optimization_notes
 from chemclaw.memory.optimization import (
     OptimizationCampaign,
@@ -19,7 +19,7 @@ from chemclaw.memory.optimization import (
     optimization_campaign_note,
 )
 from chemclaw.memory.similarity import cluster_by_similarity, reaction_fingerprints
-from tests.conftest import FakeSubmitter
+from tests.conftest import FakeWriter
 
 
 def _ester(
@@ -95,13 +95,13 @@ def test_job_pr_gates_one_note_per_campaign() -> None:
 
     async def _run() -> None:
         reactions = [_ester("run-1", 80, 85), _ester("run-2", 100, 92), _suzuki()]
-        submitter = FakeSubmitter()
+        submitter = FakeWriter()
         refs = [
-            await propose_note(unit.note, submitter) for unit in build_optimization_notes(reactions)
+            await record_note(unit.note, submitter) for unit in build_optimization_notes(reactions)
         ]
         assert len(refs) == 1
-        assert len(submitter.submissions) == 1
-        assert submitter.submissions[0].files[0].path.startswith("knowledge/optimization-campaign/")
+        assert len(submitter.writes) == 1
+        assert submitter.writes[0].files[0].path.startswith("knowledge/optimization-campaign/")
 
     asyncio.run(_run())
 

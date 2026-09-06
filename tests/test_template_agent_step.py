@@ -273,7 +273,7 @@ def test_the_model_reads_a_refusal_rather_than_a_retryable_error() -> None:
 
     graph = build_langgraph_agent(
         ScriptedChatModel(
-            [{"name": "propose_knowledge_note", "args": {"title": "x"}}, "could not do that"]
+            [{"name": "record_knowledge_note", "args": {"title": "x"}}, "could not do that"]
         ),
         profile=step_profile(None, []),
         audit_sink=NullAuditSink(),
@@ -282,7 +282,7 @@ def test_the_model_reads_a_refusal_rather_than_a_retryable_error() -> None:
 
     (message,) = [m for m in result["messages"] if getattr(m, "type", "") == "tool"]
     assert message.status != "error", "a deliberate refusal must not reach the model as is_error"
-    assert message.text.startswith("Refused: propose_knowledge_note changes stored data"), (
+    assert message.text.startswith("Refused: record_knowledge_note changes stored data"), (
         message.text
     )
     assert "try one of" not in message.text
@@ -575,7 +575,7 @@ def test_the_sequencer_hands_the_step_its_declared_writes() -> None:
         sent.append(payload)
         return "ok"
 
-    step = AgentStep(id="brief", prompt="write it up", write_tools=["propose_knowledge_note"])
+    step = AgentStep(id="brief", prompt="write it up", write_tools=["record_knowledge_note"])
     identity = StepIdentity(actor="chemist-1", roles=[], correlation_id="run-1")
 
     with pytest.MonkeyPatch.context() as patch:
@@ -587,7 +587,7 @@ def test_the_sequencer_hands_the_step_its_declared_writes() -> None:
         )
 
     (payload,) = sent
-    assert payload.write_tools == ["propose_knowledge_note"]
+    assert payload.write_tools == ["record_knowledge_note"]
 
 
 def test_every_dispatched_step_carries_a_heartbeat_timeout() -> None:
@@ -834,7 +834,7 @@ def test_declaring_a_read_tool_as_a_write_is_a_problem() -> None:
 
 def test_declaring_a_tool_that_does_not_exist_is_a_problem() -> None:
     """A typo is a write the step believes it declared and does not have."""
-    (problem,) = _problems(["propose_knowledge_notes"])
+    (problem,) = _problems(["record_knowledge_notes"])
 
     assert "unknown write tool" in problem
 
@@ -847,7 +847,7 @@ def test_declaring_a_write_the_step_profile_does_not_advertise_is_a_problem() ->
     silently nothing at run time. `property-lookup` is a shipped profile that advertises no
     knowledge-graph write.
     """
-    (problem,) = _problems(["propose_knowledge_note"], profile="property-lookup")
+    (problem,) = _problems(["record_knowledge_note"], profile="property-lookup")
 
     assert "does not advertise" in problem
     assert "property-lookup" in problem
@@ -860,5 +860,5 @@ def test_declaring_a_real_write_the_profile_advertises_is_no_problem() -> None:
     making the feature unusable: an in-process write on the default profile, and a connector
     endpoint tool the `property-lookup` profile does advertise.
     """
-    assert _problems(["propose_knowledge_note"]) == []
+    assert _problems(["record_knowledge_note"]) == []
     assert _problems([_CONNECTOR_WRITE], profile="property-lookup") == []

@@ -215,7 +215,7 @@ def activity_context(args: Sequence[Any], fn: Any = None) -> ActivityContext:
     which every gate treats as fail-closed (`authz.authorize_trigger`,
     `documents/retriever._entitled`). Lifting the actor, session and correlation is safe on the same
     reasoning: they are attribution, not authority, and what it buys is that `agent/audit.py` and
-    `kg/proposal.py`, which read the ambient actor and booked `""` for every row a worker ever
+    `kg/record.py`, which read the ambient actor and booked `""` for every row a worker ever
     wrote, now name the person the run was launched for.
     """
     models = list(_models(args))

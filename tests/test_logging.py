@@ -95,6 +95,23 @@ def test_telemetry_off_installs_a_noop_meter_provider_rather_than_leaving_none()
     )
 
 
+def _without_proxy_variables() -> dict[str, str]:
+    """This process's environment minus every proxy variable, for a subprocess arm.
+
+    The subject here is whether the OTel SDK is installed and starts under the value the chart
+    ships, and the chart ships no proxy. Inheriting one makes the arm assert something else:
+    `core/netguard.refuse_proxied_egress` charges the OTLP endpoint, because the gRPC exporter
+    resolves a proxy without consulting the target's scheme, so a subprocess that inherits this
+    sandbox's own corporate proxy is *correctly* refused and the arm fails for a true reason that
+    is not its own. Stripped rather than allowlisted, so the arm says what it is about.
+    """
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if not name.lower().endswith("_proxy") and name.lower() != "no_proxy"
+    }
+
+
 def test_configure_telemetry_works_with_the_shipped_helm_value() -> None:
     """OTel must actually start under the value the chart ships, not merely validate.
 
@@ -122,7 +139,7 @@ def test_configure_telemetry_works_with_the_shipped_helm_value() -> None:
             "from chemclaw.core.logging import configure_telemetry; configure_telemetry()",
         ],
         env={
-            **os.environ,
+            **_without_proxy_variables(),
             "CHEMCLAW_OTEL_ENABLED": "true",
             "CHEMCLAW_OTEL_ENDPOINT": "http://otel-collector.observability.svc:4317",
         },
@@ -208,7 +225,7 @@ def test_a_second_configure_telemetry_does_not_install_a_second_pipeline() -> No
     result = subprocess.run(
         [sys.executable, "-c", probe],
         env={
-            **os.environ,
+            **_without_proxy_variables(),
             "CHEMCLAW_OTEL_ENABLED": "true",
             "CHEMCLAW_OTEL_ENDPOINT": "http://otel-collector.observability.svc:4317",
         },
@@ -455,7 +472,7 @@ def test_a_short_or_empty_secret_is_not_matched(monkeypatch: pytest.MonkeyPatch)
     and a substring search for the empty string matches everywhere.
     """
     monkeypatch.setattr("chemclaw.core.config.settings.llm_api_key", SecretStr(""))
-    monkeypatch.setattr("chemclaw.core.config.settings.note_webhook_secret", SecretStr("abc"))
+    monkeypatch.setattr("chemclaw.core.config.settings.live_probe_token", SecretStr("abc"))
     assert _rendered(_record("abc is a fine thing to log")) == "abc is a fine thing to log"
 
 
@@ -1270,7 +1287,7 @@ def test_a_credential_redacted_from_the_logs_is_also_withheld_from_a_child_proce
     bearer lives in rather than holding it — was added for the log filter and `secret_env_names()`
     went on deriving from `_SECRET_SETTINGS` alone. So the calculation backend's bearer, the
     labelling server's and the MCP face's were scrubbed from every log line and handed, in the
-    clear, to every `git` child `kg/git_submitter.py` starts — where a credential helper, a `git`
+    clear, to every `git` child `kg/git_writer.py` starts — where a credential helper, a `git`
     hook or a remote configured on the notes checkout reads its environment. That is the exact class
     `_git_child_env` exists to withhold, and both its docstring and `secret_env_names`' said the two
     sets "cannot drift".

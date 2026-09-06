@@ -224,7 +224,7 @@ load_profiles()
 #: exactly as a tool's is.
 #:
 #: The headroom is ~816 tokens, tighter in proportion than the 29,500 it replaces: less than
-#: `propose_knowledge_note` costs, so it cannot absorb another tool of that size unnoticed.
+#: `record_knowledge_note` costs, so it cannot absorb another tool of that size unnoticed.
 #:
 #: **Raised again on 2026-08-29 by the eight infrastructure findings**, which added five tools to
 #: the `default` surface: `review_activity` 585, `request_external_input` 533, `review_commitments`
@@ -244,7 +244,7 @@ load_profiles()
 #: prompt that stops finding tools is a regression with a good-looking metric.
 #:
 #: The headroom is ~620 tokens against a measured 34,379 — tighter again than the ~816 the protocol
-#: surface left, and now well under what a single tool of `propose_knowledge_note`'s size costs. The
+#: surface left, and now well under what a single tool of `record_knowledge_note`'s size costs. The
 #: next surface to arrive here should expect to be asked for the allow-list first.
 #:
 #: **43,500 as of 2026-08-29, and no tool was added.** Every paragraph above measured the wrong
@@ -259,7 +259,7 @@ load_profiles()
 #: is restated here: they were each right about the delta they measured and wrong about the base,
 #: and rewriting them would be inventing measurements nobody took.
 #:
-#: The headroom on that day was **995** tokens against 42,505 — under what `propose_knowledge_note`
+#: The headroom on that day was **995** tokens against 42,505 — under what `record_knowledge_note`
 #: costs on the honest basis (1,126), so it could not absorb another tool of that size unnoticed,
 #: which is the property every raise above was chosen for.
 #:
@@ -286,7 +286,7 @@ load_profiles()
 #: paragraph up, committed by the paragraph that names it.** Re-measured 2026-09-04: `default` is
 #: **42,717**, so the headroom was 783 rather than 995 — drifted by merges this file never saw.
 #: The load-bearing property is what survives a re-measurement and the number is not: the ceiling
-#: holds with less headroom than one `propose_knowledge_note` costs, which is the property every
+#: holds with less headroom than one `record_knowledge_note` costs, which is the property every
 #: raise above was chosen for, and `_report` prints the day's figure so nobody has to trust this
 #: comment for it.
 #: **44,500 as of 2026-09-05, and nothing was added — the measurement got honest again.** The
@@ -297,12 +297,20 @@ load_profiles()
 #: every test in this file green. So this raise buys nothing and hides nothing: it is the same
 #: surface, counted where it is paid.
 #:
-#: The headroom is 799 tokens, which is the property every raise above was chosen for — under what
-#: one `propose_knowledge_note` costs (1,126, re-derived the same day), so the ceiling cannot absorb
-#: another tool of that size unnoticed. It is deliberately *not* the ~980 the branch point would
-#: have given: this tree already carries a sibling branch's docstring edit worth 160 tokens, and a
-#: ceiling set to today's measurement plus a fixed headroom is set against whatever else is in
-#: flight. The figure to judge a raise by is the headroom, not the ceiling.
+#: The headroom is what a raise is judged by, and it must stay *under* what one
+#: `record_knowledge_note` costs, so the ceiling cannot absorb another tool of that size unnoticed.
+#: A ceiling set to today's measurement plus a fixed headroom is set against whatever else is in
+#: flight, which is why the margin is deliberately thin.
+#:
+#: **The two figures this paragraph used to state were stale within four days, and one of them was
+#: stale when it was written.** It said 799 tokens of headroom against a 1,126-token tool; measured
+#: on 2026-09-05 the floor was 44,089 (headroom 411) against a 1,238-token tool, drifted by merges
+#: this file never saw — and this commit's own prose edits to tool docstrings moved it to 44,145
+#: (headroom 355), which is stated because a docstring is part of the bill and pretending otherwise
+#: is how the floor gets away from a ratchet. No raise: the property holds, more tightly than
+#: before. Both live figures come out of `_report`, so nobody has to trust this comment for them,
+#: and per `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` the ones written here are a
+#: claim about this commit and nothing later.
 #:
 #: **`agent_tool_result_clear_trigger` moves with it, by derivation rather than by retuning**
 #: (`core/config/agent.py`): its default is this ceiling plus the 30,000 of thread the setting has
@@ -352,7 +360,7 @@ MAX_SINGLE_TOOL_TOKENS = 900
 #: Recorded rather than hidden by a bigger bound, so the *next* one fails this test. Every entry is
 #: real debt and none is a mystery: each takes a **domain document** as its argument, which
 #: `convert_to_openai_tool` inlines model by model. `start_optimization_campaign` carries a BoFire
-#: campaign declaration — objectives, constraints and parameter domains; `propose_knowledge_note`
+#: campaign declaration — objectives, constraints and parameter domains; `record_knowledge_note`
 #: carries the note frontmatter contract; and the two protocol writers carry a structured ask and a
 #: laboratory procedure (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`).
 #:
@@ -428,8 +436,23 @@ KNOWN_OVERSIZED: dict[str, int] = {
     "generate_screening_design": 2_309,
     "predict_outcome": 2_201,
     "campaign_progress": 2_087,
-    "start_optimization_campaign": 1_535,
-    "propose_knowledge_note": 1_126,
+    # **2,307 on `main`, 1,532 here, and the difference is this branch rather than drift.** That
+    # figure was re-measured on `main` against the un-narrowed `OptimizationProblem`; this branch
+    # narrowed it, so the merge inherits the smaller schema and the ratchet measures the smaller
+    # cost. Re-recorded in the commit that merged the two, which is what this dict asks for.
+    "start_optimization_campaign": 1_532,
+    # 1,126 → 1,227 on 2026-09-05, and the cause is prose rather than schema: the tool was renamed
+    # from `propose_knowledge_note` and its docstring rewritten, because the old one told the model
+    # the note went to a human for review and that stopped being true
+    # (`D-2026-09-05-the-gate-is-deleted-not-dormant`). The replacement says what a reader now has
+    # instead — provenance, citations, correction — and that is 101 tokens the model is sent on
+    # every call. Recorded rather than trimmed: the sentence it buys is the one that stops the model
+    # asserting an unreviewed note as established fact.
+    #
+    # 1,227 → 1,238 in the fix-forward that followed, same cause: the `Returns:` line still said
+    # "the submitted PR reference". Re-recorded in the commit that moved it, which is what this
+    # dict's own test asks for and the reason it is +11 rather than a mystery inside the tolerance.
+    "record_knowledge_note": 1_238,
     # Both +22 against the re-measurement above, and it is the same 22 twice: they share the
     # `ExperimentDesign` schema, and the `max_length` ceilings
     # `D-2026-08-29-a-check-a-reader-never-sees-is-not-a-check` put on its six keyed lists render as

@@ -66,7 +66,7 @@ step names them:
 ```yaml
   - id: record
     kind: agent
-    write_tools: [propose_knowledge_note]
+    write_tools: [record_knowledge_note]
     prompt: Write up what step two found and propose it as a note.
 ```
 

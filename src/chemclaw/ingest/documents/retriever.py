@@ -41,7 +41,7 @@ from chemclaw.ingest.documents.index import (
 )
 from chemclaw.ingest.documents.reassemble import join_chunks
 from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip
-from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
+from chemclaw.retrieval.hybrid import reciprocal_rank_fusion, restated_as_position
 
 logger = logging.getLogger(__name__)
 
@@ -246,13 +246,10 @@ class ShareDocumentRetriever:
             [self._chunks(dense), self._chunks(lexical)], k=settings.retrieval_fusion_k
         )
         # The score is re-stated as the chunk's *position* in this source's own ranking, so the
-        # value and the order cannot disagree. It is deliberately not a similarity: after fusing a
-        # cosine with a `ts_rank` there is no similarity left to report, and `EvidenceChunk.score`
-        # is documented to order one source's list and nothing wider.
-        return [
-            chunk.model_copy(update={"score": round(1.0 / (1 + position), 4)})
-            for position, chunk in enumerate(fused[:top_k])
-        ]
+        # value and the order cannot disagree — `restated_as_position` carries the argument, and
+        # the cross-source sweep now makes the same restatement over the same function rather than
+        # over a second copy of this expression.
+        return restated_as_position(fused[:top_k])
 
     def _chunks(self, hits: list[DocumentHit]) -> list[EvidenceChunk]:
         """Turn ranked index hits into citable evidence."""

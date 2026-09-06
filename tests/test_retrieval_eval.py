@@ -33,12 +33,17 @@ _CORPUS = _REPO / EvalSettings.model_fields["eval_retrieval_corpus_dir"].default
 
 # (case id, expected recall, expected precision, gate pass). Pinned from the fixture corpus.
 _EXPECTED = {
-    "retrieval-suzuki": (1.0, 1.0, True),
-    "retrieval-coupling": (1.0, 1.0, True),
+    "retrieval-suzuki": (1.0, 3 / 8, True),
+    "retrieval-coupling": (1.0, 1 / 2, True),
     # The literal-miss case: "cross-coupling" reaches the playbook but not the Suzuki reaction.
-    "retrieval-cross-coupling-literal-miss": (0.5, 1.0, False),
-    "retrieval-reflux-conditions": (1.0, 1.0, True),
-    "retrieval-coupling-playbook-filter": (1.0, 1.0, True),
+    "retrieval-cross-coupling-literal-miss": (0.5, 1 / 3, False),
+    "retrieval-reflux-conditions": (1.0, 1 / 2, True),
+    "retrieval-coupling-playbook-filter": (1.0, 1 / 3, True),
+    "retrieval-organozinc-tag-filter": (1.0, 1 / 2, True),
+    "retrieval-zinc-negishi-last-id": (1.0, 1 / 4, True),
+    "retrieval-palladium-degassing": (1.0, 4 / 5, True),
+    "retrieval-protodeboronation": (1.0, 2 / 3, True),
+    "retrieval-boronic-acid": (1.0, 1 / 2, True),
 }
 
 
@@ -111,14 +116,20 @@ def test_memo_shares_one_retrieval_and_observes_corpus_changes(
 
     assert calls == [case.output["query"]]  # one sweep, both metrics scored from it
     assert recall.value == pytest.approx(1.0)
-    assert precision.value == pytest.approx(1.0)
+    # 3 of the 8 returned notes are gold. On the six-note fixture this was 1.0, because the cut
+    # could not engage and every note in the corpus was returned; on a corpus larger than
+    # `retrieval_top_k` a precision below 1 is the ordinary case rather than a regression.
+    assert precision.value == pytest.approx(_EXPECTED["retrieval-suzuki"][1])
 
     # The corpus changes on disk: one of the two expected notes disappears. The memo must
     # miss (a second live retrieval) and the metric must reflect the current corpus.
-    (corpus / "reaction-suzuki-biaryl.md").unlink()
+    # `<type>/<id>.md` — the layout the PR-gate actually files notes under. The corpus used to sit
+    # flat, which `validate_kg` reported as six layout problems on a directory whose own README
+    # called every file valid.
+    (corpus / "reaction" / "reaction-suzuki-biaryl.md").unlink()
     stale_free = get_metric("retrieval_recall")(case)
     assert calls == [case.output["query"]] * 2  # a fresh retrieval, not a stale hit
-    assert stale_free.value == pytest.approx(0.5)  # 1 of 2 expected sources remains
+    assert stale_free.value == pytest.approx(2 / 3)  # 2 of 3 expected sources remain
 
 
 def test_run_eval_scores_the_full_gold_set(_corpus: None) -> None:
@@ -200,3 +211,35 @@ def test_the_shipped_default_is_still_scored() -> None:
     """
     assert settings.retrieval_mode == "graph"
     assert not NOTE_INDEX_SOURCES & set(settings.data_source_list)
+
+
+def test_the_recall_floor_can_see_a_single_lost_gold_note() -> None:
+    """The floor must sit strictly above `(n-1)/n` for every gated gold set.
+
+    At the shipped 0.75, a case with **four** gold notes scored exactly 0.75 when one of them was
+    lost — and passed. Four of the nine gated cases have four gold notes, so on nearly half the
+    case set the floor was blind to the smallest regression that can occur.
+
+    Asserted as the inequality rather than against the number, so that adding a case with a larger
+    gold set fails here — loudly, naming the case — instead of quietly reopening the blind spot for
+    that case alone.
+    """
+    # The **shipped** default, off the model field — not `settings.retrieval_recall_min`, which the
+    # `_corpus` fixture pins to 0.75 so the other cases' gate outcomes stay stable regardless of it.
+    # This test is about what a deployment actually gets, so a fixture's pin would make it assert
+    # nothing.
+    floor = EvalSettings.model_fields["retrieval_recall_min"].default
+    blind: dict[str, float] = {}
+    for case in load_eval_cases(settings.eval_case_dir):
+        expected = list((case.reference or {}).get("expected_note_ids") or [])
+        # Only the cases the gate actually enforces; the literal-miss case is `expect_pass: false`
+        # by design and is meant to score below the floor.
+        if len(expected) < 2 or not _EXPECTED.get(case.id, (0.0, 0.0, False))[2]:
+            continue
+        one_lost = (len(expected) - 1) / len(expected)
+        if one_lost >= floor:
+            blind[case.id] = one_lost
+    assert not blind, (
+        f"the shipped floor {floor} passes these cases with one gold note lost: "
+        f"{blind}. Raise `retrieval_recall_min` above the largest of them."
+    )

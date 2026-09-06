@@ -4,5 +4,7 @@
 frontmatter (structured, queryable) plus a Markdown body whose [[wikilinks]]
 encode relations. Retrieval is graph traversal, not top-k vector similarity. This
 package is code only; the notes themselves live in the configured `knowledge/`
-directory (data), and agent-authored notes enter it via the PR-gate (D-005).
+directory (data), and agent-authored notes are written straight into it by `kg/record.py`,
+carrying `created_by: agent` and readable at once
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`).
 """

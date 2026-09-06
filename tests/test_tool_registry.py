@@ -52,7 +52,7 @@ _EXPECTED_INPROCESS_TOOLS = {
     "read_experiment_protocol",
     "find_experiment_protocols",
     "find_knowledge_gaps",
-    "propose_knowledge_note",
+    "record_knowledge_note",
     "record_confirmed_answer",
     "record_failure",
     "recall_observations",

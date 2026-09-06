@@ -50,3 +50,13 @@ endpoint:
     - reagent_frequency
     - reactions_making_substructure
     - workup_precedent
+  # Every one of them is a search over the record, so a turn that answered from one of
+  # these looked at what we know — which is what `turn_costs.retrieval_calls` reports.
+  knowledge_read:
+    - similar_reactions
+    - substrate_precedent
+    - conditions_for_similar_product
+    - conditions_for_similar_reaction
+    - reagent_frequency
+    - reactions_making_substructure
+    - workup_precedent

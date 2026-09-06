@@ -43,9 +43,11 @@ class MoleculeHit(BaseModel):
     `find_notes` on each SMILES — the literal substring path KM-4 flags as fragile. Compound
     notes now exist with structure-derived ids, so the citation is simply computed here.
 
-    `compound_note_id` names the note a *merged* ingest produces. A structure whose note is
-    still on its PR-gate branch is proposed, not merged, and the citation will not resolve
-    until it is — the same latency `reaction_note_id` has always had, and the reason
+    `compound_note_id` names the note an ingest produces. A structure indexed before its note has
+    been written has no note for the citation to resolve to yet — a smaller window than under the
+    PR-gate this replaces, where it lasted until a human merged, but not a closed one: the ingest
+    indexes and writes in separate steps. It is the same latency `reaction_note_id` has always had,
+    and the reason
     `eln.compound.compound_dependencies` makes a note land together with the compound notes
     it depends on (STO-7). It is `None` when the stored structure does not parse: ingestion
     canonicalizes leniently, so a junk label can reach the index, and one unciteable row must

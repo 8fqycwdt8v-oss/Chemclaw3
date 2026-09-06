@@ -450,7 +450,7 @@ _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
         "hard-depend on the connector registry at import time"
     ),
     ("chemclaw.evals", "chemclaw.agent"): (
-        "the live judge builds its Anthropic client through the same `_tls_http_client` the agent "
+        "the live judge builds its Anthropic client through the same `_tls_http_clients` the agent "
         "does, so a private CA configured for one is not silently absent from the other - it was: "
         "`live_judge` read `llm_base_url` and ignored `llm_tls_ca_bundle`, so grading against "
         "exactly the internal gateway that setting exists for died at TLS. Lazy because it sits "

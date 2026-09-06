@@ -195,8 +195,8 @@ class Condensation(BaseModel):
             lines.append(
                 f"\nNot compared, because these resolved to no protocol: "
                 f"{', '.join(self.unresolved)} — they are absent from the table above, not merely "
-                "unread. A note id that resolves to nothing is often a citation to a note whose "
-                "PR-gate submission has not been merged yet."
+                "unread. A note id that resolves to nothing is a citation to a note that does not "
+                "exist; check the id rather than assuming it is pending."
             )
         lines.append(
             f"\n{self._coverage()} It is not every protocol on file — whether the search that"
@@ -320,7 +320,7 @@ def _client() -> Any:
     **What came back with it is the guard against construction raising for another reason.**
     Config alone can fail before a socket is ever opened: `CHEMCLAW_LLM_TLS_CA_BUNDLE` naming a
     file that is not on the pod reaches `ssl.create_default_context(cafile=...)` through
-    `core.http.private_ca_transport` and raises `FileNotFoundError` — measured, and a mistyped path
+    `core.http.gateway_client_kwargs` and raises `FileNotFoundError` — measured, and a mistyped path
     or an unmounted secret is the likeliest misconfiguration of the documented production stack.
     Unguarded, that costs the whole comparison rather than its prose columns. So the caller guards
     this again and degrades to the *same* per-protocol `unreadable` rows a dead endpoint produces
@@ -558,7 +558,7 @@ def _table(protocols: list[Protocol], rows: list[ProtocolDigest]) -> str:
     """Render the comparison: what the record states, what the prose said, and what moved.
 
     The cells, the empty-column rule and the grid come from `memory.comparison`, which is the same
-    renderer `optimization_campaign_note` uses — so the turn-time comparison and the PR-gated
+    renderer `optimization_campaign_note` uses — so the turn-time comparison and the recorded
     campaign note are one artifact at two altitudes rather than two tables that can disagree.
 
     A column appears only if some protocol filled it (`drop_empty_columns`), because a column of

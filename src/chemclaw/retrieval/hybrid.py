@@ -75,3 +75,35 @@ def reciprocal_rank_fusion(
             scores[note_id] = scores.get(note_id, 0.0) + 1.0 / (k + rank / weight)
     ordered = sorted(scores, key=lambda note_id: (-scores[note_id], note_id))
     return [representative[note_id] for note_id in ordered]
+
+
+def restated_as_position(chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
+    """Re-state each fused chunk's `score` as its position in the fused ranking.
+
+    A chunk arrives here carrying the score its *finder* gave it — a note's `confidence` from the
+    graph leg, a `ts_rank` from the lexical one, a cosine from the dense one — and after fusion
+    that number no longer explains anything a reader can see: the list is ordered by summed
+    reciprocal rank, and a chunk's own score is a different quantity on a different scale, so the
+    model is handed an order and a number that contradict each other. Measured over the shipped
+    `knowledge/` corpus with all three note legs enabled, the reported score was monotone with the
+    fused order on **0 of 7** ordinary queries; on `reaction temperature optimization` the column
+    read 0.85 at position 1, 0.072 at position 8 and 0.90 at position 10, because it mixes a note's
+    `confidence`, a `ts_rank` and a cosine in one list.
+
+    There is no similarity left to report after fusing a cosine with a `ts_rank` (`EvidenceChunk`'s
+    own field comment says the score orders one source's list and nothing wider), so what is
+    reported is the only quantity the fusion actually produced: rank. `1 / (1 + position)` keeps it
+    inside the field's `[0, 1]` domain, descending, and monotone with the order it explains.
+
+    Applied to **both** merge modes. It was `hybrid` only, on the argument that round-robin
+    preserves each source's own ordering so a chunk's score still explains its position within the
+    list it came from — an argument that was thin (the delivered list is interleaved, so the reader
+    sees one column, not four) and became false when `GraphRetriever` started ranking by BM25-lite
+    relevance rather than by the confidence it writes into this field. Measured in `graph` mode over
+    the shipped corpus, the score column was monotone with the delivered order on **2 of 7**
+    queries, and those two returned one and two chunks.
+    """
+    return [
+        chunk.model_copy(update={"score": round(1.0 / (1 + position), 4)})
+        for position, chunk in enumerate(chunks)
+    ]

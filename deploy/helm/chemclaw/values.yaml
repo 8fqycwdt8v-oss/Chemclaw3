@@ -2,27 +2,6 @@
 # becomes one CHEMCLAW_-prefixed env var on the pods — the single pydantic Settings is the only
 # config source in-cluster (no second config system). Secrets are referenced, never inlined.
 
-# How a rolling update replaces a pool-holding Deployment's pods.
-#
-# **This is a connection budget knob before it is a rollout knob**, which is why it is stated here
-# rather than left to the Kubernetes default of 25%-rounded-up. `postgres.maxConnections` below is
-# checked against `chemclaw.fleetPools`, and that helper counts the *peak* — both generations of
-# every Deployment that surges — because a rolling update is when the fleet opens the most
-# connections it will ever open. `deployment-workers.yaml` had already looked straight at that
-# overlap and called it "only capacity": true of turns, false of the one resource a second
-# generation takes from the first. How much the difference is, is not written here for the same
-# reason the steady count is not — it moves with the topology, and
-# `tests/test_deploy_chart.py::_fleet_pools` is where it is derived and stated.
-#
-# Raising this is a provisioning change: every surge pod holds what its role holds, and `Settings`
-# refuses the product at startup in every pod. Lowering it to 0 is not free either — a
-# single-replica connector Deployment with no surge is unavailable during its own upgrade. The
-# background worker opts out entirely with `Recreate`, for a reason that is about a host-local
-# knowledge checkout rather than about connections; `tests/test_deploy_chart.py` asserts that it is
-# the only one, because the arithmetic leaves exactly its term unsurged.
-rollout:
-  maxSurgePods: 1
-
 image:
   repository: image-registry.openshift-image-registry.svc:5000/chemclaw/chemclaw
   tag: "0.1.0"
@@ -155,7 +134,7 @@ service:
 # anonymously.
 #
 # It serves reads only: the advertised set is derived from `agent.authz.READ_ONLY_TOOLS` minus the
-# ones `WITHHELD` names, so nothing here can launch a job, propose a note or settle a wait — and
+# ones `WITHHELD` names, so nothing here can launch a job, record a note or settle a wait — and
 # nothing here answers a question about this deployment's *people* rather than its chemistry, which
 # is the second predicate and the one that was originally wrong.
 mcpFace:
@@ -180,7 +159,7 @@ workers:
   background:
     # Keep at 1 — but no longer for the checkout lock. That reason is closed: submissions to one
     # remote are serialized across pods by a Postgres advisory lock
-    # (`kg/git_submitter.py::_cluster_lock`), and the host-local `flock` now only guards this pod's
+    # (`kg/git_writer.py::_cluster_lock`), and the host-local `flock` now only guards this pod's
     # own worktree sweep.
     #
     # The reason that is still live is `NoteReindexWorkflow`
@@ -229,7 +208,7 @@ knowledge:
     # fetch can never leave the directory the app reads in a half-written state; the publish copies
     # from here into the tree below.
     checkoutPath: /app/knowledge-repo
-  # The PR-gate submitter's writable clone (gap DEP-2) — and, at its `CHEMCLAW_KNOWLEDGE_DIR`
+  # The note writer's writable clone (gap DEP-2) — and, at its `CHEMCLAW_KNOWLEDGE_DIR`
   # subdirectory, the tree the application reads. There is no separate `publishPath` value, and that
   # is the fix rather than an omission: `Settings.knowledge_path` is `note_repo_dir / knowledge_dir`
   # and nothing else, so a second declared path could only ever agree with it by hand — and did not,
@@ -537,12 +516,21 @@ postgres:
   #
   # **A pod is not a pool, and this number was computed as though it were.** The helper counted
   # pods until 2026-09-05, while a front-door process holds the stores' pool, the `/readyz`
-  # probe's (a distinct `(dsn, options)` key, and that isolation is load-bearing) and the LangGraph
-  # checkpointer's — so the declared ceiling covered roughly two thirds of what the fleet opens.
-  # How many that is per front door is measured by `tests/test_fleet_pools.py` and multiplied by
-  # `chemclaw.fleetPools`, never written here. This value rose with the arithmetic, and the rise is
-  # the honest requirement becoming visible rather than a new one: the release always opened what
-  # it opens.
+  # probe's (a distinct `(dsn, options, requested max_size)` key, and that isolation is
+  # load-bearing) and the LangGraph checkpointer's — so the declared ceiling covered roughly two
+  # thirds of what the fleet opens. How many that is per front door is measured by
+  # `tests/test_fleet_pools.py` and carried by `chemclaw.fleetPools`, never written here. This
+  # value rose with the arithmetic, and the rise is the honest requirement becoming visible rather
+  # than a new one: the release always opened what it opens.
+  #
+  # **A pool is not `CHEMCLAW_PG_POOL_MAX_SIZE` either, and that half was corrected the same day.**
+  # The `/readyz` pool asks for a single connection, because the probe is single-flighted and was
+  # measured at a peak of one simultaneous checkout under 1,000 concurrent requests. Charging it
+  # the full width declared 208 for a fleet that opens 166 — and the difference was not headroom
+  # but a refusal: the front door is the role that scales, so `service.autoscaling.maxReplicas: 9`
+  # made `Settings` refuse 280 against this 256 and CrashLoop every pod against a database that
+  # could have served it. `Settings.fleet_connections_per_server` is the sum that replaced the
+  # product.
   #
   # **How many pools that is, is not written here.** The sentence that was said "17
   # pooled processes × the 8 below", which was 136 exactly — and by the time it was read the
@@ -581,27 +569,30 @@ postgres:
   # which is how D-119's connect timeouts presented: an idle database and a service that could not
   # reach it.
   #
-  # **A rolling update runs two generations, and this counted one.** `chemclaw.fleetPools` now
-  # counts the *peak* — every Deployment that surges, at `rollout.maxSurgePods` extra pods — because
-  # an upgrade is when the fleet holds the most connections it will ever hold. A site that
-  # provisioned Postgres to exactly the number declared here therefore came up short on every
-  # upgrade, and `ChemclawFleetAboveItsConnectionCeiling` — which reads the *live* pool sum against
-  # this same declaration — was armed against a correct deployment: its expression is true for the
-  # length of every rolling update, and it pages whenever one outlasts its 10-minute `for:`. An
-  # alert that a routine operation can trip is an alert its reader learns to wave through. The rise below is that peak becoming visible rather than a new cost: the
-  # release always opened it. How large the peak is stays out of this file and lives in
-  # `tests/test_deploy_chart.py::_fleet_pools`, which derives it and prints both sides when the
-  # product no longer fits.
-  #
-  # The rise keeps the same *absolute* headroom the previous number carried, and that is the honest
-  # way to state it: the property it used to buy has shrunk. Each half of a server-plus-worker
-  # bundle now costs its surge as well as itself, so the same headroom absorbs one more bundle
-  # where it used to absorb three. Enabling one connector is still not a database change in the
-  # same commit; enabling two is. `tests/test_deploy_chart.py::_fleet_pools` is where that
-  # arithmetic lives and where a reader can get the current figures.
-  #
   # Set to 0 to declare no ceiling, which makes both the startup check and the alert inert.
-  maxConnections: 336
+  maxConnections: 256
+  # The same declaration for a **split session store's** server, and it exists because one number
+  # describes one server. It is meaningful only when `secrets.optionalKeys.sessionStoreDsn`
+  # carries a DSN naming a different endpoint — which this chart cannot see, because that value
+  # lives in an operator-managed Secret and no template reads a Secret's contents. So the process
+  # decides: `Settings` places every pool on the server it will actually be opened against, and
+  # warns when this is 0 while the split is real.
+  #
+  # **What the split costs is measured rather than argued.** Pointing the session layer at a second
+  # database gives every pooled process one more `core/db` pool — a front door holds four where it
+  # held three, because its `/readyz` key and its checkpointer both resolve
+  # `session_store_dsn or postgres_dsn` and move there while the stores' session key is new. On the
+  # shipped topology that is 278 connections against the 256 above — a release breaching its own
+  # declared ceiling with the startup check passing, which is the `mcpFace` defect `_helpers.tpl`
+  # records, a second time. Split across the two servers it is 112 here and 166 there, so neither
+  # is over on its own and summing them into one ceiling would refuse a legal deployment. (320 and
+  # 208 were the uniform-width arithmetic the same commit replaced, which charged every readiness
+  # pool `CHEMCLAW_PG_POOL_MAX_SIZE` where each asks for one connection.)
+  #
+  # 0 = undeclared, matching `maxConnections`. A release with no split leaves it at 0 and nothing
+  # about it applies; setting it *without* a split is refused, because a ceiling for a server that
+  # does not exist is one the runtime alert would add to the real one.
+  sessionStoreMaxConnections: 0
 
 # The pre-install/pre-upgrade migration hook (D-034).
 migrateJob:
@@ -904,7 +895,7 @@ config:
   # On in production, off in code, for the same reason `BUDGET_ENABLED` is (REV-16): a CLI, a test
   # and a single-user dev run have no reason to be throttled, and a deployment serving real users
   # over a shared endpoint has no reason not to be. The turn guards above bound what reaches the
-  # LLM; this bounds everything else — `/proposals`, `/jobs`, `/schedules`, `/sessions` — which was
+  # LLM; this bounds everything else — `/jobs`, `/schedules`, `/sessions` — which was
   # entirely unmetered, so a loop with no LLM call in it cost nothing to run.
   # 120/min sustained with a burst of 30: far above a chemist clicking through a UI, far below what
   # a script can do. Per process, so `service.autoscaling.maxReplicas` multiplies the real ceiling —
@@ -942,19 +933,8 @@ config:
   # 8.3 s / 3600, so 200 people at a turn a minute is 27.7 in flight and 200 people at a turn every
   # 30 s is 55.3. The old ceiling was 48 *and unreachable*, because the CPU-only HPA never left
   # `minReplicas: 2` = 16. Both halves had to move for either to matter.
-  #
-  # **And it is the rollout peak, for the same reason `postgres.maxConnections` is.** It shipped as
-  # the steady product with zero headroom, so an upgrade — which runs both generations, at
-  # `rollout.maxSurgePods` extra front-door pods each advertising its own admission cap — put the
-  # live sum above the declaration every time. `ChemclawFleetAboveItsTurnCeiling` reads that live
-  # sum and already named "a rollout that left both generations up" as a usual cause, so the alert
-  # was armed against a correct deployment: the failure the connection ceiling was just fixed for,
-  # one value away, and its ADR argued this one away on the grounds that a rollout's surge here is
-  # "another system's decision". It is not, and was not by the time that sentence was written —
-  # both ceilings read the same declared `rollout.maxSurgePods`, rendered onto the same
-  # `deployment-service.yaml`. `Settings` still validates the *steady* product, because a pod
-  # validates the shape it was handed; this is the number the live fleet actually reaches.
-  CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS: "84"
+
+  CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS: "72"
   # JSON logs in-cluster. Every line already carries correlation_id / actor / session_id from the
   # context filter; JSON is what lets a log stack index them instead of regexing a `%`-string.
   CHEMCLAW_LOG_JSON: "true"
@@ -991,14 +971,9 @@ secrets:
   keys:
     llmApiKey: "CHEMCLAW_LLM_API_KEY"
     postgresDsn: "CHEMCLAW_POSTGRES_DSN"
-    # Push credential for the knowledge repo (gap DEP-2). Without it the PR-gate cannot open a
-    # branch for any agent-authored note, so every knowledge write fails at push in-cluster.
+    # Push credential for the knowledge repo (gap DEP-2). Without it the note writer cannot push
+    # the base branch, so every knowledge write fails at push in-cluster.
     knowledgeRepoToken: "CHEMCLAW_KNOWLEDGE_REPO_TOKEN"
-    # The shared secret the git host signs its post-merge webhook with. Without it
-    # `/events/knowledge-merged` can still force a reindex but may not close a proposal as merged
-    # (D-2026-07-31-a-proposal-is-a-record-not-a-branch), so every reviewed note would stay in the
-    # queue forever — a review surface that only ever grows is one nobody works.
-    noteWebhookSecret: "CHEMCLAW_NOTE_WEBHOOK_SECRET"
   # Secrets that are safe when unset, rendered with `optional: true` so naming a new one does not
   # take an existing release down on upgrade (see `chemclaw.env` in `_helpers.tpl`).
   optionalKeys:

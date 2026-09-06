@@ -114,3 +114,55 @@ def test_distinct_correlation_ids_both_count() -> None:
         assert await _spend(actor) == (2, 150)
 
     asyncio.run(_run())
+
+
+def test_a_row_written_before_the_knowledge_columns_existed_reads_as_unknown() -> None:
+    """The ambiguous zero, in a column — and why these five are nullable and undefaulted.
+
+    `retrieval_calls = 0` is the most interesting value this table can hold: a turn that answered
+    without consulting the record. `NOT NULL DEFAULT 0` would assert exactly that about every row
+    written before the column existed, so a query for "turns that answered blind" would return the
+    whole history of the table, none of which was measured. This drives both halves against a real
+    schema: a row inserted without the columns reads NULL, and a row the sink writes carries the
+    numbers it was handed.
+    """
+
+    async def _run() -> None:
+        sink = await _sink_or_skip()
+        async with db.connection(_dsn()) as conn:
+            await conn.execute(
+                "INSERT INTO turn_costs (correlation_id, actor) VALUES (%s, %s) "
+                "ON CONFLICT (correlation_id) DO NOTHING",
+                ("pgcost-knowledge-legacy", "pgcost-actor-knowledge"),
+            )
+            cursor = await conn.execute(
+                "SELECT retrieval_calls, capture_calls, answer_confidence, review_required, "
+                "notes_cited FROM turn_costs WHERE correlation_id = %s",
+                ("pgcost-knowledge-legacy",),
+            )
+            legacy = await cursor.fetchone()
+        assert legacy == (None, None, None, None, None), (
+            "a row written before the measurement existed reports a measurement"
+        )
+
+        await sink.record(
+            TurnCost(
+                correlation_id="pgcost-knowledge-measured",
+                actor="pgcost-actor-knowledge",
+                retrieval_calls=3,
+                capture_calls=1,
+                answer_confidence=0.75,
+                review_required=True,
+                notes_cited=2,
+            )
+        )
+        async with db.connection(_dsn()) as conn:
+            cursor = await conn.execute(
+                "SELECT retrieval_calls, capture_calls, answer_confidence, review_required, "
+                "notes_cited FROM turn_costs WHERE correlation_id = %s",
+                ("pgcost-knowledge-measured",),
+            )
+            measured = await cursor.fetchone()
+        assert measured == (3, 1, 0.75, True, 2)
+
+    asyncio.run(_run())

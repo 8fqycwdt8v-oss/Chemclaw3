@@ -257,7 +257,6 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
         "the outbox is a table, and the shipped SQL driver reaches a Postgres results store"
     ),
     ("chemclaw.publish", "httpx"): "the shipped HTTP driver POSTs records to a results service",
-    ("chemclaw.kg", "postgres"): "the note-proposal store",
     ("chemclaw.protocols", "postgres"): (
         "a design and its append-only revision history are two tables (migration 073)"
     ),
@@ -311,7 +310,7 @@ _ALLOWED_LAZY_STACKS: dict[Edge, str] = {
         "the `langgraph` row does not also license building a model client"
     ),
     ("chemclaw.agent", "httpx"): (
-        "agent/llm_provider builds the CA-pinned client inside `_tls_http_client`, so only a "
+        "agent/llm_provider builds the CA-pinned client inside `_tls_http_clients`, so only a "
         "private-CA internal endpoint pays for it. This row used to be module-scope and to say "
         "'the workload-identity and OBO token exchanges are HTTP'; both exchanges were deleted "
         "unused, and what is left of agent's HTTP is one lazy client factory"

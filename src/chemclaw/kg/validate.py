@@ -3,15 +3,21 @@
 Checks a notes directory for the failure modes that would corrupt the graph:
 unparseable/invalid notes, duplicate ids, links to unknown notes, and note types or
 relations outside the declared vocabulary. Run as
-`python -m chemclaw.kg.validate [notes_dir]`; it exits non-zero if any problem is found,
-so it gates the PR that adds or edits notes (D-005).
+`python -m chemclaw.kg.validate [notes_dir]`; it exits non-zero if any problem is found, so it
+fails CI on a corpus somebody broke by hand.
 
-**What it no longer checks is the hazard content of a procedure.** D-080's per-note gate
-screened an agent-authored `## Procedure` and refused it if the flags its structures raised
-were not documented. Safety became an ordinary MCP capability
-(`D-2026-08-15-safety-is-a-tool-not-a-gate`), so the screen that gate called no longer lives
-in this repository and CI no longer runs one on a reviewer's behalf. The corpus is still
-gated — by the human who reviews the PR, which is what a PR-gate always meant.
+**It is not a gate on what the agent writes, and has not been since
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`.** An agent-authored note is committed
+directly, so this never runs between the writing of one and its readability. What it still catches
+is a *human's* edit to the corpus — a moved file, a broken wikilink, a type nobody registered — and
+a systematic breakage the writer introduces, on the next CI run rather than at the moment of the
+write.
+
+**What it no longer checks at all is the hazard content of a procedure.** D-080's per-note gate
+screened an agent-authored `## Procedure` and refused it if the flags its structures raised were
+not documented. Safety became an ordinary MCP capability
+(`D-2026-08-15-safety-is-a-tool-not-a-gate`), so the screen that gate called no longer lives in
+this repository.
 """
 
 import sys
@@ -77,18 +83,18 @@ def validate_with_notes(notes_dir: Path) -> tuple[list[str], list[Note]]:
         # `reindex_notes` looks that map up by the id in the frontmatter. When the two disagree the
         # note is missing from both sides of the diff, which used to read as "unchanged" and left it
         # out of the retrieval index entirely and silently. That half is fixed there; this is the
-        # half that keeps a mismatch from merging at all, because the right name is knowable here.
+        # half that catches a mismatch in CI, because the right name is knowable here.
         if path.stem != note.id:
             problems.append(
                 f"note {note.id!r} is in {path}, whose filename says {path.stem!r} — "
                 f"the file must be named {note.id + '.md'!r} "
                 "(the note index keys on the filename and would skip this note)"
             )
-        # The directory is an index key exactly as the filename is: the PR-gate derives a note's
-        # path from its *type* (`pr_gate._note_file` -> `note_relative_path`), so a note filed
-        # under the wrong type directory means the next proposal for the same id writes a second
+        # The directory is an index key exactly as the filename is: the writer derives a note's
+        # path from its *type* (`record._note_file` -> `note_relative_path`), so a note filed
+        # under the wrong type directory means the next write for the same id creates a second
         # file claiming it — and `_parse_notes`' first-in-path-order rule then keeps the mis-filed
-        # one and silently drops the freshly merged note.
+        # one and silently drops the note just written.
         expected = note_relative_path(note.type, note.id)
         try:
             actual = path.relative_to(notes_dir).as_posix()
@@ -96,8 +102,8 @@ def validate_with_notes(notes_dir: Path) -> tuple[list[str], list[Note]]:
             actual = path.as_posix()
         if actual != expected:
             problems.append(
-                f"note {note.id!r} of type {note.type!r} is at {actual}, but the PR-gate files "
-                f"that type at {expected} — a re-proposal would create a second file for this id"
+                f"note {note.id!r} of type {note.type!r} is at {actual}, but this system files "
+                f"that type at {expected} — a re-write would create a second file for this id"
             )
         located.append((note, path))
 
@@ -107,9 +113,12 @@ def validate_with_notes(notes_dir: Path) -> tuple[list[str], list[Note]]:
         for source, target in dangling_links(notes)
     )
     # Whole-corpus vocabulary checks (gap KNW-6, STO-8). Both are checked here rather than in the
-    # `Note` schema so the agent can *propose* a genuinely new type or relation and a human sees it
-    # at the PR-gate — while a typo, which would make the note or the edge unfindable by every
-    # filter keyed on it, cannot reach the graph. `kg-validate` runs on that same PR.
+    # `Note` schema, and what that placement buys has changed with the gate's deletion. It used to
+    # be "the agent may propose a new type and a human sees it at the gate". There is no gate, so
+    # what it buys now is that a genuinely new type is a *corpus*-level decision — CI names it,
+    # once, over the whole tree — rather than a per-note refusal that would make the agent's write
+    # fail on a vocabulary a deployment may legitimately be extending. A typo is caught the same
+    # way, on the next run, rather than never.
     #
     # The vocabulary is core's own set **plus what the enabled bundles declare**: `bo-candidate` is
     # minted by a connector, so a deployment's vocabulary is a property of which bundles it runs,

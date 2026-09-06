@@ -391,9 +391,10 @@ _CORRELATION_ID = re.compile(r"\A[A-Za-z0-9_-]{8,64}\Z")
 # errors and ~32 MB from a 2 MB body, on the pod's single uvicorn worker, reachable by any
 # authenticated caller (`docs/archive/lessons-2026-08.md`).
 #
-# **It bounds the error *count*, and that is not the same bound as the webhook's.** This comment
-# used to claim it bounded "every other route the same way" as `api/routes/proposals.py`, and the
-# two are not comparable: measured, that webhook answers a 2.4 MB body in 112 bytes, while 20
+# **It bounds the error *count*, and that is not the same bound as a webhook's.** This comment
+# used to claim it bounded "every other route the same way" as the knowledge-merged webhook (which
+# went with the PR-gate, `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), and the
+# two were never comparable: measured, that webhook answered a 2.4 MB body in 112 bytes, while 20
 # pydantic errors still carry 20 copies of whatever the caller sent, because a v2 error object
 # embeds the offending `input` verbatim. Measured before `_render_errors` existed: a 200,025-byte
 # body came back as a 200,119-byte 422, so with `service_max_request_bytes` at 4,000,000 the

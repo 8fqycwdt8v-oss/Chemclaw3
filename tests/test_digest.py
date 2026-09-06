@@ -208,9 +208,9 @@ def test_a_digest_is_read_by_its_owner_and_by_nobody_else() -> None:
 
     The reproduction this closes (`D-2026-08-27-a-digest-nobody-can-read-is-not-delivered`): the
     only consumer of a digest row was `GET /sessions/{id}/events`, which 404s the synthetic
-    `digest-<owner>` id and claims only the two job-outcome kinds — so the exact claim it makes
-    returned `[]` against a real digest row and left it unconsumed, while `acknowledge_digest` had
-    already moved the watermark past the notes it named.
+    `digest-<owner>` id and claims a kind set that never includes this one — so the exact claim it
+    makes returned `[]` against a real digest row and left it unconsumed, while
+    `acknowledge_digest` had already moved the watermark past the notes it named.
     """
 
     async def _run() -> None:

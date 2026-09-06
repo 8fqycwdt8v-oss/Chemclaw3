@@ -1,3 +1,6 @@
+-- RETIRED with migration 027 (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). The
+-- `superseded` state stays in the CHECK for the rows that already hold it; nothing writes one.
+
 -- A re-proposed note closes its own previous open version.
 --
 -- The branch is per-note (`note/<id>`) while the record is per-version (`(note_id,

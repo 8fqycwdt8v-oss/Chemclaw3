@@ -271,12 +271,146 @@ def test_image_installs_the_binaries_the_knowledge_layer_shells_out_to() -> None
     assert {"git", "rsync"} <= _dnf_installed_packages()
 
 
+def _git(*args: str, cwd: Path) -> None:
+    """One git command in `cwd`, with a committer identity and no interactive prompt."""
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, env=env, capture_output=True)
+
+
+def _note(note_id: str) -> str:
+    """A minimal parseable note body."""
+    return f"---\nid: {note_id}\ntype: reaction\ncreated_by: agent\n---\n\nbody\n"
+
+
+def test_a_locally_recorded_note_survives_the_sidecar(tmp_path: Path) -> None:
+    """The sidecar must not delete a note this pod recorded but has not pushed.
+
+    **This is the coupling `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` created.** Until
+    the gate was deleted, `kg/git_writer.py` committed inside a private worktree and this script
+    was the only writer of the tree readers scan, so publishing a read replica over it with
+    `rsync --delete` could only remove notes that had genuinely left the base branch. The writer
+    commits *there* now, and `tests/test_knowledge.py` asserts that a push which fails still leaves
+    the note committed and readable — which the next sync tick then deleted, permanently: it stays
+    in the local `HEAD`, so no later path-limited `git add` restores it.
+
+    Driven end to end against real git repositories rather than by reading the script, because the
+    shape assertions below all passed on the broken version. The pod is set up the way the chart
+    sets it up — a writer's clone with the notes directory inside it — carrying one note the remote
+    does not have. After a sync it is still there, and what the remote holds has arrived.
+
+    The *diverged* case is its own test below, because the right behaviour there is different.
+    """
+    if not shutil.which("flock"):  # pragma: no cover - present on every Linux CI image
+        pytest.skip("flock is not installed")
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(seed)], check=True)
+    (seed / "knowledge" / "reaction").mkdir(parents=True)
+    (seed / "knowledge" / "reaction" / "from-the-remote.md").write_text(_note("from-the-remote"))
+    _git("add", "-A", cwd=seed)
+    _git("commit", "-qm", "seed", cwd=seed)
+    _git("remote", "add", "origin", str(remote), cwd=seed)
+    _git("push", "-q", "origin", "main", cwd=seed)
+
+    note_repo = tmp_path / "note-repo"
+    subprocess.run(
+        ["git", "clone", "-q", "--branch", "main", str(remote), str(note_repo)], check=True
+    )
+    # What `kg/git_writer.py` leaves behind when the push fails: committed here, not on the remote.
+    (note_repo / "knowledge" / "reaction" / "stranded.md").write_text(_note("stranded"))
+    _git("add", "-A", cwd=note_repo)
+    _git("commit", "-qm", "Add reaction note: stranded", cwd=note_repo)
+
+    result = _sync(tmp_path, remote, note_repo)
+    assert result.returncode == 0, result.stderr
+
+    served = {path.name for path in (note_repo / "knowledge" / "reaction").iterdir()}
+    assert "stranded.md" in served, (
+        "the sidecar deleted a note this pod recorded and had not pushed — the note is still in "
+        f"the local HEAD, so nothing will ever restore it. Served: {sorted(served)}"
+    )
+    assert "from-the-remote.md" in served, "the refresh no longer delivers what the remote holds"
+
+
+def test_a_diverged_checkout_warns_rather_than_crash_looping_the_pod(tmp_path: Path) -> None:
+    """A stranded note *and* a moved remote is a warning, and the pod keeps serving.
+
+    `once` is an init container. Returning non-zero on a divergence would crash-loop the pod on a
+    note whose push failed — trading a stale graph for no graph at all. Resolving the divergence is
+    `kg/git_writer.py`'s job (it replays its own unpushed commits on the next write, see
+    `tests/test_knowledge.py`); this script's job until then is to serve what the pod holds and say
+    so. What it must never do is silently drop the local note, which is the assertion below.
+    """
+    if not shutil.which("flock"):  # pragma: no cover - present on every Linux CI image
+        pytest.skip("flock is not installed")
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(seed)], check=True)
+    (seed / "knowledge" / "reaction").mkdir(parents=True)
+    (seed / "knowledge" / "reaction" / "from-the-remote.md").write_text(_note("from-the-remote"))
+    _git("add", "-A", cwd=seed)
+    _git("commit", "-qm", "seed", cwd=seed)
+    _git("remote", "add", "origin", str(remote), cwd=seed)
+    _git("push", "-q", "origin", "main", cwd=seed)
+
+    note_repo = tmp_path / "note-repo"
+    subprocess.run(
+        ["git", "clone", "-q", "--branch", "main", str(remote), str(note_repo)], check=True
+    )
+    (note_repo / "knowledge" / "reaction" / "stranded.md").write_text(_note("stranded"))
+    _git("add", "-A", cwd=note_repo)
+    _git("commit", "-qm", "Add reaction note: stranded", cwd=note_repo)
+    # Somebody else pushes, so the pod's clone is now genuinely diverged rather than merely behind.
+    (seed / "knowledge" / "reaction" / "pushed-elsewhere.md").write_text(_note("pushed-elsewhere"))
+    _git("add", "-A", cwd=seed)
+    _git("commit", "-qm", "elsewhere", cwd=seed)
+    _git("push", "-q", "origin", "main", cwd=seed)
+
+    result = _sync(tmp_path, remote, note_repo)
+    assert result.returncode == 0, f"a divergence crash-loops the pod:\n{result.stdout}"
+    assert "WARNING" in result.stdout and "push failed" in result.stdout, result.stdout
+    served = {path.name for path in (note_repo / "knowledge" / "reaction").iterdir()}
+    assert "stranded.md" in served, f"the local note was dropped: {sorted(served)}"
+
+
+def _sync(tmp_path: Path, remote: Path, note_repo: Path) -> "subprocess.CompletedProcess[str]":
+    """One `knowledge-sync.sh once`, configured the way the chart configures the sidecar."""
+    return subprocess.run(
+        ["bash", str(DEPLOY / "knowledge-sync.sh"), "once"],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CHEMCLAW_KNOWLEDGE_REPO_URL": str(remote),
+            "CHEMCLAW_KNOWLEDGE_SYNC_DIR": str(tmp_path / "replica"),
+            "CHEMCLAW_NOTE_REPO_DIR": str(note_repo),
+            "CHEMCLAW_KNOWLEDGE_DIR": "knowledge",
+            "CHEMCLAW_KNOWLEDGE_PUBLISH_DIR": str(note_repo / "knowledge"),
+            "GIT_TERMINAL_PROMPT": "0",
+        },
+    )
+
+
 def test_the_sync_never_deletes_what_it_is_about_to_replace() -> None:
-    """The publish step must fail loudly rather than empty the directory the app is reading.
+    """The replica publish must fail loudly rather than empty the directory the app is reading.
 
     Guarding the *shape* and not just the missing package: reintroducing any `rm -rf` of the publish
     directory reintroduces the outage even with rsync present, because the destructive branch is
     reachable on any rsync failure (a dead remote, a full disk, a permission change).
+
+    This covers the replica path, which is now reached only by a pod with no writable clone. The
+    path a pod *with* one takes is asserted behaviourally above, because that is where the
+    `--delete` did real damage.
     """
     script = (DEPLOY / "knowledge-sync.sh").read_text()
     destructive = [
@@ -286,7 +420,7 @@ def test_the_sync_never_deletes_what_it_is_about_to_replace() -> None:
     ]
     assert not destructive, f"knowledge-sync.sh must never rm -rf the published tree: {destructive}"
 
-    publish = script.split("Publish into the directory")[1]
+    publish = script.split("A plain copy (not a symlink)")[1]
     assert "command -v rsync" in publish, "a missing rsync must be detected, not swallowed"
     assert "rsync -a --delete" in publish and "2>/dev/null" not in publish.split("rsync -a")[1], (
         "rsync must run with its stderr visible, or a missing binary looks like a transfer error"
@@ -491,7 +625,7 @@ def test_knowledge_volume_is_mounted_on_every_reading_component() -> None:
 
 
 def test_note_repo_clone_exists_wherever_notes_are_submitted() -> None:
-    """The front door and the background worker both call `propose_note`, so both need a clone."""
+    """The front door and the background worker both call `record_note`, so both need a clone."""
     for template in ("deployment-service.yaml", "deployment-workers.yaml"):
         text = (CHART / "templates" / template).read_text()
         assert 'include "chemclaw.noteRepoInit"' in text, template
@@ -1090,22 +1224,6 @@ def test_the_shipped_fleet_ceiling_matches_the_fleet_the_chart_renders() -> None
         f"{declared}; every front-door pod would refuse to start"
     )
 
-    # And the *peak*, which is the number the live fleet reaches and the alert reads. A rolling
-    # update runs both generations, at `rollout.maxSurgePods` extra front-door pods each
-    # advertising its own admission cap, so this ceiling had the same defect the connection one
-    # was just fixed for — 84 live against a declaration of 72 at the HPA ceiling, with
-    # `ChemclawFleetAboveItsTurnCeiling` armed against a correct deployment. `Settings` still
-    # validates the steady product above, because a pod validates the shape it was handed; nothing
-    # but this could see the other one.
-    surge = int(values["rollout"]["maxSurgePods"])
-    peak = (replicas + surge) * workers * per_process
-    assert peak <= declared, (
-        f"a rolling update runs {replicas} + {surge} front-door pods × {workers} worker(s) × "
-        f"{per_process} turns = {peak} concurrent turns against a declared ceiling of {declared}; "
-        "the startup guard cannot see this because every pod's own configuration is valid, so the "
-        "first sign is ChemclawFleetAboveItsTurnCeiling firing on a correct deployment"
-    )
-
     # The fleet size must be *derived* from the autoscaling block, not written beside it. A second
     # copy of `maxReplicas` in `config:` goes stale the first time someone scales the front door —
     # which is precisely the silent multiplication the ceiling exists to catch, reintroduced by the
@@ -1232,29 +1350,22 @@ POOLS_PER_FRONT_DOOR = 3
 """How many Postgres pools one front-door process holds.
 
 The stores' pool, the `/readyz` probe's (`api/routes/ops.py` borrows with its own statement
-timeout, and `core/db` keys a pool on `(dsn, libpq options)`) and the LangGraph checkpointer's
-registered autocommit pool. Every other role holds one. Measured rather than assumed:
-`tests/test_fleet_pools.py` drives each role's real composition root and counts.
+timeout, and `core/db` keys a pool on `(dsn, libpq options, requested max_size)`) and the LangGraph
+checkpointer's registered autocommit pool. Every other role holds one. Measured rather than
+assumed: `tests/test_fleet_pools.py` drives each role's real composition root and counts.
+
+They are not the same *width*: the `/readyz` one asks for a single connection, so a count of pools
+is not a count of connections and `Settings.fleet_connections_per_server` is what converts one to
+the other. This constant stays a pool count because that is what `chemclaw.fleetPools` renders.
 """
 
 
 def _fleet_pools(values: dict[str, Any]) -> int:
-    """The Postgres pools this chart renders at its **rollout peak** — the helper's arithmetic.
+    """The Postgres pools this chart renders — the helper's arithmetic.
 
     **Pools, not pods**, which is the defect this file used to share with the validator: both
     multiplied `pg_pool_max_size` by a process count, so a front door measured at three pools and
     48 connections was charged 16 and the shipped chart declared 136 against a real floor of 208.
-
-    **And the peak, not the steady state**, which is the defect it shared with the template until
-    2026-09-05: a rolling update runs both generations, so every Deployment that surges holds its
-    pools twice over for the length of the upgrade. Steady the shipped chart is 26 pools; at the
-    peak it is 36, which is 288 connections against a ceiling that declared 256 — a shortfall a
-    site provisioned to the declared number met on an upgrade at the HPA ceiling — 192 of 256 at
-    the `minReplicas: 2` resting size, so the shortfall is the worst case rather than every
-    case — while
-    `ChemclawFleetAboveItsConnectionCeiling`, which reads the live sum against that same
-    declaration, was true for the length of every one of them and paged whenever a rollout
-    outlasted its 10-minute `for:`.
 
     Kept here rather than read out of the template because the point of the test is to check the
     template against the topology *independently*; reading its own answer back would assert
@@ -1264,29 +1375,23 @@ def _fleet_pools(values: dict[str, Any]) -> int:
     front_door = (
         autoscaling["maxReplicas"] if autoscaling["enabled"] else values["service"]["replicas"]
     )
-    # Every rolling Deployment gets this many extra pods for the length of an upgrade. Declared in
-    # values rather than inherited from Kubernetes' 25%-rounded-up default precisely so this
-    # multiplication has something to read.
-    surge = int(values["rollout"]["maxSurgePods"])
-    total = (front_door + surge) * POOLS_PER_FRONT_DOOR
-    # The background worker is the one pool-holding role that does not surge: `Recreate`, because
-    # two of it race on a host-local knowledge checkout (`deployment-workers.yaml`).
+    total = front_door * POOLS_PER_FRONT_DOOR
     total += values["workers"]["background"]["replicas"]
     # The face serves the same in-process read-only tools over MCP and opens the same pool. Off by
     # default, so this term is zero for the shipped values and the point of it is the release that
     # turns the switch on.
     if values["mcpFace"]["enabled"]:
-        total += values["mcpFace"]["replicas"] + surge
+        total += values["mcpFace"]["replicas"]
     for bundle in values["connectors"].values():
         if not bundle["enabled"]:
             continue
         # An externally hosted bundle (`url`) pods no server here, so it pools nothing here.
         if bundle.get("server") and not bundle.get("url"):
-            total += bundle.get("serverReplicas", bundle.get("replicas")) + surge
+            total += bundle.get("serverReplicas", bundle.get("replicas"))
         # Each half at its own count: two Deployments, two knobs, and a `url:` bundle's worker
         # still pods here even though its server does not.
         if bundle.get("worker"):
-            total += bundle.get("workerReplicas", bundle.get("replicas")) + surge
+            total += bundle.get("workerReplicas", bundle.get("replicas"))
     return int(total)
 
 
@@ -1313,20 +1418,33 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
     pools = _fleet_pools(values)
     per_pool = int(values["config"]["CHEMCLAW_PG_POOL_MAX_SIZE"])
     declared = int(values["postgres"]["maxConnections"])
+    # The front-door replica ceiling is a *second* input to this budget, not only to the turn one:
+    # one pool per front door is the `/readyz` probe's and one connection wide. Omitting it here
+    # would leave the test constructing a `Settings` at the code default of one replica — passing
+    # on arithmetic no rendered pod runs.
+    autoscaling = values["service"]["autoscaling"]
+    replicas = (
+        autoscaling["maxReplicas"] if autoscaling["enabled"] else values["service"]["replicas"]
+    )
 
     try:
-        Settings(  # type: ignore[call-arg]
+        settings = Settings(  # type: ignore[call-arg]
             _env_file=None,
             pg_fleet_pools=pools,
             pg_pool_max_size=per_pool,
             pg_fleet_max_connections=declared,
+            service_fleet_replicas=replicas,
         )
     except ValueError as exc:  # pragma: no cover - the failure this test exists to report
         pytest.fail(
-            f"the shipped chart renders {pools} pools × {per_pool} connections = "
-            f"{pools * per_pool} against a declared ceiling of {declared}; every pod would refuse "
-            f"to start with: {exc}"
+            f"the shipped chart renders {pools} pools at {per_pool} connections each (bar "
+            f"{replicas} readiness pools of one) against a declared ceiling of {declared}; every "
+            f"pod would refuse to start with: {exc}"
         )
+    # No split in the shipped chart: `sessionStoreDsn` is a Secret key nothing populates, so every
+    # pool lands on one server and the second figure must be zero. A release that started
+    # declaring a split here without declaring its ceiling would warn on every pod's startup.
+    assert settings.fleet_connections_per_server()[1] == 0
 
     # Derived from the topology, never hand-written beside it — a second copy of the replica counts
     # goes stale the first time a connector is enabled, which is exactly the silent multiplication
@@ -1370,17 +1488,8 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
     assert ".Values.service.autoscaling.maxReplicas" in front_door.split("{{- end -}}")[0]
     # And it counts POOLS: the front-door term is multiplied by what one such process holds. This
     # is the line whose absence declared 136 for a fleet that opens 208.
-    #
-    # And it counts them at the ROLLOUT PEAK: the surge is inside the multiplication, because an
-    # upgrade runs both generations and a front-door pod costs three pools, not one. Written as one
-    # text pin rather than two, since `mul $frontDoor 3` beside a surge added somewhere else would
-    # satisfy a pair of looser assertions while charging the front door's overlap once.
-    assert f"mul (add $frontDoor $surge) {POOLS_PER_FRONT_DOOR}" in definition, (
-        "chemclaw.fleetPools counts front-door pods rather than the pools each one holds, or "
-        "counts one generation of them rather than the two a rolling update runs"
-    )
-    assert 'include "chemclaw.rolloutSurgePods"' in definition, (
-        "the surge the ceiling multiplies by must come from the same helper the Deployments render"
+    assert f"mul $frontDoor {POOLS_PER_FRONT_DOOR}" in definition, (
+        "chemclaw.fleetPools counts front-door pods rather than the pools each one holds"
     )
     # And every other pooled process comes from the same blocks the Deployments do.
     assert ".Values.workers.background.replicas" in definition
@@ -1404,7 +1513,26 @@ def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do(
     """
     rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
     assert "ChemclawFleetAboveItsConnectionCeiling" in rules
-    assert "sum(chemclaw_pg_pool_max_size) > max(chemclaw_pg_fleet_max_connections)" in rules
+    # Each server against its own ceiling, and *not* a sum against a sum: enumerated over 200,000
+    # random draws, `sum(pools) > primary + session` never fired with both servers inside their
+    # ceilings and stayed silent in 49,993 where one was over — it can only miss. It also paged a
+    # healthy split whose second ceiling was undeclared, pointing remediation at the wrong server.
+    # The primary's side is the total minus the split store's; with no split the subtrahend is 0 in
+    # every pod and both branches are exactly the comparison this shipped with.
+    assert (
+        "sum(chemclaw_pg_pool_max_size) - sum(chemclaw_pg_session_pool_max_size)" in rules
+        and "> max(chemclaw_pg_fleet_max_connections)" in rules
+    )
+    assert (
+        "sum(chemclaw_pg_session_pool_max_size)" in rules
+        and "> max(chemclaw_pg_session_fleet_max_connections)" in rules
+    )
+    # Self-disabling on the second ceiling too, or a split with none declared alerts forever.
+    assert "max(chemclaw_pg_session_fleet_max_connections) > 0" in rules
+    assert (
+        "max(chemclaw_pg_fleet_max_connections) + max(chemclaw_pg_session_fleet_max_connections)"
+        not in rules
+    ), "the summed comparison is back; it can only miss (see this test's docstring)"
     # Self-disabling, or every deployment that declares no ceiling alerts forever.
     assert "max(chemclaw_pg_fleet_max_connections) > 0" in rules
     assert "ChemclawPgPoolSaturated" in rules
@@ -1417,7 +1545,12 @@ def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do(
     # registry without this would depend on whether some earlier test opened a pool.
     bind_pool_metrics()
     rendered = METRICS.render()
-    for gauge in ("chemclaw_pg_pool_max_size", "chemclaw_pg_fleet_max_connections"):
+    for gauge in (
+        "chemclaw_pg_pool_max_size",
+        "chemclaw_pg_session_pool_max_size",
+        "chemclaw_pg_fleet_max_connections",
+        "chemclaw_pg_session_fleet_max_connections",
+    ):
         assert gauge in rendered, f"the alert compares against {gauge}, which the app never exposes"
 
 
@@ -2970,89 +3103,6 @@ def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
-def test_every_pool_holding_deployment_surges_by_the_number_the_ceiling_was_computed_against() -> (
-    None
-):
-    """The connection ceiling multiplies by a surge; this is what makes that surge real.
-
-    `chemclaw.fleetPools` counts the rollout *peak* — a rolling update runs both generations, and
-    connections are the one resource the new one takes from the old. That arithmetic is only true
-    if the Deployments actually carry the surge it multiplies by, and until 2026-09-05 none of them
-    declared a strategy at all: Kubernetes defaulted `maxSurge` to 25% rounded up, which put the
-    shipped chart's peak at 39 pools (312 connections) rather than 36, against a declared 256.
-
-    So both halves are asserted here. Every rolling pool-holder renders exactly
-    `rollout.maxSurgePods`, and the background worker is the one that opts out — `Recreate`, for a
-    reason that is about two pods racing on a host-local knowledge checkout rather than about
-    connections, which is why `_fleet_pools` leaves its term unsurged.
-    """
-    rendered = _render("--set", "mcpFace.enabled=true")
-    assert rendered.returncode == 0, rendered.stderr
-    surge = int(_values()["rollout"]["maxSurgePods"])
-
-    rolling: dict[str, Any] = {}
-    recreate: set[str] = set()
-    pooled: set[str] = set()
-    for doc in yaml.safe_load_all(rendered.stdout):
-        if not doc or doc.get("kind") != "Deployment":
-            continue
-        strategy = doc["spec"].get("strategy") or {}
-        name = doc["metadata"]["name"]
-        if strategy.get("type") == "Recreate":
-            recreate.add(name)
-        else:
-            rolling[name] = strategy
-        # A Deployment holds a Postgres pool exactly when its pods read this release's config,
-        # which is what carries the DSN. Collected off the *render* rather than off `values`,
-        # because `_fleet_pools` re-derives from values and therefore cannot see a role that
-        # exists only as a template — which is the third way this invariant breaks and the one
-        # neither assertion below used to cover.
-        containers = doc["spec"]["template"]["spec"].get("containers") or []
-        if any(
-            source.get("configMapRef", {}).get("name", "").startswith("chemclaw")
-            for container in containers
-            for source in container.get("envFrom") or []
-        ):
-            pooled.add(name)
-
-    assert recreate == {"chemclaw-background-worker"}, (
-        f"the roles that never overlap generations are {sorted(recreate)}; `_fleet_pools` leaves "
-        "exactly the background worker's term unsurged, so any other Recreate makes the ceiling "
-        "over-count and any background worker that starts rolling makes it under-count"
-    )
-    assert rolling, "no rolling Deployment rendered — the extraction is broken"
-    for name, strategy in sorted(rolling.items()):
-        assert strategy.get("rollingUpdate", {}).get("maxSurge") == surge, (
-            f"{name} renders {strategy!r}; the connection ceiling is computed against "
-            f"rollout.maxSurgePods={surge}, and a Deployment that surges by anything else "
-            "(Kubernetes defaults to 25% rounded up) peaks above the number the chart declared"
-        )
-
-    # **And every pool-holding Deployment is one the arithmetic knows about.** The two assertions
-    # above check how a role rolls; neither could see a role that rolls correctly and is simply
-    # absent from `chemclaw.fleetPools`, which is the direction that actually costs connections.
-    # Demonstrated: a `deployment-audit-reader.yaml` with `replicas: 2`, the shared strategy and
-    # the shared `envFrom` passed the whole chart suite while putting three uncounted pools —
-    # 24 connections — outside the declared ceiling.
-    counted = {
-        "chemclaw-service",
-        "chemclaw-background-worker",
-        "chemclaw-mcp-face",
-        *(
-            f"chemclaw-connector-{half}{name}"
-            for name in _values()["connectors"]
-            for half in ("", "worker-")
-        ),
-    }
-    assert pooled <= counted, (
-        f"{sorted(pooled - counted)} read this release's config — so each pod opens a Postgres "
-        "pool — and chemclaw.fleetPools counts no term for it. Add the term in _helpers.tpl and "
-        "in tests/test_deploy_chart.py::_fleet_pools, or the declared ceiling is short by "
-        "replicas × pools-per-pod × CHEMCLAW_PG_POOL_MAX_SIZE with nothing able to say so"
-    )
-
-
-@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 @pytest.mark.parametrize(
     ("key", "helper"),
     [
@@ -3579,23 +3629,16 @@ def test_turning_on_a_pooled_component_moves_the_declared_connection_budget() ->
     front door's three: it serves read-only tools and takes no turn, so it holds neither a
     checkpointer pool nor a readiness probe's.
 
-    Plus one surge, once, whatever the replica count: turning the face on adds a Deployment, and a
-    rolling update runs a Deployment's two generations at the same time
-    (`rollout.maxSurgePods`). That term is what the ceiling was missing for every rolling
-    pool-holder until 2026-09-05 — asserted here in the same difference, so a surge the helper
-    forgets to charge for one role shows up as an off-by-`maxSurgePods` rather than as nothing.
     """
     baseline = _declared_fleet_pools()
-    surge = int(_values()["rollout"]["maxSurgePods"])
     for replicas in (1, 10):
         with_face = _declared_fleet_pools(
             "--set", "mcpFace.enabled=true", "--set", f"mcpFace.replicas={replicas}"
         )
-        assert with_face - baseline == replicas + surge, (
+        assert with_face - baseline == replicas, (
             f"enabling mcp-face at {replicas} replicas moved the declared fleet pool count by "
-            f"{with_face - baseline}, not {replicas + surge}; every one of those pods opens a pool "
-            "and an upgrade runs both generations, so the connection ceiling is understated by "
-            "the difference and the guard cannot fire"
+            f"{with_face - baseline}; every one of those pods opens a pool, so the fleet's "
+            "connection ceiling is understated by the difference and the guard cannot fire"
         )
 
 

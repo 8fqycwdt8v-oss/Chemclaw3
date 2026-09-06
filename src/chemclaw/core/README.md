@@ -11,7 +11,7 @@ and each is read from several sibling packages at once — a count worth measuri
 (an AST or grep pass over `src/`) rather than pinning here, since it moves every time a capability
 grows and a stale range is exactly the kind of claim this file exists to not make. The turn's
 identity (`identity_context`), its session id
-(`session_context`), the side-channel a tool records job launches and PR-gate proposals on
+(`session_context`), the side-channel a tool records job launches and recorded notes on
 (`turn_signals`), and the in-process capability-tool registry (`tool_registry`). They sat in
 `chemclaw.agent` until R2 and were the single import that made three sibling edges — including one
 whole `kg <-> agent` cycle — exist at all.

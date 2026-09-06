@@ -22,6 +22,7 @@ terms does a query ask for" — the two halves that must not differ.
 """
 
 import re
+from collections import Counter
 from collections.abc import Sequence
 
 from chemclaw.kg.note import Note
@@ -37,6 +38,13 @@ _STOPWORDS = frozenset(
 )
 # Below this a term matches too much to be worth requiring; two characters is already `pd`.
 _MIN_TERM_CHARS = 2
+
+# The one tokeniser both halves of this module use, so a query term and a haystack token are the
+# same kind of thing and `term_frequencies` can compare them. `\W` with `re.UNICODE` (the default
+# for a `str` pattern) rather than `[^0-9a-z]`: the ASCII form split `Lösungsmittel` into `l` and
+# `sungsmittel` and dropped `超純水` entirely, while `core.fulltext.reference_tokens` — the other
+# half of the same rule one layer over — has always used the Unicode alphabet.
+_SPLIT = re.compile(r"[\W_]+")
 
 
 def search_text(note: Note) -> str:
@@ -94,7 +102,7 @@ def query_terms(query: str) -> list[str]:
         # dropped `超純水` entirely, and `core.fulltext.reference_tokens` — the other half of the
         # same rule, one layer over — has always used the Unicode alphabet. Two halves of one rule
         # disagreeing about what a word is, which is what that module exists to prevent.
-        for term in re.split(r"[\W_]+", query.lower(), flags=re.UNICODE)
+        for term in _SPLIT.split(query.lower())
         if len(term) >= _MIN_TERM_CHARS and term not in _STOPWORDS
     ]
     if terms:
@@ -109,8 +117,15 @@ def term_coverage(note: Note, terms: Sequence[str]) -> int:
     `find_notes` and the digest require all of them, `GraphRetriever` ranks by how many matched and
     widens to partial hits when nothing matches completely. Computing it once here is what keeps
     "matched" meaning the same thing in all three.
+
+    **Substring, and deliberately not the token count `term_frequencies` takes.** This is the
+    coarseness this module's caller already documents — it is what makes `ester` find `polyester`
+    and a bare SMILES find the note that embeds it — and narrowing it here would change which rows
+    are hits, which is a recall decision rather than a ranking one. The two answer different
+    questions: this one decides membership, that one weighs it.
     """
-    return sum(1 for count in term_frequencies(note, terms).values() if count)
+    haystack = search_text(note).lower()
+    return sum(1 for term in terms if term in haystack)
 
 
 def term_frequencies(note: Note, terms: Sequence[str]) -> dict[str, int]:
@@ -121,11 +136,20 @@ def term_frequencies(note: Note, terms: Sequence[str]) -> dict[str, int]:
     hit matches every term, that is all of them. `GraphRetriever` needs a within-note signal to rank
     by; this is the cheapest honest one, and it costs the same scan the boolean already paid for.
 
-    Counting is `str.count`, so it is occurrences of the term as a *substring*, matching exactly
-    what `term_coverage` means by "appears" — `search_text` is a substring haystack and a token
-    count here would be a second, quietly different definition of a match, which is the defect this
-    module's docstring is entirely about.
+    **Counted over tokens, not substrings, and that difference is a measured ranking defect rather
+    than a nicety.** `term_coverage` asks "does this term appear", and a substring answer is right
+    there — it is what makes `ester` find `polyester`, which this module's caller documents as a
+    deliberate coarseness. But *frequency* multiplies, and chemistry's short abbreviations live
+    inside ordinary English words: a work-up log reading "the organics were dried… drying was
+    repeated" scores `dr` **three** times without containing the term at all, and with saturating
+    tf-idf above it that log outranked the note reporting `dr 95:5`. `ee` behaves the same inside
+    *been*, *three*, *needed*, *between*, *degrees*.
+
+    So membership stays substring-based and unchanged — `term_coverage` is what decides which notes
+    are hits, and this function does not — while the weight a matched note earns counts whole
+    tokens. A note that matches only as a substring therefore appears in `term_coverage` and
+    contributes nothing here, which is the honest ordering: it matched, weakly.
     """
-    haystack = search_text(note).lower()
-    counts = {term: haystack.count(term) for term in terms}
-    return {term: count for term, count in counts.items() if count}
+    wanted = set(terms)
+    counts = Counter(token for token in _SPLIT.split(search_text(note).lower()) if token in wanted)
+    return {term: counts[term] for term in terms if counts[term]}

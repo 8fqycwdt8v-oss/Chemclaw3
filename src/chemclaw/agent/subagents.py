@@ -59,7 +59,7 @@ and it is a number rather than an argument.
 anything.** `helper_profile` is what made that true, and it was written because the surface and the
 story had drifted apart: the `task` description said isolation and parallel reading while the helper
 held every in-process tool its caller did — measured against the live registry, 54 of them,
-including nine `run_*` durable job launchers, `propose_knowledge_note`,
+including nine `run_*` durable job launchers, `record_knowledge_note`,
 `start_optimization_campaign` and `request_external_input`. So a helper spawned on a brief the
 *model* wrote could open a pull
 request against the knowledge graph, start a CREST search costing hours of pod time, and post a

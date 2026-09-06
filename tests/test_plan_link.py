@@ -178,8 +178,8 @@ def test_the_stamp_reads_the_batchs_own_rewrite_not_the_pre_batch_snapshot() -> 
             },
             "id": "c-plan",
         }
-        this_call = {"name": "propose_knowledge_note", "args": {}, "id": "c-write"}
-        request = tool_request("propose_knowledge_note", call_id="c-write")
+        this_call = {"name": "record_knowledge_note", "args": {}, "id": "c-write"}
+        request = tool_request("record_knowledge_note", call_id="c-write")
         object.__setattr__(
             request,
             "state",
@@ -214,8 +214,8 @@ def test_an_unanswerable_batch_rewrite_falls_back_to_the_pre_batch_snapshot() ->
 
         rewrite_one = {"name": "write_todos", "args": {"todos": []}, "id": "c-plan-1"}
         rewrite_two = {"name": "write_todos", "args": {"todos": []}, "id": "c-plan-2"}
-        this_call = {"name": "propose_knowledge_note", "args": {}, "id": "c-write"}
-        request = tool_request("propose_knowledge_note", call_id="c-write")
+        this_call = {"name": "record_knowledge_note", "args": {}, "id": "c-write"}
+        request = tool_request("record_knowledge_note", call_id="c-write")
         object.__setattr__(
             request,
             "state",

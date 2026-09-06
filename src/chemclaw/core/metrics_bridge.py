@@ -64,7 +64,7 @@ def degraded(
     `.warning()`/`.warn()` and contains no `raise`: **41 such handlers across 34 modules, of which
     4 counted anything** (`api/routes/turns.py:173`, `api/state.py:237`, `durable/publish.py:151`,
     `kg/graph.py:155`). The other 30 modules were invisible to anything but a log search nobody
-    runs. (An earlier revision of this docstring said 42/35/3 and named `kg/proposal.py` as one of
+    runs. (An earlier revision of this docstring said 42/35/3 and named `kg/record.py` as one of
     the three; its handler logs and `return`s, and the `record_metric` beside it is on the success
     path. The re-derivation is in D-2026-08-08-a-rule-with-no-test-is-a-claim.)
 

@@ -20,8 +20,8 @@ from chemclaw.core.embeddings import embed_texts
 from chemclaw.kg.conflicts import NoteConflicts, conflict_index
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import Note, note_id_for_reaction, strip_links
-from chemclaw.kg.search import query_terms, term_frequencies
-from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip
+from chemclaw.kg.search import query_terms, term_coverage, term_frequencies
+from chemclaw.retrieval.evidence import EvidenceChunk, Hits, RetrieverSkip
 from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
 from chemclaw.science.fingerprints.store import FingerprintInputError, FingerprintStore, Match
@@ -150,7 +150,7 @@ def _eligible_sync(directory: Path, filters: dict[str, Any], today: date) -> dic
 
 def _rank_by_terms(
     directory: Path, filters: dict[str, Any], terms: Sequence[str], today: date
-) -> list[tuple[int, float, float, Note]]:
+) -> tuple[list[tuple[int, float, float, Note]], int]:
     """`GraphRetriever`'s whole search, synchronously: eligible notes, scored, ranked and cut.
 
     One function rather than three awaits, because each hand-back between them lands on the event
@@ -160,25 +160,32 @@ def _rank_by_terms(
     its body, which is O(corpus) pure Python and belongs in the worker thread with the load.
 
     Returns:
-        `(coverage, relevance, confidence, note)` for the best `retrieval_top_k` matches, best
-        first.
+        `(chosen, found)` — `(coverage, relevance, confidence, note)` for the best
+        `retrieval_top_k` matches, best first, and the **pre-cut** total. Both, because only this
+        function can see the second: it scores every eligible note and then truncates, and the
+        caller reports `found` so that a cut does not look like a corpus.
     """
-    frequencies: list[tuple[dict[str, int], Note]] = []
+    frequencies: list[tuple[int, dict[str, int], Note]] = []
     for note in _eligible_sync(directory, filters, today).values():
-        counts = term_frequencies(note, terms)
-        if counts:
-            frequencies.append((counts, note))
+        # **Membership is `term_coverage`, weight is `term_frequencies`, and they disagree on
+        # purpose.** Coverage is substring — the coarseness that makes `ester` find `polyester`
+        # — so gating on the frequency dict instead would silently narrow the hit set, which is
+        # a recall decision this ranking change has no business taking.
+        coverage = term_coverage(note, terms)
+        if not coverage:
+            continue
+        frequencies.append((coverage, term_frequencies(note, terms), note))
     # Document frequency over the *matched* population, which is the same number as over the
     # eligible one: a term's df counts the notes containing it, and a note containing it
     # matched. So the rarer term in a two-term query earns the larger weight without a second
     # pass over the corpus.
     population = len(frequencies)
     document_frequency: dict[str, int] = {}
-    for counts, _ in frequencies:
+    for _, counts, _ in frequencies:
         for term in counts:
             document_frequency[term] = document_frequency.get(term, 0) + 1
     scored: list[tuple[int, float, float, Note]] = []
-    for counts, note in frequencies:
+    for coverage, counts, note in frequencies:
         # Confidence is a *trust* signal (KM-5), so it decides which of two equally relevant
         # notes survives truncation — never relevance itself; see `_relevance`. A note with no
         # confidence takes the configured neutral default.
@@ -187,8 +194,11 @@ def _rank_by_terms(
             if note.confidence is not None
             else settings.retrieval_default_confidence
         )
+        # `coverage`, not `len(counts)` — the widening and the complete-match rule are keyed
+        # on how many terms *matched*, which is the substring question, while `counts` holds
+        # only the terms that matched as whole tokens and is the weight.
         scored.append(
-            (len(counts), _relevance(counts, document_frequency, population), confidence, note)
+            (coverage, _relevance(counts, document_frequency, population), confidence, note)
         )
     complete = [entry for entry in scored if entry[0] == len(terms)]
     # RRF reads each source's list as ranked best-first, so the list must be ordered by this
@@ -203,10 +213,11 @@ def _rank_by_terms(
     # then arrived at the round-robin with thousands of entries against every other leg's k,
     # which is the crowding-out asymmetry D-2026-08-01 was written about, relocated from the
     # cut to the input.
-    return sorted(
+    ranked = sorted(
         complete or scored,
         key=lambda entry: (-entry[0], -entry[1], -entry[2], entry[3].id),
-    )[: settings.retrieval_top_k]
+    )
+    return ranked[: settings.retrieval_top_k], len(ranked)
 
 
 def _load_if_present(directory: Path) -> list[Note]:
@@ -268,7 +279,7 @@ class GraphRetriever:
         self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
         self.name = name
 
-    async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
+    async def retrieve(self, query: str, filters: dict[str, Any]) -> Hits:
         """Return chunks from notes matching every term of `query`, ranked best first.
 
         Deterministic and case-insensitive over `chemclaw.kg.search.search_text` — the note's id,
@@ -304,12 +315,24 @@ class GraphRetriever:
         # heartbeat over 10 000 notes: p50 loop lag 418 ms at eight concurrent calls, against
         # 26 ms once the scan moved. It buys latency and jitter, not throughput — the scan holds
         # the GIL either way.
-        chosen = await asyncio.to_thread(_rank_by_terms, self._dir, filters, terms, date.today())
+        chosen, found = await asyncio.to_thread(
+            _rank_by_terms, self._dir, filters, terms, date.today()
+        )
         conflicts = await _conflict_index(self._dir)
-        return [
-            _chunk_for(note, self.name, confidence, conflicts.get(note.id), terms)
-            for _, _, confidence, note in chosen
-        ]
+        # **`found` is the pre-cut total, and this leg is the one that can honestly report it.**
+        # It scores every eligible note and then truncates, so both numbers exist here. Measured on
+        # 5,000 notes that all matched every term, `gather_evidence` reported `chunks=8,
+        # total_before_cap=8, truncated_by=None` while 4,992 matching notes were discarded inside
+        # this function — the model was told "8 found, nothing was cut" about a corpus it had seen
+        # 0.16% of. `EvidenceSweep` exists so "a cut does not look like a corpus"; this is the
+        # number that makes that true of the per-leg bound rather than only of the merge caps.
+        return Hits(
+            (
+                _chunk_for(note, self.name, confidence, conflicts.get(note.id), terms)
+                for _, _, confidence, note in chosen
+            ),
+            found=found,
+        )
 
 
 # BM25's saturation constant, in its usual range. Named rather than inlined because it is the one

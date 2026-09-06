@@ -26,7 +26,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.turn_signals import (
     JobSignal,
     record_job_started,
-    record_proposal,
+    record_note_written,
 )
 from tests.fakes_turn import Piece, ScriptedTurn
 from tests.signals import collect_signals
@@ -44,7 +44,7 @@ class _SignallingAgent(ScriptedTurn):
         for job_id, kind in self._jobs:
             record_job_started(job_id, kind)
         for note_id, reference in self._proposals:
-            record_proposal(note_id, reference)
+            record_note_written(note_id, reference)
         yield " done"
 
 
@@ -157,7 +157,7 @@ def test_recording_outside_a_graph_is_a_no_op_rather_than_an_error() -> None:
     CLI and most tests are in the same position.
     """
     record_job_started("qm-1", "qm")
-    record_proposal("n-1", "note/n-1")
+    record_note_written("n-1", "note/n-1")
 
 
 def test_recording_from_a_governed_call_outside_a_graph_is_a_no_op() -> None:

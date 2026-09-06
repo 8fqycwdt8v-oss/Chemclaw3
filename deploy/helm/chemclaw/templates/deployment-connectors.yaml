@@ -43,7 +43,6 @@ spec:
          `enabled: false`, which takes its tools off the agent's surface too — a bundle scaled to
          zero pods while still advertised is the failure the enable list was just fixed for. */}}
   replicas: {{ $cfg.serverReplicas | default $cfg.replicas | required (printf "connectors.%s: server pods need serverReplicas or replicas" $name) }}
-  {{- include "chemclaw.rolloutStrategy" $ | nindent 2 }}
   selector:
     matchLabels:
       {{- include "chemclaw.selectorLabels" $ | nindent 6 }}
@@ -167,7 +166,6 @@ spec:
          `replicas` at all: Kubernetes defaulted it to 1 and `chemclaw.fleetPools` counted it
          as `nil | int` = 0. `required` is what turns that silence into a refused render. */}}
   replicas: {{ $cfg.workerReplicas | default $cfg.replicas | required (printf "connectors.%s: worker pods need workerReplicas or replicas" $name) }}
-  {{- include "chemclaw.rolloutStrategy" $ | nindent 2 }}
   selector:
     matchLabels:
       {{- include "chemclaw.selectorLabels" $ | nindent 6 }}

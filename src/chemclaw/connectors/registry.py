@@ -655,8 +655,15 @@ def _bound_by_this_process() -> dict[str, str]:
     into the very registry read here — so reading them back would make every deployment with jobs
     fail on its second build, on a name it declared itself. The launchers are recognised by the
     module that generated them rather than by a marker, so there is nothing to remember to set.
-    Template launchers are deliberately *not* excluded: `run_<name>` is a different name space that
-    a bundle has no business claiming either.
+    **Template launchers are a fourth name space and this sentence used to claim they were
+    covered.** It read "template launchers are deliberately *not* excluded", which is true of the
+    exclusion above and false about the outcome: measured, a bundle declaring
+    `run_bond_strength_survey` is accepted. The launchers are not in `registered_tools()` when this
+    runs — `chemclaw_agent._register_generated_tools` is `[*job_tools(), *template_tools()]`, so
+    the collision check has already returned before the first launcher is registered. The gap is
+    the ordering, not the exclusion. Filed in `docs/planning/BACKLOG.md` rather than closed here,
+    because reading the template registry from this module is a new import edge
+    (`tests/test_layering.py`) and a decision about which registry owns that name space.
     """
     from chemclaw.agent import chemclaw_agent
 
@@ -690,7 +697,7 @@ def _declared_tool_names() -> dict[str, tuple[str, str]]:
 
     **A first-party name is claimed too, and by whoever holds it** (`_bound_by_this_process`).
     The rule was always stated in general terms — one name is one capability — and checked in one
-    direction only, which is how a bundle came to be able to take over `propose_knowledge_note`
+    direction only, which is how a bundle came to be able to take over `record_knowledge_note`
     with every gate still firing on the name and the note body going to the connector's server.
 
     Raises:
@@ -764,6 +771,25 @@ def state_changing_tool_names() -> list[str]:
         if manifest.endpoint is not None:
             names.update(manifest.endpoint.state_changing)
         names.update(job.name for job in manifest.jobs)
+    return sorted(names)
+
+
+def knowledge_read_tool_names() -> list[str]:
+    """Every enabled connector tool that consults the record, sorted.
+
+    The retrieval counterpart of `state_changing_tool_names`, and declared by the bundle for the
+    same reason: whether `substrate_precedent` searches the reaction corpus is `rxnfp`'s fact, not
+    something core can read off a name. Read by `chemclaw.agent.authz.knowledge_read_tools`, whose
+    only consumer is `turn_costs.retrieval_calls` — the column that says whether a turn looked at
+    what we know before answering.
+
+    Jobs are deliberately absent, where `state_changing_tool_names` includes them: a durable job is
+    spending, which is what that set is about, and none of the declared ones is a search.
+    """
+    names: set[str] = set()
+    for manifest in enabled():
+        if manifest.endpoint is not None:
+            names.update(manifest.endpoint.knowledge_read)
     return sorted(names)
 
 

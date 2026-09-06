@@ -146,7 +146,7 @@ def test_each_gate_classifies_as_its_own_reason_and_a_bug_classifies_as_none() -
     """
     assert refusal_reason(DryRunRefusal("no")) == "dry_run"
     assert refusal_reason(UndeclaredWriteRefusal("no")) == "undeclared_write"
-    assert refusal_reason(plan_approval_refusal("propose_note")) == "plan_gate"
+    assert refusal_reason(plan_approval_refusal("record_note")) == "plan_gate"
     assert refusal_reason(RepeatedCallRefusal("again")) == "repeat"
     # The base, reached by a plain role denial and by the skills tree's write refusal.
     assert refusal_reason(SkillsReadOnlyRefusal("read-only")) == "authz"
@@ -164,10 +164,10 @@ def test_a_refusal_is_recorded_as_refused_and_counted_by_its_reason(
     reading either.
     """
     before = METRICS.value("chemclaw_tool_refusals_total")
-    refusal = DryRunRefusal("DRY RUN — propose_note changes stored data, so it was not called.")
+    refusal = DryRunRefusal("DRY RUN — record_note changes stored data, so it was not called.")
 
     with caplog.at_level(logging.WARNING):
-        sink, escaped = _drive("propose_note", raises=refusal)
+        sink, escaped = _drive("record_note", raises=refusal)
 
     assert escaped is refusal  # observe-only: the refusal reaches the gate above unchanged
     assert [event.outcome for event in sink.events] == ["refused"]
@@ -374,6 +374,6 @@ def test_a_refusal_is_distinguishable_on_the_span_without_flooding_the_error_vie
     error view full of them is an error view nobody reads. What makes the distinction available is
     the attribute, beside `chemclaw_tool_refusals_total{reason}`.
     """
-    _drive("propose_note", raises=UndeclaredWriteRefusal("not given to this agent"))
+    _drive("record_note", raises=UndeclaredWriteRefusal("not given to this agent"))
 
     assert spans()[0].attributes["outcome"] == "refused"

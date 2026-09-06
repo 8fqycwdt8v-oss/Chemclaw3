@@ -1,13 +1,23 @@
-"""Propose knowledge notes from a directory of existing documents (gap IDEA-6).
+"""Write knowledge notes from a directory of existing documents (gap IDEA-6).
 
 The only ingestion path was the incremental, cursored ELN sync. A real deployment arrives with a
 decade of existing reports, SOPs and filings, and its first question is "make our existing documents
 answerable" — so the day-one experience of a correctly-installed Chemclaw was an empty graph.
 
 This is the batch driver. It reuses `chemclaw.agent.attachments`' parsers verbatim (one parsing
-implementation, not a second one that could drift) and routes every document through the **same
-PR-gate** as every other machine-written note: a backfill proposes, humans review. That is the whole
-reason this is safe to run over a decade of documents — nothing lands in the graph unreviewed.
+implementation, not a second one that could drift) and routes every document through the same write
+path as every other machine-written note.
+
+**What makes it safe to run over a decade of documents changed, and the answer it changed to is the
+better one.** This paragraph used to say "a backfill proposes, humans review — nothing lands in the
+graph unreviewed", which stopped being true when the PR-gate was deleted
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), and would have been an unreviewed dump of
+thousands of notes if the safety had really rested there. It does not, and the reason is one
+paragraph down: this is a **deterministic transcription**, one note per document, verbatim. It
+infers nothing, so there is nothing for a reviewer to decide — the argument
+`D-2026-08-25-an-eln-transcription-is-data-not-a-claim` makes about an ELN entry, applied to a PDF.
+A backfill that summarized would be a different thing entirely and would need a different argument,
+which is exactly why it does not.
 
 **Deliberately one note per document, verbatim.** No summarizing, no fact extraction, no chunking.
 A backfill's job is to make existing documents *reachable*; deciding what they *mean* is the
@@ -26,9 +36,9 @@ from pathlib import Path
 from chemclaw.agent.attachments import AttachmentError, parse_attachment
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import configure_logging
-from chemclaw.kg.git_submitter import default_submitter
+from chemclaw.kg.git_writer import default_writer
 from chemclaw.kg.note import Note
-from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.record import record_note
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +69,7 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
     files (the reject-and-continue discipline the ELN sync uses).
     """
     proposed = skipped = 0
-    submitter = default_submitter()
+    submitter = default_writer()
     for path in sorted(p for p in directory.rglob("*") if p.is_file()):
         try:
             note = note_for_document(path, path.read_bytes(), tags)
@@ -70,7 +80,7 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
         if dry_run:
             logger.info("would propose %s from %s (%d chars)", note.id, path.name, len(note.body))
         else:
-            reference = await propose_note(note, submitter)
+            reference = await record_note(note, submitter)
             logger.info("proposed %s from %s -> %s", note.id, path.name, reference)
         proposed += 1
     return proposed, skipped

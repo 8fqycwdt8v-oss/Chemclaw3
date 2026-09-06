@@ -1,23 +1,23 @@
 """Agent tools for the memory layers: capturing a confirmed answer, and recalling observations.
 
 A confirmed or corrected answer from a chemist is evidence too. `record_confirmed_answer`
-lets the agent capture such an exchange as an episodic `interaction` note and route it
-through the **same** PR-gate as every other agent note (a human validates it before it
-becomes trusted knowledge, D-005) — the fourth memory source, on the one shared write path.
+lets the agent capture such an exchange as an episodic `interaction` note on the **same** write
+path as every other agent note (`D-2026-09-05-the-gate-is-deleted-not-dormant`: recorded, readable
+at once, nobody reviews it) — the fourth memory source, on the one shared write path.
 
 `recall_observations` reads the ungated tier (D-161), and is a **separate tool on purpose**. An
 observation is not evidence and must never arrive as a chunk in the evidence list: fusing the two
 would make "what the record shows" and "what the agent noticed" the same kind of thing at the
-moment of ranking, which is the distinction the human gate exists to preserve. Keeping it a
-distinct call is what makes the separation structural rather than a naming convention.
+moment of ranking. Keeping it a distinct call is what makes the separation structural rather than a
+naming convention — and it matters more, not less, now that neither tier has a human in front of it.
 """
 
 from chemclaw.agent.framing import defang, frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import tool
-from chemclaw.core.turn_signals import record_proposal
-from chemclaw.kg.git_submitter import default_submitter
-from chemclaw.memory.interaction import propose_confirmed_answer
+from chemclaw.core.turn_signals import record_note_written
+from chemclaw.kg.git_writer import default_writer
+from chemclaw.memory.interaction import record_confirmed_answer_note
 from chemclaw.memory.observations import Observation, open_observations
 
 
@@ -29,11 +29,12 @@ async def record_confirmed_answer(
     evidence_note_ids: list[str] | None = None,
     corrected_from: str = "",
 ) -> str:
-    """Record a user-confirmed/corrected answer as an `interaction` note via the PR-gate.
+    """Record a user-confirmed/corrected answer as an `interaction` note in the knowledge graph.
 
     Call this only after the chemist has explicitly confirmed or corrected an answer, so the
-    exchange becomes reusable knowledge. It is authored as `agent`, so it lands on a feature
-    branch for human sign-off, never straight into the graph.
+    exchange becomes reusable knowledge. It is authored as `agent` and is **readable by everyone as
+    soon as this returns** — nobody reviews it, so record what the chemist actually said rather
+    than a paraphrase that flatters the answer.
 
     Args:
         interaction_id: Stable, unique id for this exchange (becomes note `interaction-<id>`).
@@ -45,19 +46,19 @@ async def record_confirmed_answer(
             fact that you were wrong is the most useful thing in the note.
 
     Returns:
-        The submitted PR reference.
+        A reference to what landed — the commit the note was recorded in.
     """
-    reference = await propose_confirmed_answer(
+    reference = await record_confirmed_answer_note(
         interaction_id,
         question,
         answer,
         evidence_note_ids,
-        default_submitter(),
+        default_writer(),
         corrected_from,
     )
     # Surface the opened branch on the turn's stream, so the chemist sees their contribution land
-    # instead of the PR-gate being visible only in a git host's UI (gap RCH-4).
-    record_proposal(f"interaction-{interaction_id}", reference)
+    # instead of the write being visible only in a git host's UI (gap RCH-4).
+    record_note_written(f"interaction-{interaction_id}", reference)
     return reference
 
 

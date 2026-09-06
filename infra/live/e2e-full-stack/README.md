@@ -14,7 +14,7 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | Process | Repo | Port | Started by |
 | --- | --- | --- | --- |
 | Postgres/pgvector + Temporal | this repo | 5432, 7233 | `infra/live/bootstrap.sh` |
-| PR-gate note repo | this repo | — | `infra/live/bootstrap.sh` |
+| note-writer repo | this repo | — | `infra/live/bootstrap.sh` |
 | `props` (solvent/pure-component properties) | Chemclaw3-mcp | 8850 | this script |
 | `rxnpredict` (forward/condition prediction, `fake_a`/`fake_c` doubles) | Chemclaw3-mcp | 8857 | this script |
 | `chem` (RDKit: resolve, stoichiometry, green metrics, render) | Chemclaw3-mcp | 8858 | `infra/live/processes.sh` |
@@ -81,7 +81,7 @@ The last thing `up` does is start an `ElnSyncWorkflow` from the epoch. Without i
 the seeded data is **permanently invisible**: all ~10,000 exports share one mtime (the moment the
 repo was cloned) and carry older payload timestamps, so the incremental cursor passes them on its
 first firing and no later run can qualify them again. The bring-up only *starts* the drain and
-waits 120 s — a PR-gate proposal costs ~1.8 s, so the 4,251 ingestible records take a little over
+waits 120 s — a note write costs ~1.8 s, so the 4,251 ingestible records take a little over
 two hours — and the log lands in `.live/e2e-corpus-backfill.log`.
 
 `make live-data` is where a shortfall shows up, and it names the number:

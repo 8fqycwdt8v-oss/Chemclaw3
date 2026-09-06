@@ -39,3 +39,8 @@ endpoint:
   read_only:
     - similar_molecules
     - substructure_matches
+  # Every one of them is a search over the record, so a turn that answered from one of
+  # these looked at what we know — which is what `turn_costs.retrieval_calls` reports.
+  knowledge_read:
+    - similar_molecules
+    - substructure_matches

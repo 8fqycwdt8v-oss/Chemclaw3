@@ -110,7 +110,7 @@ def _hubs(graph: nx.DiGraph, top_n: int) -> list[tuple[str, int]]:
     too, by the very citations that make them dangling. Measured on a corpus where four notes cite
     a `compound-pending` that does not exist: it came back as *the most-cited note in the graph*.
     That is not an exotic corruption but the state D-018 describes as normal — a fingerprint-indexed
-    reaction is citable before its note clears the PR-gate — so `find_knowledge_gaps` was telling a
+    reaction is citable before its note is written — so `find_knowledge_gaps` was telling a
     chemist to check the hub that matters most, and `expand_note` on it raised.
 
     A dangling target is not silently dropped by this filter, it is reported as what it is: it has

@@ -462,7 +462,8 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end }}
 {{- end -}}
 
-{{- /* Sidecar: refresh on a cadence so a merged note reaches a *live* pod without a redeploy.
+{{- /* Sidecar: refresh on a cadence so a note another pod wrote reaches a *live* pod without a
+       redeploy.
 
        **With a liveness probe, because a wedged one used to be invisible.** `loop` catches a failing
        refresh deliberately — a dead git remote must not kill the pod — and the consequence was that
@@ -543,18 +544,18 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
   emptyDir: {}
 {{- end -}}
 
-{{- /* The PR-gate submitter's writable clone (gap DEP-2) — and, inside it at `knowledge_dir`, the
-       tree every reader resolves. Every component that can call `propose_note` needs one: the front
-       door (the `propose_knowledge_note` agent tool) and the background worker (job-result / BO /
-       memory publishes), but NOT a connector's own worker — a bundle returns its note in the job
-       envelope and core publishes it, so no connector process touches the note repo.
+{{- /* The note writer's writable clone (gap DEP-2) — and, inside it at `knowledge_dir`, the
+       tree every reader resolves. Every component that can write a note needs one: the front
+       door (the `record_knowledge_note` agent tool) and the background worker (job-result / BO /
+       memory writes), but NOT a connector's own worker — a bundle returns its note in the job
+       envelope and core writes it, so no connector process touches the note repo.
 
        One clone rather than a clone plus a published copy, because `Settings` offers one path for
-       both: `knowledge_path` is `note_repo_dir / knowledge_dir`, and `kg/git_submitter.py` returns
-       the checkout to the base branch after every submission *because* readers share it. The
-       shallow replica at `sync.checkoutPath` survives as what the publish copies **from**, which is
-       its stated reason for existing: a failed fetch must not be able to leave the directory the
-       app reads half-written.
+       both: `knowledge_path` is `note_repo_dir / knowledge_dir`, and `kg/git_writer.py` commits
+       onto the base branch in that same tree, which is what makes a recorded note readable at once.
+       The shallow replica at `sync.checkoutPath` is now only used by a pod that has *no* writable
+       clone; where there is one, `knowledge-sync.sh` fast-forwards it instead of copying a replica
+       over it, because copying could delete a note whose push had failed.
 
        This init container runs first — `git clone` refuses a non-empty destination and the publish
        directory is inside this one. */ -}}
@@ -730,22 +731,6 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
        renders, the number `chemclaw.fleetPools` starts from, and the number the HPA's occupancy
        target is denominated against — and three copies of "the HPA ceiling, or the fixed replica
        count when the HPA is off" is three places for the fourth reader to get it wrong. */ -}}
-{{- /* The front-door processes a rolling update may run *at once* — the steady count plus the
-       surge, which is what both fleet ceilings have to be provisioned against.
-
-       `chemclaw.frontDoorProcesses` is the steady number: what `Settings` validates, because a pod
-       validates the shape it was handed. This is the peak: what the *live* fleet reaches during an
-       upgrade, and therefore what `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` must declare, for
-       exactly the reason `chemclaw.fleetPools` counts the peak one definition below.
-
-       This existed as a gap the connection commit created and its own ADR then argued away: that
-       the turn ceiling's overlap "is another system's decision" while the connection ceiling's is
-       the chart's. Both read the same `rollout.maxSurgePods`, rendered onto the same
-       `deployment-service.yaml`. Only one was raised. */ -}}
-{{- define "chemclaw.frontDoorProcessesAtRolloutPeak" -}}
-{{- add (include "chemclaw.frontDoorProcesses" . | int) (include "chemclaw.rolloutSurgePods" . | int) -}}
-{{- end -}}
-
 {{- define "chemclaw.frontDoorProcesses" -}}
 {{- if .Values.service.autoscaling.enabled -}}
 {{- .Values.service.autoscaling.maxReplicas | int -}}
@@ -754,72 +739,8 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end -}}
 {{- end -}}
 
-{{- /* How many extra pods of one Deployment a rolling update may run beside the old generation.
-
-       Declared rather than inherited. Kubernetes defaults `maxSurge` to 25% rounded up, and the
-       connection ceiling below is *multiplied* by this number — so a bound the chart depends on
-       arithmetically must be a bound the chart states. Inherited, the shipped topology surges by
-       ten pools (two front-door pods at three each, plus one per connector Deployment) and peaks
-       at 312 connections against a ceiling that declared 256; declared as 1 it peaks at 288, and
-       the peak is what `chemclaw.fleetPools` now counts.
-
-       Not 0. A single-replica connector Deployment with no surge is a Deployment that goes away
-       during its own upgrade, which trades an availability property for connections the ceiling
-       can simply be provisioned for. The background worker is the one role that does surge to
-       nothing, and it says why in `deployment-workers.yaml`: `Recreate`, because two of it race
-       on a host-local knowledge checkout. */ -}}
-{{- define "chemclaw.rolloutSurgePods" -}}
-{{- $surge := .Values.rollout.maxSurgePods -}}
-{{- /* **Pods, not a percentage, and the render refuses rather than reinterprets.** Helm's `int`
-       is `toInt64`, which parses a leading integer and yields 0 for anything it cannot read — so
-       `maxSurgePods: 25%`, the single most likely operator input given that Kubernetes' own
-       default is 25% and this ADR is written about it, rendered `maxSurge: 0` on every
-       pool-holding Deployment *and* left the connection ceiling counting the steady state. That
-       is silently the one alternative the decision rejects by name: every connector here is a
-       single-replica Deployment, so a zero surge means the capability is down during its own
-       upgrade. A negative was worse — `maxSurge: -1` is refused by the API server, and it
-       *lowered* the declared ceiling, loosening the startup guard and the alert at once.
-
-       So: a number, and not a negative one. Both numeric kinds are accepted because the same
-       value arrives as two types depending on how it was set — `float64` from `values.yaml`,
-       which is how Helm's YAML loader types every unquoted number, and `int64` from `--set`.
-       Checking only one of them refuses the shipped default or every override, and the first
-       version of this guard refused `--set rollout.maxSurgePods=3`. Anything else — a string, a
-       percentage, a bool — falls to the `fail`. */ -}}
-{{- if not (or (kindIs "float64" $surge) (kindIs "int64" $surge)) -}}
-{{- fail (printf "rollout.maxSurgePods must be a whole number of pods, not %q (%s). It is multiplied into postgres.maxConnections by chemclaw.fleetPools, so a percentage renders maxSurge: 0 and counts nothing." (toString $surge) (kindOf $surge)) -}}
-{{- end -}}
-{{- if lt ($surge | int) 0 -}}
-{{- fail (printf "rollout.maxSurgePods is %v; a negative surge renders a Deployment the API server refuses and lowers the declared connection ceiling, loosening the guard and the alert together" $surge) -}}
-{{- end -}}
-{{- $surge | int -}}
-{{- end -}}
-
-{{- /* The rollout strategy every pool-holding Deployment shares, so the surge the ceiling is
-       computed against is the surge the cluster is told. `maxUnavailable` is left to Kubernetes:
-       this is a statement about the *upper* bound on concurrent pods, which is the only half the
-       connection budget can see. */ -}}
-{{- define "chemclaw.rolloutStrategy" -}}
-strategy:
-  type: RollingUpdate
-  rollingUpdate:
-    maxSurge: {{ include "chemclaw.rolloutSurgePods" . }}
-{{- end -}}
-
-{{- /* **The peak, not the steady state.** A rolling update runs both generations at once, and
-       `deployment-workers.yaml` reasoned about that overlap as "only capacity" — true of turns and
-       false of connections, which are the one resource a second generation takes from the first.
-       Measured against the shipped chart: 26 pools steady, 36 at the rollout peak, 288 connections
-       where the ceiling declared 256. The consequence was not merely a wrong comment. A site that
-       provisioned Postgres to exactly the declared number lost up to 56 connections on an
-       upgrade *at the HPA ceiling* — the alert reads a live sum, so with the front door at its
-       `minReplicas: 2` resting size the old peak was 192 of 256 and fitted with room,
-       and `ChemclawFleetAboveItsConnectionCeiling` — which compares the *live* pool sum against
-       that same declaration — was armed against a correct deployment: true for the length of every
-       rolling update, paging whenever one outlasted its 10-minute `for:`. */ -}}
 {{- define "chemclaw.fleetPools" -}}
 {{- $frontDoor := include "chemclaw.frontDoorProcesses" . | int -}}
-{{- $surge := include "chemclaw.rolloutSurgePods" . | int -}}
 {{- /* Three each, and the only role for which the number is not one — see the header. A pool is
        keyed on `(loop, dsn, options)`, so a turn-serving process holds the stores' pool,
        `/readyz`'s own at its own statement timeout, and the LangGraph checkpointer's, where a
@@ -828,10 +749,7 @@ strategy:
        this helper: a test that read the template's own answer back would assert nothing. What
        pins the 3 to reality is neither of those two but `tests/test_fleet_pools.py`, which drives
        the real front-door composition root and counts the pools it actually opens. */ -}}
-{{- $total := mul (add $frontDoor $surge) 3 -}}
-{{- /* The background worker is `Recreate` (see `deployment-workers.yaml`), so it is the one
-       pool-holding role whose generations never overlap and the one term the surge does not
-       touch. */ -}}
+{{- $total := mul $frontDoor 3 -}}
 {{- $total = add $total (.Values.workers.background.replicas | int) -}}
 {{- /* The face too, when it is enabled. It runs `connectors/server.py` over the in-process
        read-only tool set — knowledge search, fingerprint search, precedent lookup — so it opens a
@@ -840,7 +758,7 @@ strategy:
        guard checks the *declared* number, so it could not fire: the first sign was the runtime
        `ChemclawFleetAboveItsConnectionCeiling` alert, after the pods were up. */ -}}
 {{- if .Values.mcpFace.enabled -}}
-{{- $total = add $total (add (.Values.mcpFace.replicas | int) $surge) -}}
+{{- $total = add $total (.Values.mcpFace.replicas | int) -}}
 {{- end -}}
 {{- range $name, $cfg := .Values.connectors -}}
 {{- if $cfg.enabled -}}
@@ -852,8 +770,8 @@ strategy:
        separately scalable. Reading `replicas` for both was right only while one knob drove both;
        it is also what made a `url:` bundle with a worker contribute `nil | int` = 0 to the
        budget, since `replicas` was never required of one. */ -}}
-{{- if and $cfg.server (not $cfg.url) -}}{{- $total = add $total (add ($cfg.serverReplicas | default $cfg.replicas | int) $surge) -}}{{- end -}}
-{{- if $cfg.worker -}}{{- $total = add $total (add ($cfg.workerReplicas | default $cfg.replicas | int) $surge) -}}{{- end -}}
+{{- if and $cfg.server (not $cfg.url) -}}{{- $total = add $total ($cfg.serverReplicas | default $cfg.replicas | int) -}}{{- end -}}
+{{- if $cfg.worker -}}{{- $total = add $total ($cfg.workerReplicas | default $cfg.replicas | int) -}}{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- $total -}}

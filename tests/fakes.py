@@ -2,7 +2,7 @@
 
 **Why a module rather than `conftest.py`.** `conftest` is what pytest loads and injects: fixtures,
 hooks, collection policy. These are neither — they are objects a test constructs when it wants one,
-imported by name like any other helper. `FakeSubmitter` lives in `conftest` for the same DRY reason
+imported by name like any other helper. `FakeWriter` lives in `conftest` for the same DRY reason
 and is imported the same way, which is precisely the shape that argues for a separate module rather
 than against one: a file pytest reads for hooks should not also be the suite's library, or every
 new shared helper grows the thing loaded before every session.

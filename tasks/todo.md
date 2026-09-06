@@ -1,57 +1,177 @@
-# The capture half of the knowledge loop
+# Task — ungate knowledge, and delete the PR-gate
 
-Follow-on to `D-2026-09-04-a-ranker-that-sorts-alphabetically-is-not-a-ranker`, which closed the
-retrieval half and said plainly what it had not done: **data is captured automatically, conclusions
-are not.** All four review claims re-verified against `HEAD` before building — the tree had moved
-twice — and all four held.
+Carries `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`, which decided the axis and
+explicitly did not claim the code shipped. Owner's call this session, put as a question because the
+ADR did not foresee it: **every `propose_note` caller is knowledge**, so ungating leaves the gate
+with no subject at all. Chosen: ungate everything and delete the gate rather than leave ~2,232
+lines unreachable (`D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`).
 
-## Done
+## Blast radius, measured
 
-- [x] 1. **Nine `run_*` procedures wrote no durable record.** `record_job` had one caller in the
-      tree (`durable/connector_job.py`), so a template run left no `job_records` row: never
-      findable by `find_past_jobs`, and `get_durable_job_status` answered for its id only until
-      Temporal retained its history away. A *failing* run left nothing anywhere.
-      `TemplateWorkflow` now records on both paths. Proven on a real broker, not just by the
-      builders: removing the success-path call makes `tests/test_template_job_record.py` report
-      "got 1" instead of 2.
-- [x] 2. **Two docstrings asserted the opposite in the present tense** (`agent/durable_tools.py`) —
-      both true of connector jobs alone. Corrected, and `find_past_jobs` now documents the
-      `connector="template"` filter.
-- [x] 3. **A correction was recorded as a confirmation.** `memory/interaction.py` rendered
-      `A (confirmed):` unconditionally while three docstrings and the system prompt said
-      "confirmed **or corrected**". `corrected_from` carries what the system had said; empty means
-      confirmed.
-- [x] 4. **The recording rule had no trigger.** "A computed value that matters beyond the
-      conversation" named no moment; now a comparison whose margin *clears* the stated uncertainty
-      does, with the inside-the-error-bar case pointed at the ceiling section.
-- [x] 5. **Nothing graded the write-up after a calculation.** `propose_knowledge_note` is named by
-      fourteen probes across seven files and by none in `durable.yaml` or
-      `multistep-calculation.yaml`. Two new probes, `ms-18` and `ms-19`.
+- **15 src files** import the gate; **~17 test files** exercise it.
+- 348 files mention it in prose; **11 of 11 eval probe files** grade the agent on gate behaviour.
 
-## Rejected, with the reasoning kept
+## The write path
 
-- [x] 6. **An automatic `publish_to_graph` over calc's twelve durable jobs.** Designed, reviewed and
-      **not built** — two of its premises were false (`job-result` *is* minted, by
-      `propose_knowledge_note`; the record does *not* stop at the cache, `_publish_result` runs for
-      every job), `skills/computational-evidence` already forbids it in as many words, roughly half
-      the notes would have read "this calculation could not distinguish them" at GFN2-xTB's ±3
-      kcal/mol, and neither default is defensible. The ADR keeps the whole argument so it is not
-      re-proposed from scratch.
+`settings.knowledge_path` is `note_repo_dir / knowledge_dir` — one location for read and write, so a
+file written there is readable by `load_notes` *immediately*. That is what makes "global the moment
+it is learned" true without a new store.
 
-## Two things measurement changed
+- [x] 1. `kg/record.py`: `record_note(note, writer, ...)` replaces `pr_gate.propose_note`. Renders
+      the subject note, its dependencies and its retirements; writes them; returns the reference.
+      **Dependencies are written before the subject**, so a note never appears in the graph before
+      what it cites — the invariant that replaces "one PR is one reviewable unit" (D-133).
+- [x] 2. `kg/submission.py` → the write vocabulary: `NoteFile` kept, `NoteSubmission` → `NoteWrite`
+      (no branch/title/body), `NoteSubmitter` → `NoteWriter`. The injection seam stays; tests need it.
+- [x] 3. `kg/git_submitter.py` → `GitNoteWriter`: keep the repo guard, the lock and the error
+      classification; drop the per-note branch, the worktree and the force-push. Commit on the
+      checkout's own branch and push.
+- [x] 4. The 9 call sites: `graph_tools` (x2), `memory_jobs` (x2), `observation_jobs`,
+      `report_workflow` (x2), `backfill_corpus`, `memory/interaction`.
 
-**The eval fix as proposed would have made the probes weaker.** The recommendation was to add
-`propose_knowledge_note` to `expects_tools` on `ms-07`/`ms-08`. `evals/live.py` scores that field
-with `any()`, so a second name makes a probe pass on *either* tool — `ms-07` would then have been
-satisfied by a turn that recorded a note and never ranked anything. Separate probes instead.
+## The deletions
 
-**`turn_costs` already is the per-turn outcome row**, so the "no end-of-turn record" finding was
-half wrong: `tool_calls`, `tool_failures`, `jobs_started` and `outcome` are written every turn.
-What is missing is the knowledge dimensions (did this turn retrieve, cite, capture) — a much
-cheaper change than the new table that was proposed, and queued rather than rushed at the end of
-this one.
+- [x] 5. `kg/proposal.py`, `kg/proposal_store.py`, `api/routes/proposals.py`,
+      `cli/reconcile_proposals.py`, the `Proposal*` schemas, `_visible_proposal`/`VisibleProposal`,
+      the knowledge-merged webhook. **`_is_reviewer` stays** — `routes/jobs.py` uses it too.
+- [x] 6. Migrations 027/036/058 keep their files with `RETIRED` headers and the tables stay empty,
+      the forward-only rule `D-2026-08-14` already paid for with `audit_anchors`.
+      `durable/retention.py`'s `note_proposals` refusal goes with the reason it stated.
+- [x] 7. Metrics whose subject is gone (`chemclaw_notes_proposed_total` and the proposal-state
+      series), the `proposal_*` settings, and `make proposals-reconcile`.
 
-## Cost, stated
+## The one real correctness question
+
+- [x] 8. **D-161's support count was "distinct *merged* notes" and there is no merge any more.**
+      `mine_interactions` counts `interaction` notes as support; ungated, those are agent-written
+      with no human step, which is the self-confirming loop migration `025`'s CHECK exists to stop,
+      one level up. Decide and state it: either support counts only human-authored notes, or the
+      thresholds mean something new and `observations.py` says so. **Not a detail to discover
+      while editing** — it is the reason D-161 wrote a CHECK rather than a convention.
+
+## Then
+
+- [x] 9. Tests: delete `test_note_proposals*.py` and `test_pr_gate.py`; rewrite the gate assertions
+      in the other ~14; add the direct-write tests including the dependency-ordering invariant.
+- [x] 10. Probes: 11 files grade gate behaviour. Regrade against what the system now does.
+- [x] 11. Prose: `CLAUDE.md`, `ARCHITECTURE.md`, `SECURITY.md`, package READMEs, the skills that
+      teach the gate, the system prompt and `make prose-validate`.
+- [x] 12. ADR + ledger + BACKLOG; `make lint type test` green with Postgres up.
+
+## Review
+
+**The fork the deciding ADR had not foreseen, and how it was resolved.** All nine `propose_note`
+callers write knowledge, so ungating did not shrink the gate's subject — it removed it, leaving
+2,232 lines with no caller. That is not a call to make while editing: shipping them dormant is what
+`D-2026-08-15` deleted 1,442 lines over, and deleting throws away tested machinery including #323's
+reviewer history from hours earlier. Put to the owner; answer was delete.
+
+**Three things the change turned over, each argued rather than assumed:**
+
+1. **Write order replaces D-133.** A PR merged every file at once; a direct write can be read
+   mid-flight. Dependencies → subject → retirements, each citing the one before it, with the
+   accepted window (a note and its replacement both current) stated against the rejected one (a
+   dangling `superseded-by`).
+2. **The cache is now busted where the gate deliberately did not bust it.** Both correct for their
+   own design — the gate wrote where no reader scanned. The test that asserted "leave the cache
+   alone" now asserts the opposite and keeps both earlier readings in its docstring.
+3. **A regression the suite caught.** The gate's linked worktree had its own index, so staged
+   residue structurally could not reach a note's commit. One shared index removed that guarantee
+   and a plain `git commit` swept the stray in. Fixed in the *code* (path-limited commit and
+   path-limited idempotence check), not in the test.
+
+**D-161's anti-feedback rule was restated, not repaired.** `load_notes` now returns agent-written
+notes, so "support counts *merged* notes" would have become the description of a self-confirming
+loop. It is not one: `project_of` admits only reaction records, so support is real experiments plus
+the chemist's own confirmation. The property doing the work was never the merge — it was the kind of
+thing counted, and the merge was a second human step on top of a human act that had already
+happened.
+
+**What was found only because a validator exists.** `make prose-validate` caught seven stale
+references including one in a *merged* ADR, which must never be edited — the sanctioned remedy is
+`_RETIRED_METRIC_NAMES`, empty until now, and this is its first entry. `test_docstring_paths`
+caught 22 files with dangling module pointers. Neither would have been visible by reading.
+
+**Cost accepted and written down rather than smoothed over**: a wrong machine-written claim is now
+served until contradicted. (The second cost stated here — "a write that dies between two files
+leaves the first on disk" — was closed in the fix-forward below rather than accepted: every path is
+validated before any byte lands, each file is replaced atomically, and a failure restores what was
+there.)
+
+**Verification.** `make lint`, `make type` (448 files), `make prose-validate`, `make skill-validate`
+green. Full `make test` reported in the commit, with Docker and Postgres up so the DB-backed tests
+run rather than skip — the first run of this change reported 475 skips against a normal 63, which
+was Postgres being down and is exactly the trap `CLAUDE.md` warns about.
+
+
+---
+
+# Fix-forward — five fresh-context reviews of the merge above
+
+Five subagents over `7654cfb`, each given the diff and one dimension, none given the account of why
+it was written. ADR: `D-2026-09-05-a-reader-outlives-its-writer-more-quietly-than-a-writer`.
+
+**The shape four of the nine findings share**, and the reason a deletion is riskier than a build: a
+component whose *producer* was removed keeps its readers, and a reader with no writer passes every
+test it has. Grep finds the writers; the readers name a table or a concept and survive the grep.
+
+## Stranded readers
+
+- [x] `operations.authorship` answered "how much of this was AI-written" out of `note_proposals` —
+      a table nothing writes. On any deployment installed since it would report `proposed=0`: not an
+      error, a truthful-looking zero about the thing that was asked. Rebased onto `audit_events`.
+- [x] The evidence pack's `proposals` section, same table. Worse setting: the pack's own `limits`
+      train a reader to read an empty section as "this system recorded nothing". Deleted; the one
+      thing genuinely lost is named in `LIMITS`.
+- [x] `kg-validate`'s docstring claimed it gates the PR that adds notes. It never runs between a
+      write and its readability now. Restated as what it catches.
+- [x] `backfill_corpus`'s stated safety was "nothing lands in the graph unreviewed". Re-grounded on
+      the reason that is actually true — a deterministic transcription infers nothing.
+
+## Two defects the deletion created in the write path, both measured
+
+- [x] **A failed push wedged every later write on that pod, forever.** The writer deliberately
+      leaves a note committed locally when a push fails; once the remote moves, `merge --ff-only`
+      refuses and every subsequent write raises — while `_push`'s docstring said the next attempt
+      "fetches, fast-forwards past whatever landed, and pushes this commit along with its own".
+      `_replay_our_unpushed_commits` rebases *our* commits and refuses anything without the trailer,
+      which is the case the old refusal was really for and could not distinguish.
+- [x] **The knowledge-sync sidecar deleted notes the pod had just recorded.** `rsync -a --delete`
+      from a replica into the tree the writer now commits to removed a note whose push had failed —
+      permanently, since it stays in the local `HEAD` and no path-limited `git add` restores it.
+      Where there is a writer's clone the refresh is that clone's own fast-forward; the replica
+      stays for a pod that records nothing. A divergence warns rather than failing, because `once`
+      is an init container and a non-zero exit would crash-loop the pod on a stranded note.
+
+## Test quality
+
+- [x] Five mutations the suite did not kill, each re-planted to verify the fix: the retirements half
+      of the write order (148 tests green with the loop hoisted), the supporting-note count
+      (`test_pr_gate.py` was deleted and had been pinning it), `record.py`'s `overwrite=False` on
+      dependencies, the `if outcome.written:` metric guard, and the `diff --cached` scoping.
+- [x] Three inert assertions: the connector-bundle guard scanned for a module *this commit deleted*
+      and otherwise matched one call spelling (two bypasses planted and now caught); the
+      fast-forward test built its second clone after the first push, so it was never stale; and two
+      assertions billed as "the absence of the mutation" checked for artefacts nothing creates.
+
+## Prose, verified at the emitted artifact
+
+Nine model-facing passages still promised a reviewer — six skills, the `reporting` profile's live
+prompt, eight eval probes whose `forbids_claims` contradicted their own `direction`. Checked by
+rendering every registered profile's `SystemMessage` and every bound tool's `.description`, not by
+grep, because grep is what let them ship.
+
+## Companion repo
+
+`Chemclaw3_ui` #68: the review queue's proposals section called the deleted `/proposals` routes, and
+`orEmpty` folds a 404 into `[]` — so a chemist saw "everything has been decided" for a decision that
+cannot occur. Second time that policy has bitten that page. `/review` itself stays: its plans and
+questions sections are live.
+
+## Verification
+
+`ruff`, `mypy --strict` (799 files) and every validator green; full `pytest` with Docker and
+Postgres up, so the DB-backed tests run rather than skip.
 
 The context floor moves 43,063 -> 43,316 against the unraised 43,500 ceiling: **184 tokens of
 headroom**, from one optional argument on `record_confirmed_answer`. That is tight enough to be the

@@ -150,15 +150,25 @@ class NoteIndex(Protocol):
         ...
 
 
-# The version of the note-text derivation behind every stored note vector. `search_text` decides
-# what a note's embedded text *is*, and `embedding_config_key()` cannot see that decision — it
-# keys the model, endpoint and dimension, so a change to the derivation (adding `conditions` and
-# `source` to the haystack did exactly this) left every stored vector reading as current while
-# embedding a different text than a fresh index would. Folding the version into the note-side key
-# makes the old rows invisible to dense reads (the safe failure) and the next reindex re-embed
-# them, which is the same self-healing path a model swap already takes. Bump it whenever
-# `chemclaw.kg.search.search_text`'s composition changes.
-_NOTE_TEXT_VERSION = "ntv2"
+# The version of the note-text derivation behind every stored note row. `search_text` decides what
+# a note's embedded text *is*, and `embedding_config_key()` cannot see that decision — it keys the
+# model, endpoint and dimension, so a change to the derivation (adding `conditions` and `source` to
+# the haystack did exactly this) left every stored vector reading as current while embedding a
+# different text than a fresh index would. Folding the version into the note-side key makes the old
+# rows invisible to dense reads (the safe failure) and the next reindex re-embed them, which is the
+# same self-healing path a model swap already takes.
+#
+# **Bump it whenever the text a fresh index would store differs from the text an existing row
+# holds** — not only when `chemclaw.kg.search.search_text`'s composition changes, which is how this
+# comment read while missing a change of exactly this kind. `upsert` normalises `record.text` on
+# the way in (`core.fulltext.normalize_search_text`), so that normalisation is part of the stored
+# derivation as much as the composition is, and a change to it leaves every existing `lexeme` built
+# from the *old* rule. `ntv3` is the sign-anchoring commit: `-78` was tokenised as the lexeme
+# `'-78'` and a chemist searching for it found nothing, and the fix reaches a deployment's own
+# corpus only when its rows are rewritten. The lexical read does not filter on this key — it cannot,
+# `ts_rank` has no notion of an embedding — so the bump is not itself the repair; it is what makes
+# the next reindex do the repair, by emptying the fingerprints every note is compared against.
+_NOTE_TEXT_VERSION = "ntv3"
 
 
 def note_embedding_key() -> str:

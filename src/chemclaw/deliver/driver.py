@@ -225,9 +225,18 @@ class WebhookDeliveryDriver:
         async with httpx.AsyncClient(
             timeout=self.timeout_seconds,
             # Never inherit an ambient proxy — the same flag, and the same reason, every other
-            # client in this tree that reaches a real dependency carries (`connectors/registry.py`,
+            # *httpx* client in this tree that reaches a real dependency carries. Not every client:
+            # `api/auth.py`'s `PyJWKClient` fetches the tenant key set through
+            # `urllib.request.urlopen`, which has no such flag and follows `HTTP_PROXY` (measured);
+            # it is a `BACKLOG.md` row rather than a silent exception to this sentence. The httpx
+            # set is (`connectors/registry.py`,
             # `core/mcp_session.py`, `core/embeddings.py`, `connectors/health.py`,
-            # `agent/llm_provider.py`, `publish/drivers/http.py`). This one was the exception and
+            # `agent/llm_provider.py`, `publish/drivers/http.py`). That list was *aspirational*
+            # about its last two until 2026-09-05: both LLM seams carried the flag only on a
+            # private-CA branch no shipped configuration takes, so this comment described a fleet
+            # posture two of its six members did not have
+            # (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address` made it true).
+            # This one was the exception and
             # is the worst place for it: the payload is human-readable message content and the
             # request carries `Authorization: Bearer`. Measured with a recording listener installed
             # as `HTTP_PROXY`, the proxy received the whole POST — body and bearer — and the

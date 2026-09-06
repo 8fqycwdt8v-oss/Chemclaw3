@@ -24,7 +24,6 @@ disables `app.dependency_overrides`.)
 | `plan.py` | `GET/POST /sessions/{id}/plan[...]` — the pre-execution harness-plan gate (D-137/D-167) — plus `GET /plans/pending`, the cross-session inbox of plans nobody has decided, which is the only one of the three not addressed by a session id because it is what finds the session |
 | `pending.py` | `GET /pending`, `POST /pending/{id}/answer` — the questions an agent asked a chemist and is waiting on, addressed by request rather than by session for the same reason `/plans/pending` is |
 | `protocols.py` | `GET /protocols[...]`, `GET /protocols/{id}/diff`, `POST /protocols/{id}/revisions`, `POST /protocols/{id}/status` — the design revision surface. **The two write routes are the only ones in this package that answer 403 rather than 404**, because a protocol is not owner-scoped the way a session is; worth knowing before reading their gate as an inconsistency |
-| `proposals.py` | `GET/POST /proposals[...]`, `POST /events/knowledge-merged` — the PR-gate's review queue and the webhook that closes it |
 | `notes.py` | `GET /notes/{id}` — one knowledge note as the `NoteView` `expand_note` returns, so a citation chip resolves to the note it cites. `CurrentUser`-gated, not owner-scoped: the graph has no owner |
 | `jobs.py` | `GET/DELETE /jobs[...]` — the durable-run surface over `job_records` |
 

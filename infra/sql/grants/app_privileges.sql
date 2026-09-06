@@ -62,10 +62,17 @@ BEGIN
     -- explicitly refuses to prune, each for a stated reason (the cache is bounded by cost policy
     -- rather than by a clock, D-011; a job record is the durable evaluation record D-157 exists to
     -- keep). Withholding DELETE makes those refusals enforced rather than merely intended.
+    --
+    -- **`note_proposals` was here and is not any more.** The PR-gate that wrote it is gone
+    -- (`D-2026-09-05-the-gate-is-deleted-not-dormant`) and the table is retired rather than
+    -- dropped, because it holds real sign-offs an erasure request must still find. A retired
+    -- table the application can still INSERT and UPDATE is a privilege nobody uses, which is the
+    -- one that matters when somebody else finds it — so the grant is withdrawn while the rows
+    -- stay readable.
     EXECUTE format(
         'GRANT INSERT, UPDATE ON '
         'calculation_results, calculation_artifacts, job_records, '
-        'bo_campaigns, measurements, predictions, note_proposals, observations, '
+        'bo_campaigns, measurements, predictions, observations, '
         'pending_requests, effects, '
         'reaction_records, experiment_protocols, '
         'plan_approvals, sync_cursors, turn_costs, '

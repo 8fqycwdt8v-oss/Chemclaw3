@@ -120,7 +120,7 @@ if (exec 3<>/dev/tcp/127.0.0.1/4317) 2>/dev/null; then
   export CHEMCLAW_OTEL_LLM_SPANS="${CHEMCLAW_OTEL_LLM_SPANS:-true}"
   export CHEMCLAW_OTEL_ENDPOINT="${CHEMCLAW_OTEL_ENDPOINT:-http://127.0.0.1:4317}"
 fi
-# The PR-gate's dedicated clone, created by bootstrap.sh. Without it `note_repo_dir`
+# The note writer's dedicated clone, created by bootstrap.sh. Without it `note_repo_dir`
 # defaults to "." — this checkout — and every note submission is refused before a git
 # command runs, which silently removes the whole knowledge-contribution half of a run.
 export CHEMCLAW_NOTE_REPO_DIR="${CHEMCLAW_NOTE_REPO_DIR:-$LIVE_DIR/knowledge-repo}"

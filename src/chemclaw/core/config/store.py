@@ -94,12 +94,15 @@ class StoreSettings(BaseSettings):
     # database — a connect that cannot be scheduled inside `pg_connect_timeout_seconds` fails,
     # which is how a non-fatal correctness guard got silently disarmed under load.
     #
-    # `min_size` connections are kept warm so the first request after an idle period does not pay
-    # a handshake. `max_size` bounds **one pool**, not one process — a process holds as many pools
-    # as it has distinct `(dsn, libpq options)` keys, plus any foreign pool it registers. The
-    # deployment total is therefore `max_size × pools`, which must stay under the server's
-    # `max_connections` — see `pg_fleet_pools` below, which is what turns that sentence into a
-    # check.
+    # `min_size` is the *floor* a pool is kept warm at, not the number it holds: measured, a
+    # `min_size=2` pool whose first checkout races the initial fill settles at three and stays
+    # there, because `pg_pool_max_idle_seconds` never fires on a pool something borrows from every
+    # ten seconds. `max_size` bounds **one pool**, not one process — a process holds as many pools
+    # as it has distinct `(dsn, libpq options, requested max_size)` keys, plus any foreign pool it
+    # registers — and it is the *default* width, which a call site may narrow for itself with
+    # `db.connection`'s `pool_max_size`. So the deployment total is not `max_size × pools`; it
+    # is what `Settings.fleet_connections_per_server` adds up, and `pg_fleet_pools` below is one of
+    # its two inputs.
     pg_pool_min_size: int = Field(default=2, ge=0)
     pg_pool_max_size: int = Field(default=16, gt=0)
     # The two halves of the fleet connection budget
@@ -123,20 +126,46 @@ class StoreSettings(BaseSettings):
     # has summed a process's pools since D-2026-08-05, so the *runtime* alert was already honest
     # and only the startup check was not; the two contradicted each other on the shipped values.
     #
-    # **A second DSN is a second pool per role, and the chart cannot see one.** `session_store_dsn`
-    # arrives as a Secret, so a deployment that points the session layer at a *different* database
-    # gives every role that touches both an extra `core/db` pool — a front door then holds four —
-    # while the connections split across two servers, which one `pg_fleet_max_connections` cannot
-    # describe. Left as a documented limit rather than a mechanism: nothing in a pod knows the
-    # topology, and the shipped chart leaves that key unset so both DSNs resolve to one string.
+    # **Not every pool is `max_size` wide, and counting as if they were refused a legal fleet.**
+    # One of a front door's three is the `/readyz` probe's, which is single-flighted and measured at
+    # a peak of one simultaneous checkout across 1,000 concurrent probes with the cache window off,
+    # so it asks for one connection (`api/routes/ops.py`). Charging it eight put the shipped chart's
+    # floor at 208 where the fleet opens **166**, and the 42-connection difference is not free
+    # headroom: it is the front door that scales, so raising `service.autoscaling.maxReplicas` from
+    # 6 to 9 made `Settings` refuse 280 against 256 and CrashLoop every pod in the fleet, against a
+    # database that could have served it. `fleet_connections_per_server` charges the readiness pools
+    # one connection each and everything else `pg_pool_max_size`.
+    #
+    # **A second DSN is a second pool per role, and only the process can see one.**
+    # `session_store_dsn` arrives in a Secret the chart never reads, so `chemclaw.fleetPools` counts
+    # what is right for one DSN and wrong for two. Measured on the real composition roots with the
+    # session layer on a second database: front door 3 → **4** pools, background worker 1 → 2,
+    # connector server 1 → 2 — one more per pooled process, uniformly, because the front door's
+    # `/readyz` and checkpointer pools both resolve `session_store_dsn or postgres_dsn` and *move*
+    # there while the stores' session pool is new. On the shipped chart that is 40 real pools
+    # against 26 declared, and **320 connections against a `postgres.maxConnections` of 256** — a
+    # release breaching its own declared ceiling with the startup check passing, caught only by the
+    # `for: 10m` runtime alert once the pods were up. Which is exactly the `mcpFace` defect
+    # `_helpers.tpl` records, a second time.
+    #
+    # **The pool count is decidable here; the second server's ceiling is not.** That is why this is
+    # two settings and not one documented limit — the comment here used to say "nothing in a pod
+    # knows the topology", and every pod is in fact handed `CHEMCLAW_PG_FLEET_POOLS` *and*
+    # `CHEMCLAW_SERVICE_FLEET_REPLICAS`, derived by the chart from the same autoscaling block, which
+    # is enough to place every pool on the right server. What no pod can derive is what a *second*
+    # server will serve, so that is declared.
     #
     # The chart derives the fleet's pool count from the same values that render those Deployments
     # (`chemclaw.fleetPools`), so it cannot disagree with the pods that exist.
-    # `pg_fleet_max_connections` is what the server will actually serve this deployment; 0 means
-    # undeclared and the check is inert, matching how the turn ceiling and the artifact-eviction
-    # budgets ship off until an operator states a number.
+    # `pg_fleet_max_connections` is what `postgres_dsn`'s server will serve this deployment, and
+    # `pg_session_fleet_max_connections` the same for a split session store's; 0 means undeclared,
+    # matching how the turn ceiling and the artifact-eviction budgets ship off until an operator
+    # states a number. Undeclared while a split is real is warned about rather than refused: the
+    # variable is new, and raising would fail every existing split deployment on the `helm upgrade`
+    # that introduces it.
     pg_fleet_pools: int = Field(default=1, gt=0)
     pg_fleet_max_connections: int = Field(default=0, ge=0)
+    pg_session_fleet_max_connections: int = Field(default=0, ge=0)
     # Close a connection idle beyond this, so a burst does not pin `max_size` sockets forever.
     pg_pool_max_idle_seconds: float = Field(default=300.0, gt=0)
     # How long a caller waits for a free pooled connection before the request fails as a

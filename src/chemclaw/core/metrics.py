@@ -241,7 +241,7 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_job_runtime_seconds_total": (
         "Wall-clock seconds accumulated by finished durable jobs, by connector."
     ),
-    "chemclaw_notes_proposed_total": "Notes opened on a branch through the PR-gate.",
+    "chemclaw_notes_recorded_total": "Notes written into the knowledge graph.",
     # A note the indexer cannot parse is dropped from the graph so one bad file cannot block every
     # query — which is right, and was silent. `kg-validate` reports these in CI, over the
     # repository; nothing reported them over the tree a pod is actually serving, where a partial
@@ -268,7 +268,7 @@ _COUNTERS: dict[str, str] = {
     # outage reads as "zero proposals", which is exactly what an idle system reads as. Two counters
     # make the difference visible and give the alert a ratio to fire on.
     "chemclaw_notes_publish_failures_total": (
-        "Knowledge notes that could not be opened on a branch; the knowledge was lost."
+        "Knowledge notes that could not be written into the graph; the knowledge was lost."
     ),
     # A fan-out child that exhausted its retries and was dropped (`durable/orchestrator.py`).
     # Isolate-and-drop is the right policy — one poison input must not restart its siblings — but
@@ -277,23 +277,15 @@ _COUNTERS: dict[str, str] = {
     # healthy. Measured: a live fan-out returned two results from four inputs with nothing but log
     # lines to show for it.
     #
-    # The failure this makes visible: the PR-gate's git credential expires, every
+    # The failure this makes visible: the notes repo's git credential expires, every
     # `PublishNoteWorkflow` child fails, and all three memory-synthesis jobs complete green
     # returning `[]` every night — `/schedules` showing `runs_total` climbing and no failures — for
-    # as long as it takes someone to notice that nothing has been proposed in months.
+    # as long as it takes someone to notice that nothing has been recorded in months.
     # `chemclaw_notes_publish_failures_total` above does not cover it: that one is incremented by
     # `publish_note_best_effort`, which the memory fan-out does not use.
     "chemclaw_fan_out_children_dropped_total": (
         "Fan-out children that failed their retries and were dropped; their work is missing from "
         "an otherwise successful parent."
-    ),
-    # The gate's outcomes, which the two counters above cannot express: they count submissions,
-    # and the question an operator actually has is whether anything is being *reviewed*. A rising
-    # `open` against a flat `merged` is a review queue nobody is working; `rejected` is the series
-    # that had no record at all before, because a rejection is a deleted branch.
-    "chemclaw_note_proposals_total": (
-        "Note proposals by state — open on submission, merged/rejected on a human decision, "
-        "failed when the submission never reached git."
     ),
     # A turn whose connectors did not come up still answers — from whatever tools remained. That is
     # the right behaviour and the reason it needs a number: a degraded answer is indistinguishable
@@ -846,9 +838,6 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_output_tokens_total": ("profile",),
     "chemclaw_cache_read_tokens_total": ("profile",),
     "chemclaw_cache_write_tokens_total": ("profile",),
-    # Four values, fixed by a CHECK constraint in `infra/sql/027_note_proposals.sql` — the only
-    # label in this registry whose cardinality is bounded by the database rather than by trust.
-    "chemclaw_note_proposals_total": ("state",),
     # Bounded by `CHEMCLAW_DELIVERY_CHANNELS` — a deployment's own list of channel folder names,
     # never a caller's string. Same rule as every label here.
     "chemclaw_deliveries_total": ("channel",),
@@ -995,6 +984,31 @@ _GAUGES: dict[str, str] = {
     "chemclaw_pg_pool_max_size": "This process's configured maximum pooled connections.",
     "chemclaw_pg_fleet_max_connections": (
         "Declared fleet-wide ceiling on Postgres connections (0 = none)."
+    ),
+    # The second half of that pair, because one number describes one server: a deployment that
+    # points `session_store_dsn` at another server puts a front door's `/readyz` and checkpointer
+    # pools there. 0 when there is no split, which leaves the alert's comparison exactly what it
+    # was.
+    "chemclaw_pg_session_fleet_max_connections": (
+        "Declared ceiling on Postgres connections at a split session store (0 = none)."
+    ),
+    # And the left-hand side that ceiling needs, because a sum against a sum is not two checks.
+    # `sum(pools) > primary_ceiling + session_ceiling` can only *miss*: enumerated over 200,000
+    # random (pools, ceilings) draws it produced 0 firings with neither server over and 49,993
+    # silences with one of them over. Measured on the shipped topology with the session server
+    # declared at 180, it sits at 183 (over its own ceiling) from 7 front-door replicas and the
+    # summed comparison stays silent until 13, by which point it is at **1.58x**. Splitting the
+    # left-hand side rather than labelling `chemclaw_pg_pool_max_size` keeps that gauge a pure
+    # configuration reading: a label carrying a *measured* server identity is unknown until a pool
+    # fills, so the ceiling alert would go silent during exactly the database outage it exists for.
+    #
+    # Which pools land here is the same `pg_endpoint` comparison `fleet_connections_per_server`
+    # makes, read from `core/config` rather than restated — so the startup half and the runtime
+    # half cannot disagree, and the two spellings of one server that config reads as two servers
+    # this reads as two as well. That limit is `pg_endpoint`'s and is pinned there.
+    "chemclaw_pg_session_pool_max_size": (
+        "This process's maximum pooled connections that land on a split session store's own "
+        "server (0 = no split)."
     ),
     # The calculation backend's admission budget (D-2026-08-27-a-per-worker-cap-is-not-a-backend-
     # ceiling), the third pair of this shape. Unlike the two above, the left-hand side is *live*

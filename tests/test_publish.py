@@ -423,7 +423,7 @@ def _fake_workflow(*, raises: bool, replaying: bool = False) -> types.SimpleName
 def test_a_lost_knowledge_note_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
     """A swallowed publish failure must be visible, or a dead git remote looks like an idle system.
 
-    `chemclaw_notes_proposed_total` counts only successes, so with no failure counter "the remote
+    `chemclaw_notes_recorded_total` counts only successes, so with no failure counter "the remote
     is down and every note was lost" and "nobody asked for a note" produce identical exposition.
     """
     from chemclaw.core.metrics import METRICS

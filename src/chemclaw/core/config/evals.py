@@ -134,7 +134,19 @@ class EvalSettings(BaseSettings):
     # the "did we surface the expected evidence?" recall metric gates against — the seam that
     # catches a substring-filter or evidence-cap change quietly dropping recall.
     eval_retrieval_corpus_dir: str = "data/evals/retrieval_corpus"
-    retrieval_recall_min: float = Field(default=0.75, ge=0.0, le=1.0)
+    # **0.75 was blind to the smallest regression that exists, on nearly half the case set.**
+    # A case with a 4-note gold set scores exactly 0.75 when one of those notes is lost, so it
+    # passed a floor of 0.75 — and four of the nine gated cases have four gold notes. The floor has
+    # to sit strictly above `max((n-1)/n)` over the gated gold sets or it cannot see one lost note.
+    #
+    # 0.80 is the lowest round value above that bound at n=4: it keeps the most tolerance the
+    # invariant allows while still failing on a single lost note in every gated case, and leaves
+    # `retrieval-cross-coupling-literal-miss` failing at 0.50 as it is designed to.
+    #
+    # `tests/test_retrieval_eval.py` asserts the *inequality* against the loaded cases rather than
+    # restating this number, so a future case with a 5-note gold set (needing > 0.80) fails loudly
+    # instead of silently reopening the blind spot.
+    retrieval_recall_min: float = Field(default=0.80, ge=0.0, le=1.0)
     # Autonomy gates (F9-T3). These score a *scripted* transcript, so they measure the harness's
     # plumbing — that a plan is produced, that work is closed before answering, that the A/B
     # arithmetic holds — and never the model's judgment, which needs the live endpoint AG-13 is

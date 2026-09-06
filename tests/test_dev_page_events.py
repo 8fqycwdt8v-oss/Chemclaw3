@@ -36,6 +36,36 @@ def test_dev_page_handles_every_event_type() -> None:
     )
 
 
+# `events.addEventListener("job_completed", …)` — the push-back stream's subscriptions.
+_LISTENER = re.compile(r'events\.addEventListener\(\s*"([a-z_]+)"')
+
+#: Kinds `api/routes/streams.py` maps onto the push-back stream, as the SSE `event:` names it sends.
+#:
+#: Written out rather than imported because this is the *wire* name a browser dispatches on, and
+#: the point of the test below is to compare two independent spellings of it.
+_PUSHED_TO_THE_BROWSER = {"job_completed", "job_failed", "awaiting_answer"}
+
+
+def test_dev_page_subscribes_to_every_pushed_kind() -> None:
+    """A `case` without a matching `addEventListener` is dead code, and looks exactly like a fix.
+
+    `EventSource` dispatches by the SSE `event:` name, so `applyEvent`'s branch for a pushed kind
+    is only ever reached if `openEventStream` subscribed to that name. It did not for
+    `awaiting_answer`: the case was added, the listener was not, and the one surface in this
+    repository that renders the event never received a single one.
+
+    `test_dev_page_handles_every_event_type` cannot see this — it matches `case "…":` as text and
+    executes no JavaScript — which is exactly why the gap survived a green suite.
+    """
+    source = _APP_JS.read_text(encoding="utf-8")
+    subscribed = set(_LISTENER.findall(source))
+    missing = _PUSHED_TO_THE_BROWSER - subscribed
+    assert not missing, (
+        "the dev page renders these kinds but never subscribes to them, so the branch is "
+        f"unreachable: {sorted(missing)}"
+    )
+
+
 def test_dev_page_has_no_case_for_a_type_that_does_not_exist() -> None:
     """The other direction: a case left behind by a renamed or removed event is dead code."""
     handled = set(_CASE.findall(_APP_JS.read_text(encoding="utf-8")))
