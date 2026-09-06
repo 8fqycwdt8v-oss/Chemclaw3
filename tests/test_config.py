@@ -310,18 +310,24 @@ def test_raising_only_the_activity_budget_is_refused_rather_than_silently_ignore
     # And the fix the message asks for actually works — a guard that cannot be satisfied is a wall.
     #
     # It now takes a third setting, and that is the point rather than an inconvenience: a template
-    # `job` step is a child workflow bounded by `connector_job_timeout_seconds` + 4 x
-    # `activity_timeout_seconds`, so raising the job ceiling raises the ceiling a template run has
-    # to contain (`_the_template_run_ceiling_covers_one_step`). Before that rule existed, the
-    # eight-hour search this operator is buying would have run under a 7,200 s template run and
-    # ended it as a bare TIMED_OUT with nothing on the chemist's stream. The startup refusal names
-    # the number, so the chain costs one more line rather than an afternoon.
+    # `job` step is a child workflow bounded by `connector_job_timeout_seconds` plus what the
+    # wrapper's five post-child steps may spend, so raising the job ceiling raises the ceiling a
+    # template run has to contain (`_the_template_run_ceiling_covers_one_step`). Before that rule
+    # existed, the eight-hour search this operator is buying would have run under a 7,200 s template
+    # run and ended it as a bare TIMED_OUT with nothing on the chemist's stream. The startup refusal
+    # names the number, so the chain costs one more line rather than an afternoon.
+    #
+    # 52,530 rather than the 39,600 this line first carried: that number was `32,400 + 4 x 1,800`,
+    # the count-based headroom the wrapper never actually had. The five post-child steps are bounded
+    # by their own `schedule_to_start + start_to_close` — 12,930 s at the shipped budgets — so the
+    # honest bound here is 45,330, and this is that plus the eight-ordinary-step allowance, the same
+    # rule the default is sized by.
     assert (
         Settings(  # type: ignore[call-arg]
             _env_file=None,
             xtb_job_timeout_seconds=28_800,
             connector_job_timeout_seconds=32_400.0,
-            template_run_timeout_seconds=39_600.0,
+            template_run_timeout_seconds=52_530.0,
         ).connector_job_timeout_seconds
         == 32_400.0
     )
