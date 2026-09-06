@@ -265,7 +265,17 @@ def test_connection_defaults_the_statement_timeout_onto_the_connect(
     assert seen == [f"{plan} -c statement_timeout=12000", f"{plan} -c statement_timeout=2000", plan]
 
 
-_UNBOUNDED_BY_DESIGN = {"chemclaw/core/migrate.py", "chemclaw/core/grants.py"}
+_UNBOUNDED_BY_DESIGN = {
+    "chemclaw/core/migrate.py",
+    "chemclaw/core/grants.py",
+    # `agent/checkpointer._setup_once`, added in wave 6 for the same three reasons as the two
+    # above, which is why it belongs in the set rather than in an exemption: it is a schema
+    # migration (upstream's `setup()`, three of whose statements are `CREATE INDEX CONCURRENTLY`),
+    # it takes an advisory lock so two pods starting together do not collide, and the lock is held
+    # *across* that migration — so the connection cannot come from the saver's own pool, which is
+    # what `setup()` runs on, or a small pool deadlocks immediately.
+    "chemclaw/agent/checkpointer.py",
+}
 _DEFINITION_SITE = "chemclaw/core/db.py"
 
 
@@ -312,11 +322,13 @@ def test_only_the_migration_paths_open_an_unbounded_postgres_connection() -> Non
 
     Defaulting the timeout in `connection()` closes the hole a forgotten keyword opened, and leaves
     exactly one way to reopen it: reach past `connection()` to `connect()`, which still defaults to
-    no bound because a migration's index build legitimately runs long. Two modules want that (the
-    migration runner and the grant applier, both of which also need a connection nobody else can be
-    handed, for the advisory lock). A third would be a store quietly running unbounded again, which
-    is the defect this whole change exists to make impossible rather than merely unlikely — so it
-    is pinned here instead of trusted to review.
+    no bound because a migration's index build legitimately runs long. **The members are listed in
+    `_UNBOUNDED_BY_DESIGN` with a reason each, and their number is not written here** — it said
+    "two modules" and a third joined it legitimately one wave later. What they share is the
+    property, not the count: each runs a schema migration under an advisory lock held across it, on
+    a connection nobody else can be handed. A member without that property is a store quietly
+    running unbounded again, which is the defect this whole change exists to make impossible rather
+    than merely unlikely — so it is pinned here instead of trusted to review.
 
     Two call sites moved off `connect()` to get here: `cli/live_jobs` and `cli/live_storm` each read
     one scalar from the live database through it, which wanted no dedicated connection and no

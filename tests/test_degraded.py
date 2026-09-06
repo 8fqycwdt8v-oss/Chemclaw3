@@ -116,6 +116,19 @@ _EXPECTED_SUBSYSTEMS = {
     "commitment_export",
     "plan_approval",
     "preferences",
+    # `publish/outbox`, on a row wave 6 found had no name: the claim spends its attempt and commits
+    # before delivery, so an interruption mid-delivery leaves the row `pending` at the attempt
+    # ceiling with an empty error — unclaimable, invisible to the dead-letter counter, counted
+    # forever in the pending gauge, and reset by nothing. The reaper turns it into an honest dead
+    # letter; this counter is how an operator learns it happened at all, since the row's own
+    # history is exactly what the interruption failed to write.
+    "result_outbox_orphaned",
+    # `publish/drivers/sql`, on a result store one migration behind the writer. Measured: the
+    # missing columns were simply dropped and the delivery reported success, which is the
+    # `deliver_redaction` shape at the far end of the same pipeline — the site believes it holds a
+    # record it does not hold. Per (sink, table) rather than per row, because a lagging schema is a
+    # deployment fact and one row's worth of it is not news.
+    "result_sink_schema_lag",
     # `agent.condense`, added with the protocol condenser. Two degradations share it and both
     # are per protocol rather than per turn: no reachable `"protocol-digest"` route (the comparison
     # still renders from every record's own figures), and one extraction that failed or timed out

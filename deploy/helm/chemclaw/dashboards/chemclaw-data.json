@@ -895,6 +895,49 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 19,
+      "type": "graph",
+      "title": "Checkpointer: statements waiting on the saver lock",
+      "description": "The saver serialises every checkpoint write on one asyncio lock, which is invisible to the pool gauges above: measured, 8 concurrent turns ran at concurrency 1 inside the saver with 612 ms of maximum wait while chemclaw_pg_pool_requests_waiting read 0. These two series are what makes that queue visible. A rising wait with a flat pool is the saver, not the database.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 60
+      },
+      "targets": [
+        {
+          "expr": "max(chemclaw_checkpointer_statements_waiting)",
+          "legendFormat": "waiting (max over pods)",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(chemclaw_checkpointer_lock_wait_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95 lock wait",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "graph",
+      "title": "Turns whose transcript and thread parted company",
+      "description": "The two records of one conversation: the transcript a chemist sees on reload, and the checkpoint the model is rebuilt from. A teardown between the two leaves the model holding an exchange the chemist cannot see. Counts one branch \u2014 a completed run that never answered \u2014 and deliberately not the whole class, so a flat line is not proof of agreement.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 60
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_transcript_thread_divergence_total[15m]))",
+          "legendFormat": "divergences/s",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",
