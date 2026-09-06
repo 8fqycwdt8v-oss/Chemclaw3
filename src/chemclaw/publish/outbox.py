@@ -33,7 +33,7 @@ from psycopg.types.json import Jsonb
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
-from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.publish.record import CONTRACT_VERSION, Publication, ResultRecord
 from chemclaw.publish.registry import enabled_names, publishing_enabled
 
@@ -56,11 +56,25 @@ _ENQUEUE = """
 # twice and each record a failure, double-counting the attempt budget against one destination's
 # outage.
 #
-# Incrementing inside the claim closes that: the `UPDATE` takes a row lock the other run's
-# `SKIP LOCKED` respects, and by the time the lock is released the row's attempt is already spent.
-# Duplicate *delivery* would still be safe — every key on the far side is a content hash — but the
-# accounting would not be, and an attempt budget that empties twice as fast retires rows a working
-# destination would have accepted.
+# Incrementing inside the claim narrows that and **does not close it, which this comment used to
+# claim.** `SKIP LOCKED` excludes only *overlapping transactions*, and this one commits immediately
+# — deliberately, so no lock is held across the delivery. The second run's claim therefore happens
+# *after* that commit, sees a row that is still `pending` with `attempts < max`, and claims it
+# again. The scenario named above overlaps over the **delivery** (seconds to a minute), not over
+# the claim (milliseconds), so the lock argument never engages for the case it was written for.
+# Measured with a sink taking 1.0 s and a second drain started 0.3 s in: both drains delivered the
+# same row and it came to rest at `attempts=2` for one delivery.
+#
+# What that costs and what it does not: duplicate *delivery* is safe — every key on the far side is
+# a content hash, and the shipped SQL sink was driven three times over one record and converged
+# exactly — so the harm is the accounting, an attempt budget that empties at 2x under two
+# concurrent drains. Closing it properly needs a **lease**: a claim that moves the row out of
+# `pending` (`state='in_flight'` plus a `claimed_at`, reaped back by a later pass), so the second
+# run skips it by predicate rather than by lock duration. That is a column and a `CHECK` in
+# `infra/sql/050_result_publications.sql` — a change this module cannot make alone, so it is
+# written down here and in `docs/planning/BACKLOG.md` rather than described as done. The reaper
+# below is the half that *is* in reach, and it turns the doubled burn from a permanent zombie into
+# an honest dead letter an operator can requeue.
 #
 # Oldest first, so a backlog drains in the order it accumulated and a burst of fresh results cannot
 # starve what was already waiting.
@@ -76,6 +90,36 @@ _CLAIM = """
         FOR UPDATE SKIP LOCKED
     )
     RETURNING id, calc_ref, document
+"""
+
+# **The fourth state the three-state contract does not name, and how a row leaves it.** `_CLAIM`
+# spends the attempt and commits *before* the delivery, so every way a pass dies between the claim
+# and the mark — a pod eviction, an activity `start_to_close` expiry, the drain's own per-sink
+# ceiling being reached after the claim — leaves the row `pending` with an attempt spent and
+# `last_error` untouched. Repeat that `result_publish_max_attempts` times and the row is:
+# excluded from `_CLAIM` by `attempts < %s` so it is never delivered again; not `'failed'`, so
+# `_DEAD_LETTERED` never counts it and `chemclaw_outbox_dead_lettered` reads zero for it forever;
+# still `'pending'`, so it is counted forever in `chemclaw_outbox_pending` and ages forever in
+# `chemclaw_outbox_oldest_pending_seconds`, which is what `ChemclawResultOutboxStuck` pages on;
+# unmatched by `backfill.requeue_failed` (`WHERE state = 'failed'`), so the documented remedy
+# resets nothing; and unmatched by retention (`state = 'delivered'`), so it is never pruned.
+# Measured with a hanging sink and eight interrupted passes: `('alpha','h1','pending',8,'')`,
+# `claim()` returned `[]`, `dead_lettered` was empty, and `requeue_failed()` reset 0 rows.
+#
+# This statement is the transition that state was missing. A row whose budget is spent and whose
+# state is still `pending` has, by construction, no outcome recorded — a claimed row is `pending`
+# only until `mark_delivered`/`mark_failed` runs — so retiring it is not a guess about what
+# happened, it is the definition of what did not. It runs at the head of every claim for that sink,
+# which is the moment the exclusion would otherwise bite silently.
+#
+# `last_error` is written only when empty, so the last *real* failure a pass did record outranks
+# this generic one — the reason an operator needs is the destination's, not the reaper's.
+_REAP_EXHAUSTED = """
+    UPDATE result_publications
+    SET state = 'failed',
+        last_error = CASE WHEN last_error = '' THEN %s ELSE last_error END
+    WHERE sink = %s AND state = 'pending' AND attempts >= %s
+    RETURNING id
 """
 
 _MARK_DELIVERED = """
@@ -139,9 +183,28 @@ _MARK_FAILED = """
 # and a stopped drain is the outage `ChemclawResultOutboxStuck` exists to catch, so the metric was
 # blind to its own headline case. `ingest/eln/cursor.py` had already made this choice and written
 # down why; this is that argument applied to the sibling that got it wrong.
+#
+# **Scoped to the enabled sinks, because the gauge must describe what the drain actually works on.**
+# `enqueue` writes one row per *currently enabled* sink and the drain iterates *currently enabled*
+# manifests, while this read took every row regardless. So removing a sink from
+# `CHEMCLAW_RESULT_SINKS` left its pending rows drained by nobody, pruned by nobody (retention
+# sweeps `delivered` only) and requeued by nobody — and counted here forever. Measured:
+# `chemclaw_outbox_pending{sink="beta"} 1.0` with `dead_lettered` empty and `requeue_failed()`
+# resetting 0 rows, so `ChemclawResultOutboxStuck` ("the drain is not keeping up or has stopped")
+# fires permanently for a destination the operator deliberately turned off, with no way to silence
+# it but editing the table. Those rows are not lost — they are reported once per pass through
+# `degraded()` instead, which is a different fact wanting a different, non-paging rule.
 _PENDING = """
     SELECT sink, count(*), EXTRACT(EPOCH FROM min(enqueued_at))
-    FROM result_publications WHERE state = 'pending' GROUP BY sink
+    FROM result_publications WHERE state = 'pending' AND sink = ANY(%s) GROUP BY sink
+"""
+
+# Rows queued for a sink no longer enabled. A count per sink, for the log line and the degradation
+# counter — never a gauge, because it must not page: an operator who disabled a destination has
+# already decided, and what they need is a line saying how much is stranded, not an alert.
+_ORPHANED = """
+    SELECT sink, count(*) FROM result_publications
+    WHERE state = 'pending' AND NOT (sink = ANY(%s)) GROUP BY sink
 """
 
 # Dead letters, per sink. Deliberately a second statement: there is no partial index on `failed`,
@@ -161,7 +224,8 @@ _PENDING = """
 # becomes one if the table reaches millions of rows, and the fix then is a partial index on
 # `(sink) WHERE state = 'failed'` in `infra/sql/`, not a change here.
 _DEAD_LETTERED = """
-    SELECT sink, count(*) FROM result_publications WHERE state = 'failed' GROUP BY sink
+    SELECT sink, count(*) FROM result_publications
+    WHERE state = 'failed' AND sink = ANY(%s) GROUP BY sink
 """
 
 # The last backlog reading, per sink, for the three gauge families below. Refreshed by the drain,
@@ -322,6 +386,13 @@ async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
     run picks them up — at-least-once, which is exactly what the content-addressed upserts on the
     far end are built for.
 
+    **And when the budget runs out that way, this retires the row rather than stranding it.** The
+    sentence above was true for every attempt but the last: a row that spent its eighth attempt
+    without ever being marked stayed `pending` forever, unclaimable, uncounted as a dead letter,
+    ageing in the gauge the stuck-outbox alert reads, and untouched by the documented `--requeue`.
+    `_REAP_EXHAUSTED` runs first, in the same transaction, and moves exactly those rows to
+    `'failed'` — see that statement for the measurement.
+
     **This no longer refreshes the backlog gauges, and that is the fix rather than an omission.**
     It used to, with a comment saying the reading was taken after the claim "so the reading
     excludes the rows this pass is about to deliver". `_CLAIM` only increments `attempts`; it
@@ -332,10 +403,44 @@ async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
     must never give. The refresh now happens once per pass after every row has been marked — see
     `durable/publish_results._drain_result_publications`.
     """
+    budget = settings.result_publish_max_attempts
     async with _connect("outbox_claim") as conn:
-        cursor = await conn.execute(_CLAIM, (sink, settings.result_publish_max_attempts, limit))
+        # Reaped in the same transaction as the claim, so a row can never be both retired here and
+        # handed out below: the `attempts >= budget` reap and the `attempts < budget` claim
+        # partition the pending set, and one commit publishes both halves.
+        cursor = await conn.execute(
+            _REAP_EXHAUSTED,
+            (
+                f"spent all {budget} attempts without an outcome being recorded; a pass died "
+                "between claiming this row and marking it (worker eviction, activity timeout, or "
+                "the per-sink delivery ceiling). Requeue with `backfill_publications --requeue` "
+                "once the destination is reachable.",
+                sink,
+                budget,
+            ),
+        )
+        reaped = len(await cursor.fetchall())
+        cursor = await conn.execute(_CLAIM, (sink, budget, limit))
         rows = await cursor.fetchall()
         await conn.commit()
+    if reaped:
+        # The same counter `mark_failed` books, because it is the same transition: a row has left
+        # the queue without being published. Booked here rather than left to the gauge so that the
+        # dead-letter *rate* an operator alerts on covers this cause too — it was the one that
+        # produced nothing at all.
+        record_metric(lambda m: m.increment("chemclaw_results_dead_lettered_total", reaped))
+        log_event(
+            logger,
+            "publish.reaped_exhausted",
+            "publish[delivery]: %d row(s) for sink %r had spent their attempts with no outcome "
+            "recorded and were retired to dead-letter",
+            reaped,
+            sink,
+            level=logging.WARNING,
+            stage="delivery",
+            sink=sink,
+            dead_lettered=reaped,
+        )
     return [(int(row[0]), str(row[1]), row[2]) for row in rows]
 
 
@@ -435,14 +540,29 @@ async def refresh_backlog(dsn: str | None = None) -> None:
     """
     target = dsn if dsn is not None else settings.postgres_dsn
     try:
+        sinks = enabled_names()
         async with db.connection(target, operation="outbox_backlog") as conn:
-            cursor = await conn.execute(_PENDING)
+            cursor = await conn.execute(_PENDING, (sinks,))
             pending = await cursor.fetchall()
-            cursor = await conn.execute(_DEAD_LETTERED)
+            cursor = await conn.execute(_DEAD_LETTERED, (sinks,))
             dead = await cursor.fetchall()
+            cursor = await conn.execute(_ORPHANED, (sinks,))
+            orphaned = await cursor.fetchall()
     except Exception:
         logger.warning("publish: could not read the outbox backlog; gauges keep their last value")
         return
+    if orphaned:
+        degraded(
+            logger,
+            "result_outbox_orphaned",
+            "publish: %s row(s) are queued for sink(s) no longer enabled (%s); nothing drains, "
+            "prunes or requeues them. Re-enable the sink to deliver them, or discard them "
+            "deliberately",
+            sum(int(row[1]) for row in orphaned),
+            ", ".join(f"{row[0]}={row[1]}" for row in orphaned),
+            level=logging.WARNING,
+            exc_info=False,
+        )
     _replace(_PENDING_GAUGE, {str(row[0]): float(row[1]) for row in pending})
     # The enqueue epoch of each sink's oldest pending row; the gauge turns it into an age. A sink
     # with nothing pending has no oldest row, and `_replace` zeroes it — which reads as "0 seconds
@@ -474,7 +594,19 @@ def _oldest_pending_seconds() -> dict[str, float]:
     read as a negative age, which is a nonsense an alert cannot interpret.
     """
     now = time.time()
-    return {sink: max(0.0, now - enqueued) for sink, enqueued in _OLDEST_ENQUEUED.items()}
+    # **A stored epoch of zero means "nothing pending", not "enqueued in 1970".** `_replace` keeps a
+    # sink that has fallen to zero in the family rather than dropping it — the right call, because
+    # a disappearing series silently stops an alert evaluating — and this function used to subtract
+    # that placeholder from the clock. Measured on a sink whose queue had just drained:
+    # `chemclaw_outbox_oldest_pending_seconds{sink="alpha"} = 1788721651`, about 56 years, which
+    # fires `ChemclawResultOutboxStuck` at its worst reading at the exact moment the drain is
+    # healthiest. The docstring above already stated the intent — *"a sink with nothing pending has
+    # no oldest row, and `_replace` zeroes it, which reads as '0 seconds behind'"* — and the
+    # arithmetic said the opposite; this is the line that makes the sentence true.
+    return {
+        sink: 0.0 if enqueued <= 0.0 else max(0.0, now - enqueued)
+        for sink, enqueued in _OLDEST_ENQUEUED.items()
+    }
 
 
 def bind_backlog_gauges() -> None:

@@ -207,15 +207,18 @@ def test_the_webhook_sends_the_recipients_view_and_not_the_join_key() -> None:
     the webhook driver serialised the whole model with `model_dump()` and posted it to a third-party
     chat or ticketing host. The projection is an allow-list rather than a deny-list, so a field
     added later is omitted rather than leaked.
-    """
-    from chemclaw.deliver.message import Message
 
+    **Driven through the real driver rather than re-derived here.** This test used to build the
+    projection itself and assert on that, which made it a claim about `model_dump` and not about
+    what leaves the process — a driver that added a field after the projection would have been
+    invisible to it. It reads the captured request body instead, which is where the guarantee is.
+    """
     message = Message(
         recipient="u-1", subject="s", body="b", kind="digest", correlation_id="corr-secret"
     )
-    payload = message.model_dump(include={"recipient", "subject", "body", "kind"})
+    payload = _post_and_capture(message)[1]
     assert "correlation_id" not in payload
-    assert set(payload) == {"recipient", "subject", "body", "kind"}
+    assert set(payload) == {"recipient", "subject", "body", "kind", "message_id"}
 
 
 def test_the_webhook_never_follows_an_ambient_proxy() -> None:
@@ -753,4 +756,119 @@ def test_a_recipient_the_scrub_rewrote_is_reported_rather_than_silently_undelive
         intact = Message(recipient="chemist@example.com", subject="s", body="b").redacted()
     assert intact.recipient == "chemist@example.com" and not caplog.records, (
         "an ordinary address is untouched and unremarked"
+    )
+
+
+def _post_and_capture(message: Message) -> tuple[dict[str, str], dict[str, object]]:
+    """Drive the real webhook driver once and return `(headers, json body)` off the wire.
+
+    A `MockTransport` under the driver's own `httpx.AsyncClient`, so everything the driver decides
+    — the projection, the headers, the redirect policy, `trust_env` — is what is being observed.
+    """
+    import httpx
+
+    from chemclaw.deliver.driver import WebhookDeliveryDriver
+
+    seen: list[httpx.Request] = []
+
+    def _handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200)
+
+    real_client = httpx.AsyncClient
+    original = httpx.AsyncClient
+    try:
+        httpx.AsyncClient = lambda *a, **k: real_client(  # type: ignore[assignment,misc]
+            *a, **{**k, "transport": httpx.MockTransport(_handle)}
+        )
+        driver = WebhookDeliveryDriver(name="probe", url="http://127.0.0.1:1/hook")
+        asyncio.run(driver.deliver(message))
+    finally:
+        httpx.AsyncClient = original  # type: ignore[misc]
+    import json as _json
+
+    return dict(seen[0].headers), _json.loads(seen[0].content)
+
+
+def test_the_webhook_carries_a_dedup_handle_the_file_channel_already_had() -> None:
+    """Both shipped channels must answer "is this the same message" the same way.
+
+    `deliver_digest_activity` runs under `BAD_DATA_RETRY`, so a worker death after the POST landed
+    re-runs the activity and re-POSTs — at-least-once, which is the correct contract for delivery
+    and is precisely why the receiver needs a key. Measured before this: three `deliver()` calls of
+    one message left **one** file on the share and put **three** POSTs on the wire, with no field a
+    receiver could dedupe on, because `correlation_id` is (rightly) excluded from the payload.
+
+    Sent both ways: `Idempotency-Key` is what chat and ticketing hosts actually read, and
+    `message_id` in the body is what a site's own receiver reads.
+    """
+    from chemclaw.deliver.driver import message_id
+
+    message = Message(recipient="u-1", subject="s", body="b", kind="digest")
+    headers, payload = _post_and_capture(message)
+    assert payload["message_id"] == message_id(message)
+    assert headers["idempotency-key"] == message_id(message)
+
+
+def test_two_messages_differing_only_in_kind_are_not_the_same_message() -> None:
+    """A digest and a job result with the same body must not share an `Idempotency-Key`.
+
+    They would if the handle were the file driver's original three-field hash, which spelled the
+    kind as the filename's prefix instead — and a receiver deduping on it would drop a real
+    `job-result` because a digest with the same body had already arrived.
+    """
+    from chemclaw.deliver.driver import message_id
+
+    common = {"recipient": "u-1", "subject": "s", "body": "b"}
+    assert message_id(Message(**common, kind="digest")) != message_id(
+        Message(**common, kind="job-result")
+    )
+
+
+def test_the_file_channel_is_never_observed_half_written(tmp_path: Path) -> None:
+    """A reader on the share must never see a truncated digest.
+
+    `Path.write_text` truncates and then writes; a share is read by people and scripts holding no
+    lock, and a re-delivery overwrites the same path by design (the filename is a content hash,
+    which is what makes this channel idempotent) — so the window opens on every retry. Measured on
+    the unfixed driver with a ~520 kB body, 60 re-deliveries and a concurrent reader: **227 of
+    1,883** observations (12%) saw a short file. After the temp-file + `os.replace`: 0 of 7,409.
+
+    Asserted as "never", not as a rate: `os.replace` is atomic within a filesystem, so one short
+    read is a regression rather than noise.
+    """
+    import threading
+
+    from chemclaw.deliver.driver import FileDeliveryDriver as Driver
+
+    driver = Driver(name="probeshare", directory=str(tmp_path))
+    message = Message(recipient="u-1", subject="digest", body="x" * 200_000, kind="digest")
+    asyncio.run(driver.deliver(message))
+    full = next(tmp_path.glob("*.md")).stat().st_size
+
+    stop = threading.Event()
+    short: list[int] = []
+
+    def _read() -> None:
+        while not stop.is_set():
+            for path in tmp_path.glob("*.md"):
+                try:
+                    size = path.stat().st_size
+                except FileNotFoundError:
+                    continue
+                if size != full:
+                    short.append(size)
+
+    reader = threading.Thread(target=_read, daemon=True)
+    reader.start()
+    try:
+        for _ in range(40):
+            asyncio.run(driver.deliver(message))
+    finally:
+        stop.set()
+        reader.join(timeout=5)
+
+    assert not short, (
+        f"{len(short)} read(s) saw a partial digest (sizes {sorted(set(short))[:3]}); the share is "
+        "read without a lock, so a rewrite must be an atomic replace"
     )

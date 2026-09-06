@@ -358,6 +358,54 @@ CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
     "calculation_flag": ("calc_ref", "ordinal"),
 }
 
+# The columns whose *absence* changes what a row asserts, per table — as opposed to the ones whose
+# absence merely records less.
+#
+# **The distinction the "write down to the schema you find" rule was missing.** That rule is right
+# and stays: a site may not grant DDL to the runtime principal, so this image can be ahead of the
+# store, and refusing every row over one new provenance column would turn a schema *lag* into a
+# total publish outage. But the omission filter could not tell a new metadata column from the ones
+# carrying the science. Measured against a `property_value` one migration behind, missing
+# `value_canonical` and `uncertainty`: the delivery **returned normally** and was booked
+# `delivered`, and the row it wrote said `uncertainty_kind='reported'` with no uncertainty and no
+# `value_canonical` — the column the DDL itself calls *"THE predicate column ... Every range filter
+# reads this and nothing else"*. So the store's headline query silently returns nothing for those
+# rows while they positively claim an error bar they do not carry.
+#
+# A missing column here is therefore the same class of fault as a missing *table* and gets the same
+# answer: `SinkRejectedError` naming `sink_schema`. Only the four fact tables are listed, because
+# they are the only ones where a column carries a measurement rather than a description of one; the
+# conflict key is included in each because an upsert that cannot be keyed is not an upsert.
+REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
+    "property_value": frozenset(
+        {
+            *CONFLICT_KEYS["property_value"],
+            "calc_ref",
+            "property",
+            "scope_kind",
+            # The value, in all three of the shapes a fact may take, plus what the calculator
+            # actually said and the unit it said it in.
+            "value_canonical",
+            "value_bool",
+            "value_text",
+            "reported_value",
+            "reported_unit",
+            # The error bar and its kind travel together: `uncertainty_kind` without `uncertainty`
+            # is a claim about a number the row does not hold.
+            "uncertainty",
+            "uncertainty_kind",
+        }
+    ),
+    "calculation_site_value": frozenset({*CONFLICT_KEYS["calculation_site_value"], "value"}),
+    "calculation_point_value": frozenset(
+        {*CONFLICT_KEYS["calculation_point_value"], "value", "x_value", "x_unit"}
+    ),
+    "conformer": frozenset(
+        {*CONFLICT_KEYS["conformer"], "energy_hartree", "relative_kcal", "population"}
+    ),
+}
+
+
 # Columns a *blank* incoming value must never overwrite.
 #
 # `structure` is content-addressed: `structure_id` is a hash of the geometry, so two rows with one

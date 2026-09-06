@@ -345,6 +345,24 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
+- [ ] **The result outbox has no claim lease, so two overlapping drains spend one row's budget
+      twice** — [S], found 2026-09-06 in the wave-6 delivery review
+      (`D-2026-09-06-a-response-class-nobody-named-is-a-delivery-nobody-made`, decision 3).
+      `_CLAIM` spends the attempt and commits before the delivery by design, so `SKIP LOCKED`
+      excludes only the *claim*, which lasts milliseconds — and the case the comment named (a
+      scheduled drain plus an operator's manual one) overlaps over the *delivery*, which lasts
+      seconds to a minute. Measured with a 1.0 s sink and a second drain started 0.3 s in: both
+      delivered the same row, `attempts=2`. Duplicate delivery is harmless (every far-side key is a
+      content hash, verified over three redeliveries), so the harm is that an attempt budget of 8
+      empties after 4 real attempts against one destination's outage. The reaper added in that ADR
+      makes the outcome an honest dead letter rather than a zombie, so this is no longer a
+      *lost-row* defect — it is a budget that is half what it says. The fix is a lease:
+      `state='in_flight'` plus `claimed_at` in `infra/sql/050_result_publications.sql` (a new
+      migration and a widened `CHECK`), set by `_CLAIM`, cleared by `mark_delivered`/`mark_failed`,
+      and returned to `pending` by a reaper on age — at which point the second run skips the row by
+      *predicate* rather than by lock duration and `_CLAIM`'s comment becomes true as written. It is
+      a schema change, which is why it is a row here rather than part of that commit.
+
 - [ ] **The two eval gates score literals written in their own case files** — [M], same review.
       11 of 13 baseline metrics are read from the case file rather than computed, so a metric that
       stops measuring and answers "perfect" passes both `make eval-strict` and

@@ -235,11 +235,36 @@ class HttpResultSink:
             raise SinkUnavailableError(
                 f"result sink {self._name!r} answered {response.status_code}; will retry"
             )
-        if response.status_code >= 400:
-            # The body is included because it is the receiver's own account of what was wrong with
-            # the content, and this failure is one an operator has to read to fix. Bounded, because
-            # an HTML error page is not worth a log line of unbounded length.
+        if 200 <= response.status_code < 300:
+            return
+        if response.status_code < 400:
+            # **A redirect is a refusal, and it used to be a reported success.** The classification
+            # below was written as two rejections with an implicit `return` for everything else, so
+            # a 3xx — which `follow_redirects=False` (httpx's default, and this fleet's deliberate
+            # posture) leaves as the response — fell through both guards and `deliver()` returned.
+            # Measured end to end: a 302 endpoint received the POST, wrote nothing, and
+            # `result_publications` read `state='delivered'` with `delivered_at` set, while this
+            # module's own `_record` line for that same call said `sink.failed ... -> 3xx`. The row
+            # is then unreachable — `requeue_failed` matches `failed` only — and retention deletes
+            # it. That is the reporting-success-without-delivering class, on the seam carrying the
+            # scientific record.
+            #
+            # **Rejected rather than retried**, because the batch did not land where the manifest
+            # addressed it and no retry to the same URL changes that: the fix is the `url`, and a
+            # dead letter is how an operator is told so. Following it instead is not on the table —
+            # the records are confidential chemistry and the request may carry a bearer token,
+            # neither of which may reach an address no manifest named (the reason
+            # `connectors/registry.py` sets `follow_redirects=False` too).
             raise SinkRejectedError(
-                f"result sink {self._name!r} refused the batch with {response.status_code}: "
-                f"{response.text[:500]}"
+                f"result sink {self._name!r} answered {response.status_code} "
+                f"(Location: {response.headers.get('location', '') or 'unset'}); this client does "
+                "not follow a redirect, so the batch was not delivered. Point the sink's `url` at "
+                "the final address."
             )
+        # The body is included because it is the receiver's own account of what was wrong with the
+        # content, and this failure is one an operator has to read to fix. Bounded, because an HTML
+        # error page is not worth a log line of unbounded length.
+        raise SinkRejectedError(
+            f"result sink {self._name!r} refused the batch with {response.status_code}: "
+            f"{response.text[:500]}"
+        )

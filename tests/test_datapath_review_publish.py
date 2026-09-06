@@ -111,7 +111,9 @@ def test_the_dead_letter_count_is_per_transition_not_per_call() -> None:
     assert _counter("chemclaw_results_dead_lettered_total") == before + 3
 
 
-def test_claiming_publishes_no_backlog_reading_because_a_claim_delivers_nothing() -> None:
+def test_claiming_publishes_no_backlog_reading_because_a_claim_delivers_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`_CLAIM` only spends the attempt; the row it returns is still `pending`.
 
     The refresh used to sit inside `claim()`, justified by a comment saying the reading was taken
@@ -125,6 +127,14 @@ def test_claiming_publishes_no_backlog_reading_because_a_claim_delivers_nothing(
     asyncio.run(migrated_db_or_skip())
     sink = "review-claim"
     outbox._PENDING_GAUGE.pop(sink, None)
+    # **The backlog gauges read only the *enabled* sinks**, so this probe sink has to be one for
+    # the second half of this test to observe anything. That scoping is deliberate: rows queued for
+    # a sink an operator has removed from `CHEMCLAW_RESULT_SINKS` are drained by nobody and pruned
+    # by nobody, and counting them here made `ChemclawResultOutboxStuck` fire permanently for a
+    # destination that was switched off on purpose. Patched at the module the reader uses, exactly
+    # as `tests/test_publish_outbox.py::_with_sink` does, because `enabled()` validates names
+    # against discovered manifests and this file is testing the reading, not discovery.
+    monkeypatch.setattr(outbox, "enabled_names", lambda: [sink])
 
     async def run() -> list[int]:
         async with db.connection(settings.postgres_dsn) as conn:
