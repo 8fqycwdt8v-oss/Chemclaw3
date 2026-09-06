@@ -98,7 +98,7 @@ class WarehouseElnAdapter:
             self._warehouse = open_warehouse(self._binding.connection)
         return self._warehouse
 
-    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+    async def fetch_new_entries(self, since: datetime, limit: int | None = None) -> list[RawEntry]:
         """Every reaction created or amended at or after `since`, oldest first.
 
         Inclusive on `since` because the sync's cursor is the newest timestamp already seen and
@@ -123,17 +123,40 @@ class WarehouseElnAdapter:
         `bodies` lookup each and are skipped as unchanged; what the block's size decides is how much
         the source re-reads, not whether it makes progress. A site paying that noticeably should
         bind a finer watermark column, which is what the warning above tells it.
+
+        **`limit` reaches the `LIMIT`, which is the point of it existing.** The durable sync drains
+        in chunks of `eln_sync_batch_size` and throws away everything past that, so every
+        continuation chunk asked this warehouse for `entry.fetch_limit` rows to keep 100 — 500 at
+        the binding's default, up to 5,000 at its ceiling, so a 5x to 50x over-read of a table per
+        chunk for the length of the drain. It is not only the entry query: every fetched key
+        becomes a bind parameter in each child relation's `IN (...)` list, so the related-table
+        reads were over-read by the same factor. The ordinary page is now `min(limit,
+        fetch_limit)`, which is the half of the chunked re-read a source *can* bound — the file
+        drops next door cannot, and say so.
+
+        The tie-crossing pages below deliberately keep the binding's own `fetch_limit`: a
+        continuation page exists to get *past* a block of rows sharing one watermark, so shrinking
+        it would shrink the block this fetch can cross — the caller's bound is on the ordinary
+        read, not on the recovery path.
+
+        Args:
+            since: The cursor; rows at or after it, in watermark order.
+            limit: At most this many rows on the ordinary page. `None` reads the binding's page.
         """
         warehouse = await self._connection()
         entry = self._ingest.entry
+        page_size = min(limit, entry.fetch_limit) if limit is not None else entry.fetch_limit
         rows: list[dict[str, Any]] = []
         after_key = ""
         for _ in range(_MAX_TIE_PAGES):
-            page = await self._page(warehouse, since, after_key)
+            # The ordinary page is the caller's bound; a continuation page is crossing a watermark
+            # block and takes the binding's full page, for the reason the docstring gives.
+            size = entry.fetch_limit if after_key else page_size
+            page = await self._page(warehouse, since, after_key, size)
             rows.extend(page)
             # Short of the limit means the source had nothing more to give, so there is nothing
             # waiting and nothing to page past.
-            self._truncated = len(page) == entry.fetch_limit
+            self._truncated = len(page) == size
             if not self._truncated or self._watermark(rows[-1]) > since:
                 break
             last_key = rows[-1].get(entry.key)
@@ -216,12 +239,17 @@ class WarehouseElnAdapter:
         return self._truncated
 
     async def _page(
-        self, warehouse: Warehouse, since: datetime, after_key: str
+        self, warehouse: Warehouse, since: datetime, after_key: str, size: int
     ) -> list[dict[str, Any]]:
-        """One bounded page of entry rows, starting at the cursor or inside a watermark block."""
+        """One page of `size` entry rows, at the cursor or inside a watermark block.
+
+        `size` is passed rather than read from the binding because the caller's chunk bound and the
+        binding's page are two different numbers on one fetch — the ordinary page takes the
+        smaller, the tie-crossing page takes the binding's.
+        """
         entry = self._ingest.entry
         statement, params = sql.entry_statement(
-            entry, warehouse.placeholder, since, entry.fetch_limit, after_key
+            entry, warehouse.placeholder, since, size, after_key
         )
         async with warehouse.cursor() as cursor:
             await cursor.execute(statement, params)

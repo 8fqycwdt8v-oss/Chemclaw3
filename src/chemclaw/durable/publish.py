@@ -370,6 +370,43 @@ def light_write_queue_wait_timeout() -> timedelta:
     return timedelta(seconds=settings.template_step_timeout_seconds)
 
 
+def fan_out_queue_wait_timeout() -> timedelta:
+    """How long a **fan-out child's** activity may sit unclaimed before the child gives up.
+
+    The same construction as `connector_queue_wait_timeout` below, one level over, and it is here
+    for the same defect: `fan_out_child_timeout_seconds` is a wall-clock ceiling on the child, the
+    child's single activity passed core's flat `queue_wait_timeout()`, and the wait precedes the
+    work — so what the ceiling had to contain was `q + w` = 3,600 + 300 = 3,900 s against a 3,600 s
+    ceiling. The ceiling was *exactly equal* to the wait, which makes the child's own
+    `SCHEDULE_TO_START` expiry unreachable: the execution timeout always fires first, and an
+    execution timeout is not delivered to workflow code. Measured on the real broker scaled 1000:1,
+    a section whose queue nobody served came back as `ChildWorkflowError: Child Workflow execution
+    timed out` and was dropped by `fan_out`; with the ceiling clear of `q + w` the same run
+    produced `retrieval_failed:TimeoutError`, which is the degradation `ReportSectionWorkflow`'s
+    `except ActivityError` was written for and `activity_failure_reason` names the cause of.
+
+    Subtracting rather than taking a fraction, for the reason `connector_queue_wait_timeout` spells
+    out at length: a fraction makes `q` grow with the very ceiling it has to fit inside, so no
+    fraction makes the composite fit. What is left of the ceiling once one worst attempt and its
+    overhead are paid for is exactly the headroom a queued child may spend waiting, and the
+    composite is then at most `(C - w - a) + w = C - a` whatever the three numbers are.
+
+    At the shipped settings that is 3,600 - 300 - 30 = 3,270 s — still nine tenths of core's hour,
+    so nothing this bound rejects was passing before it. `longest_fan_out_activity` is `Settings`'
+    own max over the two children's budgets, read rather than restated, because two spellings of
+    that max is how `q + w` came apart on the connector side.
+
+    Returns:
+        The `schedule_to_start_timeout` a fan-out child's activity passes. Strictly positive by
+        construction: `_the_fan_out_ceiling_covers_the_section_it_bounds` refuses a ceiling that
+        does not exceed the longest fan-out activity plus one activity's overhead.
+    """
+    longest, _ = settings.longest_fan_out_activity
+    return timedelta(
+        seconds=settings.fan_out_child_timeout_seconds - longest - settings.activity_timeout_seconds
+    )
+
+
 def connector_queue_wait_timeout() -> timedelta:
     """How long a **connector bundle's** activity may sit unclaimed on its own queue.
 

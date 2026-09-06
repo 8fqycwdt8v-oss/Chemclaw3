@@ -305,6 +305,21 @@ def require_pg_tls(dsn: str, name: str) -> None:
     )
 
 
+# One row per iteration-bounded Temporal Schedule: the setting that bounds how many iterations a
+# run may take, the setting that budgets one of its activities, and how many activities one
+# iteration dispatches. `_a_bounded_run_fits_the_ceiling_that_kills_it` multiplies them out; the
+# third column is *derived from each workflow's own loop* by
+# `tests/test_config.py::test_the_dispatch_count_each_bounded_drain_declares_is_the_one_it_runs`,
+# so a loop that gains an activity fails there rather than quietly overrunning the ceiling. A new
+# iteration-bounded drain is one row here and nothing else.
+_BOUNDED_DRAINS: tuple[tuple[str, str, int], ...] = (
+    ("corpus_sync_max_iterations", "corpus_sync_timeout_seconds", 1),
+    ("document_sync_max_iterations", "document_sync_timeout_seconds", 3),
+    ("label_sync_max_iterations", "label_sync_timeout_seconds", 1),
+    ("eln_sync_max_iterations", "eln_sync_timeout_seconds", 3),
+)
+
+
 class Settings(
     ObservabilitySettings,
     TemporalSettings,
@@ -382,6 +397,33 @@ class Settings(
             (
                 (self.xtb_job_timeout_seconds, "xtb_job_timeout_seconds"),
                 (self.result_republish_timeout_seconds, "result_republish_timeout_seconds"),
+            )
+        )
+        return longest
+
+    @property
+    def longest_fan_out_activity(self) -> tuple[float, str]:
+        """The longest activity budget a *fan-out* child can spend, and its setting name.
+
+        The twin of `longest_bundle_activity` one level over: two fan-out children exist
+        (`ReportSectionWorkflow`'s retrieval, `PublishNoteWorkflow`'s note write) and both run a
+        single activity under `fan_out_child_timeout_seconds`. Two readers need the same number and
+        they bound each other — `_the_fan_out_ceiling_covers_the_section_it_bounds` checks that the
+        ceiling funds one attempt, and `durable/publish.py::fan_out_queue_wait_timeout` derives the
+        headroom a queued child may spend waiting as ceiling minus this minus one activity's
+        overhead — so it is written once, for the reason the bundle twin gives.
+
+        A property on the composed class because the max spans two sections (`ReportSettings` and
+        `PublishSettings`); a third fan-out child is covered by being added to the tuple below, and
+        the wait bound narrows itself for free.
+
+        Returns:
+            The largest activity budget in seconds and the name of the setting that carries it.
+        """
+        longest: tuple[float, str] = max(
+            (
+                (self.report_section_timeout_seconds, "report_section_timeout_seconds"),
+                (self.note_write_timeout_seconds, "note_write_timeout_seconds"),
             )
         )
         return longest
@@ -924,17 +966,91 @@ class Settings(
         pre-empts a section that was still running and reports it as a timed-out child — the guard
         causing the failure it exists to bound. Strictly greater, because equality is the defect.
 
-        Scoped here rather than to `ReportSettings` only for symmetry with the validator below; both
-        settings live in that section, so this one could move if a second cross-section rule ever
-        needs the company.
+        **It checked the work and not the wait, which is the correction
+        `connector_queue_wait_timeout` was written for and which was never applied here.** Both
+        children passed core's flat `queue_wait_timeout()` as their `schedule_to_start`, and the
+        wait precedes the work, so what the ceiling has to contain is `q + w` — 3,600 + 300 = 3,900
+        against a 3,600 ceiling on the section, 3,600 + 120 = 3,720 on the note. The ceiling was
+        *exactly* the wait, so a section's own `SCHEDULE_TO_START` expiry could not be observed:
+        driven on the real broker scaled 1000:1, both children came back as bare
+        `ChildWorkflowError: Child Workflow execution timed out` — an execution timeout is not
+        delivered to workflow code — where the shape below produces the designed
+        `retrieval_failed` marker with `activity_failure_reason`'s "nothing is serving that queue"
+        cause behind it.
+
+        The composite is made to fit *by construction* rather than by a second number to keep in
+        step: `durable/publish.py::fan_out_queue_wait_timeout` subtracts this rule's own floor from
+        the ceiling, so `(C - w - a) + w = C - a` whatever the three numbers are. This rule is what
+        keeps that wait strictly positive, which is why it now reserves one activity's overhead
+        exactly as `_the_job_ceiling_covers_the_activity_it_bounds` does.
+
+        Scoped here rather than to `ReportSettings` because the max spans two sections; both
+        settings the max reads live in `longest_fan_out_activity`, read rather than restated for
+        the reason that property gives.
         """
-        if self.fan_out_child_timeout_seconds <= self.report_section_timeout_seconds:
+        longest, budget = self.longest_fan_out_activity
+        needed = longest + self.activity_timeout_seconds
+        if self.fan_out_child_timeout_seconds <= needed:
             raise ValueError(
                 f"fan_out_child_timeout_seconds={self.fan_out_child_timeout_seconds} does not "
-                f"cover the section it bounds: one section may take "
-                f"{self.report_section_timeout_seconds}s (report_section_timeout_seconds). Raise "
-                "the ceiling above it, or lower the section budget."
+                f"cover the child it bounds: one attempt at the longest fan-out activity may take "
+                f"{longest}s ({budget}) and the child's own overhead up to "
+                f"{self.activity_timeout_seconds}s more (activity_timeout_seconds). Raise "
+                f"fan_out_child_timeout_seconds above {needed}, or lower {budget} — the child's "
+                "queue wait is derived from what is left, so a ceiling that does not clear this "
+                "floor leaves no wait to give it."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _a_bounded_run_fits_the_ceiling_that_kills_it(self) -> Self:
+        """A drain that bounds its own run must be able to *finish* one inside `run_timeout`.
+
+        Four Schedules drain in chunks and hand their position to a fresh execution with
+        `continue_as_new` after `*_max_iterations` of them (`durable/corpus_sync.py`,
+        `document_sync.py`, `label_sync.py`, `eln_sync.py`). `schedule_run_timeout_seconds` is the
+        `run_timeout` on that same run. Nothing checked that the first number's worth of work fits
+        the second, and at the shipped defaults it did not: 100 iterations of a 900 s activity plus
+        the planning activity is **90,900 s against an 86,400 s ceiling**, and the document share's
+        loop dispatches three activities per iteration, which is 270,900 s.
+
+        **What that costs is the whole reason this is a refusal rather than a comment.** A run
+        killed at the ceiling is a `TIMED_OUT` that no `except` sees, and the setting's own
+        paragraph names the two jobs that keep no row between runs — `corpus_sync` in release mode
+        and `document_sync` — so their next *fire* starts from page one. A corpus large enough to
+        use its iteration budget therefore burnt a day of a worker slot per fire and made no net
+        progress: the wedge the ceiling exists to prevent, arrived at from the other side.
+
+        **Work only, and the queue wait is deliberately not charged.** A dispatch may also sit up
+        to `activity_queue_wait_seconds` on the queue, which at the shipped hour would dominate
+        every term here and force `document_sync_max_iterations` to 6. That is the wrong reading of
+        what the ceiling is for: a run that overruns because its activities are unclaimed is
+        precisely the stuck run this ceiling is the backstop for, and killing it is correct. A run
+        that overruns doing its own budgeted work is the defect, and that is what this refuses.
+        The residual is real and is stated rather than argued away — under sustained backpressure a
+        bounded run can still be killed, and for the two uncursored jobs that still costs the whole
+        drain.
+
+        `_BOUNDED_DRAINS` carries the arithmetic's third term because a loop body is not something
+        this object can see; the test named there derives it from the workflow's own source, so the
+        declaration cannot go stale in silence.
+        """
+        for iterations_name, budget_name, per_iteration in _BOUNDED_DRAINS:
+            iterations: int = getattr(self, iterations_name)
+            budget: float = getattr(self, budget_name)
+            # The planning activity every one of these runs before its loop, then the loop.
+            needed = budget * (1 + iterations * per_iteration)
+            if needed > self.schedule_run_timeout_seconds:
+                raise ValueError(
+                    f"{iterations_name}={iterations} does not fit the ceiling that kills the run: "
+                    f"one planning activity plus {iterations} iteration(s) of {per_iteration} "
+                    f"activity/activities at {budget}s ({budget_name}) is {needed}s against "
+                    f"schedule_run_timeout_seconds={self.schedule_run_timeout_seconds}. Lower "
+                    f"{iterations_name} to at most "
+                    f"{int((self.schedule_run_timeout_seconds / budget - 1) // per_iteration)}, or "
+                    f"lower {budget_name} — raising the ceiling instead makes a stuck run "
+                    "invisible for longer, which is what it exists to bound."
+                )
         return self
 
     @model_validator(mode="after")

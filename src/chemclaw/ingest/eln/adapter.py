@@ -128,7 +128,7 @@ class RawEntry(BaseModel):
 class ElnAdapter(Protocol):
     """Fetch new ELN entries and map them to the canonical schema. One per ELN source."""
 
-    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+    async def fetch_new_entries(self, since: datetime, limit: int | None = None) -> list[RawEntry]:
         """Return entries created *or amended* at or after `since` (the sync's high-water cursor).
 
         Inclusive on purpose: the cursor is the newest timestamp already seen, and an
@@ -140,6 +140,31 @@ class ElnAdapter(Protocol):
         compare the later of the two against `since` and set `RawEntry.modified_at` — otherwise a
         correction to an old entry is never fetched, and the sync cannot notice what it never
         sees. `entry_window` is that comparison, written once so two adapters cannot disagree.
+
+        **`limit` bounds the read, where the read can be bounded.** The durable sync drains a
+        source in chunks and truncates what it gets back to `eln_sync_batch_size`
+        (`durable/eln_sync.py::_BoundedIngest`) — so without this, every chunk re-read the whole
+        outstanding set to keep a hundredth of it, and a drain cost O(corpus²/batch). Measured on a
+        3,000-file drop: 30 chunks, 90,000 file reads, 2.55 s against 0.31 s for a corpus a third
+        the size. Passing the number down lets a source that can push the bound into its own read
+        do so; the warehouse adapter turns it into its `LIMIT`, cutting a continuation
+        chunk's read from the binding's page (500 rows by default) to the chunk (100).
+
+        It is a **capability, not a requirement**, on the same terms as `fetch_was_truncated`
+        below: an adapter that cannot bound its read may ignore it, because the caller truncates
+        anyway. What an adapter may **never** do is return a non-prefix subset — the entries it
+        withholds must all be *later*, in `entry_window` order, than every entry it returns.
+        Anything else advances the cursor past an entry that was never offered, and no later fetch
+        offers it again. That is why the file-drop adapters ignore this: their scan is ordered by
+        filename and an entry's window is inside the payload, so a break in that scan drops
+        entries the cursor then skips for good.
+
+        `None` means unbounded, which is what a caller reading a whole corpus passes.
+
+        Args:
+            since: The fetch floor — entries at or after it, in `entry_window` order.
+            limit: At most this many entries *strictly newer* than `since`; entries at or before
+                it (the sync's overlap replay) are not counted against it. `None` is unbounded.
         """
         ...
 
@@ -249,9 +274,9 @@ class DatedIngest:
         """
         return self._inner
 
-    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
-        """Delegate unchanged — dating is purely a mapping concern."""
-        return await self._inner.fetch_new_entries(since)
+    async def fetch_new_entries(self, since: datetime, limit: int | None = None) -> list[RawEntry]:
+        """Delegate unchanged — dating is purely a mapping concern, and so is bounding."""
+        return await self._inner.fetch_new_entries(since, limit)
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Map through the wrapped adapter, then date the record if it came back undated."""

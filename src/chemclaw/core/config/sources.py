@@ -82,7 +82,15 @@ class SourcesSettings(BaseSettings):
     document_sync_heartbeat_timeout_seconds: float = Field(default=120.0, gt=0)
     # How many chunks one workflow run drains before continuing as new. Event history is bounded,
     # and a first full crawl of a TB share is thousands of chunks — far past what one run may hold.
-    document_sync_max_iterations: int = Field(default=100, ge=1)
+    # **Derived from `schedule_run_timeout_seconds` rather than chosen**, and it moved from 100
+    # to 30 when that arithmetic was first done: `_a_bounded_run_fits_the_ceiling_that_kills_it`
+    # refuses a count whose iterations cannot finish inside the `run_timeout` on the very run
+    # they bound. It is a third of its siblings' because this loop dispatches three activities per
+    # iteration, not one: at 100 that was 270,900 s against 86,400 s, and this drain also keeps no
+    # cursor between fires. What the cut costs is one extra `continue_as_new`
+    # per 30 iterations and nothing else — the hop carries the drain's position — and what it
+    # buys is that a run large enough to use its budget is no longer killed near the end of one.
+    document_sync_max_iterations: int = Field(default=30, ge=1)
     # How many stale chunks one re-embedding pass refreshes. Its own bound because the work is
     # unlike the crawl's: no filesystem at all, just a read of stored text, one embedding batch and
     # an update — so it is paced by the embedding endpoint rather than by a network share.
@@ -157,6 +165,13 @@ class SourcesSettings(BaseSettings):
     # rather than a stream, so this bounds a whole-set read rather than a page — larger than the
     # ELN's per-chunk budget for that reason, and still a ceiling rather than an expectation.
     commitment_sync_timeout_seconds: float = Field(default=300.0, gt=0)
+    # Dead-worker detection for that pass, the one gap in an otherwise complete sweep: every other
+    # long background activity in `durable/` carries a heartbeat timeout and this one carried none,
+    # so a worker that died mid-mirror was invisible for the whole 300 s start-to-close and the
+    # redelivery that would have salvaged the pass waited it out. A fifth of the budget, the same
+    # ratio `eln_sync_heartbeat_timeout_seconds` uses against its own, so `durable/heartbeat.py`
+    # derives a 15 s beat — comfortably inside a portfolio export's own latency.
+    commitment_sync_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
 
     # How often the mirror refreshes, in minutes. It is also runnable on demand. The default is
     # daily: a portfolio tool's dates move on a human cadence, and a tighter loop would spend a

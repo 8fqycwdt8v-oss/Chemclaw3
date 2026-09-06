@@ -402,3 +402,62 @@ def test_the_eviction_sweep_beats_inside_the_budget_it_reports_within(
         "a sweep that scans the whole blob store must beat *while it runs*, not only at the start"
     )
     assert any("still running" in beat for beat in beats)
+
+
+def test_every_beating_activity_in_durable_is_dispatched_with_a_heartbeat_timeout() -> None:
+    """A beat nobody is listening for is not liveness, and this was true of one activity.
+
+    `mirror_commitments_activity` reached an external portfolio system and then wrote every row it
+    got back under a 300 s start-to-close with **no** `heartbeat_timeout` — the only gap in an
+    otherwise complete sweep of eleven heartbeat/budget pairs. Temporal only checks the interval a
+    dispatch declares, so an activity that beats without one is invisible for its whole budget, and
+    a dispatch that declares one over an activity that never beats kills healthy work at it. Both
+    are the same missing pairing, so both are asserted here.
+
+    Derived from the tree rather than listed: the beating activities are the ones whose own body
+    calls `activity.heartbeat()` or `durable.heartbeat.beating(...)`, and the dispatches are the
+    `execute_activity(<name>, ...)` sites that name them. A new long activity is covered by being
+    written, which is the property a list of eleven pairs does not have.
+    """
+    beats: set[str] = set()
+    dispatched: dict[str, set[str]] = {}
+    for path in sorted((_SRC_ROOT / "durable").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef):
+                body = ast.dump(node)
+                if "'heartbeat'" in body or "'beating'" in body:
+                    beats.add(node.name)
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            if node.func.attr not in {"execute_activity", "start_activity"}:
+                continue
+            if not (node.args and isinstance(node.args[0], ast.Name)):
+                continue
+            where = f"{path.name}:{node.lineno}"
+            dispatched.setdefault(node.args[0].id, set()).add(
+                where if any(kw.arg == "heartbeat_timeout" for kw in node.keywords) else f"!{where}"
+            )
+
+    unheard = sorted(
+        f"{name} at {site[1:]}"
+        for name, sites in dispatched.items()
+        if name in beats
+        for site in sites
+        if site.startswith("!")
+    )
+    assert unheard == [], (
+        "these activities heartbeat but are dispatched without a heartbeat_timeout, so the beat "
+        f"is unobserved and a dead worker is invisible for the whole start-to-close: {unheard}"
+    )
+    silent = sorted(
+        f"{name} at {site}"
+        for name, sites in dispatched.items()
+        if name not in beats
+        for site in sites
+        if not site.startswith("!")
+    )
+    assert silent == [], (
+        "these dispatches declare a heartbeat_timeout over an activity that never beats, so "
+        f"Temporal will kill work that is running normally: {silent}"
+    )

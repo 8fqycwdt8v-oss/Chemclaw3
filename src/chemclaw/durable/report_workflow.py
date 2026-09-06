@@ -36,7 +36,11 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.science.fingerprints.store import default_reaction_store
 
 from chemclaw.durable.orchestrator import fan_out
-from chemclaw.durable.publish import BAD_DATA_RETRY, publish_note, queue_wait_timeout
+from chemclaw.durable.publish import (
+    BAD_DATA_RETRY,
+    fan_out_queue_wait_timeout,
+    publish_note,
+)
 
 
 def default_retrievers() -> list[SourceRetriever]:
@@ -145,7 +149,13 @@ class ReportSectionWorkflow:
                 retrieve_section,
                 request,
                 start_to_close_timeout=timedelta(seconds=settings.report_section_timeout_seconds),
-                schedule_to_start_timeout=queue_wait_timeout(),
+                # **The fan-out wait, not core's hour**: this child runs under
+                # `fan_out_child_timeout_seconds`, and core's flat hour equalled that ceiling, so
+                # the SCHEDULE_TO_START expiry the `except` below degrades on could never be
+                # reached — the child died as an execution timeout, which is delivered to nobody.
+                # `fan_out_queue_wait_timeout` is the ceiling's headroom, so `q + w` fits it by
+                # construction.
+                schedule_to_start_timeout=fan_out_queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
         except ActivityError:

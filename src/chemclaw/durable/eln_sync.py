@@ -194,9 +194,21 @@ class _BoundedIngest:
 
         `ingest/eln/warehouse/sql.py` already orders and limits on `COALESCE(modified, created)`,
         so this also makes the in-process cap agree with the page boundary the source itself cut.
+
+        **The bound is now offered to the source as well as applied here, and only on the chunks
+        where the two mean the same thing.** Truncating after the read is what made a chunked drain
+        re-read the whole outstanding set per chunk — O(corpus²/batch); the warehouse adapter turns
+        `limit` into its `LIMIT` and stops asking for 5,000 rows to keep 100. It is offered only
+        when `since >= self._since`, which is exactly a chunk with no overlap rewind behind it: on
+        the *first* chunk of a run the caller's floor sits `eln_sync_overlap_seconds` before the
+        cursor, so a `limit` applied at that floor would be spent on the overlap replay and could
+        return a chunk of nothing but already-ingested entries — a fetch that reports itself
+        truncated while the cursor cannot advance, which is the wedge the workflow's own guard
+        stops loudly. Every continuation chunk, which is what a large drain is made of, is bounded.
         """
+        bounded = since >= self._since
         entries = sorted(
-            await self._inner.fetch_new_entries(since),
+            await self._inner.fetch_new_entries(since, self._limit if bounded else None),
             key=lambda entry: (entry_window(entry.created_at, entry.modified_at), entry.entry_id),
         )
         overlap = [

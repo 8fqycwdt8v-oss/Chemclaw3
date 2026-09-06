@@ -9,8 +9,10 @@ no bundle has a second way in.
 import ast
 import asyncio
 import logging
+import os
 import subprocess
 import sys
+import time
 from datetime import date
 from pathlib import Path
 
@@ -1134,3 +1136,222 @@ def test_a_note_path_may_not_reach_into_the_git_directory(tmp_path: Path, relati
             )
         )
     assert "evil.example" not in (work / ".git" / "config").read_text(encoding="utf-8")
+
+
+def _stage_without_committing(work: Path, relative: str, content: str) -> None:
+    """Leave `relative` written and staged, exactly as a `SIGKILL` between add and commit does.
+
+    Not an injected state: `probe_git.py after_add` (wave 6) produced this by `os.kill(getpid(),
+    SIGKILL)` inside the writer, and the porcelain output was identical. Built with plain git here
+    because a test may not kill the process running it.
+    """
+    path = work / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "--", relative], check=True)
+
+
+def test_a_hard_kill_between_add_and_commit_does_not_wedge_the_pod_forever(
+    tmp_path: Path,
+) -> None:
+    """The rollback that clears the index is in-process, and a pod eviction does not run it.
+
+    `test_a_failed_commit_leaves_nothing_staged_and_the_pod_can_write_again` covers the arm where
+    the handler *does* run. This is the arm defined by it not running — an OOMKill, a node drain
+    past the grace period — which leaves the note's blobs staged and uncommitted with nothing
+    anywhere to clear them. Measured before the fix: another pod pushing the same paths made every
+    later write on this pod raise `GitRemoteError` ("no local commits to replay"), forever, three
+    unrelated notes in a row, with the index still staged after each. The sidecar cannot recover it
+    either — `knowledge-sync.sh::refresh_note_repo` fast-forwards with the same `--ff-only` and
+    treats a divergence as a warning by design.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    _stage_without_committing(work, "knowledge/job-result/job-killed.md", "half a write\n")
+    _diverge(remote, tmp_path, "job-killed")
+
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    outcome = asyncio.run(writer.write(_note_write("job-after", content="after\n")))
+
+    assert outcome.written is True, "a later write must not inherit the dead write's index"
+    status = subprocess.run(
+        ["git", "-C", str(work), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert status.strip() == "", f"the killed write's residue survived: {status!r}"
+    # The residue is *gone*, not committed: the dead write was retracted, not published.
+    assert (work / "knowledge" / "job-result" / "job-killed.md").read_text(
+        encoding="utf-8"
+    ) == "from elsewhere: job-killed\n"
+    on_remote = subprocess.run(
+        ["git", "-C", str(remote), "ls-tree", "-r", "--name-only", "main"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "knowledge/job-result/job-after.md" in on_remote
+
+
+def test_a_staged_note_survives_every_write_the_checkout_can_still_serve(tmp_path: Path) -> None:
+    """The recovery is on demand, and this is the arm where the demand never comes.
+
+    A staged note in this clone is *indistinguishable* from a killed write's residue — that is what
+    a kill leaves — so the only thing that can separate "recover" from "discard an operator's
+    work" is whether the checkout still moves. While it does, nothing is discarded: this is
+    `test_poisoned_index_does_not_leak_into_the_next_write` driven across three further writes, so
+    a sweep that ran unconditionally would fail here rather than only there.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    _stage_without_committing(work, "knowledge/job-result/job-staged.md", "an operator's work\n")
+    stray = work / "unrelated.txt"
+    stray.write_text("somebody else's staged work\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "--", "unrelated.txt"], check=True)
+
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    for index in range(3):
+        assert asyncio.run(writer.write(_note_write(f"job-after-{index}"))).written is True
+
+    staged = subprocess.run(
+        ["git", "-C", str(work), "diff", "--cached", "--name-only"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert sorted(staged.split()) == ["knowledge/job-result/job-staged.md", "unrelated.txt"]
+    assert stray.read_text(encoding="utf-8") == "somebody else's staged work\n"
+
+
+def test_a_blocker_outside_the_knowledge_tree_is_still_reported_rather_than_discarded(
+    tmp_path: Path,
+) -> None:
+    """The discard is scoped to every path this writer can stage, and to nothing else.
+
+    `record._note_file` builds every path as `<knowledge_dir>/…`, so a staged change outside it is
+    not this writer's residue whatever git says about the fast-forward — it keeps the refusal that
+    names it, which is the message an operator needs to find the real blocker.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    (work / "README.md").write_text("an operator's uncommitted edit\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "--", "README.md"], check=True)
+    other = _clone(remote, tmp_path / "other-readme")
+    (other / "README.md").write_text("from another pod\n", encoding="utf-8")
+    for command in (["commit", "-qam", "elsewhere"], ["push", "-q"]):
+        subprocess.run(["git", "-C", str(other), *command], check=True)
+
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitRemoteError, match="no local commits to replay"):
+        asyncio.run(writer.write(_note_write("job-blocked")))
+    assert (work / "README.md").read_text(encoding="utf-8") == "an operator's uncommitted edit\n"
+
+
+def test_a_stale_index_lock_is_cleared_and_a_fresh_one_is_retryable(tmp_path: Path) -> None:
+    """A killed `git commit` leaves `.git/index.lock`, and nothing used to remove it.
+
+    Two halves, and they need each other. **Classification:** `Unable to create index.lock: File
+    exists` used to raise the non-retryable `GitWriteError` — it is a local command — so it sat in
+    `durable/publish._BAD_DATA_TYPES`, `note_publish_retry` spent no attempt on it and
+    `publish_note_best_effort` swallowed it. Every note on the pod was dropped until a human
+    deleted a file. **Removal:** a *stale* lock is cleared under the flock, which is the evidence
+    that no peer writer is mid-write; the age bound is what covers the one holder the flock does
+    not exclude, a person running git in the clone by hand.
+
+    `_exec`'s docstring claimed this state was unreachable ("can never … orphan a git child holding
+    `.git/index.lock`") — measured, `SIGKILL` of a `git commit` leaves the file. It no longer
+    claims it.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    lock = work / ".git" / "index.lock"
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+
+    lock.touch()
+    with pytest.raises(GitRemoteError, match="index.lock"):
+        asyncio.run(writer.write(_note_write("job-fresh-lock")))
+    assert lock.exists(), "a lock that may still have a live holder is not removed"
+
+    stale = time.time() - settings.git_command_timeout_seconds - 1
+    os.utime(lock, (stale, stale))
+    assert asyncio.run(writer.write(_note_write("job-stale-lock"))).written is True
+    assert not lock.exists()
+
+
+@pytest.mark.parametrize(
+    "wording",
+    [
+        "remote: Permission to acme/knowledge.git denied to chemclaw-bot.",
+        "remote: You are not allowed to push code to this project.",
+        "remote: Write access to repository not granted.",
+        "remote: error: 403 ... has not enabled or enforced SAML SSO",
+        "remote: TF401027: You need the Git 'GenericContribute' permission.",
+    ],
+)
+def test_a_forge_denying_the_push_is_not_retried_against_the_same_credential(
+    tmp_path: Path, wording: str
+) -> None:
+    """A forge denial reaches the classifier written for it, because the push now goes through it.
+
+    Every wording `_AUTH_FAILURE_MARKERS` surveyed is a *push* refusal, and the push had no path to
+    the classifier: `_is_auth_failure` was reached only from `_git(transient=True)`, whose one call
+    site is the fetch, while `_push` raised `GitRemoteError` unconditionally. Measured, all
+    five came back retryable while the classifier answered True about the same stderr — so a
+    read-only token (the fetch succeeds, only the push is denied) burned `note_write_max_attempts`
+    against a credential no retry installs.
+
+    Driven through `write()` rather than by calling the classifier, deliberately: two tests already
+    call it directly, which is the shape CLAUDE.md names — a guard whose only caller is its own
+    test is a claim that a control exists.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text(f"#!/bin/sh\necho {wording!r} >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+
+    with pytest.raises(GitWriteError) as raised:
+        asyncio.run(writer.write(_note_write("job-denied")))
+    assert not isinstance(raised.value, GitRemoteError), (
+        "a denied credential must not be retried: no number of retries installs a token"
+    )
+
+
+def test_a_rejected_push_that_is_not_a_denial_is_still_retryable(tmp_path: Path) -> None:
+    """The other arm of the same classification, so the fix cannot be "call everything auth".
+
+    `_is_auth_failure`'s own docstring argues that a bare status code is not enough because a 403
+    is also a secondary rate limit; this is that argument driven through the push, where a
+    transient server-side rejection must keep the retryable class.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\necho 'remote: failed to lock ref' >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+
+    with pytest.raises(GitRemoteError, match="push"):
+        asyncio.run(writer.write(_note_write("job-blip")))
+
+
+def test_a_failed_push_tells_the_caller_the_note_is_already_readable_here(tmp_path: Path) -> None:
+    """A note whose push failed is *live* in this pod's graph, and the error said only "failed".
+
+    `_write_and_commit` lands the bytes in the tree `load_notes` scans and busts the cache before
+    the push, deliberately. So "the write failed" is false in the half that matters to the reader,
+    and `GitWriteError`'s docstring records what the model does when told a note write failed: it
+    retried five times permuting its arguments and then printed the ungated document into the chat.
+    `surface_domain_errors` shows this text to the model, so this is where that is fixed.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+
+    with pytest.raises(GitRemoteError) as raised:
+        asyncio.run(writer.write(_note_write("job-live", content="live\n")))
+
+    assert (work / "knowledge" / "job-result" / "job-live.md").exists(), (
+        "the premise: the note is readable in the tree readers scan"
+    )
+    message = str(raised.value)
+    assert "already" in message and "readable here" in message, message
+    assert "re-record nothing" in message, message

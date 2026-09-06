@@ -1128,6 +1128,17 @@ fail a finished calculation. Usual causes are a dead git remote, an expired push
 processes sharing one `note_repo_dir`. §(ix) says where an agent-authored note goes; the notes lost
 here never got there.
 
+**Two of those causes are a *hard kill*, not a misconfiguration, and they wedge the pod** — every
+later note write on it fails until something reconciles the checkout
+(`D-2026-09-06-a-rollback-a-sigkill-skips-is-not-a-rollback`). A pod evicted between `git add` and
+`git commit` leaves the note staged and uncommitted, and once the remote moves on those paths the
+fast-forward refuses with no commits to replay; a kill during the commit itself can leave git's own
+index.lock behind (written unbackticked: it is a path inside .git, not a file this repository
+ships, and the prose gate resolves a backticked path). Both now recover on their own, and both say so: look for
+`kg.write.dead_write_residue_discarded` and `kg.write.stale_index_lock_cleared` at WARNING. Seeing
+either once is the recovery working. Seeing one repeatedly is a pod being killed mid-write, which is
+a restart-loop question rather than a git one — check the worker's terminations, not the remote.
+
 #### ChemclawKnowledgeCorpusStale
 `warning`, and **only rendered when `monitoring.alerts.knowledgeCorpusStaleSeconds` is non-zero** —
 the chart ships it at 0 because the threshold is how often *your* chemists merge notes. The same

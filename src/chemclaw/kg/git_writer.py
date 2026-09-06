@@ -40,6 +40,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
@@ -327,6 +328,29 @@ def _for_log(text: str, limit: int = _LOGGED_TEXT_LIMIT) -> str:
     return f"{text[:limit]}… [{len(text) - limit} more character(s) omitted]"
 
 
+# What git says when it cannot take the index lock, matched on the two halves that are git's own
+# text rather than on the path between them. It is the only *local* git failure in this module that
+# a retry can clear on its own, and the phrase git prints under it says so: "a git process may have
+# crashed in this repository earlier: remove the file manually to continue."
+_INDEX_LOCK_MARKERS = ("index.lock", "file exists")
+
+
+def _is_a_contended_index(stderr: str) -> bool:
+    """Whether git refused because `.git/index.lock` already exists.
+
+    **Local, and still retryable — the one exception to the split `_git` otherwise makes.** Every
+    other `add`/`commit` failure is structural and replays identically, which is what puts
+    `GitWriteError` in `durable/publish._BAD_DATA_TYPES`. This one is a *holder*: a git child that
+    is still running, or a lock file a killed one left behind — and `_clear_a_stale_index_lock`
+    below removes the stale file at the top of the next write, so the retry `GitRemoteError` buys
+    is what reaches that reconciliation. Classified non-retryable it was measured as a permanent
+    wedge: `note_write_max_attempts` was never spent, `publish_note_best_effort` swallowed the
+    first attempt, and every note on that pod was dropped until a human deleted a file.
+    """
+    lowered = stderr.lower()
+    return all(marker in lowered for marker in _INDEX_LOCK_MARKERS)
+
+
 def _is_auth_failure(stderr: str) -> bool:
     """Whether git's stderr says the remote refused this credential.
 
@@ -374,7 +398,14 @@ class GitNoteWriter:
 
         Bounded by `git_command_timeout_seconds`: a hung command (dead remote, credential prompt)
         is killed and reported as a failure, so it can never deadlock the process-wide write lock
-        or orphan a git child holding `.git/index.lock`.
+        or leave a git *child* running.
+
+        **It can leave that child's `.git/index.lock` behind, and this docstring used to claim it
+        could not.** The kill is `SIGKILL`, so a `git commit` taking the index dies without its own
+        cleanup — measured, the lock file survives. Nothing here can prevent that (a lock file is
+        precisely what a process that may be killed cannot unwind); what the module does instead is
+        classify the resulting failure as retryable (`_is_a_contended_index`) and clear the stale
+        file under the flock on the next write (`_clear_a_stale_index_lock`).
 
         `tests/test_knowledge.py` fakes `create_subprocess_exec` to prove both bounds, so a command
         issued any other way would be unbounded and invisible at once.
@@ -420,7 +451,8 @@ class GitNoteWriter:
         `transient=True` marks the commands whose ordinary failure is the *network's* — fetch and
         push — so they raise the retryable `GitRemoteError`. Local operations (add, commit,
         checkout) fail for structural reasons a retry replays identically, and keep the
-        non-retryable class.
+        non-retryable class — **with one exception, which is a holder rather than a structure**: a
+        contended `.git/index.lock` is retryable wherever it appears (`_is_a_contended_index`).
 
         **An expired credential is not a network partition, and this used to classify it as one.**
         `transient=True` covers fetch and push, so a 403 from the git host raised `GitRemoteError`
@@ -450,7 +482,9 @@ class GitNoteWriter:
         if returncode == 0:
             return
         auth = transient and _is_auth_failure(stderr)
-        error = GitRemoteError if transient and not auth else GitWriteError
+        # A contended index is the one *local* failure a retry clears — see `_is_a_contended_index`.
+        retryable = (transient and not auth) or _is_a_contended_index(stderr)
+        error = GitRemoteError if retryable else GitWriteError
         log_event(
             log,
             "git.failed",
@@ -462,7 +496,7 @@ class GitNoteWriter:
             level=logging.WARNING,
             command=args[0],
             returncode=returncode,
-            retryable=error is GitRemoteError,
+            retryable=retryable,
         )
         raise error(f"git {' '.join(args)} failed: {stderr}")
 
@@ -621,6 +655,16 @@ class GitNoteWriter:
         and moving it is not this writer's call, so that is the case the refusal is kept for. Which
         is what the paragraph this replaces was really protecting; it just could not tell the two
         apart, so it refused both and one of them was itself.
+
+        **And a rebase cannot resolve what a rebase cannot see.** Both recoveries above are about
+        *commits*; a hard kill leaves residue that is not a commit — blobs staged and never
+        committed, a `.git/index.lock` nobody released — and every in-process handler that would
+        have cleared it is exactly what a `SIGKILL` does not run. Two more steps therefore run
+        here, where the flock that makes them safe is held:
+        `_clear_a_stale_index_lock` before anything touches the index, and
+        `_discard_a_dead_writes_residue` between the failed fast-forward and the rebase, because
+        that is the point at which git has said the checkout cannot move and the residue is what
+        is holding it.
         """
         branch = await self._read("symbolic-ref", "--short", "HEAD")
         if branch != self._base:
@@ -629,11 +673,124 @@ class GitNoteWriter:
                 f"{self._base!r}. Recorded notes are committed to the base branch, and readers "
                 "scan this same tree, so a checkout parked elsewhere would serve the wrong notes."
             )
+        self._clear_a_stale_index_lock()
         await self._git("fetch", self._remote, self._base, transient=True)
         returncode, stderr = await self._run("merge", "--ff-only", f"{self._remote}/{self._base}")
+        if returncode != 0 and await self._discard_a_dead_writes_residue():
+            returncode, stderr = await self._run(
+                "merge", "--ff-only", f"{self._remote}/{self._base}"
+            )
         if returncode != 0:
             await self._replay_our_unpushed_commits(stderr)
         return await self._write_and_commit(write)
+
+    def _clear_a_stale_index_lock(self) -> None:
+        """Remove a `.git/index.lock` a killed git child left behind, with the flock held.
+
+        `_exec` kills its child on a timeout and on cancellation, and the kill is `SIGKILL`: the
+        child dies without unwinding, and measured, the *lock file* survives it. So does the lock a
+        `git commit` held when the pod itself was evicted. Nothing in this module, in
+        `deploy/knowledge-sync.sh` or in any startup path removed it, and every `git add` in the
+        checkout then failed — permanently, and non-retryably until `_is_a_contended_index`, so
+        `note_publish_retry` spent no attempt and `publish_note_best_effort` dropped every note.
+
+        **Two conditions, and each covers what the other cannot.** The exclusive `flock` is held
+        here, which is the evidence that no *peer writer* is mid-write; it says nothing about a
+        person running `git commit` in the clone by hand, who takes no flock. The age bound is what
+        covers that one: the lock is removed only when it is older than the ceiling every git child
+        of this module is held to (`git_command_timeout_seconds`), so a command that could still be
+        running keeps its index. A lock younger than that raises the retryable `GitRemoteError`
+        instead, and the retry is what reaches this once the lock has aged into staleness.
+
+        Best-effort by construction: if the unlink races something, the `git add` that follows
+        fails with the retryable class and the next attempt tries again.
+        """
+        lock_path = _git_dir(self._repo_dir) / "index.lock"
+        try:
+            age = time.time() - lock_path.stat().st_mtime
+        except OSError:
+            return
+        if age <= settings.git_command_timeout_seconds:
+            return
+        with contextlib.suppress(OSError):
+            lock_path.unlink()
+            log_event(
+                log,
+                "kg.write.stale_index_lock_cleared",
+                "removed a stale %s left by a killed git process (%.0fs old)",
+                lock_path,
+                age,
+                level=logging.WARNING,
+                age_seconds=round(age),
+            )
+
+    async def _discard_a_dead_writes_residue(self) -> bool:
+        """Put the knowledge tree back to `HEAD` when a dead write's residue is blocking the merge.
+
+        Returns whether anything was discarded, so the caller can fast-forward again.
+
+        **The state this recovers is defined by a handler not running.** `_write_and_commit`
+        unwinds a partial write in an `except BaseException` — restore the tree, un-stage the blobs
+        — and a `SIGKILL` runs neither that clause nor any `finally`, so a pod eviction between the
+        `git add` and the commit leaves the note's blobs staged and its bytes in the tree with
+        nothing anywhere to clear them. Measured: once another pod pushes the same note paths,
+        `merge --ff-only` refuses, `_replay_our_unpushed_commits` finds no commits of ours to
+        replay and refuses too, and **every later write on this pod fails forever** — three
+        unrelated notes in a row, index still staged after each. The sidecar cannot recover it
+        either: `knowledge-sync.sh::refresh_note_repo` fast-forwards with the same `--ff-only` and
+        treats a divergence as a warning by design, so it logs once per interval and changes
+        nothing.
+
+        **Called only when the fast-forward has already failed, and that is the whole of what makes
+        it acceptable.** A staged note in this clone is indistinguishable from residue — that is
+        what a kill leaves — so a sweep that ran on every write would have to discard an operator's
+        staged work as well, which `test_poisoned_index_does_not_leak_into_the_next_write` refuses
+        and is right to: while the checkout still moves, nothing here is owed that. Once git itself
+        says the checkout cannot move, the alternative to discarding is that this pod records no
+        knowledge at all, ever again. So the trade is taken exactly there and nowhere else, and it
+        is logged at WARNING with the paths, because a person who staged a note by hand is the one
+        holder this cannot tell from a corpse.
+
+        Scoped to `knowledge_dir`, which is every path this writer can stage: `record._note_file`
+        builds them all as `<knowledge_dir>/…`. A blocker outside it is not this writer's residue
+        and is left alone, to be reported by the refusal that already names it.
+        """
+        # `-z`: git quotes a path with unusual bytes in the default listing, and a quoted path is
+        # not the pathspec the reset below needs.
+        listing = await self._read(
+            "diff", "--cached", "--name-only", "-z", "HEAD", "--", settings.knowledge_dir
+        )
+        orphaned = [path for path in (listing or "").split("\0") if path]
+        if not orphaned:
+            return False
+        log_event(
+            log,
+            "kg.write.dead_write_residue_discarded",
+            "the fast-forward is blocked by %d path(s) a killed write left staged in %s; "
+            "restoring them to HEAD so this pod can record again: %s",
+            len(orphaned),
+            self._repo_dir,
+            _for_log(", ".join(orphaned)),
+            level=logging.WARNING,
+            paths=len(orphaned),
+        )
+        # Index back to `HEAD` for those paths. Un-staging alone does not clear the wedge —
+        # measured: the residue is then *untracked*, and `merge --ff-only` refuses to overwrite an
+        # untracked file just as it refuses a staged one. The worktree has to go back too.
+        await self._git("reset", "-q", "HEAD", "--", *orphaned)
+        # Of those paths, the ones `HEAD` actually holds — the index now agrees with `HEAD`, so
+        # this is exactly the set `git checkout --` can restore. The rest existed only in the dead
+        # write, and restoring those means removing them.
+        tracked_listing = await self._read("ls-files", "-z", "--", *orphaned)
+        tracked = [path for path in (tracked_listing or "").split("\0") if path]
+        if tracked:
+            await self._git("checkout", "-q", "--", *tracked)
+        for path in set(orphaned) - set(tracked):
+            with contextlib.suppress(OSError):
+                self._contained_note_path(path).unlink(missing_ok=True)
+        # These bytes were in the tree `load_notes` scans, so a warm reader is holding them.
+        invalidate_cache()
+        return True
 
     async def _replay_our_unpushed_commits(self, why: str) -> None:
         """Rebase this clone's own unpushed note commits onto the remote — or refuse.
@@ -775,11 +932,22 @@ class GitNoteWriter:
             # `git add` above — a `pre-commit` hook, an `index.lock`, `_exec`'s timeout kill — the
             # index still holds the blob just retracted, and restoring the tree does not remove it.
             # Left staged it is two failures: any non-path-limited `git commit` in this clone
-            # publishes a note this system un-published, and the next write's `merge --ff-only`
-            # refuses because of it — which `_replay_our_unpushed_commits` sees as a checkout with
-            # no commits of ours to replay, so it refuses too and every later write on this pod
-            # fails forever. Scoped to `written` for the same reason the commit is: nothing else
-            # somebody staged here is this writer's to reset.
+            # publishes a note this system un-published, and a later `merge --ff-only` refuses
+            # because of it — which `_replay_our_unpushed_commits` sees as a checkout with no
+            # commits of ours to replay, so it refuses too and every later write on this pod fails
+            # forever.
+            #
+            # **The middle clause of that sentence used to say "the next write's", and measured it
+            # is narrower than that.** The fast-forward refuses only once the incoming commits
+            # touch the staged paths; with the remote unchanged a following write fast-forwards
+            # cleanly and its path-limited commit ignores the residue entirely. So the wedge is the
+            # *two-pod* case — which is the one `_cluster_lock` exists for, not a corner. Being
+            # precise about it is what shows why this handler is not enough on its own: it is the
+            # kill that skips this clause that produces the state, and
+            # `_discard_a_dead_writes_residue` is where that is undone.
+            #
+            # Scoped to `written` for the same reason the commit is: nothing else somebody staged
+            # here is this writer's to reset.
             with contextlib.suppress(ChemclawError):
                 await self._run("reset", "-q", "HEAD", "--", *written)
             invalidate_cache()
@@ -807,11 +975,26 @@ class GitNoteWriter:
         ahead = await self._read("rev-list", "--count", f"{self._remote}/{self._base}..HEAD")
         if ahead == "0":
             return WriteOutcome(reference=commit or self._base, written=False)
-        returncode, stderr = await self._run("push", self._remote, f"HEAD:refs/heads/{self._base}")
-        if returncode != 0:
-            # Retryable: the next attempt fetches, fast-forwards past whatever landed, and pushes
-            # this commit along with its own. Nothing here rewrites what somebody else pushed.
-            raise GitRemoteError(f"git push to {self._base} failed: {stderr}")
+        try:
+            # Through `_git`, so a push reaches the classifier written for it. Every wording in
+            # `_AUTH_FAILURE_MARKERS` is a *push*-side refusal, and this raised its own
+            # `GitRemoteError` directly — so all five were unreachable, a read-only token retried
+            # `note_write_max_attempts` times against a credential no retry installs, and git's
+            # own stderr never reached the `git.failed` record that exists to carry it.
+            await self._git("push", self._remote, f"HEAD:refs/heads/{self._base}", transient=True)
+        except GitWriteError as exc:
+            # The class `_git` chose is kept — retryable for a network failure or a rejection,
+            # non-retryable for a denied credential — and what is added is the half the caller
+            # cannot see. The note is already committed on the base branch of the tree readers
+            # scan, so "the write failed" is false where it matters most: told that, the model
+            # retried five times permuting its arguments and then printed the document into the
+            # chat (`GitWriteError`'s docstring records the measurement). It is the *push* that
+            # failed, and the next attempt pushes this same commit.
+            raise type(exc)(
+                f"{exc} — the note is committed on {self._base} in this checkout and is already "
+                f"readable here; only the push to {self._remote} did not happen, so re-record "
+                "nothing and change nothing: the next attempt pushes this same commit."
+            ) from exc
         return WriteOutcome(reference=commit or self._base)
 
     def _is_a_persons_note(self, note_path: Path) -> bool:

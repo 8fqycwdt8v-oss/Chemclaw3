@@ -19,6 +19,7 @@ from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.warehouse.adapter import _MAX_TIE_PAGES, WarehouseElnAdapter
 from chemclaw.ingest.eln.warehouse.binding import BindingError, load_binding
+from chemclaw.ingest.eln.warehouse.connect import forget_open_warehouses
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from chemclaw.science.labels.store import InMemoryLabelIndex
 from tests import warehouse_fake
@@ -768,3 +769,59 @@ def test_a_binding_may_name_the_intent_column_but_not_carve_one_out_of_prose() -
         with pytest.raises(BindingError, match="derive a run's stated intent"):
             load_binding(derived)
         assert label  # names which shape failed, when one of them stops failing
+
+
+def test_a_bounded_chunk_asks_the_warehouse_for_the_chunk_and_not_for_the_page() -> None:
+    """The read is bounded at the source, which is the half of the quadratic drain a source can fix.
+
+    The durable sync drains in chunks of `eln_sync_batch_size` and truncates whatever comes back to
+    that (`durable/eln_sync.py::_BoundedIngest`), so every continuation chunk of a drain asked this
+    warehouse for the binding's whole `fetch_limit` — 5,000 rows at the default — and kept 100. A
+    50x over-read of a table, per chunk, for the length of the drain.
+
+    Asserted on the `LIMIT` the engine actually binds and on the rows that come back, against the
+    fake that honours WHERE/ORDER BY/LIMIT — the plain fake answers every statement with the whole
+    primed table and so cannot tell a bounded page from an unbounded one.
+    """
+    since = datetime(2026, 1, 1, tzinfo=UTC)
+    binding = _binding()
+    binding["ingest"]["entry"]["fetch_limit"] = 150
+    reactions = [
+        _reaction_row(f"RX-{i:03d}", since + timedelta(minutes=i), None) for i in range(120)
+    ]
+    charges = [row for entry in reactions for row in _charge_rows(str(entry["REACTION_ID"]))]
+
+    def _entry_limits(warehouse: Any) -> list[Any]:
+        return [
+            params[-1]
+            for statement, params in warehouse.executed
+            if "FROM V_REACTION " in statement
+        ]
+
+    def _drive(limit: int | None) -> tuple[list[Any], Any]:
+        # `open_warehouse` memoises per connection block, so the second drive would otherwise be
+        # served the fake the first one primed and record nothing.
+        forget_open_warehouses()
+        warehouse = warehouse_fake.prime_warehouse(
+            warehouse_fake.WatermarkWarehouse(
+                {"V_REACTION": reactions, "V_CHARGE": charges},
+                entry_relation="V_REACTION",
+                created_at="CREATED_TS",
+                modified_at="LAST_MODIFIED_TS",
+                key="REACTION_ID",
+            )
+        )
+        adapter = WarehouseElnAdapter(binding=binding, name="eln-test")
+        return asyncio.run(adapter.fetch_new_entries(since, limit)), warehouse
+
+    entries, warehouse = _drive(5)
+    assert _entry_limits(warehouse) == [5], (
+        "the bounded chunk still asked the warehouse for the binding's whole page; the sync would "
+        f"throw all but five of them away. LIMITs bound: {_entry_limits(warehouse)}"
+    )
+    assert len(entries) == 5
+
+    # Unbounded is unchanged: a caller reading a whole corpus still gets the binding's page.
+    entries, warehouse = _drive(None)
+    assert _entry_limits(warehouse) == [150]
+    assert len(entries) == 120

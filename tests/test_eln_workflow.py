@@ -141,7 +141,9 @@ def test_bounded_ingest_keeps_overlap_and_truncates_new() -> None:
     newer = [entry(f"new-{i}", since + timedelta(hours=i)) for i in range(1, 5)]
 
     class _FakeAdapter:
-        async def fetch_new_entries(self, _since: datetime) -> list[RawEntry]:
+        async def fetch_new_entries(
+            self, _since: datetime, _limit: int | None = None
+        ) -> list[RawEntry]:
             return newer + older  # deliberately unsorted
 
         def map_to_ord(self, raw: RawEntry) -> OrdReaction:  # pragma: no cover - never reached
@@ -190,7 +192,9 @@ def test_the_bound_truncates_on_the_same_stamp_the_cursor_advances_on() -> None:
     ]
 
     class _AmendedAdapter:
-        async def fetch_new_entries(self, _since: datetime) -> list[RawEntry]:
+        async def fetch_new_entries(
+            self, _since: datetime, _limit: int | None = None
+        ) -> list[RawEntry]:
             return list(entries)
 
         def map_to_ord(self, raw: RawEntry) -> OrdReaction:  # pragma: no cover - never reached
