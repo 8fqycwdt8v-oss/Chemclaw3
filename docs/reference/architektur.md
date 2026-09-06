@@ -1,8 +1,9 @@
 # Architektur: Agent-Orchestrierung + Temporal + Skills + Markdown-Knowledge-Graph
 
 > **Stand dieses Dokuments.** Es ist der *Vorab-Entwurf* der Architektur, nicht ihre Beschreibung
-> (siehe `CLAUDE.md`): es kennt keine Connectors — die Naht, die heute jedes Tool, jeden Job und
-> jeden Skill trägt (D-118) — und die Reasoning-Schicht wurde inzwischen ausgetauscht. Sie lief
+> (siehe `CLAUDE.md`): die Connector-Naht, die heute jedes Tool, jeden Job und jeden Skill trägt
+> (D-118), ist nicht in ihn hineinentworfen, sondern nachträglich in Anmerkungen eingetragen —
+> und die Reasoning-Schicht wurde inzwischen ausgetauscht. Sie lief
 > zunächst auf dem Microsoft Agent Framework; seit
 > [`D-2026-08-10-langgraph-rebuild-of-the-conversation-layer`](../decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md)
 > läuft sie auf **LangGraph**, und der Grund war nicht Leistungsfähigkeit, sondern Fehlerlast: vier
@@ -193,8 +194,9 @@ Chemiker: *"Wie ist die zu erwartende Regioselektivität für die späte C–H-F
     Kern gibt es keine zweite Queue mehr.
   - **Connector-Server**: `connector-molfp`, `connector-rxnfp` und die übrigen Bundles — dieselbe
     Rolle wie jeder andere Connector. Einen eigenen „MCP-Server"-Deployment-Typ gibt es nicht;
-    `deploy/entrypoint.sh` kennt nur `service`, `background-worker`, `connector-worker-*` und
-    `connector-*` (D-156 hat dieselbe Zeile in `deploy/README.md` bereits gestrichen).
+    `deploy/entrypoint.sh` kennt `service`, `background-worker`, `mcp-face`,
+    `connector-worker-*` und `connector-*` (D-156 hat dieselbe Zeile in `deploy/README.md`
+    bereits gestrichen).
 - **LLM**: **ein** internes OpenAI-kompatibles Gateway (`src/chemclaw/agent/llm_provider.py`,
   `CHEMCLAW_LLM_BASE_URL`). Einen `llm_provider`-Schalter gibt es nicht mehr — welcher Anbieter
   hinter der Adresse antwortet, ist Sache des Gateways
@@ -272,7 +274,7 @@ Anforderung: **eine** Identität pro Nutzer, die sich konsequent durch den gesam
 
 **Kurzfassung:** Reine Nebenläufigkeit (viele gleichzeitige Nutzer) ist in allen vier Schichten gut gelöst. Differenzierte Rechte pro Nutzer/Rolle waren zum Zeitpunkt dieses Entwurfs nirgends vorhanden.
 
-> **Stand heute (D-052, D-2026-08-01):** Zwei der hier als offen beschriebenen Punkte sind gebaut. Rollenbewusstes Skill-Filtering existiert als `RoleScopedSkillsSource` in `src/chemclaw/agent/skill_access.py` (D-052). Die Tool-Autorisierung liegt **nicht** im MCP-Server, sondern in `src/chemclaw/agent/authz.py` und `src/chemclaw/agent/tool_authz.py` — ein Gate, das jeder Tool-Aufruf passiert, unabhängig davon, ob das Tool in-process oder hinter einem Connector liegt. Die Tabelle unten ist der ursprüngliche Befund und wird als solcher gelesen.
+> **Stand heute (D-052, D-2026-08-01):** Zwei der hier als offen beschriebenen Punkte sind gebaut. Rollenbewusstes Skill-Filtering existiert als `RoleScopedSkills` in `src/chemclaw/agent/skill_access.py` (D-052). Die Tool-Autorisierung liegt **nicht** im MCP-Server, sondern in `src/chemclaw/agent/authz.py` und `src/chemclaw/agent/tool_authz.py` — ein Gate, das jeder Tool-Aufruf passiert, unabhängig davon, ob das Tool in-process oder hinter einem Connector liegt. Die Tabelle unten ist der ursprüngliche Befund und wird als solcher gelesen.
 
 Schicht für Schicht:
 

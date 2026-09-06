@@ -48,9 +48,9 @@ thread allowance falls by the prefix, and a configured budget *below* the prefix
 against a 43,175-token prefix, which put the default configuration in exactly that state and is why
 `_note_floored_trigger` exists — the floor has to be said rather than arrive silently. The same
 commit that charged the prefix raised the default above the prefix, and it is **derived** from
-`tests/test_context_floor.py`'s ratchet ceiling plus 30,000 of thread, so it moves when that
-ceiling does (74,500 as of 2026-09-05, when the ratchet started measuring the prompt half of the
-prefix on the wire rather than re-deriving it). The shipped configuration is therefore not floored;
+`tests/test_context_floor.PREFIX_BOUND` — that file's ratchet ceiling plus the allowance for the
+bundles it cannot serve — plus 30,000 of thread, so it moves whenever either half does, and no
+figure for it is written down here. The shipped configuration is therefore not floored;
 `_note_floored_trigger` serves the deployment that lowers it, which is the case it was written
 for. The live numbers are whatever `tests/test_compaction.py` and
 `tests/test_context_floor.py` measure, not these, for the reason
@@ -235,7 +235,8 @@ def _note_floored_trigger(configured: int, prefix: int, window: int) -> None:
     what happens when the prefix is charged unconditionally and a configured budget is smaller than
     the prefix. That was the shipped default's own state — 30,000 against a `default` profile prefix
     measured at 43,175 on 2026-09-04 — until the default rose above the prefix in the same commit
-    (74,500 today, derived from the ratchet ceiling rather than written down here); this now fires
+    (derived from `tests/test_context_floor.PREFIX_BOUND` plus 30,000 of thread rather than written
+    down here); this now fires
     for a deployment that configures a budget under its own prefix, which is a corner that stays
     reachable because the prefix grows with every bound tool.
 
