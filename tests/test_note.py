@@ -246,3 +246,95 @@ def test_no_reader_hand_rolls_the_external_id_strip() -> None:
         if f'removeprefix("{prefix}")' in path.read_text(encoding="utf-8")
     ]
     assert offenders == [], f"hand-rolled external-id strip, use external_record_id(): {offenders}"
+
+
+# --------------------------------------------------------------------------------------------
+# A calculation citation must accept every key the calculation store can write.
+#
+# `_CALC_REF` restates `CalculationKey`'s four field patterns, because `kg` may import
+# `chemclaw.core` and nothing else while `CalculationKey` lives in `science`. A restatement with
+# nothing holding it to its original is a copy that drifts, and this one had: the version segment
+# barred `:` where the store leaves it free on purpose, and the two hashes demanded lowercase hex
+# where the store admits any non-colon text. The consequence was silent from the caller's side —
+# `record_knowledge_note(calc_refs=[...])` raised a `ValidationError` on a key read straight out of
+# the cache, so a note resting on a *calibrated* calculation could not be written at all.
+# --------------------------------------------------------------------------------------------
+
+
+def test_every_calculation_key_the_store_accepts_can_be_cited() -> None:
+    """Round-trip: `CalculationKey.as_str()` in, `Note.calc_refs` accepts it.
+
+    The calibrated key is the case that failed, and it is not hypothetical — it is the shape a
+    deployment's `calculation_results` actually holds, and the shape `connectors/calc/remote.py`
+    states the calculation server returns over the wire.
+    """
+    from chemclaw.science.calc.store import CalculationKey
+
+    keys = [
+        CalculationKey(
+            calc_type="xtb",
+            calc_version="GFN2-xTB+tblite+0.4.0",
+            input_hash="9ac385b135af0125",
+            params_hash="72dc4f72005af2e5",
+        ),
+        # The `@` inside a version: `esol-delaney@2004`, named in the store's own comment.
+        CalculationKey(
+            calc_type="solubility",
+            calc_version="esol-delaney@2004",
+            input_hash="9ac385b135af0125",
+            params_hash="72dc4f72005af2e5",
+        ),
+        # The `:` inside a version — a calibration offset. This is the arm that was refused.
+        CalculationKey(
+            calc_type="pka",
+            calc_version="GFN2-xTB+tblite+0.4.0/cal-0.28733:-29.3116",
+            input_hash="9ac385b135af0125",
+            params_hash="72dc4f72005af2e5",
+        ),
+        # A hash the store admits and the note-side pattern's `[0-9a-f]+` did not.
+        CalculationKey(
+            calc_type="xtb",
+            calc_version="GFN2-xTB",
+            input_hash="ABC123",
+            params_hash="Zz-_09",
+        ),
+    ]
+    for key in keys:
+        flat = key.as_str()
+        assert Note(id="n", type="observation", calc_refs=[flat]).calc_refs == [flat]
+        assert Note(
+            id="n", type="observation", artifact_refs=[f"{flat}#hessian"]
+        ).artifact_refs == [f"{flat}#hessian"]
+
+
+def test_the_citation_pattern_restates_the_store_s_own_field_patterns() -> None:
+    """The restatement is bound to its original, segment by segment.
+
+    A round-trip test proves today's keys are citable; this proves the *rule* did not diverge, so
+    loosening or tightening a `CalculationKey` field fails here rather than at a chemist's note
+    months later. Read off `model_fields` rather than retyped, for the reason
+    `message_pairing` imports the shape stamp instead of restating it.
+    """
+    from chemclaw.science.calc.store import CalculationKey
+
+    def store_pattern(field: str) -> str:
+        (meta,) = [m for m in CalculationKey.model_fields[field].metadata if hasattr(m, "pattern")]
+        return str(meta.pattern).removeprefix("^").removesuffix("$")
+
+    assert note_module._CALC_TYPE == store_pattern("calc_type")
+    assert note_module._CALC_VERSION == store_pattern("calc_version")
+    assert note_module._CALC_HASH == store_pattern("input_hash")
+    assert note_module._CALC_HASH == store_pattern("params_hash")
+
+
+def test_a_calculation_citation_still_refuses_what_is_not_a_key() -> None:
+    """Widening the version and the hashes must not widen the refusal this field exists for.
+
+    The point of validating the shape at all is that a note citing "the GFN2 run" is a crosslink
+    nothing can resolve. A key needs its `@` and both of its colons.
+    """
+    from pydantic import ValidationError as _ValidationError
+
+    for bad in ["the GFN2 run", "xtb@GFN2-xTB", "xtb@GFN2-xTB:onlyonehash", "@:::", "xtb:a:b"]:
+        with pytest.raises(_ValidationError):
+            Note(id="n", type="observation", calc_refs=[bad])

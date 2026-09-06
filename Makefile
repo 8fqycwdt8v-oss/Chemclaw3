@@ -106,6 +106,12 @@ mutants:  ## Mutation-test the invariant-bearing modules (see [tool.mutmut]; slo
 	uv run mutmut run $(ARGS)
 
 mutant-results:  ## Show the survivors from the last `make mutants` run.
+	@# `mutmut results` prints nothing when there is no run to report on, and nothing is exactly
+	@# what a clean run looks like — "no survivors" and "nobody has run this" read alike, which is
+	@# the same green-on-no-evidence shape the validators were just fixed for. `mutmut` keeps its
+	@# state in `.mutmut-cache`/`mutants/`, so the absence of both is the question worth asking.
+	@test -e .mutmut-cache -o -d mutants || \
+		{ echo 'no mutation run found — run `make mutants` first (this is not "no survivors")'; exit 1; }
 	uv run mutmut results
 
 mutant-stats:  ## Write the last run's per-category counts to mutants/mutmut-cicd-stats.json.
@@ -376,10 +382,16 @@ reindex:  ## Incrementally rebuild the derived note index — only notes changed
 reindex-full:  ## Full note-index rebuild, ignoring stored fingerprints (recovery only).
 	uv run python -m chemclaw.retrieval.vector_index --full
 
+# The `@test -n` guard is the one `explain`, `user-erase` and `synthesize` already carry: a bare
+# invocation expands the variable to nothing, and argparse then reports a missing positional under
+# `make: *** Error 2` rather than saying which variable to set. Same `exit 64` (EX_USAGE) as those
+# three, so the three that guard and the three that did not now answer alike.
 share-estimate:  ## Cost a mounted document share before indexing it (reads nothing). SHARE=<source>
+	@test -n "$(SHARE)" || { echo "usage: make share-estimate SHARE=<source>"; exit 64; }
 	uv run python -m chemclaw.cli.sync_share $(SHARE) --dry-run
 
 share-sync:  ## Crawl a mounted document share into the document index now. SHARE=<source>
+	@test -n "$(SHARE)" || { echo "usage: make share-sync SHARE=<source>"; exit 64; }
 	uv run python -m chemclaw.cli.sync_share $(SHARE)
 
 up:  ## Start the local dev stack (Temporal dev server + Postgres/pgvector).
@@ -399,6 +411,7 @@ phoenix-down:  ## Stop Phoenix.
 	docker compose -f infra/docker-compose.observability.yml down
 
 phoenix-publish:  ## Publish an archived probe run to Phoenix. DIR=<transcripts> [NAME=<experiment>]
+	@test -n "$(DIR)" || { echo "usage: make phoenix-publish DIR=<transcripts> [NAME=<experiment>]"; exit 64; }
 	uv run python -m chemclaw.cli.phoenix_publish $(DIR) $(if $(NAME),--name $(NAME),)
 
 # The live lane. Four targets rather than one, because the stages answer different questions and

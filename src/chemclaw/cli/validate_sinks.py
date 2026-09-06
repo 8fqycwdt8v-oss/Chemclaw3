@@ -107,8 +107,33 @@ def problems() -> list[str]:
 
     Rule 1 stays a property of the enabled *set* rather than of any one manifest, which is why it
     is computed separately and not folded into the loop.
+
+    **Zero discovered manifests is itself a finding**, because it is the same state one step
+    further out: a gate iterating nothing cannot fail, and this one was green on it.
     """
-    manifests = discovered()
+    try:
+        manifests = discovered()
+    except ResultSinkError as exc:
+        # A malformed or mis-named manifest stops discovery entirely, so there is nothing further
+        # to check — and it is reported as a problem line rather than escaping as a traceback, the
+        # way `validate_connectors` and `validate_datasources` already report the same input class.
+        # An operator reading a Python stack trace out of a manifest gate learns that it crashed;
+        # what they need is which file and what is wrong with it, which the message already holds.
+        return [str(exc)]
+
+    if not manifests:
+        # **Zero discovered is the state this docstring already describes, one level out.** The
+        # move from the enabled set to the discovered set fixed a gate that "could only fail on
+        # rule 1, which by construction was empty too" — and zero *discovered* manifests
+        # reproduces that identical state exactly. `CHEMCLAW_RESULT_SINKS_DIR` is a `PATH`-style
+        # operator override, so a typo in it, or an image that failed to ship
+        # `data/publish/sinks/`, turns all three rules off behind a green line. The wording is
+        # `validate_datasources`'.
+        return [
+            f"no result sinks discovered under {settings.result_sinks_dir!r} — no driver, no "
+            "config block and no `*_env` name would be checked, and this gate would have checked "
+            "nothing"
+        ]
     found = _enabled_problems(manifests)
     for manifest in manifests.values():
         found.extend(_driver_problems(manifest))

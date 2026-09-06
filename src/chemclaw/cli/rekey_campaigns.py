@@ -125,7 +125,14 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging()
     examined, moved = asyncio.run(rekey(dry_run=not args.apply))
     verb = "moved" if args.apply else "would move"
-    logger.info("%d campaign(s) examined, %d %s", examined, verb, moved)
+    # `%d` was handed `verb` and `%s` the count, so `logging` raised `TypeError` inside
+    # `getMessage`, printed a "--- Logging error ---" trace on stderr and dropped the record.
+    # The one status line this command has therefore never appeared — in dry run *or* under
+    # `--apply` — while the process exited 0, so the preview the docstring above argues for
+    # produced nothing to read. `tests/test_campaign_rekey.py` now formats the record, because a
+    # `logger.info` call is only asserted by a test that renders it: `caplog` alone holds the
+    # unformatted args and passes over exactly this fault.
+    logger.info("%d campaign(s) examined, %s %d", examined, verb, moved)
     return 0
 
 

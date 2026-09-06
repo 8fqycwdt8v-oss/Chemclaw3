@@ -41,6 +41,8 @@ import logging
 import sys
 from urllib.parse import urlsplit
 
+import yaml
+
 from chemclaw.core.config import settings
 from chemclaw.core.connect import ENV_SUFFIX, check_env_name
 from chemclaw.core.logging import configure_logging
@@ -166,8 +168,32 @@ def _posture_problems(manifest: DeliveryChannelManifest) -> list[str]:
 
 
 def problems() -> list[str]:
-    """Every finding across every discovered channel, plus rule 1 over the enabled set."""
-    manifests = discovered()
+    """Every finding across every discovered channel, plus rule 1 over the enabled set.
+
+    Zero discovered manifests is itself a finding, for the reason `validate_sinks.problems` gives:
+    a gate iterating nothing cannot fail, and rule 4 is the plaintext-destination refusal.
+    """
+    try:
+        manifests = discovered()
+    except (DeliveryChannelError, OSError, yaml.YAMLError) as exc:
+        # One problem line rather than a traceback, as the two sibling manifest gates already do.
+        # `OSError`/`yaml.YAMLError` are listed beside the seam's own error because
+        # `deliver.registry._load` reads and parses the file without wrapping either — unlike
+        # `publish.registry._load`, which folds both into `ResultSinkError` — so an unreadable or
+        # malformed `channel.yaml` reaches here as the raw parser exception.
+        return [f"cannot read a delivery channel manifest: {exc}"]
+
+    if not manifests:
+        # Same refusal as `validate_sinks`, for the same reason and in the same words: zero
+        # discovered manifests leaves rules 2, 3 and 4 iterating nothing, so the gate can only
+        # fail on rule 1 — which is empty by construction on the shipped configuration. Rule 4 is
+        # the plaintext-destination refusal, so a typo in the `PATH`-style
+        # `CHEMCLAW_DELIVERY_CHANNELS_DIR` silently turns *that* off too.
+        return [
+            f"no delivery channels discovered under {settings.delivery_channels_dir!r} — no "
+            "driver, no config block and no destination posture would be checked, and this gate "
+            "would have checked nothing"
+        ]
     found = _enabled_problems(manifests)
     for manifest in manifests.values():
         found.extend(_driver_problems(manifest))

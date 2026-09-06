@@ -4,8 +4,8 @@ The four miners run on demand, never on a Schedule — and after the Schedule we
 trigger was `agent/durable_tools.synthesize_memory`, an LLM tool: a chemist who wanted "mine the
 corpus after this import" had to phrase it in chat and hope the model picked the tool, and an
 operator finishing a backfill had no way to start one at all. Knowledge generation deserves a
-switch a person can flip directly; this is that switch, going through the same workflows, the
-same PR-gate and the same daily-dedup id as the tool.
+switch a person can flip directly; this is that switch, going through the same workflows and the
+same daily-dedup id as the tool.
 
 Usage: `python -m chemclaw.cli.synthesize <kind> [--fresh] [--actor <id>]` — kinds as the tool
 lists them (`campaign`, `playbook`, `optimization`, `observation-promotion`), `--fresh` to force

@@ -947,3 +947,37 @@ def test_an_unrouted_judge_says_it_is_grading_with_the_model_under_test(
     finally:
         # Process-cached, so a later test must not inherit this route.
         live_judge._judge_client.cache_clear()
+
+
+def test_the_corpus_fidelity_run_writes_under_its_own_directory_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`live_data` was the third writer into the committed transcripts directory.
+
+    It wrote `tasks/live-test/transcripts/corpus-fidelity.md` — a *tracked* file — so every
+    fidelity run dirtied the working tree and replaced the previous run's report with nothing
+    marking which run either came from. Fixed by routing it through the same `run_output_dir`
+    `live_probes` and `live_jobs` share, rather than by a second path policy: two writers into one
+    directory is how the overwrite happened, and three would not be better.
+
+    The checks themselves are stubbed out. What is under test is where the report lands, and that
+    is decided after they run.
+    """
+    from chemclaw.cli import live_data
+    from chemclaw.cli.live_probes import run_output_dir
+
+    monkeypatch.setattr(settings, "live_probe_transcript_dir", str(tmp_path))
+
+    async def _no_checks(*_args: object, **_kwargs: object) -> live_data.DataRun:
+        return live_data.DataRun(seconds=0.0)
+
+    monkeypatch.setattr(live_data, "run_data_checks", _no_checks)
+    real_data = tmp_path / "real_data"
+    real_data.mkdir()
+    assert live_data.main(["--corpus-only", "--real-data", str(real_data)]) == 0
+    capsys.readouterr()
+
+    written = run_output_dir("corpus-fidelity") / "corpus-fidelity.md"
+    assert written.is_file(), "the report must land in this run's own directory"
+    assert written.parent.parent.parent == tmp_path, "one suite dir, one run dir, then the file"
+    assert not (tmp_path / "corpus-fidelity.md").exists(), "never over the record"

@@ -732,7 +732,7 @@ async def backfill(timeout_seconds: float) -> str:
     # **A fixed id, so a second invocation rejoins the running drain instead of racing it.**
     # This is D-011's argument applied to the harness: the drain takes hours, `up.sh` starts one on
     # every bring-up and a human may run the lane meanwhile, and two concurrent syncs over one
-    # corpus contend on the PR-gate's git repository while producing no row the first would not.
+    # corpus contend on one corpus while producing no row the first would not.
     # Measured while writing this: calling it twice did start two.
     workflow_id = "eln-backfill-epoch"
     try:
@@ -751,9 +751,12 @@ async def backfill(timeout_seconds: float) -> str:
     try:
         summary = await asyncio.wait_for(handle.result(), timeout=timeout_seconds)
     except TimeoutError:
-        # **A drain still running is a state, not an error.** Every proposal costs a PR-gate git
-        # branch and commit — measured at ~1.8 s/record against this corpus, so the mock's 4,251
-        # ingestible records take a little over two hours. Failing here would make the lane red for
+        # **A drain still running is a state, not an error.** The drain is long: ~1.8 s/record
+        # measured against this corpus when each record still cost a PR-gate git branch and commit
+        # (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` has since removed that cost and
+        # nobody has re-measured), so the mock's 4,251 ingestible records took a little over two
+        # hours and the timeout is set for that order rather than for a re-measured one. Failing
+        # here would make the lane red for
         # a reason that is not a defect; the reachability check below reports how far it got, which
         # is the honest number and the one that converges on its own.
         return (
@@ -948,7 +951,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     text = report(run)
     print(text)
 
-    destination = args.report or Path(settings.live_probe_transcript_dir) / "corpus-fidelity.md"
+    # Imported here rather than at module scope, for the reason `live_jobs` gives at its own call
+    # site: this CLI needs one path policy from the probe lane and none of the httpx/judge
+    # machinery importing it at the top would pull in.
+    from chemclaw.cli.live_probes import run_output_dir
+
+    # A directory per run, never over the record. This wrote
+    # `tasks/live-test/transcripts/corpus-fidelity.md` — a *tracked* file — so every fidelity run
+    # dirtied the working tree and replaced the previous run's report with nothing marking which
+    # run either came from. The third writer into that one committed directory, fixed the same way
+    # as the other two: `run_output_dir` holds the whole argument, including why the parent stays
+    # committed rather than moving to a scratch path.
+    destination = args.report or run_output_dir("corpus-fidelity") / "corpus-fidelity.md"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(text + "\n", encoding="utf-8")
     print(f"\nwritten to {destination}")
