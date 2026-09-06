@@ -471,7 +471,10 @@ SLO, and no Alertmanager route" — and all three are now closed:
 (`up`/`absent()`, the only rules that fire for a process that is *gone*), turn latency, the durable
 tier and the silent-degradation counters; `templates/alertmanagerconfig.yaml` is the route, gated on
 `monitoring.alertmanager.enabled` and refusing to render without receivers; and every rule carries a
-`runbook_url` into `docs/guides/runbook.md` § "When an alert fires", which indexes all thirty-six.
+`runbook_url` into `docs/guides/runbook.md` § "When an alert fires", which indexes every one of
+them — a count is not written here for the same reason it is not written for the CI jobs below;
+`tests/test_deploy_chart.py::test_every_alert_carries_a_runbook_url_that_resolves` is what makes
+"every one" true rather than believed, by resolving each rule's `runbook_url` to a real heading.
 `templates/configmap-dashboards.yaml` carries the rest, so no declared metric is left with no reader
 — `tests/test_deploy_chart.py::test_every_declared_metric_has_a_consumer` is what keeps that true
 rather than believed.
@@ -483,7 +486,7 @@ whole group with it, silently, with the object still reading as `Valid`.
 
 ## CI/CD (F6-T4)
 
-Two workflows, both at the **repository root** — the only place GitHub Actions reads them from.
+Every workflow sits at the **repository root** — the only place GitHub Actions reads them from.
 Until D-117 these lived under `services/chemclaw/.github/`, where nothing executed them.
 
 - `ci.yml` — `make lint type cov` against a real Postgres, every validator the `ci` target names,

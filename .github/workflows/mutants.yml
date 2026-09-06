@@ -1,11 +1,18 @@
-# Weekly mutation test of the seven invariant-bearing modules — the backstop `ci.yml` deliberately
+# Weekly mutation test of the invariant-bearing modules — the backstop `ci.yml` deliberately
 # does not carry.
 #
-# `[tool.mutmut]` names `agent/authz.py`, `agent/audit_store.py`, `api/budget.py`,
-# `api/runner_trace.py`, `kg/note.py`, `kg/pr_gate.py` and `science/calc/store.py`: the
-# authorization gate, the audit trail, the budget guard, the runner's trace, the note schema, the
-# PR-gate and the calculation cache's key. `make mutants` is excluded from the `ci` target because
-# it costs an order of magnitude more than the gate — and until this file it had **no schedule
+# **Which modules is `[tool.mutmut].source_paths` in `pyproject.toml`, and it is not restated
+# here.** It was, and the restatement went stale in both directions at once: it said "seven" over a
+# list of eleven, and it named `kg/pr_gate.py`, a module
+# `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` had already deleted along with the whole
+# PR gate. A weekly job advertising coverage of a file that does not exist is the same defect class
+# this repository records for its validator list and its Makefile target count.
+# `tests/test_docstring_paths.py` is what keeps it honest now: its corpus was widened to cover
+# `.github/` in the same commit, so a module named in a workflow comment must resolve on disk
+# exactly as one named in a docstring must.
+#
+# `make mutants` is excluded from the `ci` target because it costs an order of magnitude more than
+# the gate — and until this file it had **no schedule
 # either**, so the only thing that had ever run it was a person, once
 # (`D-2026-08-08-a-survivor-is-a-hypothesis`). That pass found real holes: `propose_note`'s
 # `actor`/`session_id`/`correlation_id` stamps could each be deleted with the whole suite green,
