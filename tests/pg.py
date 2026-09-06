@@ -20,9 +20,19 @@ fixture and broke a similarity assertion. CI never noticed because its database 
 throwaway container; a shared dev database is where this bites.
 
 The schema is carried on the DSN itself (`options=-c search_path=...`) rather than threaded
-through the stores, because every store already resolves its own connection from
-`settings.postgres_dsn` — so redirecting that one value isolates all of them with no schema
-parameter anywhere in product code. `tests/conftest.py` owns that redirect.
+through the stores, because every store already resolves its own connection from a DSN setting —
+so redirecting those settings isolates all of them with no schema parameter anywhere in product
+code. `tests/conftest.py` owns that redirect and `redirect_dsns_to_test_schema` owns the list of
+what it covers.
+
+**It is a list rather than one value, and reading it as one value is what broke it.** This
+paragraph said "redirecting that one value isolates all of them" and named `postgres_dsn`; the
+migrations do not run through `postgres_dsn`. `migrate()` resolves
+`postgres_migration_dsn or postgres_dsn`, so a deployment configured for the split principal of
+`D-2026-08-05-append-only-by-grant-not-by-contract` migrated outside the isolation schema, left it
+empty, and every store then resolved through the search_path's second entry to `public` — with
+this suite's truncations and deletes landing there. `tests/test_suite_isolation.py` is what fails
+now if a fourth DSN setting appears unlisted.
 """
 
 from urllib.parse import quote
@@ -97,9 +107,14 @@ async def drop_test_schema(base_dsn: str, schema: str = TEST_SCHEMA) -> None:
 async def migrated_db_or_skip() -> None:
     """Ensure a reachable, migrated Postgres database, or skip if none is available.
 
-    Migrates into whatever `settings.postgres_dsn` currently points at — which the session
-    fixture in `conftest.py` has already redirected to `TEST_SCHEMA`. Every DDL statement in
-    `infra/sql` is unqualified, so they land in the first schema on the search_path.
+    Migrates into whatever `chemclaw.core.migrate.migration_dsn()` resolves —
+    `postgres_migration_dsn or postgres_dsn`, *both* of which the session fixture in `conftest.py`
+    has redirected to `TEST_SCHEMA`. Every DDL statement in `infra/sql` is unqualified, so they
+    land in the first schema on the search_path.
+
+    The reachability probe is against `postgres_dsn` deliberately: it is the connection the tests
+    themselves use, so a migrator that answers while the runtime credential does not is a failure
+    worth seeing rather than a skip.
     """
     try:
         conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)

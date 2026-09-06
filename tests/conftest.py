@@ -67,15 +67,52 @@ class FakeWriter:
         return WriteOutcome(reference=f"commit://{len(self.writes)}")
 
 
+# Every `Settings` field naming a Postgres database this suite would otherwise write to. Each
+# configured one is redirected into the isolation schema below, and
+# `tests/test_suite_isolation.py` fails if a fourth `*_dsn` field appears and is not listed here.
+# An allowlist somebody has to extend is the point: the two that were listed by hand were the two
+# somebody thought of, and the third — `postgres_migration_dsn`, which is what `migrate()` and
+# `apply_grants()` actually resolve — escaped for as long as it went unnamed.
+_ISOLATED_DSN_SETTINGS = ("postgres_dsn", "postgres_migration_dsn", "session_store_dsn")
+
+
+def redirect_dsns_to_test_schema(patch: pytest.MonkeyPatch) -> None:
+    """Point every configured Postgres DSN setting at `tests.pg.TEST_SCHEMA`.
+
+    A loop over a named list rather than a line per setting, because a line per setting is what
+    produced the escape: `postgres_dsn` and `session_store_dsn` each got one and
+    `postgres_migration_dsn` — added later, for the split-principal posture
+    `D-2026-08-05-append-only-by-grant-not-by-contract` describes — got none. `migrate()` resolves
+    `postgres_migration_dsn or postgres_dsn`, so with one configured, `migrated_db_or_skip`
+    migrated somewhere else entirely, the isolation schema stayed **empty**, and every store fell
+    through the search_path's second entry to `public`. Measured before the fix, with the
+    migration DSN naming a second schema: `isolation schema: 0 tables / migration target: 44`, and
+    an "isolated" connection then counting `public`'s live `note_index` rows. It does not fail —
+    it passes, on the deployment's own data, which the suite truncates.
+
+    An empty setting is left alone: both optional ones fall back to `postgres_dsn`, which is
+    already redirected, so rewriting `""` would invent a target rather than isolate one.
+    """
+    for name in _ISOLATED_DSN_SETTINGS:
+        configured = str(getattr(settings, name))
+        if configured:
+            patch.setattr(settings, name, schema_dsn(configured))
+
+
 @pytest.fixture(scope="session", autouse=True)
 def isolated_postgres_schema() -> Iterator[None]:
     """Point every Postgres-backed test at a dedicated schema, and drop it afterwards.
 
     Session-scoped and autouse so it is impossible to opt out of by forgetting a fixture: the
     destructive tests (`test_vector_index` truncates `note_index`) would otherwise run against
-    whatever database the developer's `.env` points at. Redirecting `postgres_dsn` is enough to
-    isolate every store, because
-    they all resolve their own connection from it — see `tests/pg.py`.
+    whatever database the developer's `.env` points at. Redirecting the DSN settings is enough to
+    isolate every store, because they all resolve their own connection from one — see `tests/pg.py`
+    and `redirect_dsns_to_test_schema`, which owns the list.
+
+    The schema itself is created with the *unredirected* runtime DSN. Under a split-principal
+    configuration whose migrator cannot create in a schema the runtime role owns, the migration
+    then fails loudly instead of landing outside — which is the whole point: a run that cannot be
+    isolated must stop, not quietly proceed against the real one.
 
     A missing database is not an error here: the per-test `migrated_db_or_skip` already turns
     that into a skip, so this yields untouched and lets it report the reason.
@@ -88,11 +125,7 @@ def isolated_postgres_schema() -> Iterator[None]:
         return
 
     patch = pytest.MonkeyPatch()
-    patch.setattr(settings, "postgres_dsn", schema_dsn(base_dsn))
-    # `session_store_dsn` falls back to `postgres_dsn` only while it is empty; an explicitly
-    # configured one would otherwise escape the redirect and write to the real schema.
-    if settings.session_store_dsn:
-        patch.setattr(settings, "session_store_dsn", schema_dsn(settings.session_store_dsn))
+    redirect_dsns_to_test_schema(patch)
     try:
         yield
     finally:
@@ -320,10 +353,14 @@ def _report_postgres_skips(terminalreporter: TerminalReporter) -> None:
     tables, retention, the outbox — and still prints a green line, which reads as "the suite
     passed" and means "the suite mostly did not run". `CLAUDE.md` warns about exactly this and
     stated the size of it as a number, which went stale by ~38% in the direction that understates
-    the risk (it said ~157; the measured figure was 216). A count in prose describes the suite on
-    the day someone counted; this one is measured by the run that is reporting it, which is the
-    rule `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` reached for the eight other
-    counts that were wrong.
+    the risk. **The number that replaced it is not written here either, and the first version of
+    this docstring wrote it down anyway** — it named the figure measured on the day the counter
+    was added, and a later review measuring the gated files alone found more than twice that,
+    which is this docstring committing the mistake it was added to describe. A count in prose
+    describes the suite on the day someone counted; the line printed below is measured by the run
+    that is reporting it, which is the rule
+    `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` reached for the eight other counts
+    that were wrong.
     """
     skipped = [
         report

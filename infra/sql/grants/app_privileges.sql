@@ -268,8 +268,19 @@ BEGIN
     -- enumerated list would be a third place the table set is written down.
     EXECUTE format('GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO %I', app_role);
 
-    -- `schema_migrations` is deliberately absent from every GRANT above: the ledger is the
-    -- migrator's record of its own work, and a runtime credential able to write it could mark a
-    -- migration applied that never ran.
+    -- `schema_migrations` is deliberately absent from every *write* GRANT above: the ledger is
+    -- the migrator's record of its own work, and a runtime credential able to write it could mark
+    -- a migration applied that never ran. Measured as the role: `42501` on INSERT and on UPDATE.
+    --
+    -- **The read reaches it, and this sentence used to deny that.** It said "absent from every
+    -- GRANT above", which is false: `GRANT SELECT ON ALL TABLES IN SCHEMA public` forty lines up
+    -- names no table, so it reaches the ledger like everything else, and the test guarding the
+    -- claim read the *named* GRANT statements out of this file's text and therefore could not see
+    -- it. That is left as it is rather than narrowed. Read is uniform here by design, the ledger
+    -- holds filenames and checksums of files that ship in the image, and the threat this paragraph
+    -- describes is entirely a write. A REVOKE would be a second, special-cased posture bought with
+    -- nothing. `tests/test_runtime_ddl_privilege.py` now asserts both halves against the live ACL —
+    -- the refusals by attempting them as the role, the read by holding this claim to it — so the
+    -- next release that disagrees has to change the assertion and this sentence together.
 END
 $$;

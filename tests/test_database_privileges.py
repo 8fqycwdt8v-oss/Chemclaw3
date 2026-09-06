@@ -325,8 +325,16 @@ def test_the_audit_trail_is_append_only_by_grant() -> None:
     )
 
 
-def test_the_migration_ledger_is_never_granted_to_the_runtime_role() -> None:
-    """A role that can write the ledger can mark a migration applied that never ran."""
+def test_the_migration_ledger_is_never_granted_a_write_verb() -> None:
+    """A role that can write the ledger can mark a migration applied that never ran.
+
+    **A write verb, and the name of this test used to say more than it checks.** It read "never
+    granted", over a derivation that models INSERT/UPDATE/DELETE and deliberately not SELECT — so
+    it could not see, and was read as excluding, the blanket `GRANT SELECT ON ALL TABLES IN SCHEMA
+    public` that does reach the ledger. Measured as the role: `SELECT` allowed, `42501` on INSERT
+    and UPDATE. The read is intended and `app_privileges.sql` now says so; the live half of the
+    claim is `tests/test_runtime_ddl_privilege.py`, which asks the ACL instead of this file's text.
+    """
     assert "schema_migrations" not in verbs_the_grant_allows()
 
 
