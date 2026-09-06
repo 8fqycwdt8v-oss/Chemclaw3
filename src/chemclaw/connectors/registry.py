@@ -36,7 +36,6 @@ from types import ModuleType
 from typing import Any, assert_never
 
 import httpx
-import yaml
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.sessions import StdioConnection, StreamableHttpConnection
 from pydantic import ValidationError
@@ -54,6 +53,7 @@ from chemclaw.connectors.transport import ConnectorSpec, HeldConnectorSession
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.http import default_ssl_context
+from chemclaw.core.manifest_io import read_manifest, within_root
 from chemclaw.core.mcp_session import CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_GRACE_SECONDS
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.tool_registry import CapabilityTool, registered_tools
@@ -111,7 +111,7 @@ def _bundle_dirs() -> list[Path]:
         if not root.is_dir():
             continue
         for path in sorted(root.iterdir()):
-            if (path / MANIFEST_FILENAME).is_file():
+            if (path / MANIFEST_FILENAME).is_file() and within_root(root, path):
                 # First dir wins, so an operator's private connectors dir listed ahead of the
                 # repo's can override a shipped bundle — the same precedence a `PATH` entry has.
                 found.setdefault(path.name, path)
@@ -127,12 +127,7 @@ def _load_manifest(bundle: Path) -> ConnectorManifest:
     applies to `SKILL.md`).
     """
     path = bundle / MANIFEST_FILENAME
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        raise ConnectorError(f"{path}: unreadable or malformed YAML: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise ConnectorError(f"{path}: must contain a YAML mapping, got {type(raw).__name__}")
+    raw = read_manifest(path, ConnectorError)
     try:
         manifest = ConnectorManifest.model_validate(raw)
     except ValidationError as exc:

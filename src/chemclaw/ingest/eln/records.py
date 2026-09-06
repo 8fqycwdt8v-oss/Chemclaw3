@@ -28,7 +28,7 @@ structural hits, `agent.graph_tools.expand_note` serves the recipe behind one hi
 """
 
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Any, Protocol, runtime_checkable
@@ -48,6 +48,15 @@ logger = logging.getLogger(__name__)
 # The one note type a reaction record answers to. A `type=` filter naming anything else can match
 # nothing here, and that is decided without a query.
 RECORD_TYPE = "reaction"
+
+
+class UnreadableConditions(ChemclawError):
+    """A `reaction_records.conditions` payload is not a JSON object, so no build can read it.
+
+    Distinct from the version skew `_stored_conditions` tolerates: an *added* field is an ordinary
+    rolling upgrade and is ignored, while a payload that is not an object at all cannot have come
+    from any build of this ingest.
+    """
 
 
 class AmbiguousReactionRecord(ChemclawError):
@@ -504,6 +513,59 @@ class PostgresReactionRecordStore:
         return {row[0] for row in rows}
 
 
+def _stored_conditions(reaction_id: str, stored: Any) -> ProcessConditions | None:
+    """One row's `conditions` payload as a model, ignoring fields this build does not know.
+
+    **The read tolerates what the write forbids, and the asymmetry is the decision** — the same one
+    `D-2026-09-06-a-decode-the-workflow-does-not-do-is-a-failure-nobody-hears` took on the Temporal
+    wire, for the same fact: a rolling upgrade is not atomic. `ProcessConditions` forbids extras
+    because a typo'd key silently dropped is a number a chemist wrote that no comparison will ever
+    render, and that argument is about *writing* — `ingest/eln/record.py` builds the model from ORD
+    data inside this image, where an unknown key is a bug that must fail loudly. This function reads
+    a row written by *some* build of core against one shared database, and during every rollout that
+    is routinely a newer one. Measured before this existed: a row carrying one added field raised
+    `ValidationError: pressure_bar_v2 — Extra inputs are not permitted` on the old pod, and because
+    a reaction is looked up by *structure*, the failure landed on a chemist's query for a molecule
+    rather than on the ingest that wrote it.
+
+    Unknown keys are dropped rather than kept, because `ProcessConditions` is frozen and typed and
+    there is nowhere to put them; the row itself still holds them for the build that understands
+    them. A *known* field with an unreadable value is not this case and still raises: that is
+    corruption or a type change, not a version skew, and `read` addresses one reaction by id, so
+    refusing is telling the caller about the row it asked for.
+
+    `is not None` rather than a truth test: `{}` is "conditions were recorded and every one of them
+    is unknown", which `comparison.MISSING` renders differently from "no conditions were recorded",
+    and a falsy check collapsed the two.
+
+    Args:
+        reaction_id: The record the payload belongs to, for the log line.
+        stored: The `conditions` column as psycopg returns it — a parsed object, or SQL `NULL`.
+
+    Returns:
+        The conditions, or `None` when the column is NULL.
+    """
+    if stored is None:
+        return None
+    if not isinstance(stored, Mapping):
+        # `conditions` is a bare `jsonb` column, so an array or a scalar is storable and both
+        # reached `ProcessConditions(**row)` as `TypeError: argument after ** must be a mapping`,
+        # which names neither the table nor the row. Nothing this repository writes produces one.
+        raise UnreadableConditions(
+            f"reaction_records row {reaction_id!r} holds {type(stored).__name__} in `conditions` "
+            "where a JSON object is required; the row was written by something other than this "
+            "ingest."
+        )
+    known = {key: value for key, value in stored.items() if key in ProcessConditions.model_fields}
+    if len(known) != len(stored):
+        logger.info(
+            "reaction %s carries condition field(s) this build does not know (%s); ignoring them",
+            reaction_id,
+            ", ".join(sorted(set(stored) - set(known))),
+        )
+    return ProcessConditions(**known)
+
+
 def _record(row: tuple[Any, ...]) -> ReactionRecord:
     """Build a `ReactionRecord` from a `_COLUMNS` row, validated through the model."""
     return ReactionRecord(
@@ -512,7 +574,7 @@ def _record(row: tuple[Any, ...]) -> ReactionRecord:
         compound_smiles=row[2],
         project=row[3],
         performed_at=row[4],
-        conditions=ProcessConditions(**row[5]) if row[5] else None,
+        conditions=_stored_conditions(row[0], row[5]),
         source=row[6],
     )
 

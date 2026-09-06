@@ -234,21 +234,29 @@ class AuditEvent(BaseModel):
     # and here did not, which is false in both halves. It renders the answerable question instead.
     purpose: str = ""
     actor: str
-    # Which specialist made this call — the `AgentProfile` name of the running subagent, empty for
-    # the main agent (D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor, invariant 3).
+    # Which agent made this call — the `AgentProfile` name of the graph the call ran on, empty for
+    # the agent a chemist is talking to (D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor,
+    # invariant 3). **Beside `actor`, never instead of it**: overloading `actor` — the human's Entra
+    # oid — would produce exactly the D-040 failure this system has already been bitten by, a trail
+    # recording an agent's self-authorization under the chemist's identity, which is worse than an
+    # unrecorded act because it *looks* attributable. `purpose` stays reserved for *why* a call was
+    # made, a different and still unanswerable question.
     #
-    # **Nothing writes it, and that is now visible rather than claimed.** The contextvar this field
-    # was read from had no setter in `src/` for as long as it existed, so the column was empty on
-    # every row ever written while three docstrings said the trail named the agent beside the human
-    # (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`). The field and its
-    # column stay because `infra/sql/006` is merged and a merged migration is never edited, and
-    # because the shape is right for when subagents return: **beside `actor`, never instead of it**.
-    # Overloading `actor` — the human's Entra oid — would produce exactly the D-040 failure this
-    # system has already been bitten by: the trail recorded an agent's self-authorization under the
-    # chemist's identity, which is worse than an unrecorded act because it *looks* attributable. And
-    # `purpose` is reserved for why a call was made, which is a different question with a different
-    # (still unanswerable) answer; filling it with an agent name would spend the one column that is
-    # honest about being empty.
+    # **It has a producer, and did not for as long as it existed before**
+    # (`D-2026-09-06-the-one-agent-that-exists-is-named-in-the-trail`). The contextvar this used to
+    # be read from had no setter in `src/`, so the column was empty on every row ever written
+    # while three docstrings said the trail named the agent beside the human, and
+    # `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted the plumbing and
+    # pinned the absence. What changed is that there is now exactly one subagent, spawned on
+    # every turn (`D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`), and its tool
+    # calls were landing in the trail as the chemist's own with nothing marking them.
+    #
+    # The value is a **build-time argument** (`make_audit_middleware(agent=…)`), not an ambient
+    # read:
+    # a helper is a second compiled graph with its own middleware chain, so the graph that owns the
+    # row already knows which one it is, and a contextvar would reintroduce a producer that can be
+    # forgotten. `tests/test_audit.py` drives both graphs and asserts each row's value rather than
+    # scanning for the absence of one.
     agent: str = ""
     # The plan step this call served — the `content` of the first `in_progress` todo, or empty when
     # the call was not made from a plan step (`agent/plan_link.plan_link_for_call`, the same rule
@@ -469,6 +477,7 @@ def make_audit_middleware(
     correlation_id: str,
     actor: str,
     sink: AuditSink | None = None,
+    agent: str = "",
 ) -> AgentMiddleware[Any, Any]:
     """The trail as tool-call middleware — the wiring, with the recording itself in `_recording`.
 
@@ -481,6 +490,17 @@ def make_audit_middleware(
     The result recorded as the `ok` detail is the `ToolMessage`'s content rather than a raw return
     value, because that is what the model is actually handed: an audit row saying what the tool
     computed, where the model read something else, would be a record of the wrong event.
+
+    Args:
+        correlation_id: The turn this chain belongs to, used when no turn stamped one ambiently.
+        actor: The build-time fallback identity, used when no turn bound an authenticated one.
+        sink: Where rows go; the process default when omitted.
+        agent: Which graph this chain governs — `AuditEvent.agent`. Empty for the agent a chemist
+            talks to, and the helper's profile name for the graph behind `task`. A build-time
+            argument rather than an ambient read because a helper *is* a separately compiled graph
+            with its own chain: the thing that builds it is the only thing that knows, and it
+            cannot forget in the way a contextvar setter demonstrably can
+            (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`).
     """
     audit_sink: AuditSink = sink if sink is not None else default_audit_sink()
     revision = settings.deployment_revision
@@ -498,6 +518,7 @@ def make_audit_middleware(
             tool_revision=_served_by(request),
             plan_step=_plan_step(request),
             metric_name=metric_tool_name(request, request.tool_call["name"]),
+            agent=agent,
         ) as recorded:
             result = await handler(request)
             recorded.result = getattr(result, "content", result)
@@ -541,6 +562,7 @@ async def _recording(
     tool_revision: str = "",
     plan_step: str = "",
     metric_name: str = "",
+    agent: str = "",
 ) -> AsyncIterator[_Recorded]:
     """The trail itself, with no framework in it — both engines' middlewares are wrappers.
 
@@ -551,8 +573,9 @@ async def _recording(
     and the `cancelled` outcome exists precisely because a subtle omission here went unnoticed
     until it was measured (D-130).
 
-    What each engine supplies is only the four things it alone knows: the tool's name, its
-    arguments, the plan step the request was carrying, and — inside the block — its result.
+    What each engine supplies is only what it alone knows: the tool's name, its arguments, the plan
+    step the request was carrying, which graph is running (`agent`, fixed when the chain was built),
+    and — inside the block — its result.
     """
     args = bounded_repr(arguments)
     # The real actor is the turn's authenticated Entra user (F4-T5); fall back to the static
@@ -577,6 +600,10 @@ async def _recording(
             correlation_id=event_cid,
             session_id=event_session,
             actor=event_actor,
+            # Not resolved beside the actor above: the human is read off the turn, and which graph
+            # is running is known by whatever built this chain. One is ambient because it varies per
+            # turn on a process-lived object; the other is fixed for the life of the graph.
+            agent=agent,
             plan_step=plan_step,
             tool=name,
             arguments=args,

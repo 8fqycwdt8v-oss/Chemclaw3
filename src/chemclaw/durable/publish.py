@@ -66,6 +66,11 @@ _BAD_DATA_TYPES = [
     # transient: the parent has taken no turn, so there is no thread to copy, and retrying finds
     # exactly the same absence — nothing about waiting makes a checkpoint appear.
     "SessionForkError",
+    # A `reaction_records.conditions` payload that is not a JSON object at all
+    # (`ingest/eln/records.py`). Bad data rather than transient — no build of this ingest writes
+    # one, and retrying re-reads the same row. Distinct from the *extra field* a newer build
+    # writes, which is tolerated rather than raised.
+    "UnreadableConditions",
     "ElnMappingError",
     "ElnFormatError",
     "OrdFormatError",

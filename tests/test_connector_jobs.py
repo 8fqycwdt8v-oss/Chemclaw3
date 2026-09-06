@@ -33,6 +33,7 @@ from chemclaw.connectors.jobs import (
 )
 from chemclaw.connectors.manifest import JobSpec
 from chemclaw.connectors.registry import enabled
+from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.turn_signals import JobSignal
 from chemclaw.durable.connector_job import ConnectorJobInput
@@ -201,8 +202,17 @@ def test_a_referenced_model_gives_full_fidelity_for_a_structured_input() -> None
     assert build_job_tool("bo", referenced).__annotations__["params"] is CampaignSpec
 
 
-def test_an_unresolvable_model_reference_fails_with_a_named_error() -> None:
-    """Caught by `make connector-validate`, not when a chemist first calls the tool."""
+def test_an_unresolvable_model_reference_fails_with_a_named_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caught by `make connector-validate`, not when a chemist first calls the tool.
+
+    The unimportable arm has to name an *allowed* package now, because a reference is refused for
+    its package before anything tries to import it
+    (`D-2026-09-06-a-manifest-is-data-in-every-field-that-executes`) — and a test asserting "cannot
+    import" against a reference that never reaches the import would be asserting the wrong refusal.
+    """
+    monkeypatch.setattr(settings, "manifest_driver_packages", "no")
     with pytest.raises(ConnectorJobError, match="cannot import"):
         resolve_params_model("no.such.module:Thing")
     with pytest.raises(ConnectorJobError, match="has no"):

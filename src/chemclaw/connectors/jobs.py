@@ -43,6 +43,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.manifest_io import check_driver_module
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.plan_context import get_current_plan_link
 from chemclaw.core.session_context import get_current_session_id
@@ -105,9 +106,15 @@ def resolve_params_model(reference: str) -> type[BaseModel]:
     a pydantic model is a configuration error reported here (and by `make connector-validate`),
     not a confusing failure when the tool is first called.
 
+    The reference is held to `CHEMCLAW_MANIFEST_DRIVER_PACKAGES` first: this import runs top-level
+    module code in the chat process on the per-turn agent-build path, and a manifest is data
+    (`D-2026-09-06-a-manifest-is-data-in-every-field-that-executes`).
+
     Raises:
-        ConnectorJobError: When the module or attribute does not exist, or is not a pydantic model.
+        ConnectorJobError: When the package is not allowed, the module or attribute does not
+            exist, or the attribute is not a pydantic model.
     """
+    check_driver_module(reference, ConnectorJobError, "params_model")
     module_name, _, attribute = reference.partition(":")
     try:
         module = import_module(module_name)
@@ -129,9 +136,14 @@ def resolve_precondition(reference: str) -> Callable[[Any], None]:
     Resolved at build time (and by `make connector-validate`), not at call time, so a typo is a
     configuration error a deployment finds before a chemist does.
 
+    Held to the same package allow-list `resolve_params_model` is, and for the sharper reason: a
+    precondition is not merely imported, it is *called*.
+
     Raises:
-        ConnectorJobError: When the module or attribute does not exist, or is not callable.
+        ConnectorJobError: When the package is not allowed, the module or attribute does not
+            exist, or the attribute is not callable.
     """
+    check_driver_module(reference, ConnectorJobError, "precondition")
     module_name, _, attribute = reference.partition(":")
     try:
         module = import_module(module_name)

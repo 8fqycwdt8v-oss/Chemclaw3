@@ -35,7 +35,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict
 
 from chemclaw.agent.audit import NullAuditSink, make_audit_middleware
-from chemclaw.agent.framing import ENVELOPE_TAG
+from chemclaw.agent.framing import ENVELOPE_TAG, envelope_delimiters
 from chemclaw.agent.langgraph_agent import build_langgraph_agent, tool_call_middleware
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.tool_framing import defanged_payload, frame_connector_results
@@ -769,3 +769,38 @@ class _Stamped:
     """A tool object carrying the `SERVED_BY` stamp a connector handshake writes onto one."""
 
     metadata = {SERVED_BY: {"connector": "fakeconn", "server": "s"}}
+
+
+def test_escaping_a_disguised_tag_cannot_carry_a_read_past_the_ceiling() -> None:
+    """The ceiling is on what the model is sent, and escaping happens after the cut.
+
+    `bound_tool_results` is nested *inside* this middleware, so it cuts the raw payload and the
+    defang pass runs afterwards. That pass is deliberately blunt: once an invisible character
+    reveals a disguised envelope tag it escapes **every** `<` in the content, which is a 4x
+    expansion of exactly the character it is most worth filling a payload with.
+
+    Measured on the shipped 60,000 ceiling before the re-bound: a scratch file cut to 60,000
+    reached the model at **239,865** characters, 4.00x, against a bound the deployment believed
+    it had. This drives the real graph rather than the escape function, because the defect was in
+    the *composition* of two correct pieces — asserting on `defang` alone would have stayed green
+    through it.
+    """
+    ceiling = settings.agent_max_tool_result_chars
+    opening, _ = envelope_delimiters("probe")
+    # A tag disguised by one zero-width byte — enough to trip the second pass — then filled to the
+    # ceiling with the character that pass escapes.
+    disguised = f"{opening[0]}​{opening[1:]}"
+    payload = disguised + "<" * (ceiling - len(disguised))
+
+    messages = _scratch_turn(
+        _wrote(content=payload),
+        {"name": "read_file", "args": {"file_path": "/scratch/evidence.md"}},
+    )
+    read = messages[-1]
+    delivered = sum(len(span) for span in _text_spans(read.content))
+
+    assert delivered <= ceiling, (
+        f"a read delivered {delivered} characters against a {ceiling} ceiling "
+        f"({delivered / ceiling:.2f}x): escaping a disguised tag expands the text after the "
+        "cut, so the layer that expands it has to re-check the bound"
+    )

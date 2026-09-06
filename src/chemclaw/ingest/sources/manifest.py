@@ -47,8 +47,19 @@ class DataSourceManifest(BaseModel):
 
     name: str = Field(
         min_length=1,
+        pattern=r"^[a-z][a-z0-9-]*$",
         description=(
-            "The source's stable key. It is also the enable token in `CHEMCLAW_DATA_SOURCES` and "
+            "The source's stable key, in the shape `ConnectorManifest`, `ResultSinkManifest` and "
+            "`DeliveryChannelManifest` all require and this one alone did not — measured, folders "
+            "named `UPPER`, `with space`, `unicode-ïd`, `dot.dot` and `-leading` all loaded and "
+            "`make datasource-validate` exited 0. **The constraint is really on the folder**, "
+            "because the folder name is authoritative and is the string that arrives here. "
+            "Defence in depth rather than a fix for a live escape: the 2026-09 review could not "
+            "turn a hostile name into a traversal or a metric-label injection (`core/metrics.py` "
+            "escapes at all four exposition sites). But this string is the document-index "
+            "partition key, the sweep's delete predicate, the citation label and a "
+            "`retrieval_source_weights` key, and three sibling manifests already show the shape. "
+            "It is also the enable token in `CHEMCLAW_DATA_SOURCES` and "
             "the string the durable ELN sync records in its workflow history "
             "(`sync_eln_entries(source=name)`), so renaming a source is a history-visible change, "
             "not a cosmetic one."

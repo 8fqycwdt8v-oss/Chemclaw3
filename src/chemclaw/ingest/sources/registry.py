@@ -21,18 +21,17 @@ before any import and a half's callable is resolved only when it is about to be 
 in the shared session `sys.modules` already holds what every other test imported.
 """
 
-import importlib
 import logging
 from collections.abc import Callable
 from functools import cache
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pydantic import ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.manifest_io import read_manifest, resolve_driver, within_root
 from chemclaw.ingest.sources.base import DataSource, IngestHalf, RetrieveHalf, SourceSpec
 from chemclaw.ingest.sources.manifest import DataSourceManifest
 
@@ -69,7 +68,7 @@ def _source_dirs() -> list[Path]:
         if not root.is_dir():
             continue
         for path in sorted(root.iterdir()):
-            if (path / MANIFEST_FILENAME).is_file():
+            if (path / MANIFEST_FILENAME).is_file() and within_root(root, path):
                 found.setdefault(path.name, path)
     return [found[name] for name in sorted(found)]
 
@@ -77,14 +76,7 @@ def _source_dirs() -> list[Path]:
 def _read_manifest(path: Path) -> DataSourceManifest:
     """Parse and validate one `datasource.yaml`, raising `DataSourceError` naming the file."""
     manifest_path = path / MANIFEST_FILENAME
-    try:
-        raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        raise DataSourceError(f"{manifest_path}: unreadable data source manifest: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise DataSourceError(
-            f"{manifest_path}: manifest must be a mapping, got {type(raw).__name__}"
-        )
+    raw = read_manifest(manifest_path, DataSourceError)
     try:
         manifest = DataSourceManifest.model_validate(raw)
     except ValidationError as exc:
@@ -116,27 +108,13 @@ def resolve_half(reference: str) -> Callable[..., Any]:
     second cache here would only obscure which process resolved what, which is exactly the
     property `tests/test_datasource_isolation.py` measures.
     """
-    module_name, _, attribute = reference.partition(":")
-    try:
-        module = importlib.import_module(module_name)
-    except ImportError as exc:
-        raise DataSourceError(
-            f"cannot import {module_name!r} for data source half {reference!r}: {exc}"
-        ) from exc
-    resolved = getattr(module, attribute, None)
-    if resolved is None:
-        raise DataSourceError(
-            f"{module_name!r} has no attribute {attribute!r} (from {reference!r})"
-        )
-    if not callable(resolved):
-        raise DataSourceError(
-            f"{reference!r} resolved to {type(resolved).__name__}, which is not callable"
-        )
-    # `getattr` on a module is `Any`, and the `callable()` guard above is the only check that can be
-    # made — what a half must satisfy is `IngestHalf`/`RetrieveHalf`, which are runtime-checkable
-    # protocols on the *built* object, not on the factory. `_build_half`'s caller gets that check
-    # for free the moment it assigns the result into `SourceSpec`.
-    factory: Callable[..., Any] = resolved
+    # `getattr` on a module is `Any`, and the `callable()` guard `resolve_driver` applies is the
+    # only check that can be made here — what a half must satisfy is `IngestHalf`/`RetrieveHalf`,
+    # which are runtime-checkable protocols on the *built* object, not on the factory.
+    # `_build_half`'s caller gets that check for free the moment it assigns the result into
+    # `SourceSpec`. The package allow-list `resolve_driver` enforces is the doctrinal half: this
+    # reference is imported in whichever process holds the source, and a manifest is data.
+    factory: Callable[..., Any] = resolve_driver(reference, DataSourceError, "data source half")
     return factory
 
 

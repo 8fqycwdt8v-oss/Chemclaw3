@@ -11,6 +11,8 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
+from chemclaw.core.config.dsn import DatabaseDsn
+
 
 class ServiceSettings(BaseSettings):
     """The front-door run service (plan Phase F2/F3): binding, limits, sessions, budgets.
@@ -88,7 +90,7 @@ class ServiceSettings(BaseSettings):
     # calculation/fingerprint DSN; empty falls back to `postgres_dsn` (one database in the
     # simple deployment).
     session_store: Literal["memory", "postgres"] = "memory"
-    session_store_dsn: str = ""
+    session_store_dsn: DatabaseDsn = ""
     # Cap on the front door's in-process live-session cache (COR-3). The service holds the live
     # AgentSession object per session id; without a bound this map grows for the pod's whole
     # lifetime. When the cap is exceeded the least-recently-used session is evicted — its

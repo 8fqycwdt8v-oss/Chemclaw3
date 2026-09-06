@@ -31,11 +31,13 @@ that also serves every SSE stream.
 """
 
 import logging
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
 
 from chemclaw.core.config import settings
+from chemclaw.core.logging import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,45 @@ def _tracer() -> Any:
     except Exception:  # pragma: no cover - defensive; tracing must never break the caller
         logger.debug("tracing enabled but the OpenTelemetry API is unavailable", exc_info=True)
         return None
+
+
+# The leading `ClassName(` or `ClassName:` of a failure description — which is what every caller
+# hands `SpanHandle.failed`: `bounded_repr(exc)` renders `ValueError("…")` and this module's own
+# escape handler renders `ValueError: …`. The class is an *identifier*, so it survives the
+# suppression below; everything after it is the message, which is content.
+_FAILURE_CLASS = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]{0,63})[(:]")
+
+# What a span says instead of a message when content is not permitted on the wire. Names the flag,
+# because the operator reading a bare `***` in a collector has no way to find out what governs it.
+_WITHHELD = "detail withheld (CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA is off)"
+
+
+def exportable_detail(description: str) -> str:
+    """What a failure description may carry to the collector, under the two rules that govern it.
+
+    **This is the one place the exception channel is filtered, and it did not exist.** `start_span`
+    has always stated the rule — "identifiers and counts, never a question, an argument or an
+    answer" — and it held for the attributes this module sets and for nothing else. Measured with a
+    real exporter and `otel_include_sensitive_data` at its shipped default: a tool failure put the
+    exception message *and* the full stacktrace on an exported span, and a marker credential echoed
+    back in a 401 body went out verbatim. Spans are not `logging.LogRecord`s, so
+    `SecretRedactingFilter` — the inventory that catches those identical strings on the log path —
+    never saw any of it, while `core/logging._warn_about_sensitive_data` told the operator that
+    with the flag off "no first-party span carries turn content".
+
+    Two rules, and they are not the same rule:
+
+    - **A credential is never exported**, on either setting of the flag. The flag is a decision
+      about *turn content* — a chemist's question and the model's answer — and nobody enables it in
+      order to ship this process's own bearer to a collector. So `redact_secrets` runs regardless.
+    - **A message is content**, so with the flag off only the failure's *class* survives. That
+      keeps the span diagnostic in the way an operator actually filters — `status=ERROR`, plus
+      which exception — without exporting what the tool was called about.
+    """
+    if settings.otel_include_sensitive_data:
+        return redact_secrets(description)
+    match = _FAILURE_CLASS.match(description.strip())
+    return f"{match.group(1)}: {_WITHHELD}" if match else _WITHHELD
 
 
 class SpanHandle:
@@ -120,13 +161,18 @@ class SpanHandle:
         Swallowing here rather than at the call site, for the reason `record_metric` swallows: this
         is called from inside an `except` block on the tool path, and a tracing failure must not
         replace the failure being reported.
+
+        **`description` is filtered here rather than by the caller**, through `exportable_detail`.
+        A flag read at one call site and not another is the defect shape this repository keeps
+        finding; a caller cannot forget a rule it is not asked to apply, and the next call site
+        inherits it on the day it is written.
         """
         if self._span is None:
             return
         try:
             from opentelemetry.trace import Status, StatusCode
 
-            self._span.set_status(Status(StatusCode.ERROR, description))
+            self._span.set_status(Status(StatusCode.ERROR, exportable_detail(description)))
         except Exception:  # pragma: no cover - defensive; tracing must never break the caller
             logger.debug("could not set an error status on the current span", exc_info=True)
 
@@ -148,10 +194,35 @@ def start_span(name: str, **attributes: str | int | float | bool) -> Iterator[Sp
     if tracer is None:
         yield SpanHandle(None)
         return
-    with tracer.start_as_current_span(name) as span:
+    # **The SDK's own exception handling is switched off and replaced, and that is the fix rather
+    # than an optimisation.** `use_span` records an `exception` event carrying `exception.message`
+    # and the *full* `exception.stacktrace`, then sets the status description to
+    # `f"{type(exc).__name__}: {exc}"` — three exports of the same content, none of which any
+    # first-party code is in a position to filter, because they happen underneath this `with`.
+    # Measured with a real exporter and the content flag off: a marker credential echoed back in an
+    # upstream 401 body reached the collector verbatim on all three, and the stacktrace disclosed
+    # every absolute path in the frame list beside it.
+    #
+    # Both flags are turned off together and the ERROR status is set here instead, so an operator
+    # filtering a collector by `status=ERROR` sees exactly what they saw before — including for a
+    # *refusal*, which `agent/audit.py` deliberately does not mark itself on the argument that "it
+    # raises, so OpenTelemetry marks it anyway". That argument is what makes replacing the status
+    # mandatory rather than optional: dropping `set_status_on_exception` without this clause would
+    # have silently un-marked every refusal.
+    #
+    # `Exception`, not `BaseException`, because that is the width `use_span` catches: a
+    # `CancelledError` still escapes unmarked here, and `agent/audit.py` still marks it itself.
+    with tracer.start_as_current_span(
+        name, record_exception=False, set_status_on_exception=False
+    ) as span:
         for key, value in attributes.items():
             span.set_attribute(key, value)
-        yield SpanHandle(span)
+        handle = SpanHandle(span)
+        try:
+            yield handle
+        except Exception as exc:
+            handle.failed(f"{type(exc).__name__}: {exc}")
+            raise
 
 
 def trace_header_names() -> frozenset[str]:

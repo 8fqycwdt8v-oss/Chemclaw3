@@ -27,7 +27,11 @@ and the copy is what makes restamping *possible*: there is a row of the child's 
    channel, version)` and its rows are *shared across a thread's checkpoints* — a channel written
    at version 3 and unchanged since is stored once and referenced by every later checkpoint. Copying
    only the newest checkpoint's rows therefore loses every channel value whose version predates it,
-   and loses it silently: the fork resumes with holes rather than failing.
+   and loses it silently: the fork used to resume with holes rather than failing. It no longer
+   resumes at all in that state — `D-2026-09-06-a-sweep-and-a-live-turn-are-two-writers` made a
+   checkpoint whose stamped channel values are absent raise `CheckpointValuesMissing` instead of
+   reading back as an empty conversation, and a partial copy is exactly that shape. The reason to
+   copy the whole thread is unchanged; what changed is that getting it wrong is now loud.
 2. **The transcript, not only the checkpoint.** A session with no `session_messages` rows is
    **invisible** to `GET /sessions`, whose owner listing `LATERAL`-joins `max(created_at)` over that
    table and drops sessions with none. A fork that copied only graph state would be a session the

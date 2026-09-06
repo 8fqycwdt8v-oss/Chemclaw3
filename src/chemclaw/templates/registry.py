@@ -18,7 +18,6 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pydantic import BaseModel, Field, ValidationError, create_model
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
@@ -29,6 +28,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_roles
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.manifest_io import read_manifest
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
@@ -64,12 +64,7 @@ class TemplateError(ChemclawError):
 
 def _load(path: Path) -> Template:
     """Parse and validate one template file, whose stem is its name."""
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        raise TemplateError(f"{path}: unreadable or malformed YAML: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise TemplateError(f"{path}: must contain a YAML mapping, got {type(raw).__name__}")
+    raw = read_manifest(path, TemplateError)
     if "name" in raw:
         raise TemplateError(
             f"{path}: a template's name is its filename; remove the 'name' key so the two "

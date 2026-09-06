@@ -31,6 +31,20 @@ from chemclaw.ingest.sources.base import DataSource, SourceSpec
 from chemclaw.retrieval.evidence import EvidenceChunk
 
 
+@pytest.fixture(autouse=True)
+def _allow_test_package_drivers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let this suite's manifests name halves that live in this file.
+
+    `D-2026-09-06-a-manifest-is-data-in-every-field-that-executes` holds `retrieve:`/`ingest:` to
+    `chemclaw` plus whatever an operator named, because that reference is imported and called in
+    the process reading it. These fixtures are precisely the *third-party* case the setting exists
+    for, so the suite does what such a deployment does — one env var — rather than the seam being
+    loosened so its own tests keep passing. That the escape hatch carries a real out-of-tree
+    driver here is the strongest evidence the D-118/D-120 "zero core edits" property survived.
+    """
+    monkeypatch.setattr(settings, "manifest_driver_packages", "tests")
+
+
 def _write_source(directory: Path, name: str, body: str) -> None:
     """Create `directory/name/datasource.yaml` — the whole of what attaching a source requires."""
     folder = directory / name

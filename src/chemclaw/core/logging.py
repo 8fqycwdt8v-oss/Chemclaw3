@@ -509,6 +509,14 @@ def _warn_about_sensitive_data() -> None:
     Not an error, and not a refusal: a deployment is entitled to make this choice, and failing to
     start over a telemetry setting would be worse than the setting. What it is not entitled to is
     making it without noticing, so the line names the endpoint the content is going to.
+
+    **The first branch's claim is true because something now makes it true.** "No first-party span
+    carries turn content" was measured false: the span *exception* channel — `SpanHandle.failed`
+    plus the SDK's automatic `exception` event — exported a tool failure's message and its full
+    stacktrace with this flag off, and a marker credential echoed in a 401 body with it. A span is
+    not a `LogRecord`, so nothing below reached it. `core/tracing.exportable_detail` is the reader
+    that closes it (`D-2026-09-06-a-redaction-that-only-covers-logrecords-covers-one-sink`); this
+    sentence is a claim about that function, and whoever removes it should correct this line.
     """
     logger = logging.getLogger(__name__)
     if not settings.otel_llm_spans:

@@ -240,6 +240,14 @@ def build_langgraph_agent(
         correlation_id=correlation_id if correlation_id is not None else uuid.uuid4().hex,
         actor=actor,
         sink=audit_sink,
+        # Which of the two graphs in a turn wrote the row. Taken from `prof` *after* the narrowing
+        # above, so it is the derived `<caller>-helper` name rather than a literal — a caller that
+        # resolved `property-lookup` gets `property-lookup-helper`, and a profile added next year
+        # names itself. Empty for the agent a chemist talks to, which is the whole convention
+        # `AuditEvent.agent` states: the trail names the human always and the agent only when it is
+        # not the one being spoken to
+        # (`D-2026-09-06-the-one-agent-that-exists-is-named-in-the-trail`).
+        agent=prof.name if helper else "",
     )
     # One walk of the skills trees per build, shared by the backend that routes them and the
     # middleware that labels them. They used to derive it independently — two `_skill_dirs()`

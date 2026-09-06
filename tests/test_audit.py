@@ -10,12 +10,11 @@ enough — no live agent run or model call is needed.
 
 import asyncio
 import logging
-import re
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 
 from chemclaw.agent.audit import (
     AuditEvent,
@@ -23,6 +22,10 @@ from chemclaw.agent.audit import (
     default_audit_sink,
     make_audit_middleware,
 )
+from chemclaw.agent.langgraph_agent import build_langgraph_agent
+from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.state import turn_config, turn_input
+from chemclaw.agent.subagents import HELPER_BRIEF
 from chemclaw.core.config import settings
 from tests.middleware import run_middleware, tool_request
 
@@ -145,17 +148,21 @@ def test_ambient_identity_overrides_the_static_actor() -> None:
     assert sink.events[0].actor == "u-entra-oid"  # ambient user, not the "unknown" fallback
 
 
-def test_the_audit_row_records_an_empty_agent_and_nothing_else_changes() -> None:
-    """`agent` is empty on every row, and every other audited field is untouched.
+def test_the_audit_row_leaves_agent_empty_for_the_agent_the_chemist_talks_to() -> None:
+    """`agent` is empty on a caller's row, and every other audited field is untouched.
 
-    Empty is the whole truth rather than the main agent's half of it: the contextvar the field used
-    to be read from had no setter in `src/` for as long as it existed, so *every* row this trail has
-    ever written carried `agent=""` while three docstrings said the trail named the agent beside the
-    human (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`). The field and its
-    column stay for when subagents return; what went is the plumbing that claimed to fill them.
+    Empty is the *convention*, not the whole truth about the column any more: the trail names an
+    agent only when the call was not made by the one the chemist is talking to, which is what makes
+    a non-empty value mean something (the helper half is driven in
+    `test_the_trail_names_the_helper_that_made_a_call_and_leaves_the_caller_unnamed`). This test
+    pins the other side of it — a chain built with no `agent=` argument records none — because the
+    default is what every non-helper caller relies on, `agent/tool_invocation.py`'s template step
+    included.
 
     The second half is the one that matters for the trail already in the database: the row a call
-    produces is field-for-field what it was, so the deletion perturbs no stored shape.
+    produces is field-for-field what it was, so neither the deletion of the old plumbing
+    (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`) nor the arrival of the
+    new producer perturbs a stored shape.
     """
     sink = _RecordingSink()
     mw = make_audit_middleware(correlation_id="conv-main", actor="alice@corp", sink=sink)
@@ -173,6 +180,8 @@ def test_the_audit_row_records_an_empty_agent_and_nothing_else_changes() -> None
         "actor": "alice@corp",
         # Written in rather than excluded, for the same reason `tool_revision` is: an exclude set
         # that grows with each new field is a guard that checks less every time it is updated.
+        # Empty because `make_audit_middleware` was given no `agent=`, which is every caller but
+        # the helper branch of `build_langgraph_agent`.
         "agent": "",
         # Empty because this request carries no todo list — the plan step is read from
         # `request.state["todos"]`, and a request built outside the harness has none
@@ -194,29 +203,103 @@ def test_the_audit_row_records_an_empty_agent_and_nothing_else_changes() -> None
     }
 
 
-def test_nothing_in_the_tree_writes_the_agent_column() -> None:
-    """An absence pinned, so re-adding the claim without a producer turns this red.
+class _TaskScript(GenericFakeChatModel):
+    """A model that spawns one helper and has it call one tool — the two graphs of a real turn.
 
-    The failure this closes was not that the field was empty — it was that a control *looked* like
-    it existed: a contextvar with a setter, a getter, a nesting-aware reset and three tests driving
-    them directly, none of which any production path called. That is the `map_to_hpc_identity` shape
-    `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` deleted three other controls for.
-
-    So this asserts the honest state rather than the plumbing: no module under `src/` sets `agent`
-    on an `AuditEvent`. Whoever re-adds subagents will fail this test, which is the point — the
-    producer and the claim have to arrive together.
+    The two are told apart by the prompt each is sent: only the helper's system message carries
+    `HELPER_BRIEF`. That is the discriminator rather than a call counter because the point of the
+    test below is *which graph wrote the row*, and reading the graph's own prompt is the one signal
+    that stays right however many model calls either side makes.
     """
-    src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
-    writers = [
-        path.relative_to(src).as_posix()
-        for path in src.rglob("*.py")
-        if re.search(r"^\s*agent=", path.read_text(), flags=re.MULTILINE)
-        and "AuditEvent" in path.read_text()
-    ]
-    assert writers == [], (
-        f"{writers} constructs an AuditEvent with an `agent`; the field's comment and "
-        "tests/test_audit.py say nothing does. Update both in the same change."
+
+    parent_calls: int = 0
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        return self
+
+    def _generate(
+        self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
+    ) -> Any:
+        from langchain_core.messages import AIMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        # The first line rather than a prefix slice: a system message reaches a fake model as a
+        # list of content blocks, so `str(...)` of it carries `\n` as two literal characters and a
+        # slice that starts with the brief's own blank line matches nothing.
+        blob = " ".join(str(getattr(m, "content", "")) for m in messages)
+        if HELPER_BRIEF.strip().splitlines()[0] in blob:
+            message = AIMessage(
+                content="",
+                tool_calls=[{"name": "ls", "args": {}, "id": "h1", "type": "tool_call"}],
+            )
+            if any(getattr(m, "name", None) == "ls" for m in messages):
+                message = AIMessage(content="nothing found")
+        else:
+            self.parent_calls += 1
+            message = (
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {
+                                "description": "sweep the sources",
+                                "subagent_type": "general-purpose",
+                            },
+                            "id": "t1",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+                if self.parent_calls == 1
+                else AIMessage(content="final answer")
+            )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def test_the_trail_names_the_helper_that_made_a_call_and_leaves_the_caller_unnamed() -> None:
+    """A helper's calls are marked as its own, the caller's are not, and both name the chemist.
+
+    **This replaces an absence test, and the replacement is the point.**
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted a contextvar whose
+    setter had no caller and pinned `test_nothing_in_the_tree_writes_the_agent_column` in its place,
+    so that "the trail names the agent" could not be claimed again without a producer arriving in
+    the same change. Three days later
+    `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` established that there is one
+    subagent and it is spawned on *every* turn — so the column
+    went on being empty while something could fill it, and a helper's calls, made on a brief the
+    chemist never saw, landed in the trail as the chemist's own with nothing marking them.
+
+    The producer arrived with the claim, which is what that ADR asked for, so the absence is now the
+    wrong assertion: keeping it would forbid exactly the fix it was written to demand. What stands
+    in its place is stronger than a source scan — a real `task` spawn, driven through the compiled
+    graph, with the rows read back off the sink. A scan can only see that a keyword is written; this
+    sees the value reach a row, and it fails if the argument is dropped anywhere between
+    `build_langgraph_agent` and the sink.
+
+    The third assertion is `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` invariant 3
+    in its enforceable form: the agent is named **beside** the human, never instead of one. A helper
+    row that lost the actor would be the D-040 failure — an agent's act recorded as nobody's.
+    """
+    sink = _RecordingSink()
+    graph = build_langgraph_agent(
+        model=_TaskScript(messages=iter([])),
+        profile=AgentProfile(name="default"),
+        actor="alice@corp",
+        audit_sink=sink,
     )
+    asyncio.run(graph.ainvoke(turn_input("sweep the sources"), turn_config("agent-column")))
+
+    by_tool = {event.tool: event.agent for event in sink.events}
+    assert by_tool.get("ls") == "default-helper", (
+        "a tool call made inside the helper is recorded with no agent, so the trail cannot tell it "
+        f"from a call the chemist's own agent made: {by_tool}"
+    )
+    assert by_tool.get("task") == "", (
+        "the caller's own calls must stay unnamed — the column says which agent ran a call when it "
+        "was not the one the chemist is talking to"
+    )
+    assert {event.actor for event in sink.events} == {"alice@corp"}
 
 
 def test_audit_stamps_the_deployment_revision(monkeypatch: pytest.MonkeyPatch) -> None:

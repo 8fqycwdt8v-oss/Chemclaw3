@@ -114,6 +114,7 @@ from pydantic import BaseModel
 
 from chemclaw.agent.framing import defang, envelope_delimiters, frame_untrusted
 from chemclaw.agent.tool_result_shape import rewritten_tool_messages
+from chemclaw.agent.tool_result_size import bounded_for_batch
 from chemclaw.connectors.transport import SERVED_BY
 
 #: What `defanged_payload` preserves: a payload comes back as the type it went in as.
@@ -432,7 +433,17 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
     result = await handler(request)
 
     def _defanged(message: ToolMessage) -> ToolMessage:
-        return message.model_copy(update={"content": _rewritten(message.content, defang)})
+        # **Re-bounded after escaping, because escaping is what makes the text longer.**
+        # `bound_tool_results` is nested *inside* this middleware, so it cuts the raw payload and
+        # this pass runs afterwards — and `framing._defang`'s second pass escapes every `<` in the
+        # content once an invisible character reveals a disguised tag, which is a 4x expansion of
+        # the one character it is most worth filling a payload with. Measured on the shipped
+        # ceiling: a payload already cut to 60,000 left at **239,865** characters, exactly 4.00x,
+        # against a bound the deployment believed it had. The inner cut is not wrong and is not
+        # moved — a ceiling is enforced on what the model is actually sent, so the layer that does
+        # the expanding is the layer that has to re-check.
+        escaped = _rewritten(message.content, defang)
+        return message.model_copy(update={"content": bounded_for_batch(request, escaped)})
 
     origin = served_by(request)
     if origin:

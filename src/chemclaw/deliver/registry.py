@@ -12,16 +12,16 @@ something out of the building*, and turning that on by finding a folder is the s
 `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` was written about.
 """
 
-import importlib
 import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import yaml
+from pydantic import ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.manifest_io import read_manifest, resolve_driver, within_root
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.deliver.driver import DeliveryDriver
@@ -51,7 +51,11 @@ def _channel_dirs() -> list[Path]:
         if not base.is_dir():
             continue
         for child in sorted(base.iterdir()):
-            if (child / _MANIFEST).is_file() and child.name not in seen:
+            if (
+                (child / _MANIFEST).is_file()
+                and child.name not in seen
+                and within_root(base, child)
+            ):
                 seen.add(child.name)
                 found.append(child)
     return found
@@ -68,11 +72,11 @@ def _load(directory: Path) -> DeliveryChannelManifest:
     line. The CLI compensated; the asymmetry belonged here.
     """
     path = directory / _MANIFEST
+    raw = read_manifest(path, DeliveryChannelError)
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        raise DeliveryChannelError(f"cannot read delivery channel manifest {path}: {exc}") from exc
-    manifest = DeliveryChannelManifest.model_validate(raw)
+        manifest = DeliveryChannelManifest.model_validate(raw)
+    except ValidationError as exc:
+        raise DeliveryChannelError(f"invalid delivery channel manifest {path}:\n{exc}") from exc
     if manifest.name != directory.name:
         raise DeliveryChannelError(
             f"delivery channel in {directory} declares name {manifest.name!r}; the folder is the "
@@ -116,22 +120,9 @@ def delivery_enabled() -> bool:
 
 def _resolve(reference: str) -> Callable[..., Any]:
     """Import `module:callable` and return it, or fail naming both halves of the reference."""
-    module_name, _, attribute = reference.partition(":")
-    try:
-        module = importlib.import_module(module_name)
-    except ImportError as exc:
-        raise DeliveryChannelError(
-            f"cannot import {module_name!r} for delivery driver {reference!r}: {exc}. A driver's "
-            "client package is installed only where that channel is actually used."
-        ) from exc
-    driver = getattr(module, attribute, None)
-    if driver is None:
-        raise DeliveryChannelError(
-            f"{module_name!r} has no attribute {attribute!r} (from {reference!r})"
-        )
-    if not callable(driver):
-        raise DeliveryChannelError(f"{reference!r} is not callable")
-    resolved: Callable[..., Any] = driver
+    resolved: Callable[..., Any] = resolve_driver(
+        reference, DeliveryChannelError, "delivery driver"
+    )
     return resolved
 
 
@@ -149,7 +140,16 @@ def build(manifest: DeliveryChannelManifest) -> DeliveryDriver:
             f"delivery channel {manifest.name!r} cannot build {manifest.driver!r} from its "
             f"`config:` block: {exc}. The driver's own signature is the schema."
         ) from exc
-    return driver  # type: ignore[no-any-return]
+    if not isinstance(driver, DeliveryDriver):
+        # The check `publish/registry.build` already made for a sink, and this seam needed more
+        # than that one: a channel is the surface whose whole job is to leave the building, so a
+        # factory that built the wrong thing must fail here rather than at send time, when the
+        # message that was supposed to reach a person is the thing being dropped.
+        raise DeliveryChannelError(
+            f"delivery channel {manifest.name!r}: {manifest.driver!r} did not build a "
+            "DeliveryDriver (it must expose an async `deliver(message)`)"
+        )
+    return driver
 
 
 async def deliver(message: Message) -> list[str]:

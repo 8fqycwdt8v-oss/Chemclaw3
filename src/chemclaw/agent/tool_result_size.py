@@ -292,6 +292,55 @@ def bounded_content(content: Any, tool: str, limit: int) -> tuple[Any, int]:
     return _rebuilt(content, _kept(spans, kept, _notice(tool, removed, total), carrier)), removed
 
 
+def bounded_for_batch(request: Any, content: Any) -> Any:
+    """`content` cut to this call's share of the ceiling, counted, logged, and said so in the text.
+
+    The share arithmetic and both of its side effects in one function, because there are now two
+    callers and a ceiling enforced twice is two ceilings. `bound_tool_results` below is the first,
+    for what a tool *returned*. The second is `agent/tool_authz._refusal_message`, for what a
+    converter writes when a tool *raised* — and that caller is why this is a function at all: the
+    two converters sit **outside** this middleware in `tool_call_middleware`, so a raised failure
+    never reaches the wrapper below and the module docstring's "every tool" was false for exactly
+    the results whose text this system did not compose. Measured: a `SubsystemUnavailableError`
+    carrying 200,000 characters reached the model at 200,007, against a 60,000 ceiling.
+
+    Returns `content` itself when nothing was removed, so a caller can tell "unchanged" by
+    identity rather than by re-measuring — the same contract `rewritten_tool_messages` relies on.
+    """
+    tool = str(request.tool_call["name"])
+    ceiling = settings.agent_max_tool_result_chars
+    # The batch's share, never below 1: 0 is the deployment's own "no cap" and a share that rounded
+    # to it would restore the unbounded behaviour exactly where the batch is widest.
+    limit = max(ceiling // batch_width(request), 1) if ceiling else 0
+    bounded, removed = bounded_content(content, tool, limit)
+    if not removed:
+        return content
+    # **The metric label is the served name, never the model's string**, and `core/metrics.py`
+    # already claimed it was ("a tool name here is one the registry served, never a string a caller
+    # invented"). It was not: `ToolNode` dispatches an unregistered name through this chain, its
+    # not-a-valid-tool error echoes that name back, and the echo is over the ceiling whenever the
+    # name is — so an invented name of 90,000 characters minted a **90,054-character**
+    # `chemclaw_tool_results_truncated_total{tool=…}` line on an unauthenticated `/metrics`, one
+    # series per invented name. The same clamp `agent/audit.metric_tool_name` applies two
+    # middlewares away, reused rather than re-derived; the notice the model reads keeps the raw
+    # name, because a result must say which call it belongs to.
+    label = metric_tool_name(request, tool)
+    record_metric(
+        lambda m: m.increment("chemclaw_tool_results_truncated_total", 1.0, {"tool": label})
+    )
+    log_event(
+        logger,
+        "tool_result.truncated",
+        "cut %d characters from the %s result to stay inside this batch's share of the ceiling",
+        removed,
+        tool,
+        tool=tool,
+        characters_removed=removed,
+        ceiling=limit,
+    )
+    return bounded
+
+
 def batch_width(request: Any) -> int:
     """How many tool calls the assistant message that asked for *this* one made.
 
@@ -344,40 +393,11 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
     60,000, so a report measured at **70,048 characters** reached the caller's thread whole.
     """
     result = await handler(request)
-    tool = str(request.tool_call["name"])
-    # **The metric label is the served name, never the model's string**, and `core/metrics.py`
-    # already claimed it was ("a tool name here is one the registry served, never a string a caller
-    # invented"). It was not: `ToolNode` dispatches an unregistered name through this chain, its
-    # not-a-valid-tool error echoes that name back, and the echo is over the ceiling whenever the
-    # name is — so an invented name of 90,000 characters minted a **90,054-character**
-    # `chemclaw_tool_results_truncated_total{tool=…}` line on an unauthenticated `/metrics`, one
-    # series per invented name. The same clamp `agent/audit.metric_tool_name` applies two
-    # middlewares away, reused rather than re-derived; the notice the model reads keeps the raw
-    # name, because a result must say which call it belongs to.
-    label = metric_tool_name(request, tool)
-
-    ceiling = settings.agent_max_tool_result_chars
-    # The batch's share, never below 1: 0 is the deployment's own "no cap" and a share that rounded
-    # to it would restore the unbounded behaviour exactly where the batch is widest.
-    limit = max(ceiling // batch_width(request), 1) if ceiling else 0
 
     def _bounded(message: ToolMessage) -> ToolMessage:
-        content, removed = bounded_content(message.content, tool, limit)
-        if not removed:
+        content = bounded_for_batch(request, message.content)
+        if content is message.content:
             return message
-        record_metric(
-            lambda m: m.increment("chemclaw_tool_results_truncated_total", 1.0, {"tool": label})
-        )
-        log_event(
-            logger,
-            "tool_result.truncated",
-            "cut %d characters from the %s result to stay inside this batch's share of the ceiling",
-            removed,
-            tool,
-            tool=tool,
-            characters_removed=removed,
-            ceiling=limit,
-        )
         return message.model_copy(update={"content": content})
 
     return rewritten_tool_messages(result, _bounded)
