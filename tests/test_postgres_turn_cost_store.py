@@ -166,3 +166,47 @@ def test_a_row_written_before_the_knowledge_columns_existed_reads_as_unknown() -
         assert measured == (3, 1, 0.75, True, 2)
 
     asyncio.run(_run())
+
+
+def test_an_estimate_reaches_the_ledger_and_stays_out_of_the_measured_sum() -> None:
+    """A turn the provider never reported writes a real number, in its own column.
+
+    `stream_options.include_usage` puts a request's usage on the terminal chunk, so a turn the
+    client abandons mid-message is billed by the gateway and reported by nobody. Wave 4 measured
+    that end to end: `input_tokens=0, output_tokens=0` on a row for a turn that really spent, while
+    the budget — which meters the measured tokens *plus* the estimate — had the number all along
+    and had nowhere durable to put it (migration 087).
+
+    Both halves are asserted, because either alone would pass a wrong implementation. That the
+    estimate **arrives** catches a column the writer never sets; that `_SPEND` is **unchanged by
+    it** catches the tempting fix of adding it to `input_tokens`, which would let an inferred
+    number pass for a provider's in every existing dashboard and eval that reads this table.
+    """
+
+    async def _run() -> None:
+        sink = await _sink_or_skip()
+        actor = "pgcost-actor-estimated"
+        await sink.record(
+            TurnCost(
+                correlation_id="pgcost-estimated-1",
+                actor=actor,
+                input_tokens=0,
+                output_tokens=0,
+                estimated_tokens=43438,
+                outcome="abandoned",
+                completed=False,
+            )
+        )
+
+        async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
+            cursor = await conn.execute(
+                "SELECT estimated_tokens FROM turn_costs WHERE correlation_id = %s",
+                ("pgcost-estimated-1",),
+            )
+            row = await cursor.fetchone()
+        assert row is not None, "the row the sink just wrote is not there"
+        assert int(row[0]) == 43438, "the estimate did not reach the ledger"
+
+        assert await _spend(actor) == (1, 0), "an estimate was summed into the measured tokens"
+
+    asyncio.run(_run())

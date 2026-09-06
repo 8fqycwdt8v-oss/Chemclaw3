@@ -1563,6 +1563,7 @@ def _book_turn_spend(
             output_tokens=ledger.usage.output,
             cache_read_tokens=ledger.usage.cache_read,
             cache_write_tokens=ledger.usage.cache_write,
+            estimated_tokens=estimated,
             duration_seconds=elapsed,
             # **`ledger.answered`, which is what it has always been, not `outcome == "answered"`.**
             # The two agree on most rows and disagree on the ones that matter: a loop-capped turn
@@ -1629,9 +1630,9 @@ def _book_turn_spend(
         # apart, so an inferred number can never pass for a provider's. It lands here rather than
         # on a counter for the reason `agent/compaction._announce` gives about its own two edits:
         # a distinction a declared counter's label set cannot carry belongs in a structured record,
-        # where it is a field rather than a series nobody declared a reader for. `turn_costs` has
-        # no column for it either — adding one is a migration, and this is the line that makes an
-        # abandoned turn's real spend legible until there is.
+        # where it is a field rather than a series nobody declared a reader for. The same number
+        # goes onto the turn's `turn_costs` row (migration 087) in its own column, so the durable
+        # ledger stops reading 0/0 for a turn that really spent.
         estimated_tokens=estimated,
         tool_calls=ledger.tool_calls,
         tool_failures=ledger.tool_failures,

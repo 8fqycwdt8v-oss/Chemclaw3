@@ -40,6 +40,7 @@ _COLUMNS = (
     "output_tokens",
     "cache_read_tokens",
     "cache_write_tokens",
+    "estimated_tokens",
     "duration_seconds",
     "completed",
     "outcome",
