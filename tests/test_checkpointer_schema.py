@@ -237,11 +237,13 @@ def test_notrequired_does_not_make_an_added_channel_safe() -> None:
 def test_the_stamp_covers_this_repository_s_channels_and_not_the_upstream_base_s() -> None:
     """A dependency bump must not be able to move the stamp — the guard's own worst failure mode.
 
-    `ChemclawState` inherits four of its six channels from langchain's `PlanningState`, and a
-    `TypedDict` merges those into `__annotations__`, so the naive reading reports all six. A stamp
-    over all six would refuse **every in-flight thread in the fleet** the next time langchain adds
-    or renames one of its own channels — the guard bricking the sessions it exists to protect, on a
-    change nobody associated with turn state.
+    `ChemclawState` inherits part of its state from langchain's `PlanningState`, and a `TypedDict`
+    merges those into `__annotations__`, so the naive reading reports both sets as one. A stamp over
+    that union would refuse **every in-flight thread in the fleet** the next time langchain adds or
+    renames one of its own channels — the guard bricking the sessions it exists to protect, on a
+    change nobody associated with turn state. No count is written here or in the module: two
+    sentences in `agent/checkpointer.py` said "six" over a state that had grown to eight, and the
+    test below is what makes the set checkable instead.
 
     Both halves are asserted: that the derived set excludes everything the upstream base declares
     (which survives a first-party field being added, so it does not need editing for one), and that
@@ -260,6 +262,32 @@ def test_the_stamp_covers_this_repository_s_channels_and_not_the_upstream_base_s
         "the stamp covers none of the channels this repository declares, so it refuses nothing"
     )
     assert declared < set(get_type_hints(ChemclawState, include_extras=True))
+
+
+def test_the_declared_channels_partition_the_state() -> None:
+    """What this repository declares and what the base declares are exactly the state, and disjoint.
+
+    The assertion a prose count was standing in for. `agent/checkpointer.py` twice said the state
+    holds six channels, and by the time a reviewer counted them it held eight — both sentences
+    written by sessions that were not editing the file that had grown. A number in prose is a claim
+    about a commit (`D-2026-09-03`); a partition is a claim a test can hold, so the numbers are
+    deleted and this stands in their place.
+
+    It fails in both directions that matter. A first-party channel the derivation drops leaves a
+    name in neither half, which is a channel `FIRST_PARTY_CHANNELS` will not stamp and a resume will
+    not refuse; a base channel it picks up leaves a name in both, which is the fleet-wide refusal on
+    a dependency bump that `..._and_not_the_upstream_base_s` guards from the other side.
+    """
+    upstream = set(get_type_hints(PlanningState, include_extras=True))
+    declared = set(ckpt.FIRST_PARTY_CHANNELS)
+    whole = set(get_type_hints(ChemclawState, include_extras=True))
+
+    assert declared | upstream == whole, (
+        "the two halves do not add up to the state: "
+        f"in neither {sorted(whole - (declared | upstream))}, "
+        f"in neither's state {sorted((declared | upstream) - whole)}"
+    )
+    assert not (declared & upstream), f"{sorted(declared & upstream)} is claimed by both halves"
 
 
 def test_a_channel_added_to_the_upstream_base_does_not_move_the_stamp() -> None:

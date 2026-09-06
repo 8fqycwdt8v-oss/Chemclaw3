@@ -31,9 +31,18 @@ strategy over the persisted history so the next turn "started smaller", and the 
 the durable half of that named the reason it was wrong: a context heuristic must not edit a record
 somebody else's policy governs. The checkpointer is turn state rather than the durable record — that
 is `session_messages` — but the same argument applies to it one step down, and a reduction that is
-recomputed costs an estimator pass while a reduction that is *applied* costs history. What bounds
-the checkpoint tables is age, in `durable/retention.py`, which is the policy statement a deployment
-actually makes.
+recomputed costs an estimator pass while a reduction that is *applied* costs history.
+
+**What bounds the checkpoint tables is now two things, and only one of them is a policy.** Age, in
+`durable/retention.py`, is the deployment's own statement about how long a thread is kept — and it
+is off by default, so on a shipped deployment it bounded nothing. Beside it,
+`agent/checkpointer._PRUNE_SUPERSEDED` drops the *copies* a turn superseded: every superstep
+rewrites the whole message list, so a thread stored O(turns²) bytes of copies its newest checkpoint
+still holds in full (measured: 40 turns of conversation, 10.3 MB of `checkpoint_blobs`, 520 rows,
+reduced to 757 kB and 15 rows with the thread resuming identical). That is deduplication rather
+than disposal, which is why it does not contradict the paragraph above: no record is edited, and
+nothing a reader could ask for is gone
+(`D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record`).
 
 **One thing is lost against D-025 and it is named rather than glossed.** Its
 `ToolResultCompactionStrategy` collapsed an older tool result "into a short cited

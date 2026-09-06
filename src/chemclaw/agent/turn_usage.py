@@ -226,16 +226,17 @@ def error_result_usage(response: Any) -> TurnUsage:
             for candidate in generation:
                 metadata = getattr(getattr(candidate, "message", None), "response_metadata", None)
                 body = metadata.get("body") if isinstance(metadata, Mapping) else None
-                served = body.get("usage") if isinstance(body, Mapping) else None
+                if not isinstance(body, Mapping):
+                    continue
+                served = body.get("usage")
                 if not isinstance(served, Mapping):
                     continue
+                tier = body.get("service_tier")
                 usage.add(
                     graph_usage_tokens(
                         AIMessage(
                             content="",
-                            usage_metadata=_create_usage_metadata(
-                                dict(served), body.get("service_tier")
-                            ),
+                            usage_metadata=_create_usage_metadata(dict(served), tier),
                         )
                     )
                 )

@@ -367,8 +367,9 @@ def test_a_judge_reply_that_fails_validation_still_books_what_the_gateway_served
             token = set_turn_usage(ledger)
             try:
                 meter = off_stream_metering()["callbacks"][0]
-                await meter.on_llm_error(ValueError("no structured VerificationResult"),
-                                         response=response, run_id="r")
+                await meter.on_llm_error(
+                    ValueError("no structured VerificationResult"), response=response, run_id="r"
+                )
             finally:
                 from chemclaw.agent.turn_usage import reset_turn_usage
 

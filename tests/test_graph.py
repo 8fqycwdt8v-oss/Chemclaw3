@@ -513,3 +513,67 @@ def test_note_file_fingerprints_agrees_with_the_parse_on_a_duplicate(tmp_path: P
     fingerprints = graph.note_file_fingerprints(tmp_path)
     first = (tmp_path / "compound" / "x.md").stat()
     assert fingerprints["x"] == f"{first.st_mtime_ns}:{first.st_size}"
+
+
+def test_one_note_changed_re_reads_one_file_and_not_the_corpus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`invalidate_cache` clears the corpus cache; it must not throw away every file's parse.
+
+    The measurement behind it: `kg/git_writer.py` calls `invalidate_cache()` on every note write and
+    the agent has been the writer since `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`, so
+    the next reader re-parsed the whole tree — 2,969 ms of `load_notes` at 20,000 notes, and
+    4,032 ms of `build_graph` after touching one file.
+
+    Counted at `read_note` rather than timed: a wall-clock threshold on a synthetic corpus would be
+    a machine-load assertion, and what changed is *how many files are read*, which is exact.
+    """
+    directory = _make_graph_dir(tmp_path)
+    graph.invalidate_cache()
+    reads: list[str] = []
+    # Reached by string through `MonkeyPatch` rather than by attribute: `read_note` is imported by
+    # `kg.graph` rather than re-exported from it, so a direct attribute access is not an export
+    # mypy follows — and the patch has to land on the name the scanner looks up at call time.
+    real = graph.__dict__["read_note"]
+
+    def counting(path: Path) -> object:
+        reads.append(path.name)
+        return real(path)
+
+    monkeypatch.setattr(graph, "read_note", counting)
+    assert len(graph.load_notes(directory)) == 3
+    cold = len(reads)
+    assert cold == 4, f"the cold parse read {cold} files, not the four in the fixture"
+
+    reads.clear()
+    (directory / "compound" / "b.md").write_text(_note("b", ["a", "c"]), encoding="utf-8")
+    graph.invalidate_cache()
+    notes = {note.id: note for note in graph.load_notes(directory)}
+
+    assert reads == ["b.md"], (
+        f"one note changed and {len(reads)} files were re-read ({reads}); the per-file parse cache "
+        "is not being reused, so every note write costs the next reader the whole corpus"
+    )
+    assert sorted(notes["b"].outgoing_links()) == ["a", "c"], (
+        "the changed note was served from the cache rather than re-read, which is the failure in "
+        "the other direction and worse"
+    )
+
+
+def test_a_file_that_is_deleted_leaves_no_entry_behind(tmp_path: Path) -> None:
+    """A path recreated later must not be served from the entry its predecessor left.
+
+    The trap the per-file cache would otherwise have: `(mtime_ns, size)` is a strong signal for a
+    file that has existed continuously and a guessable one for a path that has been away. Dropping
+    the entry when the scan stops naming the path is what closes it, and this asserts the drop
+    rather than the timing that would exploit it.
+    """
+    directory = _make_graph_dir(tmp_path)
+    graph.invalidate_cache()
+    assert len(graph.load_notes(directory)) == 3
+    (directory / "compound" / "b.md").unlink()
+    graph.invalidate_cache()
+    assert sorted(note.id for note in graph.load_notes(directory)) == ["a", "c"]
+    assert "b.md" not in "".join(graph._PARSED_FILES.get(str(directory), {})), (
+        "the deleted file's parse entry survived the scan that no longer names it"
+    )

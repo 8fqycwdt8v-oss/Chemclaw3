@@ -455,7 +455,7 @@ def _matches(stored: StoredResult, query: CalculationQuery) -> bool:
 #: case was neither shared nor deferred: it simply failed, for a cache that exists to stay out of
 #: the way. Weak on the loop so a ledger dies with the loop it belongs to rather than being keyed
 #: by an `id()` a later loop can be handed again.
-_Ledger = dict[str, "asyncio.Future[tuple[ResultPayload, bool]]"]
+_Ledger = dict[str, "asyncio.Future[tuple[ResultPayload, float]]"]
 _IN_FLIGHT: "WeakKeyDictionary[asyncio.AbstractEventLoop, _Ledger]" = WeakKeyDictionary()
 
 

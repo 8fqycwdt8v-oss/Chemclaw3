@@ -88,7 +88,7 @@ async def _seed() -> None:
         # summed two of six columns: a *cached* turn and an *abandoned* one. `turn_id` is spelled
         # out because it is the primary key since migration 088
         # (`D-2026-09-06-an-id-a-caller-chooses-is-not-a-key`).
-        for turn_id, inp, out, cache_read, cache_write, estimated, completed, calls in (
+        for turn_id, inp, out, cache_read, cache_write, estimated, completed, tool_calls in (
             ("ops-turn-1", 100, 20, 0, 0, 0, True, 3),
             ("ops-turn-cached", 600, 250, 400, 300, 0, True, 0),
             ("ops-turn-abandoned", 0, 0, 0, 0, 43_506, False, 0),
@@ -109,7 +109,7 @@ async def _seed() -> None:
                     estimated,
                     completed,
                     1.5 if turn_id == "ops-turn-1" else 0.0,
-                    calls,
+                    tool_calls,
                 ),
             )
         await conn.commit()
