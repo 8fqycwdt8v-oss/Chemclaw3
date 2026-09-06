@@ -46,9 +46,9 @@ logger = logging.getLogger(__name__)
 # `_database_unavailable` — and the client behaviour it asks for is the same either way: back off
 # and retry. A browser has no business learning which piece of infrastructure was full.
 #
-# Public because it now has three readers across two modules (`routes/turns.py` says it on an open
-# stream, `auth.py` sheds with it before a request reaches a pool), and a name imported through the
-# underscore is a private name only by spelling.
+# Public because it now has three readers across two modules (`api/routes/turns.py` says it on an
+# open stream, `auth.py` sheds with it before a request reaches a pool), and a name imported
+# through the underscore is a private name only by spelling.
 AT_CAPACITY = "server at capacity; retry shortly"
 
 # CSP for the self-served chat UI (SEC-5): everything is same-origin except the one inline
