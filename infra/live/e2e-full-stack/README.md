@@ -2,8 +2,9 @@
 
 Brings up this backend together with the three companion repos so a chemist's turn actually
 crosses every boundary the architecture claims it can: a real browser, a real LangGraph turn
-against a real Anthropic model, a real MCP connector fleet, and
-mocked ELN/ORD data sources. Nothing here runs in `make ci` — like the rest of `infra/live/`, it
+against whatever gateway `CHEMCLAW_LLM_BASE_URL` names — the scripted mock by default, a real model
+when you point it at one (see the prerequisites) — a real MCP connector fleet, and mocked ELN/ORD
+data sources. Nothing here runs in `make ci` — like the rest of `infra/live/`, it
 is a manual lane run against a checkout, not a diff.
 
 Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw3_mock` →
@@ -23,7 +24,7 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | `calc` (the physics behind this repo's calculator tools — *not* a connector) | Chemclaw3-mcp | 8860 | `infra/live/processes.sh` |
 | `mock-eln` (ELN/ORD data) | Chemclaw3_mock | 8090 | this script |
 | `mock-vendor` (building-block search/pricing MCP tool) | Chemclaw3_mock | 8091 | this script |
-| connectors, 4 Temporal workers, front door | this repo | 8810+, 9000-9003, 8000 | `infra/live/processes.sh` |
+| connectors, 4 Temporal workers, front door | this repo | 8810, 8000, workers per `.live/run/<name>.port` | `infra/live/processes.sh` |
 | BFF + SPA | Chemclaw3_ui | 8787, 5173 | this script |
 
 **`chem`, `safety` and the `calc` backend are started by `infra/live/processes.sh`, which this
@@ -46,10 +47,14 @@ egress. See `chemclaw_mcp_rxnpredict.engine.base_doubles.register_requested`.
 
 - `uv`, `npm`, `python3` on `PATH`.
 - Docker, *or* the native fallback `infra/live/bootstrap.sh` builds (see its own header comment).
-- Sibling checkouts of the three companion repos. Point at them with:
-  - `CHEMCLAW_MCP_REPO` (default `/workspace/8fqycwdt8v-oss/chemclaw3-mcp`)
-  - `CHEMCLAW_MOCK_REPO` (default `/workspace/8fqycwdt8v-oss/chemclaw3_mock`)
-  - `CHEMCLAW_UI_REPO` (default `/workspace/8fqycwdt8v-oss/chemclaw3_ui`)
+- Sibling checkouts of the three companion repos. `infra/live/siblings.sh` finds them — beside this
+  checkout, or under an owner directory beside it (`../8fqycwdt8v-oss/<name>`), in either casing —
+  and `CHEMCLAW_MCP_REPO` / `CHEMCLAW_MOCK_REPO` / `CHEMCLAW_UI_REPO` override the search. It is one
+  file because it used to be two disagreeing defaults, neither of which resolved anywhere: this
+  script guessed `/workspace/8fqycwdt8v-oss/…`, which does not exist in the container this
+  repository's own tooling provisions, and `processes.sh` guessed something else. **The three
+  checkouts are a hard prerequisite** — `up` refuses before starting anything if one is missing, so
+  `make live-e2e-full-stack` below is a one-liner only once they are all present.
 - **A model, optionally.** Every model call goes to the one OpenAI-compatible gateway
   `CHEMCLAW_LLM_BASE_URL` names (`D-2026-09-04-a-gateway-is-the-only-provider`), so this lane needs
   no vendor credential to run: with nothing set it drives `chemclaw.cli.mock_llm` on
@@ -99,12 +104,21 @@ them rather than inventing a structure. That is declared, not discovered — see
 ## Checking it is really wired up
 
 ```sh
-curl -s localhost:8000/readyz | python3 -m json.tool     # props, rxnpredict, mock-vendor all listed
-curl -s localhost:8000/metrics | grep chemclaw_connectors_unhealthy
+curl -s localhost:8000/metrics | grep '^chemclaw_connector_unhealthy{'
+# chemclaw_connector_unhealthy{connector="props"} 0
+# chemclaw_connector_unhealthy{connector="rxnpredict"} 0
+# chemclaw_connector_unhealthy{connector="mock-vendor"} 0
+# ... plus this repo's own bo, calc, chem, molfp, results, rxnfp, safety
 ```
 
-Absence of an error is not success — check one of these two, same rule
-`Chemclaw3-mcp/docs/integration.md` gives for a single connector.
+Absence of an error is not success, same rule `Chemclaw3-mcp/docs/integration.md` gives for a single
+connector — and this section used to break its own rule. It named `/readyz` ("props, rxnpredict,
+mock-vendor all listed") and the unlabelled `chemclaw_connectors_unhealthy`, and **neither can list
+anything**: `/readyz` answers as a count on purpose, because it is unauthenticated and its body is
+therefore a public document (`api/routes/ops.py::readyz`, D-2026-08-05), and the unlabelled gauge is
+a count too — `0` reads the same whether three connectors are healthy or were never enabled. The
+labelled series above is the roster, so a missing *name* fails the check rather than only a
+connector that is down.
 
 ## Logs
 

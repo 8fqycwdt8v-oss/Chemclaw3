@@ -15,9 +15,9 @@ drift `CLAUDE.md` records about a target count that read 23 while the file held 
 3. **A mutating tool on the agent-facing allow-list.** The agent's connector surface is
    read/compute only: mutation goes through a `jobs:` entry (which core authorizes, dry-run-gates
    and
-   attributes) or through a core PR-gate tool. This is the `allowed_tools` boundary (D-029) promoted
+   attributes) or through a core write tool. This is the `allowed_tools` boundary (D-029) promoted
    from a convention to something CI enforces, because a connector quietly adding an `index_*` tool
-   to its allow-list would hand the model a write path around the PR-gate.
+   to its allow-list would hand the model a write path around every one of those controls.
 4. **A job that cannot be built.** A `params_model` reference that does not resolve, or two
    connectors claiming the same job name, fails here rather than when a chemist first calls it.
 5. **A disagreement between what a bundle declares and what its server serves — in either
@@ -151,7 +151,7 @@ def _served_tool_problems(manifest: ConnectorManifest) -> list[str]:
     computed**, which they were not: this reported `served - declared` and left `declared - served`
     uncalculated while stating the rule as an equality. A capability that genuinely must not be on
     the agent's surface is a `jobs:` entry — which core authorizes, dry-run-gates and attributes —
-    or a core PR-gate tool. That is D-029's actual shape; an undeclared MCP tool was never the
+    or a core write tool. That is D-029's actual shape; an undeclared MCP tool was never the
     third option it looked like, and a declared one nothing serves was never a way to reserve a
     name.
 

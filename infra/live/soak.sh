@@ -32,7 +32,6 @@ readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly LIVE_DIR="${CHEMCLAW_LIVE_DIR:-$REPO_ROOT/.live}"
 readonly RECORD="$LIVE_DIR/soak.jsonl"
 readonly API_PORT="${CHEMCLAW_LIVE_API_PORT:-8000}"
-readonly MOCK_PORT="${CHEMCLAW_LIVE_MOCK_PORT:-8820}"
 # Below this the run stops itself. Writes fail before the disk reads as full in this environment,
 # and a soak that fills the disk takes the container down with it.
 readonly DISK_FLOOR_GB="${CHEMCLAW_SOAK_DISK_FLOOR_GB:-4}"
@@ -49,6 +48,7 @@ readonly COLLIDE="${CHEMCLAW_SOAK_COLLIDE:-8}"
 readonly FAMILIES="${CHEMCLAW_SOAK_FAMILIES:-BCDFGH}"
 
 log() { printf '\033[36m[soak]\033[0m %s\n' "$*"; }
+die() { printf '\033[31m[soak] %s\033[0m\n' "$*" >&2; exit 1; }
 
 python_bin() { ( cd "$REPO_ROOT" && uv run python -c 'import sys; print(sys.executable)' ); }
 
@@ -93,6 +93,20 @@ sample_rows() {
 run() {
   local limit="${1:-200}"
   local python; python="$(python_bin)"
+
+  # The mock gateway's address is asked of the code that defines it, never written out here.
+  #
+  # `processes.sh` reads `cli.mock_llm.MOCK_BASE_URL` for exactly this reason — it once compared a
+  # transcribed address, the default moved, and the front door came up pointed at a mock nobody had
+  # started — and `tests/test_config.py` fails that script if the string reappears in it. This file
+  # held the same address in two halves (`8820` and the `/v1` shape) that the literal scan cannot
+  # see, plus a `CHEMCLAW_LIVE_MOCK_PORT` knob nothing else read, so it could not move the mock and
+  # could only disagree with it: every round of a long unattended soak, pointed at a closed port.
+  local mock_base
+  mock_base="$("$python" -c 'from chemclaw.cli.mock_llm import MOCK_BASE_URL; print(MOCK_BASE_URL)')" \
+    || die "could not resolve the mock gateway address from chemclaw.cli.mock_llm"
+  local mock_stats="${mock_base%/v1}/__mock/stats"
+
   mkdir -p "$LIVE_DIR"
   local round; round="$(resume "$python")"
   log "resuming at round $round (record: $RECORD)"
@@ -107,7 +121,7 @@ run() {
 
     local start; start="$(date +%s)"
     local storm_out; storm_out="$LIVE_DIR/soak-round.md"
-    CHEMCLAW_LLM_BASE_URL="http://127.0.0.1:$MOCK_PORT/v1" \
+    CHEMCLAW_LLM_BASE_URL="$mock_base" \
     CHEMCLAW_LLM_MODEL=mock \
       timeout 1800 "$python" -m chemclaw.cli.live_storm \
         --families "$FAMILIES" \
@@ -132,7 +146,7 @@ run() {
     SOAK_RSS_KB="$(ps -o rss= -p "$(cat "$LIVE_DIR/run/api.pid" 2>/dev/null)" 2>/dev/null | tr -d ' ')" \
     SOAK_ROWS="$(sample_rows)" \
     SOAK_METRICS="$(curl -s --max-time 5 "http://127.0.0.1:$API_PORT/metrics" || true)" \
-    SOAK_MOCK="$(curl -s --max-time 5 "http://127.0.0.1:$MOCK_PORT/__mock/stats" || true)" \
+    SOAK_MOCK="$(curl -s --max-time 5 "$mock_stats" || true)" \
       "$python" - >>"$RECORD" <<'PY'
 import json, os
 
@@ -202,5 +216,11 @@ PY
 case "${1:-200}" in
   report) exec "$(python_bin)" -m chemclaw.cli.soak_report "$RECORD" ;;
   reset)  rm -f "$RECORD"; log "record cleared" ;;
+  # Anything else used to fall through to `run "$1"` as a round count. `run` carries `set -uo
+  # pipefail` and deliberately no `-e`, so `[ "$round" -le "reprot" ]` was a non-fatal error:
+  # `soak.sh reprot` printed "reached round limit reprot" and exited **0** having run zero rounds
+  # and written zero record lines — on the one target whose whole point is a long unattended run
+  # nobody is watching. Zero is refused with the rest: it is not a soak either.
+  ''|0|*[!0-9]*) die "usage: soak.sh [rounds|report|reset] (rounds must be a positive integer)" ;;
   *)      run "${1:-200}" ;;
 esac

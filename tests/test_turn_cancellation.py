@@ -46,6 +46,7 @@ from chemclaw.core.identity_context import (
     get_current_correlation_id,
     get_current_roles,
 )
+from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import get_current_session_id
 from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
@@ -217,9 +218,23 @@ def test_abandoned_turn_still_books_its_tokens() -> None:
 
     Without this, a user could bypass the token budget indefinitely by dropping each connection
     just before the answer, which is the cheapest possible attack on the runaway-cost guard.
+
+    **What "spent" means here changed on 2026-09-06, and the old answer was an artifact of this
+    suite.** A gateway reports usage on the terminal frame only (`stream_options.include_usage`),
+    so a turn cut off mid-message has been reported *nothing* — the ~30 tokens this used to assert
+    existed only because `tests/fakes_turn` attached usage to every chunk, a wire shape no
+    OpenAI-compatible endpoint produces. Measured against a real one, the abandoned turn booked
+    0/0 beside an identical completed turn's 900/120. So what is billed now is the prompt the
+    provider was already handed, estimated (`agent/turn_usage.InFlightPrompts`), and the assertion
+    is that it is non-zero and lands in the *estimated* series rather than the measured one — not a
+    figure, which would be a claim about how many tools this profile happens to bind.
+
+    The second assertion is the other half of that: the estimate binds the *budget* and is not
+    published as measured spend, so `chemclaw_tokens_total` stays exactly where it was.
     """
     budget = _RecordingBudget()
     agent = _EndlessAgent()
+    measured_before = METRICS.value("chemclaw_tokens_total")
 
     async def _abandon() -> None:
         stream = _closable(
@@ -251,7 +266,10 @@ def test_abandoned_turn_still_books_its_tokens() -> None:
     assert budget.booked, "an abandoned turn booked nothing at all"
     session_id, user_id, tokens = budget.booked[0]
     assert (session_id, user_id) == ("s1", "u1")
-    assert tokens >= 30, f"only {tokens} of the ~30 metered tokens were booked"
+    assert tokens > 0, "the prompt this turn had already been billed for was booked as free"
+    assert METRICS.value("chemclaw_tokens_total") == measured_before, (
+        "an estimate was published as though a provider had reported it"
+    )
 
 
 def test_abandoned_turn_releases_its_permit_and_turn_slot() -> None:
@@ -465,6 +483,9 @@ def test_a_cancelled_turn_still_books_its_tokens() -> None:
     "runs" is not "completes" when the task is cancelled, and that distinction is exactly what
     cost the durable claim release. Pinning it here means a future `await` added to that `finally`
     fails a test rather than silently making abandoned turns free.
+
+    On what a cancelled turn is billed for, and why it is not a number: see
+    `test_abandoned_turn_still_books_its_tokens` above.
     """
     budget = _RecordingBudget()
     session = TurnSession(session_id="s5")
@@ -488,7 +509,7 @@ def test_a_cancelled_turn_still_books_its_tokens() -> None:
         assert budget.booked, "a cancelled turn booked nothing at all"
         booked_session, user_id, tokens = budget.booked[0]
         assert (booked_session, user_id) == ("s5", "u1")
-        assert tokens >= 30, f"only {tokens} of the ~30 metered tokens were booked"
+        assert tokens > 0, "a cancelled turn was billed nothing for the prompt it had sent"
 
     asyncio.run(_drive())
 

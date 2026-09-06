@@ -44,6 +44,14 @@ class TurnCost(BaseModel):
     output_tokens: int = Field(default=0, ge=0)
     cache_read_tokens: int = Field(default=0, ge=0)
     cache_write_tokens: int = Field(default=0, ge=0)
+    # **Tokens the provider was billed for and never reported, beside the measured four rather than
+    # summed into them.** `stream_options.include_usage` reports on the terminal chunk only, so a
+    # turn abandoned mid-message carries a real cost the gateway never told anyone about;
+    # `agent/turn_usage.InFlightPrompts` estimates the requests nobody was billed *through*. The
+    # budget meters the sum, because a cost guard has to bind on the whole bill. This record keeps
+    # the two apart, so an inferred number can never pass for a provider's — and so a reader can
+    # ask what fraction of the ledger is inference. `0` on every completed turn.
+    estimated_tokens: int = Field(default=0, ge=0)
     duration_seconds: float = Field(default=0.0, ge=0)
     # False when the turn was torn down *before it answered* — `chemclaw.api.runner` books
     # `completed=answered`, so a disconnect or wall-clock deadline that lands after the answer is a

@@ -16,6 +16,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
+from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -142,8 +143,11 @@ class CalculationKey(BaseModel):
     # is excluded everywhere because a newline inside a primary key would let one key's text carry
     # another's, and no producer has ever emitted one.
     #
-    # A pattern here rather than at the reader alone: `kg/note.py::_CALC_REF` validates this shape
-    # at the PR-gate, so the check existed only on the way *out* of the system.
+    # A pattern here rather than at the reader alone: `kg/note.py::_CALC_REF` validates the same
+    # shape on a note's citation, so the check used to exist only on the way *out* of the system.
+    # The two are bound by a test that reads these four fields' own patterns, because `kg` may
+    # import only `core` and so cannot import `CalculationKey` — the note side was narrower than
+    # this one for long enough that no note could cite a calibrated calculation.
     calc_type: str = Field(min_length=1, pattern=r"^[^\s@:]+$")
     calc_version: str = Field(min_length=1, pattern=r"^\S+$")
     input_hash: str = Field(min_length=1, pattern=r"^[^\s:]+$")
@@ -375,12 +379,26 @@ def _matches(stored: StoredResult, query: CalculationQuery) -> bool:
     return True
 
 
-#: Computations currently in flight in this process, by key. The single-flight ledger: a second
+#: Computations currently in flight, by key, **per event loop**. The single-flight ledger: a second
 #: miss on a key someone is already computing awaits the first computation instead of starting a
 #: duplicate. `api/routes/ops._shared_probe` is the same shape for the readiness probes, and
 #: `docs/planning/DEFERRED.md` keeps the *cross-process* half of the dedup — an advisory lock or
 #: an in-flight row — which this deliberately does not attempt.
-_IN_FLIGHT: dict[str, "asyncio.Future[tuple[ResultPayload, bool]]"] = {}
+#:
+#: **Per loop, because an `asyncio.Future` is.** One flat dict made this ledger process-wide, and a
+#: caller on a second loop in the same process — `core/temporal_client.py`'s own docstring names
+#: the shape, "an `asyncio.run` in a thread, a test that starts its own" — found the first loop's
+#: future and raised `RuntimeError: Task ... attached to a different loop` on awaiting it. That
+#: case was neither shared nor deferred: it simply failed, for a cache that exists to stay out of
+#: the way. Weak on the loop so a ledger dies with the loop it belongs to rather than being keyed
+#: by an `id()` a later loop can be handed again.
+_Ledger = dict[str, "asyncio.Future[tuple[ResultPayload, bool]]"]
+_IN_FLIGHT: "WeakKeyDictionary[asyncio.AbstractEventLoop, _Ledger]" = WeakKeyDictionary()
+
+
+def _in_flight() -> _Ledger:
+    """This loop's slice of the single-flight ledger, created on first use."""
+    return _IN_FLIGHT.setdefault(asyncio.get_running_loop(), {})
 
 
 async def cached_compute(
@@ -440,7 +458,8 @@ async def cached_compute(
         record_metric(lambda m: m.increment("chemclaw_calc_cache_total", labels={"outcome": "hit"}))
         return hit.result, True
     slot = key.as_str()
-    waiting = _IN_FLIGHT.get(slot)
+    in_flight = _in_flight()
+    waiting = in_flight.get(slot)
     if waiting is not None:
         logger.debug("calc cache miss already computing elsewhere, awaiting: %s", slot)
         # Counted before the await, not after: a waiter whose computer is cancelled raises here,
@@ -453,7 +472,7 @@ async def cached_compute(
         result, _ = await asyncio.shield(waiting)
         return result, True
     future: asyncio.Future[tuple[ResultPayload, bool]] = asyncio.get_running_loop().create_future()
-    _IN_FLIGHT[slot] = future
+    in_flight[slot] = future
     try:
         logger.debug("calc cache miss, computing: %s", slot)
         record_metric(
@@ -480,7 +499,7 @@ async def cached_compute(
             future.exception()
         raise
     finally:
-        _IN_FLIGHT.pop(slot, None)
+        in_flight.pop(slot, None)
 
 
 class _Abandoned(Exception):

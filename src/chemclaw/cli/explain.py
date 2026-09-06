@@ -21,8 +21,10 @@ audit trail is evidence *about* the agent, and a surface that let the agent read
 would invite it to summarize rather than to be examined.
 """
 
+import argparse
 import asyncio
 import sys
+from collections.abc import Sequence
 from typing import NamedTuple
 
 from chemclaw.agent.session_store import is_degraded_render, message_from_row
@@ -231,12 +233,41 @@ def _render(
     return lines
 
 
-def main() -> int:
-    """CLI: `python -m chemclaw.cli.explain <session-id>`."""
-    if len(sys.argv) != 2:
-        print("usage: python -m chemclaw.cli.explain <session-id>", file=sys.stderr)
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI: `python -m chemclaw.cli.explain <session-id>`.
+
+    **Declared rather than read raw.** `sys.argv[1]` was taken as a session id whatever it was, so
+    `--help` and `--not-a-flag` were both looked up as sessions and both exited 0 under a heading
+    naming the flag — the identical defect `validate_kg`'s docstring records as fixed, still live
+    in the tool an auditor reaches for. Worse than a mis-read argument: the empty string matched
+    the rows written before `session_id` was recorded and printed *another* actor's audit rows and
+    durable jobs under a blank heading, so a blank shell variable was a small disclosure. A blank
+    id is refused for the reason `erase_actor` refuses one ("actor must be a non-empty id"), and
+    the database's own unreachability is one line rather than a traceback, because an operator
+    reading a stack trace out of a read-only reporting command learns only that it crashed.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m chemclaw.cli.explain",
+        description="Reconstruct a session: its turns, the tools each ran, and why.",
+    )
+    parser.add_argument("session_id", help="the session id to reconstruct.")
+    options = parser.parse_args(argv)
+    if not options.session_id.strip():
+        print(
+            "session id must be a non-empty id; refusing to reconstruct on a blank id, which "
+            "matches the rows written before the correlation id existed.",
+            file=sys.stderr,
+        )
         return 64
-    for line in asyncio.run(explain(sys.argv[1])):
+    try:
+        lines = asyncio.run(explain(options.session_id))
+    except ConnectionError as exc:
+        # `core.db` publishes "an unreachable or saturated database raises `ConnectionError`" and
+        # `_DatabaseUnavailable` is that subclass, so this catches the real failure mode by its
+        # documented contract rather than by a vendor exception type.
+        print(f"cannot read the audit trail: {exc}", file=sys.stderr)
+        return 1
+    for line in lines:
         print(line)
     return 0
 

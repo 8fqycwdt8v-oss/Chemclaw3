@@ -47,8 +47,8 @@ def note_for_document(path: Path, raw: bytes, tags: list[str]) -> Note:
     """Build the `report` note for one source document (idempotent id, verbatim body).
 
     The id is derived from the *content*, not the filename: re-running a backfill after a file is
-    renamed or moved must not mint a second note for the same document, and the PR-gate's
-    byte-identical no-op then makes a repeat run genuinely free.
+    renamed or moved must not mint a second note for the same document, and a byte-identical
+    rewrite of an existing note then makes a repeat run genuinely free.
     """
     attachment = parse_attachment(path.name, raw)
     return Note(

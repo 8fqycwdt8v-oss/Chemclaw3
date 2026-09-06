@@ -16,7 +16,10 @@ being a claim in a docstring.
 
 When the database is unreachable the gate says so, loudly, and does **not** pass silently. A
 validator that quietly skips is indistinguishable in a log from one that found nothing wrong, which
-is the failure mode `map_to_hpc_identity` is remembered for.
+is the failure mode `map_to_hpc_identity` is remembered for. **The same rule now covers the corpus
+half**, which it did not: a notes directory that is empty, holds no `.md`, or is not a directory at
+all walked zero notes and printed the success line, so a mis-set `CHEMCLAW_NOTE_REPO_DIR` turned
+the only check on `[[reaction-*]]` citations off in silence.
 """
 
 import argparse
@@ -58,8 +61,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     options = parser.parse_args(argv)
     notes_dir = Path(options.notes_dir) if options.notes_dir else settings.knowledge_path
-    if not notes_dir.exists():
-        print(f"notes directory does not exist: {notes_dir}")
+    # `is_dir()`, not `exists()`. A *file* passed where a directory belongs exists, walks zero
+    # notes and printed the success line — the same green-on-nothing arm the empty-corpus refusal
+    # below closes, reached one step earlier.
+    if not notes_dir.is_dir():
+        print(f"notes directory does not exist, or is not a directory: {notes_dir}")
         return 1
     try:
         # One parse for all the halves: the citation checks read the same corpus `validate` just
@@ -68,6 +74,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ChemclawError as exc:
         print(f"cannot determine this deployment's note vocabulary: {exc}")
         return 1
+
+    if not notes:
+        # Appended as a *problem* rather than returned early, so a corpus whose only file is
+        # unparseable still reports the parse failure beside this line: `validate_with_notes`
+        # yields no notes in that case too, and an early return would hide the finding that
+        # explains it.
+        #
+        # **A corpus of zero notes is a problem, not a pass.** Four sibling validators already
+        # refuse this and say why in the same words (`validate_templates`: "this gate would have
+        # checked nothing"; `validate_datasources`, `validate_skills`, `ingest/eln/validate`), and
+        # this module's own docstring makes the argument for the *database* half — "a validator
+        # that quietly skips is indistinguishable in a log from one that found nothing wrong" —
+        # while leaving the corpus half unguarded. It matters most here: since D-2026-08-25
+        # `dangling_links` ignores every `reaction-` target on purpose, so this gate is the only
+        # thing checking those citations, and a `CHEMCLAW_NOTE_REPO_DIR` pointing at a fresh
+        # clone, the wrong branch, or a PVC mounted after its directory was created makes it green
+        # forever.
+        problems.append(
+            f"no notes found under {notes_dir} — this gate would have checked nothing. "
+            "Check CHEMCLAW_NOTE_REPO_DIR / CHEMCLAW_KNOWLEDGE_DIR before reading this as a pass."
+        )
 
     citations = external_citations(notes)
     calc_refs = calc_citations(notes)

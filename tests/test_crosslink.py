@@ -56,13 +56,29 @@ def test_a_note_may_cite_a_calculation_that_lives_outside_the_graph() -> None:
 
 @pytest.mark.parametrize(
     "bad",
-    ["the GFN2 run", "xtb.hess@v1", "xtb.hess@v1:nothex:0011", "xtb.hess:0011:2233"],
+    [
+        "the GFN2 run",
+        "xtb.hess@v1",
+        "xtb.hess:0011:2233",
+        # An empty hash segment, either side. `CalculationKey` gives both `min_length=1`, so these
+        # are refused by the *store's* rule rather than by a stricter one invented here.
+        "xtb.hess@v1::0011",
+        "xtb.hess@v1:0011:",
+    ],
 )
 def test_a_calc_ref_that_is_not_a_calculation_key_is_refused(bad: str) -> None:
-    """Prose in this field is a crosslink nothing can resolve, so it fails at the schema.
+    r"""Prose in this field is a crosslink nothing can resolve, so it fails at the schema.
 
     The whole value of the field is that a machine can follow it. `"the GFN2 run"` looks like
     provenance and is not, and a note carrying it would pass review looking perfectly informative.
+
+    **`"xtb.hess@v1:nothex:0011"` used to be in this list and is not a defensible refusal.** It
+    asserted that a hash must be lowercase hex, which `CalculationKey` never said — its two hash
+    fields are `[^\s:]+` — so this case was pinning the note side *narrower* than the store it
+    claims to mirror. Removed rather than kept, because keeping it would hold `_CALC_REF` to a rule
+    that refuses keys the calculation cache really writes; the cases that replace it are refusals
+    the store makes too. `tests/test_note.py` holds the other half, that every key the store
+    accepts is citable.
     """
     with pytest.raises(ValueError, match="not a calculation key"):
         Note(id="n", type="job-result", calc_refs=[bad])

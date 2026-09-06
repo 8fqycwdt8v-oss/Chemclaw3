@@ -1,0 +1,18 @@
+-- What the provider never got to report, on the row that bills it.
+--
+-- `stream_options.include_usage` puts a request's usage on the *terminal* chunk, so a turn the
+-- client abandons mid-message is billed by the gateway and reported by nobody. Wave 4 of the
+-- 2026-09 re-review measured it end to end: a turn killed at 7 s after 12 token frames wrote
+-- `input_tokens=0, output_tokens=0` while the gateway logged a real request, and six such turns
+-- against a 1,000-token cap refused nothing.
+--
+-- `agent/turn_usage.InFlightPrompts` closed the *guard* half — the estimate is charged to the
+-- budget and published on `turn.finished` — and left this one open, with `api/runner.py` saying so
+-- in the present tense: "`turn_costs` has no column for it either — adding one is a migration".
+-- This is that migration, so the durable ledger stops reading 0/0 for a turn that really spent.
+--
+-- **A separate column, never folded into the measured pair.** The budget meters the sum, because a
+-- cost guard has to bind on the whole bill; the record keeps them apart so an inferred number can
+-- never pass for a provider's. `0` is the honest default for every row written before this existed
+-- and for every turn whose usage the provider did report.
+ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS estimated_tokens BIGINT NOT NULL DEFAULT 0;

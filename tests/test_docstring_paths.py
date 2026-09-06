@@ -58,6 +58,17 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SEARCH_ROOTS = (_REPO_ROOT / "src", _REPO_ROOT / "tests")
 
+# The workflow definitions are in the corpus too, and they were not until wave 4 of the 2026-09
+# re-review found why they should be: `mutants.yml`'s header advertised weekly mutation coverage of
+# `kg/pr_gate.py`, a module `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` had deleted
+# along with the whole PR gate — and said "seven modules" over a `[tool.mutmut]` list of eleven.
+# Nothing could see it: `mypy` and `ruff` do not read YAML, and the corpus here was `*.py`.
+#
+# A workflow comment is a pointer a reader follows exactly like a docstring's, and it makes a
+# *claim about what CI covers*, which is the more expensive kind to have wrong. The scan is text,
+# not `ast`, so widening it costs nothing but the glob.
+_WORKFLOW_ROOT = _REPO_ROOT / ".github"
+
 # A backticked path with at least one directory segment, ending in `.py`. Requiring a separator is
 # what keeps this off bare module names (`config.py` alone is ambiguous between four packages and
 # is not a pointer anyone can follow anyway).
@@ -157,13 +168,19 @@ _REMOVED = frozenset(
         # Named by this file's own `_POINTER` comment: the module whose two surviving
         # pointers are the reason the `::symbol` form is matched at all.
         "agent/team.py",
+        # The PR gate, deleted whole by `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`.
+        # `.github/workflows/mutants.yml` names it because that workflow used to claim it as
+        # mutation coverage, and saying so is the point of the sentence.
+        "kg/pr_gate.py",
     }
 )
 
 
 def _source_files() -> list[Path]:
-    """Every first-party Python file whose prose this rule covers."""
-    return sorted(path for root in _SEARCH_ROOTS for path in root.rglob("*.py"))
+    """Every first-party file whose prose this rule covers: the packages, plus the workflows."""
+    files = [path for root in _SEARCH_ROOTS for path in root.rglob("*.py")]
+    files += [path for suffix in ("*.yml", "*.yaml") for path in _WORKFLOW_ROOT.rglob(suffix)]
+    return sorted(files)
 
 
 def _resolve(pointer: str) -> Path | None:

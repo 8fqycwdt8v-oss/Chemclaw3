@@ -188,3 +188,33 @@ def test_the_cli_previews_by_default_and_writes_only_when_told(
     assert seen == [True], "a bare invocation must not write"
     assert rekey_campaigns.main(["--apply"]) == 0
     assert seen == [True, False]
+
+
+def test_the_cli_reports_what_it_examined_and_what_it_would_move(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The preview's one status line must actually render.
+
+    `logger.info("%d campaign(s) examined, %d %s", examined, verb, moved)` handed `%d` the verb,
+    so `logging` raised `TypeError` inside `getMessage`, printed "--- Logging error ---" on stderr
+    and dropped the record — while the process exited 0. The command's *only* output therefore
+    never appeared, in dry run or under `--apply`, which is the whole of what the preview-by-
+    default above exists to give an operator before a lossy merge.
+
+    Asserted through `record.getMessage()` rather than through `caplog.records` alone, because
+    that is the call that raises: `caplog` holds the format string and the unformatted args and is
+    green on a record that can never be printed.
+    """
+    from chemclaw.cli import rekey_campaigns
+
+    async def _counts(*, dry_run: bool) -> tuple[int, int]:
+        return 7, 2
+
+    monkeypatch.setattr(rekey_campaigns, "rekey", _counts)
+    # `configure_logging` installs this deployment's own handlers on the root logger, which
+    # detaches `caplog`'s. Stubbed so the assertion is about the record, not about the handler set.
+    monkeypatch.setattr(rekey_campaigns, "configure_logging", lambda: None)
+    with caplog.at_level("INFO", logger="chemclaw.cli.rekey_campaigns"):
+        assert rekey_campaigns.main([]) == 0
+    rendered = [record.getMessage() for record in caplog.records]
+    assert "7 campaign(s) examined, would move 2" in rendered

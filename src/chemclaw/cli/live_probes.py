@@ -29,6 +29,7 @@ import json
 import logging
 from collections import Counter
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
@@ -78,13 +79,28 @@ _M12_SUITES: dict[str, str] = {
 }
 
 
-def _summary(probes: list[Probe], outcomes: list[ProbeOutcome], grades: list[Judgement]) -> str:
-    """The run in one table per axis: verdicts, tool reach, failure visibility, per section."""
+def _summary(
+    probes: list[Probe],
+    outcomes: list[ProbeOutcome],
+    grades: list[Judgement],
+    provenance: str,
+) -> str:
+    """The run in one table per axis: verdicts, tool reach, failure visibility, per section.
+
+    `provenance` is one line naming what produced these numbers — the model gateway a fresh run
+    asked, or the transcript directory a re-grade read. It is a parameter rather than read from
+    `settings` here because those are different facts: a re-grade's verdicts belong to whatever
+    gateway wrote the transcripts, which may not be the one this process resolves, and stamping the
+    current one on them would be a claim nobody checked. `live_storm` prints the same line for the
+    same reason, and this report had none — so a run against the scripted mock and a run against a
+    real gateway produced files a reader cannot tell apart.
+    """
     by_id = {p.id: p for p in probes}
     verdicts = Counter(g.verdict for g in grades)
     lines: list[str] = []
 
     lines.append(f"# Live probe run — {len(outcomes)} probes\n")
+    lines.append(f"{provenance}\n")
     lines.append("## Verdicts\n")
     lines.append("| verdict | count | share |")
     lines.append("| --- | ---: | ---: |")
@@ -197,6 +213,83 @@ def _summary(probes: list[Probe], outcomes: list[ProbeOutcome], grades: list[Jud
     return "\n".join(lines) + "\n"
 
 
+def _gateway_line() -> str:
+    """The model gateway this run resolved, named in the report and warned about when it is a mock.
+
+    Asked of `Settings` and `cli.mock_llm` rather than compared against a string written here — the
+    same rule `infra/live/processes.sh` follows to decide whether to *start* that mock, and for the
+    same reason: a transcribed address agrees with the default on the day it is written and cannot
+    follow it afterwards.
+    """
+    from chemclaw.cli.mock_llm import MOCK_BASE_URL
+
+    line = f"**model gateway**: {settings.llm_base_url} · **model**: {settings.llm_model}"
+    if settings.llm_base_url == MOCK_BASE_URL:
+        logger.warning(
+            "this run is pointed at the scripted mock (%s). Its answers are a fixed script, so "
+            "nothing here can be graded and the run will exit non-zero.",
+            MOCK_BASE_URL,
+        )
+        return line + " — **the scripted mock**: its answers are not gradeable"
+    return line
+
+
+def _reachability_status(outcomes: list[ProbeOutcome]) -> int:
+    """3 when the run reached the front door for no probe at all; 0 otherwise.
+
+    Measured, not assumed: with nothing listening, three probes came back 100% `ConnectError`, were
+    judged `unserved` on their empty answers — a real verdict, so `_grading_status` returned 0 —
+    and the run exited **0**. The two guards are therefore about different failures, and the
+    grading one does not subsume this one.
+
+    Exit 3 rather than 2 to match `validate_template_args_live`, whose Makefile comment already
+    fixes the convention: *"Exit 3 (not 1) means it could not reach something — reported, never
+    counted as checked."* `transport_error` is the signal because it is the one that means the
+    request never arrived; a front door answering 500 on everything is a system that failed, which
+    is a result this suite is supposed to report rather than refuse.
+
+    All, not any: a partial outage is a finding about the probes it names and the report says which.
+    """
+    if outcomes and all(o.transport_error for o in outcomes):
+        logger.error(
+            "not one of the %d probes reached %s — this run measured nothing",
+            len(outcomes),
+            settings.live_probe_base_url,
+        )
+        return 3
+    return 0
+
+
+def _grading_status(grades: list[Judgement]) -> int:
+    """2 when judging happened and produced no verdict at all; 0 otherwise.
+
+    The corpus suite ended `return 0` unconditionally — twenty lines below its own empty-selection
+    guard, whose comment already states the rule this function applies: *"Zero probes is not a
+    clean run, it is a run that measured nothing … A renamed probe id would otherwise turn a
+    scripted `--only` invocation into a permanent green line over an empty set."* A run where the
+    judge returned a verdict for nothing reaches that same permanent green line through a different
+    door, and it is the door a **mock** gateway walks through every time: measured, three probes,
+    100% ungraded, exit 0, with the two bolded honesty rows (`failed silently`, `answers citing a
+    note no tool returned`) both reading 0 because nothing was judged. The module docstring above
+    already commits to this for the M12 suites — "a measurement that did not happen is not a
+    measurement that passed" — and this is the suite that did not do it.
+
+    **The boundary is zero, not a configured floor.** A partial ungraded share is a real result
+    worth reading (a judge that failed on four probes out of 190 is a fact about those four); a
+    share of nothing is not a result at all. Any number between the two would be a threshold this
+    repository would then have to defend, and there is no measurement to derive one from.
+    """
+    if any(g.verdict != "ungraded" for g in grades):
+        return 0
+    logger.error(
+        "every one of the %d judgements came back ungraded — this run measured nothing. "
+        "The usual cause is a gateway that cannot grade: `settings.llm_base_url` is %s.",
+        len(grades),
+        settings.llm_base_url,
+    )
+    return 2
+
+
 def _load_transcripts(directory: Path) -> tuple[list[Probe], list[ProbeOutcome]]:
     """Every stored transcript in `directory`, as the probe/outcome pair that produced it."""
     probes: list[Probe] = []
@@ -251,16 +344,45 @@ def _client(base_url: str | None) -> httpx.AsyncClient:
     )
 
 
+#: One stamp per process, so every call below agrees about which run it is writing. Computed at
+#: import rather than per call: a suite that resolved its directory twice would otherwise split one
+#: run's transcripts from its own summary, which is the defect `_write_outputs` exists to prevent.
+_RUN_STAMP = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
+
+
+def run_output_dir(suite: str) -> Path:
+    """`<live_probe_transcript_dir>/<suite>/<this run's UTC stamp>` — where a live run writes.
+
+    **The parent stays the committed transcripts directory, and that is deliberate.** `.gitignore`
+    exempts it in so many words — *"a live result nobody can read back later is a claim rather than
+    evidence"* — so moving live output to a scratch directory would reverse a decision this
+    repository states in the one file that enforces it, which is an ADR's job and not a CLI
+    default's.
+
+    What was wrong is narrower and worse: every run wrote *over* that record. A three-probe pass
+    replaced a 190-probe one in place, `--no-judge` replaced real verdicts with none, and one
+    review run modified **196 tracked files** and had to restore each with `git show HEAD:<p>`.
+    Nothing marked which run a file came from, so the newest artefact always looked like the record.
+    Per-run directories cost nothing, dirty no tracked file, and make "which run produced this"
+    answerable for the first time; promoting one into the record is then a deliberate copy.
+
+    `live_jobs` writes its own report through this function too — one definition, because two
+    writers into one committed directory is exactly how the overwrite happened.
+    """
+    return Path(settings.live_probe_transcript_dir) / suite / _RUN_STAMP
+
+
 def _suite_dir(transcript_dir: str | None, suite: str) -> Path:
     """Where one suite's transcripts and report land.
 
     A subdirectory per suite by default, for the reason `_write_outputs` records at length: outputs
     live *with* the transcripts that produced them, so two suites cannot overwrite each other's
-    summary the way two probe runs into one parent once did.
+    summary the way two probe runs into one parent once did — then one per *run* beneath it, for
+    the reason `run_output_dir` gives.
     """
     if transcript_dir is not None:
         return Path(transcript_dir)
-    return Path(settings.live_probe_transcript_dir) / suite
+    return run_output_dir(suite)
 
 
 def _findings_report(title: str, preamble: str, findings: list[Finding], notes: list[str]) -> str:
@@ -561,6 +683,15 @@ async def _main(args: argparse.Namespace) -> int:
         # measurement.
         directory = Path(args.transcript_dir or settings.live_probe_transcript_dir)
         probes, outcomes = _load_transcripts(directory)
+        if not outcomes:
+            # The same rule the run path takes on an empty selection, on the path that had none:
+            # a re-grade over a directory holding no transcripts used to print a "# Live probe run
+            # — 0 probes" report, write it over `summary.md`, and exit 0. That artefact is
+            # committed evidence in this repository (`.gitignore` exempts the directory precisely
+            # so a live result can be read back later), so the failure was not academic: the record
+            # survived and the run it describes never happened.
+            logger.error("no transcripts to re-grade in %s — nothing was measured", directory)
+            return 2
         logger.info("re-grading %d stored transcripts from %s", len(outcomes), directory)
         by_id = {p.id: p for p in probes}
         semaphore = asyncio.Semaphore(settings.live_probe_concurrency)
@@ -570,10 +701,16 @@ async def _main(args: argparse.Namespace) -> int:
                 return await judge_outcome(by_id[outcome.probe_id], outcome)
 
         regraded: list[Judgement] = list(await asyncio.gather(*(regrade(o) for o in outcomes)))
-        report = _summary(probes, outcomes, regraded)
+        report = _summary(
+            probes,
+            outcomes,
+            regraded,
+            f"**re-graded** from {len(outcomes)} stored transcripts in `{directory}`, "
+            f"by `{judge_model()}`. The answers themselves are whatever gateway wrote them.",
+        )
         print(report)
         _write_outputs(directory, report, regraded)
-        return 0
+        return _grading_status(regraded)
 
     probes = load_probes(args.probe_dir)
     loaded = len(probes)
@@ -597,7 +734,11 @@ async def _main(args: argparse.Namespace) -> int:
         "running %d probes against %s", len(probes), args.base_url or settings.live_probe_base_url
     )
 
-    outcomes = await run_probes(probes, base_url=args.base_url, transcript_dir=args.transcript_dir)
+    # Resolved once and passed to both writers: `run_probes` used to fall back to
+    # `settings.live_probe_transcript_dir` on its own, so it wrote its transcripts over the
+    # committed record while the summary went wherever this function decided separately.
+    directory = _suite_dir(args.transcript_dir, "corpus")
+    outcomes = await run_probes(probes, base_url=args.base_url, transcript_dir=str(directory))
 
     grades: list[Judgement] = []
     if not args.no_judge:
@@ -610,11 +751,23 @@ async def _main(args: argparse.Namespace) -> int:
 
         grades = list(await asyncio.gather(*(grade(o) for o in outcomes)))
 
-    report = _summary(probes, outcomes, grades)
+    report = _summary(probes, outcomes, grades, _gateway_line())
     print(report)
 
-    _write_outputs(Path(args.transcript_dir or settings.live_probe_transcript_dir), report, grades)
-    return 0
+    _write_outputs(directory, report, grades)
+    logger.info("transcripts and summary written to %s", directory)
+
+    # Reachability first, and it binds every run: a pass that reached nothing measured nothing
+    # whether or not it asked for verdicts.
+    unreachable = _reachability_status(outcomes)
+    if unreachable:
+        return unreachable
+    # **`--no-judge` stands at 0, and this is the sentence saying why.** It asked for no verdicts
+    # and got none, which is not a run that measured nothing — it measured coverage, and tool
+    # reach, silent failures and durable-job launches are all real numbers this report carries. A
+    # run that declines to grade is not claiming a grade. The case where it truly measured nothing
+    # is the one above, which it does not escape.
+    return 0 if args.no_judge else _grading_status(grades)
 
 
 def _positive(value: str) -> int:
@@ -643,7 +796,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     construct the options this module acts on without starting a probe run against a live front
     door — which is why the empty-selection defect below had no test.
     """
-    """Parse arguments and run the selected suite."""
     # `configure_logging()`, not `basicConfig`: this probe builds an `Authorization: Bearer`
     # header from `live_probe_token` (added to the redaction inventory on 2026-08-27 precisely so
     # it would be scrubbed), and a bare `basicConfig` installs no `SecretRedactingFilter` — so an

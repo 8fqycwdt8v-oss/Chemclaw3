@@ -1,83 +1,58 @@
-# Multi-wave codebase review (2026-09-06)
+# Multi-wave re-review — waves 4-8 (building on 1-3)
 
-Full re-review of the tree as if new. Prior review waves ignored by construction: every
-agent gets the code, not the history, and every finding must be proved by running something.
+Waves 1-3 (merged: #331, #332, #333) read the tree: per-package, then cross-cutting,
+then the regressions the first two introduced. 107 defects fixed. Waves 4-8 escalate
+from *reading* the tree to *running* it, attacking it, and measuring it.
 
-## Wave 0 — baseline (done before any review)
-- [x] Start the daemon: `sudo -n dockerd`, `make up`, `make db-migrate` (Postgres + Temporal live)
-- [x] `make lint` green
-- [x] `make type` green (804 files, mypy --strict)
-- [x] `make test` green with Postgres up — record the skip count the epilogue reports
+Rules carried forward from waves 1-3 (they were earned):
+- No fix agent may run `git checkout --`, `git stash`, or `git reset`. A/B by hand-edit.
+- Fix agents get disjoint file sets. Cross-scope residuals come back to the orchestrator.
+- Every fix must reproduce the defect first, check `docs/decisions/` for an ADR making the
+  behaviour intentional, and prove the fix with a test watched failing against unfixed source.
+- `.mypy_cache` corrupts under concurrent `mypy` in one directory. `rm -rf .mypy_cache`
+  before the gate whenever agents ran in parallel.
+- Prose is evidence about what its author believed, never about what the code does.
 
-## Wave 1 — per-package correctness sweep (fan-out, find-only)
-Ten agents, one package cluster each, reading for defects that change behaviour.
-- [x] agent/ graph + middleware chain + budgets
-- [x] agent/ sessions, authz, tools, skills, subagents
-- [x] core/ + protocols/
-- [x] ingest/
-- [x] science/ + evals/
-- [x] connectors/ + templates/
-- [x] durable/ + operations/
-- [x] api/ + deliver/
-- [x] cli/ + publish/
-- [x] kg/ + retrieval/ + memory/
-- [x] Verify each finding adversarially, fix, `make lint type test`, PR, merge on green (#331)
+## Wave 4 — Execution truth: run it, do not read it
+- [ ] W4.1 Postgres-backed suite driven against the live DB (the ~200 skips), every gate reached
+- [ ] W4.2 Temporal worker + durable jobs end to end against the running broker
+- [ ] W4.3 Front door: OIDC-off and OIDC-on, SSE stream, session push-back, budget metering
+- [ ] W4.4 The live lane (`make live-infra`/`live-up`/`live-probes`) against `chemclaw.cli.mock_llm`
+- [ ] W4.5 Every CLI entry point and every `make` target actually invoked
+- [ ] W4.6 Chart render + kubeconform + promtool on shipped defaults and on the refusal paths
+- [ ] W4 fix stage, gate, PR, merge on green
 
-## Wave 2 — cross-cutting invariants (fan-out, find-only)
-Cuts that no per-package reader can see.
-- [x] Concurrency and async correctness (event loops, pools, locks, cancellation)
-- [x] SQL, migrations and data integrity (schema vs. reader, index vs. query, transactions)
-- [x] Security: authorization chain, redaction, injection, credential handling
-- [x] Resource lifecycle: leaks, unclosed clients, unbounded growth
-- [x] Config/settings: readerless settings, magic numbers, chart vs. code drift
-- [x] Tests that prove nothing (mocks asserting themselves, dead fixtures, absent arms)
-- [x] Prose vs. code: CLAUDE.md / ADR / docstring claims falsified by the current commit
-- [x] Verify, fix, `make lint type test`, PR, merge on green (#332)
+## Wave 5 — Adversarial input and hostile state
+- [ ] W5.1 Untrusted text: envelope framing/defanging, nonce, Cf category, helper reports
+- [ ] W5.2 Authorization chain: every middleware order, refusal paths, subagent attenuation
+- [ ] W5.3 Manifest/declaration fuzz: connector.yaml, datasource.yaml, sink, SKILL.md, templates
+- [ ] W5.4 Egress guard + secrets: what escapes, what is logged, what reaches a metric label
+- [ ] W5.5 Malformed persisted state: half-written rows, unknown shapes, migration gaps
+- [ ] W5 fix stage, gate, PR, merge on green
 
-## Wave 3 — deep semantic pass on what waves 1–2 disturbed
-- [x] Re-review the fixed regions plus anything two waves both flagged
-- [x] Sweep the surfaces the first two waves only read (small packages, validators, corpora, examples)
-- [x] Verify, fix, `make lint type test`, PR (#333)
+## Wave 6 — Concurrency, durability, failure injection
+- [ ] W6.1 Crash/retry/idempotency across Temporal activities and the connector-job wrapper
+- [ ] W6.2 Checkpointer + session store under concurrent turns on one thread
+- [ ] W6.3 Pool exhaustion, cancellation, timeouts; the parent-ceiling invariant under load
+- [ ] W6.4 Retention/pruning races against live writers
+- [ ] W6.5 Sinks and publication: at-least-once, duplicate suppression, partial failure
+- [ ] W6 fix stage, gate, PR, merge on green
+
+## Wave 7 — Numbers: budgets, accounting, cost
+- [ ] W7.1 Context prefix/floor/compaction arithmetic measured end to end, connectors bound
+- [ ] W7.2 Token/spend accounting: every counter proved to move, and to move by the right amount
+- [ ] W7.3 Every number in prose (CLAUDE.md, ARCHITECTURE.md, ADRs, docstrings) re-measured
+- [ ] W7.4 Hot paths profiled; quadratic growth hunted (checkpoints, ELN re-read, KG scans)
+- [ ] W7.5 Memory: resident growth, cache bounds, the one eviction policy
+- [ ] W7 fix stage, gate, PR, merge on green
+
+## Wave 8 — Doctrine, dead weight, and the tests themselves
+- [ ] W8.1 Every merged ADR's claim checked against the code: does the control exist, is it called
+- [ ] W8.2 Dead code, settings with no reader, metrics with no producer, one-caller abstractions
+- [ ] W8.3 Mutation sweep over everything waves 4-7 touched
+- [ ] W8.4 Repo map / ARCHITECTURE / layering / validator conformance
+- [ ] W8.5 The four items waves 1-3 deliberately left open, re-decided with measurement
+- [ ] W8 fix stage, gate, PR, merge on green
 
 ## Review
-
-Three waves, ~2,300 lines of finding reports, **107 defects fixed** across 26 review and fix
-agents. The suite was green before any of it (6,799 passed), so every one of them was a gap the
-suite could not see. It is green after, at 6,989 passed / 6 skipped — and the skip count is the
-other half of the story: it was 67, and 62 of those were the Helm chart tests, which had been
-skipping because `helm` was not installed. They now run.
-
-**The one pattern worth carrying forward, because it recurred in every wave:**
-*a gate that has never been watched refusing is a claim that a gate exists.*
-- Wave 1: `make template-validate` resolved the profile surface before profiles were loaded, so
-  every shipped profile read as unknown and one of its three rules was unreachable. 61 tests
-  passed over it, because the tests loaded profiles themselves.
-- Wave 2: the egress guard's `connect` hook could be deleted with the whole egress corpus green.
-  Every refusal assertion called the private decision function; the one socket-level test was
-  refused by the patched `getaddrinfo` before `connect` was reached. One wrapper of nine observed.
-- Wave 3: `make skill-validate` could not see a tool name in backticks — the way Markdown
-  naturally names one — hiding 10 skill/profile pairs from agents that hold the tool.
-
-The corollary is the method: **mutation testing is what finds this class.** Wave 2's mutation pass
-killed ~25 guards it tried and could not break, which is what makes the six survivors credible.
-
-**Second pattern: a fix is a hypothesis until a second reader runs it.** The fixers overturned
-their own reviewers five times — the diff's named cost measured at 5% of it (the real lever was
-elsewhere, 1.67 s → 0.18 s); a proposed redaction carve-out was measured to *stop* redacting
-base32 credentials; a proposed cache bound was measured to make peak memory worse (+102 → +194 MB);
-pre-creating tables would not have fixed the grant (`CREATE TABLE IF NOT EXISTS` checks the ACL
-before existence); and a reported 1,846 ms loop block was 210 ms once measured on an idle box.
-
-**Third: fixes collide.** Wave 3 existed to check that, and found three defects the earlier waves
-introduced — including a capped turn answering `''` because wave 1's correct fix dropped the
-partial answer the cap exists to preserve, hidden by a fake too generous to express the failure.
-
-**Nine findings were declined rather than fixed**, each against a merged ADR or a measurement:
-a running job has no owner by construction, the activity reading is ungated by decision,
-retention-off is the argued default, `HandoffEvent` and `EffectSpec.compensation` are deliberate,
-and `_SKILL_READ_LIMIT` was a leftover whose "missing control" reading measurement disproved.
-
-**Left open, with reasons, in the fix reports:** the quadratic checkpoint growth (both candidate
-fixes contradict merged decisions; the in-thread prune SQL is written down), the KG cache bound
-(counterproductive, measured), the ELN quadratic re-read (needs a `limit` through an interface
-outside the fixer's scope), and a narrower split-principal posture than the CREATE grant.
+(filled in at the end)

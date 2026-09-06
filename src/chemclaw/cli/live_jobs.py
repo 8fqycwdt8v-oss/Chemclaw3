@@ -403,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
         "--report",
         type=Path,
         default=None,
-        help="where to write the markdown report (default: alongside the live transcripts)",
+        help="where to write the markdown report (default: a per-run dir under the transcripts)",
     )
     parser.add_argument(
         "--actor",
@@ -434,7 +434,16 @@ def main(argv: list[str] | None = None) -> int:
     text = report(run)
     print(text)
 
-    destination = args.report or Path(settings.live_probe_transcript_dir) / "durable-smoke.md"
+    # Imported here rather than at module scope: this CLI needs one path policy from the probe
+    # lane and none of the httpx/yaml/judge machinery that importing it at the top would pull into
+    # a run whose whole point is that no model is involved.
+    from chemclaw.cli.live_probes import run_output_dir
+
+    # A directory per run, never over the record. This wrote
+    # `tasks/live-test/transcripts/durable-smoke.md` — a *tracked* file — so every smoke run
+    # dirtied the working tree and replaced the previous run's report with no way to tell them
+    # apart. `run_output_dir` states the whole argument, including why the parent stays committed.
+    destination = args.report or run_output_dir("durable") / "durable-smoke.md"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(text + "\n", encoding="utf-8")
     print(f"\nwritten to {destination}")

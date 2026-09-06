@@ -11,6 +11,8 @@ why the pure pieces are pulled out and pinned here instead.
 """
 
 import asyncio
+import inspect
+import logging
 
 import pytest
 
@@ -20,10 +22,12 @@ from chemclaw.durable.job_record import (
     JobRecord,
     NullJobRecordSink,
     default_job_record_sink,
+    log_record_durability,
     note_with_run_provenance,
     record_job,
     search_job_records,
 )
+from chemclaw.durable.serve import serve_worker
 from chemclaw.kg.note import Note
 
 _INPUT = ConnectorJobInput(
@@ -155,6 +159,42 @@ def test_searching_without_a_store_answers_honestly_rather_than_raising(
     """`find_past_jobs` on a memory-store deployment reports no history, not an error."""
     monkeypatch.setattr(settings, "session_store", "memory")
     assert asyncio.run(search_job_records("suzuki")) == []
+
+
+def test_a_worker_that_keeps_no_job_records_says_so_at_boot(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One switch answers two questions, so the worker has to announce which one it got.
+
+    `record_session_event_activity` reads no such switch, so a deployment left at the shipped
+    default (`CHEMCLAW_SESSION_STORE=memory`) writes the `job_completed` push-back to Postgres and
+    drops the durable record beside it — measured against a live database, one session event and
+    zero `job_records` rows for the same completed run, with `record_job` reporting success in
+    0.000 s and `chemclaw_jobs_finished_total` incremented anyway. The drop is at debug on the null
+    sink, so nothing at any level said it. This is the line that does.
+    """
+    monkeypatch.setattr(settings, "session_store", "memory")
+    with caplog.at_level(logging.WARNING, logger="chemclaw.durable.job_record"):
+        log_record_durability("background-worker")
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
+    assert "CHEMCLAW_SESSION_STORE=memory" in caplog.records[0].getMessage()
+
+    caplog.clear()
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    with caplog.at_level(logging.WARNING, logger="chemclaw.durable.job_record"):
+        log_record_durability("background-worker")
+    assert caplog.records == [], "a deployment that does keep records must not be warned"
+
+
+def test_every_worker_announces_it_on_the_way_up() -> None:
+    """The announcement is worth nothing if an entrypoint can skip it.
+
+    `serve_worker` is the one tail every worker's `main()` runs through — the same argument
+    `bind_job_gauges` is called there under — so the check is that this call sits beside it rather
+    than at any individual entrypoint that could be added without it.
+    """
+    source = inspect.getsource(serve_worker)
+    assert "log_record_durability(component)" in source
 
 
 def test_the_null_sink_keeps_nothing_and_says_so() -> None:

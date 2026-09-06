@@ -645,7 +645,7 @@ def check_prose_contract() -> list[str]:
         for note_type in sorted(referenced_note_types(text) - known_note_types()):
             problems.append(
                 f"{origin}: tells the agent to write a `{note_type}` note, which is not a known "
-                "note type — the PR-gate would open a branch that `kg-validate` then rejects"
+                "note type — the note lands in `knowledge/` and then fails `make kg-validate`"
             )
         for workflow_name in sorted(set(_WORKFLOW.findall(text))):
             problems.append(

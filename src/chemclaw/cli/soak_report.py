@@ -187,10 +187,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("record", type=Path, help="the soak JSONL written by infra/live/soak.sh")
     args = parser.parse_args(argv)
-    if not args.record.exists():
+    if not args.record.is_file():
+        # `is_file()`, not `exists()`: a directory argument reached `read_text` and came back as a
+        # raw `IsADirectoryError`, which is the same "the missing case is handled and the
+        # unreadable one is not" split the malformed-record arm below had.
         print(f"no soak record at {args.record}")
         return 1
-    print(report(read_rounds(args.record)))
+    try:
+        rounds = read_rounds(args.record)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # A soak record is written line by line by `infra/live/soak.sh` while a long run is in
+        # flight, so a truncated or half-written file is the *expected* damaged input, not an
+        # exotic one — an operator reporting on a run that was killed mid-write hits it. One line
+        # naming the file beats a `json.decoder.JSONDecodeError` traceback out of a reporting
+        # command. The exit code was already 1 and stays 1.
+        print(f"cannot read the soak record at {args.record}: {exc}")
+        return 1
+    print(report(rounds))
     return 0
 
 

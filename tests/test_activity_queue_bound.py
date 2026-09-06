@@ -48,6 +48,7 @@ with workflow.unsafe.imports_passed_through():
 
     from chemclaw.core.config import settings
     from chemclaw.durable.note_index import NoteReindexWorkflow
+    from chemclaw.durable.publish import connector_queue_wait_timeout
     from tests.temporal_env import pydantic_client, start_env_or_skip
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
@@ -253,3 +254,36 @@ def test_an_activity_nobody_polls_fails_instead_of_waiting_forever(
         assert timeout.type is TimeoutType.SCHEDULE_TO_START
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("ceiling", [3600.0, 25200.0, 86400.0])
+def test_the_job_ceiling_funds_exactly_one_worst_case_attempt_at_any_setting(
+    monkeypatch: pytest.MonkeyPatch, ceiling: float
+) -> None:
+    """One attempt fits, a second cannot, and no ceiling changes it — so nothing may claim it does.
+
+    `Settings._the_job_ceiling_covers_the_activity_it_bounds` said in its own docstring that it
+    keeps `BAD_DATA_RETRY` alive, "so `activity_max_attempts` is a number that can never be
+    reached" is the thing it prevents. Measured at the shipped defaults it prevents no such thing:
+    longest 15,000 s, ceiling 25,200 s, queue wait 10,170 s, one worst-case attempt 25,170 s, 30 s
+    left over against `activity_max_attempts=5`.
+
+    And it is structural rather than a badly chosen value, which is why this is parametrized over
+    three ceilings a decade apart instead of asserting the shipped numbers. A bundle activity's
+    attempt costs `q + w`, and `connector_queue_wait_timeout` is derived as `C - w - a` precisely so
+    that composite fits by construction — so `q + w` is `C - a` whatever `C` is, and the second
+    attempt has `a` to spend. Anything that re-derives the queue wait as a fraction of the ceiling
+    (the shape `connector_queue_wait_timeout` says was reverted for making `q` grow with `C`) moves
+    this ratio, which is the drift worth catching.
+    """
+    monkeypatch.setattr(settings, "connector_job_timeout_seconds", ceiling)
+    longest, _budget = settings.longest_bundle_activity
+    overhead = settings.activity_timeout_seconds
+    one_attempt = connector_queue_wait_timeout().total_seconds() + longest
+
+    assert one_attempt == ceiling - overhead
+    assert one_attempt <= ceiling, "the ceiling must fund one worst-case attempt"
+    assert 2 * one_attempt > ceiling, (
+        "a second full-length attempt fits, so the ceiling now funds retries and "
+        "`_the_job_ceiling_covers_the_activity_it_bounds` may say so"
+    )

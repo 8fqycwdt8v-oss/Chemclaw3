@@ -280,12 +280,31 @@ def require_note_slug(value: str) -> str:
     return value
 
 
-# `CalculationKey.as_str()`: `calc_type@calc_version:input_hash:params_hash`. The version segment
-# is the loose one on purpose — it carries a method name and a build string
-# (`GFN2-xTB+tblite+0.4.0`), so it is matched as "anything but a colon" rather than enumerated.
-# The point of validating the shape at all is that a note citing `"the GFN2 run"` in this field is
-# a crosslink nothing can resolve, and it should fail at the PR-gate rather than silently.
-_CALC_REF = re.compile(r"^[^\s@:]+@[^\s:]+:[0-9a-f]+:[0-9a-f]+$")
+# `CalculationKey.as_str()`: `calc_type@calc_version:input_hash:params_hash`. **The four segment
+# patterns below are `CalculationKey`'s own**, restated rather than imported because `kg` may
+# import `chemclaw.core` and nothing else (`tests/test_layering.py`), and `CalculationKey` lives in
+# `science`. `tests/test_note.py::test_every_calculation_key_the_store_accepts_can_be_cited` closes
+# that by driving real keys through both, so the restatement cannot drift in silence.
+#
+# **It had drifted, in the direction that refuses real work.** This was
+# `[^\s@:]+@[^\s:]+:[0-9a-f]+:[0-9a-f]+`, which is narrower than the store on two arms, and the
+# error message beside it claimed to accept whatever `as_str()` writes:
+#   - the *version* excluded `:`, but the store leaves it free on purpose and says why — "a real
+#     version carries them … `cal-0.28733:-29.3116` the `:`, which is the measured fact that made
+#     the key cross the wire as four parts". A calibrated calculation's key was therefore
+#     uncitable, and the only key in a live `calculation_results` was one;
+#   - the two hashes demanded lowercase hex, where the store admits any non-colon, non-space text.
+# Both refusals surfaced as a pydantic `ValidationError` out of `record_knowledge_note`, so a note
+# resting on a calibration could not be written at all, and `make kg-validate` called one written
+# any other way an "invalid note" rather than a citation.
+#
+# The parse stays unambiguous with the version free of both delimiters, for the reason the store
+# gives: `calc_type` bars `@` (so the first `@` ends it) and the two hashes bar `:` (so the last
+# two colons end them), and the version is whatever lies between.
+_CALC_TYPE = r"[^\s@:]+"
+_CALC_VERSION = r"\S+"
+_CALC_HASH = r"[^\s:]+"
+_CALC_REF = re.compile(rf"^{_CALC_TYPE}@{_CALC_VERSION}:{_CALC_HASH}:{_CALC_HASH}$")
 
 
 def _reject_unencodable(value: str, field: str) -> str:
@@ -295,8 +314,8 @@ def _reject_unencodable(value: str, field: str) -> str:
     carry an unpaired surrogate (`json.loads('"\ud800"')` returns one happily), so a model that
     emits a truncated escape puts a `str` in this field that no UTF-8 consumer can accept. The
     field itself then looks fine and every write of it fails: `path.write_text` raises
-    `UnicodeEncodeError` in the PR-gate's commit, and psycopg and the vector index raise the same
-    way on the proposal store and the index refresh.
+    `UnicodeEncodeError` when `kg/record.py` writes the note, and psycopg and the vector index
+    raise the same way on the index refresh.
 
     So the check belongs on the note, not on the file writer. A `Note` is by definition something
     that gets written to a UTF-8 file in Git; a value that cannot be is not a note field that
@@ -623,8 +642,8 @@ class Note(TemporalWindow):
         `body`, `source`, `compound_smiles`, `tags`, and every unconstrained string on a *nested*
         model. The nested walk exists because the enumeration above once went stale exactly as
         this docstring predicted: `conditions` grew `major_impurity`, an unconstrained `str`,
-        and a surrogate in it built a Note that raised `UnicodeEncodeError` in the PR-gate's
-        commit — the precise failure this validator says it prevents.
+        and a surrogate in it built a Note that raised `UnicodeEncodeError` on the write of the
+        note file — the precise failure this validator says it prevents.
         `tests/test_properties_core.py` pins both halves without pinning *who* rejects what, so
         the split fails loudly if either of the other two checks ever stops covering its part.
         """

@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
 
 from chemclaw.core.config import settings
+from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.durable.registry import durable_activity
 from chemclaw.kg.note import Note
@@ -168,6 +169,41 @@ def _records_are_durable() -> bool:
     spelled out at each of the three entry points below so they cannot drift apart.
     """
     return settings.session_store == "postgres"
+
+
+def log_record_durability(component: str) -> None:
+    """Say once, at worker start, whether this process actually keeps the records it writes.
+
+    `record_job` is best-effort by design and the null sink drops at debug, so a deployment that
+    resolved to it reported every run as "recorded in 0.000 s", kept nothing, and still booked
+    `chemclaw_jobs_finished_total` — a counter whose own docstring reads "a run was recorded".
+    Measured against a live Postgres with `session_store` at its shipped default of `memory`: zero
+    `job_records` rows for a completed run whose `job_completed` push-back *did* reach the same
+    database, because `record_session_event_activity` reads no such switch. One switch, two answers,
+    and nothing at any level said so; `find_past_jobs` and `get_durable_job_status`'s fallback are
+    then measuring an empty table they cannot distinguish from a quiet one.
+
+    A boot line rather than a per-record one: the fact is a property of the deployment, so it wants
+    saying once where somebody reading a worker's first ten lines finds it, and at WARNING because
+    it is nearly always a misconfiguration — a process is normally started against a database.
+    Beside the predicate rather than inline at the call site, so the announcement and the switch it
+    describes cannot drift.
+
+    Args:
+        component: What this process is, for the log line — as `serve_worker` names it.
+    """
+    if _records_are_durable():
+        return
+    log_event(
+        logger,
+        "job_records.not_kept",
+        "%s: job records are dropped (CHEMCLAW_SESSION_STORE=%s); session push-back still writes",
+        component,
+        settings.session_store,
+        level=logging.WARNING,
+        component=component,
+        session_store=settings.session_store,
+    )
 
 
 def default_job_record_sink() -> JobRecordSink:

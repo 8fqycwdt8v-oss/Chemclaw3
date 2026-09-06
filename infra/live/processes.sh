@@ -29,6 +29,10 @@ readonly LIVE_DIR="${CHEMCLAW_LIVE_DIR:-$REPO_ROOT/.live}"
 readonly RUN_DIR="$LIVE_DIR/run"
 readonly API_PORT="${CHEMCLAW_LIVE_API_PORT:-8000}"
 
+# One resolution of the sibling checkouts, shared with `e2e-full-stack/up.sh`. See its header.
+# shellcheck source=infra/live/siblings.sh
+. "$(dirname "${BASH_SOURCE[0]}")/siblings.sh"
+
 log() { printf '\033[36m[live]\033[0m %s\n' "$*"; }
 die() { printf '\033[31m[live] %s\033[0m\n' "$*" >&2; exit 1; }
 
@@ -139,6 +143,22 @@ connector_env() {
   "$1" -m chemclaw.cli.connectors_dev --export-env
 }
 
+# Every variable an enabled connector's manifest names as its bearer token — asked of the registry
+# that already answers this question for the log redactor and the webhook redactor, rather than
+# listed a third time.
+#
+# The list *was* written out (`CHEMCLAW_CHEM_TOKEN`, `..._SAFETY_...`, `..._CALC_...`), directly
+# below the paragraph explaining that this file exists so a second shell does not get "401s from a
+# connector that is plainly up" — and it dropped `rxnpredict`, the same bundle whose absence from a
+# hardcoded list already broke this lane once (see `fleet_bundle_names`). The env file therefore
+# handed a second shell three credentials out of four, and every `make live-jobs`/`live-probes`
+# call that reached rxnpredict raised `MissingConnectorCredential` against a server this lane had
+# started and was serving. Derived, a bundle added next year is persisted the day it is enabled.
+bearer_token_vars() {
+  "$1" -c 'from chemclaw.connectors.registry import bearer_token_env_names
+print("\n".join(bearer_token_env_names()))'
+}
+
 # The pid file must hold the pid of the *worker*, not of a wrapper around it. `uv run python -m …`
 # would record `uv`, whose child is the real process — so `kill` would reach the launcher and a
 # signal aimed at the worker (the wedged-worker check in `make live-jobs` sends SIGSTOP) would
@@ -180,9 +200,12 @@ start_worker() {
 # Poll a URL until it answers 200, or fail naming the log to read. Never a bare sleep: a fixed
 # wait is either too short (a flaky lane) or too long (a slow one), and it reports nothing.
 #
-# The budget is 300s, not 90. Measured: on a *cold* page cache — a fresh container, or the first
+# The budget is 300 *attempts*, not 90 — and an attempt is a `curl --max-time 2` plus a one-second
+# sleep, so a lane whose polls all time out waits up to ~15 minutes. This paragraph said "300s" and
+# the number is load-bearing prose, so an operator was told five minutes for a hang that can run
+# three times that. Measured: on a *cold* page cache — a fresh container, or the first
 # start after one is reclaimed — importing this dependency set (torch, rdkit, bofire) pages in
-# ~1 GB and the process sits in uninterruptible disk sleep for minutes. At 90s the lane declared
+# ~1 GB and the process sits in uninterruptible disk sleep for minutes. At 90 the lane declared
 # a healthy process dead and killed the run; the second start, with the cache warm, took ten
 # seconds. A readiness budget has to cover the slowest legitimate start, not the typical one.
 #
@@ -238,7 +261,7 @@ wait_for() {
 # measured, with the two unreachable the front door does not degrade, it exits 3 with
 # `ConnectorsUnavailable: chem (unreachable), safety (unreachable)` — so a `make live-up` that did
 # not start them could not run a single one of the 259 probes in `data/evals/probes/`.
-readonly MCP_REPO="${CHEMCLAW_MCP_REPO:-$REPO_ROOT/../chemclaw3-mcp}"
+readonly MCP_REPO="$(sibling_repo CHEMCLAW_MCP_REPO Chemclaw3-mcp)"
 
 # Ports and package names come from the fleet's own manifests, which is the same "one reader for one
 # shape" rule `connector_env` follows: a server that moves port there moves here without an edit.
@@ -461,13 +484,29 @@ up() {
 
   # Now every address and credential is known, so the file a second shell reads can be complete.
   # `connector_env`'s own exports, then the fleet's two tokens and the URL map it rewrote.
+  # Which variables carry a credential is derived (`bearer_token_vars`), plus `CHEMCLAW_CALC_TOKEN`
+  # — named here because the calc backend is deliberately *not* a connector and so is in no
+  # manifest the registry reads (see `start_calc_backend`).
+  #
+  # An unset variable is skipped rather than written empty: an `export X=` in this file would
+  # overwrite a credential the reading shell already held, which is the mismatch this file exists
+  # to prevent, running backwards. What was skipped is logged, because a silently short list is
+  # exactly what went wrong here.
+  local token_var
+  local -a held=() unheld=()
+  for token_var in $(bearer_token_vars "$python") CHEMCLAW_CALC_TOKEN; do
+    # `connector_env` already emits its own bundles' minted tokens; writing them a second time
+    # would say the same thing twice and invite the two copies to disagree.
+    case "$connector_exports" in *"export $token_var="*) continue ;; esac
+    if [ -n "${!token_var:-}" ]; then held+=("$token_var"); else unheld+=("$token_var"); fi
+  done
   ( umask 077
     printf '%s\n' "$connector_exports"
     printf 'export CHEMCLAW_CONNECTOR_URLS=%q\n' "$CHEMCLAW_CONNECTOR_URLS"
-    printf 'export CHEMCLAW_CHEM_TOKEN=%q\n' "$CHEMCLAW_CHEM_TOKEN"
-    printf 'export CHEMCLAW_SAFETY_TOKEN=%q\n' "$CHEMCLAW_SAFETY_TOKEN"
-    printf 'export CHEMCLAW_CALC_TOKEN=%q\n' "$CHEMCLAW_CALC_TOKEN"
+    for token_var in "${held[@]}"; do printf 'export %s=%q\n' "$token_var" "${!token_var}"; done
   ) > "$RUN_DIR/connector-env.sh"
+  [ ${#unheld[@]} -eq 0 ] \
+    || log "no credential held for ${unheld[*]} — a second shell will 401 on those connectors"
   if [ "${CHEMCLAW_LIVE_PROBE_TOKEN:-}" != "" ]; then
     ( umask 077; printf 'export CHEMCLAW_LIVE_PROBE_TOKEN=%q\n' "$CHEMCLAW_LIVE_PROBE_TOKEN" \
       >> "$RUN_DIR/connector-env.sh" )
