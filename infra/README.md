@@ -18,12 +18,22 @@ carries its own compose project name so `phoenix-down` cannot reach the spine's
 Postgres. Not part of the Helm chart, and not meant to be — production traces go
 to whatever collector the cluster runs.
 
-`live/` holds the two scripts the live-test lane is made of: `bootstrap.sh`
-provides what `make up` provides on a machine with no Docker daemon (it defers to
-the compose file whenever one is reachable), and `processes.sh` starts and stops
-the connectors, the four Temporal workers and the front door with readiness polls
-rather than sleeps. Both are reached through `make live-*`; the procedure is in
-`docs/guides/runbook.md`.
+`live/` holds the scripts the live-test lane is made of. `bootstrap.sh` provides
+what `make up` provides on a machine with no Docker daemon (it defers to the
+compose file whenever one is reachable), and records whether *it* created the
+containers — so a lane that adopted the shared spine refuses to tear it down.
+`processes.sh` starts and stops the connectors, the Temporal workers, the mock
+gateway and the front door with readiness polls rather than sleeps. `soak.sh`
+drives the lane in rounds, and `siblings.sh` is the one place that resolves a
+sibling checkout's path for both lanes. All are reached through `make live-*`;
+the procedure is in `docs/guides/runbook.md`.
+
+**Neither the script count nor the process list is written out here**, and the
+count was wrong within one commit of being written — it said "the two scripts"
+over four. What each process is called and which port it holds is a thing the
+lane *knows at runtime* and prose does not: `bootstrap.sh status` prints it, and
+`.live/run/<name>.port` is the authority for a port
+(`D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`).
 
 `sql/` is the migration set `make db-migrate` applies, in filename order, against
 a ledger with per-file checksums. The schema is forward-only and additive
