@@ -143,8 +143,11 @@ class CalculationKey(BaseModel):
     # is excluded everywhere because a newline inside a primary key would let one key's text carry
     # another's, and no producer has ever emitted one.
     #
-    # A pattern here rather than at the reader alone: `kg/note.py::_CALC_REF` validates this shape
-    # at the PR-gate, so the check existed only on the way *out* of the system.
+    # A pattern here rather than at the reader alone: `kg/note.py::_CALC_REF` validates the same
+    # shape on a note's citation, so the check used to exist only on the way *out* of the system.
+    # The two are bound by a test that reads these four fields' own patterns, because `kg` may
+    # import only `core` and so cannot import `CalculationKey` — the note side was narrower than
+    # this one for long enough that no note could cite a calibrated calculation.
     calc_type: str = Field(min_length=1, pattern=r"^[^\s@:]+$")
     calc_version: str = Field(min_length=1, pattern=r"^\S+$")
     input_hash: str = Field(min_length=1, pattern=r"^[^\s:]+$")

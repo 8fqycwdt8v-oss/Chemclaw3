@@ -58,8 +58,20 @@ def _channel_dirs() -> list[Path]:
 
 
 def _load(directory: Path) -> DeliveryChannelManifest:
-    """Read and validate one manifest, rejecting a name that disagrees with its folder."""
-    raw = yaml.safe_load((directory / _MANIFEST).read_text(encoding="utf-8")) or {}
+    """Read and validate one manifest, rejecting a name that disagrees with its folder.
+
+    The read and the parse are wrapped for the same reason `publish/registry._load` wraps them: an
+    unreadable or malformed `channel.yaml` is a *manifest* problem, and a caller that catches
+    `DeliveryChannelError` — `channel-validate` is one — should not have to also catch `OSError`
+    and `yaml.YAMLError` to report it. It did have to: wave 4 of the 2026-09 re-review drove a
+    malformed manifest through the validator and got a raw traceback where its sibling reported a
+    line. The CLI compensated; the asymmetry belonged here.
+    """
+    path = directory / _MANIFEST
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise DeliveryChannelError(f"cannot read delivery channel manifest {path}: {exc}") from exc
     manifest = DeliveryChannelManifest.model_validate(raw)
     if manifest.name != directory.name:
         raise DeliveryChannelError(

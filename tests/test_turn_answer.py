@@ -49,7 +49,7 @@ def test_the_answer_is_the_prose_of_the_last_model_call() -> None:
         [
             TokenEvent(text="Let me look that up."),
             ToolCallEvent(tool="find_notes", arguments="{}"),
-            ToolResultEvent(tool="find_notes", result="matches=[…]"),
+            ToolResultEvent(tool="find_notes", preview="matches=[…]"),
             TokenEvent(text="THE FINAL ANSWER IS 42."),
         ]
     )
