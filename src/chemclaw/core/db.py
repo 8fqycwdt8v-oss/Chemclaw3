@@ -267,10 +267,14 @@ def _forget_pools_of_ended_loops() -> None:
     with _POOL_REGISTRY_LOCK:
         dead = [key for key in _POOLS if key[0].is_closed()]
         evicted = [_POOLS.pop(key) for key in dead]
-    # Released here, one statement outside the lock, and the placement is the whole point: dropping
-    # the last reference to a pool runs psycopg's `__del__`, which gathers the pool's background
-    # workers with a five-second timeout. Doing that under the lock would block every other reader
-    # of the registry — the request path included — for as long as it took.
+    # Released here, one statement outside the lock, and the placement is right for a reason this
+    # comment used to get wrong: it said dropping the last reference runs psycopg's `__del__`,
+    # which gathers the pool's background workers with a five-second timeout. `AsyncConnectionPool`
+    # has **no** `__del__` in psycopg_pool 3.3.1 — that method is the *sync* pool's, behind an
+    # `if False:` in the shared source — so the drop is not a five-second hazard. What it is, is
+    # the release: measured, the marked backends went 3 -> 0 the moment the last reference fell,
+    # in 0.2 ms. Outside the lock anyway, because a registry the request path reads should not be
+    # held across a refcount drop whose cost is somebody else's implementation detail.
     evicted.clear()
 
 
@@ -299,12 +303,18 @@ def _pool_for(dsn: str, options: str | None, max_size: int | None) -> _Pool:
     not catch it either — the route 500s. A one-connection pool keeps exactly one connection warm.
     """
     _forget_pools_of_ended_loops()
-    key = (asyncio.get_running_loop(), dsn, options, max_size)
+    # The *effective* width, in the key as well as in the pool. Keying on the raw request let a
+    # caller asking for a falsy size mint a second pool of the default width beside the one that
+    # already existed — same DSN, same options, same ceiling, two pools — because `0` and `None`
+    # are different keys and `0 or default` is the default. Normalising first makes the key say
+    # what the pool is rather than what was asked for, so an explicit `pg_pool_max_size` and an
+    # omitted one are one pool, which is what they are.
+    size = max_size or settings.pg_pool_max_size
+    key = (asyncio.get_running_loop(), dsn, options, size)
     with _POOL_REGISTRY_LOCK:
         pool = _POOLS.get(key)
         if pool is not None:
             return pool
-        size = max_size or settings.pg_pool_max_size
         pool = AsyncConnectionPool(
             conninfo=dsn,
             connection_class=psycopg.AsyncConnection[TupleRow],
@@ -434,7 +444,12 @@ def _record_duration(operation: str, seconds: float) -> None:
         log_event(
             logger,
             "db.slow",
-            "database operation %r held a connection for %.3fs (threshold %.3fs)",
+            # "spent", not "held": the span opens before `_pool_for`, so a call that waited out
+            # `pg_pool_timeout_seconds` and never got a connection was logged as having held one
+            # for two seconds. That is the wait/hold conflation `chemclaw_pg_pool_requests_waiting`
+            # exists to separate, printed at an operator in the one line they read first.
+            "database operation %r spent %.3fs waiting for and using a connection "
+            "(threshold %.3fs)",
             operation,
             seconds,
             threshold,
@@ -536,9 +551,11 @@ def bind_pool_metrics() -> None:
     """Expose this process's pool gauges, so pool saturation is visible wherever a pool exists.
 
     Called by `pooling()` rather than by any one process's startup code, which is the whole point:
-    all three of these gauges used to be bound in the front door's `create_app`, so the eleven of
-    the shipped chart's seventeen pooled processes that are *not* the front door — every Temporal
-    worker, every connector server — served a `/metrics` surface with no pool reading on it at all.
+    all three of these gauges used to be bound in the front door's `create_app`, so every pooled
+    process that is *not* the front door — every Temporal worker, every connector server — served a
+    `/metrics` surface with no pool reading on it at all. (How many that is is rendered, not
+    written here: two counts in this file said "seventeen pooled processes" while the chart
+    rendered fourteen, which is the same drift `values.yaml` already records against itself.)
     `requests_waiting` is the signal D-119 introduced to make "the pool is too small" legible, and
     it was absent from exactly the processes that do the long database work (the retention sweep,
     the reindex, the chain verification). Binding it where the pool is opened means a process
@@ -555,11 +572,13 @@ def bind_pool_metrics() -> None:
     stores do not share
     connections, and the checkpointer registers a third — and measured against a live server that
     was three pools and 48 connections reported as 16. That under-count reached the fleet
-    validator too, which multiplied *processes* rather than pools: the shipped chart's real floor
-    is **208** where its values file provisioned 136. Both are fixed —
-    `pg_fleet_pools` counts pools and `postgres.maxConnections` provisions 256 — and the figure to
-    trust is whichever `tests/test_deploy_chart.py` derives from the rendered chart, not this
-    sentence.
+    validator too, which multiplied *processes* rather than pools: the shipped chart's floor was
+    **208** against the 136 its values file then provisioned. Both are fixed — `pg_fleet_pools`
+    counts pools, the readiness probe's pool is charged the one connection it asks for, and
+    `postgres.maxConnections` provisions 256 — and the figure to trust is whichever
+    `tests/test_deploy_chart.py` derives from the rendered chart, not this sentence. It has moved
+    twice since it was written: 208 was the product, 166 is the sum, and a sentence stating either
+    goes stale the next time a replica count does.
 
     Imported inside the function: `core/metrics.py` is a sibling of this module and `core` keeps
     its no-module-scope-sibling-import rule (`tests/test_layering.py`), the same lazy exception

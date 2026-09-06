@@ -360,6 +360,81 @@ topic).
       that the export directory was complete — which makes it a `datasource.yaml` key defaulting
       to false, not a class attribute.
 
+- [ ] **Neither net sees one Postgres server that two DSNs spell differently** — [M], found
+      2026-09-05 by a fresh-context review of `D-2026-09-05-a-pool-count-is-not-a-connection-count`,
+      whose own "what this does not do" says a measured cluster identity is a row and then did not
+      write one. Both halves split the fleet with `core/config.pg_endpoint`, a string comparison:
+      `Settings.fleet_connections_per_server` at startup and `db._session_store_max_connections`
+      for the runtime gauge. So `localhost` against `127.0.0.1` — one server — is charged and
+      alerted as two, each inside its own ceiling, and the real total is checked by nothing.
+      Measured: a front door's 49 declared connections split 16 primary / 33 session on one
+      database. The *released* expression before the split gauge existed would have caught it,
+      comparing one sum against one ceiling, so this is a regression at runtime for that
+      configuration. `SELECT system_identifier FROM pg_control_system()` answers it exactly (0.24 ms,
+      readable by an unprivileged role) and cannot answer it in a validator that runs at import with
+      no loop and no pool — so the fix belongs on the gauge, where a pool has already connected, and
+      costs the alert its series during a database outage. That trade is the decision.
+      Anchors: `core/config/__init__.py::pg_endpoint`, `core/db.py::_session_store_max_connections`.
+
+- [ ] **A front door scaled to zero renders a release in which every pod refuses to start** — [S],
+      found 2026-09-05 by a fresh-context chart review. `service_fleet_replicas` is
+      `Field(default=1, gt=0)` and `config.yaml` renders `service.replicas` straight into the shared
+      ConfigMap, so `--set service.replicas=0` (or `autoscaling.maxReplicas=0`) gives every pod in
+      the release a value `Settings` rejects — workers and connector servers included, none of which
+      has a front door. `helm template` and `kubeconform` both pass, so `make helm-validate` is
+      green. The arithmetic is *right* at zero (measured: `readiness=0`, and the per-server figures
+      match a real fleet with the bound relaxed); only the bound refuses it. Deciding whether a
+      front-doorless release is legal is the work. Anchors: `core/config/service.py`,
+      `deploy/helm/chemclaw/templates/config.yaml`.
+
+- [ ] **A result sink on the primary server opens connections no budget counts** — [S], found
+      2026-09-05 beside the fleet-budget review. `publish/drivers/postgres.py` holds an un-pooled,
+      unregistered connection, so it is invisible to both `pg_fleet_pools` and
+      `chemclaw_pg_pool_max_size`. Harmless while a site points `CHEMCLAW_RESULT_SINKS` at a
+      database of its own, and a silent under-count of exactly the kind this budget exists to
+      prevent when it points at `postgres_dsn`'s server. Either register it the way
+      `agent/checkpointer.py` registers its foreign pool, or state in `values.yaml` that a sink's
+      connections are the operator's to add. Anchors: `publish/drivers/postgres.py`,
+      `core/db.py::_FOREIGN_POOLS`.
+
+- [ ] **A nested `asyncio.run` inside a pooled process can hang on loop teardown** — [M], found
+      2026-09-05 by a fresh-context review of `core/db`. `_forget_pools_of_ended_loops`
+      institutionalises abandoning a nested loop's pool and reclaiming it later, and nothing closes
+      it *before* that loop ends — so `asyncio.run`'s teardown cancels the pool's background fill
+      and then gathers it, while `psycopg_pool` treats `CancelledError` as a client exception,
+      logs an empty `error connecting in 'pool-N': ` and **reschedules the retry**. The gather never
+      completes. Measured, 15 runs an arm: abandoned pool at `pg_pool_min_size=2` hangs 7/15 and at
+      8 hangs 15/15; closing it first or leaving `_POOLING` off hangs 0/15.
+      `tests/test_db_pool.py::test_a_pool_whose_loop_has_ended_is_neither_counted_nor_left_holding_backends`
+      covers this path by name and opens by pinning `min_size = max_size = 1` — the one value at
+      which no second fill can be in flight; the same body at the shipped defaults hangs 8 of 12.
+      Reachable only through `durable/eval_drift` -> `evals/retrieval._run_sync`, which is
+      `eval_drift_enabled=False` by default and did not hang in 60 end-to-end runs, so this is a
+      mechanism with no structural guard rather than a live outage. The fix is to close a pool
+      before its loop ends rather than after. Anchors: `core/db.py::_forget_pools_of_ended_loops`,
+      `evals/retrieval.py::_run_sync`.
+
+- [ ] **`/readyz` cannot bound a Postgres that accepts the socket and stops answering** — [S],
+      found 2026-09-05, upstream in origin and recorded here because `api/routes/ops.py` claimed
+      otherwise. `asyncio.wait_for` bounds acquisition; on a warm pooled connection psycopg's
+      `AsyncConnection.wait()` catches the cancellation, calls `_try_cancel` against the same
+      frozen server, then re-waits on the socket with no timeout. Driven with `docker pause`: one
+      run answered `200 ready` after 7.6 s for an unreachable database, another never returned.
+      Bounded in a deployment by the kubelet — the chart derives `readinessProbe.timeoutSeconds`
+      from this budget and ships 5 s with `failureThreshold: 3`, so the pod goes not-ready either
+      way — which is why this is a row and not a fix: the correct outcome is reached by the wrong
+      route, and a second in-process timeout cannot cancel what the first one could not. Worth
+      revisiting if psycopg gains a cancel that respects a deadline. Anchors:
+      `api/routes/ops.py::_probe_database`, `core/db.py::connection`.
+
+- [ ] **Three pool gauges read three different instants of one scrape** — [S], found 2026-09-05.
+      `bind_pool_metrics` binds `pool_size`, `pool_available` and `requests_waiting` as three
+      lambdas that each call `pool_stats()`, so one `/metrics` scrape recomputes the walk three
+      times and publishes a triple that never existed together. Harmless for a trend, wrong for the
+      one question these gauges are read for together — is the pool full *and* are callers waiting
+      — which is exactly the saturation reading D-119 introduced them for. A single cached snapshot
+      per scrape, or one gauge family. Anchor: `core/db.py::bind_pool_metrics`.
+
 ## 4 — Operating it
 
 - [ ] **Nothing bounds what a helper writes into its caller's checkpointed state** — [M], opened

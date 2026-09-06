@@ -1310,6 +1310,24 @@ def _fleet_pools(values: dict[str, Any]) -> int:
     return int(total)
 
 
+def _helper_body(name: str) -> str:
+    """One `define` block out of `_helpers.tpl`, for checks a renderless suite can still make.
+
+    `make helm-validate` renders; this file does not, which is why several assertions here compare
+    a render to another render and a whole class of defect walks through. Reading a helper's own
+    text is the half that is available offline.
+    """
+    source = (CHART / "templates" / "_helpers.tpl").read_text()
+    start = source.index(f'{{{{- define "{name}"')
+    # To the next `define`, not the next `end`: the block nests `if`/`range`, so the first `end`
+    # closes an inner one and the slice would stop before the arithmetic this reads.
+    nxt = source.find("{{- define ", start + 1)
+    block = source[start : nxt if nxt != -1 else len(source)]
+    # Comments out: these blocks carry their whole argument in prose, dates and measured figures
+    # included, and a scan for the arithmetic's own constants must not read them.
+    return re.sub(r"/\*.*?\*/", "", block, flags=re.S)
+
+
 def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() -> None:
     """The chart's own numbers must clear the validator every pod runs at startup.
 
@@ -1349,6 +1367,10 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
             pg_pool_max_size=per_pool,
             pg_fleet_max_connections=declared,
             service_fleet_replicas=replicas,
+            # The fourth fleet number the chart renders, and it was omitted. `Settings` refuses a
+            # session ceiling declared without a split, so a release setting this non-zero fails to
+            # construct in *every* pod — while this test, feeding three of four, stayed green.
+            pg_session_fleet_max_connections=int(values["postgres"]["sessionStoreMaxConnections"]),
         )
     except ValueError as exc:  # pragma: no cover - the failure this test exists to report
         pytest.fail(
@@ -1360,6 +1382,20 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
     # pool lands on one server and the second figure must be zero. A release that started
     # declaring a split here without declaring its ceiling would warn on every pod's startup.
     assert settings.fleet_connections_per_server()[1] == 0
+    # **Every number the helper adds comes from the topology, not from a literal.** This suite is
+    # offline and cannot render, so it cannot compare `chemclaw.fleetPools`' answer to the
+    # derivation above — which is how a constant added inside the helper survived: measured, a `+5`
+    # made the chart declare 31 pools for a topology of 26 and all 199 tests here stayed green,
+    # because they compare one render to another or a difference to a difference. What is checkable
+    # without a renderer is the helper's *shape*: the only bare integer in it is the 3 a front door
+    # holds, and every other term is a `.Values` path.
+    body = _helper_body("chemclaw.fleetPools")
+    literals = {int(n) for n in re.findall(r"\b(\d+)\b", body)}
+    assert literals == {3}, (
+        f"chemclaw.fleetPools adds bare numbers {sorted(literals)}; only the 3 pools a front door "
+        "holds is a constant, and every other term has to come from a .Values path or the declared "
+        "count stops meaning the topology. The rendered proof is `make helm-validate`."
+    )
 
     # Derived from the topology, never hand-written beside it — a second copy of the replica counts
     # goes stale the first time a connector is enabled, which is exactly the silent multiplication
@@ -1412,6 +1448,19 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
     assert "$cfg.workerReplicas | default $cfg.replicas" in definition
 
 
+def _alert_expression(rules: str, name: str) -> str:
+    """One alert's `expr:` block, out of the un-rendered template text.
+
+    This suite is deliberately offline (`helm` is `make helm-validate`'s job), so the rule is read
+    as text — and text is the whole file, which is what made an assertion on PromQL fragments pass
+    against the alert's own `description` once that description started quoting them. Slicing from
+    `- alert: <name>` to the next `for:` keeps the comparison in view and leaves the annotations,
+    and the Helm comments above the alert, out of it.
+    """
+    start = rules.index(f"- alert: {name}")
+    return rules[start : rules.index("for:", start)]
+
+
 def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do() -> None:
     """The same blind spot the turn ceiling has, for the same reason, needing the same pair.
 
@@ -1425,28 +1474,47 @@ def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do(
     """
     rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
     assert "ChemclawFleetAboveItsConnectionCeiling" in rules
+    # **Sliced to the `expr:` block, because searching the whole file made this vacuous.** The
+    # assertions below name PromQL fragments, and the alert's own `description` quotes those
+    # fragments at an operator — so once the annotation explained the two comparisons, every one of
+    # these passed against documentation text. Measured: the expression gained `or vector(0)` on
+    # both `sum()`s and not one assertion moved. A guard that reads prose is not reading the rule.
+    expr = _alert_expression(rules, "ChemclawFleetAboveItsConnectionCeiling")
     # Each server against its own ceiling, and *not* a sum against a sum: enumerated over 200,000
     # random draws, `sum(pools) > primary + session` never fired with both servers inside their
     # ceilings and stayed silent in 49,993 where one was over — it can only miss. It also paged a
     # healthy split whose second ceiling was undeclared, pointing remediation at the wrong server.
     # The primary's side is the total minus the split store's; with no split the subtrahend is 0 in
     # every pod and both branches are exactly the comparison this shipped with.
-    assert (
-        "sum(chemclaw_pg_pool_max_size) - sum(chemclaw_pg_session_pool_max_size)" in rules
-        and "> max(chemclaw_pg_fleet_max_connections)" in rules
+    assert "sum(chemclaw_pg_pool_max_size)" in expr
+    assert "- sum(chemclaw_pg_session_pool_max_size" in expr
+    assert "> max(chemclaw_pg_fleet_max_connections)" in expr
+    assert "> max(chemclaw_pg_session_fleet_max_connections)" in expr
+    # `A - B` is a vector join, so a pod publishing neither gauge emptied the primary comparison
+    # and silenced the alert while the fleet was over. Both `sum()`s take the absent case.
+    assert expr.count("or vector(0)") == 2, (
+        "a bare sum() of the session gauge is a vector join that goes empty when a pod has opened "
+        "no pool, which silences the comparison it is part of"
     )
-    assert (
-        "sum(chemclaw_pg_session_pool_max_size)" in rules
-        and "> max(chemclaw_pg_session_fleet_max_connections)" in rules
+    # Each branch self-disabling on *its own* ceiling. Sharing the primary's guard meant
+    # `postgres.maxConnections: 0` — a documented "no ceiling" — also silenced a declared
+    # `sessionStoreMaxConnections`: measured, a session store at 500 against 180 with nothing
+    # firing. Two independent ceilings, two independent guards.
+    assert "max(chemclaw_pg_session_fleet_max_connections) > 0" in expr
+    assert "max(chemclaw_pg_fleet_max_connections) > 0" in expr
+    # **Disjoined, and this is the assertion the substrings could not make.** Every check above
+    # holds when the two branches are joined by `and` instead of `or` — measured, and an `and`
+    # there means the alert fires only when *both* servers are over, i.e. effectively never. The
+    # operator that combines them is the whole semantics; a fragment list cannot see it.
+    joined = " ".join(expr.split())
+    assert ") or ( max(chemclaw_pg_session_fleet_max_connections)" in joined, (
+        "the two per-server comparisons are joined by something other than `or`; either one being "
+        "over its own ceiling has to fire this, and `and` makes it unfireable"
     )
-    # Self-disabling on the second ceiling too, or a split with none declared alerts forever.
-    assert "max(chemclaw_pg_session_fleet_max_connections) > 0" in rules
     assert (
         "max(chemclaw_pg_fleet_max_connections) + max(chemclaw_pg_session_fleet_max_connections)"
-        not in rules
+        not in expr
     ), "the summed comparison is back; it can only miss (see this test's docstring)"
-    # Self-disabling, or every deployment that declares no ceiling alerts forever.
-    assert "max(chemclaw_pg_fleet_max_connections) > 0" in rules
     assert "ChemclawPgPoolSaturated" in rules
     assert "max(chemclaw_pg_pool_requests_waiting) > 0" in rules
 

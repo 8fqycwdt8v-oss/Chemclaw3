@@ -56,7 +56,12 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-from chemclaw.connectors.jobs import _params_model, build_job_tool, resolve_precondition
+from chemclaw.connectors.jobs import (
+    _params_model,
+    build_job_tool,
+    require_funded_ceiling,
+    resolve_precondition,
+)
 from chemclaw.connectors.manifest import ConnectorManifest, JobSpec
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.connectors.registry import (
@@ -315,6 +320,16 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
             build_job_tool(manifest.name, job)
         except ValueError as exc:
             problems.append(f"connector {manifest.name!r}: job {job.name!r} cannot be built: {exc}")
+        # Asked here as well as at launch, because the two are different moments and both matter.
+        # `require_funded_ceiling` refuses at launch — bounding the blast radius to the job being
+        # started rather than to every launcher this process builds — which means building a tool
+        # no longer raises, and a declaration nobody funded would otherwise reach production
+        # without this gate ever being red. Called directly rather than through `build_job_tool`
+        # so the validator does not depend on where the refusal happens to live.
+        try:
+            require_funded_ceiling(manifest.name, job)
+        except ValueError as exc:
+            problems.append(f"connector {manifest.name!r}: {exc}")
         problems.extend(_precondition_problems(manifest.name, job))
         # **The last unchecked string in a seam whose design is two plain strings.** `workflow` is a
         # Temporal type name, resolved at dispatch against whatever the bundle's worker registered —
