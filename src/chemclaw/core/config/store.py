@@ -31,7 +31,7 @@ class StoreSettings(BaseSettings):
     """
 
     # `DatabaseDsn`, not `str`: the password lives in the userinfo, and a plain `str` put it in
-    # `repr(settings)`, `model_dump()` and every other non-logging sink. See `config/dsn.py`.
+    # `repr(settings)`, `model_dump()` and every other non-logging sink. See `core/config/dsn.py`.
     postgres_dsn: DatabaseDsn = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw"
     # The credential that owns the schema, as distinct from the one that serves requests
     # (D-2026-08-05-append-only-by-grant-not-by-contract). Empty falls back to `postgres_dsn`, so a

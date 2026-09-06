@@ -1422,6 +1422,6 @@ def test_a_dsn_password_survives_no_ordinary_stringification() -> None:
     assert settings.postgres_dsn == "postgresql://u:MARKER-PGPW-9a1@pg.internal:5432/db"
     # The host survives the *mask*, because an operator diagnosing a connection failure needs to
     # see which server the DSN names. It does not survive `repr`, which drops the three fields
-    # whole — the two mechanisms close different sinks and `config/dsn.py` says why.
+    # whole — the two mechanisms close different sinks and `core/config/dsn.py` says why.
     assert "pg.internal" in settings.model_dump()["postgres_dsn"]
     assert "postgres_dsn" not in repr(settings)
