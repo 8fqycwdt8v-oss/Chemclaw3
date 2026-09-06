@@ -167,17 +167,25 @@ make live-up        # connectors (:8810), the four Temporal workers, the front d
                     # backend (:8860) that every durable calculation job dials
 make live-status    # what is running
 make live-jobs      # STAGE A: a real durable job, no model needed
-make live-probes    # STAGE B: the probe corpus through the front door (needs a real gateway)
+make live-probes    # STAGE B: the probe corpus through the front door (needs a real gateway;
+                    #   exits 3 if it reached nothing, 2 if nothing was graded — which is what
+                    #   a mock gateway produces, since a script cannot be judged)
 make live-down && make live-infra-down
 ```
 
 **Stage A (`make live-jobs`) needs no model credential and is the load-bearing one.** It launches
-`compute_reaction_energy` through the *real* generated job tool and then asks the live system six
+`compute_reaction_energy` through the *real* generated job tool and then asks the live system
 questions that have mechanical answers — the workflow's terminal state from Temporal, the cache row
 and the `job_records` row from Postgres, whether a duplicate launch rejoins rather than recomputes,
-whether a job whose worker is wedged comes back *pending* rather than hanging or crashing, and
-whether the audit chain still verifies. Nothing is scored from prose. The report lands in
-`tasks/live-test/transcripts/durable-smoke.md`.
+whether a job whose worker is wedged comes back *pending* rather than hanging or crashing. Nothing
+is scored from prose. It prints how many passed, and that count is not restated here: this
+paragraph said **six** including *"whether the audit chain still verifies"* long after
+`D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks` removed the
+hash chain, so the operator guide promised a control that had been deliberately deleted. The report
+lands in `tasks/live-test/transcripts/durable/<utc-stamp>/durable-smoke.md` — a directory per run,
+because both live CLIs used to write *over* the committed record (one review pass modified 196
+tracked files). The parent stays committed on purpose; promoting a run into the record is a
+deliberate copy, and `--report`/`--transcript-dir` still put output exactly where you say.
 
 **Two prerequisites the corpus layer needs, or the probes measure an empty database.** `make
 reindex` fills `note_index`; the fingerprint tables are filled only as a side effect of the ELN
@@ -252,8 +260,12 @@ Notes on the stack itself:
   permissions error instead of the system. Mint any other identity by POSTing to that same URL:
   `{"oid":"u-bench"}` for a chemist with no entitlements, `{"expires_in":-60}` for an expired token,
   `{"unpublished_key":true}` for a forgery.
-- **Each worker gets its own probe port** (9000-9003). `worker_http` otherwise has them all
-  contend for 9000; setting the port to 0 would silence the readiness signal this lane polls.
+- **Each worker gets its own probe port**, and the file is the authority: `processes.sh` writes
+  each one to `.live/run/<name>.port`. Stated as a range here (`9000-9003`) it was wrong — the
+  results worker is on 9004 and 9003 is unused — so an operator scraping the documented range
+  missed exactly the worker whose absence from this lane had already gone unnoticed once.
+  `worker_http` otherwise has them all contend for 9000; setting the port to 0 would silence the
+  readiness signal this lane polls.
 - **Without a Docker daemon** the bootstrap builds pgvector and the Temporal CLI from git clones.
   That is not a preference: `temporal.download` and `codeload.github.com` archives are both denied
   by a filtering egress proxy, while git-over-HTTPS and the Go module proxy are not. PostgreSQL

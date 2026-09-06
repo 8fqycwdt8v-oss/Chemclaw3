@@ -34,6 +34,18 @@ readonly PGDATA="${CHEMCLAW_LIVE_PGDATA:-/var/lib/postgresql/chemclaw-live}"
 readonly PGPORT="${CHEMCLAW_LIVE_PGPORT:-5432}"
 readonly TEMPORAL_PORT="${CHEMCLAW_LIVE_TEMPORAL_PORT:-7233}"
 readonly TEMPORAL_UI_PORT="${CHEMCLAW_LIVE_TEMPORAL_UI_PORT:-8081}"
+readonly COMPOSE_FILE="$REPO_ROOT/infra/docker-compose.yml"
+# Whether *this lane* created the compose containers or adopted a stack that was already up.
+#
+# Sharing the compose project with `make up` is deliberate — same file, same project name, same
+# ports, so nothing downstream knows which command produced the stack, which is the property the
+# native path below exists to preserve. What does not follow from sharing it is the right to
+# destroy it: `down` was a bare `docker compose down`, which stops and **removes** containers this
+# lane never created, and the storm's broker-outage primitive stopped the dev broker for every
+# other process on the machine. A second compose project would have to bind second ports and would
+# cost exactly that property, so ownership is recorded instead: a lane that adopted a stack may
+# read it and start it, never stop or remove it.
+readonly COMPOSE_OWNED_MARKER="$LIVE_DIR/compose-owned"
 # Pinned, not `@latest`: the version the stack was verified against is part of the record, and a
 # lane whose broker version drifts under it reports a different system than the one reviewed.
 readonly TEMPORAL_CLI_VERSION="${CHEMCLAW_LIVE_TEMPORAL_CLI_VERSION:-v1.8.2}"
@@ -68,6 +80,18 @@ as_postgres() {
 }
 
 docker_available() { docker info >/dev/null 2>&1; }
+
+# The container id compose holds for one service, or non-zero if there is none (or no daemon).
+compose_service_id() {
+  docker_available || return 1
+  local id
+  id="$(docker compose -f "$COMPOSE_FILE" ps -aq "$1" 2>/dev/null)"
+  [ -n "$id" ] || return 1
+  printf '%s' "$id"
+}
+
+# Did `up` create the containers it found, or adopt them? See COMPOSE_OWNED_MARKER.
+compose_owned() { [ -f "$COMPOSE_OWNED_MARKER" ]; }
 
 # ---------------------------------------------------------------------------- prerequisites
 
@@ -165,7 +189,31 @@ run_sql() {
       -U '$PGUSER_NAME' -d '$database' -tAqc \"$statement\""
 }
 
+# Postgres has the same two backends Temporal does, and for a while only Temporal knew it.
+#
+# `stop_postgres` returned early on a missing `$PGDATA/postmaster.pid` and `start_postgres` on an
+# answering `pg_isready` — both true on a Docker lane, where the pidfile belongs to a cluster that
+# was never created here and the container answers the readiness probe. So `restart-postgres`
+# logged two success lines and bounced nothing, and the one caller that exists — the storm's E3
+# check, "the front door recovers from a Postgres restart" — reported `24/24 in-flight turns
+# survived the bounce`, the strongest-looking result the check can produce, from not having done
+# the experiment. That is the identical shape the paragraph above the temporal helpers documents,
+# left in the third verb after the first two were fixed.
+compose_postgres_id() { compose_service_id postgres; }
+
 start_postgres() {
+  if compose_postgres_id >/dev/null; then
+    log "starting the compose postgres container"
+    docker compose -f "$COMPOSE_FILE" start postgres >/dev/null
+    for _ in $(seq 1 90); do
+      if pg_isready -h 127.0.0.1 -p "$PGPORT" >/dev/null 2>&1; then
+        log "postgres up on $PGPORT (compose)"
+        return
+      fi
+      sleep 1
+    done
+    die "the compose postgres container did not accept connections on $PGPORT within 90s"
+  fi
   if pg_isready -h 127.0.0.1 -p "$PGPORT" >/dev/null 2>&1; then
     log "postgres already accepting connections on $PGPORT"
   else
@@ -188,6 +236,14 @@ start_postgres() {
 }
 
 stop_postgres() {
+  if compose_postgres_id >/dev/null; then
+    compose_owned || die "refusing to stop the compose postgres container: this lane adopted it \
+rather than creating it, so it is whatever else on this machine is using \`make up\`'s stack.
+Stop it deliberately with \`make down\` if that is really what you want."
+    log "stopping the compose postgres container"
+    docker compose -f "$COMPOSE_FILE" stop postgres >/dev/null
+    return
+  fi
   [ -f "$PGDATA/postmaster.pid" ] || { log "postgres not running"; return; }
   as_postgres "$PGBIN/pg_ctl -D '$PGDATA' -m fast -w stop >/dev/null"
   log "postgres stopped"
@@ -207,13 +263,7 @@ stop_postgres() {
 # So the check that exists to prove the system survives a broker outage never caused one, and then
 # blamed a timeout. Measured: the container read `Up 2 hours` throughout. Widening the window — the
 # obvious fix — would have preserved both halves of the lie.
-compose_temporal_id() {
-  docker_available || return 1
-  local id
-  id="$(docker compose -f "$REPO_ROOT/infra/docker-compose.yml" ps -aq temporal 2>/dev/null)"
-  [ -n "$id" ] || return 1
-  printf '%s' "$id"
-}
+compose_temporal_id() { compose_service_id temporal; }
 
 # Readiness without the `temporal` CLI: the gRPC port accepting a connection. Weaker than
 # `operator cluster health`, and it has to be — that binary is absent on a Docker lane, which is
@@ -225,7 +275,7 @@ temporal_port_open() {
 start_temporal() {
   if compose_temporal_id >/dev/null; then
     log "starting the compose temporal container"
-    docker compose -f "$REPO_ROOT/infra/docker-compose.yml" start temporal >/dev/null
+    docker compose -f "$COMPOSE_FILE" start temporal >/dev/null
     for _ in $(seq 1 90); do
       if temporal_port_open; then log "temporal up on $TEMPORAL_PORT (compose)"; return; fi
       sleep 1
@@ -260,14 +310,54 @@ start_temporal() {
 
 stop_temporal() {
   if compose_temporal_id >/dev/null; then
+    compose_owned || die "refusing to stop the compose temporal container: this lane adopted it \
+rather than creating it, so stopping it takes the broker away from every other process on this
+machine — which is what \`make live-storm\`'s family E did. Stop it deliberately with
+\`make down\` if that is really what you want."
     log "stopping the compose temporal container"
-    docker compose -f "$REPO_ROOT/infra/docker-compose.yml" stop temporal >/dev/null
+    docker compose -f "$COMPOSE_FILE" stop temporal >/dev/null
     return
   fi
   [ -f "$LIVE_DIR/temporal.pid" ] || { log "temporal not running"; return; }
   kill "$(cat "$LIVE_DIR/temporal.pid")" 2>/dev/null || true
   rm -f "$LIVE_DIR/temporal.pid"
   log "temporal stopped"
+}
+
+# ---------------------------------------------------------------------------- status
+
+# What is serving, by the mechanism that is actually serving it — and a non-zero exit when
+# something is not.
+#
+# This asked the `temporal` CLI unconditionally with `|| true` on both branches, so on a Docker
+# lane it printed `temporal: command not found` over a healthy broker and exited 0. That is the
+# absent-binary failure `compose_temporal_id` and `temporal_port_open` were written for two
+# sections above, left in the one verb whose entire job is to say what is up.
+status() {
+  local failed=0 pg_kind="native" temporal_kind="native"
+  if compose_postgres_id >/dev/null; then pg_kind="compose"; fi
+  if compose_temporal_id >/dev/null; then temporal_kind="compose"; fi
+
+  if pg_isready -h 127.0.0.1 -p "$PGPORT" >/dev/null 2>&1; then
+    log "postgres: serving $PGPORT ($pg_kind)"
+  else
+    log "postgres: nothing is serving $PGPORT"
+    failed=1
+  fi
+  if temporal_port_open; then
+    log "temporal: serving $TEMPORAL_PORT ($temporal_kind)"
+  else
+    log "temporal: nothing is serving $TEMPORAL_PORT"
+    failed=1
+  fi
+  if docker_available && [ -n "$(docker compose -f "$COMPOSE_FILE" ps -aq 2>/dev/null)" ]; then
+    if compose_owned; then
+      log "compose stack: created by this lane — \`down\` removes it"
+    else
+      log "compose stack: adopted — \`down\` leaves it alone"
+    fi
+  fi
+  [ "$failed" -eq 0 ] || die "the live lane's infrastructure is not fully up"
 }
 
 # ---------------------------------------------------------------------------- entrypoint
@@ -285,7 +375,18 @@ case "${1:-up}" in
     ensure_note_repo
     if docker_available; then
       log "docker daemon reachable — using infra/docker-compose.yml"
-      exec docker compose -f "$REPO_ROOT/infra/docker-compose.yml" up -d
+      # Ownership is decided *before* the hand-off, and it has to be: `exec` never comes back, and
+      # after `up -d` every container exists either way, so "did this lane create it" stops being
+      # an answerable question one line later.
+      mkdir -p "$LIVE_DIR"
+      if [ -z "$(docker compose -f "$COMPOSE_FILE" ps -aq 2>/dev/null)" ]; then
+        : >"$COMPOSE_OWNED_MARKER"
+        log "this lane creates the compose stack, so \`down\` may remove it again"
+      else
+        rm -f "$COMPOSE_OWNED_MARKER"
+        log "adopting the compose stack that is already up — this lane will not stop or remove it"
+      fi
+      exec docker compose -f "$COMPOSE_FILE" up -d
     fi
     log "no docker daemon — bringing the stack up natively"
     ensure_pgvector
@@ -296,21 +397,35 @@ case "${1:-up}" in
     log "stack ready. Next: make db-migrate && make live-up"
     ;;
   down)
-    if docker_available; then
-      exec docker compose -f "$REPO_ROOT/infra/docker-compose.yml" down
+    # The marker is asked first, and alone: it is the record of what this lane created, so a lane
+    # that owns the stack removes it whatever else is on the host, and a lane that does not owns
+    # nothing to remove regardless of what compose reports.
+    if compose_owned; then
+      rm -f "$COMPOSE_OWNED_MARKER"
+      exec docker compose -f "$COMPOSE_FILE" down
+    fi
+    if docker_available && [ -n "$(docker compose -f "$COMPOSE_FILE" ps -aq 2>/dev/null)" ]; then
+      log "the compose stack was already up when this lane started, so this lane did not create it"
+      log "  and will not remove it. \`make down\` removes it deliberately."
+      exit 0
     fi
     stop_temporal
     stop_postgres
     ;;
-  status)
-    pg_isready -h 127.0.0.1 -p "$PGPORT" || true
-    temporal operator cluster health --address "127.0.0.1:$TEMPORAL_PORT" || true
-    ;;
+  status) status ;;
   # The four verbs the chaos family needs. They are subcommands rather than inlined `pg_ctl` and
   # `kill` calls inside the harness for the reason `connector_urls` reads the dev runner instead of
   # rebuilding its port: one place knows how this stack is started, so a chaos test cannot restart
   # it differently from how it was brought up and then measure the difference.
   restart-postgres)
+    # A chaos primitive that cannot cause the fault must not report success — see the paragraph
+    # above `compose_postgres_id`. With neither backend present there is nothing to bounce, and
+    # saying so is the only honest outcome: the alternative is E3 passing on an experiment that
+    # never happened.
+    if ! compose_postgres_id >/dev/null && [ ! -f "$PGDATA/postmaster.pid" ]; then
+      die "restart-postgres finds nothing it can restart: no compose postgres container, and no \
+native cluster at $PGDATA. Refusing rather than reporting a bounce that did not happen."
+    fi
     stop_postgres
     start_postgres
     ;;

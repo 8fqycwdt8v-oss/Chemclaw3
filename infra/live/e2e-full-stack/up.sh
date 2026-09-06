@@ -20,9 +20,13 @@ readonly REPO_ROOT="$(cd "$HARNESS_DIR/../../.." && pwd)"
 readonly LIVE_DIR="${CHEMCLAW_LIVE_DIR:-$REPO_ROOT/.live}"
 readonly RUN_DIR="$LIVE_DIR/e2e/run"
 
-readonly MCP_REPO="${CHEMCLAW_MCP_REPO:-/workspace/8fqycwdt8v-oss/chemclaw3-mcp}"
-readonly MOCK_REPO="${CHEMCLAW_MOCK_REPO:-/workspace/8fqycwdt8v-oss/chemclaw3_mock}"
-readonly UI_REPO="${CHEMCLAW_UI_REPO:-/workspace/8fqycwdt8v-oss/chemclaw3_ui}"
+# One resolution of the sibling checkouts, shared with `../processes.sh`. See its header for why
+# this is a file rather than a default in each script.
+# shellcheck source=infra/live/siblings.sh
+. "$HARNESS_DIR/../siblings.sh"
+readonly MCP_REPO="$(sibling_repo CHEMCLAW_MCP_REPO Chemclaw3-mcp)"
+readonly MOCK_REPO="$(sibling_repo CHEMCLAW_MOCK_REPO Chemclaw3_mock)"
+readonly UI_REPO="$(sibling_repo CHEMCLAW_UI_REPO Chemclaw3_ui)"
 
 # stderr, not stdout: `mock_venv_bin()` returns a path via stdout command substitution, and a
 # log() that shared stdout corrupted it with ANSI-coded log text — the exact bug that made
@@ -307,9 +311,10 @@ up() {
 
   log "connectors dir: $CHEMCLAW_CONNECTORS_DIR"
 
-  # `chem` and `safety` come up inside processes.sh, which resolves the fleet checkout from this
-  # same variable but defaults it differently (`$REPO_ROOT/../chemclaw3-mcp`). Exporting the value
-  # this lane resolved is what makes one owner work from either lane's default.
+  # `chem` and `safety` come up inside processes.sh, which resolves the fleet checkout through the
+  # same `sibling_repo` and therefore reaches the same answer. Exported anyway, so the child lane
+  # is pinned to the path *this* one resolved rather than resolving a second time — one search, one
+  # answer, whatever the two shells were started with.
   export CHEMCLAW_MCP_REPO="$MCP_REPO"
 
   log "starting the Chemclaw3-mcp fleet (props, rxnpredict; chem, safety and calc via processes.sh)"
@@ -377,8 +382,10 @@ backfill_corpus() {
 }
 
 down() {
-  log "stopping Chemclaw3_ui"
+  # The precondition first: this announced "stopping Chemclaw3_ui" and *then* returned "nothing
+  # running", so the one line an operator reads named work the next line declined to do.
   [ -d "$RUN_DIR" ] || { log "nothing running"; return; }
+  log "stopping Chemclaw3_ui"
   for pidfile in "$RUN_DIR"/*.pid; do
     [ -e "$pidfile" ] || continue
     local name pid

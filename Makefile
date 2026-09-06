@@ -410,7 +410,7 @@ phoenix-publish:  ## Publish an archived probe run to Phoenix. DIR=<transcripts>
 live-infra:  ## Start Postgres/pgvector + Temporal for the live lane (uses Docker when available).
 	bash infra/live/bootstrap.sh up
 
-live-infra-down:  ## Stop the live lane's Postgres and Temporal.
+live-infra-down:  ## Stop the Postgres and Temporal this lane created (never a stack it adopted).
 	bash infra/live/bootstrap.sh down
 
 live-up:  ## Start the live processes: connectors, the four Temporal workers, the front door.
@@ -434,7 +434,7 @@ live-e2e-full-stack-status:  ## Show which four-repo-pass processes are running.
 live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + Postgres; no LLM).
 	uv run python -m chemclaw.cli.live_jobs
 
-live-probes:  ## Ask the running front door the live probe set (needs a real model gateway).
+live-probes:  ## Ask the running front door the live probe set (exit 3 unreached, 2 ungraded).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)
 
 # The half of `template-validate` that needs a session. `make template-validate` reads a tool's

@@ -25,6 +25,7 @@ import pytest
 import yaml
 
 from chemclaw.agent.chemclaw_agent import available_tool_names
+from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.evals.live import ProbeOutcome, _score_citations, load_probes, run_probe
 from chemclaw.evals.probe import Probe, ProbeSet
@@ -533,7 +534,7 @@ def test_a_job_that_finished_inside_the_turn_is_not_reported_as_no_job_at_all() 
         tools_called=["compute_reaction_energy"],
     )
 
-    report = _summary([probe], [outcome], [])
+    report = _summary([probe], [outcome], [], "a test")
 
     assert "ran none" not in report, "an inline-completed durable job was reported as no job at all"
     assert "finished inside the turn" in report, "the inline case must still be visible, not hidden"
@@ -558,7 +559,7 @@ def test_a_probe_that_needed_a_job_and_called_no_job_tool_is_still_flagged() -> 
         tools_called=["find_notes", "gather_evidence", "find_past_jobs"],
     )
 
-    report = _summary([probe], [outcome], [])
+    report = _summary([probe], [outcome], [], "a test")
 
     assert "du-03" in report
     assert "ran none" in report
@@ -628,6 +629,103 @@ def test_the_harness_makes_no_token_cost_claim_it_cannot_take() -> None:
         "`evals/live.py` declares a token measurement again. It needs a caller and a reader in the "
         "same change, or it records `None` on every probe the way it did before."
     )
+
+
+def test_a_run_where_every_judgement_is_ungraded_is_not_a_pass() -> None:
+    """The empty-selection rule below, reached through the other door.
+
+    `_main` ended `return 0` unconditionally, so a run against a gateway that cannot grade — the
+    scripted mock, which `infra/live/processes.sh` starts by default — reported three probes,
+    100% ungraded, exit 0, with both bolded honesty rows reading zero because nothing was judged.
+    Measured on the live lane before this rule existed; it is now exit 2 on the same run.
+
+    A verdict that is not `ungraded` is enough: the boundary is "nothing was measured", not a
+    quality bar, and any share in between is a real result about the probes it names.
+    """
+    from chemclaw.cli.live_probes import _grading_status
+    from chemclaw.evals.live_judge import Judgement
+
+    ungraded = Judgement(probe_id="an-01", verdict="ungraded")
+    served = Judgement(probe_id="an-02", verdict="served")
+
+    assert _grading_status([]) == 2
+    assert _grading_status([ungraded]) == 2
+    assert _grading_status([ungraded, served]) == 0
+
+
+def test_a_run_that_reached_nothing_is_not_a_pass() -> None:
+    """The third arm of the same hole, and the one `_grading_status` does not close.
+
+    Measured with nothing listening: three probes came back 100% `ConnectError`, the judge called
+    the empty answers `unserved` — real verdicts, so the grading rule was satisfied — and the run
+    exited **0**. Exit 3 follows `validate_template_args_live`: could not reach, never counted as
+    checked. It binds `--no-judge` too, which is why that flag can keep exiting 0 otherwise.
+    """
+    from chemclaw.cli.live_probes import _reachability_status
+
+    def outcome(probe_id: str, error: str = "") -> ProbeOutcome:
+        return ProbeOutcome(
+            probe_id=probe_id,
+            section=1,
+            persona="lab_technician",
+            bucket="A",
+            question="q",
+            transport_error=error,
+        )
+
+    assert _reachability_status([]) == 0
+    assert _reachability_status([outcome("an-01", "ConnectError")]) == 3
+    assert _reachability_status([outcome("an-01", "ConnectError"), outcome("an-02")]) == 0
+
+
+def test_a_run_writes_under_its_own_directory_and_never_over_the_record() -> None:
+    """A live run used to write over tracked files in the committed transcripts directory.
+
+    One review pass modified 196 of them and had to restore each with `git show HEAD:<p>`. The
+    parent stays committed on purpose — `.gitignore` says why, in the file that enforces it — so
+    the fix is a directory per run beneath it, shared by `live_probes` and `live_jobs` so two
+    writers cannot disagree about where a run's output goes.
+    """
+    from chemclaw.cli.live_probes import _suite_dir, run_output_dir
+
+    root = Path(settings.live_probe_transcript_dir)
+    corpus = run_output_dir("corpus")
+    assert corpus.parent.parent == root
+    assert corpus != root and corpus.parent != root
+    # Twice in one process is one run, or a suite's transcripts and its summary would split.
+    assert run_output_dir("corpus") == corpus
+    # An explicit --transcript-dir still wins, unstamped: promoting a run is a deliberate act.
+    assert _suite_dir("somewhere/else", "corpus") == Path("somewhere/else")
+
+
+def test_a_regrade_over_a_directory_with_no_transcripts_is_an_error(tmp_path: Path) -> None:
+    """`--regrade` had no empty guard at all, and its report is committed evidence.
+
+    It printed a "0 probes" summary, wrote it over `summary.md` in a directory `.gitignore`
+    deliberately exempts so a live result can be read back later, and exited 0. The artefact
+    survived; the run it describes never happened.
+    """
+    from chemclaw.cli import live_probes
+
+    args = live_probes._parse_args(["--regrade", "--transcript-dir", str(tmp_path)])
+    assert asyncio.run(live_probes._main(args)) == 2
+    assert not (tmp_path / "summary.md").exists(), "a report was written over a run of nothing"
+
+
+def test_the_report_names_the_gateway_that_produced_it() -> None:
+    """A mock run and a real run used to produce files a reader cannot tell apart.
+
+    `live_storm` prints its gateway for the same reason. The mock is recognised by asking
+    `cli.mock_llm` rather than by a string written here — the transcription rule
+    `tests/test_config.py` already enforces on `infra/live/processes.sh`.
+    """
+    from chemclaw.cli.live_probes import _gateway_line
+    from chemclaw.cli.mock_llm import MOCK_BASE_URL
+
+    line = _gateway_line()
+    assert settings.llm_base_url in line
+    if settings.llm_base_url == MOCK_BASE_URL:
+        assert "not gradeable" in line
 
 
 def test_a_selection_that_matches_no_probe_is_an_error_not_a_clean_run(
