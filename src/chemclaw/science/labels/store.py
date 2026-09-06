@@ -161,15 +161,27 @@ class InMemoryLabelIndex(LabelIndex):
         return rows[:limit]
 
     async def store_labels(self, label: ReactionLabel, version: str) -> None:
-        """Write the derived phase over the stored record phase, stamped `version`."""
+        """Write the derived phase over the stored record phase, stamped `version`.
+
+        Species are paired by **`ordinal`**, which is the row key
+        `PostgresLabelIndex._STORE_SPECIES` matches on and the identity `_carry_species` already
+        matches the record phase by. Pairing them by *position* — `zip(..., strict=False)` — made
+        the two backends disagree about the same answer: a labeller handing four species back in a
+        different order gave bromobenzene `PRODUCT` here and `STARTING_MATERIAL` in Postgres, and a
+        short answer was truncated in one and applied in the other. An ordinal the stored row does
+        not carry is ignored, which is what the SQL `UPDATE ... WHERE ordinal = %s` does with one.
+        """
         key = (label.source, label.reaction_id)
         existing = self._rows.get(key)
         if existing is None:
             raise LabelIndexError(f"no record-phase row for {key!r}; label the corpus first")
         derived = label.model_dump(include=_DERIVED_FIELDS)
+        by_ordinal = {new.ordinal: _derived_species(new) for new in label.species}
         species = [
-            stored.model_copy(update=_derived_species(new))
-            for stored, new in zip(existing.species, label.species, strict=False)
+            stored.model_copy(update=by_ordinal[stored.ordinal])
+            if stored.ordinal in by_ordinal
+            else stored
+            for stored in existing.species
         ]
         self._rows[key] = existing.model_copy(
             update={

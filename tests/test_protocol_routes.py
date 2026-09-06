@@ -26,6 +26,7 @@ import chemclaw.api.routes.protocols as routes
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import Principal, require_principal
 from chemclaw.protocols.checks import run_checks
+from chemclaw.protocols.diff import diff_designs
 from chemclaw.protocols.models import (
     EvidenceRef,
     ExperimentDesign,
@@ -691,6 +692,53 @@ def test_the_diff_route_takes_both_endpoints_explicitly(
     # three rows read `'' -> ''` and a miner asking how often a chemist sets an arm note counted
     # them as changes that never happened.
     assert {change["path"] for change in body["changes"]} == {"arms.A3.arm_id"}
+
+
+def test_both_routes_run_the_diff_off_the_event_loop(
+    client: TestClient, store: InMemoryDesignStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`diff_designs` is bounded work, not small work, and this process has one loop.
+
+    Ordering only the paths that differ took a chemist's edit at every declared count ceiling from
+    1.67 s to 0.18 s, but two ceiling-sized revisions sharing no identifier genuinely differ in
+    208,213 paths and cost 3.2 s to compare and order — real work, and `service_uvicorn_workers` is
+    refused above 1, so inline it is every other chemist's SSE stream and both kubelet probes.
+
+    The assertion is the thread the call actually ran on rather than a wall clock, which would be
+    flaky and would not tell "fast" from "off the loop": `asyncio.get_running_loop` answers only on
+    the loop's own thread. It fails if either `asyncio.to_thread` hop is removed.
+    """
+    on_the_loop: list[bool] = []
+    # Taken from the module that owns it rather than off `routes`: the route imports the name, and
+    # `mypy --strict` refuses a read of an imported name through the importing module. The
+    # `setattr` below still has to name `routes`, because that is the binding the route body reads.
+    real = diff_designs
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_the_loop.append(False)
+        else:
+            on_the_loop.append(True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "diff_designs", _spy)
+    _seed(store, _design())
+
+    assert (
+        client.post(
+            f"/protocols/{_DESIGN_ID}/revisions",
+            json={
+                "document": _design(arms=2).model_dump(mode="json"),
+                "parent_revision": 1,
+                "change_note": "a second arm",
+            },
+        ).status_code
+        == 200
+    )
+    assert client.get(f"/protocols/{_DESIGN_ID}/diff").status_code == 200
+    assert on_the_loop == [False, False]
 
 
 def test_the_diff_route_404s_on_a_revision_that_does_not_exist(

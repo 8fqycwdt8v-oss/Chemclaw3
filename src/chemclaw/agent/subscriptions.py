@@ -24,6 +24,7 @@ from psycopg.rows import TupleRow
 from pydantic import BaseModel, Field
 
 from chemclaw.agent.authz import require_actor
+from chemclaw.agent.framing import defang
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import tool
@@ -172,7 +173,9 @@ async def watch_for(query: str, note_type: str | None = None) -> str:
     """
     owner = require_actor()
     await add(owner, query, note_type)
-    return f"Watching for {query!r}; you'll be told when something new matches."
+    # The confirmation echoes the model's own argument, so it is the same untrusted span
+    # `list_watches` neutralises — it simply reaches the prompt a turn earlier.
+    return f"Watching for {defang(query)!r}; you'll be told when something new matches."
 
 
 @tool
@@ -182,7 +185,23 @@ async def list_watches() -> list[Subscription]:
     Returns:
         Each saved watch and when it last reported.
     """
-    return await for_owner(require_actor())
+    # `query` and `note_type` are free text the model wrote through `watch_for`, out of whatever it
+    # had just read — and a watch is durable by design, so they re-enter a prompt on every later
+    # turn and in every later session. Measured: a query carrying the live closing delimiter came
+    # back verbatim. Defanged rather than framed, for the reason `agent/tool_framing.py` gives a
+    # helper's report: a saved query is this system's own note, not evidence to cite. The
+    # neutralisation is here rather than in `for_owner`, which the digest job also reads and which
+    # writes no prompt. The rest of the row is an integer id, the ambient oid, a timestamp and note
+    # ids from the corpus.
+    return [
+        watch.model_copy(
+            update={
+                "query": defang(watch.query),
+                "note_type": defang(watch.note_type) if watch.note_type else watch.note_type,
+            }
+        )
+        for watch in await for_owner(require_actor())
+    ]
 
 
 @tool
@@ -197,4 +216,4 @@ async def stop_watching(query: str) -> str:
     """
     owner = require_actor()
     await remove(owner, query)
-    return f"Stopped watching for {query!r}."
+    return f"Stopped watching for {defang(query)!r}."  # echoed back, like `watch_for`'s

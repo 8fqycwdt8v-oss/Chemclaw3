@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from chemclaw.publish.properties import REGISTRY
+from chemclaw.publish.record import Conditions
 from chemclaw.publish.solvents import display_name, known_solvents
 
 _SCHEMA_DIR = Path(__file__).resolve().parents[3] / "schema" / "result-store"
@@ -89,8 +90,15 @@ def seed() -> str:
         "-- The condition set every calculator with no conditions of its own points at. A real row",
         "-- rather than a null, so 'ran in the gas phase' and 'this calculator has no conditions'",
         "-- are one queryable value instead of a LEFT JOIN in every consumer.",
+        "--",
+        "-- **The id is derived, not chosen.** This row is the writer's own empty `Conditions`,",
+        "-- whose `condition_id` is a content hash like every other key in this schema. It was",
+        "-- seeded as the literal 'cond_unspecified' and the writer has always upserted the hash,",
+        "-- so a consumer following the advice above and joining on that name got zero rows,",
+        "-- forever, while the row it wanted sat beside it under another id. Generated from the",
+        "-- model rather than written out, so the two cannot part company if the hash basis moves.",
         "INSERT INTO condition_set (condition_id, solvent_model) VALUES "
-        "('cond_unspecified', '') ON CONFLICT DO NOTHING;",
+        f"({_quote(Conditions().condition_id)}, '') ON CONFLICT DO NOTHING;",
     ]
     return "\n".join(lines) + "\n"
 

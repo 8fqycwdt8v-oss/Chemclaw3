@@ -41,7 +41,13 @@ from chemclaw.core.fulltext import (
     reference_terms,
     reference_tokens,
 )
-from chemclaw.kg.graph import invalidate_cache, load_notes, note_file_fingerprints
+from chemclaw.kg.graph import (
+    invalidate_cache,
+    load_notes,
+    note_file_fingerprints,
+    scan_notes_dir,
+)
+from chemclaw.kg.note import NoteError, read_note
 from chemclaw.kg.search import search_text
 
 log = logging.getLogger(__name__)
@@ -615,6 +621,42 @@ def _needs_embedding(note_id: str, current: dict[str, str], stored: dict[str, st
     return fingerprint != stored.get(note_id)
 
 
+def _notes_that_failed_to_parse(directory: Path, stems: set[str]) -> list[str]:
+    """Which of `stems` are notes that failed to parse — not files that were never notes.
+
+    The alarm below exists to tell an operator that N notes have dropped out of both derived
+    retrieval legs, and it was computed as "on disk minus parsed", over an `on_disk` that
+    `note_file_fingerprints` builds from **every** `*.md` under the tree. A Markdown file with no
+    frontmatter is not a note at all — `read_note` returns `None` and `_parse_notes` skips it
+    silently and correctly — so `knowledge/README.md`, which is committed, was named as a broken
+    note on every scheduled re-index. A standing false positive is worse than no alarm: a real one
+    is then indistinguishable from the baseline.
+
+    So the difference set is re-read rather than assumed. It is normally empty, and it is bounded
+    by the files that are on disk and did not become notes, so this reads no more than a handful
+    even on a corpus in trouble. `read_note` is the only definition of "is this a note" (a missing
+    frontmatter block) and of "did it fail" (`NoteError`), which is why it is asked rather than
+    restated here. A file that parses fine is not reported either: its frontmatter names an id
+    that differs from its filename, which is `_needs_embedding`'s case and already said there.
+
+    First path per stem wins, matching `note_file_fingerprints` and `_parse_notes`, so all three
+    scans of one tree name the same file.
+    """
+    if not stems:
+        return []
+    unparsed: list[str] = []
+    seen: set[str] = set()
+    for path, _ in scan_notes_dir(directory):
+        if path.stem not in stems or path.stem in seen:
+            continue
+        seen.add(path.stem)
+        try:
+            read_note(path)
+        except NoteError:
+            unparsed.append(path.stem)
+    return unparsed
+
+
 async def reindex_notes(
     index: NoteIndex, notes_dir: str | None = None, *, full: bool = False
 ) -> int:
@@ -693,7 +735,9 @@ async def reindex_notes(
     # for a file whose frontmatter is broken — which is exactly the population that must survive.
     # The graph leg already degrades this way (skip, WARNING, counter); the derived legs now do too.
     on_disk = set(current_fingerprints)
-    unparsed = on_disk - {note.id for note in notes}
+    unparsed = await asyncio.to_thread(
+        _notes_that_failed_to_parse, directory, on_disk - {note.id for note in notes}
+    )
     if unparsed:
         log.warning(
             "note re-index: %d note file(s) on disk did not parse and are kept in the index rather "

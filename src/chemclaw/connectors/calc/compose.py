@@ -2138,7 +2138,7 @@ async def rotation_profile(
         f"a rotational profile of {smiles} at {step:g} degrees",
     )
 
-    profile = await _driven(store, structure, atoms, coarse, solvent, progress, run)
+    profile, method = await _driven(store, structure, atoms, coarse, solvent, progress, run)
     refined = await _refined_maxima(
         store, structure, atoms, profile, step, torsion.period_degrees, solvent, progress, run
     )
@@ -2167,7 +2167,13 @@ async def rotation_profile(
     return RotationProfile(
         smiles=structure.smiles or smiles,
         input_structure_id=structure.structure_id,
-        method=settings.xtb_method,
+        # **The server's method, not this deployment's configured name** — the same read every
+        # sibling composite makes, and this one is on the same publication path: `publish/project`
+        # turns this field into a `TheoryLevel` beside a `rotational_barrier` fact, so a deployment
+        # whose env says `GFN2-xTB` while the server runs GFN1 published a rotational barrier
+        # asserting the wrong level of theory. The fallback is the config only for a payload that
+        # states no method, exactly as `bond_dissociation_survey` does.
+        method=method or settings.xtb_method,
         solvent=solvent,
         temperature_k=temperature,
         level=level,
@@ -2420,14 +2426,25 @@ async def _driven(
     solvent: str | None,
     progress: Progress,
     run: RemoteRunner,
-) -> dict[float, float]:
-    """Relax the molecule at each dihedral value and return `{degrees: energy}`.
+) -> tuple[dict[float, float], str]:
+    """Relax the molecule at each dihedral value and return `{degrees: energy}`, and the method.
 
     Each point is driven from the *input* geometry rather than from its neighbour, exactly as
     `scan_profile` does and for the same reason: a sequential walk's answer depends on the direction
     it was walked, which is a hidden input a content-addressed cache must not have (D-011).
+
+    **The method comes back because it is the server's, not this pod's.** The physics answers from
+    `Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`), so `settings.xtb_method`
+    is a label this process holds rather than a fact about the calculation — and
+    `RotationProfile.method` is a published claim about the level of theory. This function already
+    validated the payload that states it and threw it away; every sibling composite reads it off
+    the result instead (`scan_profile` from `relaxed[0].method`, `bond_dissociation_survey` from
+    `methods[0]`). The first point's, for the same reason `scan_profile` takes the first: the whole
+    profile is one method, and an empty string is the "the payload did not say" case the caller
+    falls back on.
     """
     energies: dict[float, float] = {}
+    method = ""
     for index, value in enumerate(values, start=1):
         progress(f"dihedral {value:g} degrees ({index}/{len(values)})")
         payload, _ = await run(
@@ -2443,8 +2460,10 @@ async def _driven(
             ),
             f"dihedral at {value:g} degrees",
         )
-        energies[value] = OptimizationResult.model_validate(await kept(payload)).energy_hartree
-    return energies
+        point = OptimizationResult.model_validate(await kept(payload))
+        energies[value] = point.energy_hartree
+        method = method or point.method
+    return energies, method
 
 
 def _wrapped(profile: dict[float, float], period_degrees: float) -> list[tuple[float, float]]:
@@ -2509,17 +2528,16 @@ async def _refined_maxima(
             for offset in range(1, extra + 1)
         ]
         progress(f"resolving the maximum near {peak:g} degrees")
-        refined.update(
-            await _driven(
-                store,
-                structure,
-                atoms,
-                [value for value in wanted if value not in profile and value not in refined],
-                solvent,
-                progress,
-                run,
-            )
+        points, _ = await _driven(
+            store,
+            structure,
+            atoms,
+            [value for value in wanted if value not in profile and value not in refined],
+            solvent,
+            progress,
+            run,
         )
+        refined.update(points)
     return refined
 
 

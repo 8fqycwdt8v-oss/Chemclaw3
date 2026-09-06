@@ -40,9 +40,10 @@ class _FakeRetriever:
 
     name = "fake"
 
-    def __init__(self, keyword: str, chunks: list[EvidenceChunk]) -> None:
+    def __init__(self, keyword: str, chunks: list[EvidenceChunk], name: str = "fake") -> None:
         self._keyword = keyword
         self._chunks = chunks
+        self.name = name
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         return self._chunks if self._keyword in query else []
@@ -500,6 +501,72 @@ def test_an_all_healthy_section_is_not_marked_failed() -> None:
 
     assert gathered.retrieval_failed is False
     assert gathered.supported is True
+
+
+def test_a_note_two_sources_both_found_is_one_bullet_not_two() -> None:
+    """`gather_section` merges the per-source lists; concatenating them inflated the report.
+
+    Every text retriever excerpts the same note body, so a note two legs both return arrives
+    twice with byte-identical content and an identical citation. `report_note` renders one bullet
+    per chunk, so on `graph,vector,lexical` the same note was cited up to three times, differing
+    only in the trailing `via <source>` — measured over the committed corpus, 11 of the 24 bullets
+    in a drafted section repeated a note already cited above them.
+
+    That is the reading `report_note`'s own conflict warning exists to prevent, arrived at from
+    the other side and in the artifact a chemist signs; the conversational path has always
+    deduplicated, so the two disagreed about what "the evidence" is.
+    """
+    section = ReportSection(heading="Esterification", query="ester", memory_layer="evidence")
+    excerpt = "Ethyl acetate, 85% after distillation."
+    graph = _FakeRetriever(
+        "ester",
+        [EvidenceChunk(content=excerpt, source_note_id="reaction-a", retriever="graph")],
+        name="graph",
+    )
+    vector = _FakeRetriever(
+        "ester",
+        [EvidenceChunk(content=excerpt, source_note_id="reaction-a", retriever="vector")],
+        name="vector",
+    )
+
+    gathered = asyncio.run(gather_section(section, [graph, vector]))
+
+    assert [chunk.retriever for chunk in gathered.evidence] == ["graph"], (
+        "the first list's chunk represents the note, which is what argument order is for"
+    )
+    body = report_note(Report(title="R", sections=[gathered])).body
+    assert len([line for line in body.splitlines() if line.startswith("- ")]) == 1
+
+
+def test_two_different_excerpts_of_one_note_are_still_two_pieces_of_evidence() -> None:
+    """The merge keys on `(note, content)`, not on the note — the round-robin's contract.
+
+    A report has no budget cap to spend, so dropping a second, genuinely different excerpt would
+    discard evidence to fix a repeat. Only a byte-identical repeat is dropped.
+    """
+    section = ReportSection(heading="Esterification", query="ester", memory_layer="evidence")
+    graph = _FakeRetriever(
+        "ester",
+        [
+            EvidenceChunk(
+                content="85% after distillation.", source_note_id="rxn-a", retriever="graph"
+            )
+        ],
+        name="graph",
+    )
+    share = _FakeRetriever(
+        "ester",
+        [
+            EvidenceChunk(
+                content="The SOP calls for a 6 h reflux.", source_note_id="rxn-a", retriever="share"
+            )
+        ],
+        name="share",
+    )
+
+    gathered = asyncio.run(gather_section(section, [graph, share]))
+
+    assert len(gathered.evidence) == 2
 
 
 # --- a chunk is placed as a cell, not as markup (A9-F1) -------------------------------

@@ -317,3 +317,37 @@ def test_the_compound_row_carries_the_structure_its_own_id_was_derived_from() ->
     assert [row["canonical_smiles"] for row in rows["compound"]] == ["CC(=O)O"]
     # The species itself is still recorded, one table over.
     assert [row["smiles"] for row in rows["subject_member"]] == ["CC(=O)[O-]"]
+
+
+def test_no_structure_column_is_blank_in_every_row_the_writer_can_build() -> None:
+    """A column no writer can fill is a stored fact that is not one — the third bullet above, again.
+
+    `atom_count` and `geometry` were columns of the shipped `structure` DDL, whose comment said
+    coordinates lived there (and named a `formula` column that never existed). The two builders in
+    `rows_for` are the table's only writers and neither `SubjectMember` nor `ConformerFact` carries
+    either fact, so both hardcoded `0` and `{}`: measured over all 19 published shapes, 15
+    structure rows and one distinct value between them, `(0, '{}')`. `PRESERVE_ON_BLANK` then read
+    those two as "the writer did not know", so no later delivery could fill them either — a
+    `structure_id` addressed a row saying every geometry this system has ever published has no
+    atoms. Both are gone from `rows_for` and from the DDL
+    (`002_structure_loses_the_columns_no_writer_fills.sql`); the coordinates ride whole in
+    `calculation_payload`, and `atom_count` is a `property_value` fact wherever a payload states
+    one.
+
+    Asserted over the union of a record's rows rather than per row, because the two builders know
+    different halves — a subject member has no `origin_calc_ref` and a conformer does, which is
+    what `PRESERVE_ON_BLANK` exists for.
+    """
+    rows = rows_for(_anionic_ensemble(), tenant_id="t", writer_version="w")["structure"]
+    blanks: tuple[Any, ...] = (None, "", 0, {})
+
+    unfillable = sorted(
+        column
+        for column in {key for row in rows for key in row}
+        if all(row.get(column) in blanks for row in rows)
+    )
+
+    assert not unfillable, (
+        f"{unfillable} is written to `structure` on every row and is blank on every row — no "
+        "producer can fill it, so the column records nothing while reading as a stored fact"
+    )

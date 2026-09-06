@@ -940,6 +940,35 @@ def test_the_structural_rules_still_catch_the_real_shapes_after_narrowing() -> N
         assert secret not in redact_secrets(sample), sample
 
 
+def test_a_variable_name_survives_the_line_that_tells_an_operator_to_set_it() -> None:
+    """`NAME=NAME` is a hint, not a credential — and the exemption must not open either direction.
+
+    `_SECRET_ENV_SETTINGS` argues that a `*_token_env` setting holds a variable *name* and that
+    redacting it "would scrub the variable name out of every line that helpfully tells an operator
+    which credential to set". The SCREAMING_CASE rule was doing precisely that: the shape
+    `.env.example` carries three times came back with the question kept and the answer replaced.
+
+    The other three rows are the two ways a wider carve-out would have leaked. Exempting the *key*
+    alone would log an operator's pasted token in the clear; exempting the *value* alone would drop
+    every uppercase credential, base32 secrets among them, which are exactly the shape that has no
+    lower-case tail to be caught by.
+    """
+    for line, expected in [
+        (
+            "set CHEMCLAW_CALC_SERVER_TOKEN_ENV=CHEMCLAW_CALC_TOKEN to name the credential",
+            "set CHEMCLAW_CALC_SERVER_TOKEN_ENV=CHEMCLAW_CALC_TOKEN to name the credential",
+        ),
+        ("CHEMCLAW_CALC_SERVER_TOKEN_ENV=sk-ant-api03-abc123XYZ", None),
+        ("CHEMCLAW_MCP_FACE_TOKEN=JBSWY3DPEHPK3PXPJBSWY3DP", None),
+        ("MY_PASSWORD=CORRECTHORSEBATTERY", None),
+    ]:
+        redacted = redact_secrets(line)
+        if expected is None:
+            assert redacted.endswith("***"), redacted
+        else:
+            assert redacted == expected
+
+
 # One pathological repeating unit per structural rule. A unit is the shortest string that makes the
 # rule's own prefix match over and over, which is what forces the engine to try and re-try the tail.
 #

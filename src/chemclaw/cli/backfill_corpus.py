@@ -62,13 +62,13 @@ def note_for_document(path: Path, raw: bytes, tags: list[str]) -> Note:
 
 
 async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[int, int]:
-    """Propose a note per readable document; return `(proposed, skipped)`.
+    """Write a note per readable document; return `(written, skipped)`.
 
     An unreadable or unsupported file is skipped with a WARNING, never fatal: a decade of documents
     will contain formats this cannot parse, and one PDF must not abort a backfill of ten thousand
     files (the reject-and-continue discipline the ELN sync uses).
     """
-    proposed = skipped = 0
+    written = skipped = 0
     submitter = default_writer()
     for path in sorted(p for p in directory.rglob("*") if p.is_file()):
         try:
@@ -78,34 +78,42 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
             skipped += 1
             continue
         if dry_run:
-            logger.info("would propose %s from %s (%d chars)", note.id, path.name, len(note.body))
+            logger.info("would write %s from %s (%d chars)", note.id, path.name, len(note.body))
         else:
             reference = await record_note(note, submitter)
-            logger.info("proposed %s from %s -> %s", note.id, path.name, reference)
-        proposed += 1
-    return proposed, skipped
+            logger.info("wrote %s from %s -> %s", note.id, path.name, reference)
+        written += 1
+    return written, skipped
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point: walk a directory and PR-gate one note per readable document."""
+    """CLI entry point: walk a directory and write one note per readable document.
+
+    **Not a proposal, and this said it was.** The summary line read "PR-gate one note per readable
+    document" and `--dry-run`'s help promised a run that opened no branch, both left behind by
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`: `record_note` commits onto the notes
+    repository's base branch, so a bare invocation writes one note per document straight into
+    `knowledge/`. That sentence is the one an operator reads while deciding whether the non-dry-run
+    is safe, which is why it is worth more than a wording fix.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path, help="Directory of documents to backfill.")
     parser.add_argument("--tag", action="append", default=[], help="Tag to apply (repeatable).")
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Report what would be proposed without opening any branch. Run this first.",
+        help="Report what would be written without committing anything. Run this first.",
     )
     args = parser.parse_args(argv)
     configure_logging()
     if not args.directory.is_dir():
         print(f"not a directory: {args.directory}", file=sys.stderr)
         return 2
-    proposed, skipped = asyncio.run(
+    written, skipped = asyncio.run(
         backfill(args.directory, tags=list(args.tag), dry_run=args.dry_run)
     )
-    verb = "would propose" if args.dry_run else "proposed"
-    print(f"{verb} {proposed} note(s); skipped {skipped} unreadable/unsupported file(s)")
+    verb = "would write" if args.dry_run else "wrote"
+    print(f"{verb} {written} note(s); skipped {skipped} unreadable/unsupported file(s)")
     return 0
 
 

@@ -21,6 +21,7 @@ import asyncio
 from typing import Any
 
 import pytest
+import yaml
 
 import chemclaw.api.runner as runner
 from chemclaw.agent.session import TurnSession
@@ -303,6 +304,38 @@ def test_the_direction_is_honoured_so_a_lower_is_better_metric_is_not_inverted()
         ),
     )
     assert lower.value == 1.0 and higher.value == 0.0
+
+
+def test_a_yaml_yes_is_not_a_token_baseline() -> None:
+    """`bool` is a subclass of `int`, and YAML writes `yes` where a reader sees a word.
+
+    `if not isinstance(baseline, (int, float))` therefore let `baseline_tokens: yes` through as a
+    baseline of **1**, and the four committed turns of `autonomy-turn-cost` scored 1100.0 instead
+    of raising — a number in the drift band `make eval-baseline-check` watches, derived from a
+    reference nobody wrote. `metrics._scalar` guards the identical hazard one file over and says
+    why in its own docstring; this metric did not.
+    """
+    assert yaml.safe_load("baseline_tokens: yes") == {"baseline_tokens": True}
+    turns = [{"correlation_id": "cost-01", "input_tokens": 1000, "output_tokens": 100}]
+    with pytest.raises(MetricError, match="positive number of billed tokens"):
+        _score(
+            "turn_cost_ratio",
+            _case(
+                metrics=["turn_cost_ratio"],
+                output={"turns": turns},
+                reference=yaml.safe_load("baseline_tokens: yes"),
+            ),
+        )
+    # A real baseline still scores, so the guard is a refusal of non-numbers and not of the metric.
+    scored = _score(
+        "turn_cost_ratio",
+        _case(
+            metrics=["turn_cost_ratio"],
+            output={"turns": turns},
+            reference={"baseline_tokens": 1100},
+        ),
+    )
+    assert scored.value == pytest.approx(1.0)
 
 
 def test_the_shipped_autonomy_cases_load_and_score() -> None:

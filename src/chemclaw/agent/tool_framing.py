@@ -43,7 +43,16 @@ joined it. The three:
    delimiter and none of them is evidence a citation may name; `frame_connector_results`' own
    docstring argues each case.
 3. **Left alone** — everything else. An in-process tool that frames its own spans, a generated job
-   launcher, a template tool: unstamped, not a helper, not a file verb, and nothing to rewrite.
+   launcher, a template tool: unstamped, not a helper, not a file verb. "Nothing to rewrite" is
+   what this line used to say and it is a claim about every other tool in the tree, which this
+   module cannot check and which was false: `recall_preferences`, `list_watches` and the four
+   protocol-design tools each replayed a durable, model-authored string with a live delimiter in it
+   (measured 2026-09-06; each now defangs at its own return). Widening this branch is still the
+   wrong fix — a tool that frames its own spans would have the envelope this system just wrote
+   escaped out from under it, and telling the two apart needs a list of which tools frame
+   themselves, which is a list that goes stale. So the third treatment is sound only while every
+   in-process tool returning model-authored or third-party text neutralises it itself. **That is a
+   review rule, not a control**, and saying so is the point.
 
 The two rewritten sets are read from the functions that *derive* them rather than from a list
 spelled here, which is the same argument `subagents.helper_profile` makes for
@@ -242,10 +251,13 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
     exception to the first two** (`D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-
     thread`). What `task` returns is prose a model wrote after reading evidence that arrived framed,
     and it lands in the caller's thread as an ordinary tool result — measured, carrying a **live**
-    closing delimiter, because nothing on that path rewrote it. Every other route by which model
-    prose or third-party text reaches a prompt neutralises it: `agent/condense.py` defangs each
-    field the digest model returns, `agent/verifier.py` defangs the answer under review, and
-    retrieved content is framed at its source. This was the one span that arrived raw.
+    closing delimiter, because nothing on that path rewrote it. The routes this paragraph surveyed
+    do neutralise it: `agent/condense.py` defangs each field the digest model returns,
+    `agent/verifier.py` defangs the answer under review, and retrieved content is framed at its
+    source. It went on to call this "the one span that arrived raw", which was a claim about the
+    whole tool surface made from a survey of part of it — six more were found in 2026-09-06's
+    review, all of them durable rather than turn-scoped, and the module docstring's third treatment
+    above now says what actually holds them.
 
     The nonce does not cover this the way it covers external content. `frame_untrusted`'s own
     docstring is explicit that "forgery is closed by *defanging* the content, and the nonce and the

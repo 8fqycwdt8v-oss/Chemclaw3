@@ -284,11 +284,6 @@ def resolve_compound_name(name: str) -> ResolvedCompound | None:
     )
 
 
-def known_names() -> list[str]:
-    """Every recognised spelling, sorted — what a caller can offer as a suggestion on a miss."""
-    return sorted(_TABLE)
-
-
 def display_name(smiles: str) -> str | None:
     """The recognised name for a structure, or `None` if it is not a known reagent.
 

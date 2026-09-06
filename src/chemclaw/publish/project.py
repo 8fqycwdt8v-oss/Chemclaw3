@@ -866,7 +866,10 @@ def _species_distribution(
             smiles=_identify(item.get("smiles"))[1],
             compound_id=_identify(item.get("smiles"))[0],
             score=item.get("population"),
-            score_property="population",
+            # A *species* population, not a conformer's: `population` is registered at conformer
+            # scope and belongs to the `conformer` table, so scoring a candidate row with it made
+            # `score_property` disagree with the placement `property_definition.scope_kind` states.
+            score_property="species_population",
             # The tool's own extra fields, verbatim and never a predicate — the relative energy
             # that produced the population, the label a chemist reads, and how many conformers
             # stood behind each species.

@@ -23,7 +23,7 @@ from chemclaw.core.chem import (
     compound_id,
     standard_smiles,
 )
-from chemclaw.core.reagents import display_name, known_names, resolve_compound_name, synonyms_of
+from chemclaw.core.reagents import _TABLE, display_name, resolve_compound_name, synonyms_of
 from chemclaw.ingest.eln.compound import compound_note
 from chemclaw.kg.note import KNOWN_NOTE_TYPES
 from chemclaw.kg.render import render_note
@@ -411,7 +411,7 @@ def test_the_solvate_rule_changed_no_shipped_reagent() -> None:
     `test_a_solvate_is_not_its_solvent`, and by the tie-break test, whose solute was chosen so
     that the old rule loses it.
     """
-    shipped = {r.smiles: r.name for r in map(resolve_compound_name, known_names()) if r}
+    shipped = {r.smiles: r.name for r in map(resolve_compound_name, sorted(_TABLE)) if r}
     assert len(shipped) == 68, "the shipped table changed; re-measure before editing the set below"
     shrunk = {
         name
@@ -508,7 +508,7 @@ def test_every_shipped_reagent_note_carries_its_name() -> None:
     Asserted over the whole shipped table, because the gap was invisible on DMF, where the two
     keys happen to agree.
     """
-    anonymous = [n for n in known_names() if "- name: " not in compound_note(_shipped(n)).body]
+    anonymous = [n for n in sorted(_TABLE) if "- name: " not in compound_note(_shipped(n)).body]
     assert anonymous == []
 
 
@@ -522,7 +522,7 @@ def test_a_reagent_note_lists_the_spellings_of_its_own_compound_only() -> None:
     assert compound_note(_shipped("DMSO")).body.count("also written: dimethylsulfoxide, dmso") == 1
     assert "pd(oac)2" not in compound_note(_shipped("AcOH")).body
     by_compound: dict[str, set[str | None]] = {}
-    for name in known_names():
+    for name in sorted(_TABLE):
         shipped = _shipped(name)
         by_compound.setdefault(compound_id(shipped), set()).add(display_name(shipped))
     assert [names for names in by_compound.values() if len(names) > 1] == []

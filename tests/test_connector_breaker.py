@@ -138,6 +138,9 @@ def test_a_healthy_readiness_sweep_readmits_a_connector_the_open_path_blocked(
 
     manifest = SimpleNamespace(
         name="dark",
+        # The sweep asks every manifest about its durable half as well as its endpoint, so a
+        # stand-in that omits `jobs` is not one a real `ConnectorManifest` could be.
+        jobs=[],
         endpoint=HttpEndpoint(
             url="http://127.0.0.1:1/mcp",
             health_url="http://127.0.0.1:1/healthz",
@@ -172,6 +175,9 @@ def test_a_failed_readiness_sweep_spares_the_next_turn_its_open_timeout(
     monkeypatch.setattr(settings, "connector_breaker_window_seconds", 60.0)
     manifest = SimpleNamespace(
         name="dark",
+        # The sweep asks every manifest about its durable half as well as its endpoint, so a
+        # stand-in that omits `jobs` is not one a real `ConnectorManifest` could be.
+        jobs=[],
         endpoint=HttpEndpoint(
             url=f"http://127.0.0.1:{_free_port()}/mcp",
             health_url=f"http://127.0.0.1:{_free_port()}/healthz",
@@ -208,6 +214,9 @@ def test_a_repeated_failing_sweep_does_not_restart_the_breaker_window(
     monkeypatch.setattr(settings, "connector_breaker_window_seconds", 0.5)
     manifest = SimpleNamespace(
         name="dark",
+        # The sweep asks every manifest about its durable half as well as its endpoint, so a
+        # stand-in that omits `jobs` is not one a real `ConnectorManifest` could be.
+        jobs=[],
         endpoint=HttpEndpoint(
             url=f"http://127.0.0.1:{_free_port()}/mcp",
             health_url=f"http://127.0.0.1:{_free_port()}/healthz",

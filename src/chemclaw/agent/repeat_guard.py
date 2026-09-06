@@ -108,7 +108,7 @@ def _key(name: str, arguments: Any) -> tuple[str, str]:
     return (name, json.dumps(arguments, sort_keys=True, default=str))
 
 
-def forget_calls(cleared: Iterable[tuple[str, str, Any]]) -> int:
+def forget_calls(cleared: Iterable[tuple[str, str, Any]]) -> None:
     """Clear the repeat counters for calls whose answers compaction just took away.
 
     **The dead end this removes.** The guard's whole justification is that a repeat "will not
@@ -145,28 +145,29 @@ def forget_calls(cleared: Iterable[tuple[str, str, Any]]) -> int:
 
     A no-op off the request path, like every other function in this module.
 
+    **It reports nothing, because nothing reads a report.** This returned a count of the results
+    forgiven for the first time, documented as "the caller's signal that this model call saw a
+    *new* reduction rather than the standing one re-derived" — and its one caller
+    (`compaction._publish_reduction`) discarded it and decided that same question from the turn
+    watch's high-water reclaim, which is the better signal because it also sees the conversation
+    window's cut. A documented return with no reader is a claim about a collaboration that does not
+    exist.
+
     Args:
         cleared: `(tool call id, tool name, arguments)` per result replaced by a placeholder.
-
-    Returns:
-        How many of these results were forgiven for the first time — the caller's signal that this
-        model call saw a *new* reduction rather than the standing one re-derived.
     """
     watch = _calls.get()
     if watch is None:
-        return 0
+        return
     forgotten = 0
-    newly_seen = 0
     for call_id, name, arguments in cleared:
         if call_id in watch.forgiven:
             continue
         watch.forgiven.add(call_id)
-        newly_seen += 1
         if watch.counts.pop(_key(name, arguments), None) is not None:
             forgotten += 1
     if forgotten:
         logger.info("context was compacted; %d repeat counter(s) cleared", forgotten)
-    return newly_seen
 
 
 def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:

@@ -38,7 +38,6 @@ from chemclaw.api.tool_results import (
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics import METRICS
-from tests.fakes import FakeUpdate, fed
 from tests.pg import migrated_db_or_skip
 
 _SCREEN = (
@@ -47,31 +46,15 @@ _SCREEN = (
 )
 
 
-class _ResultContent:
-    """A function-result content: a `call_id` and a `result`, and no `arguments` attribute at all.
+def _returned(trace: runner_trace.ToolCallTrace, call_id: str, tool: str, text: str) -> Any:
+    """The `tool_result` event `tool` produces on `trace`, with its call announced first.
 
-    The same shape `tests/test_runner.py` uses, repeated rather than imported because importing a
-    private double across test modules couples two files that otherwise share nothing.
+    Both halves are the trace's own surface — the graph driver calls exactly these two methods with
+    a call and a result it has already assembled (`chemclaw.api.graph_stream`) — so what a test
+    drives here is what a turn drives.
     """
-
-    def __init__(self, *, call_id: str, result: str) -> None:
-        self.call_id = call_id
-        self.result = result
-
-
-class _CallContent:
-    """A function-call content: the opening one carries the name, the fragments carry arguments."""
-
-    def __init__(self, *, call_id: str, name: str = "", arguments: Any = None) -> None:
-        self.call_id = call_id
-        self.name = name
-        self.arguments = arguments
-
-
-def _issued(trace: runner_trace.ToolCallTrace, call_id: str, tool: str) -> None:
-    """Drive `trace` to the point where `call_id` has been announced under `tool`."""
-    fed(trace, FakeUpdate(contents=[_CallContent(call_id=call_id, name=tool, arguments={})]))
-    fed(trace, FakeUpdate(contents=[_CallContent(call_id=call_id, arguments="{}")]))
+    trace.issued(call_id, tool, "{}")
+    return asyncio.run(trace.returned(call_id, text))
 
 
 # --- the store ---------------------------------------------------------------------------------
@@ -270,10 +253,7 @@ def test_the_trace_names_the_result_it_stored() -> None:
         return content_address(text)
 
     trace = runner_trace.ToolCallTrace(sink=_sink)
-    _issued(trace, "s1", "screen_hazards")
-    events = fed(trace, FakeUpdate(contents=[_ResultContent(call_id="s1", result=_SCREEN)]))
-
-    (event,) = [e for e in events if e.type == "tool_result"]
+    event = _returned(trace, "s1", "screen_hazards", _SCREEN)
     assert event.result_ref == content_address(_SCREEN)
     assert stored == [("screen_hazards", _SCREEN)]
     assert event.preview == _SCREEN[: settings.agent_audit_max_arg_chars]
@@ -286,10 +266,7 @@ def test_a_trace_with_no_sink_reports_no_ref() -> None:
     a property of the code and not of a comment.
     """
     trace = runner_trace.ToolCallTrace()
-    _issued(trace, "n1", "find_notes")
-    events = fed(trace, FakeUpdate(contents=[_ResultContent(call_id="n1", result="[]")]))
-
-    (event,) = [e for e in events if e.type == "tool_result"]
+    event = _returned(trace, "n1", "find_notes", "[]")
     assert event.result_ref == ""
 
 
@@ -304,21 +281,11 @@ def test_a_small_result_rides_along_and_a_large_one_does_not(
     quietly become the path a 40-chunk evidence sweep takes to a browser.
     """
     trace = runner_trace.ToolCallTrace()
-    _issued(trace, "s1", "screen_hazards")
-    (small,) = [
-        e
-        for e in fed(trace, FakeUpdate(contents=[_ResultContent(call_id="s1", result=_SCREEN)]))
-        if e.type == "tool_result"
-    ]
+    small = _returned(trace, "s1", "screen_hazards", _SCREEN)
     assert small.result_inline == _SCREEN
 
     monkeypatch.setattr(settings, "stream_inline_result_bytes", 10)
-    _issued(trace, "s2", "screen_hazards")
-    (large,) = [
-        e
-        for e in fed(trace, FakeUpdate(contents=[_ResultContent(call_id="s2", result=_SCREEN)]))
-        if e.type == "tool_result"
-    ]
+    large = _returned(trace, "s2", "screen_hazards", _SCREEN)
     assert large.result_inline == ""
     # And the preview is untouched by either outcome: this is a shortcut past a fetch, never a
     # widening of the budget the preview keeps.
@@ -336,12 +303,7 @@ def test_the_inline_cap_is_measured_in_bytes_not_characters(
     text = '{"unit": "' + "µ" * 40 + '"}'
     monkeypatch.setattr(settings, "stream_inline_result_bytes", len(text))
     trace = runner_trace.ToolCallTrace()
-    _issued(trace, "u1", "ich_impurity_limit")
-    (event,) = [
-        e
-        for e in fed(trace, FakeUpdate(contents=[_ResultContent(call_id="u1", result=text)]))
-        if e.type == "tool_result"
-    ]
+    event = _returned(trace, "u1", "ich_impurity_limit", text)
     assert len(text) < len(text.encode("utf-8"))
     assert event.result_inline == ""
 
@@ -352,12 +314,7 @@ def test_setting_the_inline_cap_to_zero_puts_nothing_on_the_event(
     """One knob rather than a cap plus a flag — "never inline" is the cap at its floor."""
     monkeypatch.setattr(settings, "stream_inline_result_bytes", 0)
     trace = runner_trace.ToolCallTrace()
-    _issued(trace, "z1", "screen_hazards")
-    (event,) = [
-        e
-        for e in fed(trace, FakeUpdate(contents=[_ResultContent(call_id="z1", result=_SCREEN)]))
-        if e.type == "tool_result"
-    ]
+    event = _returned(trace, "z1", "screen_hazards", _SCREEN)
     assert event.result_inline == ""
 
 
@@ -370,30 +327,14 @@ def test_the_trace_names_the_values_a_result_returned() -> None:
     known and their names are not.
     """
     trace = runner_trace.ToolCallTrace()
-    _issued(trace, "p1", "predict_pka")
-    (event,) = [
-        e
-        for e in fed(
-            trace,
-            FakeUpdate(contents=[_ResultContent(call_id="p1", result='{"pka": 4.76, "sd": 1.6}')]),
-        )
-        if e.type == "tool_result"
-    ]
+    event = _returned(trace, "p1", "predict_pka", '{"pka": 4.76, "sd": 1.6}')
     assert [(v.label, v.value, v.unit) for v in event.values] == [
         ("pka", 4.76, ""),
         ("sd", 1.6, ""),
     ]
     assert event.numbers == [4.76, 1.6]
 
-    _issued(trace, "p2", "find_notes")
-    (prose,) = [
-        e
-        for e in fed(
-            trace,
-            FakeUpdate(contents=[_ResultContent(call_id="p2", result="the pKa is about 4.76")]),
-        )
-        if e.type == "tool_result"
-    ]
+    prose = _returned(trace, "p2", "find_notes", "the pKa is about 4.76")
     assert prose.values == []
     assert prose.numbers == [4.76]
 
@@ -419,11 +360,8 @@ def test_an_oversize_result_is_refused_whole_and_says_so(
         return content_address(text)
 
     trace = runner_trace.ToolCallTrace(sink=_sink)
-    _issued(trace, "b1", "gather_evidence")
     with caplog.at_level(logging.WARNING, logger=runner_trace.__name__):
-        events = fed(trace, FakeUpdate(contents=[_ResultContent(call_id="b1", result=_SCREEN)]))
-
-    (event,) = [e for e in events if e.type == "tool_result"]
+        event = _returned(trace, "b1", "gather_evidence", _SCREEN)
     assert event.result_ref == ""
     assert called == []
     assert "gather_evidence" in caplog.text
@@ -442,10 +380,7 @@ def test_the_cap_is_measured_in_bytes_not_characters(monkeypatch: pytest.MonkeyP
         return content_address(text)
 
     trace = runner_trace.ToolCallTrace(sink=_sink)
-    _issued(trace, "u1", "find_notes")
-    events = fed(trace, FakeUpdate(contents=[_ResultContent(call_id="u1", result="字" * 20)]))
-
-    (event,) = [e for e in events if e.type == "tool_result"]
+    event = _returned(trace, "u1", "find_notes", "字" * 20)
     assert event.result_ref == ""
 
 
@@ -457,10 +392,7 @@ def test_setting_the_cap_to_zero_disables_the_store(monkeypatch: pytest.MonkeyPa
         raise AssertionError("the store is disabled and must not be written to")
 
     trace = runner_trace.ToolCallTrace(sink=_sink)
-    _issued(trace, "z1", "find_notes")
-    events = fed(trace, FakeUpdate(contents=[_ResultContent(call_id="z1", result="[]")]))
-
-    (event,) = [e for e in events if e.type == "tool_result"]
+    event = _returned(trace, "z1", "find_notes", "[]")
     assert event.result_ref == ""
 
 

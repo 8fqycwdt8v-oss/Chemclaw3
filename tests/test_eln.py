@@ -494,6 +494,54 @@ def test_late_arrival_warning_is_one_bounded_line(
     assert "+2 more" in caplog.text  # names capped, count preserved
 
 
+def test_the_late_arrival_line_names_the_source_rather_than_the_format(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two drop directories, two lines — and the line has to say which one it is about.
+
+    `name` reaches every other warning these adapters log, and not this one, which is the one about
+    files that are *silently never ingested*: a deployment running two drop directories got two
+    identical lines naming a format ("ELN JSON export", "ORD export") and neither source.
+    """
+
+    async def _run() -> None:
+        entry = tmp_path / "late.json"
+        _write_entry(entry, "late-1", "2026-01-01T00:00:00Z")
+        _set_mtime(entry, datetime(2026, 6, 1, tzinfo=UTC))
+        await JsonExportAdapter(str(tmp_path), name="eln-site-a").fetch_new_entries(
+            datetime(2026, 3, 1, tzinfo=UTC)
+        )
+
+        ord_dir = tmp_path / "ord"
+        ord_dir.mkdir()
+        ord_file = ord_dir / "late-ord.json"
+        ord_file.write_text(
+            json.dumps(
+                {
+                    "reaction_id": "ord-late",
+                    "provenance": {"record_created": {"time": {"value": "2026-01-01T00:00:00Z"}}},
+                    "inputs": {},
+                    "outcomes": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        _set_mtime(ord_file, datetime(2026, 6, 1, tzinfo=UTC))
+        await OrdJsonAdapter(str(ord_dir), name="ord-site-b").fetch_new_entries(
+            datetime(2026, 3, 1, tzinfo=UTC)
+        )
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(_run())
+
+    late = [
+        record.getMessage() for record in caplog.records if "arrived after" in record.getMessage()
+    ]
+    assert len(late) == 2
+    assert late[0].startswith("eln-site-a:"), late[0]
+    assert late[1].startswith("ord-site-b:"), late[1]
+
+
 def test_ord_adapter_reports_late_arrivals_too(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

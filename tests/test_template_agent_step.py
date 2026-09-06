@@ -28,7 +28,11 @@ it, so a test of the arithmetic would have passed throughout.
 
 import asyncio
 import contextlib
+import os
+import subprocess
+import sys
 from contextlib import AsyncExitStack
+from pathlib import Path
 from typing import Any, NamedTuple
 
 import pytest
@@ -39,6 +43,7 @@ from temporalio.testing import ActivityEnvironment
 from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.chemclaw_agent import advertised_tool_names
 from chemclaw.agent.turn_cost import TurnCost
+from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.template_activities import (
     AgentStepInput,
@@ -790,14 +795,8 @@ def test_every_dispatched_step_actually_heartbeats(
 
 def _problems(write_tools: list[str], profile: str | None = None) -> list[str]:
     """Every problem the validator reports for one agent step declaring `write_tools`."""
-    from chemclaw.agent.profile_discovery import load_profiles
     from chemclaw.cli.validate_templates import _available_tools, _step_problems
     from chemclaw.templates.manifest import Template
-
-    # The file profiles are registered by the validator's entry point, not by `_step_problems` —
-    # so a test calling the inner function has to do what the outer one does, or every named
-    # profile reads as unknown.
-    load_profiles()
 
     template = Template.model_validate(
         {
@@ -862,3 +861,110 @@ def test_declaring_a_real_write_the_profile_advertises_is_no_problem() -> None:
     """
     assert _problems(["record_knowledge_note"]) == []
     assert _problems([_CONNECTOR_WRITE], profile="property-lookup") == []
+
+
+def test_the_cli_gate_checks_a_step_profile_against_the_profiles_that_exist(
+    tmp_path: Path,
+) -> None:
+    """The same rule as the test above, asked of `make template-validate` rather than the function.
+
+    The rule was unreachable from the entry point for as long as it has existed. `main` resolved
+    `_Surface` — which snapshots `registered_profile_names()` — *before* anything loaded the
+    profile files, so the six shipped profiles read as unknown: a template naming one was rejected
+    with "names unknown profile 'property-lookup'; known: ['default']", and `_write_tool_problems`
+    fell back to the whole tool surface, where no declaration can ever be outside the profile.
+    Every test above passed over it because each calls `load_profiles()` itself first, which is
+    precisely what the CLI did not do — so this one drives the module the way the Makefile does,
+    in a subprocess, and reads the process's own output.
+    """
+    (tmp_path / "profile-probe.yaml").write_text(
+        "summary: Probe.\n"
+        "description: A step naming a shipped profile and declaring a write outside it.\n"
+        "steps:\n"
+        "  - id: brief\n"
+        "    kind: agent\n"
+        "    purpose: Probe.\n"
+        "    profile: property-lookup\n"
+        "    write_tools:\n"
+        "      - record_knowledge_note\n"
+        "    prompt: write it up\n",
+        encoding="utf-8",
+    )
+
+    run = subprocess.run(
+        [sys.executable, "-m", "chemclaw.cli.validate_templates"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CHEMCLAW_TEMPLATES_DIR": str(tmp_path)},
+    )
+
+    assert "names unknown profile" not in run.stdout, run.stdout + run.stderr
+    assert "record_knowledge_note" in run.stdout, run.stdout + run.stderr
+    assert "does not advertise" in run.stdout, run.stdout + run.stderr
+    assert run.returncode == 1, run.stdout + run.stderr
+
+
+# --- a capped step is not a finished one ---------------------------------------------------------
+#
+# Both caps end a turn by *returning* from `before_model`, which runs after the tool node — so a
+# capped step's last message is a `ToolMessage` and the step returns like any other. Nothing here
+# asked, and the two consequences met in one row: `answer_text` handed back the tool's own body as
+# the step's answer (which every later step of the template then interpolates as
+# `${steps.<id>.result}`), and `turn_costs` booked `outcome="answered"` for a truncated runaway.
+
+
+def _looping(turns: int, usage: dict[str, Any] | None = None) -> list[AIMessage]:
+    """`turns` assistant messages that each say something *and* ask for another tool call.
+
+    Prose beside the call because that is what makes the first assertion sharp: the turn has an
+    assistant text to fall back to, so returning the tool body instead is a choice rather than the
+    only thing available. `ls` is the tool for the reason `tests/test_spend_cap.py` gives — it is
+    registered on every agent by `FilesystemMiddleware`, so driving the loop needs no connector.
+    """
+    return [
+        AIMessage(
+            content=f"partial {index}",
+            tool_calls=[{"name": "ls", "args": {"path": "."}, "id": f"call-{index}"}],
+            usage_metadata=usage,
+        )
+        for index in range(turns)
+    ]
+
+
+def test_a_loop_capped_step_answers_with_prose_and_is_booked_as_capped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A step stopped by the iteration cap returns its own last text, and says it was capped.
+
+    Measured before the fix on this activity at a cap of 3: the step's answer was `'No files
+    found'` — the `ls` body — booked with `outcome='answered'`, so a truncated runaway was
+    indistinguishable in the ledger from a step that finished its work and handed the rest of the
+    template a tool payload as prose.
+    """
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 3)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+
+    step = _drive(monkeypatch, _step(), _looping(8))
+
+    assert "No files found" not in step.answer, (
+        "the step answered with the tool's own output; a ToolMessage is not an assistant answer"
+    )
+    assert step.answer == "partial 2"
+    assert [row.outcome for row in step.costs] == ["loop_capped"]
+
+
+def test_a_spend_capped_step_is_booked_as_capped_rather_than_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same for the other cap, which ends the run from the hook immediately after it.
+
+    Driven through the real activity rather than the hook, because the defect was that the caller
+    never asked: `spend_capped(result)` was correct throughout and had no reader in `src/`.
+    """
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 25)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 200)
+
+    step = _drive(monkeypatch, _step(), _looping(8, {**_USAGE, "total_tokens": 120}))
+
+    assert [row.outcome for row in step.costs] == ["spend_capped"]
+    assert "No files found" not in step.answer

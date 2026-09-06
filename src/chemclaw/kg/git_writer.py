@@ -21,7 +21,10 @@ Two properties survive that change and are load-bearing without it:
   application is how a deployment loses a file nobody wrote.
 - **A write is all-or-nothing in the tree.** Every path is validated before any byte is written,
   each file is replaced atomically, and any failure restores what was there — so a reader that
-  walks the tree mid-write sees the old note or the new one, never half of either.
+  walks the tree mid-write sees the old note or the new one, never half of either. The rollback
+  un-stages as well as restores: a failure between the `git add` and the commit would otherwise
+  leave the retracted blob in the index, where it is both publishable by anyone else's commit in
+  this clone and enough to make every later write's fast-forward refuse.
 
 Concurrency: writes in this process serialize through a module-level asyncio lock, and
 cross-process ownership is *enforced* by an exclusive OS-level `flock` on a file under the
@@ -640,6 +643,11 @@ class GitNoteWriter:
         by a push that failed, and replaying them is what lets the pod recover instead of failing
         every write from then on. Anything else is a person's commit in the notes clone, and
         rewriting it is not a decision this writer gets to take on its own.
+
+        **"No commits at all" is a third case and gets its own sentence.** A fast-forward also
+        fails on a dirty tree or a dirty index, and the arithmetic below then reports
+        `0 local commit(s) this system did not write` — a refusal naming commits that do not
+        exist, which sends an operator looking for the wrong thing entirely.
         """
         subjects = await self._read("log", "--format=%B%x00", f"{self._remote}/{self._base}..HEAD")
         ours = [
@@ -648,7 +656,13 @@ class GitNoteWriter:
             if message.strip() and _RECORD_TRAILER in message
         ]
         total = [message for message in (subjects or "").split("\0") if message.strip()]
-        if not total or len(ours) != len(total):
+        if not total:
+            raise GitRemoteError(
+                f"the notes checkout could not fast-forward onto {self._remote}/{self._base} and "
+                "holds no local commits to replay, so the checkout itself is what refuses — a "
+                f"modified file or a staged change in {self._repo_dir!r}: {why}"
+            )
+        if len(ours) != len(total):
             raise GitRemoteError(
                 f"the notes checkout could not fast-forward onto {self._remote}/{self._base} and "
                 f"holds {len(total) - len(ours)} local commit(s) this system did not write, so "
@@ -697,6 +711,21 @@ class GitNoteWriter:
             note_path = self._contained_note_path(file.path)
             if not file.overwrite and note_path.exists():
                 continue
+            # An amendment to somebody's own note is dropped rather than refused, and only an
+            # amendment: the subject note keeps the hard refusal, because writing an agent note
+            # over a curated one at the same id is the forgery the check exists for. See
+            # `_refuse_to_clobber_a_person` for why the unit must not die with the amendment.
+            if file.amendment and self._is_a_persons_note(note_path):
+                log_event(
+                    log,
+                    "kg.write.amendment_left_alone",
+                    "left %s alone: it is a human's note, so it is not retired in place — the "
+                    "note recorded alongside it still lands and marks it as contradicted",
+                    file.path,
+                    level=logging.WARNING,
+                    path=file.path,
+                )
+                continue
             self._refuse_to_clobber_a_person(note_path, file.path)
             planned.append((note_path, file))
         if not planned:
@@ -742,6 +771,17 @@ class GitNoteWriter:
                     note_path.unlink(missing_ok=True)
                 else:
                     _replace_atomically(note_path, content.decode("utf-8"))
+            # **The tree is only half of what this write touched.** If the failure came after the
+            # `git add` above — a `pre-commit` hook, an `index.lock`, `_exec`'s timeout kill — the
+            # index still holds the blob just retracted, and restoring the tree does not remove it.
+            # Left staged it is two failures: any non-path-limited `git commit` in this clone
+            # publishes a note this system un-published, and the next write's `merge --ff-only`
+            # refuses because of it — which `_replay_our_unpushed_commits` sees as a checkout with
+            # no commits of ours to replay, so it refuses too and every later write on this pod
+            # fails forever. Scoped to `written` for the same reason the commit is: nothing else
+            # somebody staged here is this writer's to reset.
+            with contextlib.suppress(ChemclawError):
+                await self._run("reset", "-q", "HEAD", "--", *written)
             invalidate_cache()
             raise
 
@@ -774,6 +814,19 @@ class GitNoteWriter:
             raise GitRemoteError(f"git push to {self._base} failed: {stderr}")
         return WriteOutcome(reference=commit or self._base)
 
+    def _is_a_persons_note(self, note_path: Path) -> bool:
+        """Whether a human's note is already at `note_path` — the check both policies below read.
+
+        An unparseable or absent file is not a person's work, so it is not one.
+        """
+        if not note_path.exists():
+            return False
+        try:
+            existing = parse_note(note_path)
+        except (NoteError, OSError):
+            return False
+        return existing.created_by == "human"
+
     def _refuse_to_clobber_a_person(self, note_path: Path, relative: str) -> None:
         """Refuse to overwrite a note a human authored.
 
@@ -786,15 +839,18 @@ class GitNoteWriter:
         The system's own answer to disagreeing with curated knowledge is a *new* note carrying a
         `contradicts` edge (`memory/failure.py`), which is what the deletion ADR names as the
         replacement control — and that control only works while the thing to be contradicted is
-        still there. An unparseable or absent file is not a person's work, so it does not refuse.
+        still there.
+
+        **Which is why this refuses the subject note and not an amendment.** A `NoteFile` marked
+        `amendment=True` is a retirement of a note that already exists, and refusing the *write*
+        for it took the new note down with it: `record_failure` puts the failure note and the
+        retirement in one unit, so a chemist refuting a curated playbook — 37 of the 38 notes in
+        the shipped corpus are `created_by: human` — lost the observation as well as the date. The
+        amendment steps aside in `_write_and_commit` instead, which leaves exactly the state
+        `close_refuted_note` documents as the truthful one for a claim this system may not close:
+        the note stays open, served, and permanently marked as contradicted.
         """
-        if not note_path.exists():
-            return
-        try:
-            existing = parse_note(note_path)
-        except (NoteError, OSError):
-            return
-        if existing.created_by == "human":
+        if self._is_a_persons_note(note_path):
             raise GitWriteError(
                 f"refusing to overwrite {relative!r}: it is authored by a human, and an agent "
                 "write may not replace or retire curated knowledge in place. Record a new note "

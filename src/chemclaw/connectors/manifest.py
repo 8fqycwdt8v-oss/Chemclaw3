@@ -665,3 +665,31 @@ class ConnectorManifest(BaseModel):
         if duplicated:
             raise ValueError(f"connector {self.name!r} declares duplicate job name(s) {duplicated}")
         return self
+
+    @model_validator(mode="after")
+    def _compensations_name_a_declared_job(self) -> Self:
+        """A named compensation must be a job this bundle actually declares.
+
+        Nothing *runs* a compensation, and that is a decision rather than an omission
+        (`D-2026-08-29-an-effect-declares-whether-it-can-be-undone`): naming one tells an operator
+        which job undoes this one, and launching it is their call through the ordinary launcher.
+        Which is exactly why the name has to resolve — the whole value of the field is that
+        somebody can act on it, so a name nothing answers to is a reversibility nobody can perform,
+        the claim `EffectSpec` already refuses when the field is left *empty*. It could not be
+        checked there: a job cannot see its siblings, and this model is the first thing that can.
+        """
+        declared = {job.name for job in self.jobs}
+        unresolved = sorted(
+            f"{job.name!r} -> {job.effect.compensation!r}"
+            for job in self.jobs
+            if job.effect is not None
+            and job.effect.compensation
+            and job.effect.compensation not in declared
+        )
+        if unresolved:
+            raise ValueError(
+                f"connector {self.name!r} names compensation(s) it does not declare as jobs: "
+                f"{', '.join(unresolved)} — a compensation is launched like any other job, so a "
+                "name outside this bundle is one nobody can run"
+            )
+        return self

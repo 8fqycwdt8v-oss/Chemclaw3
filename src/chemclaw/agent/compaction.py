@@ -736,12 +736,21 @@ def _publish_reduction(request: ModelRequest[Any]) -> None:
         return
     if turn.peak_reclaimed == 0:
         record_metric(lambda m: m.increment("chemclaw_context_compactions_total"))
-        _announce(request, reclaimed, cleared)
     turn.compacted = True
     delta = float(reclaimed) - turn.peak_reclaimed
     if delta > 0:
         record_metric(lambda m: m.increment("chemclaw_context_reclaimed_tokens_total", delta))
         turn.peak_reclaimed = float(reclaimed)
+        # **The announcement rides the high-water mark, not the first reduction**, which is what
+        # its own docstring has always claimed and what the counter beside it already did. On the
+        # first branch it said `peak_reclaimed == 0` instead, and the two then disagreed about the
+        # same turn: measured, a turn whose first model call reclaimed 999 tokens by clearing a
+        # tool payload and whose second dropped a conversation group reported
+        # `reclaimed_tokens=999, conversation_groups_dropped=0` against a counter high-watered at
+        # 1,031 — so the *destructive* edit, the one this record exists to tell apart from the
+        # lossless one, was invisible. Under `delta > 0` the standing reduction still announces
+        # once, because a re-derivation of it has a delta of exactly 0.
+        _announce(request, reclaimed, cleared)
 
 
 def _record_overrun(request: ModelRequest[Any], sent: int) -> None:
@@ -868,9 +877,12 @@ def _announce(
     turns the model no longer sees. Zero means the destructive edit did not fire — the reduction was
     entirely the lossless one, which is the good case and worth being able to see.
 
-    Once per turn, on the high-water compaction, for the reason the metrics are high-water-marked:
-    the edits are non-destructive, so this same standing reduction is re-derived on every model
-    call of the turn and a per-call line would repeat it thirty times.
+    On the high-water compaction, for the reason the metrics are high-water-marked: the edits are
+    non-destructive, so this same standing reduction is re-derived on every model call of the turn
+    and a per-call line would repeat it thirty times. That makes it once per turn in the ordinary
+    case — a re-derivation reclaims exactly what the last one did — and a second line only where
+    the turn genuinely reduced *further*, which is the case worth hearing about, because a later
+    call is where the destructive edit starts dropping conversation groups.
     """
     tools = sorted({name for _call_id, name, _args in cleared})
     dropped = _group_count(request.state.get("messages") or []) - _group_count(request.messages)

@@ -6,8 +6,17 @@ deployment does **not** own — and, crucially, says it *before* the change is a
 **A row in `attempting` after a crash is the honest state**, not a bug in the ledger. This system
 may have filed the deviation and lost the acknowledgement; a ledger that recorded only successes
 would answer "nothing happened" for exactly the case an operator most needs to investigate. So
-`begin_effect` writes first and `settle_effect` updates, and `unsettled` is the query an incident
-starts from.
+`begin_effect` writes first and `settle_effect` updates, and `unsettled` is the query that reads
+the set an incident starts from.
+
+**What reaches an operator today is the per-session half, and only that.**
+`operations/evidence_pack.assemble` selects this table by `session_id` with its own statement, so
+"what did this conversation change outside" is answerable. `unsettled` — "what is in doubt right
+now, across every session" — is served by no route, CLI or tool, so this sentence says *reads*
+rather than claiming a workflow: an operator wanting that set runs it themselves. A second
+per-session reader here was deleted on 2026-09-06 rather than left standing as a duplicate of the
+evidence pack's: it had never had a caller, while its docstring named one that has always issued
+its own SQL.
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -16,7 +25,7 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import TupleRow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -176,26 +185,3 @@ async def unsettled(limit: int = 50) -> list[EffectRecord]:
                 (max(1, min(limit, 200)),),
             )
             return [_row(tuple(row)) for row in await cur.fetchall()]
-
-
-async def effects_for_session(session_id: str, limit: int = 50) -> list[EffectRecord]:
-    """Every effect one conversation caused, newest first — the evidence pack's read."""
-    async with _connect() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                f"SELECT {_COLUMNS} FROM effects WHERE session_id = %s "
-                "ORDER BY attempted_at DESC LIMIT %s",
-                (session_id, max(1, min(limit, 200))),
-            )
-            return [_row(tuple(row)) for row in await cur.fetchall()]
-
-
-class Unsettled(BaseModel):
-    """The unsettled set, with the sentence an operator needs beside it."""
-
-    effects: list[EffectRecord] = Field(default_factory=list)
-    meaning: str = (
-        "Each of these was begun and never settled: this system may have changed something in "
-        "the named system and cannot prove either way. Check the far side by `external_ref` "
-        "where one was recorded, and by the job's arguments where none was."
-    )

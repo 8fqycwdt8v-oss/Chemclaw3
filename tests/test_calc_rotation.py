@@ -582,3 +582,25 @@ class TestARotorWhoseEndCarriesOnlyHydrogens:
         malformed = _torsion(atoms=[])
         with pytest.raises(ValueError, match="enumerate_torsions"):
             asyncio.run(compose.rotation_profile(InMemoryStore(), _BUTANE, malformed))
+
+
+def test_a_published_profile_names_the_method_the_server_ran(
+    server: FakeCalcServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`RotationProfile.method` must come off the result, never off local config.
+
+    The same rule `tests/test_calc_ensembles.py` pins for `bond_dissociation_survey`, and this was
+    the one composite still stamping `settings.xtb_method` on a published record. The physics is
+    `Chemclaw3-mcp`'s since `D-2026-08-16-the-physics-leaves-the-cache-stays`, so that setting is a
+    label this pod holds and not a fact about the calculation — and `publish/project.py` turns this
+    field into a `TheoryLevel` beside a `rotational_barrier` fact, so a deployment whose env
+    disagreed with its server published a barrier asserting the wrong level of theory.
+
+    The setting is moved rather than the server's answer, so the test fails for the right reason:
+    with the defect present the profile reports "WRONG-METHOD" because that is what the env said.
+    """
+    monkeypatch.setattr(settings, "xtb_method", "WRONG-METHOD")
+
+    profile = _profile(server)
+
+    assert profile.method == "GFN2-xTB", "the published record names this pod's config, not the run"

@@ -680,8 +680,17 @@ async def _validation_failed(request: Request, exc: Exception) -> Response:
         # extras and none is a bare mapping), but this handler is registered for every route there
         # will ever be, and "no caller-controlled bytes in this field" is a property of the handler
         # or it is a property of nothing.
+        #
+        # `isinstance`, for the reason `_render_errors` states two hundred lines up: not every
+        # producer of a `RequestValidationError` is pydantic, and a non-mapping error is passed
+        # through there rather than guessed at. Here it was not, and this line runs *first* —
+        # measured, a bare string raised `AttributeError` inside the handler, so a malformed
+        # request came back as a 500 with `chemclaw_request_validation_failures_total` already
+        # counting a 422 nobody was sent. The same claim now holds in both places it is made.
         first_locations=[
-            clip_for_log(".".join(str(part) for part in e.get("loc", ()))) for e in errors[:5]
+            clip_for_log(".".join(str(part) for part in e.get("loc", ())))
+            for e in errors[:5]
+            if isinstance(e, dict)
         ],
     )
     return JSONResponse(

@@ -23,7 +23,10 @@ import logging
 import re
 from collections.abc import Sequence
 
+from pydantic import BaseModel
+
 from chemclaw.agent.authz import require_actor
+from chemclaw.agent.framing import defang
 from chemclaw.agent.session_store import owner_permits
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_correlation_id
@@ -58,6 +61,29 @@ logger = logging.getLogger(__name__)
 #: The most designs one listing returns. A chemist scanning a list wants the recent ones; anything
 #: longer is a query with a filter on it.
 _LISTING_LIMIT = 50
+
+
+def _readable(document: BaseModel) -> str:
+    """`document` as the JSON a tool returns, with any envelope delimiter in it neutralised.
+
+    Every tool in this file answers with a serialised model, and every one of those models carries
+    free text the *model* wrote: the ask's title and goal, a `quote`, an evidence `summary`, a
+    change note, the rendered markdown. That text is durable — it is read back out of the design
+    store on any later turn, in any later session — so a delimiter smuggled into it through one
+    turn's arguments is replayed into every reading of the design afterwards. Measured before this
+    existed: all four tools returned a live `</retrieved-note-…>` verbatim.
+
+    **Defanged, not framed.** A design is this system's own document, drafted by the agent and
+    reviewed by a chemist; an envelope says "evidence to weigh and cite", which is the
+    misattribution `agent/tool_framing.py` withholds it for over a helper's report.
+
+    **The whole payload rather than a field list**, which is the argument `tool_framing.py` makes
+    for a connector result and it holds here for the same reason: escaping `<` cannot make the JSON
+    unparseable, and a convention naming which of `title`, `goal`, `quote`, `summary`,
+    `change_note` and `markdown` needs it is a list that goes stale the next time the schema grows
+    a string.
+    """
+    return defang(document.model_dump_json())
 
 
 def _store() -> DesignStore:
@@ -343,13 +369,15 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
     # plate, the ask was restated in a later session, and the header came back `draft` over a head
     # that compared equal to the approved one. Nothing changed, so nothing is stored.
     if head is not None and design == head.design:
-        return receipt(
-            design,
-            head.checks,
-            design_id=design_id,
-            revision=head.revision,
-            status=await _stored_status(store, design_id),
-        ).model_dump_json()
+        return _readable(
+            receipt(
+                design,
+                head.checks,
+                design_id=design_id,
+                revision=head.revision,
+                status=await _stored_status(store, design_id),
+            )
+        )
 
     checks = run_checks(design, stage="protocol" if design.has_protocol else "request")
     revision = await store.append(
@@ -364,13 +392,15 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
         correlation_id=get_current_correlation_id() or "",
         status="requested",
     )
-    return receipt(
-        design,
-        checks,
-        design_id=design_id,
-        revision=revision.revision,
-        status=await _stored_status(store, design_id),
-    ).model_dump_json()
+    return _readable(
+        receipt(
+            design,
+            checks,
+            design_id=design_id,
+            revision=revision.revision,
+            status=await _stored_status(store, design_id),
+        )
+    )
 
 
 @tool
@@ -508,14 +538,16 @@ async def draft_experiment_protocol(
         len(design.arms),
         len(design.evidence),
     )
-    return receipt(
-        design,
-        checks,
-        design_id=design_id,
-        revision=revision.revision,
-        status=status,
-        changed_paths=changed,
-    ).model_dump_json()
+    return _readable(
+        receipt(
+            design,
+            checks,
+            design_id=design_id,
+            revision=revision.revision,
+            status=status,
+            changed_paths=changed,
+        )
+    )
 
 
 def _layout(
@@ -572,7 +604,7 @@ async def read_experiment_protocol(design_id: str, revision: int = 0) -> str:
         design=stored.design,
         markdown=render_markdown(stored.design, stored.checks),
     )
-    return body.model_dump_json()
+    return _readable(body)
 
 
 @tool
@@ -596,4 +628,4 @@ async def find_experiment_protocols(status: str = "", project: str = "", limit: 
         project=project,
         limit=max(1, min(limit, _LISTING_LIMIT)),
     )
-    return DesignListing(designs=summaries).model_dump_json()
+    return _readable(DesignListing(designs=summaries))

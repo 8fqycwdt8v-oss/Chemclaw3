@@ -135,12 +135,18 @@ CREATE TABLE IF NOT EXISTS compound (
 -- One 3-D geometry, content-addressed. `structure_id` is derived byte-identically on both sides of
 -- the calculation wire, so an address written here resolves in the calculation store too.
 --
--- Coordinates stay in the JSON column: no chemistry question is "where is atom 7", while
--- `atom_count` and `formula` are asked and so are real columns.
+-- **The coordinates are not here, and this table used to claim they were.** `atom_count` and a
+-- `geometry` JSONB were columns until 002 dropped them: no writer could fill either -- the two
+-- builders in `publish/dialect.py` are the only ones that exist and both hardcoded `0` and `{}` --
+-- so a `structure_id` addressed a row that said, of every geometry this system has ever published,
+-- that it has no atoms. (The same comment also named a `formula` column that was never created.)
+-- Where they actually are: the coordinates in `calculation_payload`, which carries the payload
+-- whole and is what makes this database re-buildable, and `atom_count` in `property_value`
+-- wherever a payload states one. A row here is the address, its compound and the electronic state
+-- it was computed at.
 CREATE TABLE IF NOT EXISTS structure (
     structure_id    VARCHAR(64) PRIMARY KEY,
     compound_id     VARCHAR(64) REFERENCES compound (compound_id),
-    atom_count      INTEGER     NOT NULL DEFAULT 0,
     -- **Nullable, because 0 and 1 are answers.** A geometry reaches the writer either whole (its
     -- charge and multiplicity stated) or as a bare content address (they are not), and a NOT NULL
     -- default made the second case indistinguishable from a neutral closed-shell singlet -- so
@@ -151,7 +157,6 @@ CREATE TABLE IF NOT EXISTS structure (
     multiplicity    INTEGER,
     -- The calculation that produced this geometry, when it is an output rather than an embedding.
     origin_calc_ref VARCHAR(512) NOT NULL DEFAULT '',
-    geometry        JSONB       NOT NULL,
     created_at      TIMESTAMP WITH TIME ZONE NOT NULL
 );
 CREATE INDEX IF NOT EXISTS structure_compound_idx ON structure (compound_id);

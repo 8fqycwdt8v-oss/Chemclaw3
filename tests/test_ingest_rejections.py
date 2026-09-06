@@ -36,6 +36,7 @@ from chemclaw.agent.framing import ENVELOPE_TAG, defang
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.ingest import rejections
+from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 from chemclaw.ingest.eln.ord_adapter import DEFAULT_LEDGER_SOURCE as LEDGER_SOURCE
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
 from chemclaw.ingest.eln.records import (
@@ -43,10 +44,12 @@ from chemclaw.ingest.eln.records import (
     PostgresReactionRecordStore,
 )
 from chemclaw.ingest.eln.sync import IngestSummary
+from chemclaw.ingest.eln.warehouse.adapter import WarehouseElnAdapter
 from chemclaw.ingest.rejections import IngestRejection, record_refusals, refusals_matching
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from chemclaw.science.labels.store import InMemoryLabelIndex
+from tests import warehouse_fake
 from tests.pg import migrated_db_or_skip
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -612,6 +615,95 @@ def test_two_ord_sources_file_their_refusals_under_their_own_names(
                 f"{name}'s refusal did not land under its own manifest name"
             )
             await _clear(name)
+
+    asyncio.run(_run())
+
+
+def test_a_json_export_the_fetch_drops_leaves_a_ledger_row(tmp_path: Path) -> None:
+    """The asymmetry `D-2026-08-29-a-bound-derived-twice-is-two-bounds` left standing, closed.
+
+    `OrdJsonAdapter` recorded a file it could not read and a file that arrived too late;
+    `JsonExportAdapter` has both of the same paths and only logged. Neither becomes a `RawEntry`,
+    so `durable/eln_sync.py`'s single writer over `IngestSummary.rejected` cannot see them either
+    — which is why the recording is in the fetch, for this adapter as for the other one.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear("eln-site-a")
+        (tmp_path / "truncated.json").write_text('{"id": "EXP-9", "timest', encoding="utf-8")
+        late = tmp_path / "late.json"
+        late.write_text(
+            json.dumps({"id": "EXP-4", "timestamp": "2026-01-01T00:00:00Z"}), encoding="utf-8"
+        )
+        stamp = datetime(2026, 6, 1, tzinfo=UTC).timestamp()
+        os.utime(late, (stamp, stamp))
+
+        adapter = JsonExportAdapter(str(tmp_path), name="eln-site-a")
+        assert await adapter.fetch_new_entries(datetime(2026, 3, 1, tzinfo=UTC)) == []
+
+        rows = {row[0]: row[1] for row in await _rows("eln-site-a")}
+        assert sorted(rows) == ["late", "truncated"], "a dropped export left no question to answer"
+        assert "unreadable" in rows["truncated"]
+        assert "arrived after the sync cursor" in rows["late"]
+        await _clear("eln-site-a")
+
+    asyncio.run(_run())
+
+
+def test_a_warehouse_row_the_fetch_cannot_order_leaves_a_ledger_row() -> None:
+    """The warehouse's own fetch-time refusal, which nothing downstream can see either.
+
+    A row whose bound `created_at` is unreadable never becomes a `RawEntry`, so it is absent from
+    `IngestSummary.rejected` — the one place `durable/eln_sync.py` files every other refusal from
+    (`D-2026-08-29-a-bound-derived-twice-is-two-bounds`). Before the fix it did not merely go
+    unrecorded: it raised out of the fetch and stopped the source. This is the same argument that
+    keeps `ord_adapter`'s two fetch-time writers where they are, so it is asserted the same way.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear("warehouse-site")
+        warehouse_fake.prime(
+            V_REACTION=[
+                {"REACTION_ID": "RX-1", "CREATED_TS": "2026-05-01T09:00:00Z"},
+                {"REACTION_ID": "RX-2", "CREATED_TS": "not a timestamp"},
+            ],
+            V_CHARGE=[],
+        )
+        adapter = WarehouseElnAdapter(
+            binding={
+                "connection": {"driver": "tests.warehouse_fake:open_fake"},
+                "ingest": {
+                    "entry": {
+                        "relation": "V_REACTION",
+                        "key": "REACTION_ID",
+                        "created_at": "CREATED_TS",
+                    },
+                    "related": [
+                        {"name": "charges", "relation": "V_CHARGE", "foreign_key": "REACTION_ID"}
+                    ],
+                    "reaction": {"reaction_id": {"path": "root.REACTION_ID"}},
+                    "components": [
+                        {
+                            "from": "charges",
+                            "smiles": {"path": "SMILES"},
+                            "role": {"path": "ROLE"},
+                        }
+                    ],
+                    "provenance": "wh:${root.REACTION_ID}",
+                },
+            },
+            name="warehouse-site",
+        )
+
+        entries = await adapter.fetch_new_entries(_EPOCH)
+
+        assert [entry.entry_id for entry in entries] == ["RX-1"]
+        rows = await _rows("warehouse-site")
+        assert [row[0] for row in rows] == ["RX-2"]
+        assert "CREATED_TS" in rows[0][1], "the reason must name the column an operator has to fix"
+        await _clear("warehouse-site")
 
     asyncio.run(_run())
 

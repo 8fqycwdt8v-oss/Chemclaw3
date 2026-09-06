@@ -322,16 +322,6 @@ def arm(allowed: Iterable[str] = ()) -> None:
     _armed = True
 
 
-def armed() -> bool:
-    """Whether the guard is installed. For the readiness gauge and tests."""
-    return _armed
-
-
-def allowed_hosts() -> frozenset[str]:
-    """The current allowlist. For tests and diagnostics."""
-    return _allowed
-
-
 # The variables every consumer of this convention reads, lower case winning. `grpc_proxy` is here
 # because grpc reads it *first* and then falls back to the other two; nothing else in this process
 # looks at it.

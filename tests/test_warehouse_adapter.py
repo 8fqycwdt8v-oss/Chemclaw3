@@ -664,6 +664,54 @@ def test_a_block_too_large_to_page_past_stops_the_source_out_loud(
     assert any("2026-06-01" in record.getMessage() for record in caplog.records)
 
 
+def test_one_row_with_no_creation_timestamp_costs_itself_and_not_the_source(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One unreadable `created_at` used to stop the whole ELN, permanently and silently.
+
+    `_raw_entry` raised out of `fetch_new_entries`, which `sync_entries` calls *before* its `try:`
+    — so the reject-and-continue every other refusal gets never ran — and `ElnMappingError` is in
+    `durable/publish._BAD_DATA_TYPES`, so Temporal marked the activity non-retryable. The cursor
+    never advanced and every scheduled run re-fetched the same page and failed the same way.
+
+    The row is reachable because the binding declares `modified_at`: `COALESCE(modified, created)`
+    passes an amended row whose creation column is NULL, which is what an outer-join miss or a
+    column the site backfilled looks like. Driven through the workflow's own chunk loop, because
+    what the defect cost is the *cursor*, and only that loop can see it move.
+    """
+    old = datetime(2026, 1, 1, tzinfo=UTC)
+    amended = datetime(2026, 6, 1, tzinfo=UTC)
+    rows = [
+        _reaction_row("RX-1", _CREATED),
+        dict(_reaction_row("RX-2", _CREATED, modified=amended), CREATED_TS=None),
+        _reaction_row("RX-3", _CREATED),
+    ]
+    warehouse_fake.prime_warehouse(
+        warehouse_fake.WatermarkWarehouse(
+            {
+                "V_REACTION": rows,
+                "V_CHARGE": [
+                    row for entry in ("RX-1", "RX-2", "RX-3") for row in _charge_rows(entry)
+                ],
+            },
+            entry_relation="V_REACTION",
+            created_at="CREATED_TS",
+            modified_at="LAST_MODIFIED_TS",
+            key="REACTION_ID",
+        )
+    )
+    adapter = WarehouseElnAdapter(binding=_binding(), name="eln-test")
+
+    with caplog.at_level("WARNING"):
+        seen, wedged = _drain(adapter, old, batch=10, chunks=2)
+
+    assert seen == {"RX-1", "RX-3"}, "the batch was lost to one row it could not order"
+    assert wedged == [], "the source must still be able to advance its cursor"
+    assert any("RX-2" in record.getMessage() for record in caplog.records), (
+        "the skipped row must name itself, or it is lost in silence"
+    )
+
+
 def test_a_binding_may_name_the_intent_column_but_not_carve_one_out_of_prose() -> None:
     """The rule `json_adapter` states in Python was reachable through YAML, and now is not.
 

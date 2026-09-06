@@ -359,3 +359,62 @@ def test_a_refused_skills_write_reaches_the_model_as_a_refusal(
         "a refusal any model can trigger at will logged at ERROR: "
         f"{[record.getMessage() for record in caplog.records]}"
     )
+
+
+def test_a_capped_grep_still_says_it_was_capped(tree: str) -> None:
+    """The gate filters the match list; it must not also erase the flag that says it was cut.
+
+    `GrepResult` carries `truncated` beside `error` and `matches`, and the rebuild this override
+    used to do named two of the three — so a base backend answering `truncated=True` came back
+    `truncated=False` and upstream's `_format_grep_tool_result` withheld its truncation note. The
+    model then read a capped match list as the whole tree, which is the failure this repository
+    names for `NoteSearch` ("a capped list with no marker reads as the whole corpus", D-066 #4).
+
+    Driven against an all-permitting predicate so the filter removes nothing: what is asserted is
+    that the *narrowing* is the only difference between the two backends, not the disclosure.
+    """
+    base = FilesystemBackend(root_dir=tree, virtual_mode=True)
+    narrowed = _backend(tree, lambda _name: True)
+    assert base.grep("body", "/", None, max_count=2).truncated is True, (
+        "the fixture no longer trips the cap"
+    )
+    assert narrowed.grep("body", "/", None, max_count=2).truncated is True
+    # And an uncapped search is still reported as complete, so this is not a flag stuck on.
+    assert narrowed.grep("body", "/", None).truncated is False
+
+
+def test_a_skill_longer_than_the_read_default_says_so_rather_than_stopping_silently() -> None:
+    """Why `_SKILL_READ_LIMIT` was deleted rather than wired up: nothing is silent here.
+
+    That constant was `1000` with no reader anywhere, under a comment saying the default "lives
+    here rather than in the model's hands so a skill is not silently truncated when the model
+    forgets". Both halves were measured false. It could not be spent where it was written —
+    `FilesystemMiddleware` calls `backend.read(path, offset=offset, limit=limit)` with `limit`
+    always bound, from the *tool's* signature default of 100, so a backend signature default is
+    unreachable by construction. And the truncation it named is disclosed twice over: upstream's
+    skills prompt tells the model to "pass `limit=1000`", and a partial read comes back with a
+    notice naming the window, the total and the offset to resume from.
+
+    So the constant was a claim that a control existed, which is the `map_to_hpc_identity` shape
+    this tree deletes on sight. This test is what stands in its place, in both directions: it fails
+    if the constant comes back without a seam to be spent at, and it fails if upstream ever drops
+    the disclosure — which is the day a default here would start being worth having.
+    """
+    from chemclaw.agent import skill_backend
+
+    assert not hasattr(skill_backend, "_SKILL_READ_LIMIT"), (
+        "a read-limit default is back in this module, and there is still nowhere to spend it: "
+        "upstream binds `limit` on every call, so a backend signature default is never consulted"
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        skill = Path(tmp) / "long-one"
+        skill.mkdir()
+        body = "\n".join(f"step {n}" for n in range(1, 213))
+        (skill / "SKILL.md").write_text(body + "\n")
+
+        read = _read(_backend(tmp, lambda _name: True), "/long-one/SKILL.md")
+
+    assert "step 100" in read and "step 101" not in read, "the tool's default no longer caps at 100"
+    assert "112 lines remaining from offset 100" in read
+    assert "of 212 total" in read

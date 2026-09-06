@@ -263,3 +263,45 @@ def test_requeue_failed_returns_failed_rows_to_pending() -> None:
         assert tuple(row) == ("pending", 0, "")
 
     asyncio.run(_run())
+
+
+def test_a_requeue_dry_run_counts_the_retired_rows_without_touching_them() -> None:
+    """The preview must not make the one write that destroys what it is previewing.
+
+    `--requeue` reset every retired row whatever `--dry-run` said, and the run then printed "dry
+    run: nothing was written" — so an operator previewing a backfill cleared the attempt budget and
+    the recorded error on every dead-lettered publication in the deployment, and the drain
+    redelivered them. Driven through the CLI's own `main`, because the walks below honoured
+    `dry_run` all along and only the entry point's requeue branch did not.
+    """
+    import chemclaw.cli.backfill_publications as backfill_publications
+
+    async def _seed() -> None:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await _reset(conn)
+            await conn.execute(
+                "INSERT INTO result_publications "
+                "(sink, calc_ref, document, schema_version, state, attempts, last_error) "
+                "VALUES ('a', 'r-1', %s, 1, 'failed', 3, 'boom')",
+                (Jsonb({}),),
+            )
+            await conn.commit()
+
+    asyncio.run(_seed())
+
+    assert backfill_publications.main(["--dry-run", "--requeue"]) == 0
+
+    async def _after() -> tuple[Any, int]:
+        async with db.connection(settings.postgres_dsn) as conn:
+            cursor = await conn.execute(
+                "SELECT state, attempts, last_error FROM result_publications WHERE calc_ref = 'r-1'"
+            )
+            row = await cursor.fetchone()
+        # Reported, not merely skipped: the operator asked what a requeue would cover.
+        return row, await backfill.requeue_failed(dry_run=True)
+
+    row, would_reset = asyncio.run(_after())
+    assert row is not None
+    assert tuple(row) == ("failed", 3, "boom")
+    assert would_reset == 1

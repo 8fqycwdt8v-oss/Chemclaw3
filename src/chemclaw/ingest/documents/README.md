@@ -37,8 +37,8 @@ job. That is also why `tests/test_no_egress.py` needed no amendment.
 
 **Nothing here writes.** Not to the share (no code path opens a file for writing), and not to the
 knowledge graph. These documents are pre-existing human-authored records, so they are *evidence*
-retrieved with a citation; the PR-gate exists for what the agent generates.
-`chemclaw.cli.backfill_corpus` is the other choice — one PR-gated note per document — and it is
+retrieved with a citation, rather than notes.
+`chemclaw.cli.backfill_corpus` is the other choice — one committed note per document — and it is
 right only for a small curated folder someone wants *in* the graph. At 500k files it would be
 500k pull requests.
 

@@ -419,21 +419,81 @@ def failed_job_record(
 # On the light queue: this wrapper does no work itself — it starts a child on the
 # connector's own queue and waits — so it belongs with the many light workers, not the few
 # heavy ones. The *capability* is heavy; this is not (D-006).
-# The four things the wrapper still does *after* its child returns, each one activity's worth of
-# wall clock: write the durable record (D-157), offer the composite to the results store, PR-gate
-# the note, push back to the launching session. They are why the wrapper is not a pass-through, and
-# why anyone giving it an execution timeout must leave room for them.
-_FINISH_STEPS = 4
+
+
+def finish_headroom() -> timedelta:
+    """What the wrapper may still spend *after* its child returns, from the steps' own budgets.
+
+    Five things happen after `_run_child`, and they are why this wrapper is not a pass-through:
+    settle the effect ledger, write the durable record (D-157), offer the composite to the results
+    store, PR-gate the note, push back to the launching session. Anyone giving the wrapper an
+    execution timeout has to leave room for all of them.
+
+    **The room used to be counted rather than measured, and one activity is not what any of these
+    costs.** The reservation was `activity_timeout_seconds * 4` — 120 s at the shipped defaults,
+    against post-child steps individually permitted up to 3,720 s each. `_record_run` and the
+    push-back each pass `light_write_queue_wait_timeout()` (900 s) as their `schedule_to_start`,
+    which is the whole point of that bound: `durable/notify.py` measures the expected wait for a
+    slot on `background-jobs` at ~150 s at target load and 41.6 s behind a full slate — both
+    already over the 120 s the wrapper had reserved for everything. So a job whose child hit its
+    own ceiling, which is the bounded and intended outcome, was reaped as `TIMED_OUT` before it
+    could write its `job_records` failure row or tell the chemist: measured on a live broker,
+    scaled 1:1260, a run with a 6 s post-child write ended `TIMED_OUT` with neither, while the
+    identical run with a 0.2 s write produced both. That is exactly the failure
+    `wrapper_execution_timeout` below exists to prevent, produced by its own arithmetic.
+
+    Two errors in one number, and the count was the smaller of them: there are **five** post-child
+    activities rather than four (`_settle_effect("applied")` runs between the child and `_finish`
+    whenever the job names an `effect_system`), and the unit bounded none of them. What a step can
+    actually take is its own `schedule_to_start` plus its own `start_to_close`, so that is what is
+    summed here — the same `q + w` composite `publish.connector_queue_wait_timeout` is built on,
+    and read off the call sites' own helpers rather than restated, so a step whose bound moves
+    moves this with it.
+
+    One attempt each, deliberately, matching every other ceiling in this tree
+    (`Settings._the_job_ceiling_covers_the_activity_it_bounds` reserves one attempt at the longest
+    activity plus one activity's overhead). A retry-inclusive reservation would be five times as
+    wide for a case a `schedule_to_start` expiry does not even produce — that timeout is not
+    retried — and the ceiling exists to reap a wedged wrapper, not to guarantee every best-effort
+    attempt.
+
+    Returns:
+        The wall clock the wrapper's post-child steps may spend between them.
+    """
+    queue = queue_wait_timeout()
+    light = light_write_queue_wait_timeout()
+    activity_budget = timedelta(seconds=settings.activity_timeout_seconds)
+    return (
+        # `_settle_effect`, on either ending.
+        queue
+        + activity_budget
+        # `_record_run`.
+        + light
+        + timedelta(seconds=settings.job_record_timeout_seconds)
+        # `_publish_result`.
+        + queue
+        + timedelta(seconds=settings.result_publish_timeout_seconds)
+        # The note's PR-gate.
+        + queue
+        + timedelta(seconds=settings.note_write_timeout_seconds)
+        # The session push-back, on either ending.
+        + light
+        + activity_budget
+    )
 
 
 def wrapper_execution_timeout() -> timedelta:
     """A ceiling for the *wrapper*, strictly above the one it hands its own child.
 
-    A caller that bounds `ConnectorJobWorkflow` at exactly `connector_job_timeout_seconds` — the
-    number the wrapper then gives its child — leaves **zero** headroom, and since the wrapper
-    starts first its ceiling expires first. A workflow execution timeout is not delivered to
-    workflow code, so the `except BaseException -> _notify_failure` clause that exists precisely to
-    stop a job failing in silence never runs: measured, the run ends `TIMED_OUT` with no push-back
+    `connector_job_timeout_seconds`, the number the wrapper then gives its child, plus
+    `finish_headroom` — which is what the post-child steps may spend and is derived from their own
+    budgets rather than counted in activities.
+
+    A caller that bounds `ConnectorJobWorkflow` at exactly `connector_job_timeout_seconds` leaves
+    **zero** headroom, and since the wrapper starts first its ceiling expires first. A workflow
+    execution timeout is not delivered to workflow code, so the `except BaseException ->
+    _notify_failure` clause that exists precisely to stop a job failing in silence never runs:
+    measured, the run ends `TIMED_OUT` with no push-back
     and no `job_records` row, which is the "a failure that says nothing is read as proceed" defect
     through the one door that clause cannot cover.
 
@@ -446,7 +506,7 @@ def wrapper_execution_timeout() -> timedelta:
     whatever the child gets — and since a declared ceiling can only *lower* the child's
     (`child_execution_timeout`), the global value clears every one of them by construction.
     Deriving it from the job's own number instead would shrink the wrapper in step with the child
-    and hand back the headroom the four post-child steps need, which is the failure this function
+    and hand back the headroom `finish_headroom` reserves, which is the failure this function
     was written for. The cost of not deriving it is that a wedged *wrapper* under a short job is
     still bounded by the fleet-wide number — but the child, which is where the work is, fails
     first and the wrapper's own failure path then runs, which is the outcome that matters.
@@ -477,10 +537,7 @@ def wrapper_execution_timeout() -> timedelta:
     reason this paragraph is about — no execution timeout — and is cut off on the template path by
     this number.
     """
-    return timedelta(
-        seconds=settings.connector_job_timeout_seconds
-        + settings.activity_timeout_seconds * _FINISH_STEPS
-    )
+    return timedelta(seconds=settings.connector_job_timeout_seconds) + finish_headroom()
 
 
 def child_execution_timeout(

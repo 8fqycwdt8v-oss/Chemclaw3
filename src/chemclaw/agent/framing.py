@@ -34,6 +34,8 @@ source. Full content-provenance handling remains a Phase-6 item (see DEFERRED).
 import hmac
 import re
 import secrets
+import sys
+import unicodedata
 from hashlib import sha256
 
 from chemclaw.core.config import settings
@@ -93,12 +95,29 @@ ENVELOPE_TAG = f"retrieved-note-{_NONCE}"
 # is that no spelling of the tag survives into content, not to parse markup.
 _FORGERY = re.compile(r"<(?=\s*/?\s*retrieved-note)", re.IGNORECASE)
 
-# Unicode format and zero-width characters: soft hyphen, the zero-width space/joiner family, the
-# bidirectional controls, the word-joiner block, and the BOM. They render as nothing, so
-# `</​retrieved-note>` and `</re\xadtrieved-note>` *look* exactly like the tag while matching
-# neither `_FORGERY` (which expects only whitespace between `<` and the word) nor any spelling a
-# reader would notice. Measured: four such variants passed through undefanged.
-_INVISIBLE = re.compile(r"[­​-‏‪-‮⁠-⁤﻿]")
+# Every Unicode format character, as a `str.translate` table that deletes them. They render as
+# nothing, so `</​retrieved-note>` and `</re\xadtrieved-note>` *look* exactly like the tag while
+# matching neither `_FORGERY` (which expects only whitespace between `<` and the word) nor any
+# spelling a reader would notice. Measured: four such variants passed through undefanged.
+#
+# **Derived from the category rather than enumerated, because the enumeration went stale.** This was
+# a hand-written class of 17 codepoints — soft hyphen, the zero-width space/joiner family, the
+# deprecated bidirectional embeddings, the word-joiner block and the BOM — and 146 `Cf` codepoints
+# sat outside it: the whole `U+E0000` Tags block (`U+E0041` is named TAG LATIN CAPITAL LETTER A and
+# is the canonical invisible-text carrier), the bidi *isolates* `U+2066`-`U+2069` that replaced the
+# embeddings it did list, and the interlinear annotations `U+FFF9`-`U+FFFB`. Measured through
+# `frame_untrusted`: a zero-width space was escaped while an isolate, a tag character and an
+# interlinear each carried a live `<` into the model's context. A hand-written list of codepoints is
+# a list of what Unicode looked like the week it was written; the category test is total by
+# construction and cannot go stale on a revision.
+#
+# The cost was measured rather than assumed: one scan of the codepoint space at import (~80 ms,
+# once per process, against the ~580 ms this module's own imports already cost) and a per-call
+# *saving*, since deleting through a translation table is about 10x faster here than the regex it
+# replaces.
+_INVISIBLE = dict.fromkeys(
+    cp for cp in range(sys.maxunicode + 1) if unicodedata.category(chr(cp)) == "Cf"
+)
 
 
 def _defang(content: str) -> str:
@@ -116,7 +135,7 @@ def _defang(content: str) -> str:
     to make it safe would undermine the citation it exists to support.
     """
     body = _FORGERY.sub("&lt;", content)
-    if _FORGERY.search(_INVISIBLE.sub("", content)):
+    if _FORGERY.search(content.translate(_INVISIBLE)):
         body = body.replace("<", "&lt;")
     return body
 

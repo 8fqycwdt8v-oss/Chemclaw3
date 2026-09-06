@@ -277,6 +277,27 @@ class BoCampaignWorkflow:
                 retry_policy=BAD_DATA_RETRY,
             )
             history = await self._evaluate(spec, seed, "seed", timeout, heartbeat_timeout)
+            if not history:
+                # The seed batch nobody reported — the normal end of a two-week plate wait that
+                # expired. The loop below has this guard (`if not measured: break`) and the seed
+                # did not, so `_measure`'s promise that "the caller sees a campaign that ended
+                # with what it had" held for every round *except the one every campaign runs*:
+                # with an empty history, `propose_next` raises "needs at least 2 observations"
+                # and `best_of` raises "no observations", `failure_exception_types` turns either
+                # into a workflow failure, and the chemist is pushed an internal precondition
+                # message naming neither the campaign nor the batch they were asked for.
+                #
+                # It ends here rather than falling through to the terminal write: there is no
+                # best point to record and no note to draw, so a `CampaignResult` would have to
+                # be invented to carry nothing.
+                return ConnectorJobResult(
+                    summary=(
+                        f"campaign {spec.objective_name!r} ended with no evaluations: its seed "
+                        f"batch of {len(seed)} condition(s) was never reported before the "
+                        "measurement deadline, so no optimization was possible. Re-run it once "
+                        "the results are in hand."
+                    )
+                )
             rounds_remaining = spec.n_rounds
             rounds_done = 0
         else:

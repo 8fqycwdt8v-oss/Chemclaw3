@@ -13,10 +13,10 @@ reachability probe that lets the model plan against the surface it will actually
 """
 
 import asyncio
-import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -35,16 +35,12 @@ from chemclaw.api.events import (
     ApprovalRequestEvent,
     CapabilityDegradedEvent,
     ErrorEvent,
-    Event,
     JobStartedEvent,
     PlanEvent,
-    ToolCallEvent,
-    ToolResultEvent,
 )
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.turn_signals import record_job_started
-from tests.fakes import FakeUpdate, fed
 from tests.fakes_turn import Piece, ScriptedTurn
 
 
@@ -351,177 +347,37 @@ def test_verifier_failure_degrades_to_plain_answer(monkeypatch: pytest.MonkeyPat
     assert answer.unsupported_claims == ["verification did not run"]
 
 
-class _CallContent:
-    """One streamed function-call content, in the shape the provider actually emits.
+def test_every_method_the_trace_offers_is_one_the_shipped_turn_calls() -> None:
+    """No method of `ToolCallTrace` may have its only caller in this suite.
 
-    The name arrives once, on a content whose `arguments` is still an empty dict; the argument
-    JSON then streams as text fragments on contents that carry only the `call_id`. Reproduced
-    here from a live capture rather than invented, because the bug being guarded against was
-    believing a different shape (D-138).
+    The absence this pins is a whole reassembler. `feed`, its `_names`/`_fragments` buffers and the
+    `flush` the runner drained after every stream were written for the previous engine's streamed
+    content shape; LangGraph hands a finished tool call over, so `api/graph_stream.py` called
+    `issued`/`returned` directly and nothing in `src/` had called `feed` since. Measured on a real
+    turn with a real tool call: **0** calls to `feed` and one `flush` returning `[]` — 130 lines
+    whose only caller was a helper in this suite, under a module docstring naming `feed` as the
+    place the one write happens.
+
+    Written as a rule rather than as `not hasattr(ToolCallTrace, "feed")` because the defect is the
+    *class* and not the name: a method a turn stops calling is announced by its own tests
+    continuing to pass. Whoever adds a provider that streams argument fragments adds the caller in
+    the same change.
     """
-
-    def __init__(
-        self,
-        *,
-        name: str = "",
-        call_id: str = "",
-        arguments: object = None,
-        result: object = None,
-    ) -> None:
-        self.name = name
-        self.call_id = call_id
-        self.arguments = arguments
-        # A result content carries no `arguments` field at all, which is how the trace tells the
-        # two apart; `result` is what it reports once it has.
-        if result is not None:
-            self.result = result
-
-
-def _update(*contents: object) -> FakeUpdate:
-    update = FakeUpdate()
-    update.contents = list(contents)
-    return update
-
-
-def _one_call(events: list[Event]) -> ToolCallEvent:
-    """The single `tool_call` the trace produced — asserting the kind, not just the count."""
-    (event,) = events
-    assert isinstance(event, ToolCallEvent), f"expected a tool_call, got {event.type}"
-    return event
-
-
-def _one_result(events: list[Event]) -> ToolResultEvent:
-    """The single `tool_result` the trace produced."""
-    (event,) = events
-    assert isinstance(event, ToolResultEvent), f"expected a tool_result, got {event.type}"
-    return event
-
-
-def test_a_streamed_tool_call_reports_the_arguments_it_was_called_with() -> None:
-    """`ToolCallEvent.arguments` must carry the reassembled JSON, not the empty opening content.
-
-    The call is announced on the update that *closes* the argument JSON, not on a later one —
-    see the timing test below for why that difference is the whole of D-159.
-    """
-    trace = runner_trace.ToolCallTrace()
-    assert fed(trace, _update(_CallContent(name="add", call_id="c1", arguments={}))) == []
-    # The provider opens the argument stream with an *empty* fragment before the first characters
-    # arrive. Reading that as "nothing more is coming" closed the call early and shipped an empty
-    # preview to the UI — the second way this defect survived a fix (D-138).
-    assert fed(trace, _update(_CallContent(call_id="c1", arguments=""))) == []
-    assert fed(trace, _update(_CallContent(call_id="c1", arguments='{"a": 1'))) == []
-    event = _one_call(fed(trace, _update(_CallContent(call_id="c1", arguments='7, "b": 25}'))))
-    assert event.tool == "add"
-    assert event.arguments == '{"a": 17, "b": 25}'
-    assert trace.flush() == []
-
-
-def test_a_call_is_announced_before_its_result_is_seen() -> None:
-    """The timing D-159 exists for: the trace must not wait for the tool to come back.
-
-    For a streamed call the next update after the arguments is the one carrying the *result* —
-    the provider closes the argument JSON, the framework runs the tool, and only then does
-    anything else arrive. So flushing on "an update went by" announced `predict_pka(...)` after
-    the twenty seconds were already spent, and a working calculation looked exactly like a hung
-    server.
-
-    Asserting on order rather than on wall-clock: the call event must be produced by the update
-    that ends the arguments, with the result update producing a *different* event afterwards.
-    """
-    trace = runner_trace.ToolCallTrace()
-    fed(trace, _update(_CallContent(name="predict_pka", call_id="p1", arguments={})))
-
-    issued = _one_call(
-        fed(trace, _update(_CallContent(call_id="p1", arguments='{"smiles": "CCO"}')))
+    src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    api = (src / "api").rglob("*.py")
+    readers = "\n".join(
+        path.read_text(encoding="utf-8") for path in api if path.name != "runner_trace.py"
     )
-    assert issued.tool == "predict_pka"
-
-    # ...and only now, after the tool has actually run, does its result arrive.
-    returned = _one_result(fed(trace, _update(_CallContent(call_id="p1", result="pKa 15.9"))))
-    assert (returned.tool, returned.preview) == ("predict_pka", "pKa 15.9")
-
-
-def test_a_result_is_reported_even_though_its_content_carries_no_name() -> None:
-    """The result content has only a `call_id`, so the name has to be remembered from the call."""
-    trace = runner_trace.ToolCallTrace()
-    fed(trace, _update(_CallContent(name="compute_xtb_energy", call_id="x", arguments={})))
-    fed(trace, _update(_CallContent(call_id="x", arguments='{"smiles": "CCO"}')))
-    result = _one_result(fed(trace, _update(_CallContent(call_id="x", result="-154.5 Hartree"))))
-    assert result.tool == "compute_xtb_energy"
-
-
-def test_an_empty_result_reports_nothing_rather_than_an_empty_value() -> None:
-    """A trace that shows a value it does not have is worse than one that shows none."""
-    trace = runner_trace.ToolCallTrace()
-    fed(trace, _update(_CallContent(name="t", call_id="e", arguments={})))
-    fed(trace, _update(_CallContent(call_id="e", arguments="{}")))
-    assert fed(trace, _update(_CallContent(call_id="e", result=""))) == []
-    assert fed(trace, _update(_CallContent(call_id="e"))) == []
-
-
-def test_arguments_that_never_parse_still_fall_back_to_the_update_went_by_rule() -> None:
-    """A provider that does not stream JSON must still get its call announced (D-159).
-
-    Completeness-by-parse is what buys the earlier timing, but it cannot be the only rule: a
-    format it does not recognise would leave the call open forever. The old rule stays underneath
-    it, so such a call is announced at the previous, later moment rather than never.
-    """
-    trace = runner_trace.ToolCallTrace()
-    fed(trace, _update(_CallContent(name="odd_tool", call_id="c9", arguments={})))
-    assert fed(trace, _update(_CallContent(call_id="c9", arguments="smiles=CCO"))) == []
-    event = _one_call(fed(trace, _update(_CallContent(call_id="c9"))))
-    assert (event.tool, event.arguments) == ("odd_tool", "smiles=CCO")
-
-
-def test_a_call_whose_arguments_end_the_stream_is_still_reported() -> None:
-    """Nothing follows the last update, so the flush is what keeps the final call from vanishing."""
-    trace = runner_trace.ToolCallTrace()
-    fed(trace, _update(_CallContent(name="screen_hazards", call_id="c9", arguments={})))
-    assert fed(trace, _update(_CallContent(call_id="c9", arguments='{"smiles":'))) == []
-    event = _one_call(trace.flush())
-    assert (event.tool, event.arguments) == ("screen_hazards", '{"smiles":')
-
-
-def test_two_interleaved_calls_keep_their_own_arguments() -> None:
-    """Parallel tool calls share the stream; the `call_id` is what keeps them apart."""
-    trace = runner_trace.ToolCallTrace()
-    fed(
-        trace,
-        _update(
-            _CallContent(name="predict_pka", call_id="a", arguments={}),
-            _CallContent(name="predict_logd", call_id="b", arguments={}),
-        ),
-    )
-    events = fed(
-        trace,
-        _update(
-            _CallContent(call_id="a", arguments='{"smiles": "CC(=O)O"}'),
-            _CallContent(call_id="b", arguments='{"smiles": "c1ccccc1"}'),
-        ),
-    )
-    calls = sorted((e for e in events if isinstance(e, ToolCallEvent)), key=lambda e: e.tool)
-    assert [(e.tool, e.arguments) for e in calls] == [
-        ("predict_logd", '{"smiles": "c1ccccc1"}'),
-        ("predict_pka", '{"smiles": "CC(=O)O"}'),
+    offered = [
+        name
+        for name, value in vars(runner_trace.ToolCallTrace).items()
+        if not name.startswith("_") and callable(getattr(value, "fget", value))
     ]
-    assert trace.flush() == []
-
-
-def test_a_call_delivered_whole_is_reported_without_waiting_for_the_next_update() -> None:
-    """Name plus complete arguments in one content means the call is finished, so emit it now.
-
-    Holding it back until an update went by would push the trace entry behind the text the model
-    produces next, which reads as the tool having run after the sentence that describes it.
-    """
-    trace = runner_trace.ToolCallTrace()
-    event = _one_call(
-        fed(
-            trace,
-            _update(_CallContent(name="find_notes", call_id="z", arguments={"query": "amide"})),
-        )
+    unused = [name for name in offered if f".{name}" not in readers]
+    assert unused == [], (
+        f"{unused} is offered by ToolCallTrace and called from no module under src/chemclaw/api; "
+        "either the shipped turn stopped using it or its caller was never written"
     )
-    assert (event.tool, event.arguments) == ("find_notes", '{"query": "amide"}')
-    assert trace.flush() == []  # nothing left open, so nothing is emitted twice
 
 
 def test_a_result_event_carries_the_values_the_preview_cuts_off() -> None:
@@ -538,9 +394,8 @@ def test_a_result_event_carries_the_values_the_preview_cuts_off() -> None:
     assert len(result) > settings.agent_audit_max_arg_chars
 
     trace = runner_trace.ToolCallTrace()
-    fed(trace, _update(_CallContent(name="ich_impurity_limit", call_id="i1", arguments={})))
-    fed(trace, _update(_CallContent(call_id="i1", arguments='{"substance": "palladium"}')))
-    event = _one_result(fed(trace, _update(_CallContent(call_id="i1", result=result))))
+    trace.issued("i1", "ich_impurity_limit", '{"substance": "palladium"}')
+    event = asyncio.run(trace.returned("i1", result))
 
     assert event.preview == result[: settings.agent_audit_max_arg_chars]
     assert {100.0, 10.0, 1.0} <= set(event.numbers)
@@ -558,10 +413,9 @@ def test_a_result_with_more_values_than_the_wire_allows_is_capped_and_says_so(
     """
     flood = ", ".join(str(n + 0.5) for n in range(settings.stream_max_result_numbers + 50))
     trace = runner_trace.ToolCallTrace()
-    fed(trace, _update(_CallContent(name="dump_table", call_id="f1", arguments={})))
-    fed(trace, _update(_CallContent(call_id="f1", arguments="{}")))
+    trace.issued("f1", "dump_table", "{}")
     with caplog.at_level(logging.WARNING, logger=runner_trace.__name__):
-        event = _one_result(fed(trace, _update(_CallContent(call_id="f1", result=flood))))
+        event = asyncio.run(trace.returned("f1", flood))
 
     assert len(event.numbers) == settings.stream_max_result_numbers
     assert "dump_table" in caplog.text
@@ -910,96 +764,6 @@ def test_a_turn_that_writes_nothing_says_so_instead_of_answering_emptily() -> No
     assert not [e for e in events if isinstance(e, AnswerEvent)], (
         "a turn that produced nothing also claimed an answer; the error and the empty bubble "
         "tell a chemist two different things about the same turn"
-    )
-
-
-def test_a_named_fragment_stream_reassembles_into_one_call() -> None:
-    """The OpenAI Responses shape: every fragment carries the name *and* a partial document.
-
-    Measured live on 2026-08-04, driving the `openai_compatible` seam with a mock model: an
-    eight-fragment call produced **ten `tool_call` events against one `tool_result`**, the first
-    announcing `{"t` as though it were the whole argument document. `feed` had branched on
-    `name and arguments`, on the stated assumption that a streamed call's named content always
-    carries empty arguments and its fragments never carry a name — true of Anthropic, false of the
-    Responses API, and the `openai_compatible` path had never been exercised live.
-
-    A name says nothing about whether the arguments are finished. Only the arguments do.
-    """
-    trace = runner_trace.ToolCallTrace()
-    events: list[Event] = []
-    for fragment in ('{"a": 1', "7, ", '"b": 25}'):
-        events.extend(
-            fed(trace, _update(_CallContent(name="add", call_id="c1", arguments=fragment)))
-        )
-    events.extend(trace.flush())
-
-    calls = [e for e in events if isinstance(e, ToolCallEvent)]
-    assert len(calls) == 1, f"one call must announce once, got {[c.arguments for c in calls]}"
-    assert calls[0].tool == "add"
-    assert json.loads(calls[0].arguments) == {"a": 17, "b": 25}
-
-
-def test_a_whole_call_delivered_as_a_structured_object_still_announces_immediately() -> None:
-    """The other side of that fix: a Mapping is a finished call and must not wait for more.
-
-    Kept explicit because the fix narrowed the whole-call branch to the argument *type*; if that
-    narrowing had gone one step further and dropped the branch entirely, a non-streamed provider's
-    call would sit unannounced until the next update went by.
-    """
-    trace = runner_trace.ToolCallTrace()
-    events = fed(trace, _update(_CallContent(name="add", call_id="c9", arguments={"a": 1})))
-
-    calls = [e for e in events if isinstance(e, ToolCallEvent)]
-    assert len(calls) == 1
-    assert json.loads(calls[0].arguments) == {"a": 1}
-
-
-class _ResultOnlyContent:
-    """A function-result content: it carries a `call_id` and a `result`, and no `arguments` at all.
-
-    Distinct from `_CallContent`, which always defines `arguments` (as None when absent). The
-    difference is the point: `ToolCallTrace.feed` admits a content when it has *either* an
-    `arguments` attribute *or* a `call_id`, and a result content is the shape that has only the
-    second one. A class that defined both would make the guard untestable.
-    """
-
-    def __init__(self, *, call_id: str, result: str) -> None:
-        self.call_id = call_id
-        self.result = result
-
-
-def test_a_content_carrying_only_a_call_id_is_still_read() -> None:
-    """The duck-typing guard is `or`, not `and`, and a result content is why.
-
-    Found by mutation testing (2026-08-04): flipping
-    `hasattr(content, "arguments") or hasattr(content, "call_id")` to `and` survived every test of
-    this module. Under `and`, a function-result content — which has a `call_id` and no `arguments`
-    attribute — is skipped outright: no `tool_result` event, nothing appended to `outputs`, and
-    therefore no evidence for the answer verifier to score the answer against. Every citation in
-    that turn would read as fabricated.
-
-    That is the same species as the defect this module shipped on 2026-08-04, where a guard was
-    written against a stream shape somebody believed rather than one somebody had captured. So the
-    two shapes are asserted separately: a call announced from `arguments` alone, and a result read
-    from `call_id` alone.
-    """
-    trace = runner_trace.ToolCallTrace()
-    update = FakeUpdate()
-    update.contents = [_CallContent(name="find_notes", call_id="c1", arguments={"text": "x"})]
-    calls = fed(trace, update)
-    assert [event.tool for event in calls if isinstance(event, ToolCallEvent)] == ["find_notes"]
-
-    result_update = FakeUpdate()
-    result_update.contents = [_ResultOnlyContent(call_id="c1", result='[{"id": "note-a"}]')]
-    events = fed(trace, result_update)
-    results = [event for event in events if isinstance(event, ToolResultEvent)]
-    assert [event.tool for event in results] == ["find_notes"], (
-        "a result content carries no name — it is matched back to its call by id, and dropping it "
-        "would leave the turn with a call nothing ever answered"
-    )
-    assert trace.outputs == ['[{"id": "note-a"}]'], (
-        "the full result text is what the answer verifier scores against; without it every "
-        "citation in the turn reads as fabricated"
     )
 
 

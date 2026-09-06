@@ -23,18 +23,28 @@ def _restore_allowlist() -> Iterator[None]:
     """Snapshot and restore the config-derived allowlist around a test that mutates it.
 
     `_reset_for_tests` writes the module-global `_allowed`; without this, a later test in a full run
-    would inherit an emptied allowlist and refuse a legitimately-configured connector host.
+    would inherit an emptied allowlist and refuse a legitimately-configured connector host. Read
+    off `_allowed` directly, the way `_reset_for_tests` writes it: the public `allowed_hosts()`
+    that used to be read here said "for tests and diagnostics" and had no diagnostic caller, in a
+    module where the armed gauge reads the global itself.
     """
-    saved = netguard.allowed_hosts()
+    saved = netguard._allowed
     yield
     netguard._reset_for_tests(saved)
 
 
 def test_guard_is_armed_at_config_import() -> None:
-    """Importing config arms the guard, so it is a property of the system, not of a launcher."""
+    """Importing config arms the guard, so it is a property of the system, not of a launcher.
+
+    Read off `_armed` directly, for the reason the fixture above gives about `_allowed`: the public
+    `armed()` that used to be read here said "for the readiness gauge and tests" and the gauge does
+    not call it — `_publish_armed` binds a source closing over the global. A reader whose only
+    caller is this assertion is a claim that a surface exists, so it was deleted rather than kept
+    alive by the test that reads it.
+    """
     import chemclaw.core.config  # noqa: F401  (the import is the arming)
 
-    assert netguard.armed()
+    assert netguard._armed
 
 
 def test_a_non_allowlisted_host_is_refused() -> None:

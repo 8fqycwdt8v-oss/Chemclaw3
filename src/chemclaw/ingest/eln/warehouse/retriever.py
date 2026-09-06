@@ -240,7 +240,12 @@ class WarehouseVectorRetriever:
         returned **nothing at all** for every query, where before only the `where:` was ignored.
         `resolve_statement` enforces it instead, on a query already keyed to `top_k` rows.
         """
-        if not any(key in filters for key in self._vector.filter_columns):
+        # Truthiness, not presence, because `sql.vector_predicates` decides the same question that
+        # way: `gather_evidence` puts `tag` in `filters` whenever it is not `None`, so a caller
+        # passing `tag=""` — an ordinary thing to do with an optional string — took this branch and
+        # built a scope query carrying no predicate at all, enumerating the whole relation until it
+        # exceeded the cap and failed, telling the operator to narrow a filter the query never had.
+        if not any(filters.get(key) for key in self._vector.filter_columns):
             return None
         cap = settings.vector_store_max_scope_keys
         warehouse = self._connection()

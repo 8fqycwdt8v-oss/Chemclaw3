@@ -291,3 +291,80 @@ def test_an_unmeasurable_signal_is_absent_rather_than_scored_zero(tmp_path: Path
     # dropped run.
     assert published["answered"]["score"] == 1.0
     assert published["uncited_note_ids"]["score"] == 0.0
+
+
+def _publish_one(tmp_path: Path, name: str, **outcome: Any) -> dict[str, dict[str, Any]]:
+    """Publish a single-transcript run and return its evaluations by name.
+
+    One transcript per publish so an evaluation belongs to exactly one outcome without the test
+    having to re-join `experiment_run_id` back to a probe.
+    """
+    probe = load_probes(_PROBE_DIR)[0]
+    directory = tmp_path / name
+    directory.mkdir()
+    (directory / f"{probe.id}.json").write_text(
+        json.dumps(
+            {
+                "probe": probe.model_dump(),
+                "outcome": {
+                    "probe_id": probe.id,
+                    "section": probe.section,
+                    "persona": probe.persona,
+                    "bucket": probe.bucket,
+                    "question": probe.question,
+                    "latency_seconds": 1.5,
+                    **outcome,
+                },
+            }
+        )
+    )
+    client = _Client()
+    publish_run(directory, experiment_name="arm", client=client, probe_dir=_PROBE_DIR)
+    return {e["name"]: e for e in client.experiments.evaluations}
+
+
+def test_a_loud_failure_is_published_and_an_unobserved_one_is_not(tmp_path: Path) -> None:
+    """The `failed_loudly` guard and the value it published disagreed on both edges.
+
+    `failed_loudly` is `tools_failed or error_code`; the row was gated on
+    `error_code or transport_error`. So a turn whose tools fell over with **no** `error` event was
+    `True` and published nothing at all — the aggregate silently excluded exactly the runs it
+    counts — while a turn that died in transport was `False` and published
+
+        {'name': 'failed_loudly', 'score': 0.0, 'label': 'transport_error'}
+
+    "this run did not fail loudly", stamped with the name of the failure that killed it. Both are
+    the same defect as the one the test above records: a number published about something nobody
+    measured.
+
+    A transport death now publishes no `failed_loudly` row — the stream broke, so whether the
+    system announced its own failure was not observed, and `publish_run` already stamps the run
+    itself with `error=`. Every turn the harness *did* observe publishes one, so the aggregate is
+    the run's loud-failure rate rather than a constant 1.0 over the turns that carried an error
+    code.
+    """
+    broke = _publish_one(
+        tmp_path,
+        "tools-fell-over",
+        answer="the calculation could not be started",
+        answered=True,
+        tools_called=["compute_reaction_energy"],
+        tools_failed=["compute_reaction_energy"],
+        failed_loudly=True,
+    )
+    assert broke["failed_loudly"]["score"] == 1.0, (
+        "a turn whose tools fell over published no loud-failure row at all"
+    )
+    assert broke["failed_loudly"]["label"] == "tool_failed"
+    assert broke["failed_loudly"]["explanation"] == "compute_reaction_energy"
+
+    died = _publish_one(tmp_path, "died-in-transport", transport_error="ReadTimeout: stream died")
+    assert "failed_loudly" not in died, (
+        f"a turn nobody could observe published {died.get('failed_loudly')}"
+    )
+    # The measured signals still publish, so an absent evaluation is a scope and not a dropped run.
+    assert died["answered"]["score"] == 0.0
+
+    clean = _publish_one(tmp_path, "clean", answer="here it is", answered=True)
+    assert clean["failed_loudly"]["score"] == 0.0
+    assert clean["failed_loudly"]["label"] == "clean"

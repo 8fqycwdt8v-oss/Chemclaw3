@@ -348,3 +348,14 @@ def test_every_projected_scalar_is_registered_for_the_scalar_table() -> None:
             assert definition_for(site.property).scope_kind == "site"
         for point in record.points:
             assert definition_for(point.property).scope_kind == "point"
+        # The fourth scope, and the one the rule was written without: a ranked row's
+        # `score_property` is a foreign key into the same registry, and a species distribution
+        # scored its candidates with `population` — registered per conformer, so the column a
+        # consumer joins to decide where a quantity lives pointed at the wrong table.
+        for candidate in record.candidates:
+            if not candidate.score_property:
+                continue
+            assert definition_for(candidate.score_property).scope_kind == "candidate", (
+                f"{kind} scores a candidate with {candidate.score_property!r}, which the registry "
+                f"declares at {definition_for(candidate.score_property).scope_kind!r} scope"
+            )

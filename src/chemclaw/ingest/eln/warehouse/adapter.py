@@ -38,6 +38,7 @@ from chemclaw.ingest.eln.warehouse.expr import (
     render_template,
     resolve_path,
 )
+from chemclaw.ingest.rejections import record_refusals
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +60,11 @@ class WarehouseElnAdapter:
     """An `ElnAdapter` over a SQL warehouse, configured entirely by its binding.
 
     Built by the data-source registry from a manifest's `config:` block, so its constructor
-    signature *is* the manifest's schema. `name` is accepted and unused here — it exists so this
-    class and `WarehouseVectorRetriever` take identical keyword arguments, which they must: the
-    registry splats one `config` into whichever half it builds, and `make datasource-validate` binds
-    that same config against every declared half.
+    signature *is* the manifest's schema. `name` is the data source this adapter *is*: it names
+    every warning below and is the rejection ledger's `source`. It exists in this position so that
+    this class and `WarehouseVectorRetriever` take identical keyword arguments, which they must:
+    the registry splats one `config` into whichever half it builds, and `make datasource-validate`
+    binds that same config against every declared half.
     """
 
     def __init__(self, binding: dict[str, Any], name: str | None = None) -> None:
@@ -110,6 +112,10 @@ class WarehouseElnAdapter:
         seen again. `_page` therefore keeps reading *inside* the block, by the composite keyset
         `entry_statement` now orders on, until a row with a later watermark comes into view or the
         source runs out. See `_MAX_TIE_PAGES` for what happens when a block is too large to cross.
+
+        **A row this cannot turn into a `RawEntry` costs itself, not the fetch.** One row whose
+        bound `created_at` is NULL or unreadable is logged, written to the rejection ledger and
+        skipped; see the comment at the return for why raising there stopped the source for good.
 
         The residual, stated because it is real: the cursor is inclusive, so the block sitting *at*
         the cursor is re-read on every run — one row where the watermark is a timestamp, a whole
@@ -183,7 +189,27 @@ class WarehouseElnAdapter:
                 entry.relation,
             )
         await self._attach_related(warehouse, bundles)
-        return [self._raw_entry(key, bundle) for key, bundle in bundles.items()]
+        entries: list[RawEntry] = []
+        # entry key -> why it was refused. A row whose bound `created_at` is NULL, empty or
+        # unparseable costs itself and nothing else: `_raw_entry` used to raise straight out of
+        # this method, outside every per-entry handler `sync_entries` has, and `ElnMappingError`
+        # is non-retryable (`durable/publish._BAD_DATA_TYPES`) — so one draft row with no timestamp
+        # stopped the source, the cursor never advanced, and every later run re-fetched the same
+        # page and failed identically. The two file-drop adapters have always skipped-and-continued
+        # on the same fault.
+        refused: dict[str, str] = {}
+        for key, bundle in bundles.items():
+            try:
+                entries.append(self._raw_entry(key, bundle))
+            except ElnMappingError as exc:
+                logger.warning("%s: skipping entry %s: %s", self._name, key, exc)
+                refused[key] = str(exc)
+        # Nothing downstream can see these: they never become a `RawEntry`, so they are absent from
+        # `IngestSummary.rejected` that `durable/eln_sync.py` files for every other refusal
+        # (`D-2026-08-29-a-bound-derived-twice-is-two-bounds`). This is the same argument that keeps
+        # `ord_adapter`'s two fetch-time writers where they are.
+        await record_refusals(self._name, refused)
+        return entries
 
     def fetch_truncated(self) -> bool:
         """Whether the last fetch was cut short by its own `LIMIT` (the `BoundedFetch` contract)."""
@@ -208,7 +234,8 @@ class WarehouseElnAdapter:
         `entry_window`'s `max`: what decides whether a page got past the cursor is what the
         *warehouse* sorted on. A row with no usable timestamp at all reads as no later than the
         cursor, so the fetch keeps paging rather than concluding it has moved on off a value it
-        could not read; `_raw_entry` rejects that row a moment later, naming the column.
+        could not read; `fetch_new_entries` refuses that row a moment later, naming the column, and
+        returns the rest of the batch.
         """
         entry = self._ingest.entry
         if entry.modified_at and row.get(entry.modified_at) is not None:

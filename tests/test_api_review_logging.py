@@ -15,6 +15,7 @@ against the handler directly where the shape cannot be produced by any route thi
 """
 
 import asyncio
+import json
 import logging
 import re
 from pathlib import Path
@@ -222,6 +223,37 @@ def test_a_validation_error_location_cannot_carry_the_caller_s_own_key(
     (location,) = _field(logged, "first_locations")
     assert len(location) <= _MAX_LOGGED_CHARS + 16, f"{len(location)} characters of caller key"
     assert len(response.body) < 1_000, f"the body echoed {len(response.body)} bytes"
+
+
+def test_an_error_object_that_is_not_a_mapping_still_answers_the_caller(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The 422's two halves make the same defensive claim, and only one of them held.
+
+    `_render_errors` passes a non-mapping error through as it came — "not every producer of a
+    `RequestValidationError` is pydantic" — while the log line built above it read `e.get("loc")`
+    on the same objects, and it runs *first*. Measured: a bare string raised `AttributeError`
+    inside the handler, so the caller's malformed request would come back as a **500** with
+    `chemclaw_request_validation_failures_total` already counting a 422 nobody was sent.
+
+    Driven directly, like the `loc`-clipping test above and for the same reason: no route this app
+    ships produces this shape, and the property is the handler's or it is nothing's.
+    """
+    request = Request({"type": "http", "method": "POST", "path": "/sessions", "headers": []})
+
+    async def _drive() -> Any:
+        return await _validation_failed(request, RequestValidationError(["a bare string"]))
+
+    with caplog.at_level(logging.WARNING):
+        response = asyncio.run(_drive())
+
+    assert response.status_code == 422
+    assert json.loads(response.body)["detail"] == ["a bare string"]
+    (logged,) = [r for r in caplog.records if hasattr(r, "first_locations")]
+    assert _field(logged, "first_locations") == [], (
+        "an error object with no `loc` to read must drop out of the log line, not out of the "
+        "handler"
+    )
 
 
 # --------------------------------------------------------------------------------------------

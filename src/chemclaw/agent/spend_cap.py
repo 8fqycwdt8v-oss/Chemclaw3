@@ -114,26 +114,46 @@ def record_spend_cap(billed: int) -> None:
     readers that one does: `api/runner._spend_cap_event` asks whether the guard fired, and a test
     needs to say that it did without standing up a graph that genuinely overspends.
 
-    Public rather than reached for through `_mark`, which is what `tests/test_runner.py` did first.
-    The sibling module exposes a named recorder; a test file that has to know a private name to
-    exercise the front door is one a rename breaks for no reason, and the asymmetry between the two
-    caps was accidental rather than meant.
-    """
-    _mark(billed, capped=True)
+    **`enforce_spend_cap` is its production caller**, which is what makes the two caps the same
+    shape — `record_loop_cap` has always been called from the branch that fires, and this one was
+    reached for through a private helper instead, so the asymmetry the paragraph above calls
+    accidental was still there, inverted: the *test* used the public name and the enforcer did not.
 
+    `billed` is an authoritative absolute reading rather than one more call's bill — the larger of
+    the channel and the turn's own ledger, taken by the caller — so it is folded with `max` against
+    what `_meter` has accumulated instead of being added to it. A cap that fires must not book a
+    turn's whole spend twice.
 
-def _mark(billed: int, *, capped: bool = False) -> None:
-    """Record this turn's running spend on the watch, and whether the cap has now fired.
-
-    Mutated rather than rebound, for the reason `agent/loop_cap.py` gives its own watch: a stream
-    driven from a task of its own must still be able to see it.
+    Args:
+        billed: What the turn had billed when the cap fired.
     """
     watch = _watch.get()
     if watch is None:
         return
+    # Mutated rather than rebound, for the reason `agent/loop_cap.py` gives its own watch: a stream
+    # driven from a task of its own must still be able to see it.
     watch.billed = max(watch.billed, billed)
-    if capped:
-        watch.capped = True
+    watch.capped = True
+
+
+def _meter(billed: int) -> None:
+    """Add one model call's own bill to this turn's running total.
+
+    **Added, not `max`ed, because the writers are concurrent and each reports only itself.** Every
+    branch of a fan-out is handed the same `billed_tokens` base — `SubAgentMiddleware` builds each
+    helper's input from the parent's state — so the absolute totals they compute all sit one call's
+    bill above that common base, and keeping the largest of them counts *one* branch. Measured: a
+    parent call of 1,000 followed by two helpers billing 100 and 150 folds to 1,250 in the channel
+    `enforce_spend_cap` reads and read 1,150 on the watch, which is the number
+    `api/runner._spend_cap_event` puts in front of a chemist ("after billing {billed:,}") — so the
+    sentence explaining the refusal understated the spend at the moment it was supposed to explain
+    it. Adding each call's own bill is the same fold `state.TurnTotal` performs, arrived at from
+    the other side.
+    """
+    watch = _watch.get()
+    if watch is None:
+        return
+    watch.billed += billed
 
 
 @before_model(can_jump_to=["end"], state_schema=ChemclawState)
@@ -190,7 +210,7 @@ def enforce_spend_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] 
     if billed < budget:
         return None
     logger.warning("the turn hit its %d billed-token cap after %d tokens", budget, billed)
-    _mark(billed, capped=True)
+    record_spend_cap(billed)
     return {"jump_to": "end", "spend_capped": True}
 
 
@@ -246,7 +266,8 @@ class MeterTurnSpend(AgentMiddleware[Any, Any, Any]):
 
         Absolute rather than a delta, because that is what `TurnTotal`'s fold is defined against:
         it stores `base + max(value - base, 0)`, so a delta would read as a walk backwards and
-        contribute nothing.
+        contribute nothing. The ambient watch is the mirror image — it accumulates, so it is handed
+        this call's own bill and nothing else, and the two then agree on a fan-out.
 
         Guarded end to end. Metering is an observation, and an observation that ended a turn would
         invert this module's entire purpose — the guard exists to stop a turn *cheaply*, not to be
@@ -259,7 +280,10 @@ class MeterTurnSpend(AgentMiddleware[Any, Any, Any]):
                 return response
             prior = cast(int, request.state.get("billed_tokens", 0) or 0)
             total = int(prior) + billed
-            _mark(total)
+            # The channel gets the absolute total and the watch gets this call's own bill, because
+            # the two fold differently and each is given what its fold is defined against — see
+            # `TurnTotal` for the one and `_meter` for the other.
+            _meter(billed)
             return ExtendedModelResponse(
                 model_response=response, command=Command(update={"billed_tokens": total})
             )

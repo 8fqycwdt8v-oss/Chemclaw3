@@ -885,7 +885,7 @@ def _projection_stubs() -> list[Any]:
     async def _settle(_payload: Any) -> bool:
         return True
 
-    async def _remind(_request_id: str) -> None: ...
+    async def _remind(_request_id: str, _count: int = 0) -> None: ...
 
     async def _notify(_payload: Any) -> None: ...
 
@@ -895,3 +895,57 @@ def _projection_stubs() -> list[Any]:
         activity.defn(name="record_reminder_activity")(_remind),
         activity.defn(name="record_session_event_activity")(_notify),
     ]
+
+
+@pytest.mark.parametrize("n_rounds", [0, 1])
+def test_a_seed_batch_nobody_reports_ends_the_campaign_instead_of_failing_it(
+    monkeypatch: pytest.MonkeyPatch, n_rounds: int
+) -> None:
+    """The normal end of a plate wait nobody answered, and it used to be an internal error.
+
+    `_measure` returns `[]` on an expired wait and its docstring promises that "the caller sees a
+    campaign that ended with what it had". The loop has the guard that makes that true
+    (`if not measured: break`); the **seed** did not — so the one batch every campaign runs fell
+    through with an empty history into `best_of` ("no observations") at `n_rounds=0` or
+    `propose_next` ("needs at least 2 observations; seed first") at `n_rounds≥1`. Both raise,
+    `failure_exception_types=[Exception]` turns either into a workflow failure, and
+    `ConnectorJobWorkflow` pushes `job_failed` carrying a precondition message that names neither
+    the campaign nor the batch the chemist was asked for. Both round counts are driven because the
+    two took different raises out of the same hole.
+
+    The time-skipping server is what expires the wait: left idle it fast-forwards to the deadline,
+    which is exactly the campaign nobody reported.
+    """
+    queue = "test-bo-unanswered-seed"
+    monkeypatch.setattr(settings, "background_task_queue", queue)
+    monkeypatch.setattr(settings, "bo_measurement_deadline_days", 1.0)
+    spec = CampaignSpec(
+        problem=build_problem(load_dataset()),
+        objective_name=MEASURED_OBJECTIVE,
+        n_initial=4,
+        n_rounds=n_rounds,
+    )
+
+    async def _run() -> Any:
+        async with await start_env_or_skip() as env:
+            client: Client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue=queue,
+                workflows=[BoCampaignWorkflow, AwaitAnswerWorkflow],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+                activities=[*_BO_ACTIVITIES, *_projection_stubs()],
+            ):
+                return await client.execute_workflow(
+                    BoCampaignWorkflow.run,
+                    spec.model_dump(mode="json"),
+                    id=f"bo-unanswered-seed-{n_rounds}",
+                    task_queue=queue,
+                )
+
+    envelope = asyncio.run(_run())
+
+    assert "no evaluations" in envelope.summary
+    assert "seed batch of 4 condition(s) was never reported" in envelope.summary
+    assert envelope.data == {}, "there is no best point to report, so none is invented"
+    assert envelope.note is None

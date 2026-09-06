@@ -77,7 +77,9 @@ def _routing_identities(principal: Principal) -> list[str]:
     sources: the user principal name, the roles held bare, and the same roles with
     `GROUP_ROLE_PREFIX` stripped — a security group arrives prefixed and a deployment may route to
     the unprefixed group name. Anything `_may_answer` would accept must appear here, or a request
-    is answerable and invisible.
+    is answerable and invisible. The converse is not this function's job and cannot be: separation
+    of duties turns on the *kind* and the requester, which no routing query can express, so
+    `list_pending` runs the gate itself over what this widens to.
     """
     identities = [principal.upn, *principal.roles]
     identities += [
@@ -89,7 +91,7 @@ def _routing_identities(principal: Principal) -> list[str]:
 
 
 async def list_pending(principal: CurrentUser) -> PendingRequestsOut:
-    """What is waiting on you — every open request routed to you or to nobody in particular.
+    """What is waiting on you — every open request you may actually answer.
 
     The cross-conversation read, for the reason `GET /plans/pending` exists: a question raised in a
     turn the asker has closed lives only inside that turn otherwise, and the person who has to
@@ -101,9 +103,16 @@ async def list_pending(principal: CurrentUser) -> PendingRequestsOut:
     requests = await pending_store.open_requests(
         asked_of=principal.oid, identities=_routing_identities(principal)
     )
+    # **Through the gate, not merely through the routing.** `_routing_identities` is the mirror of
+    # one branch of `_may_answer` and the store knows nothing of the other: separation of duties
+    # refuses an `approval` its own requester *before* routing is consulted, so an approval Alice
+    # raised and routed to a group Alice is in sat in Alice's inbox and answered 403 when she
+    # clicked it. Filtering on the same predicate the answer route applies is what stops the two
+    # drifting — an inbox whose rows are unactionable is the failure an inbox exists to prevent.
+    answerable = [request for request in requests if _may_answer(principal, request)]
     return PendingRequestsOut(
-        requests=[PendingRequestOut(**request.model_dump()) for request in requests],
-        count=len(requests),
+        requests=[PendingRequestOut(**request.model_dump()) for request in answerable],
+        count=len(answerable),
     )
 
 

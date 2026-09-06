@@ -163,5 +163,11 @@ def direction_of(name: str) -> Direction:
 
 
 def registered_names() -> list[str]:
-    """The names of all registered metrics, sorted (for reports and the gate check)."""
+    """The names of all registered metrics, sorted — the registry's one public read surface.
+
+    Read by the suites that assert a metric is registered at all, and by nothing in `src/`: the
+    reports and the gate check this docstring used to name resolve metrics through `get_metric`,
+    whose own error message re-derives the same list from `_REGISTRY`. Kept as the public spelling
+    of that read rather than having four test files reach into the private dict.
+    """
     return sorted(_REGISTRY)

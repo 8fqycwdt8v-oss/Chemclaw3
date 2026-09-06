@@ -532,3 +532,84 @@ def test_the_startup_budget_is_materially_larger_than_the_polls() -> None:
         settings.connector_startup_health_timeout_seconds
         >= settings.connector_health_timeout_seconds * 2
     )
+
+
+async def _ok(reader: Any, writer: Any) -> None:
+    """A `/healthz` that answers 200 at once, so the endpoint half is the *healthy* one."""
+    try:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        await writer.drain()
+        writer.close()
+    except (OSError, asyncio.IncompleteReadError):  # pragma: no cover - the client hung up
+        pass
+
+
+def _http_and_jobs(name: str, port: int) -> str:
+    """The shipped shape this sweep had no verdict for: an endpoint *and* durable work.
+
+    `calc` (twelve jobs) and `bo` (one) are both this, which is 13 of the fleet's 14 declared jobs.
+    """
+    return _http_serving(name, port) + (
+        "jobs:\n"
+        f"  - name: run_{name}_job\n"
+        "    workflow: FixtureJobWorkflow\n"
+        "    summary: Run the job.\n"
+        "    description: A job whose worker fleet is the thing being probed.\n"
+    )
+
+
+def test_a_bundle_that_serves_an_endpoint_and_owns_jobs_has_its_queue_probed_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two questions are additive, and the worse answer is the verdict.
+
+    They used to be an `elif` on the health route, so a bundle with both halves was judged on its
+    endpoint alone and its queue was asked about by nobody — `connector-worker-calc` at zero
+    replicas behind a live MCP pod read as `healthy`, the gauge stayed at 0, and
+    `connectors_required` started a service whose every launched job would sit in a queue until the
+    job ceiling expired. The endpoint here answers 200 on a real socket, so the old code has a
+    verdict to report and reports the wrong one.
+    """
+
+    async def _measure() -> tuple[list[ConnectorHealth], _FakeClient]:
+        server = await asyncio.start_server(_ok, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        _bundles(tmp_path, monkeypatch, both=_http_and_jobs("both", port))
+        client = _broker(monkeypatch, pollers=0)
+        result = await probe_connectors()
+        server.close()
+        return result, client
+
+    result, client = asyncio.run(_measure())
+
+    (item,) = result  # one row per connector, not one per half
+    assert [req.task_queue.name for req in client.workflow_service.requests] == ["connector-both"]
+    assert item.state == "unpolled", "the endpoint answered for the whole bundle again"
+    assert item.unhealthy, "an unpolled queue must count in chemclaw_connectors_unhealthy"
+    assert "connector-both" in item.detail
+
+
+def test_a_dark_endpoint_still_decides_when_the_queue_half_is_the_healthy_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction, so the fold is "the worse half" rather than "the queue wins".
+
+    `_http`'s health route is a dark loopback port and the queue has a poller: the bundle is still
+    down, because a polled worker fleet does not make an MCP endpoint dialable.
+    """
+    _bundles(
+        tmp_path,
+        monkeypatch,
+        both=_http("both", health_route=True) + "jobs:\n"
+        "  - name: run_both_job\n"
+        "    workflow: FixtureJobWorkflow\n"
+        "    summary: Run the job.\n"
+        "    description: A job whose worker fleet is polled.\n",
+    )
+    _broker(monkeypatch, pollers=1)
+
+    (item,) = asyncio.run(probe_connectors())
+
+    assert item.state == "unreachable"
+    assert item.detail, "the endpoint's reason is what an operator acts on"

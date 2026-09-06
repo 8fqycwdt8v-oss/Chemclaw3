@@ -164,7 +164,8 @@ def _read_and_parse(ref: FileRef, max_bytes: int) -> _Parsed:
 
     Raises:
         ScannedDocumentError: A PDF with no text layer.
-        DocumentParseError: An unsupported format, or one the library could not open.
+        DocumentParseError: An unsupported format, one the library could not open, or one whose
+            text carries a character the index cannot store.
         OSError: The share could not be read at this path, or it became a symlink.
     """
     # `os.open` with the flag, not `Path.read_bytes`: the check and the read must be the same
@@ -184,6 +185,19 @@ def _read_and_parse(ref: FileRef, max_bytes: int) -> _Parsed:
         if descriptor >= 0:
             os.close(descriptor)
     parsed = parse_document(ref.path, raw)
+    # **Refused here, where the pass can absorb it.** A NUL byte is valid UTF-8, so
+    # `_parse_text`'s `errors="replace"` decode keeps it and `chunk_document`'s `.strip()` does not
+    # remove it — and Postgres refuses one in a `text` column outright. Left to the write it was a
+    # `psycopg.DataError` out of `DocumentIndex.upsert`, which has no handler and no per-file arm:
+    # the whole bounded pass died, taking the good documents already parsed in the same slice with
+    # it, and the crawl keeps no cross-run cursor, so every later run walked to the same file and
+    # died again. `DocumentParseError` is caught per file, so the share loses one document instead.
+    # The ELN tier states the same argument at `ingest/eln/records._reject_unstorable`.
+    if "\x00" in parsed.text:
+        raise DocumentParseError(
+            f"{ref.path} contains a NUL (0x00) byte at position {parsed.text.index(chr(0))}; a "
+            "document is stored in a Postgres text column, which cannot hold one"
+        )
     # The identity is the content, never the path — so four copies of one report collapse to one
     # document and a rename is free.
     #

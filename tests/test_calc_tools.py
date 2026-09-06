@@ -24,6 +24,7 @@ import chemclaw.connectors.calc.server.tools as calc_tools
 from chemclaw.core.config import settings
 from chemclaw.science.calc.store import InMemoryStore
 from tests.calc_server_fake import FAKE_VERSION, FakeCalcServer, install
+from tests.pg import migrated_db_or_skip
 
 
 @pytest.fixture
@@ -371,3 +372,27 @@ def test_a_measurement_with_no_stated_unit_is_refused_rather_than_stamped() -> N
     for spelling in ("PKA", "pka ", " Solubility"):
         with pytest.raises(ValueError, match="state the unit"):
             asyncio.run(calc_tools.report_measurement(spelling, "CCO", 15.9))
+
+
+def test_a_measurement_is_filed_under_the_name_the_ledger_reads_not_the_one_it_was_typed_as(
+    server: FakeCalcServer, shared_store: InMemoryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same normalisation, on the write rather than the unit gate.
+
+    The lookup above was normalised and the *write* was not, so `"PKA"` passed the unit check,
+    reconciled nothing (predictions are logged as `pka`), and was stored under a name no reader
+    asks for: `calculator_trust("pka")` never sees the row and `calculator_trust("PKA")` refuses
+    outright. The chemist was told "Nothing had predicted PKA for it yet", which is false — and
+    the calibration point is gone. A control that only covers the unit is not the control.
+    """
+    monkeypatch.setattr(settings, "calibration_enabled", True)
+
+    async def _run() -> tuple[str, int]:
+        await migrated_db_or_skip()
+        await calc_tools.predict_pka("CC(=O)O")  # logged as calc_type "pka"
+        said = await calc_tools.report_measurement("PKA", "CC(=O)O", 4.76, "pKa")
+        return said, (await calc_tools.calculator_trust("pka")).n
+
+    said, scored = asyncio.run(_run())
+    assert scored == 1, "the measurement was stored under a name the ledger cannot read"
+    assert "reconciled 1 prediction" in said

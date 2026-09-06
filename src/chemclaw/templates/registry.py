@@ -20,6 +20,7 @@ from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, create_model
+from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
@@ -28,9 +29,11 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_roles
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import CapabilityTool
+from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable.template_job import TemplateRunInput, TemplateWorkflow
 from chemclaw.templates.manifest import InputType, Template
 
@@ -169,6 +172,29 @@ def run_workflow_id(template: Template, inputs: dict[str, Any]) -> str:
     return f"template-{template.name}-{stable_hash([template.name, inputs])}"
 
 
+async def _still_running(handle: Any) -> bool:
+    """Whether a run this launcher rejoined is still executing, per the server.
+
+    Best-effort by construction: this is asked only to decide whether to *announce* a rejoined run,
+    so a describe that fails means the announcement is skipped and the caller still returns the id.
+    Raising here would turn a successful idempotent rejoin into a tool error over a question the
+    caller could live without an answer to.
+
+    **The same question `connectors/jobs.py` asks, and deliberately not the same function.**
+    `templates -> connectors` is not an edge this architecture has (`tests/test_layering.py`), and
+    a template launcher must not acquire one to ask a broker whether a run is open; the shared home
+    for it would be `core` or `durable`, which is a move rather than a fix and is recorded as such.
+    The counter is shared, because it counts the same event on the same dashboard.
+    """
+    try:
+        description = await handle.describe()
+    except Exception:
+        record_metric(lambda m: m.increment("chemclaw_rejoin_describe_failed_total"))
+        logger.debug("could not describe rejoined template run %s; not announcing it", handle.id)
+        return False
+    return bool(description.status == WorkflowExecutionStatus.RUNNING)
+
+
 def build_template_tool(template: Template) -> CapabilityTool:
     """Build the agent tool that starts one template run."""
     params_model = _params_model(template)
@@ -213,8 +239,33 @@ def build_template_tool(template: Template) -> CapabilityTool:
                 execution_timeout=timedelta(seconds=settings.template_run_timeout_seconds),
             )
         except WorkflowAlreadyStartedError:
+            # The identical run is already going, or already done: the idempotency contract
+            # succeeding. **Announced when it is still going**, which is the half this branch used
+            # to skip — it returned the id and told nobody, so no `JobSignal` reached the turn, the
+            # session's `started_jobs` stayed empty, `agent/job_results.py` had nothing to wait on,
+            # and the second chemist to ask for a running template was told "in progress" with no
+            # row a later `job_completed` could clear. That is the defect `connectors/jobs.py`
+            # documents having fixed for jobs, one seam over, unfixed here.
+            #
+            # `RUNNING` and not "not completed", for that launcher's reason: a run that failed, was
+            # cancelled or timed out will never emit the completion an announced row waits for.
+            if await _still_running(client.get_workflow_handle(workflow_id)):
+                record_job_started(workflow_id, f"template:{template.name}")
             return workflow_id
-        from chemclaw.core.turn_signals import record_job_started
+        except Exception as exc:
+            # `connect()` above frames an unreachable broker; this is the call *after* it — a
+            # queue with no worker, a transient RPC timeout, a serialization error — which escaped
+            # raw, so `surface_domain_errors` classified an `RPCError` as neither a `ChemclawError`
+            # nor a transport failure and the model was handed `unexpected_error_result()`. The
+            # sibling launcher's framing, with its promise kept as narrow: a connected client may
+            # have reached the server before failing, so this cannot say nothing started.
+            raise TemplateError(
+                f"the {template.name!r} template could not be confirmed as started "
+                f"({type(exc).__name__}); most likely nothing was queued, but this call cannot "
+                f"promise that either way. Check `get_durable_job_status({workflow_id!r})` before "
+                "relaunching, and if it truly did not start, the same call will work once the "
+                "fault clears."
+            ) from exc
 
         record_job_started(handle.id, f"template:{template.name}")
         return handle.id

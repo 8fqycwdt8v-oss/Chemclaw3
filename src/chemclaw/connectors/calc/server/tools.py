@@ -188,18 +188,20 @@ async def report_measurement(
         call will not help.
     """
     canonical = canonical_smiles(smiles)
+    # **The name this measurement is filed under, normalised once and used for every later use of
+    # it.** `property_name` is a model-supplied string, and normalising it for the lookup while
+    # storing the raw spelling put the row outside the ledger just as surely as skipping the
+    # lookup did: predictions are logged as `pka` by `_log_prediction`, so a measurement stored as
+    # `PKA` reconciles nothing, `calculator_trust("pka")` never sees it, and `calculator_trust`
+    # refuses `"PKA"` outright — the measurement is accepted, reported as recorded, and readable by
+    # nobody. Only the unit half of that was fixed the first time.
+    ledger_property = property_name.strip().lower()
     # The ledger's own unit for this property, and the check that the reported value is in it.
     # Before this the column existed, `record_observation` took the argument, and no caller ever
     # passed one — so every measurement this system has ever stored carried an empty unit and a
     # chemist reporting 0.5 mg/mL was indistinguishable from one reporting log S = 0.5
     # (D-2026-08-29-a-quantity-without-a-unit-is-a-number).
-    # **Normalised, because the new refusal below is gated on this lookup.** `property_name` is a
-    # model-supplied string this tool never validated, and an exact-match `get` meant `"PKA"` or a
-    # trailing space fell straight through the refusal *and* through `reconcile` — stored with the
-    # empty unit this whole control exists to eliminate, and unreadable afterwards because
-    # `calculator_trust` does validate the name. A bypass reachable by one capital letter is not a
-    # control.
-    _tool, ledger_unit = _CALIBRATED.get(property_name.strip().lower(), ("", ""))
+    _tool, ledger_unit = _CALIBRATED.get(ledger_property, ("", ""))
     if ledger_unit and not unit.strip():
         # Refuse rather than assume. The assumption is invisible in the data afterwards, and it is
         # wrong exactly when a chemist reports in the unit they measure in rather than the one this
@@ -215,7 +217,7 @@ async def report_measurement(
         # being told the measurement was recorded.
         measured_value = reconcile(measured_value, unit, ledger_unit)
     matched = await record_observation(
-        property_name,
+        ledger_property,
         stable_hash(canonical),
         measured_value,
         source="chemist-reported",
@@ -239,7 +241,7 @@ async def report_measurement(
     # (DARK-9). It is now stored on its own, and the next prediction of the same thing scores
     # against it — which is worth saying, because it is the reason reporting it was not wasted.
     return (
-        f"Recorded for {canonical}. Nothing had predicted {property_name} for it yet, so no "
+        f"Recorded for {canonical}. Nothing had predicted {ledger_property} for it yet, so no "
         "prediction was scored — the measurement is kept and the next prediction of it will be "
         "scored against this value."
     )

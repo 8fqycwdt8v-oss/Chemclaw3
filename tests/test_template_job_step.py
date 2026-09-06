@@ -37,15 +37,15 @@ from chemclaw.agent.authz import AuthorizationError
 from chemclaw.connectors.jobs import ConnectorJobError
 from chemclaw.connectors.manifest import JobSpec
 from chemclaw.connectors.registry import ConnectorError, enabled, find_job
-from chemclaw.core.config import _WRAPPER_FINISH_STEPS, settings
+from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
 from chemclaw.core.logging import ContextFilter
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.durable import template_activities
 from chemclaw.durable.connector_job import (
-    _FINISH_STEPS,
     ConnectorJobInput,
     child_execution_timeout,
+    finish_headroom,
     wrapper_execution_timeout,
 )
 from chemclaw.durable.registry import registered_activities
@@ -656,26 +656,60 @@ def test_the_run_ceiling_must_be_able_to_contain_one_job_step() -> None:
     )
 
 
+def test_the_wrappers_headroom_covers_what_its_post_child_steps_may_spend() -> None:
+    """The reservation is the steps' own budgets, not a count of them times one activity.
+
+    It was `activity_timeout_seconds * 4` — 120 s at the shipped defaults — while `_record_run` and
+    the failure push-back each pass `light_write_queue_wait_timeout()` (900 s) as their
+    `schedule_to_start`, and `_publish_result` and the note PR-gate each pass core's hour. So the
+    wrapper reserved less for its whole failure path than either half of it was permitted to wait,
+    and a job that hit its own ceiling was reaped before it could record the failure or say so.
+
+    Asserted against the call sites' own helpers rather than against a literal, because the number
+    is not the invariant: a step whose bound moves must move this with it, and a restated sum is
+    exactly the drift the count above already suffered.
+    """
+    from datetime import timedelta
+
+    from chemclaw.durable.publish import light_write_queue_wait_timeout, queue_wait_timeout
+
+    assert finish_headroom() >= (
+        # `_settle_effect`, `_publish_result` and the note PR-gate take core's hour...
+        queue_wait_timeout() * 3
+        # ...the durable record and the push-back take the tighter end-of-job bound...
+        + light_write_queue_wait_timeout() * 2
+        # ...and each of the five then does its own work.
+        + timedelta(
+            seconds=settings.activity_timeout_seconds * 2
+            + settings.job_record_timeout_seconds
+            + settings.result_publish_timeout_seconds
+            + settings.note_write_timeout_seconds
+        )
+    )
+    assert wrapper_execution_timeout() == (
+        timedelta(seconds=settings.connector_job_timeout_seconds) + finish_headroom()
+    )
+
+
 def test_the_configs_restatement_of_the_wrapper_ceiling_cannot_drift() -> None:
-    """`core` may not import `durable`, so the config restates `_FINISH_STEPS`. This pins the pair.
+    """`core` may not import `durable`, so the config restates the wrapper's bound. Pins the pair.
 
     `tests/test_layering.py` enforces that `chemclaw.core` imports no sibling, so the validator
     above cannot call `wrapper_execution_timeout()` and has to spell its arithmetic out again. A
-    restatement nothing checks is the duplication moved rather than removed: add a fifth
-    post-child step to `ConnectorJobWorkflow` and the validator would go on clearing a bound that
-    is 30 s short, which is exactly the silent inversion it was written to end.
+    restatement nothing checks is the duplication moved rather than removed: the restatement was a
+    step *count*, and when the count and the unit both turned out to be wrong the validator went on
+    clearing a bound 12,810 s short — the silent inversion it was written to end.
 
-    Asserted twice on purpose. The constants must agree — that is the readable failure — and the
-    whole identity must hold, so that a change to the *shape* of `wrapper_execution_timeout` (a new
-    term, a different budget) is caught too and not just a change to its count.
+    Driven against the validator rather than against a shared constant, which is what this test
+    used to compare. Two restatements can agree with each other and both be wrong about the
+    wrapper; what cannot drift is whether `Settings` actually refuses a run ceiling that a `job`
+    step can outlive, so that is what is asked — with the live function supplying the number.
     """
-    assert _WRAPPER_FINISH_STEPS == _FINISH_STEPS, (
-        "core/config restates durable/connector_job.py::_FINISH_STEPS because it may not import it"
-    )
-    assert wrapper_execution_timeout().total_seconds() == (
-        settings.connector_job_timeout_seconds
-        + settings.activity_timeout_seconds * _WRAPPER_FINISH_STEPS
-    )
+    from chemclaw.core.config import Settings
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(template_run_timeout_seconds=wrapper_execution_timeout().total_seconds())
+    assert "template_run_timeout_seconds" in str(caught.value)
 
 
 def test_a_failed_template_step_wakes_the_session_and_names_which_step(

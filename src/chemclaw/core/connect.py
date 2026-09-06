@@ -156,6 +156,18 @@ def signature_mismatch(driver: Any, connection: Mapping[str, Any]) -> str:
 
     Values are irrelevant here and are bound as empty strings: this asks what the callable
     *accepts*, with nothing connected and no credential read.
+
+    **A driver whose signature cannot be read is "nothing to say", not a failure**, and the two
+    steps are separated because they fail with different exception types. `inspect.signature`
+    raises `ValueError` — not `TypeError` — for a callable with no introspectable signature, which
+    is the ordinary shape of a C `connect`: `sqlite3.connect` and `duckdb.connect` both raise it,
+    and a DuckDB export is one of the databases the module docstring's generality claim names. One
+    `except TypeError` around both steps let that `ValueError` out of here unnamed — past
+    `open_connection`'s `error` parameter, which exists precisely so a broken binding fails the
+    ingest seam as `BindingError` and the publish seam as `SinkConnectionError`, and out of `make
+    datasource-validate` / `make sink-validate` as a traceback naming neither the manifest nor the
+    driver. Returning empty says only what is true: this check is an offline convenience, and a
+    driver that genuinely refuses a keyword still refuses it at construction.
     """
     options = {
         key[: -len(ENV_SUFFIX)] if key.endswith(ENV_SUFFIX) else key: ""
@@ -163,7 +175,11 @@ def signature_mismatch(driver: Any, connection: Mapping[str, Any]) -> str:
         if key != "driver"
     }
     try:
-        inspect.signature(driver).bind(**options)
+        signature = inspect.signature(driver)
+    except (TypeError, ValueError):
+        return ""
+    try:
+        signature.bind(**options)
     except TypeError as exc:
         return f"does not accept its block ({sorted(options)}): {exc}"
     return ""

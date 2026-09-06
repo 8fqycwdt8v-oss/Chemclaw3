@@ -4,8 +4,8 @@
 docstring says it will stay that way — "never a whole evidence sweep streamed to a browser". The
 consequence was that everything a tool actually *returned* reached the chemist as prose the model
 wrote about it: a hazard screen's severities and citations, a charge table's rows, a solvent
-ranking. The full text already existed at emit time (`api/runner_trace.py::_result_text`,
-"Untruncated on purpose") and was dropped on the floor once the event was built.
+ranking. The full text already existed at emit time — `ToolCallTrace.returned` is handed the whole
+result and truncates only the preview — and was dropped on the floor once the event was built.
 
 This is the other half of the split the preview created. The stream keeps its budget — the event
 carries a *reference*, not a payload — and a surface that decides to render one result pulls that

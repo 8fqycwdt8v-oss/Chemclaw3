@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 from langchain_core.language_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from chemclaw.agent import plan_approval_store as store_module
 from chemclaw.agent import plan_state
@@ -95,22 +95,47 @@ def test_message_flag_parses_single_shot() -> None:
 
 
 def test_converse_returns_the_final_assistant_text() -> None:
-    """One turn returns the last message's text (graph path, no LLM).
+    """One turn returns the last *assistant* message's text (graph path, no LLM).
 
-    The answer is the *last* message rather than a single `response.text`, because a graph returns
-    its whole message list — so a turn that called tools ends with the model's reply after them,
-    and reading anything but the tail would surface a tool result as the answer.
+    The answer is a message rather than a single `response.text`, because a graph returns its whole
+    message list — and it is the last `AIMessage` rather than the tail, because the tail is not
+    always one. Both caps end a turn from `before_model`, which runs after the tool node, so a
+    capped turn ends on a `ToolMessage`; this test's own docstring used to argue that reading the
+    tail was what *stopped* a tool result surfacing as the answer, which is the reasoning that let
+    one through. See `test_a_capped_turn_never_answers_with_a_tool_result` below.
     """
-
-    class _Message:
-        content = "  55% yield  "
 
     class _Agent:
         async def ainvoke(self, state: dict[str, object], _config: object) -> dict[str, object]:
             assert state["messages"] == [("user", "hi")]
-            return {"messages": [_Message()]}
+            return {"messages": [AIMessage(content="  55% yield  ")]}
 
     assert asyncio.run(cli.converse(_Agent(), "hi")).strip() == "55% yield"
+
+
+def test_a_capped_turn_never_answers_with_a_tool_result() -> None:
+    """What the chemist is shown when a cap stops the loop: prose, or nothing — never a payload.
+
+    `cli/chat.py` prints what `converse` returns, and both caps jump to `end` from `before_model`,
+    which runs *after* the tools node — so a capped turn's message list deterministically ends on a
+    `ToolMessage`, for any cap at all. Measured before the fix on the compiled graph at
+    `harness_max_loop_iterations=3`: the CLI printed `No files found`, the `ls` tool's own body, as
+    the agent's answer.
+    """
+
+    class _Agent:
+        async def ainvoke(self, state: dict[str, object], _config: object) -> dict[str, object]:
+            return {
+                "messages": [
+                    AIMessage(
+                        content="checking the notes",
+                        tool_calls=[{"name": "ls", "args": {}, "id": "call-1"}],
+                    ),
+                    ToolMessage(content="No files found", tool_call_id="call-1"),
+                ]
+            }
+
+    assert asyncio.run(cli.converse(_Agent(), "hi")) == "checking the notes"
 
 
 def test_successive_turns_continue_one_thread() -> None:

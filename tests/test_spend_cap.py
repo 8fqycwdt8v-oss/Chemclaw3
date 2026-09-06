@@ -22,18 +22,20 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain.agents.middleware import ModelRequest
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.spend_cap import (
+    MeterTurnSpend,
     begin_spend_watch,
     end_spend_watch,
     spend_capped,
     spend_hit_cap,
     turn_billed_tokens,
 )
-from chemclaw.agent.state import turn_input
+from chemclaw.agent.state import TurnTotal, turn_input
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.tool_registry import registered_tool_names
@@ -505,3 +507,87 @@ def test_the_cap_still_binds_with_no_turn_ledger_at_all(monkeypatch: pytest.Monk
     result = asyncio.run(graph.ainvoke(turn_input("hello")))
 
     assert spend_capped(result)
+
+
+# --- the ambient half: what the chemist is told the turn spent -----------------------------------
+
+
+def _request(billed: int) -> ModelRequest[Any]:
+    """A model request whose state carries the `billed_tokens` a branch was handed."""
+    return ModelRequest(
+        model=None,  # type: ignore[arg-type]
+        system_prompt=None,
+        messages=[],
+        tool_choice=None,
+        tools=[],
+        response_format=None,
+        state={"billed_tokens": billed},  # type: ignore[arg-type]
+        runtime=None,
+    )
+
+
+def test_a_fan_outs_watch_agrees_with_the_channel_the_cap_reads(watch: Any) -> None:
+    """The ambient total and the state channel must fold a fan-out to the same number.
+
+    They did not. Each branch of a fan-out is handed the *same* `billed_tokens` base —
+    `SubAgentMiddleware` builds each helper's input from the parent's state — so the absolute
+    totals the branches compute all sit one call's bill above that common base. `TurnTotal` folds
+    those additively, by construction; the watch took the largest, so it counted one branch.
+    Measured: a parent call of 1,000 and two helpers billing 100 and 150 gave 1,250 in the channel
+    and **1,150** on the watch — and the watch is the number `api/runner._spend_cap_event` puts in
+    front of a chemist ("after billing {billed:,}"), so the sentence explaining the refusal
+    understated the spend at the moment it exists to explain it.
+
+    Driven through the real middleware and the real channel rather than a compiled fan-out, because
+    what is under test is the *fold*: `tests/test_subagents.py` is where two `task` calls in one
+    superstep are actually driven.
+    """
+    meter = MeterTurnSpend()
+    channel = TurnTotal(int)
+
+    parent = meter.wrap_model_call(_request(0), lambda _r: _billing(1_000)[0])
+    channel.update([parent.command.update["billed_tokens"]])
+    base = channel.get()
+    branches = [
+        meter.wrap_model_call(_request(base), lambda _r: _billing(100)[0]),
+        meter.wrap_model_call(_request(base), lambda _r: _billing(150)[0]),
+    ]
+    channel.update([branch.command.update["billed_tokens"] for branch in branches])
+
+    assert channel.get() == 1_250
+    assert turn_billed_tokens() == channel.get(), (
+        "the chemist is told a different number from the one the cap enforces against"
+    )
+
+
+def test_each_cap_marks_its_watch_through_its_own_public_recorder() -> None:
+    """`enforce_spend_cap` records the cap the way `enforce_loop_cap` does — through the recorder.
+
+    `record_spend_cap` is documented as the public counterpart to `record_loop_cap` and as what
+    `api/runner._spend_cap_event` reads the result of, and it had **no caller in `src/` at all**:
+    the enforcer marked the watch through a private helper instead, so the only thing exercising
+    the public name was `tests/test_runner.py`. That is the `map_to_hpc_identity` shape this
+    repository deletes on sight — a named entry point that looks like the path and is not — and it
+    is worth an assertion rather than a deletion because the runner genuinely needs a mark and the
+    loop cap's own enforcer already produces one this way.
+    """
+    sources = {
+        "spend": (Path("src/chemclaw/agent/spend_cap.py"), "enforce_spend_cap", "record_spend_cap"),
+        "loop": (Path("src/chemclaw/agent/loop_cap.py"), "enforce_loop_cap", "record_loop_cap"),
+    }
+    for cap, (module, enforcer, recorder) in sources.items():
+        tree = ast.parse(module.read_text("utf-8"))
+        body = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == enforcer
+        )
+        called = {
+            node.func.id
+            for node in ast.walk(body)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert recorder in called, (
+            f"the {cap} cap's enforcer does not go through {recorder}(), so that recorder has no "
+            "producer and the runner's reader is fed by something else"
+        )

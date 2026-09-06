@@ -307,13 +307,17 @@ def test_a_cleared_result_forgives_exactly_once_per_turn() -> None:
 
     token = begin_call_watch()
     try:
-        assert forget_calls([("call-a", "find_past_jobs", {"q": "suzuki"})]) == 1
+        # Nothing to read but the effect: `forget_calls` returns nothing at all, because the
+        # caller its count was documented for discarded it and asks the turn watch instead. That it
+        # is now a `-> None` is what `tests/test_upstream_surface.py`-style absence would pin; here
+        # the point is only that the clearing still happens.
+        forget_calls([("call-a", "find_past_jobs", {"q": "suzuki"})])
 
         assert count_call("find_past_jobs", {"q": "suzuki"}) is None
         # The next model call re-derives the same cleared result. Sighted already: no forgiveness.
-        assert forget_calls([("call-a", "find_past_jobs", {"q": "suzuki"})]) == 0
+        forget_calls([("call-a", "find_past_jobs", {"q": "suzuki"})])
         assert count_call("find_past_jobs", {"q": "suzuki"}) is None
-        assert forget_calls([("call-a", "find_past_jobs", {"q": "suzuki"})]) == 0
+        forget_calls([("call-a", "find_past_jobs", {"q": "suzuki"})])
         assert isinstance(count_call("find_past_jobs", {"q": "suzuki"}), RepeatedCallRefusal), (
             "re-sighting the same cleared result kept resetting the counter; the guard is disarmed"
         )

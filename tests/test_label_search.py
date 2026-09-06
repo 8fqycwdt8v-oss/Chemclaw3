@@ -371,6 +371,40 @@ def test_q4_reactions_whose_product_matches_a_smarts() -> None:
     asyncio.run(_run())
 
 
+def test_a_corpus_sitting_exactly_on_the_cap_is_not_reported_as_truncated() -> None:
+    """Truncation is observed by reading one row past the cap, never inferred from `len == cap`.
+
+    `len(candidates) == limit` cannot tell "there were more" from "that was all of them", so a
+    screen whose matches landed exactly on the cap returned `truncated=True` with nothing cut —
+    and `reactions_with_product_substructure` folds that flag into `PrecedentSearch.truncated`,
+    whose verdict then tells a chemist their complete answer is "a sample rather than the complete
+    set". `molfp.search` reads one row past its own cap for exactly this reason and says so in a
+    comment; this path inferred instead.
+
+    Two selenides rather than the aromatics the tests above use: the screen runs against whatever
+    else the shared database holds, and a query only these rows can match is the only way to assert
+    a *count* rather than a membership.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        molecules = CorpusMolecules()
+        corpus = ["C[Se]C", "CC[Se]C"]
+        await molecules.add_many(corpus)
+        try:
+            exactly, truncated = await molecules.containing("[#34]", 2)
+            assert sorted(exactly) == sorted(corpus)
+            assert truncated is False, "a complete answer was reported as a sample"
+
+            capped, truncated = await molecules.containing("[#34]", 1)
+            assert len(capped) == 1
+            assert truncated is True, "a screen that really did cut a row said it had not"
+        finally:
+            await _drop_corpus_molecules(corpus)
+
+    asyncio.run(_run())
+
+
 def test_the_corpus_molecule_table_is_the_fingerprint_store_pointed_elsewhere() -> None:
     """No new similarity code: `PostgresFingerprintStore` is already table-parameterised."""
 

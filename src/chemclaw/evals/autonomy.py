@@ -282,7 +282,11 @@ def turn_cost_ratio(case: EvalCase) -> MetricResult:
         raise MetricError(f"output.turns is not a list of turn costs: {exc}") from exc
 
     baseline = (case.reference or {}).get("baseline_tokens")
-    if not isinstance(baseline, (int, float)) or baseline <= 0:
+    # Bools are refused ahead of the numeric test, for the reason `metrics._scalar` states one file
+    # over: YAML parses `yes`/`no` as bools, `bool` is a subclass of `int`, and `baseline_tokens:
+    # yes` therefore passed this check as a baseline of 1 — scoring a 1,100-token run at 1100.0 and
+    # writing that into the drift band `make eval-baseline-check` watches.
+    if isinstance(baseline, bool) or not isinstance(baseline, (int, float)) or baseline <= 0:
         raise MetricError("reference.baseline_tokens must be a positive number of billed tokens")
 
     billed = sum(_billed_tokens(turn) for turn in turns)

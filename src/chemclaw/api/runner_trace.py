@@ -1,35 +1,38 @@
-"""Reading a turn's streamed updates: tool-call reassembly and the approval prompt.
+"""Reading a turn's tool calls: the events a call and its result become.
 
-Everything here is a function of the provider-shaped objects `chemclaw.api.runner` receives from
-`agent.run` and of what the caller injected — **no ambient state, no session, no contextvars**. The
-wire budgets it applies are read from `settings` rather than written as literals, which is the
-repo's rule for a threshold and does not make the functions impure: an ENV value is a constant of
-the process, not state a turn carries. That is why it lives beside the runner
-rather than inside it: the runner's own module is a lifecycle (contextvars, an `AsyncExitStack`, a
-rollback), and this is the one part of the per-turn path that can be exercised by handing it a
-content object and comparing the events that come back.
+Everything here is a function of what the graph stream hands over and of what the caller injected —
+**no ambient state, no session, no contextvars**. The wire budgets it applies are read from
+`settings` rather than written as literals, which is the repo's rule for a threshold and does not
+make the functions impure: an ENV value is a constant of the process, not state a turn carries.
+That is why it lives beside the runner rather than inside it: the runner's own module is a
+lifecycle (contextvars, an `AsyncExitStack`, a rollback), and this is the one part of the per-turn
+path that can be exercised by handing it a call and comparing the events that come back.
 
-**`feed` is a coroutine and does one write**, which is the one thing here that is not pure and is
-worth stating rather than hiding. A tool result is now persisted so a surface can fetch the whole
-of it (`api/tool_results.py`), and the write has to happen *before* the event naming it is yielded
-— announcing a ref and then storing the bytes leaves a window in which a client that follows the
-ref finds nothing. The store is reached through an injected `ResultSink`, not through the session
-id or a contextvar, so the sentence above stays literally true: this module still does not know
-what a session is, and a trace built with no sink (every test that does not care, the CLI paths)
-behaves exactly as it did.
+**`returned` is a coroutine and does one write**, which is the one thing here that is not pure and
+is worth stating rather than hiding. A tool result is persisted so a surface can fetch the whole of
+it (`api/tool_results.py`), and the write has to happen *before* the event naming it is yielded —
+announcing a ref and then storing the bytes leaves a window in which a client that follows the ref
+finds nothing. The store is reached through an injected `ResultSink`, not through the session id or
+a contextvar, so the sentence above stays literally true: this module still does not know what a
+session is, and a trace built with no sink (every test that does not care, the CLI paths) behaves
+exactly as it did.
 
-Duck-typed throughout, deliberately. A provider's function-call and function-result content
-classes are rarely stable top-level exports and their shape varies by version — the previous
-engine's were not, which is what this was written against — so these match on structure (a
-`call_id`/`arguments` pair, a result-bearing attribute) rather than importing a concrete type.
+**There is no reassembly here any more, and this docstring used to say there was.** `feed`, the
+`_names`/`_fragments` buffers it filled and the `flush` that closed out a call whose arguments
+ended the stream were written against the previous engine's streamed content shape — a name on one
+content, then argument fragments carrying only a `call_id` (D-138, D-159). LangGraph's `updates`
+stream hands a *finished* `tool_calls` list over, and `api/graph_stream.py` deliberately does not
+read the fragmented `tool_call_chunks` off the token stream — its own docstring gives the reason,
+which is the two live defects that reassembly cost. So nothing in `src/` had called `feed` since
+that rebuild, `flush()` could only ever return `[]` (it was iterated on every turn), and the
+paragraph above named `feed` as the place the one write happens while the write was in `returned`.
+Whoever adds a provider that streams argument fragments adds the reassembly back with it; nothing
+else in this module changes.
 """
 
-import json
 import logging
-from collections.abc import Mapping
-from typing import Any
 
-from chemclaw.api.events import Event, ResultValue, ToolCallEvent, ToolResultEvent
+from chemclaw.api.events import ResultValue, ToolCallEvent, ToolResultEvent
 from chemclaw.api.tool_results import ResultSink
 from chemclaw.core.config import settings
 from chemclaw.core.quantities import labelled_values, returned_values
@@ -46,44 +49,14 @@ logger = logging.getLogger(__name__)
 
 
 class ToolCallTrace:
-    """Reassemble a streamed function call, so `tool_call` can carry the arguments it promises.
+    """One turn's tool calls and results, as the events a surface renders and the evidence it left.
 
-    A streamed call does not arrive as one object. The provider sends the *name* first, on a
-    content whose `arguments` is still empty, and then streams the argument JSON as fragments on
-    further contents that carry only the `call_id` — no name. Reading name-and-arguments off a
-    single content, as this did, therefore matched exactly the one content that never has any
-    arguments, and skipped every fragment for want of a name: `ToolCallEvent.arguments` was empty
-    on every call ever emitted, and could not have been anything else (D-138). The field is
-    documented as "a short argument preview" and read by the UI trace, so this was a promise the
-    stream never kept.
+    Two methods and no state machine: `issued` announces a call the graph has already assembled,
+    `returned` reports the result that answers it. They are matched by the provider's `call_id`,
+    which is why `_issued` outlives the call — the name is what the result event reports, and a
+    `ToolMessage` does not carry it.
 
-    Fragments for one call arrive contiguously, so a call is complete once an update goes by
-    without adding to it — that is the flush condition, and it needs no knowledge of which
-    content type terminates a call. The event therefore lands slightly later than before: after
-    the arguments rather than after the name. That is the more truthful order anyway, because a
-    tool cannot run before its arguments are complete.
-
-    **That flush condition was still one step too late** (D-159). For a streamed call the next
-    update to arrive is the one carrying the call's *result* — the provider finishes the argument
-    stream, the framework runs the tool, and only then does anything else come down the wire. So
-    "an update went by without adding to it" fired after execution, and the trace announced
-    `predict_pka(...)` once the twenty seconds were already spent. From the chemist's side a
-    working calculation and a hung server were the same thing.
-
-    So a call now completes the moment its accumulated arguments **parse as JSON**, which is
-    exactly when the provider has finished sending them and before the tool is invoked. No new
-    provider signal is needed and D-138's promise is kept: the event still carries the whole
-    argument preview, it just no longer waits for the result to prove the arguments ended. The
-    update-went-by rule stays as the fallback for arguments that never parse (a provider that
-    streams something other than JSON) so nothing can be stranded.
-
-    Results are matched back by `call_id` and emitted as `ToolResultEvent`, which is why
-    `_names` outlives the flush: the name is what the result event reports, and it is not on the
-    result content.
-
-    Still duck-typed: a function-call content class is rarely a stable top-level export and its
-    shape varies by version, so this matches on structure (a `call_id`/`arguments` pair) rather
-    than importing a concrete type.
+    One per turn, because every field is scoped to that turn.
     """
 
     def __init__(self, sink: ResultSink | None = None) -> None:
@@ -96,8 +69,6 @@ class ToolCallTrace:
         sessions — see the module docstring.
         """
         self._sink = sink
-        self._names: dict[str, str] = {}
-        self._fragments: dict[str, list[str]] = {}
         # The name of every call already announced, kept so its result can be reported under the
         # same name. Bounded by the calls in one turn, which the loop cap already bounds.
         self._issued: dict[str, str] = {}
@@ -121,89 +92,13 @@ class ToolCallTrace:
         """
         return list(self._issued.values())
 
-    async def feed(self, update: Any) -> list[Event]:
-        """Take one streamed update; return the calls it issued and the results it returned.
-
-        A coroutine because storing a result is a database write and it has to complete *before*
-        the event naming it is handed back — see the module docstring. With no sink there is
-        nothing to await and this is a synchronous function wearing `async`.
-        """
-        growing: set[str] = set()
-        done: set[str] = set()
-        results: list[Event] = []
-        for content in getattr(update, "contents", None) or []:
-            if not (hasattr(content, "arguments") or hasattr(content, "call_id")):
-                continue
-            name = str(getattr(content, "name", "") or "")
-            key = str(getattr(content, "call_id", "") or "") or name
-            if not key:
-                continue
-            if name:
-                self._names.setdefault(key, name)
-            if key not in self._names and key not in self._issued:
-                continue  # a fragment for a call whose opening content we never saw
-            arguments = getattr(content, "arguments", None)
-            if arguments is None:
-                # The call id with no arguments field at all: this is the call's *result* coming
-                # back, so it must not count as the call still growing. Note the test is `is
-                # None` and not falsiness — an empty string is a real fragment of the argument
-                # stream, and treating it as the end flushed the call before its arguments had
-                # arrived, which is how this reached a second live run still empty.
-                text = _result_text(content)
-                if text is not None:
-                    results.append(await self.returned(key, text))
-                continue
-            if isinstance(arguments, Mapping) and arguments:
-                # A structured argument object: the call arrived whole rather than streamed, so it
-                # is finished now, and waiting would only delay it behind the next update's text.
-                #
-                # **The test is the argument's type, not the presence of a name**, and that
-                # distinction was measured rather than reasoned. This branch used to read
-                # `if name and arguments:` on the stated assumption that "the streamed shape never
-                # looks like this — its named content carries empty arguments and its fragments
-                # carry no name". True of Anthropic. False of the OpenAI Responses API, which puts
-                # the name on *every* `response.function_call_arguments.delta` — so each fragment
-                # matched, overwrote the ones before it, and flushed. One eight-fragment call
-                # announced **ten `tool_call` events against one `tool_result`**, the first
-                # carrying `{"t` as if it were the whole argument document
-                # (`docs/archive/storm-2026-08-04.md`).
-                #
-                # A name says nothing about completeness; only the arguments do. A string is
-                # therefore always accumulated below and finished by `_arguments_complete`, which
-                # closes a single complete fragment on the same update anyway — so the whole-call
-                # case that genuinely sends a string loses nothing.
-                self._fragments[key] = [json.dumps(arguments)]
-                done.add(key)
-            else:
-                # Only the streamed shape reaches here: the whole-object case returned above, so a
-                # non-empty `Mapping` is impossible in this branch. It used to be tested for again
-                # anyway, and the 2026-08-05 review enumerated the input space to show that no value
-                # takes it.
-                fragments = self._fragments.setdefault(key, [])
-                if isinstance(arguments, str) and arguments:
-                    fragments.append(arguments)
-            growing.add(key)
-            if _arguments_complete(self._fragments.get(key)):
-                # The provider has finished sending this call's arguments, so the tool is about
-                # to run. Announcing now is the whole point of D-159: waiting for the next update
-                # means waiting for the result, and the wait between them is the part worth
-                # showing.
-                done.add(key)
-        return [*self._take((set(self._fragments) - growing) | done), *results]
-
-    def flush(self) -> list[Event]:
-        """Emit whatever is still open — the stream ended before an untouched update arrived."""
-        return self._take(set(self._fragments))
-
     def issued(self, key: str, tool: str, arguments: str) -> ToolCallEvent:
         """Announce one *complete* call — the decision, with no reassembly in front of it.
 
-        `feed` reaches this through `_take` after buffering fragments, because a token stream
-        delivers a call's arguments in pieces. LangGraph's `updates` stream hands over a finished
-        `tool_calls` list,
-        so the graph driver has nothing to reassemble and calls this directly
-        (`chemclaw.api.graph_stream`). What must not differ between the two is everything below:
-        the argument budget, and remembering the name so the result can be reported under it.
+        LangGraph's `updates` stream hands over a finished `tool_calls` list, so the graph driver
+        (`chemclaw.api.graph_stream`) has nothing to reassemble and calls this directly. What this
+        owns is everything below: the argument budget, and remembering the name so the result can
+        be reported under it.
 
         Args:
             key: The provider's call id, which is what a later result names.
@@ -217,13 +112,18 @@ class ToolCallTrace:
         return ToolCallEvent(tool=tool, arguments=arguments[: settings.agent_audit_max_arg_chars])
 
     async def returned(self, key: str, text: str) -> ToolResultEvent:
-        """Record and describe one tool result — the decision, shared by both engines.
+        """Record and describe one tool result — this module's one write.
 
         Ids and values come off the *full* text and the preview off the truncated one, for the
         reason `outputs` exists at all: a grounding check asking "was this in front of the model?"
         against 200 characters of a 40-chunk sweep called 39 of 40 citations fabricated in a live
         run, and the re-run with ids fixed still called six verbatim ICH limits invented because
         the figures were only in the preview.
+
+        A result whose call was never announced is reported under its own id rather than under a
+        name this trace does not have. Nothing takes that fallback today — a node's update carries
+        the `tool_calls` entry before the `ToolMessage` answering it — and a `ToolResultEvent` with
+        an empty `tool` would be a surface labelling a value with nothing.
 
         Args:
             key: The call id this answers, so the result is reported under the call's tool name.
@@ -233,7 +133,7 @@ class ToolCallTrace:
             The event a surface renders for this result.
         """
         self.outputs.append(text)
-        tool = self._issued.get(key) or self._names.get(key, key)
+        tool = self._issued.get(key) or key
         return ToolResultEvent(
             tool=tool,
             preview=text[: settings.agent_audit_max_arg_chars],
@@ -245,15 +145,6 @@ class ToolCallTrace:
             result_ref=await _stored_ref(self._sink, tool, text),
             result_inline=_inline(text),
         )
-
-    def _take(self, keys: set[str]) -> list[Event]:
-        events: list[Event] = []
-        for key in [k for k in self._fragments if k in keys]:
-            arguments = "".join(self._fragments.pop(key))
-            # Remembered rather than discarded: the result content carries no name, so `issued` is
-            # what lets `ToolResultEvent` report which tool answered.
-            events.append(self.issued(key, self._names.pop(key, key), arguments))
-        return events
 
 
 def _capped_numbers(tool: str, text: str) -> list[float]:
@@ -348,49 +239,3 @@ async def _stored_ref(sink: ResultSink | None, tool: str, text: str) -> str:
         )
         return ""
     return await sink(tool, text)
-
-
-def _arguments_complete(fragments: list[str] | None) -> bool:
-    """Whether the accumulated argument fragments are a finished JSON value.
-
-    This is the signal that replaces "wait for the next update" as the moment a call is announced
-    (D-159). It works because the provider streams a tool call's arguments as one JSON document
-    and does not invoke the tool until that document is closed — so a successful parse is exactly
-    the boundary between "still arriving" and "about to run", and it is knowable from the bytes
-    already in hand rather than from something that follows.
-
-    False for anything that does not parse, which keeps the old update-went-by rule as the
-    fallback: a provider streaming a non-JSON argument format still gets its call announced, just
-    at the previous, later moment. Nothing is stranded, and nothing regresses.
-    """
-    if not fragments:
-        return False
-    try:
-        json.loads("".join(fragments))
-    except (ValueError, TypeError):
-        return False
-    return True
-
-
-def _result_text(content: Any, /) -> str | None:
-    """What a function-result content returned, in full, or None when it carries nothing.
-
-    Duck-typed over the attribute the framework version happens to use, for the same reason the
-    call side is: the concrete content class is not a stable export. A result that is empty or
-    unreadable yields None rather than a value the trace does not have — the trace should not claim
-    one, and the verifier must not treat "nothing came back" as evidence.
-
-    Untruncated on purpose. The caller truncates for the wire (`agent_audit_max_arg_chars`, the UI's
-    budget) and keeps the whole text for grounding, which are different jobs with different right
-    answers; returning the preview here would silently make the second one impossible.
-
-    Failures are deliberately not reported here. A raised call already surfaces as
-    `ToolFailedEvent` through the tool middleware, which has the exception and its message; a
-    second event for the same outcome would leave a consumer choosing which to believe.
-    """
-    for attribute in ("result", "output", "value", "text"):
-        value = getattr(content, attribute, None)
-        if value is None or value == "":
-            continue
-        return value if isinstance(value, str) else str(value)
-    return None

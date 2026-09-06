@@ -281,8 +281,12 @@ def bounded_content(content: Any, tool: str, limit: int) -> tuple[Any, int]:
         if total <= len(brief):
             return content, 0
         return _rebuilt(content, _kept(spans, 0, brief, carrier)), total
-    if total <= widest:
-        return content, 0
+    # No `total <= widest` guard here, and there used to be one: past the branch above the
+    # function has already established `limit > 0`, `total > limit` and `limit >= widest`, so
+    # `total > widest` follows and the guard could not fire. Line-traced over every
+    # `(total, limit)` pair up to 700: reached 11,116 times, taken 0. The identical guard *inside*
+    # the branch above is reachable and stays — there `limit < widest`, which settles nothing about
+    # `total`.
     kept = max(limit - widest, 0)
     removed = total - kept
     return _rebuilt(content, _kept(spans, kept, _notice(tool, removed, total), carrier)), removed

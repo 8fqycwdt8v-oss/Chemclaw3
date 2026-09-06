@@ -55,18 +55,24 @@ def _client(app: FastAPI, principal: Principal) -> TestClient:
     return TestClient(app)
 
 
-async def _open(request_id: str, *, asked_of: str = "") -> None:
+async def _open(
+    request_id: str,
+    *,
+    asked_of: str = "",
+    kind: str = "measurement",
+    requested_by: str = REQUESTER,
+) -> None:
     """Open one wait to answer."""
     async with await connect(settings.postgres_dsn) as conn:
         await conn.execute("DELETE FROM pending_requests WHERE request_id = %s", (request_id,))
         await conn.commit()
     await pending_store.open_request(
         request_id=request_id,
-        kind="measurement",
+        kind=kind,
         subject="run the four conditions",
         rationale="the campaign is suspended on this batch",
         asked_of=asked_of,
-        requested_by=REQUESTER,
+        requested_by=requested_by,
         session_id="s-1",
         correlation_id="c-1",
         due_at=datetime.now(UTC) + timedelta(days=7),
@@ -222,6 +228,34 @@ def test_the_inbox_returns_what_is_waiting_on_the_caller() -> None:
     ids = {row["request_id"] for row in body["requests"]}
     assert "api-pending-mine" in ids
     assert "api-pending-theirs" not in ids
+    assert body["count"] == len(body["requests"])
+
+
+def test_the_inbox_does_not_list_what_the_answer_route_would_refuse() -> None:
+    """A row a caller cannot act on is worse than no row: the two read one predicate.
+
+    `_routing_identities` widens the store query to the caller's whole routing surface, and the
+    store knows nothing about separation of duties — so an `approval` Alice raised and routed to a
+    group Alice belongs to matched her inbox query, and the 403 arrived only when she clicked it.
+    Driven through both routes rather than through `_may_answer` alone, because the defect was that
+    the two disagreed and only the pair can show they now agree.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _open("api-pending-self", asked_of="qc-team", kind="approval", requested_by="u-carol")
+        await _open("api-pending-other", asked_of="qc-team", kind="approval")
+
+    asyncio.run(_run())
+    with _client(_app(), _QC_LEAD) as client:
+        body = client.get("/pending").json()
+        refused = client.post("/pending/api-pending-self/answer", json={"payload": {}})
+    ids = {row["request_id"] for row in body["requests"]}
+    assert refused.status_code == 403, "the gate itself changed; this test is about the inbox"
+    assert "api-pending-self" not in ids, "the inbox listed a request the answer route refuses"
+    # And the filter is a gate rather than a blanket: what the same caller *may* answer is still
+    # there, so this cannot pass by emptying the inbox.
+    assert "api-pending-other" in ids
     assert body["count"] == len(body["requests"])
 
 

@@ -489,7 +489,11 @@ async def record_failure(
             rule; leave it unset unless the chemist indicated how firm the finding is.
         held_until: Set this **only** when the chemist says the old claim *used to be true and
             stopped* — pass the last date it held, and the refuted note is retired in the same
-            review so it stops being served as current. Leave it unset when the claim is simply
+            write so it stops being served as current. A note a *person* wrote is left alone
+            instead: the refutation still lands and still carries its `contradicts` edge, but this
+            system does not rewrite somebody else's note, so the retirement is dropped with a
+            warning rather than taking the refutation down with it. Leave it unset when the claim is
+            simply
             wrong: `held_until` records that the claim was valid up to that date, which for a
             never-true claim would be a new false statement, and the `contradicts` edge already
             keeps the disputed note visible and marked.

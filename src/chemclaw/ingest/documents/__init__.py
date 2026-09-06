@@ -12,7 +12,7 @@ Two boundaries are load-bearing and easy to erase by accident:
   client, no credential in Python, no new egress host (D-089) — the mount is the platform's job,
   exactly as `eln_export_dir` is a directory rather than an ELN client.
 - **Nothing here writes to the knowledge graph.** These documents are pre-existing human-authored
-  records, so they are *evidence*, retrieved with a citation. The PR-gate exists for what the agent
-  generates. `chemclaw.cli.backfill_corpus` is the other choice — one PR-gated note per document —
-  and it is the right one only for a small curated folder someone wants *in* the graph.
+  records, so they are *evidence*, retrieved with a citation, rather than notes.
+  `chemclaw.cli.backfill_corpus` is the other choice — one committed note per document — and it is
+  the right one only for a small curated folder someone wants *in* the graph.
 """

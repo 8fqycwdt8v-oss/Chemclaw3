@@ -12,8 +12,8 @@ stack trace to the browser — a failed turn must not take down the stream or le
 What is left here is the *lifecycle* — the exit stack, the state snapshot and its rollback, the
 contextvars a turn stamps and must unstamp. The three pieces that are pure functions of what the
 stream hands them live beside it, one module each, because they are the parts that can be tested by
-passing an object in and comparing what comes back: `api/runner_trace.py` (reassembling a streamed
-tool call and rendering an approval prompt), `api/runner_usage.py` (the turn's token arithmetic) and
+passing an object in and comparing what comes back: `api/runner_trace.py` (the events a tool call
+and its result become), `api/runner_usage.py` (the turn's token arithmetic) and
 `api/runner_answer.py` (scoring the final answer against this turn's tool outputs).
 """
 
@@ -403,17 +403,11 @@ async def run_turn(
                 # moment it becomes true, not at the answer, which is still a verifier call and
                 # possibly a job-result wait away.
                 ledger.run_complete = True
-                # A tool call whose arguments finished on the *final* update has nothing following
-                # it to close it out, so flush the trace before the answer. (Signals used to need
-                # the same treatment and no longer do: they ride the stream itself, so the last one
-                # is yielded by the same loop as every other.)
-                for call in tool_trace.flush():
-                    # Counted here as well as yielded, because this is the one path a tool call
-                    # reaches the surface on without passing through `_stream_into` — the trace's
-                    # tail, for a call whose arguments finished on the final update. Left out, the
-                    # turn record would under-count exactly the calls that ran last.
-                    ledger.note_event(call)
-                    yield call
+                # No trace flush here: every call the graph makes is announced by the `updates`
+                # stream that carried it, so there is nothing left open when that stream ends.
+                # (This used to iterate `tool_trace.flush()` for a call whose arguments finished on
+                # the final update — the streamed shape the previous engine had. The reassembler it
+                # drained went with that engine, and the loop returned `[]` on every turn.)
                 async for event in _resume_on_job_results(
                     graph,
                     config=graph_config,

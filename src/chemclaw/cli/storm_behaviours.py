@@ -110,9 +110,11 @@ BEHAVIOURS: list[Behaviour] = [
     ),
     Behaviour(
         name="c-fragmented",
-        # The hypothesis under test. `ToolCallTrace.feed` treats "name and arguments" as a complete
-        # call, and the Responses client puts the name on *every* fragment — so this should either
-        # reassemble into one event, or expose N events each carrying a partial document.
+        # The hypothesis under test. The Responses client puts the name on *every* fragment, so a
+        # reader that treats "name and arguments" as a complete call sees N calls where there is
+        # one. Nothing reassembles fragments any more — `graph_stream` reads whole `tool_call`s and
+        # the reassembler that read chunks was deleted as unreachable — so this measures whether
+        # the shipped path emits one event or N carrying partial documents.
         calls=[ToolCall(tool="find_notes", arguments={"text": "buchwald amination"}, fragments=8)],
         text="One call, arguments delivered in eight fragments.",
     ),
