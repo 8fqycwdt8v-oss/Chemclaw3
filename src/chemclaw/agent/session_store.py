@@ -543,13 +543,16 @@ def _session_delete_statements() -> tuple[tuple[str, str], ...]:
     Raises:
         RuntimeError: the erasure sweep names a table this delete has not classified.
     """
-    from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
+    from chemclaw.agent.checkpointer import checkpoint_thread_delete_statements
     from chemclaw.agent.leaver import _ERASE
 
     scoped = dict(_SESSION_DELETE)
-    for table in CHECKPOINT_TABLES:
-        # The checkpointer keys graph state by `thread_id`, and a thread id is a session id.
-        scoped[table] = f"DELETE FROM {table} WHERE thread_id = %(session_id)s"
+    # The checkpointer keys graph state by `thread_id`, and a thread id is a session id. The three
+    # statements come from the checkpointer rather than being written here, because their *order*
+    # and the re-ask inside it are what stop a turn landing mid-delete from keeping a checkpoint
+    # whose payload has gone — a rule that belongs to those tables, not to this deleter, and that
+    # this deleter had wrong for as long as the retention sweep did.
+    scoped.update(dict(checkpoint_thread_delete_statements("thread_id = %(session_id)s")))
     unclassified = [
         table for table, _ in _ERASE if table not in scoped and table not in _ACTOR_SCOPED_ONLY
     ]

@@ -27,7 +27,6 @@ from chemclaw.api.middleware import AT_CAPACITY
 from chemclaw.api.runner import failure_event, run_turn
 from chemclaw.api.schemas import MessageIn, session_title
 from chemclaw.api.state import (
-    _WORKER_ID,
     SessionTurns,
     TurnLease,
     _claim_turn_slot,
@@ -35,6 +34,7 @@ from chemclaw.api.state import (
     _release_turn_claim,
     _release_turn_slot,
     _start_turn_lease,
+    claim_holder,
     state,
 )
 from chemclaw.core.config import settings
@@ -138,6 +138,10 @@ async def post_message(
     if slot is None:
         METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "process"})
         raise HTTPException(status_code=409, detail="a turn is already running for this session")
+    # The durable claim's identity, for the reason `api/state.claim_holder` gives: keyed by the
+    # *turn*, not by the process, so a teardown arriving after its own lease has lapsed cannot
+    # revoke the successor's claim.
+    holder = claim_holder(slot)
 
     # **The id the header, the audit trail and `turn_costs` are all keyed on.** Read once, here,
     # rather than in the generator: the observability middleware minted it for this request and
@@ -173,7 +177,7 @@ async def post_message(
         heartbeat = (
             None
             if claims is None
-            else asyncio.create_task(_hold_turn_claim(claims, session_id, lease))
+            else asyncio.create_task(_hold_turn_claim(claims, session_id, lease, holder))
         )
         nonlocal permit
         # **The turn, not its error events** (M7). This used to be one increment per `error` event
@@ -346,7 +350,7 @@ async def post_message(
             _release_permit()
             _release_turn_slot(active_turns, session_id, slot)
             if claims is not None:
-                await _release_turn_claim(claims, session_id)
+                await _release_turn_claim(claims, session_id, holder)
 
     claimed = False
     handed_off = False
@@ -378,7 +382,7 @@ async def post_message(
         # a turn already running elsewhere must be told 409 by a status code, which only
         # exists before the response is handed off. A failed checkout raises `ConnectionError`
         # and is shed as a 503 by `_database_unavailable` — the guard fails closed, retryably.
-        if claims is not None and not await claims.claim(session_id, _WORKER_ID, lease):
+        if claims is not None and not await claims.claim(session_id, holder, lease):
             METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "durable"})
             raise HTTPException(
                 status_code=409, detail="a turn is already running for this session"
@@ -421,7 +425,7 @@ async def post_message(
         if not handed_off:
             _release_turn_slot(active_turns, session_id, slot)
             if claimed and claims is not None:
-                await _release_turn_claim(claims, session_id)
+                await _release_turn_claim(claims, session_id, holder)
 
 
 async def stop_turn(

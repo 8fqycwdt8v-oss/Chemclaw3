@@ -209,7 +209,10 @@ class PostgresWarehouse:
             # a `connect_timeout` a DBA had deliberately written into the `dsn` — the one form of
             # this binding where the site can already express the bound. Absent there, this is the
             # only thing standing between a blackholed warehouse and an unbounded drain.
-            timeout = (
+            # `dict[str, Any]`, not `dict[str, int]`: `connect()` is an overloaded signature and
+            # mypy matches `**kwargs` against each overload's positional parameters, so a narrowed
+            # value type is reported against `AdaptContext`, `str` and the cursor factory in turn.
+            timeout: dict[str, Any] = (
                 {}
                 if self._dsn and "connect_timeout" in conninfo_to_dict(self._dsn)
                 else {"connect_timeout": self._connect_timeout}

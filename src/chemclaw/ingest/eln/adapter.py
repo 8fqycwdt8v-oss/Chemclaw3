@@ -7,6 +7,7 @@ identical no matter which ELN is wired. There is no universal ELN abstraction �
 per source (docs/planning/DEFERRED.md: generalize only from a third source).
 """
 
+import inspect
 from datetime import UTC, datetime
 from logging import Logger
 from pathlib import Path
@@ -128,7 +129,7 @@ class RawEntry(BaseModel):
 class ElnAdapter(Protocol):
     """Fetch new ELN entries and map them to the canonical schema. One per ELN source."""
 
-    async def fetch_new_entries(self, since: datetime, limit: int | None = None) -> list[RawEntry]:
+    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
         """Return entries created *or amended* at or after `since` (the sync's high-water cursor).
 
         Inclusive on purpose: the cursor is the newest timestamp already seen, and an
@@ -180,6 +181,35 @@ class BoundedFetch(Protocol):
     def fetch_truncated(self) -> bool:
         """Whether the last `fetch_new_entries` stopped at its own limit with rows still waiting."""
         ...
+
+
+def accepts_a_limit(adapter: object) -> bool:
+    """Whether `adapter.fetch_new_entries` will take the optional `limit` this sync can offer.
+
+    **A capability, asked for, rather than a parameter every adapter must grow** — the same shape
+    as `fetch_was_truncated` above and for a sharper version of the same reason. Bounding the read
+    rather than the result was measured worth having (a continuation chunk dropped from 500 rows
+    to 100), and the first cut of it put `limit` into the `ElnAdapter` protocol. That is a
+    breaking change to the one seam D-120 promises is not one: "a new source is one
+    `ingest/sources/<name>/datasource.yaml` folder plus its name in `CHEMCLAW_DATA_SOURCES`, with
+    **zero** core edits". An out-of-tree adapter written to the documented signature would have
+    been called with two positional arguments and raised `TypeError` on its first chunk.
+
+    So the protocol keeps the signature it published, an adapter that *can* bound its read simply
+    declares the parameter, and this is how the caller finds out. `inspect.signature` rather than
+    a `runtime_checkable` Protocol because structural checks see method *names*, not their
+    parameters — the distinction this question is entirely about.
+    """
+    fetch = getattr(adapter, "fetch_new_entries", None)
+    if fetch is None:
+        return False
+    try:
+        return "limit" in inspect.signature(fetch).parameters
+    except (TypeError, ValueError):
+        # A builtin or a C-implemented callable has no introspectable signature. Unbounded is the
+        # safe answer: the sync bounds the result instead, which is what it did for every adapter
+        # before this existed.
+        return False
 
 
 def fetch_was_truncated(adapter: object) -> bool:
@@ -275,8 +305,16 @@ class DatedIngest:
         return self._inner
 
     async def fetch_new_entries(self, since: datetime, limit: int | None = None) -> list[RawEntry]:
-        """Delegate unchanged — dating is purely a mapping concern, and so is bounding."""
-        return await self._inner.fetch_new_entries(since, limit)
+        """Delegate unchanged — dating is purely a mapping concern, and so is bounding.
+
+        The wrapper declares `limit` so `accepts_a_limit` answers `True` for a source whose adapter
+        can bound its read; it forwards one only when the wrapped adapter actually takes it, for
+        the reason that function gives. A wrapper that advertised a capability its inner adapter
+        lacks would move the `TypeError` rather than prevent it.
+        """
+        if limit is not None and accepts_a_limit(self._inner):
+            return await self._inner.fetch_new_entries(since, limit)  # type: ignore[call-arg]
+        return await self._inner.fetch_new_entries(since)
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Map through the wrapped adapter, then date the record if it came back undated."""

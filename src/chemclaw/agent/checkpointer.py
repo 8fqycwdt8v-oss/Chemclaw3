@@ -20,8 +20,22 @@ must not join it:
    a connection another subsystem may have opinions about.
 
 A separate pool is also what makes the first point cheap: this one is opened with
-`autocommit=True`, so `setup()` just works and every checkpointer write is its own transaction,
-which is what a checkpoint already is.
+`autocommit=True`, so `setup()` just works.
+
+**What that does *not* mean is "every checkpointer write is its own transaction", which is what
+this paragraph said and what two modules reasoned from.**
+`AsyncPostgresSaver._cursor(pipeline=True)` opens `conn.pipeline()`, and a pipeline block on an
+autocommit connection is **one transaction** —
+measured, `txid_current()` is identical across both statements inside it, where two statements
+outside one differ. So `aput`, `aput_writes` and `adelete_thread` are each atomic across every
+statement they issue, and a concurrent reader watching a real `aput` sees only `(0, 0)` and
+`(1, 1)`, never the blob without its checkpoint. `tests/test_upstream_surface.py` pins that, because
+it is a psycopg property nobody promised and the sentence above went on being quoted after it
+stopped being true.
+
+The atomicity of one write is not the atomicity of the *pool*: each write commits the instant it
+completes, on a connection no sweep is inside, which is the property
+`checkpoint_thread_delete_statements` and `durable/retention.py` are both built against.
 
 **One saver per process, pinned to its loop.** `AsyncPostgresSaver.__init__` calls
 `asyncio.get_running_loop()` and keeps it, so the saver cannot outlive or precede the loop it was
@@ -105,6 +119,7 @@ because the stamp lives under its own metadata key
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, cast, get_origin, get_type_hints
@@ -126,8 +141,10 @@ from psycopg_pool import AsyncConnectionPool
 
 from chemclaw.agent.session_store import _session_dsn
 from chemclaw.agent.state import ChemclawState
+from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.db import register_pool, unregister_pool
+from chemclaw.core.metrics import METRICS
 from chemclaw.core.metrics_bridge import degraded
 
 logger = logging.getLogger(__name__)
@@ -151,6 +168,20 @@ _pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
 # their loop later or never. `close_checkpointer` drops it with the pool so the next loop gets its
 # own.
 _init_lock: asyncio.Lock | None = None
+
+# How many checkpointer statements are queued on the saver's lock right now, across every saver in
+# this process. A plain module-level int rather than a per-saver field because it is read by a
+# scrape from outside any saver, and correct without a lock of its own: every mutation happens on
+# the single thread of one event loop, with no `await` between the read and the write.
+_statements_waiting = 0
+
+
+def checkpointer_statements_waiting() -> float:
+    """The gauge source for `chemclaw_checkpointer_statements_waiting`.
+
+    See `SchemaStampedSaver._cursor` for what it measures and why no pool metric could.
+    """
+    return float(_statements_waiting)
 
 
 def _strict_serde() -> JsonPlusSerializer:
@@ -192,6 +223,61 @@ def _initialization_lock() -> asyncio.Lock:
 # person's turn state, and its test has to prove the list is complete. `checkpoint_migrations` is
 # deliberately absent from the *erasure* half — it holds schema versions, not anyone's conversation.
 CHECKPOINT_TABLES: tuple[str, ...] = ("checkpoints", "checkpoint_blobs", "checkpoint_writes")
+
+
+def checkpoint_thread_delete_statements(match: str) -> tuple[tuple[str, str], ...]:
+    """The three per-thread DELETEs, in an order a concurrent turn cannot tear.
+
+    **A checkpointer write and a sweep are two writers, and the sweep's own transaction protects it
+    only from itself.** This pool is `autocommit=True`, so a live turn commits its rows the instant
+    it writes them, on a connection the deleter knows nothing about; and at READ COMMITTED each
+    statement in the deleter's transaction takes a *fresh* snapshot. So a turn landing between
+    `DELETE FROM checkpoints` and `DELETE FROM checkpoint_blobs` leaves its `checkpoints` row
+    standing while its payload goes. Measured by hand on two connections, stepped statement by
+    statement because the window is a millisecond wide: `residue: 1 checkpoints, 0 blobs`, and the
+    surviving row stamps a channel value it can no longer load.
+
+    So the two dependent statements **re-ask their question inside the deleter's transaction**: a
+    thread's blobs and writes go only while that thread has no `checkpoints` row at all, which is
+    exactly the racing turn's row, committed by then and visible to this statement's snapshot.
+    `durable/retention.py` reached the same shape first, under
+    `D-2026-09-06-a-sweep-and-a-live-turn-are-two-writers`, and its sweep is where the whole
+    argument is written down.
+
+    **Here rather than in each deleter, because there were three and the fix landed in one.** The
+    erasure sweep (`agent/leaver.py`) and the single-session delete
+    (`agent/session_store.py`) both built the same checkpoints-first order by iterating
+    `CHECKPOINT_TABLES`, and both kept it after the retention sweep was fixed — three sites past
+    the Rule of Three, with the one that was corrected unable to tell the others. The retention
+    sweep keeps its own pair because its first statement re-runs an *expiry* predicate and drives
+    the other two from `RETURNING thread_id`, which is a different question; it asserts the rule for
+    itself in `tests/test_retention.py`, and `tests/test_checkpoint_delete_order.py` asserts it for
+    the two statements this function builds — by interleaving a real committed checkpoint between
+    them, which is the only way to tell the two orders apart.
+
+    Args:
+        match: The caller's own predicate selecting the threads to delete, written against the
+            table's `thread_id` — `"thread_id = %(session_id)s"`, or an `IN (…)` subselect. It is
+            interpolated, so it must be the caller's own SQL and never a value from a request; the
+            thread ids themselves belong in bound parameters, as every caller passes them.
+
+    Returns:
+        `(table, statement)` pairs in delete order, one per `CHECKPOINT_TABLES` entry.
+    """
+    statements: list[tuple[str, str]] = []
+    for table in CHECKPOINT_TABLES:
+        if table == "checkpoints":
+            statements.append((table, f"DELETE FROM {table} WHERE {match}"))
+            continue
+        statements.append(
+            (
+                table,
+                f"DELETE FROM {table} WHERE {match} AND NOT EXISTS ("
+                f"SELECT 1 FROM checkpoints c WHERE c.thread_id = {table}.thread_id)",
+            )
+        )
+    return tuple(statements)
+
 
 # The metadata key each checkpoint's channel stamp is written under. Metadata is a plain jsonb
 # column the saver round-trips untouched, so this needs no migration and no table of its own — and
@@ -424,9 +510,56 @@ class SchemaStampedSaver(AsyncPostgresSaver):
     answer: a saturated pool is a saturated pool whichever statement met it, and `_translating`
     says what reading only `aput` cost.
 
+    **And one *observability* override, on `_cursor`**, which is where every statement of all four
+    passes and where the pod's most-taken lock is. See `_cursor` for what it measures and why no
+    pool metric could.
+
     The module docstring holds what is and is not caught by the schema stamp, and the argument for
     refusing rather than resuming empty.
     """
+
+    @asynccontextmanager
+    async def _cursor(self, *, pipeline: bool = False) -> AsyncIterator[Any]:
+        """Upstream's cursor, with the wait to get into it counted.
+
+        **The pod's single most-taken lock was unmonitored, and the metric an operator was told to
+        watch could not see it.** `AsyncPostgresSaver._cursor` opens
+        `async with self.lock, get_connection(...)`, so every checkpointer statement in the process
+        runs one at a time — *before* the pool is asked for anything. Measured: 8 concurrent turns
+        on 8 different threads gave max concurrency 1 inside the saver and 612 ms of waiting, and
+        during a deliberate stall `chemclaw_pg_pool_requests_waiting` read **0**, which is the
+        precise symptom `core/db.register_pool`'s docstring claimed to have closed. It reads 0
+        because the queue is the saver's lock and not the pool's; `pool_available: 0` is no
+        substitute either, since a one-connection pool reads that whenever it is in use at all.
+
+        The wait also has **no bound**: `asyncio.Lock` takes no timeout, so nothing raises and
+        `_translating` — which exists to turn a checkpointer stall into a retryable
+        `ConnectionError` — never fires. The only ceiling is `service_turn_timeout_seconds`, per
+        turn, and every queued turn pays it in series. Making the queue visible is what lets an
+        operator see that before the timeouts do; removing the serialization is a separate change
+        (one saver per turn over the shared pool) and wants its own measurement.
+
+        The gauge is entry/exit counted rather than read off the lock, because `asyncio.Lock`
+        exposes no waiter count that is public API — a private `_waiters` read would be one more
+        upstream shape nobody promised.
+
+        Args:
+            pipeline: Passed straight through to upstream; see `AsyncPostgresSaver._cursor`.
+        """
+        global _statements_waiting
+        started = time.perf_counter()
+        _statements_waiting += 1
+        try:
+            async with super()._cursor(pipeline=pipeline) as cur:
+                # Sampled here rather than in a `finally`, so the measurement is the *wait* and not
+                # the wait plus the statement — the two are separate questions and only the first
+                # one is this lock's.
+                METRICS.observe(
+                    "chemclaw_checkpointer_lock_wait_seconds", time.perf_counter() - started
+                )
+                yield cur
+        finally:
+            _statements_waiting -= 1
 
     async def aput(
         self,
@@ -625,10 +758,100 @@ async def checkpointer() -> AsyncPostgresSaver:
     async with _initialization_lock():
         if _saver is None:
             saver = SchemaStampedSaver(pool, serde=_strict_serde())
-            await saver.setup()
+            await _setup_once(saver, _session_dsn())
             _saver = saver
             logger.info("checkpointer ready")
     return _saver
+
+
+# The advisory-lock key that serializes checkpointer migrators. Arbitrary but stable, and
+# deliberately distinct from `core/migrate._MIGRATION_LOCK_KEY`: advisory locks share one namespace
+# per database, so two subsystems picking the same number would block each other for no reason
+# either could diagnose. Same convention, next discriminator.
+_SETUP_LOCK_KEY = 0x43484D4157_00_03  # "CHMAW" + a discriminator for the checkpointer's setup
+
+# How long a pod waits for a peer's `setup()` before giving up on the lock and running its own.
+# Not a config knob: it is a property of how long this one migration takes, not something a
+# deployment tunes. Ten seconds of 0.1 s polls — `setup()` against an already-migrated schema costs
+# one query, and against a virgin schema it is three `CREATE TABLE`s and three
+# `CREATE INDEX CONCURRENTLY` on empty tables.
+_SETUP_LOCK_POLL_SECONDS = 0.1
+_SETUP_LOCK_POLLS = 100
+
+
+async def _setup_once(saver: AsyncPostgresSaver, dsn: str) -> None:
+    """Migrate the checkpoint tables under an advisory lock, so two pods cannot race each other.
+
+    **The in-process half of this was closed and the cross-process half was not.** `_init_lock`
+    exists because a second turn used to get a saver whose migrations had not run; two *pods* doing
+    the same thing on a fresh database is the identical failure one layer out, and it is every
+    deploy of a two-replica chart. `CREATE TABLE IF NOT EXISTS` is not race-safe against itself —
+    the existence check and the create are not one operation — and neither is the version ledger
+    `setup()` keeps. Measured, two savers running it concurrently against a schema that had never
+    seen these tables: one raised
+    `UniqueViolation: duplicate key value violates unique constraint "checkpoint_migrations_pkey"`,
+    the other succeeded, and afterwards all seven indexes were present and valid.
+
+    The blast radius was small and pointed exactly the wrong way: the failure is a `psycopg.Error`
+    that is **not** an `OperationalError`, so `_translating` does not touch it (and `setup()` is
+    called outside it anyway), and the chemist got `("internal", retryable=False)` about the one
+    state a retry fixes immediately.
+
+    **A lock rather than a retry, which was tried first and measured failing.** Retrying once is
+    not enough, because the winner's own migration is still in flight when the loser retries: it
+    reads the ledger at version -1 again and collides on the same row a second time.
+
+    **And a *polled* lock rather than a held wait, which is the shape `core/migrate.py` uses and is
+    wrong here — measured, it deadlocks.** Three of `setup()`'s migrations are
+    `CREATE INDEX CONCURRENTLY`, and CIC waits for every other transaction on the database that
+    holds a snapshot. A waiting `pg_advisory_lock` (or a `pg_advisory_xact_lock` inside a
+    transaction) *is* such a snapshot, so the winner's CIC waits for the loser's wait while the
+    loser waits for the winner's lock — two pods stuck forever, which is how this test first hung
+    to its timeout. `pg_try_advisory_lock` returns immediately, so the waiting pod is idle with no
+    transaction between polls and the winner's CIC can finish.
+
+    **On a dedicated autocommit connection, not one borrowed from the saver's pool**: the lock is
+    held *across* `setup()`, which runs on that pool, so borrowing from it would deadlock the moment
+    the pool is small — and autocommit is what keeps each poll from opening a transaction.
+
+    A pod that never gets the lock runs `setup()` anyway and says so: the alternative is a process
+    with no checkpointer because a peer's backend is wedged, and after ten seconds the peer is not
+    mid-`CREATE TABLE`.
+
+    Args:
+        saver: The saver whose `setup()` to run.
+        dsn: The database to take the advisory lock on — the saver's own.
+
+    Raises:
+        psycopg.Error: `setup()` itself failed for a reason that is not a concurrent migrator.
+        ConnectionError: The lock connection could not be opened.
+    """
+    async with await db.connect(dsn) as guard:
+        await guard.set_autocommit(True)
+        held = False
+        for attempt in range(_SETUP_LOCK_POLLS):
+            cursor = await guard.execute("SELECT pg_try_advisory_lock(%s)", (_SETUP_LOCK_KEY,))
+            row = await cursor.fetchone()
+            if row is not None and row[0]:
+                held = True
+                break
+            if attempt == 0:
+                logger.info("another pod is migrating the checkpoint tables; waiting for it")
+            await asyncio.sleep(_SETUP_LOCK_POLL_SECONDS)
+        if not held:
+            logger.warning(
+                "waited %.0fs for another pod's checkpointer migration and never got the lock; "
+                "running setup() anyway rather than leaving this process without a checkpointer",
+                _SETUP_LOCK_POLLS * _SETUP_LOCK_POLL_SECONDS,
+            )
+        try:
+            await saver.setup()
+        finally:
+            if held:
+                # The lock also dies with this session, which is what covers the pod being killed
+                # mid-migration. Releasing it here is what keeps the next caller in this same
+                # process from polling against a lock nobody is using.
+                await guard.execute("SELECT pg_advisory_unlock(%s)", (_SETUP_LOCK_KEY,))
 
 
 async def _checkpoint_pool() -> Any:
@@ -656,8 +879,43 @@ async def _checkpoint_pool() -> Any:
             pool: AsyncConnectionPool[AsyncConnection[DictRow]] = AsyncConnectionPool(
                 conninfo=_session_dsn(),
                 kwargs={"autocommit": True, "connect_timeout": settings.pg_connect_timeout_seconds},
+                # The one deliberate divergence from `core/db`'s pool, which uses
+                # `pg_pool_min_size`: a process that never takes a turn (a Temporal worker running
+                # calculations) should not hold connections open for a checkpointer it will not
+                # use, and the pool fills on demand.
                 min_size=0,
+                # **Sized for the *store*, not for the saver, and that is worth saying because the
+                # saver is what the pool is named after.** `AsyncPostgresSaver._cursor` holds one
+                # `asyncio.Lock` around its connection checkout, so the saver alone can never use
+                # more than one connection here — measured, 8 concurrent turns opened exactly 1
+                # against a `max_size` of 16. The obvious conclusion, "so build it with
+                # `max_size=1`", is wrong: `scratchpad.memory_store()` puts an `AsyncPostgresStore`
+                # on this same pool, and upstream's store `_cursor` **deliberately does not
+                # serialize on a pooled connection** ("the pool does not hand out the same
+                # connection concurrently, so a shared lock across calls is unnecessary"), so it
+                # is the genuinely concurrent consumer and capping the pool at 1 would serialize
+                # agent memory to make a gauge tidy.
                 max_size=settings.pg_pool_max_size,
+                # **The three settings this pool used to decline, and it is the one pool every
+                # turn's state write goes through.** It named none of them, so it ran on
+                # psycopg_pool's defaults while every `core/db` pool in the same process ran on the
+                # configured ones — measured live: `timeout=30.0` against
+                # `pg_pool_timeout_seconds=10.0`, `max_idle=600` against
+                # `pg_pool_max_idle_seconds=300`, and no `check` at all.
+                #
+                # Neither difference is tidiness. A saturated waiter was refused at **30.02 s**
+                # rather than 10.01 s, holding an admission permit for six times the admission
+                # timeout — a degradation shape, not a rounding error. And with no `check`, a
+                # backend killed from outside the pool (a managed-Postgres idle limit, a load
+                # balancer's NAT timeout, `idle_in_transaction_session_timeout`) is handed straight
+                # to a turn as `AdminShutdown` where `core/db`'s pool swaps it silently.
+                #
+                # `core/db._pool_for` is the reference rather than these literals:
+                # `tests/test_checkpointer_concurrency.py` asserts the two pools agree, so a
+                # setting added there is not silently declined here.
+                timeout=settings.pg_pool_timeout_seconds,
+                max_idle=settings.pg_pool_max_idle_seconds,
+                check=AsyncConnectionPool.check_connection,
                 open=False,
             )
             await pool.open()
@@ -669,6 +927,12 @@ async def _checkpoint_pool() -> Any:
             # against), and a saturated checkpointer stalled turns inside `AsyncPostgresSaver`
             # while `chemclaw_pg_pool_requests_waiting` read 0.
             register_pool(pool)
+            # Bound here rather than in `core/db.py`, which may not import `agent` (layering), and
+            # rather than in `api/app.py`, which is not the only process that builds a
+            # checkpointer: any process that has one has this queue.
+            METRICS.bind_gauge(
+                "chemclaw_checkpointer_statements_waiting", checkpointer_statements_waiting
+            )
             _pool = pool
     return _pool
 

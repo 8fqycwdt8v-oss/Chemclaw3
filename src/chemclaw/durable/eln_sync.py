@@ -31,7 +31,12 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.errors import ChemclawError
     from chemclaw.durable.registry import durable_activity, durable_workflow
-    from chemclaw.ingest.eln.adapter import RawEntry, entry_window, fetch_was_truncated
+    from chemclaw.ingest.eln.adapter import (
+        RawEntry,
+        accepts_a_limit,
+        entry_window,
+        fetch_was_truncated,
+    )
     from chemclaw.ingest.eln.cursor import load_cursor, store_cursor
     from chemclaw.ingest.eln.ord import OrdReaction
     from chemclaw.ingest.eln.records import default_record_store
@@ -178,6 +183,19 @@ class _BoundedIngest:
         self._limit = limit
         self.truncated = False
 
+    async def _fetch(self, since: datetime, limit: int | None) -> list[RawEntry]:
+        """Ask the wrapped adapter for entries, offering `limit` only if it takes one.
+
+        `ElnAdapter.fetch_new_entries` publishes a one-argument signature and D-120 promises a new
+        source costs zero core edits, so an out-of-tree adapter written to that signature must not
+        be handed a second positional argument — it would raise `TypeError` on its first chunk.
+        `accepts_a_limit` is the capability probe, beside `fetch_was_truncated`, which asks the
+        same kind of question about the same seam.
+        """
+        if limit is not None and accepts_a_limit(self._inner):
+            return await self._inner.fetch_new_entries(since, limit)  # type: ignore[call-arg]
+        return await self._inner.fetch_new_entries(since)
+
     async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
         """Fetch from the wrapped adapter: the overlap plus the oldest `limit` new entries.
 
@@ -208,7 +226,7 @@ class _BoundedIngest:
         """
         bounded = since >= self._since
         entries = sorted(
-            await self._inner.fetch_new_entries(since, self._limit if bounded else None),
+            await self._fetch(since, self._limit if bounded else None),
             key=lambda entry: (entry_window(entry.created_at, entry.modified_at), entry.entry_id),
         )
         overlap = [

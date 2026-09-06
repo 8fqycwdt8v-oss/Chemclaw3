@@ -81,6 +81,7 @@ async def graph_events(
     on_signal: Any,
     usage: Any,
     exchanges: list[Any] | None = None,
+    carry: dict[str, Any] | None = None,
 ) -> AsyncIterator[Event]:
     """Drive one turn on a compiled graph, yielding the turn's events in order.
 
@@ -103,6 +104,15 @@ async def graph_events(
             the only place they exist as messages — the events carry no call id, so a projection
             rebuilt from them could not pair a result with its call. `None` collects nothing, which
             is what a caller that only wants the event stream passes.
+        carry: The turn's per-turn counters, seeded into this run's input and updated from it.
+            **This is what makes a turn's caps span a mid-turn resume**, which is the one place a
+            turn is two graph invocations. `model_calls` and `billed_tokens` are `UntrackedValue`
+            channels — never checkpointed, so a second run on the same thread starts them at 0,
+            which is right at a *turn* boundary and wrong inside one: `_resume_on_job_results`
+            describes itself as continuing "the same turn" and used to hand it a fresh 25-iteration
+            loop cap and a fresh `agent_max_turn_billed_tokens`. Measured on a compiled graph, a
+            run seeded `model_calls=7` reports 8 on its first model call, so the carry is enough.
+            `None` is one-invocation-per-turn, which is every other caller.
 
     Yields:
         `Event`s in the order and with the meanings `api/events.py` declares.
@@ -122,7 +132,7 @@ async def graph_events(
     # batch and only one of them fail.
     failed_calls: set[str] = set()
     async for namespace, mode, payload in graph.astream(
-        turn_input(message), config, stream_mode=_MODES, subgraphs=True
+        {**turn_input(message), **(carry or {})}, config, stream_mode=_MODES, subgraphs=True
     ):
         if mode == "messages":
             chunk, _metadata = payload
@@ -199,6 +209,8 @@ async def graph_events(
             # the
             # turn's plan is worse than a surface not showing it.
             below_root = bool(namespace)
+            if carry is not None:
+                _carry_forward(carry, payload)
             async for event in _from_update(
                 payload,
                 "subagent" if below_root else "",
@@ -209,6 +221,31 @@ async def graph_events(
                 emit_plan=not below_root,
             ):
                 yield event
+
+
+# The channels a mid-turn resume has to continue from rather than restart, and nothing else. Named
+# rather than "every int in the update", because the carry is fed back into the graph's *input* and
+# a channel copied there by accident is a caller overriding state the graph owns.
+_CARRIED_CHANNELS = ("model_calls", "billed_tokens")
+
+
+def _carry_forward(carry: dict[str, Any], payload: Any) -> None:
+    """Record this update's per-turn counters, so a resume continues them instead of restarting.
+
+    **The highest value wins rather than the latest**, because these arrive from every node of a
+    fan-out and `TurnTotal` folds concurrent writes additively — a later update from a helper that
+    started earlier would otherwise walk the count backwards and hand the resume a larger
+    allowance than the turn has left. A cap may bind one call early; it must never bind late.
+    """
+    if not isinstance(payload, dict):
+        return
+    for update in payload.values():
+        if not isinstance(update, dict):
+            continue
+        for channel in _CARRIED_CHANNELS:
+            value = update.get(channel)
+            if isinstance(value, int) and not isinstance(value, bool):
+                carry[channel] = max(carry.get(channel, 0), value)
 
 
 def _custom_event(payload: Any, on_signal: Any) -> Event | None:

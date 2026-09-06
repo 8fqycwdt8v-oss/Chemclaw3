@@ -24,12 +24,14 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import pytest
 
 from chemclaw.agent.session_store import SessionTurnClaims
 from chemclaw.api.budget import BudgetExceeded, BudgetTracker
+from chemclaw.api.state import claim_holder
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.core.executor import install_default_executor
@@ -342,3 +344,51 @@ def test_the_installed_pool_is_wider_than_the_caps_that_can_fill_it() -> None:
         return install_default_executor(component="front-door", reserved=reserved)._max_workers
 
     assert asyncio.run(_install()) == reserved + settings.service_thread_pool_headroom
+
+
+def test_two_turns_in_one_process_are_two_holders_not_one() -> None:
+    """The same-worker arm the test above misses by using two different holder names.
+
+    `test_a_lapsed_holder_can_neither_refresh_nor_release_the_new_owners_claim` proves the guards
+    hold across *holders* — "slow" and "new" — which production never produces: both turns are in
+    one process, and the durable claim used to be keyed by `_WORKER_ID`, which is per process. So
+    the exact failure `TurnLease.token` was added to fix lived on undisturbed in the durable twin:
+
+    ```
+    turnA claim(P, 1s):  True        [lease lapses]
+    turnB claim(P, 60s): True        <- same process, a new turn
+    turnA refresh(P):    True        <- A cannot tell it lost; it extended B's lease
+    turnA release(P):    rows []     <- A's teardown deleted B's claim
+    turnC claim(Q, 60s): True        <- a second replica admitted beside the live turn B
+    ```
+
+    `api/state.claim_holder` is what makes two turns in one process two holders, so this drives the
+    two turns the way the routes now do — through that function — rather than by inventing names.
+    """
+
+    async def _run() -> None:
+        claims = await _claims_or_skip()
+        session_id = "sess-race-same-worker"
+        first = claim_holder(uuid.uuid4().hex)
+        second = claim_holder(uuid.uuid4().hex)
+        await claims.release(session_id, first)
+        await claims.release(session_id, second)
+
+        assert first != second, (
+            "two turns in one process resolved to one holder, so the durable claim cannot tell "
+            "a lapsed turn's teardown from the live turn's"
+        )
+        assert await claims.claim(session_id, first, -1.0) is True  # already lapsed
+        assert await claims.claim(session_id, second, 60.0) is True  # a successor took the slot
+
+        assert await claims.refresh(session_id, first, 600.0) is False, (
+            "the lapsed turn extended its successor's lease"
+        )
+        await claims.release(session_id, first)
+        assert await claims.claim(session_id, "another-replica", 60.0) is False, (
+            "the lapsed turn's teardown deleted the live turn's claim, so a second replica was "
+            "admitted beside it"
+        )
+        await claims.release(session_id, second)
+
+    asyncio.run(_run())

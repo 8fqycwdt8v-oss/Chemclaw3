@@ -71,6 +71,26 @@ def _render(report: ErasureReport) -> str:
         for table, why in beyond:
             lines += [f"{'':>11}{table}", *_wrapped(why)]
 
+    # **The section that must not be a footnote.** A residue is a row that came back under a session
+    # id whose ownership row is gone, and every session-scoped sweep in this system finds a session
+    # through that row — so "run it again" is not the remedy, and a report that printed the erased
+    # counts and nothing else would read as a completed erasure. Printed before the two closing
+    # notes so it is the last thing an operator reads about what happened.
+    if report.residue:
+        lines += [
+            "",
+            "INCOMPLETE — these rows came back while the erasure ran and no later erasure can "
+            "reach them:",
+        ]
+        for table, count in sorted(report.residue.items()):
+            lines.append(f"  {count:>7}  {table}")
+        lines += _wrapped(
+            "A turn was running on one of this person's sessions. Their ownership rows are gone, "
+            "so these rows are no longer reachable by session id from this command: an operator "
+            "with owner rights has to remove them directly.",
+            indent="",
+        )
+
     if not report.applied:
         lines += ["", "Nothing was written. Re-run with --apply to commit."]
     elif report.retained_total:
@@ -84,7 +104,12 @@ def _render(report: ErasureReport) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Preview or apply one actor's erasure; exit non-zero if it could not run.
+    """Preview or apply one actor's erasure; exit non-zero if it could not run or did not finish.
+
+    Three exit codes rather than two: `1` is "it did not run" (a refusal, a bad actor, a statement
+    the database declined), and `2` is "it ran, it wrote, and rows came back that no later erasure
+    can reach" — a state that must not be scriptable as a success and is not the same event as a
+    failure to start.
 
     `argv` is a parameter so a test can drive the real entry point rather than assert something
     about it — the shipped test for this path asserted `issubclass(psycopg.OperationalError,
@@ -109,7 +134,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"erasure failed: {exc}", file=sys.stderr)
         return 1
     print(_render(report))
-    return 0
+    # Non-zero on a residue, for the reason the section above is printed at all: this ran, it wrote,
+    # and it did not finish — an operator's script must not read that as a success.
+    return 2 if report.residue else 0
 
 
 if __name__ == "__main__":

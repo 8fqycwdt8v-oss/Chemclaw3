@@ -173,6 +173,44 @@ class SessionTurns(Protocol):
 # must age out rather than be inherited.
 _WORKER_ID = uuid.uuid4().hex
 
+
+def claim_holder(token: str) -> str:
+    """This *turn's* identity as a durable claim holder — the process id plus its slot token.
+
+    **The process id alone is not an identity, and `TurnLease.token` beside it says why.** The
+    in-process slot carries a per-turn token precisely because "both teardown paths used to remove
+    whatever entry sat under the session id, so once one lease had lapsed and a successor had
+    claimed the slot, the first turn's teardown revoked the successor's claim and a third turn was
+    admitted beside a live one — a guard undoing itself". The durable half was keyed by
+    `_WORKER_ID`, which is per *process*, so the same sentence applied to it unchanged. Driven
+    against the real `SessionTurnClaims`:
+
+    ```
+    turnA claim(P, 1s):  True        [lease lapses]
+    turnB claim(P, 60s): True        <- same process, a new turn
+    turnA refresh(P):    True        <- A cannot tell it lost; it just extended B's lease
+    turnA release(P):    rows []     <- A's teardown deleted B's claim
+    turnC claim(Q, 60s): True        <- a second replica admitted beside the live turn B
+    ```
+
+    In the shipped configuration this is latent rather than live — `_claim_turn_slot` refuses two
+    turns in one process first, and its lease (`turn_timeout + admission`) outlives the durable
+    one — so it is fixed because it is the guard documented as the fix for a failure it did not
+    actually cover, and because `tests/test_concurrency_claims.py` missed it by using two
+    *different* holder names, which production never does.
+
+    The slot token is already at every call site and is already the identity the sibling guard
+    checks, so the durable claim is now exactly as identity-checked as `_release_turn_slot`.
+
+    Args:
+        token: This turn's slot token from `_claim_turn_slot`.
+
+    Returns:
+        The holder string to claim, refresh and release under.
+    """
+    return f"{_WORKER_ID}:{token}"
+
+
 # The claim is refreshed this many times per lease. Three, so two consecutive refreshes can fail —
 # a slow query, one blocked moment on the loop — before the lease is genuinely at risk. Not a
 # config knob: it is a property of how the lease is maintained, not something a deployment tunes
@@ -277,7 +315,9 @@ def _release_turn_slot(active_turns: dict[str, TurnLease], session_id: str, toke
         del active_turns[session_id]
 
 
-async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds: float) -> None:
+async def _hold_turn_claim(
+    claims: SessionTurns, session_id: str, lease_seconds: float, holder: str
+) -> None:
     """Keep this turn's claim alive for as long as the turn streams.
 
     Cancelled by the stream's `finally`, so it lives exactly as long as the turn does. A refresh
@@ -291,7 +331,7 @@ async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds:
     while True:
         await asyncio.sleep(interval)
         try:
-            if not await claims.refresh(session_id, _WORKER_ID, lease_seconds):
+            if not await claims.refresh(session_id, holder, lease_seconds):
                 # The claim is no longer ours: it lapsed and another worker took the session while
                 # this turn was still running. Nothing raised — the UPDATE simply matched no row —
                 # so before the 2026-08-05 review this was indistinguishable from a healthy
@@ -324,8 +364,11 @@ async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds:
             )
 
 
-async def _release_turn_claim(claims: SessionTurns, session_id: str) -> None:
+async def _release_turn_claim(claims: SessionTurns, session_id: str, holder: str) -> None:
     """Give a session's turn slot back, surviving the cancellation that usually causes it.
+
+    `holder` is this turn's, not this process's (`claim_holder`), so a teardown arriving after its
+    own lease has lapsed is a no-op rather than a revocation of whoever took the slot next.
 
     **Shielded, and that is the entire point of this function** (D-130). Both callers reach it from
     a `finally` that runs *because* their task was cancelled — a chemist closed the tab mid-turn —
@@ -353,7 +396,7 @@ async def _release_turn_claim(claims: SessionTurns, session_id: str) -> None:
         session. A task that cannot fail cannot produce one.
         """
         try:
-            await claims.release(session_id, _WORKER_ID)
+            await claims.release(session_id, holder)
         except Exception:
             # `Exception`, not a tuple of the connection errors. The narrow tuple was written when
             # a failure here could only propagate into a `finally` that was about to be discarded

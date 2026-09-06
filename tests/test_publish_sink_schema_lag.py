@@ -96,6 +96,9 @@ async def _counts(conn: psycopg.AsyncConnection[Any]) -> tuple[int, int]:
     """`(calculation rows, property_value rows)` — the spine and the facts about it."""
     calculations = await (await conn.execute("SELECT count(*) FROM calculation")).fetchone()
     values = await (await conn.execute("SELECT count(*) FROM property_value")).fetchone()
+    # A bare `count(*)` always returns exactly one row; asserting it says so rather than
+    # `# type: ignore`, which would also hide a query someone later made conditional.
+    assert calculations is not None and values is not None
     return int(calculations[0]), int(values[0])
 
 

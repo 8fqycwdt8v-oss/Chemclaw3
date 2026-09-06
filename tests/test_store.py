@@ -441,7 +441,7 @@ def test_the_publish_is_offered_before_the_row_is_persisted() -> None:
             events.append("publish")
 
         original = store_module.publish_stored_result
-        store_module.publish_stored_result = publish  # type: ignore[assignment]
+        store_module.publish_stored_result = publish
         try:
             await cached_compute(
                 _RecordingStore(),
@@ -449,7 +449,7 @@ def test_the_publish_is_offered_before_the_row_is_persisted() -> None:
                 compute,
             )
         finally:
-            store_module.publish_stored_result = original  # type: ignore[assignment]
+            store_module.publish_stored_result = original
 
         assert events == ["publish", "put"]
 
