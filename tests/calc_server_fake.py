@@ -87,7 +87,7 @@ _KEYED: dict[str, tuple[str, tuple[str, ...]]] = {
     # The three SMILES-in tools this repository proxies through `connectors/calc/server/tools.py`
     # but composes nothing from. They were missing here, so `calculation_key` for any of them was
     # refused by the fake as "not a compute tool on this server" while the real server answers.
-    # The three rows are *measured* against `Chemclaw3-mcp`'s `engine/identity.py`, not guessed —
+    # The three rows are *measured* against `Chemclaw3-mcp`'s engine/identity.py, not guessed —
     # `tests/test_calc_fake_identity.py` is what re-measures them.
     "compute_atomic_descriptors": ("xtb.atomic", ("solvent",)),
     "compute_surface_potential": ("xtb.surface", ("solvent",)),

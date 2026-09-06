@@ -3,7 +3,9 @@
 Every D-011 assertion in `tests/test_calc_*.py` — "a persisted result is never recomputed", "the
 composite reached the entry that conformer's own address names" — is evidence about
 `calc_server_fake._KEYED`, a hand-written mirror of `Chemclaw3-mcp`'s
-`servers/calc/src/chemclaw_mcp_calc/engine/identity.py`. That file's docstring says the two
+servers/calc/src/chemclaw_mcp_calc/engine/identity.py (unbackticked deliberately: it is that
+repository's path, and `tests/test_docstring_paths.py` resolves every backticked pointer against
+this one). That file's docstring says the two
 properties in it "were measured against the running server", which is a claim about a commit in a
 repository this one does not build, and nothing re-measured it. A fake whose key table has drifted
 makes those tests pass on a design that fails in production: the two ways it can be wrong are a
