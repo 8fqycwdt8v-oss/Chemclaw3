@@ -233,9 +233,22 @@ class ConnectorJobResult(BaseModel):
     optional knowledge contribution. Typing `note` as the existing frozen `Note` means a connector's
     proposal passes the graph's own slug and schema validators on the way in, so a malformed note is
     rejected at the boundary instead of failing later at branch creation in the PR-gate.
+
+    **`extra="ignore"`, and the asymmetry with `ConnectorJobInput` above is the decision.** Five
+    fields on this wire say in as many words that they are "additive and defaulted because it
+    crosses the Temporal wire and histories are in flight". That rule made **core to bundle**
+    additions safe and left the return direction closed: the wrapper runs in core's image and the
+    child in the bundle's, so during a rolling upgrade the bundle is routinely the *newer* of the
+    two, and one field it has learned to emit was rejected by the older core — killing every
+    in-flight job of that bundle. Measured before this changed, the death was silent: no
+    `job_records` row, no push-back. An unknown field on a *result* is a separately-deployed image's
+    business and this core has no use for it; an unknown field on `ConnectorJobInput` is core
+    writing to itself, where every launch site is in this repository and an extra is a bug that must
+    fail loudly. `test_the_launch_side_of_the_wire_still_refuses_what_it_does_not_know` holds the
+    pair, because nothing else states which posture belongs on which end.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="ignore", frozen=True)
 
     summary: str = Field(min_length=1)
     data: dict[str, Any] = Field(default_factory=dict)
@@ -606,8 +619,8 @@ def child_execution_timeout(
 # **`failure_exception_types` because without it this workflow cannot fail — it hangs.** The
 # Temporal SDK treats a plain exception raised in workflow *code* as a suspected bug and suspends
 # the run in an internal workflow-task-failure loop that ignores the retry policy and never gives
-# up. This wrapper raises plain exceptions of its own: chiefly the `result_type=ConnectorJobResult`
-# decode of whatever the bundle's workflow returned. Measured against a live broker: a child
+# up. This wrapper raises plain exceptions of its own: chiefly `envelope_from_result`'s `ValueError`
+# over whatever the bundle's workflow returned. Measured against a live broker: a child
 # returning a non-envelope left the parent RUNNING indefinitely — history repeating
 # `workflow_task_failed: "Failed decoding arguments"` every ~10 s, the worker re-polling the
 # poisoned task forever, no `job_failed` push-back, and `get_durable_job_status` answering
@@ -680,6 +693,23 @@ class ConnectorJobWorkflow:
             )
             return await self._finish(job, result, started_at)
         except BaseException as exc:
+            # **An eviction is not a failure, and it arrives here looking exactly like one.** When
+            # Temporal drops a cached instance — a terminate, a cache eviction, a worker going
+            # down — the parked coroutine is *closed* from outside the workflow event loop, and
+            # Python throws that in at the await point this clause then catches. Everything below
+            # needs that loop: measured on a parked connector job, `workflow.now()` raised
+            # `_NotInWorkflowEventLoopError` and the interpreter printed a bare "Exception ignored
+            # in: <coroutine object ...>" on every such eviction. Nothing is lost by leaving — the
+            # run was not cancelled server-side and another worker replays it from history — and a
+            # clause that half-runs while claiming to record and announce a failure is noise that
+            # will hide the teardown problem worth seeing.
+            #
+            # `in_workflow()` rather than catching `_NotInWorkflowEventLoopError` around each line:
+            # the condition is one fact about where this code is running, not a property of the
+            # clock call that happened to notice it first, and every await below would fail on the
+            # same fact one line later.
+            if not workflow.in_workflow():
+                raise
             # **The ledger is settled first, before anything best-effort.** A failed effect that is
             # left `attempting` reads as "this system may have changed the far side and cannot
             # prove either way", which is the honest state for a crash and a false alarm for a run
@@ -855,13 +885,28 @@ class ConnectorJobWorkflow:
             workflow.logger.warning("effect ledger not settled for %s", job_id)
 
     async def _run_child(self, job: ConnectorJobInput) -> ConnectorJobResult:
-        """Start the bundle's own workflow on its queue and wait for its result."""
-        result: ConnectorJobResult = await workflow.execute_child_workflow(
+        """Start the bundle's own workflow on its queue, wait for its result, and decode it here.
+
+        **The decode is deliberately not the SDK's.** Passing `result_type=ConnectorJobResult`
+        reads better and puts the failure somewhere `except BaseException` cannot reach: the SDK
+        converts a child's payload while *applying the activation*, outside the workflow
+        coroutine, so a `ValidationError` there fails the run without any of this workflow's code
+        running. Measured on a live broker — a child returning `{"not": "an envelope"}` scheduled
+        **zero** activities: no `job_records` row, no `job_failed` push-back, and a chemist still
+        holding the "this is running" message, which is
+        `D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` through the one door the wide
+        clause above was widened to close.
+
+        Taking the payload untyped and validating it here puts that failure back inside workflow
+        code, where the clause writes the failure row and sends the push-back. It also reuses
+        `envelope_from_result`, which is already the single decoder both client-side waiters share
+        and already raises a sentence written to be read rather than pydantic's field dump.
+        """
+        raw = await workflow.execute_child_workflow(
             job.workflow,
             job.payload,
             id=child_workflow_id("run"),
             task_queue=job.task_queue,
-            result_type=ConnectorJobResult,
             # The actor, carried as per-execution metadata rather than in the argument. A bundle
             # whose backend runs under a *shared* service identity — a calculation backend is the
             # one we
@@ -911,7 +956,7 @@ class ConnectorJobWorkflow:
             # `child_execution_timeout`. A job that declares neither gets the setting unchanged.
             execution_timeout=child_execution_timeout(job.timeout_seconds, job.awaits_answer),
         )
-        return result
+        return envelope_from_result(workflow.info().workflow_id, raw)
 
     async def _publish_result(self, job: ConnectorJobInput, result: ConnectorJobResult) -> None:
         """Offer this run's own result to the external results store, if one is configured.

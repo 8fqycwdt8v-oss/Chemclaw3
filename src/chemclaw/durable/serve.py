@@ -44,6 +44,7 @@ from chemclaw.durable.job_metrics import (
     broker_seen_recently,
     poll_open_jobs,
 )
+from chemclaw.durable.job_record import log_record_durability
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,9 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
     # every worker's `main()` runs through, so no entrypoint can wire the drain and forget the
     # gauge.
     bind_job_gauges()
+    # And beside it, the one deployment fact a worker's own logs never carried: whether the runs it
+    # is about to record are kept at all. See `job_record.log_record_durability`.
+    log_record_durability(component)
     stop = asyncio.Event()
     for sig in _STOP_SIGNALS:
         loop.add_signal_handler(sig, stop.set)

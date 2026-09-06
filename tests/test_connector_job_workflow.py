@@ -23,7 +23,9 @@ Temporal-backed test here.
 """
 
 import asyncio
+import gc
 import inspect
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,6 +55,7 @@ from chemclaw.kg.note import Note
 from chemclaw.kg.record import record_note
 from chemclaw.memory.jobs import SynthesisUnit
 from tests.fixtures.connectors.fixture.workflows import FixtureJobWorkflow
+from tests.fixtures.foreign_result_workflow import ForeignResultWorkflow
 from tests.temporal_env import pydantic_client, start_env_or_skip, start_local_env_or_skip
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "connectors"
@@ -769,3 +772,177 @@ def test_a_job_that_fails_records_and_says_so_even_when_the_write_queue_is_busy(
     )
     assert [kind for _, kind, _ in notified] == ["job_failed"]
     assert "the fixture job was asked to fail" in notified[0][2]["reason"]
+
+
+# --- what comes back from the child ------------------------------------------------------------
+
+
+def _foreign_child_run(returns: dict[str, Any], job_id: str) -> tuple[list[Any], list[Any], str]:
+    """Drive the wrapper over a child returning `returns`; give back records, events, status."""
+    recorded: list[JobRecord] = []
+    notified: list[tuple[str, str, dict[str, Any]]] = []
+
+    class _CapturingSink:
+        async def record(self, record: JobRecord) -> None:
+            recorded.append(record)
+
+    async def _fake_record(*args: Any, **kwargs: Any) -> None:
+        bound = inspect.signature(record_session_event).bind(*args, **kwargs)
+        notified.append(
+            (bound.arguments["session_id"], bound.arguments["kind"], bound.arguments["payload"])
+        )
+
+    status: list[str] = []
+
+    async def _run() -> None:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            core = Worker(
+                client,
+                task_queue=_CORE_QUEUE,
+                workflows=[ConnectorJobWorkflow],
+                activities=[record_session_event_activity, record_job],
+            )
+            connector = Worker(
+                client, task_queue=_CONNECTOR_QUEUE, workflows=[ForeignResultWorkflow]
+            )
+            async with core, connector:
+                handle = await client.start_workflow(
+                    ConnectorJobWorkflow.run,
+                    _CEILING_JOB.model_copy(
+                        update={
+                            "workflow": "ForeignResultWorkflow",
+                            "payload": {"returns": returns},
+                            "session_id": _SESSION,
+                        }
+                    ),
+                    id=job_id,
+                    task_queue=_CORE_QUEUE,
+                    execution_timeout=wrapper_execution_timeout(),
+                )
+                try:
+                    await handle.result()
+                except WorkflowFailureError:
+                    pass
+                described = (await handle.describe()).status
+                assert described is not None
+                status.append(described.name)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("chemclaw.durable.job_record.default_job_record_sink", _CapturingSink)
+        patch.setattr("chemclaw.durable.notify.record_session_event", _fake_record)
+        patch.setattr("chemclaw.core.config.settings.background_task_queue", _CORE_QUEUE)
+        asyncio.run(_run())
+    return recorded, notified, status[0]
+
+
+def test_a_child_that_returns_a_foreign_result_still_records_and_says_so() -> None:
+    """The one failure that used to die outside workflow code entirely.
+
+    Measured on the live broker before the fix: with `result_type=ConnectorJobResult` on the child
+    call, the decode happens in the SDK's *activation-apply* phase — outside the coroutine — so the
+    `except BaseException` clause never ran. Zero activities were scheduled on the failing run: no
+    `job_records` row, no `job_failed` event, and a chemist still holding a "this is running"
+    message. That is `D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` through the exact
+    door the wide clause was written to close, so this asserts the clause's own two obligations
+    rather than merely that the run failed.
+    """
+    recorded, notified, status = _foreign_child_run({"not": "an envelope"}, "wrapper-foreign-child")
+
+    assert status == "FAILED"
+    assert [record.state for record in recorded] == ["failed"], (
+        "the decode failure wrote no durable row — it was raised outside workflow code"
+    )
+    assert [kind for _, kind, _ in notified] == ["job_failed"]
+    assert "envelope" in notified[0][2]["reason"], (
+        "the reason must name what was wrong with the result, not just that a child failed"
+    )
+
+
+def test_a_newer_bundle_may_add_a_field_to_the_envelope_it_returns() -> None:
+    """Bundle-to-core skew is a rolling upgrade, not a bug: the result envelope ignores extras.
+
+    Five fields on this wire say in as many words that they are "additive and defaulted because it
+    crosses the Temporal wire and histories are in flight". That rule made **core to bundle**
+    additions safe and left the other direction closed: `extra="forbid"` on the *result* meant a
+    bundle image newer than core's — the normal state of a rolling upgrade — killed every in-flight
+    job of that bundle the moment it emitted one field this core had not learned yet. Measured, that
+    death was the F1 one: no row, no push-back.
+    """
+    envelope = ConnectorJobResult(summary="a newer bundle ran").model_dump(mode="json")
+    recorded, notified, status = _foreign_child_run(
+        {**envelope, "provenance_v2": {"emitted_by": "a newer bundle"}}, "wrapper-newer-bundle"
+    )
+
+    assert status == "COMPLETED", "a newer bundle's extra field must not fail an in-flight job"
+    assert [record.state for record in recorded] == ["completed"]
+    assert [kind for _, kind, _ in notified] == ["job_completed"]
+
+
+def test_the_launch_side_of_the_wire_still_refuses_what_it_does_not_know() -> None:
+    """The asymmetry is on purpose, so state it: input forbids extras, the result ignores them.
+
+    An unknown field on `ConnectorJobInput` is core writing to itself — this repository builds every
+    launch site, so it is a bug and must fail loudly at the boundary. An unknown field on
+    `ConnectorJobResult` comes from a separately-deployed image and is simply not this core's
+    business. Same wire, opposite postures, and nothing but this test says which is which.
+    """
+    assert ConnectorJobInput.model_config["extra"] == "forbid"
+    assert ConnectorJobResult.model_config["extra"] == "ignore"
+
+
+def test_a_workflow_instance_torn_down_mid_job_attempts_nothing_on_the_way_out() -> None:
+    """An eviction is not a job failure, and the failure clause must not half-run through one.
+
+    When Temporal evicts a cached instance — a terminate, a cache eviction, a worker going down —
+    the parked `run` coroutine is *closed* from outside the workflow event loop. Python throws that
+    into it at its await point, `except BaseException` catches it, and every line of the clause is
+    then executing somewhere none of its work can happen: measured, `workflow.now()` raised
+    `_NotInWorkflowEventLoopError` and the interpreter printed a bare "Exception ignored in:
+    <coroutine object ...>" on **every** eviction of a parked connector job. Nothing was lost — the
+    server had not cancelled the run and another worker replays it — but a failure clause that
+    partially runs while claiming to record and announce a failure is noise that will hide the
+    teardown problem that matters.
+
+    Driven on the real dev server rather than the time-skipping one, because the property is about
+    a wall-clock eviction of a run that is still going, which time skipping fast-forwards away.
+    `sys.unraisablehook` is the only place this failure was ever visible, which is the point.
+    """
+    caught: list[BaseException | None] = []
+
+    async def _run() -> None:
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+            job = _CEILING_JOB.model_copy(
+                update={
+                    # A queue nobody serves, so the run parks in the child call and is still
+                    # parked when the terminate below evicts it.
+                    "task_queue": "connector-nobody-serves-this",
+                    "session_id": _SESSION,
+                    "timeout_seconds": None,
+                    "awaits_answer": True,
+                }
+            )
+            async with Worker(client, task_queue=_CORE_QUEUE, workflows=[ConnectorJobWorkflow]):
+                handle = await client.start_workflow(
+                    ConnectorJobWorkflow.run,
+                    job,
+                    id="wrapper-evicted-while-parked",
+                    task_queue=_CORE_QUEUE,
+                )
+                await asyncio.sleep(3)
+                await handle.terminate()
+
+    previous = sys.unraisablehook
+    sys.unraisablehook = lambda hook: caught.append(hook.exc_value)
+    try:
+        asyncio.run(_run())
+        gc.collect()
+    finally:
+        sys.unraisablehook = previous
+
+    assert [type(exc).__name__ for exc in caught] == [], (
+        "the failure clause ran during instance teardown and died there; an eviction must be "
+        "re-raised untouched, because nothing the clause does can reach anything from outside "
+        "the workflow event loop"
+    )

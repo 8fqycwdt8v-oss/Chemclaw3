@@ -1009,12 +1009,34 @@ class Settings(
         `ConnectorJobWorkflow` gives its child `connector_job_timeout_seconds` as an **execution**
         timeout (`durable/connector_job.py`), and the longest thing inside any child is
         `run_xtb_calculation` — a CREST conformer search budgeted by `xtb_job_timeout_seconds`
-        (`connectors/calc/workflows.py`). Set the ceiling at or below that and two things break,
-        neither of which says so: the activity's `BAD_DATA_RETRY` is dead, because a single attempt
-        already exhausts the parent's whole budget, so `activity_max_attempts` is a number that can
-        never be reached; and an operator who raises `xtb_job_timeout_seconds` for a large molecule
+        (`connectors/calc/workflows.py`). Set the ceiling at or below that and the longest activity
+        cannot finish once: an operator who raises `xtb_job_timeout_seconds` for a large molecule
         observes no change whatsoever and gets a bare `WorkflowExecutionTimedOut` naming neither
         setting.
+
+        **What it guarantees is one attempt, and it cannot be asked for two.** This paragraph used
+        to claim the check also keeps `BAD_DATA_RETRY` alive — "a single attempt already exhausts
+        the parent's whole budget, so `activity_max_attempts` is a number that can never be
+        reached" — and that is a property the arithmetic below cannot deliver, in either direction.
+        A bundle activity's attempt costs its queue wait plus its work, and
+        `connector_queue_wait_timeout` is *derived* as `C - longest - activity_timeout_seconds`, so
+        a worst-case attempt costs
+        `C - activity_timeout_seconds` for **every** ceiling `C` and exactly one of them fits by
+        construction. Measured at the shipped defaults: `longest` 15,000 s, ceiling 25,200 s, queue
+        wait 10,170 s, one attempt 25,170 s, 30 s left over, `activity_max_attempts` 5. Raising the
+        ceiling raises the wait in lockstep and changes none of it.
+
+        That is not a defect and `activity_max_attempts` is not a dead knob — the two just meet
+        somewhere else than this rule. Retries are spendable by attempts that end **well short of
+        their own budget**, which is what the failures `BAD_DATA_RETRY` classifies actually do: an
+        unreachable calculation server, a payload the far side rejects, a transient refusal. What
+        no ceiling here funds is a *second full-length* attempt, and an operator tuning
+        `activity_max_attempts` for a CREST search that times out should read it as one.
+        `durable/connector_job.finish_headroom` states the same reservation from the other side —
+        "one attempt each, deliberately" — and the two now agree; they did not, and the
+        operator-facing one was the wrong one. Funding a guaranteed second attempt would need
+        `C > 2*(q + w)`, which this derivation cannot express, and is a new decision rather than a
+        larger number.
 
         This is the same rule that used to be written against the DFT poll's 24 h budget. The tier
         it guarded is gone (`D-2026-08-26-semiempirical-is-the-whole-tier`) and the rule is not: the

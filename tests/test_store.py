@@ -7,6 +7,7 @@ and recomputes.
 
 import asyncio
 import logging
+import threading
 
 import pytest
 
@@ -209,6 +210,55 @@ def test_concurrent_misses_on_one_key_share_one_computation() -> None:
     assert sum(1 for _r, cached in results if not cached) == 1, (
         "exactly one caller computed; the waiters report was_cached=True"
     )
+
+
+def test_a_second_event_loop_computes_rather_than_awaiting_the_first_loops_future() -> None:
+    """The ledger is per loop, because an `asyncio.Future` is.
+
+    `cached_compute`'s docstring covers the cross-*process* case — "misses still each compute",
+    deferred with its own trigger — and said nothing about two loops in one process, which
+    `core/temporal_client.py`'s own docstring names as a shape that exists here ("an `asyncio.run`
+    in a thread, a test that starts its own"). Measured before this changed, that case was neither
+    raced nor deferred: the second caller found the first loop's future and awaiting it raised
+    `RuntimeError: Task ... attached to a different loop`, an error naming nothing a chemist could
+    act on, for a cache whose entire purpose is to not get in the way.
+
+    Deterministic rather than two racing threads: the first loop is held *inside* its computation
+    until the second loop has been all the way through `cached_compute` for the same key. The two
+    computations are separate callables, because a shared one would have the second loop wait on
+    the latch holding the first.
+    """
+    holding = threading.Event()
+    release = threading.Event()
+    store = InMemoryStore()
+    key = CalculationKey.build("xtb", "gfn2", inputs={"smiles": "CCO"})
+
+    async def hold() -> dict[str, int]:
+        holding.set()
+        await asyncio.get_running_loop().run_in_executor(None, release.wait)
+        return {"energy": 7}
+
+    computed_on_the_second_loop = 0
+
+    async def quick() -> dict[str, int]:
+        nonlocal computed_on_the_second_loop
+        computed_on_the_second_loop += 1
+        return {"energy": 7}
+
+    holder = threading.Thread(
+        target=lambda: asyncio.run(cached_compute(store, key, hold)), daemon=True
+    )
+    holder.start()
+    try:
+        assert holding.wait(5), "the first loop never reached its computation"
+        result, cached = asyncio.run(cached_compute(store, key, quick))
+    finally:
+        release.set()
+        holder.join(10)
+
+    assert result == {"energy": 7}
+    assert cached is False, "a second loop cannot join the first loop's future; it computes"
+    assert computed_on_the_second_loop == 1
 
 
 def test_a_failed_shared_computation_fails_every_waiter_and_clears_the_slot() -> None:
