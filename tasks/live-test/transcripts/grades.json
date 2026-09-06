@@ -1,0 +1,20 @@
+[
+  {
+    "probe_id": "an-01",
+    "verdict": "ungraded",
+    "reason": "unparseable judge: Two notes cover this coupling; both are cited above.",
+    "fabricated_claims": []
+  },
+  {
+    "probe_id": "an-02",
+    "verdict": "ungraded",
+    "reason": "unparseable judge: Two notes cover this coupling; both are cited above.",
+    "fabricated_claims": []
+  },
+  {
+    "probe_id": "an-03",
+    "verdict": "ungraded",
+    "reason": "unparseable judge: Two notes cover this coupling; both are cited above.",
+    "fabricated_claims": []
+  }
+]
