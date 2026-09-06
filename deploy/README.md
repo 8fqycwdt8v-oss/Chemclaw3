@@ -197,8 +197,8 @@ half-written.
   render unless exactly one of two things is stated: `networkPolicy.egressDestinations` (a list of
   NetworkPolicyPeer objects), or `networkPolicy.allowAnyDestination: true` — the deliberate,
   greppable statement that the old default was what you wanted. `helm template` on the shipped
-  defaults therefore takes `--set networkPolicy.allowAnyDestination=true`, which is what the two
-  renders in the `Makefile` pass (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`).
+  defaults therefore takes `--set networkPolicy.allowAnyDestination=true`, which is what every
+  render in the `Makefile` passes (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`).
 - **The retention posture must be stated the same way.** Every `CHEMCLAW_RETENTION_*` window
   defaults to disabled — a disposal policy is a deployment's decision, not a code default — and
   what that silence shipped was durable tables that grow for the release's lifetime (the LangGraph
@@ -206,6 +206,10 @@ half-written.
   now refuses to render unless exactly one of `retention.windows` (the day windows, rendered into
   the ConfigMap with `CHEMCLAW_RETENTION_ENABLED` derived) or
   `retention.unboundedGrowthAccepted: true` is stated; the Makefile's renders pass the latter.
+  **And a stated window must name a setting**: the map is rendered into the ConfigMap key by key
+  and pydantic-settings ignores an unknown prefixed environment variable, so a typo used to satisfy
+  the gate, report retention on, and leave every window disabled. A key that is not one of the nine
+  `CHEMCLAW_RETENTION_*` fields now refuses to render, naming the set it is not in.
 - **`/metrics` is on the public host, and the NetworkPolicy is not what bounds it.** The Route
   declares no `spec.path`, and neither a Route nor a NetworkPolicy filters by path — the ingress
   rule must allow the router, and the router publishes every path. What makes an unauthenticated
@@ -338,9 +342,10 @@ needs the workflow to carry the context), and no FastAPI/httpx/Temporal auto-ins
 builds the `TracerProvider`, the `BatchSpanProcessor` and the OTLP span exporter itself rather than
 calling `agent_framework.observability.configure_otel_providers`, so removing that package cannot
 silently stop tracing. **The chart now sets `OTEL_SERVICE_NAME` per Deployment** — `chemclaw-service`,
-`chemclaw-background-worker`, `chemclaw-connector-<name>`, `chemclaw-connector-worker-<name>` — so
-the four process roles are four services in the backend rather than the one they all reported as,
-with `service.version=<revision>` and `k8s.pod.name`/`k8s.namespace.name` from the downward API
+`chemclaw-background-worker`, `chemclaw-mcp-face`, `chemclaw-connector-<name>`,
+`chemclaw-connector-worker-<name>` — so the five process roles are five services in the backend
+rather than the one they all reported as, with `service.version=<revision>` and
+`k8s.pod.name`/`k8s.namespace.name` from the downward API
 through `OTEL_RESOURCE_ATTRIBUTES`. The framework's per-model
 `gen_ai.client.token.usage` histogram stopped being exported the moment this pipeline replaced its
 own — a span pipeline exports no metrics — and nothing in `langchain`/`langgraph`/`langsmith` emits

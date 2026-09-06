@@ -84,6 +84,17 @@ live streamable-HTTP server, opening the spec directly rather than through disco
 `ToolNode.tools_by_name` with the `SERVED_BY` stamp on it whether or not a deployment could enable
 it.
 
+**One helper is exported beside the middleware, and it belongs to the third treatment.**
+`defanged_payload` neutralises every string inside a *structured* tool result — a pydantic model, a
+dict, a list — whatever shape it arrived in. It is here rather than beside `defang` in
+`agent/framing.py` because the question it answers is a tool-result question: an in-process tool
+that returns a model has no text span to wrap and no source to attribute, so neutralising is the
+whole treatment available to it, and the review rule above is what obliges it to apply one. Whole
+payload rather than a field list, which is `_framed_content`'s argument for a connector result and
+`agent/protocol_design_tools._readable`'s for a design: escaping `<` cannot make a payload
+unreadable, and a list naming which fields carry free text goes stale the next time the schema
+grows a string.
+
 **Position: outside the audit trail, inside the two converters** (see
 `langgraph_agent.tool_call_middleware`). Outside `audit` so `audit_events.detail` records what the
 tool returned rather than what the model was shown — the envelope is a presentation decision and
@@ -94,14 +105,56 @@ middleware as an exception and is converted above it, so it is never seen either
 """
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
+from pydantic import BaseModel
 
 from chemclaw.agent.framing import defang, envelope_delimiters, frame_untrusted
 from chemclaw.agent.tool_result_shape import rewritten_tool_messages
 from chemclaw.connectors.transport import SERVED_BY
+
+#: What `defanged_payload` preserves: a payload comes back as the type it went in as.
+_Payload = TypeVar("_Payload")
+
+
+def defanged_payload(payload: _Payload) -> _Payload:
+    """`payload` with every string inside it neutralised, and its shape untouched.
+
+    For a tool whose result is *structured* — `ConnectorJobResult`, a job's `result` dict, a note's
+    frontmatter — where `frame_untrusted` has nothing to wrap. The module docstring above argues
+    why that is a neutralisation rather than an envelope; this is the function it names.
+
+    Recursive because a payload nests: a connector job's `data` is the bundle's own model dumped to
+    a dict, and its `note` is a whole `Note`. Dict *keys* are neutralised as well as values — a
+    model reads a dict as text, so a key can spell the closing delimiter exactly as a value can.
+    Anything that is not a string, a model or a container is returned as it came: escaping is a
+    property of text, and a float, a date or an enum has no delimiter to spell.
+
+    A model is rebuilt with `model_copy`, which does not re-validate. That is deliberate rather
+    than incidental: a `Note` reaching here has already passed the graph's validators, and
+    re-running them on the escaped copy would let a defang turn a readable result into a raised
+    `ValidationError` at the model's edge.
+    """
+    return cast(_Payload, _defanged(payload))
+
+
+def _defanged(value: Any) -> Any:
+    """The untyped half of `defanged_payload`, where the recursion actually happens."""
+    if isinstance(value, str):
+        return defang(value)
+    if isinstance(value, BaseModel):
+        return value.model_copy(
+            update={name: _defanged(getattr(value, name)) for name in type(value).model_fields}
+        )
+    if isinstance(value, dict):
+        return {_defanged(key): _defanged(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_defanged(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_defanged(item) for item in value)
+    return value
 
 
 def served_by(request: Any) -> str:

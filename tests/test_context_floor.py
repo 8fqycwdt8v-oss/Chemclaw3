@@ -313,10 +313,11 @@ load_profiles()
 #: claim about this commit and nothing later.
 #:
 #: **`agent_tool_result_clear_trigger` moves with it, by derivation rather than by retuning**
-#: (`core/config/agent.py`): its default is this ceiling plus the 30,000 of thread the setting has
-#: always meant, so raising the ceiling raises the trigger to 74,500 and every deployment's lossless
-#: edit fires slightly later than it did. That coupling is the reason to keep this number a
-#: *ceiling* rather than a measurement — see the config comment, which says why.
+#: (`core/config/agent.py`): its default is `PREFIX_BOUND` — this ceiling plus the allowance below
+#: it — plus the 30,000 of thread the setting has always meant, so raising the ceiling raises the
+#: trigger with it and every deployment's lossless edit fires slightly later than it did. That
+#: coupling is the reason to keep this number a *ceiling* rather than a measurement — see the
+#: config comment, which says why.
 #:
 #: **65,000 as of 2026-09-05, and for the third time nothing was added — the fixture stopped
 #: measuring a smaller system.** The two entries above are about the tool half's *objects* and the
@@ -346,9 +347,10 @@ load_profiles()
 #: `test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_bound` below now
 #: measures the sibling rather than quoting it.
 #:
-#: The headroom is **901** tokens against 64,099 — under what one `propose_knowledge_note` costs
-#: (1,126), which is the property every entry above was chosen for, and it is stated here knowing
-#: it is a claim about this commit rather than about `HEAD`.
+#: The headroom this leaves is smaller than one `record_knowledge_note`'s schema costs, which is
+#: the property every entry above was chosen for. Stated as a relation rather than as two figures:
+#: `_floor("default")` measures both, and the pair drifts on every merge that touches a tool
+#: schema — the paragraph above is about exactly that.
 CEILINGS: dict[str, int] = {"__default__": 65_000}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
@@ -572,8 +574,15 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: the allowance for what it cannot see.
 #:
 #: This is the number `core/config/agent.py` derives both compaction thresholds from — the trigger
-#: is `PREFIX_BOUND + 30,000` and the budget `PREFIX_BOUND + 57,000` — and
-#: `tests/test_compaction.py` asserts that relation rather than restating either figure. It is here
+#: is `PREFIX_BOUND + 30,000` and the budget `PREFIX_BOUND + 43,000` — and
+#: `tests/test_compaction.py` asserts that relation rather than restating either figure, as
+#: `CLEAR_TRIGGER_THREAD_ALLOWANCE` and `BUDGET_THREAD_ALLOWANCE`; read those, not this sentence,
+#: for the live allowances. This one said `+ 57,000` against a shipped `+ 43,000` for as long as
+#: the budget's own derivation ran the other way: the *window* is the input now, and the thread
+#: allowance is what is left over once the prefix is paid, so holding 57,000 fixed is exactly the
+#: arithmetic `core/config/agent.py` reverted for permitting a request a 128k model rejects. Both
+#: assertions are inequalities, so the shipped defaults passed under either sentence — which is why
+#: this one drifted silently and why the constants, not the prose, are the claim. It is here
 #: rather than in the config because the ceiling is here: two numbers that must move together
 #: belong in one place, and the previous arrangement (a config comment quoting a ceiling by value)
 #: is exactly how the connector-less ceiling propagated into two settings that were floored for
@@ -934,7 +943,7 @@ def _nested_descriptions(node: Any, path: str = "") -> list[tuple[int, str, str]
 #: tokens a turn across five.
 #:
 #: **250 rather than the measured maximum.** The widest nested description in the `default` prefix
-#: on 2026-09-05 is `propose_knowledge_note`'s `relations` at **192** — a keyed list of relation
+#: on 2026-09-05 is `record_knowledge_note`'s `relations` at **192** — a keyed list of relation
 #: kinds a caller genuinely has to be given — so the bound has ~30% headroom for a field
 #: explanation that gets clearer, and none for a design note. The three entries this test was
 #: written after measured 288, 264 and 220.

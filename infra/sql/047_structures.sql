@@ -35,5 +35,15 @@ CREATE TABLE IF NOT EXISTS structures (
 -- Which molecule a stored geometry is of, for "show me the conformers we have for this compound".
 -- A plain expression index rather than a column: the value is inside the payload already, and a
 -- second copy is a second thing that can disagree with it.
+--
+-- **Speculative, and nothing has asked that question yet.** The sentence above states the reader
+-- this index was built for, in the present tense, and there is none: the only two statements
+-- against `structures` anywhere in `src/` are `postgres_structures.py`'s insert and
+-- `SELECT structure FROM structures WHERE structure_id = %s`, both keyed by the primary key. So
+-- what this costs today is a JSONB extraction and a btree insert on every geometry written, for no
+-- read — cheap, on a table the README classes as never pruned, and worth either a caller or this
+-- note rather than a claim that it serves a live query. Dropping it is a reviewed operation
+-- (`tests/test_migrations_are_additive.py` refuses a `DROP INDEX` without an ADR naming it), which
+-- is the right price for removing something a future reader may be about to use.
 CREATE INDEX IF NOT EXISTS structures_smiles_idx
     ON structures ((structure ->> 'smiles'));

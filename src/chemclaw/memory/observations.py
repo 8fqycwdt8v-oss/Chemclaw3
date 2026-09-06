@@ -106,18 +106,31 @@ ON CONFLICT (id) DO UPDATE SET
 # row. The statement is *kept*, not refreshed: it was written by a pass that saw more than this one,
 # and replacing it would leave a "one project" sentence beside three-project evidence — the exact
 # self-contradiction the replacement above exists to remove, arrived at from the other side.
+#
+# **`COALESCE`, because `array_agg` over zero rows returns NULL rather than `'{{}}'`.** Both columns
+# are `TEXT[] NOT NULL DEFAULT '{{}}'` (025), so an accumulate whose stored *and* incoming arrays
+# are both empty aborts the statement with a not-null violation — and it takes the whole batch with
+# it, since `record` sends the pass in one `executemany`. The `_REPLACE` branch above is unaffected:
+# it assigns `EXCLUDED.*` straight through, and an empty array is a fine value to store.
+# Reachability, stated honestly: **neither shipped miner can produce it** — both `mine_corpus` and
+# `mine_interactions` skip a finding with fewer than two projects, and derive evidence from the
+# same rows the projects came from. It is `record()`'s own signature that permits it, `Observation`
+# declares both fields `default_factory=list` with no minimum length, and driving the public
+# function with such a row against a real database is what turns it red
+# (`tests/test_observations.py`). Two branches of one function that disagree about the empty case is
+# a defect whether or not today's two callers happen to avoid it.
 _ACCUMULATE = f"""
 INSERT INTO observations (id, statement, scope, evidence_note_ids, projects_seen, origin)
 VALUES (%(id)s, %(statement)s, %(scope)s, %(evidence)s, %(projects)s, %(origin)s)
 ON CONFLICT (id) DO UPDATE SET
-    evidence_note_ids = (
+    evidence_note_ids = COALESCE((
         SELECT array_agg(DISTINCT e ORDER BY e)
           FROM unnest(observations.evidence_note_ids || EXCLUDED.evidence_note_ids) AS e
-    ),
-    projects_seen = (
+    ), '{{}}'),
+    projects_seen = COALESCE((
         SELECT array_agg(DISTINCT p ORDER BY p)
           FROM unnest(observations.projects_seen || EXCLUDED.projects_seen) AS p
-    ),
+    ), '{{}}'),
     last_seen = now(),{_REVIVE}
 """
 

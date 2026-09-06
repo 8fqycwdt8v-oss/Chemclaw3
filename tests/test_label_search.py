@@ -11,9 +11,11 @@ executed half of this file.
 """
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 
 import pytest
+from rdkit import Chem
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -24,7 +26,12 @@ from chemclaw.science.fingerprints.store import (
     InMemoryFingerprintStore,
     PostgresFingerprintStore,
 )
-from chemclaw.science.labels.molecules import CORPUS_MOLECULES_TABLE, CorpusMolecules
+from chemclaw.science.labels.molecules import (
+    CORPUS_MOLECULES_TABLE,
+    CorpusMolecules,
+    _verify_within,
+)
+from chemclaw.science.labels.pattern import compile_query
 from chemclaw.science.labels.reactions import transformation_of
 from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
 from chemclaw.science.labels.search import (
@@ -522,6 +529,37 @@ def test_a_substructure_verify_that_runs_too_long_is_cut_off_rather_than_awaited
             await _drop_corpus_molecules(corpus)
 
     asyncio.run(_run())
+
+
+def test_a_verify_past_its_deadline_stops_instead_of_matching_the_rest_of_the_candidates() -> None:
+    """The bound above releases the caller; this is what makes it true of the worker thread.
+
+    `asyncio.wait_for` cannot stop a thread, so a verify that outran the bound went on matching
+    every remaining candidate — up to `substructure_scan_max_records` of them — while holding a
+    slot in the loop's *default* executor, which is also where `chemclaw.api.auth` validates every
+    bearer token. `_verify_within` reads the deadline between candidates instead.
+
+    No Postgres and no clock constant: one match is measured here and the deadline is expressed in
+    matches, so a faster machine changes the numbers and not the property.
+    """
+    query = compile_query(_UNMATCHABLE)
+    molecule = Chem.MolFromSmiles(_CHAIN_CORPUS[0])
+    started = time.perf_counter()
+    molecule.HasSubstructMatch(query)
+    per_candidate = time.perf_counter() - started
+
+    started = time.perf_counter()
+    with pytest.raises(TimeoutError):
+        _verify_within(_CHAIN_CORPUS, query, time.monotonic() + per_candidate * 5)
+    bounded = time.perf_counter() - started
+
+    started = time.perf_counter()
+    assert _verify_within(_CHAIN_CORPUS, query, time.monotonic() + 3600) == []
+    unbounded = time.perf_counter() - started
+
+    assert bounded < unbounded / 4, (
+        f"the verify ran {bounded:.3f}s of an unbounded {unbounded:.3f}s past its deadline"
+    )
 
 
 def test_an_oversized_substructure_query_is_refused_before_anything_is_scanned() -> None:

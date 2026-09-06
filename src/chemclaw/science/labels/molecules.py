@@ -15,11 +15,13 @@ ELN corpus by four orders of magnitude and hand `similar_molecules` millions of 
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 import psycopg
 from psycopg.rows import TupleRow
+from rdkit import Chem
 
 from chemclaw.core import db
 from chemclaw.core.chem import InvalidSmilesError
@@ -142,11 +144,14 @@ class CorpusMolecules:
         comprehension froze the pod's one event loop for 465 ms — every other session's SSE stream,
         every in-flight turn and every bearer-token validation with it.
 
-        Honest limit, the same one the sibling path states: the timeout releases the loop and the
-        caller, it cannot kill the RDKit thread, which holds one worker slot until the pattern
-        completes. That slot comes from the loop's *default* executor, which is also where
-        `api.auth` validates every bearer token — so this offload wants the bounded scan pool the
-        molfp path is growing, not a fourth unbounded `to_thread`.
+        Honest limit, the same one the sibling path states and narrowed the same way: the timeout
+        releases the loop and the caller and cannot kill the RDKit thread, so the bound is carried
+        *into* the worker as a deadline (`_verify_within`) rather than only awaited from outside
+        it. Without that, a verify that outran the bound went on matching the whole remaining
+        candidate list in the background — up to `substructure_scan_max_records` molecules — while
+        holding a slot in the loop's *default* executor, which is also where `api.auth` validates
+        every bearer token. What is left is one molecule's match, because RDKit exposes no
+        interruption hook and the deadline can only be read between candidates.
 
         Raises:
             FingerprintError: The query is longer than `substructure_query_max_length`, is not
@@ -175,8 +180,12 @@ class CorpusMolecules:
             )
         timeout = settings.substructure_match_timeout_seconds
         try:
+            # Both halves of one bound, as `molfp.search.find_substructure_matches` does it: the
+            # deadline stops the worker, `wait_for` still releases the caller, and both raise
+            # `TimeoutError` so the refusal below is the same either way.
             verified = await asyncio.wait_for(
-                asyncio.to_thread(matching, candidates, query), timeout=timeout
+                asyncio.to_thread(_verify_within, candidates, query, time.monotonic() + timeout),
+                timeout=timeout,
             )
         except TimeoutError as exc:
             raise FingerprintError(
@@ -185,3 +194,39 @@ class CorpusMolecules:
                 "(or raise CHEMCLAW_SUBSTRUCTURE_MATCH_TIMEOUT_SECONDS)"
             ) from exc
         return verified, truncated
+
+
+def _verify_within(structures: Sequence[str], query: Chem.Mol, deadline: float) -> list[str]:
+    """`pattern.matching`, one candidate at a time, giving up at `deadline` (the CPU-bound half).
+
+    The verify's wall-clock bound is `asyncio.wait_for`'s, and that bound is about the *caller*:
+    it cannot stop the worker thread, which went on matching every remaining candidate — up to
+    `substructure_scan_max_records` of them — against a pattern already known to be pathological.
+    Reading the deadline between candidates is what makes the bound true of the thread as well.
+
+    A wrapper here rather than a `deadline` parameter on `matching` itself: that function is the
+    pure "which of these contain the query" rule, called from the screen-then-verify path and from
+    tests that have no clock in them, and threading a deadline through it would put this path's
+    scheduling concern inside the chemistry. The cost is one `time.monotonic()` and one one-element
+    list per candidate, against a subgraph isomorphism that is orders of magnitude dearer.
+
+    Args:
+        structures: The screened candidates, in the order the screen returned them.
+        query: The compiled SMARTS.
+        deadline: `time.monotonic()` value past which the verify stops.
+
+    Returns:
+        The structures that genuinely contain `query`, in the order given.
+
+    Raises:
+        TimeoutError: The deadline passed before every candidate was verified. `containing` turns
+            it into the same `FingerprintError` `asyncio.wait_for` produces.
+    """
+    verified: list[str] = []
+    for examined, structure in enumerate(structures):
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"substructure verify gave up after {examined} of {len(structures)} molecule(s)"
+            )
+        verified.extend(matching([structure], query))
+    return verified

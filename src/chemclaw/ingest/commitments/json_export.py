@@ -11,6 +11,7 @@ is *rejected and counted* rather than repaired, and no date is derived. That is 
 be asserting a plan, which is the one thing this tier must not do.
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -52,6 +53,22 @@ class JsonCommitmentExport:
         extract is a snapshot rather than a change feed, and filtering one by a watermark this side
         would drop rows whose state moved without their file being rewritten. The upsert is keyed on
         `(source, external_id)`, so re-reading the whole snapshot converges rather than duplicating.
+
+        **The read runs off the event loop.** It is awaited from an activity on the background
+        worker, whose single event loop also carries that activity's Temporal heartbeat and
+        `/healthz`, `/readyz` and `/metrics` (`core/worker_http.py`), and the glob, every
+        `read_text` and every `json.loads` ran as one uninterrupted block across all of them —
+        measured 2026-09-06 with a 1 ms heartbeat on the same loop, **595.1 ms** for a
+        10,000-file export, the worst gap equal to the whole scan. Same rule and same fix as the
+        two ELN adapters this class is the counterpart of.
+        """
+        return await asyncio.to_thread(self._read)
+
+    def _read(self) -> list[Commitment]:
+        """The whole blocking read, in one synchronous function so one thread can hold it.
+
+        Returns:
+            Every commitment the export holds, refusals counted and skipped as below.
         """
         if not self.path.exists():
             # **Said out loud, because the alternative is a truthful-looking empty portfolio.** A

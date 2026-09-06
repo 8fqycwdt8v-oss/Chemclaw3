@@ -38,6 +38,20 @@ NotesFingerprint = frozenset[tuple[str, int, int]]
 # Parsed-notes cache, keyed by directory. Guarded by a lock because retrieval offloads `load_notes`
 # to worker threads (`asyncio.to_thread`). One entry per directory; production reads one
 # `knowledge_dir`, so this does not grow unbounded.
+#
+# **That sentence is about the number of entries, and it was read as being about memory.** One
+# entry is the whole parsed corpus, held for the life of the process, so the resident cost tracks
+# the corpus — measured at ~5.1 kB per note of realistic size (+101 MB warm on 20 000 notes,
+# reclaimed only by `invalidate_cache`), in every front-door, worker and mcp-face pod that mounts
+# the tree. Since `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` the agent grows that
+# corpus itself, so it is usage-rate rather than curation-rate.
+#
+# **A note-count ceiling that falls back to the uncached parse is not the fix**, and that was
+# measured rather than reasoned about: with `graph_cache_enabled` false there is no cache *and* no
+# `_corpus_lock`, so every concurrent reader parses and assembles its own full copy. On the same
+# 20 000-note corpus, four concurrent readers peaked at +194 MB uncached against +102 MB cached.
+# The cache is one shared copy of what a query has to materialize anyway; refusing it multiplies
+# the peak by the number of readers, which is the OOM such a ceiling would exist to prevent.
 _CACHE_LOCK = threading.Lock()
 _NOTES_CACHE: dict[str, tuple[NotesFingerprint, list[Note]]] = {}
 

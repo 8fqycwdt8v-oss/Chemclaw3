@@ -16,6 +16,7 @@ either so both round-trip. Nothing above this adapter knows ORD's shape (G6). On
 source: this and the free-text adapter share only the `ElnAdapter` contract, not code.
 """
 
+import asyncio
 import json
 import logging
 from collections.abc import Iterable
@@ -129,6 +130,30 @@ class OrdJsonAdapter:
         drain refused and whose cursor it had already advanced past. `durable/eln_sync.py` records
         what `sync_entries` actually refused, which is the same set by construction and costs no
         second mapping pass at all.
+
+        **The directory read runs off the event loop**, for the reason and with the measurement
+        `JsonExportAdapter.fetch_new_entries` states — the same defect in the same shape, and ORD
+        messages are the heavier files: measured 2026-09-06 with a 1 ms heartbeat on the same loop,
+        a 10,000-message directory blocked it for **937.4 ms**, the worst gap equal to the whole
+        scan. The quadratic re-read across a chunked drain is untouched here too.
+        """
+        entries, late, refused = await asyncio.to_thread(self._scan, since)
+        # The source, not the format: this is the one line reporting files that are silently never
+        # ingested, and a deployment running two ORD drop directories got two identical lines
+        # naming neither.
+        warn_late_arrivals(logger, self._source, late)
+        await record_refusals(self._source, refused)
+        return entries
+
+    def _scan(self, since: datetime) -> tuple[list[RawEntry], list[str], dict[str, str]]:
+        """The whole blocking read, in one synchronous function so one thread can hold it.
+
+        Args:
+            since: the window floor; messages at or after it are returned.
+
+        Returns:
+            The entries in the window oldest first, the names of the late arrivals, and the
+            refusals to file — the three things the caller has to do something asynchronous with.
         """
         entries: list[RawEntry] = []
         late: list[str] = []
@@ -174,13 +199,8 @@ class OrdJsonAdapter:
                     f"({created.isoformat()}), so no scheduled run will fetch it; re-run the sync "
                     "from an explicit earlier `since` to backfill it"
                 )
-        # The source, not the format: this is the one line reporting files that are silently never
-        # ingested, and a deployment running two ORD drop directories got two identical lines
-        # naming neither.
-        warn_late_arrivals(logger, self._source, late)
         entries.sort(key=lambda e: e.created_at)
-        await record_refusals(self._source, refused)
-        return entries
+        return entries, late, refused
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Map one ORD message to the canonical `OrdReaction` (structured, step-linked).

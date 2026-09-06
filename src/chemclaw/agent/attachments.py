@@ -302,7 +302,7 @@ async def parse_attachment_off_loop(
 
 
 class AttachmentStore:
-    """Session-scoped attachments, bounded per session and overall.
+    """Session-scoped attachments, bounded per session, in sessions and in bytes.
 
     Working material for a conversation, never the record — anything worth keeping goes through
     the one write path like every other machine-touched knowledge write.
@@ -314,13 +314,23 @@ class AttachmentStore:
         The session map is the shared `chemclaw.core.bounded.BoundedLru` (S2), capped at the same
         `service_max_live_sessions` the front door's live-session cache uses — attachments are
         working material for a live conversation, so they live and die on the same bound.
+
+        That count is not a memory bound and was read as one. `1000 × attachment_max_per_session ×
+        attachment_max_bytes` is a 20 GB ceiling in a pod the chart limits to 1 GiB, so the map is
+        *also* given the LRU's byte budget (`attachment_store_max_bytes`): the entry count bounds
+        how many conversations keep working material, the weight bounds what that costs.
         """
         self._by_session: BoundedLru[str, list[Attachment]] = BoundedLru(
-            lambda: settings.service_max_live_sessions
+            lambda: settings.service_max_live_sessions,
+            weight=lambda items: sum(len(item.text) for item in items),
+            max_weight=lambda: settings.attachment_store_max_bytes,
         )
 
     def add(self, session_id: str, attachment: Attachment) -> None:
-        """Attach a file to a session, evicting the oldest session when over the global bound."""
+        """Attach a file to a session, evicting the least-recently-used sessions past either bound.
+
+        Both bounds are the map's: too many sessions, or too many bytes across all of them.
+        """
         items = self._by_session.get(session_id)  # an upload marks the session recently active
         if items is None:
             items = []

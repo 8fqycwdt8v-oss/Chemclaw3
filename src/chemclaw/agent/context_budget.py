@@ -48,9 +48,9 @@ thread allowance falls by the prefix, and a configured budget *below* the prefix
 against a 43,175-token prefix, which put the default configuration in exactly that state and is why
 `_note_floored_trigger` exists — the floor has to be said rather than arrive silently. The same
 commit that charged the prefix raised the default above the prefix, and it is **derived** from
-`tests/test_context_floor.py`'s ratchet ceiling plus 30,000 of thread, so it moves when that
-ceiling does (74,500 as of 2026-09-05, when the ratchet started measuring the prompt half of the
-prefix on the wire rather than re-deriving it). The shipped configuration is therefore not floored;
+`tests/test_context_floor.PREFIX_BOUND` — that file's ratchet ceiling plus the allowance for the
+bundles it cannot serve — plus 30,000 of thread, so it moves whenever either half does, and no
+figure for it is written down here. The shipped configuration is therefore not floored;
 `_note_floored_trigger` serves the deployment that lowers it, which is the case it was written
 for. The live numbers are whatever `tests/test_compaction.py` and
 `tests/test_context_floor.py` measure, not these, for the reason
@@ -63,6 +63,7 @@ with two subjects, each started by the callers that bracket a turn (`api/runner.
 all — the join between the policy and the bill it exists to reduce, which no series could make.
 """
 
+import asyncio
 import logging
 import threading
 from collections.abc import Awaitable, Callable, Sequence
@@ -234,7 +235,8 @@ def _note_floored_trigger(configured: int, prefix: int, window: int) -> None:
     what happens when the prefix is charged unconditionally and a configured budget is smaller than
     the prefix. That was the shipped default's own state — 30,000 against a `default` profile prefix
     measured at 43,175 on 2026-09-04 — until the default rose above the prefix in the same commit
-    (74,500 today, derived from the ratchet ceiling rather than written down here); this now fires
+    (derived from `tests/test_context_floor.PREFIX_BOUND` plus 30,000 of thread rather than written
+    down here); this now fires
     for a deployment that configures a budget under its own prefix, which is a corner that stays
     reachable because the prefix grows with every bound tool.
 
@@ -376,6 +378,41 @@ def estimate_tool_schemas(tools: Sequence[Any]) -> int:
     return int(total)
 
 
+#: Tool-schema token totals for the life of the process, keyed by the names bound to the call.
+#:
+#: **Process-scoped, because the middleware that reads it is per turn.** `MeasureRequestPrefix` is
+#: constructed inside the compaction group of a graph that `langgraph_agent` compiles per turn, so
+#: an instance memo is cold at every turn's first model call and the whole `convert_to_openai_tool`
+#: sweep ran again on the front door's one event loop. Measured 2026-09-06 on the `default` profile
+#: with connectors bound (92 tools), a fresh graph per turn and a 1 ms heartbeat: **~100 ms** of
+#: uninterrupted loop time for the process's first surface, **~20 ms** for every turn after it, and
+#: **210 ms** for the 12 turns `service_max_concurrent_turns` admits together.
+#:
+#: A process serves one profile set over one connector fleet, so the distinct surfaces it ever sees
+#: are its profiles times the bundles that happen to be reachable — a bounded handful of entries,
+#: not a cache that grows with traffic.
+#:
+#: **What the key assumes, stated because it now spans turns.** The bound names determine the
+#: schemas. Within a turn that was already assumed; across turns it additionally means a bundle
+#: redeployed with changed schemas under unchanged tool names is measured stale until this process
+#: restarts. The thing that goes stale is an estimate used to *bound* a budget, and it is charged
+#: against a sweep every model call of every turn otherwise paid for.
+_SCHEMA_TOKENS: dict[tuple[str, ...], int] = {}
+
+
+def _schema_tokens(tools: Sequence[Any]) -> int:
+    """`estimate_tool_schemas` over this surface, computed once per process per distinct surface.
+
+    Unlocked deliberately: two threads racing a surface neither has seen both compute and both
+    store the same number, which costs one redundant sweep and cannot produce a wrong one.
+    """
+    key = tuple(_tool_name(tool) for tool in tools)
+    total = _SCHEMA_TOKENS.get(key)
+    if total is None:
+        total = _SCHEMA_TOKENS[key] = estimate_tool_schemas(tools)
+    return total
+
+
 def _as_message(schema: Any) -> BaseMessage:
     """One tool schema as a message, so the same counter measures it as measures the thread."""
     import json
@@ -393,37 +430,32 @@ class MeasureRequestPrefix(AgentMiddleware[Any, Any, Any]):
     schemas are on the request, which only a middleware holds. Publishing it into a contextvar is
     what lets an edit that cannot see the request nevertheless budget against the whole of it.
 
-    **Memoised for the life of the middleware, which is the life of the turn.** A graph is compiled
-    per turn (`langgraph_agent`), tools bind at construction, and `convert_to_openai_tool` over ~45
-    tools is real work to repeat on every step of a 30-step turn. The memo is keyed by the tool
-    names actually bound, so a build that swaps its surface recomputes rather than reporting the
-    previous one.
+    **The schema half is memoised for the life of the process, not of the middleware.** A graph is
+    compiled per turn (`langgraph_agent`) and this middleware is constructed with it, so an
+    instance memo is cold at every turn's first model call and every turn re-ran the whole
+    `convert_to_openai_tool` sweep — see `_SCHEMA_TOKENS` for what that measured and what keying it
+    by name assumes. The instructions half is per request and is counted every call, which is free.
 
     Both hooks, for the reason `RecordContextCompaction` gives: `create_agent` puts a middleware
     declaring either hook into both chains, so an async-only middleware fails every synchronous
     `graph.invoke()`.
     """
 
-    def __init__(self) -> None:
-        """Start with nothing measured; the first model call of the turn fills the memo."""
-        super().__init__()
-        self._key: tuple[str, ...] | None = None
-        self._tokens = 0
-
     def _measure(self, request: ModelRequest[Any]) -> int:
-        """This request's prefix in estimated tokens, computed once per bound tool surface."""
-        key = tuple(_tool_name(tool) for tool in request.tools)
-        if key != self._key:
-            self._key = key
-            self._tokens = estimate_tool_schemas(request.tools)
+        """This request's prefix in estimated tokens, the schema half memoised per bound surface."""
         system = request.system_message
         instructions = int(count_tokens_approximately([system])) if system is not None else 0
-        return self._tokens + instructions
+        return _schema_tokens(request.tools) + instructions
 
-    def _publish(self, request: ModelRequest[Any]) -> object | None:
-        """Set the ambient prefix, or leave it alone if it cannot be measured."""
+    def _measured(self, request: ModelRequest[Any]) -> int | None:
+        """This request's prefix, or `None` — with the degradation recorded — if it cannot be had.
+
+        Separate from `_publish` because the async path measures this half in a worker thread, and
+        `ContextVar.set` there would set the variable in that thread's context rather than in the
+        turn's.
+        """
         try:
-            return _prefix.set(self._measure(request))
+            return self._measure(request)
         except Exception:
             degraded(
                 logger,
@@ -432,11 +464,15 @@ class MeasureRequestPrefix(AgentMiddleware[Any, Any, Any]):
             )
             return None
 
+    def _publish(self, tokens: int | None) -> object | None:
+        """Set the ambient prefix, or leave it alone when there was nothing to measure."""
+        return None if tokens is None else _prefix.set(tokens)
+
     def wrap_model_call(
         self, request: ModelRequest[Any], handler: Callable[[ModelRequest[Any]], Any]
     ) -> Any:
         """Publish the prefix, run the call, and put the ambient back (sync path)."""
-        token = self._publish(request)
+        token = self._publish(self._measured(request))
         try:
             return handler(request)
         finally:
@@ -448,8 +484,26 @@ class MeasureRequestPrefix(AgentMiddleware[Any, Any, Any]):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[Any]],
     ) -> Any:
-        """The path a turn actually takes."""
-        token = self._publish(request)
+        """The path a turn actually takes — measured off the loop, published on it.
+
+        **Off the loop because a memo miss is pure CPU over every bound tool schema and this
+        process has one loop.** The front door pins itself to one uvicorn worker, so that loop
+        carries every SSE stream, both kubelet probes and the submission side of every token
+        validation, and the sweep ran to completion on it. Measured 2026-09-06 on the `default`
+        profile with connectors bound (92 tools), a fresh graph per turn and a 1 ms heartbeat, for
+        the 12 turns `service_max_concurrent_turns` admits together: **210 ms** of uninterrupted
+        loop time before, **~2 ms** once the memo above is warm, which is what every turn of a
+        running pod now costs.
+
+        **The one case this line buys, and what it does not buy, measured rather than assumed.** A
+        burst that misses together — a pod's first turns, or a bundle whose tools have just come
+        back under new names — still does the work: 100-126 ms across three runs, against 210 ms on
+        the loop. It is a halving rather than an elimination, because a thread buys no parallelism
+        (the GIL is held between switch intervals) and twelve CPU-bound threads on a 4-CPU pod
+        starve the loop thread of it for much of the burst. `api/runner.py` makes the same trade
+        for the graph build and measured the same shape.
+        """
+        token = self._publish(await asyncio.to_thread(self._measured, request))
         try:
             return await handler(request)
         finally:

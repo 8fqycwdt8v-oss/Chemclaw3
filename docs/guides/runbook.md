@@ -295,7 +295,7 @@ By default one credential does everything, and `infra/sql/006` describes `audit_
 "append-only by contract" — a contract nothing enforced and nothing prevented breaking. To make it
 append-only in fact (D-2026-08-05-append-only-by-grant-not-by-contract):
 
-1. Create a login role the application runs as, owning nothing:
+1. Create a login role the application runs as, owning none of the migrated schema:
    `CREATE ROLE chemclaw_app LOGIN PASSWORD '…';`
 2. Point `CHEMCLAW_POSTGRES_DSN` at it, and put the schema owner's DSN in
    `CHEMCLAW_POSTGRES_MIGRATION_DSN` — in the chart, `secrets.migrationKeys`, which is mounted on
@@ -308,6 +308,19 @@ rewrite the trail — this narrows who holds that power and for how long, it doe
 the grant is the whole of the guarantee. The role also needs no `CREATE EXTENSION` right;
 that stays with the migrator, which is where `vector` already required superuser on most managed
 Postgres.
+
+**It does need `CREATE` on schema `public`, and step 3 is what gives it.** This step used to read
+"owning nothing", and a role provisioned to that description could not take a single turn: the eight
+tables LangGraph keeps its turn state in are created by the *application*, on first use
+(`AsyncPostgresSaver.setup()`, `AsyncPostgresStore.setup()`), and no migration in `infra/sql`
+declares them. Under PostgreSQL 15+ `PUBLIC` holds no `CREATE` on `public`, so both setups failed
+with `permission denied for schema public` and `checkpointer()` has no fallback to fall back to.
+`app_privileges.sql` now grants it, so following these steps in order is enough — but a deployment
+that provisions its role by hand, or that locks the schema down after `make db-grants`, has to keep
+it: upstream issues `CREATE TABLE IF NOT EXISTS` on **every process start**, and Postgres checks the
+schema ACL before it checks existence, so the privilege is permanent rather than first-install only.
+Pre-creating the tables does not substitute for it. Verify with
+`SELECT has_schema_privilege('chemclaw_app', 'public', 'CREATE');` → `t`.
 
 **`job_records` is the one table a chemist's answers now depend on** (023, D-157): every finished
 connector job writes what it ran, on what arguments, its whole result, and the reason it was
@@ -804,7 +817,7 @@ all described it, and nothing could have told you.
 | the line is absent from `/metrics` | You are not scraping this process | Not a compaction signal at all: `core/metrics.py` pre-seeds every declared counter, so both names render at `0` from the first scrape of a process that has served nothing. An absent line means the worker's `/metrics` port is unscraped (`CHEMCLAW_WORKER_METRICS_PORT`), not that the policy is unwired. |
 | rising steadily, `reclaimed` large per compaction | Long sessions are routinely over budget | Expected on a deployment with real chemists. Read it against `chemclaw_turn_duration_seconds`: reduction is cheap (sub-millisecond to ~6 ms per call), so a slow turn is not this. |
 | rising on almost every call | The budget is below this deployment's normal turn | Raise `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET` toward the model's real context window. Compacting a thread that would have fit spends estimator passes and drops context for nothing. |
-| rising on **every** call, from the first one | A configured trigger is below this request's own prefix, so it floors at 1 — "reduce on every model call" | Grep the process for `context.trigger_floored`, a WARNING naming the setting, its value and the measured prefix. Both context settings are budgets on the whole *request*: the system message, the skills listing and every bound tool schema come off them before the thread gets anything, and that prefix measured 43,681 estimated tokens on `default` on 2026-09-05. The shipped `CHEMCLAW_AGENT_TOOL_RESULT_CLEAR_TRIGGER` is 74,500, above that prefix, so a shipped deployment is **not** in this state and this row means someone lowered it; raise it back above the prefix (and keep it at or below the budget, which startup enforces). |
+| rising on **every** call, from the first one | A configured trigger is below this request's own prefix, so it floors at 1 — "reduce on every model call" | Grep the process for `context.trigger_floored`, a WARNING naming the setting, its value and the measured prefix. Both context settings are budgets on the whole *request*: the system message, the skills listing and every bound tool schema come off them before the thread gets anything, and that prefix is bounded by `tests/test_context_floor.PREFIX_BOUND` — the ratchet's ceiling for the surface this repository serves plus the allowance for the bundles served out of `Chemclaw3-mcp`. The shipped `CHEMCLAW_AGENT_TOOL_RESULT_CLEAR_TRIGGER` is derived from that bound plus a thread allowance, so it is above the prefix and a shipped deployment is **not** in this state: this row means someone lowered it. Raise it back above the bound (and keep it at or below the budget, which startup enforces). The live figures are whatever `tests/test_context_floor.py` and `tests/test_compaction.py` measure — they move with every bound tool schema, so do not copy one out of this row. |
 
 Per-model attribution for the same spend **is not on this surface, and is no longer missing**. The
 old framework emitted `gen_ai.client.token.usage` labelled by request model, response model,
@@ -1946,8 +1959,8 @@ Off by default, in code and in the chart, and turning it on is a deployment deci
 facts attached — both learned the hard way and both now enforced rather than documented-only:
 
 1. **Startup probes the judge, and refuses to serve if it cannot comply.** With
-   `CHEMCLAW_VERIFIER_ENABLED=true` on an `openai_compatible` provider, the front door's lifespan
-   runs one structured-output probe against the routed `"verifier"` model
+   `CHEMCLAW_VERIFIER_ENABLED=true`, the front door's lifespan runs one structured-output probe
+   against the routed `"verifier"` model
    (`agent/verifier.require_verifier_capability`). An endpoint that rejects or ignores
    `response_format` (json_schema) fails the boot with a message naming the setting — because
    without that support the judge silently degrades to the offline citation gate on **every**

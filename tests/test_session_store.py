@@ -17,6 +17,7 @@ from psycopg.types.json import Jsonb
 from chemclaw.agent.chemclaw_agent import history_provider
 from chemclaw.agent.message_migration import LANGCHAIN_SHAPE, convert_stored_messages
 from chemclaw.agent.session_store import (
+    _OWNER_LIST,
     InMemoryHistoryProvider,
     PostgresHistoryProvider,
     SessionOwnerStore,
@@ -253,7 +254,9 @@ def test_session_owner_lists_the_null_owner_sessions() -> None:
 
     The shared dev principal records a real SQL NULL, and three-valued logic makes `= %s` false for
     every row, so the dev/no-Entra deployment would show an empty conversation list with sessions
-    sitting right there in the table. `IS NOT DISTINCT FROM` is what makes this row come back.
+    sitting right there in the table. `_OWNER_LIST`'s second owner arm — `o.owner IS NULL AND
+    %s::text IS NULL` — is what makes this row come back; it used to be `IS NOT DISTINCT FROM`, and
+    the two match exactly the same rows (see `test_the_owner_predicate_stays_indexable`).
     """
 
     async def _run() -> None:
@@ -263,6 +266,67 @@ def test_session_owner_lists_the_null_owner_sessions() -> None:
         await _spoke_in("sess-list-null")
         listed = await store.list_for_owner(None)
         assert "sess-list-null" in {session_id for session_id, *_ in listed}
+
+    asyncio.run(_run())
+
+
+def test_the_owner_predicate_stays_indexable() -> None:
+    """`_OWNER_LIST` must keep the shape `session_owners_owner_idx` can serve.
+
+    The static half of the pair below, and it runs with no database. `IS NOT DISTINCT FROM` is not
+    a btree-searchable operator, so `046_review_hardening_indexes.sql` added an index for a
+    predicate that could not use it and every `GET /sessions` stayed a sequential scan while paying
+    the index's write cost. The two-arm spelling is not a style choice — it is the only reason that
+    index does anything — so a revert to the terser operator fails here rather than silently in the
+    planner.
+    """
+    assert "IS NOT DISTINCT FROM" not in _OWNER_LIST, (
+        "IS NOT DISTINCT FROM cannot use session_owners_owner_idx (046); every GET /sessions "
+        "becomes a sequential scan over a table that is never pruned"
+    )
+    assert "(o.owner = %s OR (o.owner IS NULL AND %s::text IS NULL))" in _OWNER_LIST
+
+
+def test_the_session_listing_uses_the_owner_index() -> None:
+    """The live half: the planner actually reaches `session_owners_owner_idx` for this statement.
+
+    `enable_seqscan = off` rather than a seeded corpus large enough to make the index the cheaper
+    plan. That is the honest form of the question here: with the sequential scan disabled, a
+    predicate the index *can* serve produces an index scan at any row count, and one it cannot
+    produces a sequential scan anyway — which is exactly what the shipped statement did at 200,000
+    rows, unchanged, before the predicate was rewritten. So this asserts the property (the index is
+    reachable) rather than a timing that depends on how much the test seeded.
+
+    The retired predicate is explained beside it, and that arm is not decoration: it is the premise
+    the rewrite and both migration comments rest on, asserted rather than believed. If a future
+    Postgres learns to serve `IS NOT DISTINCT FROM` from a btree, this fails and says the
+    workaround has outlived its reason — the same shape `tests/test_upstream_surface.py` uses for
+    an absence.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        store = SessionOwnerStore()
+        await store.record("sess-plan-owner", "owner-plan-test")
+        await _spoke_in("sess-plan-owner")
+        retired = "SELECT o.session_id FROM session_owners o WHERE o.owner IS NOT DISTINCT FROM %s"
+        async with await db.connect(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SET LOCAL enable_seqscan = off")
+                await cur.execute(
+                    f"EXPLAIN (COSTS OFF) {_OWNER_LIST}",
+                    ("owner-plan-test", "owner-plan-test", None, None, None, 20),
+                )
+                shipped = "\n".join(str(row[0]) for row in await cur.fetchall())
+                await cur.execute(f"EXPLAIN (COSTS OFF) {retired}", ("owner-plan-test",))
+                before = "\n".join(str(row[0]) for row in await cur.fetchall())
+        assert "session_owners_owner_idx" in shipped, (
+            "GET /sessions does not reach session_owners_owner_idx; the plan was:\n" + shipped
+        )
+        assert "session_owners_owner_idx" not in before, (
+            "IS NOT DISTINCT FROM now reaches the index, so the two-arm predicate in _OWNER_LIST "
+            "(and the notes in migrations 039 and 046) no longer describe this Postgres:\n" + before
+        )
 
     asyncio.run(_run())
 

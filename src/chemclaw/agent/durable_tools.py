@@ -52,6 +52,7 @@ from temporalio.types import MethodAsyncNoParam
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
 from chemclaw.agent.framing import frame_untrusted
+from chemclaw.agent.tool_framing import defanged_payload
 from chemclaw.connectors.jobs import failed_job_reason
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
@@ -399,10 +400,27 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     # Both free-text fields, for `_framed_free_text`'s stated reason: they are the two columns of
     # `job_records` a person (or their model) wrote, read back months later in somebody else's
     # turn.
+    #
+    # And the third field, which is the one the two framed ones made look safe. `result` is the
+    # job's own `ConnectorJobResult.data` — for a BO campaign, `CampaignResult.model_dump()`, whose
+    # `Observation.params` keys and categorical values are strings the *requester* chose in the
+    # campaign spec, and whose `provenance` is a free string. So the same sentence a launcher
+    # interpolates into `summary` — framed here, on the argument that a first-party template is not
+    # a first-party string — sat unescaped one field over, carrying a live closing delimiter into
+    # whoever polls the id. `find_past_jobs` hands every chemist everybody's ids and this tool
+    # applies no owner check, deliberately (D-2026-08-01-a-running-job-has-no-owner: an id is
+    # `hash([connector, job, payload])`, so a run genuinely has more than one requester); an open
+    # read is exactly why the text on it has to be neutralised.
+    #
+    # **Defanged rather than framed**, which is the `_framed_content` distinction one shape further
+    # in: an envelope wraps a span of text, and this is a structured payload with no span to wrap
+    # and no id to attribute beyond the one the two fields beside it already carry. The delimiter
+    # is neutralised; the citation frame stays where a citation can use it.
     return status.model_copy(
         update={
             "summary": _framed_free_text(status.summary or "", job_id) or None,
             "rationale": _framed_free_text(status.rationale, job_id),
+            "result": defanged_payload(status.result),
         }
     )
 

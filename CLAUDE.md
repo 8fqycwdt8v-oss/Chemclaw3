@@ -193,8 +193,8 @@ from a server this repository does not build.
 `D-2026-09-04-a-budget-that-excludes-the-prefix-is-not-a-budget` changed what a budget *means* to
 fix it**, revisiting `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` on purpose.
 `effective_trigger` subtracted the request's own prefix — instructions, the skills listing and every
-bound tool schema — only `if window:`, and `llm_context_window_tokens` defaults to 0 with no value in
-`deploy/`, `infra/` or `.env.example`. So in every shipped configuration ~43,175 estimated tokens
+bound tool schema — only `if window:`, and `llm_context_window_tokens` defaulted to 0 with no
+value anywhere in `deploy/`, `infra/` or `.env.example`. So in every shipped configuration ~43,175 estimated tokens
 left on every model call charged against nothing: measured end to end, a thread the policy cut to
 its 90,030-token budget went out as a **137,301-token request at a 128k model** with
 `chemclaw_context_unreducible_total` flat. The prefix is now charged unconditionally, which makes
@@ -292,8 +292,13 @@ checkout, because a check that quietly shrinks is worse than one that says what 
 
 Its first consequence is that the compaction defaults
 were derived against the smaller prefix, so `agent_tool_result_clear_trigger` was floored at 1 while
-two places asserted it was not; they are re-derived to 106,000 and 133,000 against
-`PREFIX_BOUND`, and the assertion now measures the prefix with connectors bound.
+two places asserted it was not; the trigger is re-derived as `PREFIX_BOUND` plus the thread
+allowance it has always intended, and the assertion now measures the prefix with connectors bound.
+The budget went the *other* way in the same review: the same upwards derivation from
+`PREFIX_BOUND` permitted a maximal request no 128k model accepts, so `agent_context_token_budget` is
+derived *downwards* from the window and only checked against the bound. `core/config/agent.py`
+carries both arithmetics and `tests/test_compaction.py` holds them as
+`CLEAR_TRIGGER_THREAD_ALLOWANCE`/`BUDGET_THREAD_ALLOWANCE` — read those, not a figure here.
 
 M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is
 green with it uninstalled, which is how that was verified. Taking it out is also what exposed
@@ -336,8 +341,9 @@ A maintenance coupling is the smaller harm; the finding and the restart conditio
 **GxP is no longer a constraint on layer 1** — a conclusion
 `D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks` reached
 independently and carried out, removing the audit hash chain while keeping the trail, the gates and
-the INSERT-only grant. What that leaves open in `docs/planning/BACKLOG.md` is the durable approval
-store, the `session_messages` read-model and `HumanInTheLoopMiddleware`. `RubricMiddleware` is **declined** (`D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer`) — it cannot reuse `score_answer`, and a failed grading returns the ungraded answer.
+the INSERT-only grant. What that leaves open in `docs/planning/BACKLOG.md` is the scope of a
+standing plan approval and `HumanInTheLoopMiddleware` for per-call approval of an irreversible
+action — it stays declined for the plan gate itself. `RubricMiddleware` is **declined** (`D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer`) — it cannot reuse `score_answer`, and a failed grading returns the ungraded answer.
 
 **There is no HPC tier, and there is no DFT** (`D-2026-08-26-semiempirical-is-the-whole-tier`).
 Every calculation this system runs is semiempirical — GFN2-xTB through tblite, and CREST — and it
@@ -354,10 +360,11 @@ so and propose an experiment — there is no tier to escalate to.**
 
 **Live edges remain open** (need a real Temporal broker / OpenShift cluster): live cluster durability
 + `helm`/`kubeconform` render. See `docs/planning/BACKLOG.md` for the exact list. Note that the
-render edge now has one more thing to catch: `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`
-makes the chart **refuse to render** until a release states its egress posture, so `helm template` on
-the shipped defaults takes `--set networkPolicy.allowAnyDestination=true` — as the Makefile's two
-renders, the runbook and `deploy/README.md` all now do. The same ADR derives
+render edge now has two things to catch: `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`
+makes the chart **refuse to render** until a release states its egress posture, and the retention
+posture is refused the same way — so `helm template` on the shipped defaults takes `--set
+networkPolicy.allowAnyDestination=true --set retention.unboundedGrowthAccepted=true`, as the
+Makefile's renders, the runbook and `deploy/README.md` all do. The same ADR derives
 `CHEMCLAW_CONNECTORS_ENABLED` from the `connectors` block (`enabled: false` used to take a bundle's
 pods and leave its tools advertised) and splits `replicas` into `serverReplicas`/`workerReplicas`.
 
@@ -369,10 +376,10 @@ enforced posture end to end. The one hop still unproven is browser → tenant, b
 `login.microsoftonline.com` and mocking that is mocking a login UI rather than a key set.
 
 **On the design documents below: they are historical, not current.** `docs/reference/architektur.md` is
-pre-implementation design and contains **zero** references to connectors — the seam that now carries
-every tool, job and skill (D-118) — so it describes a system that no longer exists in its details
-while remaining right about the four layers. Read it for intent; read `docs/decisions/`, the package
-READMEs and `docs/guides/runbook.md` for what is true today.
+pre-implementation design: the connector seam that now carries every tool, job and skill (D-118) is
+retrofitted into it in notes rather than designed into it, so it describes a system that no longer
+exists in its details while remaining right about the four layers. Read it for intent; read
+`docs/decisions/`, the package READMEs and `docs/guides/runbook.md` for what is true today.
 
 - `docs/reference/architektur.md` — the four-layer architecture (§6 = the real OpenShift/internal-LLM
   deployment; §7/§8 = Entra durchgängig). Its HPC/SLURM/Nextflow and DFT-escalation prose describes a
@@ -459,9 +466,10 @@ middle one feel safe when nothing checks it:
   `Chemclaw3-mcp`. **This one is reviewed, not tested.** `tests/test_layering.py` enforces import
   *direction* and `tests/test_third_party_layering.py` which stack a package may import; neither
   asks where a capability lives. The obvious derivable form — "only `connectors/*/` and `science/`
-  may import `rdkit`/`bofire`/`tblite`" — was measured and is false today: `core/chem.py` and three
-  modules under `ingest/` import RDKit for structure handling that is infrastructure, so the rule
-  would have to be written as an allowlist of its own exceptions, which is a policy nobody reads.
+  may import `rdkit`/`bofire`/`tblite`" — was measured and is false today: `core/chem.py` and the
+  ELN adapter and validator under `ingest/` import RDKit for structure handling that is
+  infrastructure, so the rule would have to be written as an allowlist of its own exceptions, which
+  is a policy nobody reads.
 - **`data/` holds every corpus the code reads at runtime** — except `knowledge/` and `skills/`,
   which stay at the root because they are architecture layers 4 and 3, not configuration.
   (`tests/test_deploy_chart.py`, `test_every_runtime_data_directory_actually_exists`.)

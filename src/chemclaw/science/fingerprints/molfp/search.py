@@ -9,6 +9,7 @@ capability surfaces them; the `reaction-search` skill decides how to set them (G
 
 import asyncio
 import logging
+import time
 from typing import NamedTuple
 
 from pydantic import BaseModel
@@ -141,9 +142,18 @@ async def find_substructure_matches(
     `substructure_match_timeout_seconds`. Bounding the inputs is not enough: a short but
     adversarial recursive SMARTS can still match for minutes, and this call is served by the
     async front door, so an in-loop scan would stall *every* session's stream, not just its
-    own. On timeout the caller gets a `FingerprintError` naming the bound. Honest limit: the
-    timeout releases the event loop and the caller — it cannot kill the RDKit thread, which
-    holds one CPU until the pattern completes (RDKit exposes no interruption hook).
+    own. On timeout the caller gets a `FingerprintError` naming the bound.
+
+    **The bound is carried into the worker as a deadline, not only awaited from outside it.**
+    `asyncio.wait_for` releases the caller and cannot stop the thread, so a scan that outran the
+    bound used to run the *whole remaining corpus* out in the background — measured, a 60-character
+    SMARTS against a corpus of 121-atom hyperbranched molecules costs 343 ms *per molecule*, so a
+    5 s bound over the shipped 5 000-record cap orphans a thread for ~28 minutes. Those threads come
+    from the loop's default executor, which is also where `chemclaw.api.auth` validates every bearer
+    token. `_scan_for_matches` therefore checks the deadline before each record and gives up there.
+    Honest limit, narrowed rather than removed: RDKit exposes no interruption hook, so the thread
+    still runs to the end of the *one molecule* it is matching when the deadline passes — one
+    molecule instead of every remaining one.
     """
     max_length = settings.substructure_query_max_length
     if len(query) > max_length:
@@ -173,8 +183,13 @@ async def find_substructure_matches(
         )
     timeout = settings.substructure_match_timeout_seconds
     try:
+        # Both halves of one bound: the deadline stops the worker, `wait_for` still releases the
+        # caller — the deadline is only checked between records, so one pathological molecule can
+        # outlast it and the caller must not wait for that. Both raise `TimeoutError`, so the
+        # refusal below is the same either way.
         scan = await asyncio.wait_for(
-            asyncio.to_thread(_scan_for_matches, records, pattern), timeout=timeout
+            asyncio.to_thread(_scan_for_matches, records, pattern, time.monotonic() + timeout),
+            timeout=timeout,
         )
     except TimeoutError as exc:
         raise FingerprintError(
@@ -213,8 +228,10 @@ class ScanOutcome(NamedTuple):
     unreadable: int
 
 
-def _scan_for_matches(records: list[FingerprintRecord], pattern: Chem.Mol) -> ScanOutcome:
-    """Match `pattern` against each record, stopping at the result cap (the CPU-bound half).
+def _scan_for_matches(
+    records: list[FingerprintRecord], pattern: Chem.Mol, deadline: float
+) -> ScanOutcome:
+    """Match `pattern` against each record, stopping at the result cap or at `deadline`.
 
     Split out as a plain synchronous function so it can run in a worker thread: it is the only
     part of the search that burns CPU, and keeping it separate makes the async wrapper's one
@@ -233,12 +250,31 @@ def _scan_for_matches(records: list[FingerprintRecord], pattern: Chem.Mol) -> Sc
     fired without ever asking whether another match existed. Continuing costs nothing new in the
     worst case: a miss already scans every record, and a broad fragment finds its surplus match
     within a record or two of the cap. The whole scan stays bounded by the record cap and by
-    `substructure_match_timeout_seconds` above.
+    `substructure_match_timeout_seconds`, which arrives here as `deadline`.
+
+    **`deadline` is what makes the wall-clock bound true of the *thread* and not only of the
+    caller** — see `find_substructure_matches` for the measurement. Checked before each record, so
+    the cost is one `time.monotonic()` against a match that is three orders of magnitude dearer,
+    and a scan that gives up raises rather than returning what it had: a partial scan reported as a
+    result is the "no precedent exists" answer this module refuses everywhere else.
+
+    Args:
+        records: The capped corpus slice to match, in id order.
+        pattern: The compiled query.
+        deadline: `time.monotonic()` value past which the scan stops.
+
+    Raises:
+        TimeoutError: The deadline passed before every record was examined. The caller turns it
+            into the same `FingerprintError` `asyncio.wait_for` produces.
     """
     max_matches = settings.fingerprint_max_top_k
     matches: list[MoleculeHit] = []
     unreadable = 0
-    for record in records:
+    for examined, record in enumerate(records):
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"substructure scan gave up after {examined} of {len(records)} molecule(s)"
+            )
         mol = Chem.MolFromSmiles(record.label)
         if mol is None:
             unreadable += 1

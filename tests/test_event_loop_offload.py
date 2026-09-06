@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import threading
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -231,4 +232,194 @@ def test_the_memory_note_builders_run_off_the_event_loop(
     )
     assert all(thread not in loop_thread for thread in threads), (
         f"{activity_name} built its notes on the event loop"
+    )
+
+
+def _drop_directory(root: Any, files: int, payload: dict[str, Any]) -> Any:
+    """`files` copies of one export payload in `root`, which is what a drop directory is."""
+    import json as _json
+
+    for index in range(files):
+        (root / f"export-{index:03d}.json").write_text(_json.dumps(payload), encoding="utf-8")
+    return root
+
+
+#: How many export files each scan below reads. Three, because the block is injected per file
+#: rather than measured off real parsing: what is being asserted is that the *scan* leaves the loop
+#: schedulable, and one file would not distinguish a threaded scan from a lucky yield.
+_EXPORT_FILES = 3
+
+
+def test_the_eln_json_adapter_scans_its_drop_directory_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """`eln-json` is the shipped default source and it read the whole directory on the loop.
+
+    `fetch_new_entries` is awaited from `sync_eln_entries`, an activity on the background worker,
+    whose one event loop also carries that activity's Temporal heartbeat and `/healthz`, `/readyz`
+    and `/metrics` (`core/worker_http.py`). The glob, every `read_text` and every `json.loads` ran
+    as one uninterrupted block across all of them: measured 2026-09-06 with a 1 ms heartbeat on
+    the same loop, 346.9 ms at 10,000 real-shaped exports and **1,899.8 ms at 50,000, the worst
+    gap equal to the whole scan** — which is how a large enough corpus starves the heartbeat and
+    earns the sync a redelivery that blocks again.
+
+    The per-file cost is injected rather than read off a corpus this test would have to write, so
+    the number asserted is the loop stall and not the speed of a CI box's disk.
+    """
+    import chemclaw.ingest.eln.json_adapter as json_adapter
+
+    _drop_directory(
+        tmp_path,
+        _EXPORT_FILES,
+        {
+            "id": "e",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "reactants": [{"smiles": "CCO"}],
+            "products": [{"smiles": "CCO"}],
+        },
+    )
+    threads: list[int] = []
+    real = json_adapter._parse_timestamp
+
+    def _slow(*args: Any, **kwargs: Any) -> Any:
+        threads.append(threading.get_ident())
+        time.sleep(_BLOCK_SECONDS / _EXPORT_FILES)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(json_adapter, "_parse_timestamp", _slow)
+    adapter = json_adapter.JsonExportAdapter(str(tmp_path))
+
+    stall_ms, loop_thread = _worst_loop_stall(
+        lambda: adapter.fetch_new_entries(datetime(2020, 1, 1, tzinfo=UTC))
+    )
+
+    assert len(threads) == _EXPORT_FILES, "the drop directory was never read"
+    assert stall_ms < _BLOCK_SECONDS * 1000 / 2, (
+        f"the ELN adapter held the worker's loop for {stall_ms:.1f} ms of a "
+        f"{_BLOCK_SECONDS * 1000:.0f} ms directory scan"
+    )
+    assert all(thread not in loop_thread for thread in threads), (
+        "the ELN adapter read its drop directory on the event loop"
+    )
+
+
+def test_the_ord_adapter_scans_its_drop_directory_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The same seam and the same scan, over the heavier files: 937.4 ms at 10,000 messages."""
+    import chemclaw.ingest.eln.ord_adapter as ord_adapter
+
+    _drop_directory(
+        tmp_path,
+        _EXPORT_FILES,
+        {"reaction_id": "r", "provenance": {"record_created": {"time": {"value": "2026-01-01"}}}},
+    )
+    threads: list[int] = []
+    real = ord_adapter._created_at
+
+    def _slow(*args: Any, **kwargs: Any) -> Any:
+        threads.append(threading.get_ident())
+        time.sleep(_BLOCK_SECONDS / _EXPORT_FILES)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ord_adapter, "_created_at", _slow)
+    adapter = ord_adapter.OrdJsonAdapter(str(tmp_path))
+
+    stall_ms, loop_thread = _worst_loop_stall(
+        lambda: adapter.fetch_new_entries(datetime(2020, 1, 1, tzinfo=UTC))
+    )
+
+    assert len(threads) == _EXPORT_FILES, "the drop directory was never read"
+    assert stall_ms < _BLOCK_SECONDS * 1000 / 2, (
+        f"the ORD adapter held the worker's loop for {stall_ms:.1f} ms of a "
+        f"{_BLOCK_SECONDS * 1000:.0f} ms directory scan"
+    )
+    assert all(thread not in loop_thread for thread in threads), (
+        "the ORD adapter read its drop directory on the event loop"
+    )
+
+
+def test_the_commitment_export_is_read_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The portfolio mirror reads its whole export every sync: 595.1 ms at 10,000 files."""
+    import chemclaw.ingest.commitments.json_export as json_export
+    from chemclaw.ingest.commitments.models import Commitment
+
+    _drop_directory(
+        tmp_path,
+        _EXPORT_FILES,
+        {"commitments": [{"external_id": "c", "title": "t", "owner": "o"}]},
+    )
+    threads: list[int] = []
+
+    def _slow(*args: Any, **kwargs: Any) -> Any:
+        threads.append(threading.get_ident())
+        time.sleep(_BLOCK_SECONDS / _EXPORT_FILES)
+        return Commitment(*args, **kwargs)
+
+    monkeypatch.setattr(json_export, "Commitment", _slow)
+    source = json_export.JsonCommitmentExport(name="portfolio", path=str(tmp_path))
+
+    stall_ms, loop_thread = _worst_loop_stall(lambda: source.fetch_commitments(None))
+
+    assert len(threads) == _EXPORT_FILES, "the export was never read"
+    assert stall_ms < _BLOCK_SECONDS * 1000 / 2, (
+        f"the commitment export held the worker's loop for {stall_ms:.1f} ms of a "
+        f"{_BLOCK_SECONDS * 1000:.0f} ms read"
+    )
+    assert all(thread not in loop_thread for thread in threads), (
+        "the commitment export was read on the event loop"
+    )
+
+
+def test_the_bo_campaign_fits_its_surrogate_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GP fit is pure synchronous CPU, and this loop's only `await`s are between rounds.
+
+    `connectors/bo/activities.py` threads the identical `initial_candidates`/`propose_candidates`
+    pair; the in-process path did not, so every round ran to completion without yielding. Measured
+    2026-09-06 on a one-parameter problem, 5 seed points and 2 rounds, with a 5 ms sampler on the
+    same loop: **16,069.7 ms of stall against a 16,071 ms call**, the loop never scheduled.
+
+    BoFire is stubbed here rather than fitted: the property is where the fit runs, and a real one
+    would put a minute of surrogate arithmetic in the suite for a claim it does not sharpen.
+    """
+    import chemclaw.science.bo.campaign as campaign
+    from chemclaw.science.bo.problem import (
+        Candidate,
+        ContinuousParameter,
+        Objective,
+        OptimizationProblem,
+    )
+
+    threads: list[int] = []
+
+    def _slow(*args: Any, **kwargs: Any) -> list[Candidate]:
+        threads.append(threading.get_ident())
+        time.sleep(_BLOCK_SECONDS / 2)
+        return [Candidate(params={"t": 1.0 * len(threads)})]
+
+    monkeypatch.setattr(campaign, "initial_candidates", _slow)
+    monkeypatch.setattr(campaign, "propose_candidates", _slow)
+
+    async def _evaluate(params: dict[str, Any]) -> float:
+        return float(params["t"])
+
+    problem = OptimizationProblem(
+        parameters=[ContinuousParameter(name="t", lower=0.0, upper=100.0)],
+        objectives=[Objective(name="y", direction="maximize")],
+    )
+
+    stall_ms, loop_thread = _worst_loop_stall(
+        lambda: campaign.optimize(problem, _evaluate, n_initial=3, n_rounds=1, seed=1)
+    )
+
+    assert len(threads) == 2, "neither BoFire call ran"
+    assert stall_ms < _BLOCK_SECONDS * 1000 / 2, (
+        f"the campaign held its loop for {stall_ms:.1f} ms of a {_BLOCK_SECONDS * 1000:.0f} ms fit"
+    )
+    assert all(thread not in loop_thread for thread in threads), (
+        "the campaign fitted its surrogate on the event loop"
     )

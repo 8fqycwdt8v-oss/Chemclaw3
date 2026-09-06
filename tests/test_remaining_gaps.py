@@ -24,7 +24,12 @@ from typing import Any
 
 import pytest
 
-from chemclaw.agent.attachments import AttachmentError, AttachmentStore, parse_attachment
+from chemclaw.agent.attachments import (
+    Attachment,
+    AttachmentError,
+    AttachmentStore,
+    parse_attachment,
+)
 from chemclaw.cli.backfill_corpus import note_for_document
 from chemclaw.core.config import settings
 from chemclaw.science.calc.calibration import (
@@ -229,6 +234,36 @@ def test_attachments_are_bounded_per_session() -> None:
     held = store.for_session("s1")
     assert len(held) == settings.attachment_max_per_session
     assert held[-1].name == f"f{settings.attachment_max_per_session + 2}.txt"
+
+
+def test_attachments_are_bounded_in_bytes_across_sessions_not_only_in_sessions() -> None:
+    """The store's *count* bound is not a memory bound, and it was being read as one.
+
+    `service_max_live_sessions × attachment_max_per_session × attachment_max_bytes` is a 20 GB
+    ceiling in a pod the chart limits to 1 GiB, so the count could never be what stops an OOM:
+    measured against the shipped defaults, ~20 MB of parsed text is retained per fully-loaded
+    session and the pod is over its limit at ~25 of them — 2.5 % of the count bound. The byte
+    budget is the bound in the unit that kills the pod, so this drives the store with a load that
+    breached it (12 fully-loaded sessions, 240 MB of text uploaded) and measures what is left held.
+    """
+    store = AttachmentStore()
+    sessions = 12
+    text = "x" * settings.attachment_max_bytes
+    uploaded = 0
+    for session in range(sessions):
+        for index in range(settings.attachment_max_per_session):
+            store.add(
+                f"s{session}",
+                Attachment(name=f"f{index}.csv", content_type="text/csv", text=text, rows=1),
+            )
+            uploaded += len(text)
+    held = sum(len(a.text) for session in range(sessions) for a in store.for_session(f"s{session}"))
+    # The load really is one the old bound let through, rather than a constant chosen to pass.
+    assert uploaded > 3 * settings.attachment_store_max_bytes
+    assert held <= settings.attachment_store_max_bytes
+    # LRU, not "refuse the newest": the conversation being worked on keeps its working material.
+    assert len(store.for_session(f"s{sessions - 1}")) == settings.attachment_max_per_session
+    assert store.for_session("s0") == []
 
 
 # --- IDEA-6: corpus backfill ------------------------------------------------------------------

@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.framing import frame_untrusted
+from chemclaw.agent.tool_framing import defanged_payload
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
@@ -88,13 +89,31 @@ class NoteView(BaseModel):
 
 
 def _ref(note: Note) -> NoteRef:
+    """One note as a reference, with its unconstrained frontmatter neutralised.
+
+    **The second retrieved-text channel on the same object.** `expand_note` frames the note *body*
+    and `gather_evidence` frames a chunk's content, and both leave the frontmatter beside them
+    alone — but `tags`, `source` and `compound_smiles` are the three fields `Note` does not
+    constrain (`id` and `type` are slug-validated, `calc_refs` and `artifact_refs` are checked), so
+    a delimiter smuggled into a tag reached the model **live**, in the same message as the envelope
+    it closes. Measured through `find_notes` and `expand_note`, on the note's own reference and on
+    every neighbour's.
+
+    That is a cross-user channel and one producer needs no role at all: `memory/campaign.py` sets a
+    campaign note's `tags` from the ELN `project` field, which is a string whoever created the entry
+    chose. Neutralised here rather than there, for `_framed_free_text`'s reason one package over —
+    the store keeps what was ingested and the model's edge is where the escaping belongs.
+
+    Defanged and not framed: a tag is a label rather than evidence, which is the split
+    `agent/research_tools.py` draws for a chunk's `source` and the same one it draws here.
+    """
     return NoteRef(
         id=note.id,
         type=note.type,
-        compound_smiles=note.compound_smiles,
-        tags=note.tags,
+        compound_smiles=defanged_payload(note.compound_smiles),
+        tags=defanged_payload(note.tags),
         created_by=note.created_by,
-        source=note.source,
+        source=defanged_payload(note.source),
         confidence=note.confidence,
         valid_from=note.valid_from,
         valid_to=note.valid_to,
@@ -382,7 +401,17 @@ async def find_knowledge_gaps() -> GraphGaps:
     directory = settings.knowledge_path
     graph = await asyncio.to_thread(build_graph, directory)
     notes = await asyncio.to_thread(load_notes, directory)
-    return analyze(graph, notes)
+    gaps = analyze(graph, notes)
+    # The two fields here that are not identifiers, for `_ref`'s reason: a tag is free text a note
+    # author (or an ELN entry) chose, and a dangling link is a `[[wikilink]]` target, whose pattern
+    # is `[^\[\]]+` — measured, both carried a live closing delimiter out of a note body. The
+    # other fields are note ids, note types and counts.
+    return gaps.model_copy(
+        update={
+            "tags_without_distillation": defanged_payload(gaps.tags_without_distillation),
+            "dangling_links": defanged_payload(gaps.dangling_links),
+        }
+    )
 
 
 @tool

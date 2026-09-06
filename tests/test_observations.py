@@ -557,3 +557,44 @@ def test_the_recall_tool_neutralizes_the_project_names_too(monkeypatch: pytest.M
         assert "proj" in recalled[0].projects_seen[0], "neutralized, not blanked"
 
     asyncio.run(_run())
+
+
+def test_a_partial_pass_may_re_record_an_observation_with_no_evidence_yet() -> None:
+    """`_ACCUMULATE`'s array union must survive both sides being empty.
+
+    `array_agg` over zero rows returns `NULL`, not `'{}'`, and both columns are `NOT NULL` (025) —
+    so before the `COALESCE` this second call aborted with `NotNullViolation` and took the whole
+    `executemany` batch with it. The `_REPLACE` branch never had the fault, which is what made it
+    invisible: only a *partial* corpus read takes this path.
+
+    Reachability, stated rather than implied: neither shipped miner emits such a row — both skip a
+    finding with fewer than two projects — so this drives `record()` itself, which is where the
+    contract that permits it lives (`Observation` declares both fields `default_factory=list`).
+    That is the boundary being fixed, and it is the boundary a third miner would arrive at.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        empty = Observation(
+            statement="nothing cited yet",
+            scope="transformation:reaction-empty-evidence",
+            evidence_note_ids=[],
+            projects_seen=[],
+            origin="corpus-mining",
+        )
+        try:
+            assert await store.record([empty], complete=False) == 1
+            assert await store.record([empty], complete=False) == 1
+            async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+                cursor = await conn.execute(
+                    "SELECT evidence_note_ids, projects_seen FROM observations WHERE id = %s",
+                    (empty.with_id().id,),
+                )
+                row = await cursor.fetchone()
+            assert row == ([], []), f"the union rewrote the empty arrays as {row}"
+        finally:
+            async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+                await conn.execute("DELETE FROM observations WHERE id = %s", (empty.with_id().id,))
+                await conn.commit()
+
+    asyncio.run(_run())

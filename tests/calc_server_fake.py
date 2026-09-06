@@ -84,6 +84,14 @@ _KEYED: dict[str, tuple[str, tuple[str, ...]]] = {
     # tools shared one entry here and only one of them fitted it, so a Fukui set computed in water
     # and one in the gas phase collided in tests while production correctly recomputed.
     "compute_fukui_at": ("xtb.fukui", ("solvent",)),
+    # The three SMILES-in tools this repository proxies through `connectors/calc/server/tools.py`
+    # but composes nothing from. They were missing here, so `calculation_key` for any of them was
+    # refused by the fake as "not a compute tool on this server" while the real server answers.
+    # The three rows are *measured* against `Chemclaw3-mcp`'s engine/identity.py, not guessed —
+    # `tests/test_calc_fake_identity.py` is what re-measures them.
+    "compute_atomic_descriptors": ("xtb.atomic", ("solvent",)),
+    "compute_surface_potential": ("xtb.surface", ("solvent",)),
+    "optimize_geometry": ("xtb.opt", ("solvent",)),
     "predict_pka": ("pka", ()),
     "predict_solubility": ("solubility", ()),
     "predict_developability_profile": ("developability", ()),

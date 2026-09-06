@@ -131,8 +131,8 @@ imagePullSecrets:
        `configure_telemetry` builds one `Resource` for the whole process and names the service
        `chemclaw` unless `OTEL_SERVICE_NAME` says otherwise — a decision `core/logging.py` argues
        for explicitly ("a deployment that wants the front door and each worker to appear as separate
-       services sets `OTEL_SERVICE_NAME` per Deployment"). **The chart never set it.** So all four
-       process roles reported `service.name=chemclaw`, and a span could not say whether the front
+       services sets `OTEL_SERVICE_NAME` per Deployment"). **The chart never set it.** So every
+       process role reported `service.name=chemclaw`, and a span could not say whether the front
        door, a connector server, core's worker or a bundle's worker emitted it — which is most of
        what a trace is for once a turn crosses a process.
 

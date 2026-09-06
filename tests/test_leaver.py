@@ -36,26 +36,29 @@ from chemclaw.core.db import connect
 from chemclaw.durable.digest import digest_channel
 from tests.pg import migrated_db_or_skip
 
-# The column names this system uses for a person. Not every TEXT column — a derived set needs a
-# vocabulary, and this is it, drawn from the spellings the schema actually uses.
+# The column *spellings* this system uses for a person that are not covered by the `_by` suffix
+# below. Not every TEXT column — a derived set needs a vocabulary, and this is the irregular half
+# of it.
 #
-# **The vocabulary is itself a hand-written list, which is the defect this test exists to prevent,
-# one level up.** `audit_anchors.reseal_by` names "who accepted the gap and why"
-# (`infra/sql/032_audit_anchors.sql`) and was missing here, so a live person-column sat in neither
-# tier with this test green. It is added rather than argued away; the table it belongs to is
-# unreachable to the sweep for a privilege reason, which `_BEYOND_REACH` now records and which this
-# test accepts as a third answer — a *stated* one, unlike the silence it replaces.
+# **The vocabulary was itself a hand-written list of every spelling, which is the defect this test
+# exists to prevent, one level up.** It happened twice. `audit_anchors.reseal_by` names "who
+# accepted the gap and why" (`infra/sql/032_audit_anchors.sql`) and was missing, so a live
+# person-column sat in neither tier with this test green; `experiment_protocol_revisions.author`
+# (073) landed in `_RETAINED` because its author happened to think of it, not because anything
+# here would have failed if they had not.
 #
-# **`author` is the same failure recurring one migration later**, which is worth recording because
-# it is the second instance and so says something about the shape rather than about one omission.
-# `experiment_protocol_revisions.author` (073) names who wrote each revision of an experiment
-# design, and it landed in `_RETAINED` because its author happened to think of it — not because
-# anything here would have failed if they had not. It is added for the same reason `reseal_by` was:
-# a spelling the schema uses for a person that this set does not know is a column the completeness
-# check silently does not check, and the whole value of a derived set is that it cannot be silent.
-_ACTOR_COLUMN_NAMES = frozenset(
-    {"actor", "author", "owner", "holder", "requested_by", "decided_by", "opened_by", "reseal_by"}
-)
+# It happened a third time and that is why this is no longer the whole predicate: measured on
+# 2026-09-06, `effects.approved_by` and `pending_requests.answered_by` were *live person-columns
+# the completeness check could not see*, because neither spelling was in the list — and deleting
+# `approved_by` from every tier in `leaver.py` left `tests/test_leaver.py` at 23 passed. So the
+# regular half is matched by suffix (`_LIKE_A_PERSON` below) and only the spellings a suffix cannot
+# reach are enumerated here. A future `signed_off_by` is then in the scan on the day the migration
+# adds it, rather than on the day somebody remembers to add it here.
+_ACTOR_COLUMN_NAMES = frozenset({"actor", "author", "owner", "holder"})
+
+# The regular half: `<verb>_by` is what this schema calls the person who did something.
+# `\_` because `_` is a single-character wildcard to `LIKE` and this has to match the literal.
+_LIKE_A_PERSON = "%\\_by"
 
 _ANNA = "oid-anna"
 _BEN = "oid-ben"
@@ -509,13 +512,24 @@ def test_every_actor_bearing_column_in_the_schema_is_accounted_for() -> None:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT table_name, column_name FROM information_schema.columns "
-                    "WHERE table_schema = current_schema() AND column_name = ANY(%s) "
+                    "WHERE table_schema = current_schema() "
+                    "AND (column_name = ANY(%s) OR column_name LIKE %s) "
                     "ORDER BY table_name, column_name",
-                    (sorted(_ACTOR_COLUMN_NAMES),),
+                    (sorted(_ACTOR_COLUMN_NAMES), _LIKE_A_PERSON),
                 )
                 found = {(t, c) for t, c in await cur.fetchall()}
 
         retained = {(table, col) for table, cols, _ in _RETAINED for col in cols}
+        # The scan has to be able to *see* every column this module already has a position on,
+        # or the completeness check below is a completeness check over whatever the predicate
+        # happens to match. A retained column the scan misses is a spelling the vocabulary does
+        # not know, and the next column with that spelling would be accounted for by nobody.
+        invisible = sorted(retained - found)
+        assert not invisible, (
+            f"the scan does not match {invisible}, which `_RETAINED` already names as person "
+            "columns — so a *new* column spelled that way would sit in no tier with this test "
+            "green. Add the spelling to `_ACTOR_COLUMN_NAMES`."
+        )
         # The erase tier is matched by table: its statements reach rows through `session_owners`
         # rather than always naming the actor column directly, so the column-level assertion that
         # fits the retain tier would be wrong here.

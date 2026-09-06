@@ -25,6 +25,7 @@ Expected entry shape (this ELN's format — known only here):
      "procedure": "free text", "operator": "..."}
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -160,6 +161,42 @@ class JsonExportAdapter:
         is filtered out here and on every later run, so it is collected and reported in one
         aggregated WARNING (`warn_late_arrivals`) and filed under the same rule, instead of
         vanishing silently.
+
+        **The directory read runs off the event loop**, which is the rule the rest of this seam
+        already follows — `ingest/eln/warehouse/databricks.py` crosses `asyncio.to_thread` on every
+        blocking vendor call and says so in its module docstring, `ingest/documents/sync.py` and
+        `agent/attachments.py` do the same. This one did not, and it is the shipped default source
+        (`data_sources = "graph,eln-json"`). It is awaited from `durable/eln_sync.py`, an activity
+        on the background worker, whose single event loop also carries that activity's Temporal
+        heartbeat and `/healthz`, `/readyz` and `/metrics` (`core/worker_http.py`) — so the glob,
+        every `read_text` and every `json.loads` ran as one uninterrupted block across all of them.
+        Measured 2026-09-06 with a 1 ms heartbeat on the same loop, real-shaped exports: 53.8 ms at
+        2,000 files, 346.9 ms at 10,000, **1,899.8 ms at 50,000 — the worst gap equal to the whole
+        scan** — so a corpus large enough to exceed `eln_sync_heartbeat_timeout_seconds` starves
+        the heartbeat the sync depends on and Temporal redelivers an activity that blocks again.
+
+        What this does **not** fix is that the batch cap is applied after the read: a chunked drain
+        re-reads the whole directory per chunk, which is quadratic in the corpus. Bounding the read
+        needs `fetch_new_entries` to be told the chunk size, which is a change to the `ElnAdapter`
+        protocol and to `durable/eln_sync.py`'s `_BoundedIngest`, and it is a `BACKLOG.md` row.
+        """
+        entries, late, refused = await asyncio.to_thread(self._scan, since)
+        # The source, not the format: this is the one line reporting files that are silently never
+        # ingested, and a deployment running two JSON drop directories got two identical lines
+        # naming neither.
+        warn_late_arrivals(logger, self._source, late)
+        await record_refusals(self._source, refused)
+        return entries
+
+    def _scan(self, since: datetime) -> tuple[list[RawEntry], list[str], dict[str, str]]:
+        """The whole blocking read, in one synchronous function so one thread can hold it.
+
+        Args:
+            since: the window floor; entries at or after it are returned.
+
+        Returns:
+            The entries in the window oldest first, the names of the late arrivals, and the
+            refusals to file — the three things the caller has to do something asynchronous with.
         """
         entries: list[RawEntry] = []
         late: list[str] = []
@@ -202,13 +239,8 @@ class JsonExportAdapter:
                     f"({created.isoformat()}), so no scheduled run will fetch it; re-run the sync "
                     "from an explicit earlier `since` to backfill it"
                 )
-        # The source, not the format: this is the one line reporting files that are silently never
-        # ingested, and a deployment running two JSON drop directories got two identical lines
-        # naming neither.
-        warn_late_arrivals(logger, self._source, late)
         entries.sort(key=lambda e: e.created_at)
-        await record_refusals(self._source, refused)
-        return entries
+        return entries, late, refused
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Map one JSON entry to a canonical `OrdReaction` (structured + free-text).
