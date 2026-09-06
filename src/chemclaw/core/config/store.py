@@ -9,6 +9,8 @@ sections shared a single module (D-072 mixins, split per D-156).
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
+from chemclaw.core.config.dsn import DatabaseDsn
+
 # Qdrant's own default, and the value `vector_store_url` ships with. Named because the
 # addressability validator has to compare against it: the field is non-empty by default, so
 # "is it set" cannot be an emptiness test for any provider that is not Qdrant.
@@ -28,7 +30,9 @@ class StoreSettings(BaseSettings):
     for the whole app plus the connect/statement timeouts.
     """
 
-    postgres_dsn: str = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw"
+    # `DatabaseDsn`, not `str`: the password lives in the userinfo, and a plain `str` put it in
+    # `repr(settings)`, `model_dump()` and every other non-logging sink. See `core/config/dsn.py`.
+    postgres_dsn: DatabaseDsn = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw"
     # The credential that owns the schema, as distinct from the one that serves requests
     # (D-2026-08-05-append-only-by-grant-not-by-contract). Empty falls back to `postgres_dsn`, so a
     # single-principal database — dev, CI, `make up`, every test — needs no configuration and
@@ -39,7 +43,7 @@ class StoreSettings(BaseSettings):
     # turn could rewrite the audit trail recording that turn. Only a privilege boundary prevents
     # that. This DSN belongs on the migration hook Job and
     # nowhere else — it is mounted for the seconds a release takes, not for the life of a pod.
-    postgres_migration_dsn: str = ""
+    postgres_migration_dsn: DatabaseDsn = ""
     # The ordered `.sql` migrations `chemclaw.core.migrate` applies. A setting rather than
     # a path derived from `__file__`, which is what it was until D-148: `parent.parent` happened to
     # be the repository root only while the module sat two levels deeper, inside the calc package,

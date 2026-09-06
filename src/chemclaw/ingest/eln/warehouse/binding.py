@@ -122,8 +122,19 @@ class EntryBinding(BaseModel):
         default="",
         description=(
             "An extra predicate, ANDed with the cursor filter — typically the site's own notion of "
-            "'finished' (STATUS = 'COMPLETED'). Inserted literally, so it is as trusted as the "
-            "manifest itself; it is authored beside the module:callable that the same file imports."
+            "'finished' (STATUS = 'COMPLETED'). Inserted literally, and still trusted — but on a "
+            "narrower argument than the one this description used to give. It said the fragment is "
+            "'as trusted as the manifest itself; it is authored beside the module:callable that "
+            "the same file imports', and that premise is gone: "
+            "D-2026-09-06-a-manifest-is-data-in-every-field-that-executes holds the "
+            "module:callable next door to an operator-set package allow-list, precisely because a "
+            "manifest is data. What remains is a claim about who may place the file, not about "
+            "manifests as a class — a `where` is an operator-authored SQL fragment in a directory "
+            "only an operator mounts, "
+            "and it is not parsed here because a parser would be the second source of truth for a "
+            "schema D-2026-08-04-the-schema-is-a-file exists to avoid. Note what it can do: a "
+            "trailing `--` comments out the ORDER BY and LIMIT, so a careless fragment silently "
+            "removes the `fetch_limit` bound the field below spends eight lines justifying."
         ),
     )
     fetch_limit: int = Field(

@@ -479,6 +479,128 @@ def test_a_stamp_this_build_cannot_read_is_treated_as_absent() -> None:
     ]
 
 
+# --- the value stamp: a thread that lost half its rows must not read back as an empty one -------
+
+
+async def _delete_blobs(thread_id: str) -> int:
+    """Delete a thread's `checkpoint_blobs`, leaving its `checkpoints` rows standing.
+
+    The state `durable/retention.py` produced when a live turn landed between two of its DELETEs,
+    reached here by the shortest route rather than by re-staging the race — the race is measured in
+    `tests/test_retention.py`, and what this file is about is what the *reader* does with the row
+    it leaves behind, whichever route made it.
+    """
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("DELETE FROM checkpoint_blobs WHERE thread_id = %s", (thread_id,))
+        deleted = cur.rowcount
+        await conn.commit()
+    return int(deleted)
+
+
+def test_a_thread_that_has_lost_its_blobs_is_refused_rather_than_read_as_empty() -> None:
+    """The measured failure: `checkpoints` present, `checkpoint_blobs` gone, and no complaint.
+
+    Before the value stamp this resumed silently — `aget_state` returned an empty log, no
+    exception, no log line, and the next turn answered as a brand-new conversation on a thread the
+    chemist believed they were continuing. That is verbatim what `agent/checkpointer.py`'s module
+    docstring calls worse than no answer.
+
+    Asserted through a *second turn on the same thread*, because that is where the damage lands: the
+    first turn is what leaves the rows behind. The message is checked for the two facts an operator
+    needs — which session, and which channel is gone.
+    """
+
+    async def _run() -> Exception:
+        await migrated_db_or_skip()
+        saver = await ckpt.checkpointer()
+        try:
+            await _turn(saver, "sess-blobs-deleted", "q1")
+            assert await _delete_blobs("sess-blobs-deleted") > 0, "the thread had no blobs to lose"
+            with pytest.raises(ckpt.CheckpointValuesMissing) as raised:
+                await _turn(saver, "sess-blobs-deleted", "q2")
+            return raised.value
+        finally:
+            await ckpt.close_checkpointer()
+
+    message = str(asyncio.run(_run()))
+    assert "sess-blobs-deleted" in message, "the refusal does not say which session is affected"
+    assert "messages" in message, "the refusal does not name the channel whose value is gone"
+    assert "Start a new session" in message, "the refusal names no remedy, so it is not actionable"
+
+
+def test_the_value_stamp_does_not_refuse_a_healthy_thread() -> None:
+    """The control that decided the *shape* of the guard, not merely that it has a counter-example.
+
+    The obvious signal is `channel_versions` minus what loaded, and it is wrong: a channel is
+    consumed by the step that reads it, which bumps its version and writes no blob, so a healthy
+    checkpoint routinely names channels holding no value. Measured on a healthy three-turn thread,
+    that comparison flagged **every** checkpoint — a guard built on it would refuse every thread in
+    the fleet on the deploy that introduced it.
+
+    So this asserts both halves: that a healthy thread resumes, *and* that it is a thread the naive
+    signal would have refused. Without the second half the test passes against a guard that is
+    wrong for the reason this one was written to avoid.
+    """
+
+    async def _run() -> tuple[list[str], list[str]]:
+        await migrated_db_or_skip()
+        saver = await ckpt.checkpointer()
+        try:
+            await _turn(saver, "sess-values-healthy", "q1")
+            final = await _turn(saver, "sess-values-healthy", "q2")
+            tip = await saver.aget_tuple({"configurable": {"thread_id": "sess-values-healthy"}})
+            assert tip is not None, "the thread has no checkpoint to inspect"
+            loaded = tip.checkpoint["channel_values"]
+            unbacked = [name for name in tip.checkpoint["channel_versions"] if name not in loaded]
+            return list(final["messages"]), unbacked
+        finally:
+            await ckpt.close_checkpointer()
+
+    messages, unbacked = asyncio.run(_run())
+    assert messages == ["q1", "answered", "q2", "answered"], (
+        "a healthy thread did not resume through the value stamp"
+    )
+    assert unbacked, (
+        "this thread has a value for every channel it versions, so it does not exercise the "
+        "false positive the guard was shaped around — pick a graph with a consumed channel"
+    )
+
+
+def test_a_checkpoint_written_before_the_value_stamp_resumes() -> None:
+    """An unstamped checkpoint passes, for the reason the channel stamp's unstamped case does.
+
+    Every live session at the deploy that introduces this stamp has checkpoints without it, and a
+    rolling deploy keeps writing them from the older pod for the length of the rollout. Staged by
+    removing the key from the stored row and then removing the *blobs* too: a thread that has lost
+    everything the guard looks for still resumes, which is the only way to prove the guard read the
+    absent stamp rather than getting lucky.
+    """
+
+    async def _run() -> list[str]:
+        await migrated_db_or_skip()
+        saver = await ckpt.checkpointer()
+        try:
+            await _turn(saver, "sess-values-unstamped", "q1")
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE checkpoints SET metadata = metadata - %s WHERE thread_id = %s",
+                    (ckpt.CHECKPOINT_VALUES_KEY, "sess-values-unstamped"),
+                )
+                rewritten = cur.rowcount
+                await conn.commit()
+            assert rewritten > 0, "no checkpoint row was rewritten"
+            await _delete_blobs("sess-values-unstamped")
+            final = await _turn(saver, "sess-values-unstamped", "q2")
+            return list(final["messages"])
+        finally:
+            await ckpt.close_checkpointer()
+
+    assert asyncio.run(_run()) == ["q2", "answered"], (
+        "an unstamped checkpoint was refused, which would brick every live session on the deploy "
+        "that introduces the stamp"
+    )
+
+
 def test_concurrent_first_turns_get_one_migrated_saver() -> None:
     """A cold start with traffic must not hand a turn a saver whose migrations have not run.
 

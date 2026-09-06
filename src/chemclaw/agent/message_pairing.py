@@ -89,7 +89,8 @@ def stored_call_ids(payload: Mapping[str, Any], shape: str | None = None) -> fro
     historical rows working (that fallback is why the sniffing existed) without leaving a second
     authority for what a row *is*.
 
-    Returns `None` for a payload matching neither shape, and that is not the same as "no ids".
+    Returns `None` for a payload matching neither shape — including one that is not a mapping at
+    all, which this column can hold — and that is not the same as "no ids".
     Empty means "this row is in no pairing, so it may be disposed of on its own"; `None` means "this
     row cannot be read, so nothing can be concluded about what it is paired with". Collapsing the
     two would make an unreadable row look pairing-free and therefore *droppable*, which is the one
@@ -104,6 +105,19 @@ def stored_call_ids(payload: Mapping[str, Any], shape: str | None = None) -> fro
         The call ids the row mentions, whether as a call or as its answer, or `None` when the row
         matches neither stored shape.
     """
+    if not isinstance(payload, Mapping):
+        # `message` is a bare `jsonb` column, so a scalar, an array or a number is storable — and
+        # the annotation above says `Mapping`, which satisfies mypy and decides nothing at runtime.
+        # Without this the function *raises* on a payload matching neither shape, two lines before
+        # `_prune_session_messages`'s per-session `unreadable_rows` skip that exists for exactly
+        # this row: measured, one such row took the whole `session_messages` pass down, so every
+        # session stopped being pruned and Temporal retried the activity to exhaustion. That is the
+        # failure the comment above that call site records as already fixed once, through a second
+        # door. `session_store.message_from_row` guards the same column the same way, one module
+        # over, and the two readers of one column disagreeing is the defect rather than either
+        # branch. Note `"contents" in payload` below is a *substring* test on a string payload, so
+        # a row whose text happens to contain "contents" took the MAF branch and raised there.
+        return None
     if shape == LANGCHAIN_SHAPE:
         return _langchain_call_ids(payload)
     if "contents" in payload:

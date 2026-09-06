@@ -242,3 +242,42 @@ def test_an_unknown_profile_is_refused_at_session_creation() -> None:
         response = client.post("/sessions", json={"profile": "no-such-profile"})
     assert response.status_code == 400
     assert "no-such-profile" in response.json()["detail"]
+
+
+def test_a_profile_file_is_read_through_the_one_bounded_manifest_reader(
+    profiles_dir: Path,
+) -> None:
+    """The sixth manifest loader, and the one where the prose *is* the system prompt.
+
+    `D-2026-09-06-a-manifest-is-data-in-every-field-that-executes` routed five loaders through
+    `core/manifest_io.read_manifest` and left this one on a bare `yaml.safe_load`. That is the
+    wrong one to leave: a connector's prose becomes a tool description, while a profile's
+    `instructions` is the system message itself, re-sent on every model call of every turn on that
+    profile — outside the ratchet `tests/test_context_floor.py` holds, which measures shipped
+    bundles.
+
+    Three arms, each measured against the unbounded loader first: 500,000 characters of
+    `instructions` loaded and reached the prefix; a 209-byte alias bomb expanded to 4,782,969
+    nodes; and 2,000-deep nesting raised a bare `RecursionError`, which is neither a `ProfileError`
+    nor a `ValueError`, so it escaped every `except ValueError` an entry point wraps startup in.
+    """
+    (profiles_dir / "huge.yaml").write_text(f"instructions: {'A' * 500_000}\n")
+    with pytest.raises(ProfileError, match="instructions"):
+        load_profiles()
+    (profiles_dir / "huge.yaml").unlink()
+
+    (profiles_dir / "bomb.yaml").write_text(
+        "a: &a [x,x,x,x,x,x,x,x,x]\n"
+        "b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]\n"
+        "c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]\n"
+        "d: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c]\n"
+        "e: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d]\n"
+        "instructions: [*e,*e,*e,*e,*e,*e,*e,*e,*e]\n"
+    )
+    with pytest.raises(ProfileError, match="node"):
+        load_profiles()
+    (profiles_dir / "bomb.yaml").unlink()
+
+    (profiles_dir / "deep.yaml").write_text("a: " + "[" * 2000 + "]" * 2000 + "\n")
+    with pytest.raises(ProfileError, match="deeper than"):
+        load_profiles()

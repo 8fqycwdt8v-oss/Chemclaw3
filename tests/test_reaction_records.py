@@ -42,6 +42,7 @@ from chemclaw.ingest.eln.records import (
     InMemoryReactionRecordStore,
     PostgresReactionRecordStore,
     ReactionRecord,
+    UnreadableConditions,
     default_record_store,
 )
 from chemclaw.ingest.eln.sync import sync_entries
@@ -648,3 +649,95 @@ def test_the_postgres_store_keys_transcriptions_by_source_too() -> None:
             await durable.read("pg-shared")
 
     asyncio.run(_run())
+
+
+async def _write_raw_conditions(reaction_id: str, conditions: object) -> None:
+    """Put `conditions` into the column without going through `record`.
+
+    The column is bare `jsonb`, and the payload this test is about is one a *newer build of core*
+    writes during a rolling upgrade — which is not a shape any code in this checkout can produce,
+    so it is written as SQL.
+    """
+    from psycopg.types.json import Jsonb
+
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO reaction_records (ingest_source, reaction_id, body, compound_smiles, "
+            "project, performed_at, conditions, source) "
+            "VALUES ('eln', %s, 'b', 'CCO', 'p', NULL, %s, 'probe') "
+            "ON CONFLICT (ingest_source, reaction_id) "
+            "DO UPDATE SET conditions = EXCLUDED.conditions",
+            (reaction_id, None if conditions is None else Jsonb(conditions)),
+        )
+        await conn.commit()
+
+
+def test_a_row_a_newer_build_wrote_is_still_readable_by_an_older_one() -> None:
+    """A rolling upgrade runs both builds against one database, and this read used to forbid extras.
+
+    `ProcessConditions` is `extra="forbid"` because a typo'd key silently dropped is a number a
+    chemist wrote that nothing will render — an argument about *writing*. On the read side it meant
+    a row carrying one added field raised `ValidationError: pressure_bar_v2 — Extra inputs are not
+    permitted` on every old pod, and because a reaction is looked up by structure that failure
+    landed on a chemist's query for a molecule rather than on the ingest that wrote it. The
+    asymmetry is the same one `D-2026-09-06-a-decode-the-workflow-does-not-do-is-a-failure-nobody-
+    hears` chose on the Temporal wire.
+
+    The known field is asserted alongside, because a read that tolerated the extra by discarding
+    the whole payload would also not raise.
+    """
+
+    async def _run() -> object:
+        await migrated_db_or_skip()
+        await _write_raw_conditions(
+            "rxn-future-field", {"temperature_c": 25.0, "pressure_bar_v2": 3}
+        )
+        record = await PostgresReactionRecordStore().read("rxn-future-field")
+        assert record is not None and record.conditions is not None
+        return record.conditions.temperature_c
+
+    assert asyncio.run(_run()) == 25.0, (
+        "a row from a newer build was unreadable, or was read by throwing its conditions away"
+    )
+
+
+def test_recorded_but_all_unknown_conditions_are_not_read_as_absent() -> None:
+    """`{}` is "recorded, all unknown"; NULL is "not recorded". A falsy test collapsed the two.
+
+    `comparison.MISSING` renders the two differently, so the distinction is one a chemist sees.
+    """
+
+    async def _run() -> tuple[object, object]:
+        await migrated_db_or_skip()
+        store = PostgresReactionRecordStore()
+        await _write_raw_conditions("rxn-empty-conditions", {})
+        await _write_raw_conditions("rxn-null-conditions", None)
+        empty = await store.read("rxn-empty-conditions")
+        null = await store.read("rxn-null-conditions")
+        assert empty is not None and null is not None
+        return empty.conditions, null.conditions
+
+    empty, null = asyncio.run(_run())
+    assert empty is not None, "an all-unknown conditions record read as if none were recorded"
+    assert null is None, "a row with no conditions grew some"
+
+
+def test_a_conditions_payload_that_is_not_an_object_is_refused_by_name() -> None:
+    """The one case that is corruption rather than version skew, and it said nothing useful.
+
+    `ProcessConditions(**row)` on an array gave `TypeError: argument after ** must be a mapping`,
+    naming neither the table nor the reaction. Refused rather than ignored because `read` addresses
+    one reaction by id: the caller asked for this row.
+    """
+
+    async def _run() -> str:
+        await migrated_db_or_skip()
+        await _write_raw_conditions("rxn-array-conditions", [1, 2])
+        try:
+            await PostgresReactionRecordStore().read("rxn-array-conditions")
+        except UnreadableConditions as exc:
+            return str(exc)
+        return ""
+
+    message = asyncio.run(_run())
+    assert "rxn-array-conditions" in message, "the refusal does not name the row to act on"

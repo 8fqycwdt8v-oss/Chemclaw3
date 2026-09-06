@@ -1385,3 +1385,43 @@ def test_the_one_security_alarm_in_this_module_can_actually_be_formatted(
 
     assert "degraded[log_redaction]" in printed, printed
     assert "Logging error" not in printed, printed
+
+
+def test_a_dsn_password_survives_no_ordinary_stringification() -> None:
+    """The three DSNs were plain `str`, so every sink that is not `logging` disclosed the password.
+
+    The log path is fully defended and was measured so: the same `repr(settings)` through the
+    configured handler comes out clean, because `_SECRET_SETTINGS` names all three DSNs and the
+    `_URL_USERINFO` structural rule catches the shape independently. That defence is the reason
+    this one is easy to miss — the residual is every sink that is *not* a `LogRecord`: a `print`, a
+    debugger, a crash reporter, a `model_dump()` written to a file or a response, and (until it was
+    fixed alongside this) an exported span. Measured before the fix, with three marker passwords
+    loaded: `repr`, `str`, `model_dump()` and `model_dump_json()` each leaked all three.
+
+    The type is also the machine-readable signal the next reviewer reads, and plain `str` said
+    "not a secret".
+    """
+    from chemclaw.core.config import Settings
+
+    settings = Settings(
+        postgres_dsn="postgresql://u:MARKER-PGPW-9a1@pg.internal:5432/db",
+        postgres_migration_dsn="postgresql://m:MARKER-MIGPW-9a3@pg.internal:5432/db",
+        session_store_dsn="postgresql://s:MARKER-SESSPW-9a2@sess.internal:5432/db",
+    )
+    markers = ("MARKER-PGPW-9a1", "MARKER-MIGPW-9a3", "MARKER-SESSPW-9a2")
+    for rendering in (
+        repr(settings),
+        str(settings),
+        repr(settings.model_dump()),
+        settings.model_dump_json(),
+    ):
+        leaked = [marker for marker in markers if marker in rendering]
+        assert not leaked, f"{leaked} disclosed by a rendering of Settings"
+
+    # The value itself is untouched: `psycopg` is handed the attribute, not a rendering of it.
+    assert settings.postgres_dsn == "postgresql://u:MARKER-PGPW-9a1@pg.internal:5432/db"
+    # The host survives the *mask*, because an operator diagnosing a connection failure needs to
+    # see which server the DSN names. It does not survive `repr`, which drops the three fields
+    # whole — the two mechanisms close different sinks and `core/config/dsn.py` says why.
+    assert "pg.internal" in settings.model_dump()["postgres_dsn"]
+    assert "postgres_dsn" not in repr(settings)

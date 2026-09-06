@@ -15,7 +15,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 import httpx
@@ -26,8 +26,15 @@ from chemclaw.core.logging import register_secret_env
 from chemclaw.deliver.message import Message
 
 
+@runtime_checkable
 class DeliveryDriver(Protocol):
-    """Get one message to its recipient, or raise."""
+    """Get one message to its recipient, or raise.
+
+    Runtime-checkable for the reason `publish.driver.ResultSink` is: `registry.build` calls a
+    factory a *manifest* named, and the only thing standing between a mistyped `driver:` and a
+    message silently going nowhere is an `isinstance` at the moment it is built. A structural check
+    is all that is available — the protocol is one method — and one method is what the seam needs.
+    """
 
     async def deliver(self, message: Message) -> None:
         """Send `message`. Raises on any failure; the caller decides whether that is fatal."""

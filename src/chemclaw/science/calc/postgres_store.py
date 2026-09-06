@@ -7,7 +7,7 @@ upsert keyed by the flat calculation key; a `get` is a single primary-key lookup
 The DSN comes from the one config source.
 """
 
-import json
+import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
@@ -20,10 +20,14 @@ from chemclaw.core.config import settings
 from chemclaw.science.calc.store import (
     CalculationKey,
     CalculationQuery,
+    CorruptCacheRow,
     ResultStore,
     StoredResult,
+    checked_payload,
     molecule_hash,
 )
+
+logger = logging.getLogger(__name__)
 
 _UPSERT = """
     INSERT INTO calculation_results
@@ -110,11 +114,16 @@ class PostgresStore:
         if row is None:
             return None
         result, provenance, compute_seconds, structure_id = row
-        # JSONB comes back already parsed by psycopg; str only if driver differs.
-        payload = result if isinstance(result, dict) else json.loads(result)
+        # `checked_payload` rather than the old `result if isinstance(result, dict) else
+        # json.loads(result)`: that else-branch was written for a driver that hands back a string,
+        # and psycopg parses jsonb *whatever* its top level is — so an array, a string, a number or
+        # a `null` (all storable under `JSONB NOT NULL`) reached `json.loads` as a `list`/`int` and
+        # produced `TypeError: the JSON object must be str, bytes or bytearray, not list`, which
+        # names neither the table nor the row. No supported driver returns a string here; if one
+        # ever does, this refuses it by name instead of guessing.
         return StoredResult(
             key=key,
-            result=payload,
+            result=checked_payload(key, result),
             provenance=provenance,
             compute_seconds=compute_seconds,
             structure_id=structure_id,
@@ -179,7 +188,25 @@ class PostgresStore:
             async with conn.cursor() as cur:
                 await cur.execute(_FIND, params)
                 rows = await cur.fetchall()
-        return [_stored_from_row(row) for row in rows]
+        return [stored for row in rows if (stored := _readable_row(row)) is not None]
+
+
+def _readable_row(row: TupleRow) -> StoredResult | None:
+    """One `find` row, or `None` with a warning when its payload is not a result.
+
+    **Dropped rather than raised, and only on this path.** `get` addresses one key and must refuse
+    a corrupt row by name — the caller asked for that row and would otherwise be handed a wrong
+    answer. `find` is a browse ("what do we already have on this molecule"), and one poisoned row
+    taking the whole listing down with a `TypeError` is what it did before: measured, seven rows
+    of which one held a jsonb string answered zero. That is the same call
+    `retrievers._chunks_from_hits` makes when an index hit's note no longer loads. The row is not
+    hidden — it is logged here, and asking for it by key still refuses by name.
+    """
+    try:
+        return _stored_from_row(row)
+    except CorruptCacheRow as exc:
+        logger.warning("skipping a calculation_results row in the browse: %s", exc)
+        return None
 
 
 def _stored_from_row(row: TupleRow) -> StoredResult:
@@ -191,15 +218,15 @@ def _stored_from_row(row: TupleRow) -> StoredResult:
     """
     _, calc_type, calc_version, input_hash, params_hash = row[:5]
     result, provenance, compute_seconds, created_at, structure_id = row[5:]
+    stored_key = CalculationKey(
+        calc_type=calc_type,
+        calc_version=calc_version,
+        input_hash=input_hash,
+        params_hash=params_hash,
+    )
     return StoredResult(
-        key=CalculationKey(
-            calc_type=calc_type,
-            calc_version=calc_version,
-            input_hash=input_hash,
-            params_hash=params_hash,
-        ),
-        # JSONB comes back already parsed by psycopg; str only if the driver differs.
-        result=result if isinstance(result, dict) else json.loads(result),
+        key=stored_key,
+        result=checked_payload(stored_key, result),
         provenance=provenance,
         compute_seconds=compute_seconds,
         created_at=created_at,

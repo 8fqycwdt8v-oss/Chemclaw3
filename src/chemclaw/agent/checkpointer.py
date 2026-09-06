@@ -83,6 +83,17 @@ turn-failure event — classified `internal` and non-retryable, which is exactly
 retrying cannot give a checkpoint a channel it never held — while the log carries this module's own
 ERROR naming the session, the missing channels and the ones the thread does hold.
 
+**A second stamp answers a second question: what this checkpoint was holding.** The stamp above is
+about the *build*; `CHECKPOINT_VALUES_KEY` records the channels that had a value at the instant the
+checkpoint was written, and `_refuse_if_values_are_missing` refuses one that cannot load them back.
+The failure it catches is a thread whose `checkpoint_blobs` rows are gone while its `checkpoints`
+row survives — measured coming out of `durable/retention.py`'s sweep racing a live turn, and
+reachable identically from a restore, a partial `session_fork` copy or hand surgery. Before it, that
+thread resumed as an *empty conversation* with no exception and no log line, which is precisely the
+outcome the paragraph below calls worse than no answer. Two things this one does not do: it says
+nothing about a value that is present and wrong, and it is on the resume only, not on `alist` —
+history rendering shows what a session did, and a row with a hole in it is still something to show.
+
 **An *unstamped* checkpoint is accepted, and so is a stamp this build cannot read.** Refusing those
 would brick every live session at the deploy that introduces the guard — the exact outcome the
 guard exists to prevent, caused by the guard. They resume as they always did, and the first write
@@ -193,6 +204,24 @@ CHECKPOINT_TABLES: tuple[str, ...] = ("checkpoints", "checkpoint_blobs", "checkp
 # refuse the thread; under two, each reads the other's checkpoints as unstamped and resumes them.
 STATE_CHANNELS_KEY = "chemclaw_state_channels"
 
+# The metadata key each checkpoint's *value* stamp is written under: the channel names that held a
+# value at the instant this checkpoint was written.
+#
+# **Written because nothing upstream records it and the read cannot derive it.** A checkpoint's
+# `channel_values` is split across two stores by `AsyncPostgresSaver.aput` — primitives stay inline
+# in the `checkpoints` row, everything else moves to `checkpoint_blobs` — so a value that has gone
+# missing from `checkpoint_blobs` is simply a channel the reader does not see. `channel_versions`
+# looks like the answer and is not: measured on a healthy three-turn thread, **every** checkpoint
+# names channels there that legitimately hold no value (`__start__` and `branch:to:*` are consumed
+# by the step that reads them, which bumps the version and writes no blob), so a guard comparing
+# the two refuses every thread in the fleet. This stamp is taken before the split, from the writer,
+# where the answer is known exactly.
+#
+# Absent on a checkpoint written by a build without this stamp, and treated as unstamped for
+# `STATE_CHANNELS_KEY`'s reason: a rolling deploy runs both builds, and refusing what the older one
+# wrote would be the guard causing the harm it exists to prevent.
+CHECKPOINT_VALUES_KEY = "chemclaw_checkpoint_values"
+
 
 def _first_party_channels(state: Any) -> tuple[str, ...]:
     """The channel names `state` declares itself, with those of the base it extends left out.
@@ -237,6 +266,15 @@ def _first_party_channels(state: Any) -> tuple[str, ...]:
 
 
 FIRST_PARTY_CHANNELS = _first_party_channels(ChemclawState)
+
+
+class CheckpointValuesMissing(RuntimeError):
+    """A thread's newest checkpoint has lost channel values it was written holding.
+
+    Its own type, for `CheckpointSchemaMismatch`'s reason: "half this thread's rows are gone" is a
+    different fact from "this session predates a state change" and from "the database is down", and
+    only the first of the three is a reason to stop trusting what the thread reads back.
+    """
 
 
 class CheckpointSchemaMismatch(RuntimeError):
@@ -312,6 +350,68 @@ async def _translating(operation: str, config: RunnableConfig | None) -> AsyncIt
         ) from exc
 
 
+def _refuse_if_values_are_missing(stored: CheckpointTuple) -> None:
+    """Refuse a checkpoint that no longer holds channel values it was written with.
+
+    **The defect this exists for is that the half-deleted thread reads back as an empty
+    conversation.** `durable/retention.py` prunes an expired thread out of `checkpoints`,
+    `checkpoint_blobs` and `checkpoint_writes` in one transaction, and this pool is
+    `autocommit=True` by design, so a live turn committing between two of those statements leaves
+    its own `checkpoints` row standing while the sweep takes the blobs it just wrote. Measured on
+    the real sweep and the real saver: `checkpoints=3, blobs=0`, `aget_state` returning `{'log':
+    []}` with no exception, no log line and no counter, and the next turn answering as a brand-new
+    conversation. The sweep's own half of that race is fixed where it happens; this is the guard
+    for every *other* route into the same state — a restore, a partial `session_fork` copy, hand
+    surgery on the tables — because a reader that cannot tell "resumed" from "started over" is the
+    failure, not the sweep.
+
+    **It compares the writer's own record, not `channel_versions`.** `channel_versions` names every
+    channel the checkpoint depends on, and comparing it against what loaded is what this guard's
+    first draft did. Measured on a healthy three-turn thread it flags **every checkpoint**:
+    `__start__` and `branch:to:*` are consumed by the step that reads them, which bumps the version
+    and writes no blob, so a legitimate checkpoint routinely names channels that hold no value. The
+    stamp `aput` writes is taken before the inline/blob split, from the values the writer actually
+    had, so a channel in it that does not load back is missing rather than absent.
+
+    An unstamped checkpoint — one written by a build older than the stamp, or by
+    `InMemorySaver` — passes, for the reason `STATE_CHANNELS_KEY` states: a rolling deploy runs both
+    builds, and refusing the older one's checkpoints would brick every live session on the deploy
+    that introduces the guard.
+
+    Args:
+        stored: The checkpoint tuple as loaded, values already merged from both stores.
+
+    Raises:
+        CheckpointValuesMissing: A stamped channel did not load back.
+    """
+    stamp = (stored.metadata or {}).get(CHECKPOINT_VALUES_KEY)
+    if not isinstance(stamp, list):
+        return
+    loaded = stored.checkpoint.get("channel_values") or {}
+    missing = [str(name) for name in stamp if name not in loaded]
+    if not missing:
+        return
+    thread_id = stored.config.get("configurable", {}).get("thread_id", "")
+    checkpoint_id = stored.config.get("configurable", {}).get("checkpoint_id", "")
+    # `logger.error` rather than `degraded`, for the same reason the schema refusal beside it uses
+    # one: `degraded` records a deliberate swallow — "the caller continued with less" — and this
+    # call site continues with nothing. The turn fails, and the failure carries its own type.
+    logger.error(
+        "refusing turn state for session %s: checkpoint %s has lost channel value(s) %s",
+        thread_id,
+        checkpoint_id,
+        ", ".join(missing),
+    )
+    raise CheckpointValuesMissing(
+        f"session {thread_id!r} has turn state that is half gone: checkpoint {checkpoint_id!r} was "
+        f"written holding channel(s) {', '.join(missing)} and no longer has them. Rows this "
+        "checkpoint needs have been deleted from checkpoint_blobs or checkpoint_writes without its "
+        "own row going with them. Resuming would answer out of an empty conversation as if it were "
+        "the whole one, so it is refused. Start a new session: this one's transcript and audit "
+        "trail are separate stores and are unaffected."
+    )
+
+
 class SchemaStampedSaver(AsyncPostgresSaver):
     """`AsyncPostgresSaver` that records the channels it writes and refuses a thread missing one.
 
@@ -335,7 +435,13 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        """Write the checkpoint with this build's first-party channel names in its metadata.
+        """Write the checkpoint with this build's channel names, and the values it holds, stamped.
+
+        Two stamps, answering two different questions on resume. `STATE_CHANNELS_KEY` is what this
+        *build* declared; `CHECKPOINT_VALUES_KEY` is what this *checkpoint* held — read here,
+        before `super().aput` splits those values between the inline column and `checkpoint_blobs`,
+        because after the split neither store can say which channels the other was supposed to
+        have. Both constants carry the argument for their own shape.
 
         The outage translation is `_translating`'s, shared with the other three statements on this
         pool; that function holds the measurements and why it is `OperationalError` rather than
@@ -345,7 +451,16 @@ class SchemaStampedSaver(AsyncPostgresSaver):
             ConnectionError: The checkpoint could not be written.
         """
         stamped = cast(
-            CheckpointMetadata, {**metadata, STATE_CHANNELS_KEY: list(FIRST_PARTY_CHANNELS)}
+            CheckpointMetadata,
+            {
+                **metadata,
+                STATE_CHANNELS_KEY: list(FIRST_PARTY_CHANNELS),
+                # `.get`, because the stamp must never be the reason a checkpoint write fails:
+                # `channel_values` is always present on a checkpoint LangGraph built, and a
+                # hand-constructed one (a test, a future caller) would otherwise raise here rather
+                # than at the statement that actually needs it.
+                CHECKPOINT_VALUES_KEY: sorted(checkpoint.get("channel_values") or {}),
+            },
         )
         async with _translating("write", config):
             return await super().aput(config, checkpoint, stamped, new_versions)
@@ -369,6 +484,9 @@ class SchemaStampedSaver(AsyncPostgresSaver):
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Load the checkpoint, refusing one that predates a channel this build declares.
 
+        And refusing one whose stored values no longer cover what it was written holding —
+        `_refuse_if_values_are_missing` carries that argument and the measurement behind it.
+
         A stamp that is absent, or that this build cannot read — the schema-hash string the first
         version of this guard wrote, or anything else that is not a list of names — is treated the
         same as an unstamped checkpoint and resumed, for the module docstring's reason: refusing it
@@ -381,6 +499,8 @@ class SchemaStampedSaver(AsyncPostgresSaver):
             The stored checkpoint, or `None` when the thread has none.
 
         Raises:
+            CheckpointValuesMissing: The stored checkpoint has lost channel values it was written
+                holding, so resuming it would answer out of a conversation that is half gone.
             CheckpointSchemaMismatch: The stored checkpoint never held a channel this build
                 declares, so restoring it can fail inside a node instead of here.
             ConnectionError: The checkpoint could not be read — see `_translating`. This is the
@@ -391,6 +511,7 @@ class SchemaStampedSaver(AsyncPostgresSaver):
             stored = await super().aget_tuple(config)
         if stored is None:
             return None
+        _refuse_if_values_are_missing(stored)
         stamp = (stored.metadata or {}).get(STATE_CHANNELS_KEY)
         if not isinstance(stamp, list):
             return stored

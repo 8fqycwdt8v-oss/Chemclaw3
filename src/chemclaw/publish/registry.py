@@ -10,17 +10,17 @@ default**. A system that began shipping every calculation to a destination on a 
 chose would be the exact failure this seam exists to make deliberate.
 """
 
-import importlib
 import logging
 from collections.abc import Callable
 from functools import cache
 from pathlib import Path
 from typing import Any
 
-import yaml
+from pydantic import ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.manifest_io import read_manifest, resolve_driver, within_root
 from chemclaw.publish.driver import ResultSink
 from chemclaw.publish.manifest import ResultSinkManifest
 
@@ -47,7 +47,11 @@ def _sink_dirs() -> list[Path]:
         if not base.is_dir():
             continue
         for child in sorted(base.iterdir()):
-            if (child / _MANIFEST).is_file() and child.name not in seen:
+            if (
+                (child / _MANIFEST).is_file()
+                and child.name not in seen
+                and within_root(base, child)
+            ):
                 seen.add(child.name)
                 found.append(child)
     return found
@@ -61,11 +65,11 @@ def _load(directory: Path) -> ResultSinkManifest:
     sink enabled under one name and recorded under another.
     """
     path = directory / _MANIFEST
+    raw = read_manifest(path, ResultSinkError)
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        raise ResultSinkError(f"cannot read result sink manifest {path}: {exc}") from exc
-    manifest = ResultSinkManifest.model_validate(raw)
+        manifest = ResultSinkManifest.model_validate(raw)
+    except ValidationError as exc:
+        raise ResultSinkError(f"invalid result sink manifest {path}:\n{exc}") from exc
     if manifest.name != directory.name:
         raise ResultSinkError(
             f"result sink manifest {path} declares name {manifest.name!r} but lives in "
@@ -120,22 +124,7 @@ def _resolve(reference: str) -> Callable[..., Any]:
     Typed as callable rather than `object` because this function's last act is to check that it is
     one — a caller that then has to re-narrow would be re-doing the check this already did.
     """
-    module_name, _, attribute = reference.partition(":")
-    try:
-        module = importlib.import_module(module_name)
-    except ImportError as exc:
-        raise ResultSinkError(
-            f"cannot import {module_name!r} for result sink driver {reference!r}: {exc}. "
-            "A driver's client package is installed only where that sink is actually written to."
-        ) from exc
-    driver = getattr(module, attribute, None)
-    if driver is None:
-        raise ResultSinkError(
-            f"{module_name!r} has no attribute {attribute!r} (from {reference!r})"
-        )
-    if not callable(driver):
-        raise ResultSinkError(f"{reference!r} is not callable")
-    resolved: Callable[..., Any] = driver
+    resolved: Callable[..., Any] = resolve_driver(reference, ResultSinkError, "result sink driver")
     return resolved
 
 

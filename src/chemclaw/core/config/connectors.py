@@ -170,6 +170,27 @@ class ConnectorSettings(BaseSettings):
     # the front door's knob.
     connector_max_request_bytes: int = Field(default=1_000_000, ge=0)
 
+    # How much of one tool's *description* this deployment will carry, per tool, per model call.
+    #
+    # A connector's description is untrusted text in the highest-trust region of the request:
+    # `load_mcp_tools` takes it from the live server's `tools/list`, `_allowed` filters names only,
+    # and it is serialised into the `tools` block ahead of the system message on **every** model
+    # call. `chemclaw_connector_tool_schema_tokens` measured that cost and nothing bounded it, so
+    # a server this repository neither builds nor watches set the deployment's per-turn spend —
+    # and CLAUDE.md's whole prefix arithmetic rests on a ratchet that cannot see an out-of-tree
+    # bundle at all.
+    #
+    # Per description rather than per connector, because the manifest's own `tools:` list bounds
+    # how many descriptions there are: the product is a number both halves of which this
+    # repository controls. Measured 2026-09-06 against the sibling checkout — 27 tools across
+    # `chem`, `rxnpredict`, `safety` and `props` — the largest real description is
+    # `chem.describe_sites` at 2,950 characters and the whole fleet sums to 42,251. 6,000 is
+    # ~2x the largest, so a cut is a signal that something is wrong rather than a tax on a
+    # thorough docstring; past it the description is cut head-and-tail with a system-authored
+    # notice and a WARNING naming the connector and the tool. 0 disables, matching the other
+    # ceilings in this section.
+    connector_max_tool_description_chars: int = Field(default=6_000, ge=0)
+
     # Bound on the record write every finished connector job performs (D-157). Small: it is one
     # upsert of a row the job has already earned, and a database that cannot take it in this long
     # is down — in which case the retries, and then the log line, are the right outcome.
@@ -195,6 +216,35 @@ class ConnectorSettings(BaseSettings):
     # quiet. No shipped bundle declares stdio; it is the zero-infrastructure path for local
     # development and for the transport's own tests, and those set this explicitly.
     connector_stdio_enabled: bool = False
+
+    # Which top-level packages a manifest may name in a field that is **imported and called**:
+    # `params_model`, `precondition`, `ingest`, `retrieve`, `commitments`, `driver`. Comma
+    # separated; `chemclaw` is always allowed and does not need listing.
+    #
+    # **The same sentence as the setting above, applied to the other field family that executes.**
+    # `connector_stdio_enabled` refuses `command:` because "a manifest is data"; the
+    # `module:callable` family has the same reach in the same process and was on by default.
+    # Measured, a manifest
+    # naming a module ran that module's top-level code inside `job_tools()` — the per-turn
+    # agent-build path — with `connector-validate`, `sink-validate` and `datasource-validate` all
+    # exiting 0, and the sink and channel seams then *call* what they resolved with the manifest's
+    # own `config:` as keyword arguments.
+    #
+    # The bundle property D-118/D-120 sell is untouched: a driver living in this tree needs nothing
+    # here, and a third-party driver is one deliberate env var set by the operator who mounted the
+    # directory the manifest arrived in — which is the threat, because discovery is enablement.
+    manifest_driver_packages: str = ""
+
+    @property
+    def manifest_driver_package_list(self) -> frozenset[str]:
+        """The packages a manifest may import from, always including this tree's own.
+
+        Stripped and empties dropped, for the reason `connector_jobs_awaiting_answer_list` gives:
+        this list grants an entitlement, and a stray space would silently withhold one rather than
+        widen it — a refusal an operator would read as a broken driver.
+        """
+        named = (part.strip() for part in self.manifest_driver_packages.split(","))
+        return frozenset({"chemclaw", *(part for part in named if part)})
 
     # Which jobs may declare `awaits_answer: true` and so run with **no wall-clock ceiling at all**
     # (`durable/connector_job.py::child_execution_timeout`), as `<bundle>.<job>` names separated by

@@ -213,3 +213,58 @@ def test_a_real_turn_exports_a_turn_span(spans: object) -> None:
     assert "chemclaw.turn" in {span.name for span in spans()}, (  # type: ignore[operator]
         "a real turn exported no span, so the boundary the docs claim is still uninstrumented"
     )
+
+
+def test_a_failure_description_carries_no_content_while_the_flag_is_off(
+    spans: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exception channel is content, and `otel_include_sensitive_data` did not govern it.
+
+    Measured before the fix, with a real exporter and the flag at its shipped default: the span's
+    status description and the SDK's own `exception` event both carried the message verbatim, and
+    the stacktrace with it. `_warn_about_sensitive_data` tells an operator the opposite — "no
+    first-party span carries turn content" — so the one signal saying the channel is clean was the
+    signal that was wrong. A span is not a `logging.LogRecord`, so `SecretRedactingFilter` never
+    saw any of it.
+    """
+    from chemclaw.core.tracing import start_span
+
+    monkeypatch.setattr("chemclaw.core.config.settings.otel_include_sensitive_data", False)
+    marker = "CONTENT-MARKER-patient-identifier"
+    with pytest.raises(ValueError):
+        with start_span("chemclaw.tool", **{"tool.name": "mytool"}) as span:
+            span.failed(f'ValueError("upstream said: {marker}")')
+            raise ValueError(f"upstream said: {marker}")
+
+    exported = spans()  # type: ignore[operator]
+    blob = repr(
+        [
+            (s.status.description, [(e.name, dict(e.attributes or {})) for e in s.events])
+            for s in exported
+        ]
+    )
+    assert marker not in blob, blob
+    # The class survives, because "which failure" is an identifier and the rule this module states
+    # is identifiers and counts. An operator filtering by `status=ERROR` still sees the span.
+    assert "ValueError" in blob
+    assert exported[0].status.status_code.name == "ERROR"
+
+
+def test_a_credential_never_reaches_a_span_even_with_content_allowed(
+    spans: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 401 body echoed back by an upstream is how a bearer reaches an exception message.
+
+    `otel_include_sensitive_data` is a decision about *turn content* — a chemist's question and the
+    model's answer. It is not a decision to export this process's own credentials, so the value
+    inventory `core/logging` already holds applies on both settings of the flag.
+    """
+    from chemclaw.core.tracing import start_span
+
+    monkeypatch.setenv("CHEMCLAW_LLM_API_KEY", "MARKERLLMKEY9a4x")
+    monkeypatch.setattr("chemclaw.core.config.settings.otel_include_sensitive_data", True)
+    with start_span("chemclaw.tool") as span:
+        span.failed("RuntimeError: 401 from backend: Authorization: Bearer MARKERLLMKEY9a4x")
+
+    exported = spans()  # type: ignore[operator]
+    assert "MARKERLLMKEY9a4x" not in repr(exported[0].status.description)

@@ -54,7 +54,7 @@ _MESSAGES = """
 # `id` stays as the tiebreak: two calls can start inside the same clock tick, and insertion order
 # is the only thing left that distinguishes them.
 _AUDIT = """
-    SELECT correlation_id, tool, outcome, detail, latency_ms, actor, plan_step
+    SELECT correlation_id, tool, outcome, detail, latency_ms, actor, plan_step, agent
     FROM audit_events
     WHERE session_id = %s
     ORDER BY ts ASC, id ASC
@@ -79,6 +79,12 @@ class ToolCall(NamedTuple):
     latency_ms: float
     actor: str
     plan_step: str
+    #: The `AgentProfile` name of the graph that made the call, empty for the agent the chemist was
+    #: talking to (`agent/audit.AuditEvent.agent`). Rendered only when non-empty, because empty is
+    #: the overwhelming majority and "via the agent you were talking to" is noise on every line.
+    #: Defaulted so a caller constructing this positionally — every test in `tests/test_explain.py`
+    #: — keeps working; the fetch below always supplies it.
+    agent: str = ""
 
 
 class Job(NamedTuple):
@@ -171,9 +177,10 @@ async def explain(session_id: str, dsn: str | None = None) -> list[str]:
             latency,
             actor,
             plan_step,
+            agent,
         ) in await cursor.fetchall():
             calls.setdefault(correlation_id, []).append(
-                ToolCall(tool, outcome, detail, latency, actor, plan_step)
+                ToolCall(tool, outcome, detail, latency, actor, plan_step, agent)
             )
 
         # `job_records` predates this join and is keyed independently, so a job whose correlation id
@@ -227,7 +234,13 @@ def _render(
             lines.append(f"       → {_wrap(job.summary, limit=200)}")
         for call in calls.get(correlation_id, []):
             step = f" — for step: {_wrap(call.plan_step, limit=120)}" if call.plan_step else ""
-            stamp = f"{call.outcome}, {call.latency_ms:.0f} ms, {call.actor}"
+            # The agent beside the human, never instead of it
+            # (`D-2026-09-06-the-one-agent-that-exists-is-named-in-the-trail`). A helper runs on a
+            # brief the chemist never saw, so a row of its own inside the chemist's turn is exactly
+            # what a reviewer needs told apart — and it read as the chemist's own act until the
+            # column had a producer.
+            via = f" via {call.agent}" if call.agent else ""
+            stamp = f"{call.outcome}, {call.latency_ms:.0f} ms, {call.actor}{via}"
             lines.append(f"   tool {call.tool} [{stamp}]{step}")
         lines.append("")
     return lines

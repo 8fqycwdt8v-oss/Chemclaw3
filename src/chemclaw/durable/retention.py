@@ -492,6 +492,60 @@ _EXPIRED_THREADS = (
 # `ANALYZE` a warning and a no-op rather than an error, so no privilege guard is needed either.
 _ANALYZE_THREADS = "ANALYZE checkpoints"
 
+# The two statements that make the checkpoint sweep survive a turn landing in the middle of it.
+#
+# **The candidate list is stale by the time it is deleted, and the writer is not in this
+# transaction.** The checkpointer's pool is `autocommit=True` on purpose
+# (`agent/checkpointer.py`: "every checkpointer write is its own transaction, which is what a
+# checkpoint already is"), so a live turn commits its blobs and its new `checkpoints` row the
+# instant it writes them. Driven statement by statement against the real sweep and the real saver,
+# a turn landing after `DELETE FROM checkpoints` and before `DELETE FROM checkpoint_blobs` left
+# **`checkpoints=3, blobs=0`**: `aget_state` returned `{'log': []}` — no exception, no log line —
+# and the next turn answered as a brand-new conversation. Reversing the delete order was measured
+# too and loses the conversation just the same; it only changes which rows are left behind.
+#
+# So the two statements ask their questions again, each in its own snapshot:
+#
+# 1. `_DELETE_EXPIRED_CHECKPOINTS` re-runs the expiry predicate as part of the delete, restricted
+#    to the candidate ids so it stays an index probe per thread rather than the full grouping pass
+#    `_EXPIRED_THREADS` pays. A thread that took a turn between the two statements is no longer
+#    expired and simply survives to the next pass — the self-correcting direction `droppable_rows`
+#    already argues for. `RETURNING thread_id` is what the next statement works from, so a thread
+#    this one declined cannot have its blobs taken by that one.
+# 2. `_DELETE_ORPHANED` deletes a thread's blobs and writes only while that thread has **no**
+#    `checkpoints` row at all. That is what catches the measured interleaving: the racing turn's
+#    row is committed by then and visible to this statement's snapshot, so its blobs are left
+#    alone. The old checkpoints already deleted are lost history for a thread that came back to
+#    life, which is a shorter `aget_state_history` rather than a state that reads back empty.
+#
+# **What is left is one statement's snapshot wide, and it is not closed here.** A turn whose blobs
+# commit before `_DELETE_ORPHANED` takes its snapshot and whose `checkpoints` row commits after it
+# still loses them — `aput` writes blobs first and the checkpoint row second, and nothing
+# synchronises the two parties without a lock on the turn-serving write path. That residual is why
+# the guard that matters is on the *read*: `agent/checkpointer._refuse_if_values_are_missing`
+# refuses a checkpoint that has lost values it was written holding, whatever route it took to get
+# there.
+
+# The one table of the three that dates a thread, and therefore the one the expiry re-check runs
+# against; the other two are swept only where it has left nothing behind.
+_CHECKPOINTS = "checkpoints"
+
+_DELETE_EXPIRED_CHECKPOINTS = (
+    "DELETE FROM checkpoints WHERE thread_id = ANY(%s) AND thread_id IN ("
+    "SELECT thread_id FROM checkpoints WHERE thread_id = ANY(%s) GROUP BY thread_id "
+    "HAVING max((checkpoint->>'ts')::timestamptz) < now() - make_interval(days => %s)"
+    ") RETURNING thread_id"
+)
+
+# `{table}` is one of `CHECKPOINT_TABLES` — a constant of the checkpointer's own, never a caller's,
+# so the interpolation cannot carry untrusted input; the thread ids are bound.
+# `tests/test_retention.py` asserts the sweep covers exactly that tuple, so a fourth checkpointer
+# table cannot be added upstream and quietly go unpruned.
+_DELETE_ORPHANED = (
+    "DELETE FROM {table} WHERE thread_id = ANY(%s) "
+    "AND NOT EXISTS (SELECT 1 FROM checkpoints c WHERE c.thread_id = {table}.thread_id)"
+)
+
 # The three statements the per-session conversation prune needs. Only sessions that actually have an
 # expired row are visited, so a deployment whose sessions are all recent pays one indexed scan.
 #
@@ -1221,10 +1275,19 @@ async def _prune_checkpoints(
     exists so one table's failure cannot roll back another's, and it holds because those tables are
     independent. These three are not: they are one thread's state split across three keys with no
     foreign key to enforce it. Committing them separately gives a crash between two commits a choice
-    of two bad outcomes — surviving `checkpoints` rows referring to blobs that are gone (a thread
-    that now raises when read) or orphaned blobs no later pass can find (because the thread query
-    runs over `checkpoints`, and that thread no longer has any). One transaction has neither, and it
-    is bounded by the batch cap rather than by the backlog.
+    of two bad outcomes — surviving `checkpoints` rows referring to blobs that are gone, or orphaned
+    blobs no later pass can find (because the thread query runs over `checkpoints`, and that thread
+    no longer has any). One transaction has neither, and it is bounded by the batch cap rather than
+    by the backlog.
+
+    **One transaction says nothing about the other writer, and this paragraph used to claim it
+    did.** It protects the sweep from *itself*; the party that produces the first of those two
+    outcomes is a live turn, on the checkpointer's own `autocommit=True` pool, committing between
+    two of these statements. Measured, that left `checkpoints=3, blobs=0` — and the second claim
+    was wrong too: the thread did **not** raise when read, it returned an empty conversation and
+    answered the next turn as a new one. `_DELETE_EXPIRED_CHECKPOINTS` and `_DELETE_ORPHANED` are
+    what this pass does about it, and `agent/checkpointer._refuse_if_values_are_missing` is what
+    the *reader* does about every other route into the same state.
 
     **A malformed `ts` fails this pass loudly, and that is the answer rather than an oversight.**
     The thread query casts `checkpoint->>'ts'` to `timestamptz`, and Postgres has no `TRY_CAST` — a
@@ -1273,19 +1336,24 @@ async def _prune_checkpoints(
         threads = found[:cap]
         if not threads:
             return dict.fromkeys(CHECKPOINT_TABLES, 0), [], 0
-        deleted: dict[str, int] = {}
-        for table in CHECKPOINT_TABLES:
-            # `CHECKPOINT_TABLES` is a module constant of the checkpointer's own, never a caller's,
-            # so the interpolation cannot carry untrusted input; the thread ids are bound.
-            await cur.execute(
-                f"DELETE FROM {table} WHERE thread_id = ANY(%s)",
-                (threads,),
-            )
+        # Both statements re-ask their question inside this transaction;
+        # `_DELETE_EXPIRED_CHECKPOINTS` carries the measurement and what the pair does not close.
+        await cur.execute(_DELETE_EXPIRED_CHECKPOINTS, (threads, threads, days))
+        checkpoint_rows = await cur.fetchall()
+        swept = sorted({str(row[0]) for row in checkpoint_rows})
+        # By name rather than by position in `CHECKPOINT_TABLES`: the two statements are not
+        # interchangeable — one carries the expiry re-check and the other the orphan guard — so an
+        # index into that tuple would put the wrong statement on a table if it were ever reordered.
+        deleted: dict[str, int] = {_CHECKPOINTS: len(checkpoint_rows)}
+        for table in (name for name in CHECKPOINT_TABLES if name != _CHECKPOINTS):
+            await cur.execute(_DELETE_ORPHANED.format(table=table), (swept,))
             deleted[table] = max(cur.rowcount, 0)
     await conn.commit()
     logger.info(
-        "pruned %d expired checkpoint thread(s); %s",
+        "pruned %d of %d expired checkpoint thread(s)%s; %s",
+        len(swept),
         len(threads),
+        "" if len(swept) == len(threads) else " (the rest took a turn mid-sweep and stay)",
         "more remain for the next pass" if deferred else "the backlog is drained",
     )
     return deleted, [], deferred

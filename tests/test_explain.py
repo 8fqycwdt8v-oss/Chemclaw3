@@ -203,3 +203,28 @@ def test_an_unrenderable_row_shows_its_repr_instead_of_reading_as_an_absent_tran
     # unreadable row, the other holds no row at all.
     report = _report(order=["turn-a"], turns={"turn-a": [("unknown", "{'nope': 1}")]})
     assert "transcript: absent" not in report, report
+
+
+def test_a_helpers_call_is_marked_as_the_helpers_and_the_chemists_own_is_not() -> None:
+    """A helper's row says which graph made it; the caller's rows read exactly as before.
+
+    `audit_events.agent` had no producer until
+    `D-2026-09-06-the-one-agent-that-exists-is-named-in-the-trail`, so this report showed a helper's
+    tool calls — made on a model-authored brief the chemist never saw — as the chemist's own acts,
+    indistinguishable from the ones they asked for. The column having a value is not enough on its
+    own: an attribution the one operator tool cannot show is the same gap one layer down.
+
+    The empty case is asserted beside it, because "empty means the agent you were talking to" is a
+    convention the renderer has to keep silent about or every line grows a clause that says nothing.
+    """
+    report = _report(
+        order=["c-1"],
+        calls={
+            "c-1": [
+                ToolCall("task", "ok", "", 12.0, "alice@corp", "", ""),
+                ToolCall("find_notes", "ok", "", 8.0, "alice@corp", "", "default-helper"),
+            ]
+        },
+    )
+    assert "tool find_notes [ok, 8 ms, alice@corp via default-helper]" in report
+    assert "tool task [ok, 12 ms, alice@corp]" in report

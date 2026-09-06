@@ -35,6 +35,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config.agent import HarnessAutonomy
+from chemclaw.core.manifest_io import MAX_MANIFEST_TEXT_CHARS
 
 
 class AgentProfile(BaseModel):
@@ -52,7 +53,13 @@ class AgentProfile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str = Field(min_length=1)
-    instructions: str | None = None
+    # Bounded like every other manifest-supplied prose field, and this is the one where the bound
+    # is load-bearing rather than defence in depth: `instructions` *is* the system prompt, so an
+    # unbounded value is unbounded spend on every model call of every turn on that profile, outside
+    # the ratchet `tests/test_context_floor.py` holds. Measured before the bound: 500,000 characters
+    # went straight into the prefix
+    # (`D-2026-09-06-a-manifest-is-data-in-every-field-that-executes`).
+    instructions: str | None = Field(default=None, max_length=MAX_MANIFEST_TEXT_CHARS)
     tool_names: frozenset[str] | None = None
     mcp_server_names: frozenset[str] | None = None
     harness_enabled: bool | None = None

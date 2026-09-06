@@ -30,13 +30,13 @@ dropped here cannot widen what its caller may do.
 import logging
 from pathlib import Path
 
-import yaml
 from pydantic import ValidationError
 
 from chemclaw.agent.profiles import AgentProfile, register_profile, registered_profile_names
 from chemclaw.connectors.registry import profiles_dirs as connector_profiles_dirs
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.manifest_io import read_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +53,16 @@ class ProfileError(ChemclawError):
 
 
 def _load(path: Path) -> AgentProfile:
-    """Parse and validate one profile file, whose stem is its name."""
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        raise ProfileError(f"{path}: unreadable or malformed YAML: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise ProfileError(f"{path}: must contain a YAML mapping, got {type(raw).__name__}")
+    """Parse and validate one profile file, whose stem is its name.
+
+    Read through `core/manifest_io.read_manifest` rather than `yaml.safe_load`, because this is the
+    sixth manifest loader and it was the one wave 5 left out: it carried a bare `safe_load`, so an
+    alias bomb, a 2000-deep nesting (a bare `RecursionError`, past every `except ValueError` at the
+    entry points) and a duplicate key all reached it. That matters more here than at the other five
+    seams, not less — `instructions` **is** the system prompt
+    (`D-2026-09-06-a-manifest-is-data-in-every-field-that-executes`).
+    """
+    raw = read_manifest(path, ProfileError)
     if "name" in raw:
         raise ProfileError(
             f"{path}: a profile's name is its filename; remove the 'name' key so the two "

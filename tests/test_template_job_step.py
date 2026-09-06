@@ -61,6 +61,17 @@ from chemclaw.durable.template_job import TemplateWorkflow
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "connectors"
 
 
+@pytest.fixture(autouse=True)
+def _allow_test_package_drivers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let this suite's fixture bundle name a `precondition:` that lives in this file.
+
+    A precondition is imported *and called*, so it is held to the package allow-list
+    `D-2026-09-06-a-manifest-is-data-in-every-field-that-executes` introduced. This suite is the
+    out-of-tree case, so it does what an out-of-tree deployment does: one setting, deliberately.
+    """
+    monkeypatch.setattr(settings, "manifest_driver_packages", "tests")
+
+
 @pytest.fixture
 def fixture_bundle(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """Point the registry at the test bundle and return its one job name.

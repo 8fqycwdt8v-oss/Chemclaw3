@@ -31,6 +31,8 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from chemclaw.core.manifest_io import MAX_MANIFEST_TEXT_CHARS
+
 # A reference to an input, to an earlier step's result, or to a field inside that result. Anchored
 # and closed. The field path is a dotted attribute walk and nothing else — no indexing, no
 # wildcards, no expressions — which keeps the "deliberately not a template language" line exactly
@@ -64,7 +66,7 @@ class TemplateInput(BaseModel):
 
     name: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
     type: InputType
-    description: str = Field(min_length=1)
+    description: str = Field(min_length=1, max_length=MAX_MANIFEST_TEXT_CHARS)
     required: bool = True
 
 
@@ -185,8 +187,11 @@ class Template(BaseModel):
     name: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_-]*$")
     # The first line of the generated tool's docstring — what the model reads when deciding to run
     # this — and `description` is the rest, exactly as a connector job declares them.
-    summary: str = Field(min_length=1)
-    description: str = ""
+    # Bounded for the reason `JobSpec.summary` is, and by the same constant: these two are the
+    # generated `run_<template>` tool's docstring, so an unbounded value here is unbounded prompt.
+    # Measured, a 400,000-character `summary:` loaded and reached the tool untouched.
+    summary: str = Field(min_length=1, max_length=MAX_MANIFEST_TEXT_CHARS)
+    description: str = Field(default="", max_length=MAX_MANIFEST_TEXT_CHARS)
     inputs: list[TemplateInput] = Field(default_factory=list)
     steps: list[Step] = Field(min_length=1)
 

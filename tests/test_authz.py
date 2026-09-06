@@ -9,6 +9,8 @@ connector job now (D-118), so `tests/test_connector_jobs.py` proves it once for 
 instead of once per hand-written tool.
 """
 
+from typing import Any
+
 import pytest
 
 from chemclaw.agent.authz import (
@@ -331,4 +333,186 @@ def test_every_hardcoded_authorize_trigger_action_is_actually_gated() -> None:
         "authorize_trigger names action(s) that nothing gates, so the call is inert: "
         f"{ungated}. Declare them in CORE_EXPENSIVE_ACTIONS (core-owned) or via a manifest's "
         "`expensive: true` (bundle-owned)."
+    )
+
+
+def _chart_posture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shipped chart's identity posture: enforcement on, every role list empty.
+
+    `deploy/helm/chemclaw/values.yaml` ships `CHEMCLAW_ENTRA_REQUIRED=true` with
+    `CHEMCLAW_TOOL_ROLE_GATES`, `CHEMCLAW_ENTRA_PRIVILEGED_ROLES` and
+    `CHEMCLAW_ENTRA_EXPENSIVE_ACTIONS` all unset, so this is the configuration a real deployment
+    reaches unless an operator files a role name — the posture both gate docstrings describe and
+    the one the two tests below measure rather than assume.
+    """
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "tool_authz_default", "allow")
+    monkeypatch.setattr(settings, "tool_role_gates", {})
+    monkeypatch.setattr(settings, "entra_privileged_roles", "")
+    monkeypatch.setattr(settings, "entra_expensive_actions", "")
+
+
+def _refused(gate: Any, name: str) -> bool:
+    """Whether `gate` refuses `name` for the identity currently bound."""
+    try:
+        gate(name)
+    except AuthorizationError:
+        return True
+    return False
+
+
+def test_the_built_in_write_gate_closes_three_knowledge_writers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The RBAC fallback covers three names, and every template launcher passes both gates.
+
+    `DEFAULT_WRITE_TOOL_GATES`'s comment used to end "writes are closed by default, opened by
+    explicit operator config" — a claim about the whole side-effecting surface, and false of it.
+    Nothing measured it, so it read as a control for as long as it stood
+    (`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`). This is that measurement, and it
+    is deliberately expressed as three *set* equalities rather than as counts, because the
+    side-effecting surface grows with every enabled bundle and a count here would be stale on
+    somebody else's merge.
+
+    The load-bearing assertion is the last one: every template launcher — durable work, and the one
+    thing that can reach a job step without the model naming the job — passes both RBAC gates for
+    an authenticated user holding no roles at all. What refuses it is the plan gate, which the test
+    below drives; see
+    `D-2026-09-06-the-write-gate-is-three-names-and-the-plan-gate-carries-the-rest` for why the
+    division is deliberate. Widening either gate is a deployment-visible posture change
+    and turns this red, which is the point: the prose and the posture move together or not at all.
+    """
+    from chemclaw.agent.authz import side_effecting_tools
+    from chemclaw.templates.registry import template_tool_names
+
+    surface(None)  # registers the job and template launchers into the shared registry
+    _chart_posture(monkeypatch)
+    token = set_current_identity(actor="chemist@example.com", roles=frozenset())
+    try:
+        gated = side_effecting_tools()
+        by_tool_gate = {name for name in gated if _refused(authorize_tool, name)}
+        by_trigger_gate = {name for name in gated if _refused(authorize_trigger, name)}
+    finally:
+        reset_current_identity(token)
+
+    assert by_tool_gate == set(DEFAULT_WRITE_TOOL_GATES), (
+        "`authorize_tool` refuses a role-less user exactly `DEFAULT_WRITE_TOOL_GATES` and nothing "
+        "else; if that changed, the set's comment in chemclaw.agent.authz changed with it"
+    )
+    assert by_trigger_gate == set(expensive_actions()) & set(gated), (
+        "an empty `entra_privileged_roles` fails closed over exactly the declared-expensive set"
+    )
+    launchers = frozenset(template_tool_names())
+    open_at_both = gated - by_tool_gate - by_trigger_gate
+    assert launchers, "no template launchers registered — the surface call stopped working"
+    assert launchers <= open_at_both, (
+        "a template launcher is now refused by an RBAC gate for a role-less user. That is a "
+        "posture change, not a test failure: update DEFAULT_WRITE_TOOL_GATES' comment, which says "
+        "the plan gate is what carries the launchers."
+    )
+
+
+def test_the_plan_gate_refuses_a_launcher_the_rbac_gates_leave_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control the comment above names, driven rather than cited.
+
+    The set arithmetic in the test above says a template launcher reaches a role-less authenticated
+    user through both RBAC gates. That is only tolerable because something else refuses it, and
+    "something else refuses it" is exactly the kind of sentence this repository has shipped without
+    a producer behind it (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`).
+    So the covering control is driven here, on the same posture, through the real middleware and
+    the real approval store: a launcher called under an unapproved plan raises.
+    """
+    import asyncio
+
+    from chemclaw.agent import plan_approval_store as store_module
+    from chemclaw.agent.plan_gate import PlanNotApprovedError, enforce_plan_approval
+    from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+    from chemclaw.templates.registry import template_tool_names
+    from tests.middleware import run_middleware, tool_request
+
+    surface(None)
+    _chart_posture(monkeypatch)
+    monkeypatch.setattr(settings, "session_store", "memory")
+    store_module.plan_approval_store.cache_clear()
+    launcher = sorted(template_tool_names())[0]
+
+    async def _run() -> bool:
+        ran = False
+
+        async def _handler(_request: Any) -> Any:
+            nonlocal ran
+            ran = True
+            return None
+
+        request = tool_request(launcher)
+        object.__setattr__(request, "state", {"todos": [{"content": "run the launcher"}]})
+        token = set_current_session_id("s-unapproved")
+        identity = set_current_identity(actor="chemist@example.com", roles=frozenset())
+        try:
+            await run_middleware(enforce_plan_approval, request, _handler)
+        finally:
+            reset_current_identity(identity)
+            reset_current_session_id(token)
+        return ran
+
+    try:
+        with pytest.raises(PlanNotApprovedError):
+            asyncio.run(_run())
+    finally:
+        store_module.plan_approval_store.cache_clear()
+
+
+def _privileged_roles_section() -> str:
+    """The `deploy/README.md` section documenting the empty `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`."""
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[1] / "deploy" / "README.md").read_text()
+    marker = "### The setting that does *not* block boot"
+    start = readme.index(marker)
+    end = readme.index("\n## ", start + len(marker))
+    return readme[start:end]
+
+
+def test_the_operator_note_lists_no_expensive_job_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The blast-radius section derives its list instead of holding one, and the command works.
+
+    That section is the *mitigation* for a silent failure — healthy pod, a whole tier of capability
+    shut — and it shipped naming three jobs and asserting "nothing else breaks" while the gate
+    refused seventeen, `request_development_report` and `synthesize_memory` among them. A fresher
+    table would be the same defect with a later date on it: most of the set is declared by bundles
+    served out of `Chemclaw3-mcp`, which this repository does not build and cannot watch, so a list
+    here goes stale on somebody else's merge.
+
+    So the section names a command, and this runs that command's own payload — lifted out of the
+    README rather than restated — against the live set. Two failures it catches: an operator
+    instruction that no longer executes, and a hand-list creeping back in.
+    """
+    import io
+    import re
+    from contextlib import redirect_stdout
+
+    surface(None)  # registers the bundles whose manifests declare `expensive: true`
+    monkeypatch.setattr(settings, "entra_expensive_actions", "")
+    section = _privileged_roles_section()
+
+    payload = re.search(r'uv run python -c "(.+?)"\n', section)
+    assert payload is not None, (
+        "the section no longer names a `uv run python -c` command an operator can run to print "
+        "what this deployment closes; it must not go back to listing jobs"
+    )
+    printed = io.StringIO()
+    with redirect_stdout(printed):
+        # The README's own line, executed as an operator would run it.
+        exec(payload.group(1), {})
+    assert printed.getvalue().split() == sorted(expensive_actions()), (
+        "the documented command no longer prints the set the trigger gate protects"
+    )
+
+    named = sorted(action for action in expensive_actions() if f"`{action}`" in section)
+    assert named == [], (
+        f"{named} are named in deploy/README.md's blast-radius section. That list is derived from "
+        "manifests this repository does not own, so naming any of it here is a claim that goes "
+        "stale on a bundle merge — point at the command instead."
     )

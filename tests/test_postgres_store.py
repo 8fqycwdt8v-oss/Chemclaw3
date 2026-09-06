@@ -15,9 +15,11 @@ from chemclaw.science.calc.postgres_store import PostgresStore, default_store
 from chemclaw.science.calc.store import (
     CalculationKey,
     CalculationQuery,
+    CorruptCacheRow,
     InMemoryStore,
     ResultStore,
     StoredResult,
+    cached_compute,
 )
 from tests.pg import migrated_db_or_skip
 
@@ -242,3 +244,128 @@ def test_known_answers_existence_in_bulk_and_both_backends_agree() -> None:
         assert await store.known([]) == set()
 
     asyncio.run(_run())
+
+
+async def _write_raw_result(key: CalculationKey, payload: object) -> None:
+    """Put `payload` into `calculation_results.result` without going through the store.
+
+    The column is bare `JSONB NOT NULL`, so every value here is one a restore, an operator, or a
+    calculation server returning a shape this repository does not check could leave behind. Written
+    with SQL for that reason: the store's own `put` is exactly the path these rows did not take.
+    """
+    from psycopg.types.json import Jsonb
+
+    from chemclaw.core import db
+    from chemclaw.core.config import settings
+
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO calculation_results (key, calc_type, calc_version, input_hash, "
+            "params_hash, result, provenance) VALUES (%s, %s, %s, %s, %s, %s, 'computed') "
+            "ON CONFLICT (key) DO UPDATE SET result = EXCLUDED.result",
+            (
+                key.as_str(),
+                key.calc_type,
+                key.calc_version,
+                key.input_hash,
+                key.params_hash,
+                Jsonb(payload),
+            ),
+        )
+        await conn.commit()
+
+
+def test_a_row_that_is_not_a_json_object_is_refused_by_name() -> None:
+    """`JSONB NOT NULL` accepts an array, a string, a number and `null`; psycopg parses all four.
+
+    The old read was `result if isinstance(result, dict) else json.loads(result)`, written for a
+    driver that returns a string — so each of these reached `json.loads` as a `list`/`str`/`int`
+    and produced `TypeError: the JSON object must be str, bytes or bytearray, not list`, which
+    names neither the table nor the row an operator has to delete.
+    """
+
+    async def _run() -> list[str]:
+        store = await _store_or_skip()
+        messages = []
+        for index, payload in enumerate(["corrupted", [1, 2, 3], 42, None]):
+            key = CalculationKey.build("probe.shape", "1", inputs={"n": index})
+            await _write_raw_result(key, payload)
+            try:
+                await store.get(key)
+            except CorruptCacheRow as exc:
+                messages.append(str(exc))
+            else:
+                messages.append("")
+        return messages
+
+    for message in asyncio.run(_run()):
+        assert "calculation_results row" in message, (
+            f"a non-object row was accepted or refused without naming itself: {message!r}"
+        )
+
+
+def test_an_empty_result_is_neither_cached_nor_handed_back() -> None:
+    """`{}` is what a truncated or failed call to the calculation server degrades into.
+
+    Measured before this: a `{}` row answered `hit=True computes=0` and flowed out as the tool's
+    answer, permanently — D-011 never recomputes a persisted result and `calculation_results` is
+    never pruned, so one such write poisons that key for the life of the deployment. Both doors are
+    asserted: the write gate in `cached_compute`, which is the one path a calculation server's
+    answer comes through, and the read, for a row that got in some other way.
+
+    A *wrong value* under a right key is deliberately not covered — catching that needs the
+    calculator's schema, which lives in `Chemclaw3-mcp` by
+    `D-2026-08-16-the-physics-leaves-the-cache-stays`.
+    """
+
+    async def _run() -> tuple[bool, bool, int]:
+        store = await _store_or_skip()
+        read_key = CalculationKey.build("probe.empty", "1", inputs={"n": "read"})
+        await _write_raw_result(read_key, {})
+        read_refused = False
+        try:
+            await store.get(read_key)
+        except CorruptCacheRow:
+            read_refused = True
+
+        write_key = CalculationKey.build("probe.empty", "1", inputs={"n": "write"})
+        computes = 0
+
+        async def _empty() -> dict[str, object]:
+            nonlocal computes
+            computes += 1
+            return {}
+
+        write_refused = False
+        try:
+            await cached_compute(store, write_key, _empty)
+        except CorruptCacheRow:
+            write_refused = True
+        return read_refused, write_refused, computes
+
+    read_refused, write_refused, computes = asyncio.run(_run())
+    assert read_refused, "an empty stored result was handed back as a cache hit"
+    assert write_refused, "an empty computed result was persisted, which D-011 makes permanent"
+    assert computes == 1, "the write gate ran before the computation instead of after it"
+
+
+def test_one_corrupt_row_does_not_empty_the_browse() -> None:
+    """`find` answers "what do we already have"; one poisoned row used to answer nothing at all.
+
+    The split is deliberate and is the opposite of `get`'s: an exact-key lookup must refuse the row
+    the caller asked for, and a listing must not be taken down by a row nobody asked for. The same
+    call `retrievers._chunks_from_hits` makes for an index hit whose note no longer loads.
+    """
+
+    async def _run() -> list[str]:
+        store = await _store_or_skip()
+        good = CalculationKey.build("probe.browse", "1", inputs={"n": "good"})
+        bad = CalculationKey.build("probe.browse", "1", inputs={"n": "bad"})
+        await store.put(StoredResult(key=good, result={"energy": -1.0}))
+        await _write_raw_result(bad, [1, 2, 3])
+        found = await store.find(CalculationQuery(calc_type="probe.browse"))
+        return [stored.key.as_str() for stored in found]
+
+    keys = asyncio.run(_run())
+    assert keys, "one corrupt row emptied the whole browse"
+    assert all("bad" not in key for key in keys), "the corrupt row was handed back anyway"

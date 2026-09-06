@@ -63,6 +63,18 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **The sixth manifest loader is still unbounded** — [S], found 2026-09-06 driving all six
+  loaders against one hostile corpus. `D-2026-09-06-a-manifest-is-data-in-every-field-that-executes`
+  routed five of them through `core/manifest_io.read_manifest` and bounded the prose fields they
+  feed the prompt. `agent/profile_discovery.py` is the sixth and is unchanged: bare
+  `yaml.safe_load` at `:58`, so the alias bomb, the `RecursionError` and the silent duplicate key
+  all still land there, and `AgentProfile.instructions` has no `max_length` — measured, a
+  500,000-character `data/profiles/p.yaml` loaded and went straight into the system prompt. It was
+  left out of that commit only because it was outside the change's ownership, not because it is a
+  different case; the fix is `read_manifest(path, AgentProfileError)` plus
+  `max_length=MAX_MANIFEST_TEXT_CHARS`, and `tests/test_manifest_io.py` shows the shape of the two
+  tests.
+
 - [ ] **A connector can claim a step-template launcher name, and the registry says it cannot** —
   [S], found 2026-09-05 reviewing the ambient-name guard. `_bound_by_this_process` refuses a bundle
   that claims an in-process tool, a scratchpad verb, `write_todos` or `task`. Its docstring adds
@@ -97,9 +109,15 @@ topic).
   own choosing. Two things bound the severity and neither closes it: a real tenant endpoint is
   `https`, where a proxy sees a CONNECT tunnel it can only open with a CA the pod already trusts
   (which is exactly what a TLS-terminating corporate proxy arranges); and the boot refusal added by
-  that ADR stops any deployment that has *not* declared a proxy, which is every shipped one. The
-  residual is a site that has declared one — there the LLM seam refuses it and this one does not,
-  which is an asymmetry that reads as a control and is not.
+  that ADR stops a deployment that has *not* declared a proxy **and has `entra_required` on** —
+  which is the Helm chart (`values.yaml` sets `CHEMCLAW_ENTRA_REQUIRED: "true"` on every
+  component) and is **not** this repository's own defaults. This sentence said "every shipped one"
+  and that was measured false on 2026-09-06: on `Settings()` defaults `proxied_destinations`
+  charges nothing, so `make chat`, `make connectors`, CI, a hand-started worker and any site behind
+  `CHEMCLAW_SERVICE_ALLOW_INSECURE=true` boot with the hole open. For *this* row the identity-off
+  half is moot — the JWKS fetch only happens when `entra_required` is on — but the sentence was
+  being read as a statement about the boot refusal in general, and as that it is false. The
+  asymmetry with the LLM seam stands.
   **Not a one-liner, which is why it is a row.** `PyJWKClient` takes `ssl_context` and no opener,
   so the only in-process fix is
   `urllib.request.install_opener(build_opener(ProxyHandler({})))` at import — a process-wide side
@@ -116,11 +134,54 @@ topic).
   or bearer is on it; what is on it is embedded note text and the query vectors. Recorded rather
   than blind-patched for one reason: `qdrant_client` is not in this closure (`pgvector` is the
   shipped provider), so the claim "passing a client works" would be untested prose, which is the
-  shape this repository keeps deleting. **The boot refusal covers it** in any deployment that has
-  not declared a proxy, which is every shipped one — this is the residual for a site that has
-  declared one *and* runs the non-default vector store. Closing it needs the extra installed, then
+  shape this repository keeps deleting. **The boot refusal covers less than this row said.** It
+  fires only where `_env_reading_destinations` charges a destination — the OTLP endpoint and the
+  Entra JWKS — so a deployment with `entra_required=false` and `otel_enabled=false`, which is what
+  `.env.example` ships, boots with a proxy variable set and nothing charged (measured 2026-09-06:
+  HTTP 200 through a real loopback proxy to an external listener, `netguard._refused` 0 before and
+  after, the proxy's log showing the absolute-URI request line). The residual is a site that has
+  declared a proxy **or** runs identity and tracing off, *and* runs the non-default vector store. Closing it needs the extra installed, then
   one measurement of whether the SDK accepts a caller-supplied client. Anchors:
   `retrieval/vectors/qdrant.py`, `core/http.py::gateway_client_kwargs`.
+
+- [ ] **The egress guard is blind to gRPC and to Temporal, and those are its two highest-value
+  destinations** — [M], opened 2026-09-06 by the wave-5 egress review, argued in
+  `D-2026-09-06-a-redaction-that-only-covers-logrecords-covers-one-sink.md`. `arm()` patches
+  `socket.socket`'s methods and the `socket` module resolvers; grpc's C-core and Temporal's Rust
+  sdk-core open sockets through neither. Measured with the allowlist deliberately **empty** and no
+  proxy variables set: `grpc.insecure_channel`, the OTLP gRPC span exporter and
+  `temporalio.Client.connect` all reached an external listener with `chemclaw_egress_refused_total`
+  at 0. `derive_allowed` adds `otel_endpoint` and `temporal_address` all the same, which reads as a
+  bound and is not — the docstrings at `core/netguard.py` now say so in both places, which is the
+  part that was cheap. **Why it matters beyond the general concession**: with
+  `otel_include_sensitive_data` on, that exporter carries prompts and completions, so a wrong or
+  hostile `CHEMCLAW_OTEL_ENDPOINT` exports them anywhere while both signals an operator would check
+  (`chemclaw_egress_refused_total`, `chemclaw_egress_guard_armed`) report health. **And the two
+  blindnesses compound**: measured with an ambient proxy left in place, grpc followed `https_proxy`
+  to a *loopback* proxy — invisible to the socket guard because it is a compiled extension, and
+  invisible to the NetworkPolicy because a sidecar shares the pod's netns. The module's fallback
+  ("those are the NetworkPolicy's job") does not hold for that combination.
+  **Not a one-liner, which is why it is a row.** Closing it means an `LD_PRELOAD`/seccomp layer or
+  a per-library interception (grpc exposes no socket factory hook; `temporalio` dials in Rust), i.e.
+  a decision about what enforces egress rather than an edit to this module. The cheaper half that
+  remains open is the chart: `networkPolicy.egressDestinations` does not say it is the only layer
+  bounding these two, nor what a loopback sidecar does to that. Anchors:
+  `core/netguard.py::arm`, `::derive_allowed`, `deploy/helm/chemclaw/values.yaml` (`networkPolicy`).
+
+- [ ] **Six live-lane httpx clients read the ambient proxy, one of them carrying a bearer** — [S],
+  opened 2026-09-06 by the same review. `cli/live_probes.py:340` builds an `Authorization: Bearer`
+  client carrying `live_probe_token`, and `cli/live_storm.py` (five sites), `cli/phoenix_publish.py`
+  and `evals/live.py` build clients, all at httpx's default `trust_env=True`. None is on a path a
+  chemist reaches, which is why it is [S] rather than the finding itself — but
+  `core/netguard.py`'s docstring asserted "every first-party HTTP client here passes
+  `trust_env=False`" as the correctness argument for charging two destinations instead of twelve,
+  and that sentence was false for these six.
+  `tests/test_netguard.py::test_every_served_http_client_refuses_the_ambient_proxy` now enforces the
+  property with these four modules in a named exemption list, so a *new* client anywhere else fails
+  on the day it is written; closing this row is deleting the list, one keyword per site. It is a row
+  rather than a patch only because those files belong to another surface than the one that found it.
+  Anchors: `cli/live_probes.py`, `cli/live_storm.py`, `cli/phoenix_publish.py`, `evals/live.py`,
+  `tests/test_netguard.py::_TRUST_ENV_LANE_EXEMPTIONS`.
 
 - [ ] **The gateway boot guard reaches one process, and the worker is the other one** — [M],
   opened by `D-2026-09-04-a-gateway-is-the-only-provider`. `_refuse_unconfigured_llm_gateway` and

@@ -17,11 +17,23 @@ only surfaced as a connection error would be swallowed by the first `except OSEr
 (the LLM failover, `publish/drivers/http`, `connectors/health` all have one).
 
 **What it cannot cover, stated rather than implied.** A patched `socket` in this interpreter says
-nothing about a **child process** (the KG PR-gate shells out to `git`), a **`ctypes` call into
-libc**, or a syscall from a **compiled extension** (this closure carries `grpcio`, `rdkit`, torch,
-`psycopg_binary`). Those are the NetworkPolicy's job — the layer that takes the network away rather
-than asking Python nicely — and the chart's `git_remote` / egress rules are where they land. This
-guard catches the large class a static import scan cannot: a dependency reaching out at runtime.
+nothing about a **child process** (`kg/git_writer.py` shells out to `git`), a **`ctypes` call into
+libc**, a syscall from a **compiled extension** (this closure carries `grpcio`, `rdkit`, torch,
+`psycopg_binary`), or **`_socket.socket`** — the C base class `socket.socket` subclasses, whose
+`connect` is not assignable and is two lines of ordinary Python away. Those are the NetworkPolicy's
+job — the layer that takes the network away rather than asking Python nicely — and the chart's
+`git_remote` / egress rules are where they land. This guard catches the large class a static
+import scan cannot: a dependency reaching out at runtime.
+
+**Two of this deployment's own destinations are in the compiled-extension class, and naming them is
+the point.** gRPC's C-core and Temporal's Rust sdk-core open sockets without touching
+`socket.socket` or the module resolvers, so `otel_endpoint` and `temporal_address` — both of which
+`derive_allowed` adds — are **allowlist entries, not enforcement**. Measured with the allowlist
+deliberately empty and no proxy set: a `grpc.insecure_channel`, the OTLP gRPC span exporter and
+`temporalio.Client.connect` all reached an external listener with `_refused` at 0. That is a real
+limit rather than a defect this module can close, and `docs/planning/BACKLOG.md` carries the row;
+it is written here because an entry in an allowlist reads as a bound, and for these two it is not
+one.
 
 **One shape has no such backstop, and it is why `refuse_proxied_egress` exists.** A proxy moves the
 destination out of the address, so the allowlist cannot see it; and where the proxy is a sidecar on
@@ -35,9 +47,28 @@ that **reads the environment** *and* that destination is not bypassed by `NO_PRO
 proxy's host is not named in `egress_allow`. It is not "a configured proxy refuses the process".
 The narrowing to env-reading clients is the whole correctness argument and lives on
 `_env_reading_destinations`: charging every destination instead refused pods over hosts a proxy
-could not carry — every first-party HTTP client here passes `trust_env=False` — while the two that
-genuinely are proxied went uncharged, and on the shipped loopback defaults it stopped a developer
-behind a corporate proxy from importing this module at all.
+could not carry — every HTTP client on a *served* path passes `trust_env=False` — while the two
+that genuinely are proxied went uncharged, and on the shipped loopback defaults it stopped a
+developer behind a corporate proxy from importing this module at all.
+
+**That clause is a control now rather than a claim, and the word "served" in it is load-bearing.**
+It was written here as "every first-party HTTP client", and measured it was false for six of them
+— all in the live/eval lane (`cli/live_probes.py`, `cli/live_storm.py`, `cli/phoenix_publish.py`,
+`evals/live.py`), none on a path a chemist reaches, one of them carrying a bearer.
+`tests/test_netguard.py::test_every_served_http_client_refuses_the_ambient_proxy` walks every
+`httpx.Client`/`AsyncClient` construction in `src/` and holds the lane exemptions in a named list,
+so a *new* client anywhere else fails on the day it is written. `httpx` defaults `trust_env` to
+True, which makes this a property that decays by omission — the one kind a docstring cannot hold.
+
+**And the boot refusal covers less than two backlog rows used to say.** It fires only where
+`_env_reading_destinations` charges something, and on this repository's own defaults
+(`entra_required=false`, `otel_enabled=false`) it charges nothing: measured today with a real
+loopback proxy, a plain `httpx.get` to an external host returned 200 with `_refused` at 0 before
+and after, the proxy's log showing the absolute-URI request line. The shipped Helm chart sets
+`CHEMCLAW_ENTRA_REQUIRED: "true"` on every component, so the refusal does fire in the OpenShift
+topology the sidecar argument is about. What is uncovered is `make chat`, `make connectors`, CI, a
+hand-started worker, and any site running identity off — which is precisely the "a policy that only
+one way of starting the process obeys" shape `core/egress.py` exists to reject.
 
 Armed once, at `chemclaw.core.config` import, beside `pin_langsmith_egress`, because that module is
 the one import every entrypoint makes (the front door, the CLI, the connector server, the durable
@@ -191,6 +222,13 @@ def derive_allowed(settings: Any) -> frozenset[str]:
     one arrives here or is named there as somebody else's socket, so the next such field fails on
     the day it is declared rather than in a deployment that split its session store.
 
+    **Two entries here are bookkeeping rather than bounds**, and the module docstring says why:
+    `temporal_address` and `otel_endpoint` are dialled by Temporal's Rust sdk-core and grpc's
+    C-core, neither of which goes through the patched `socket.socket` or the patched resolvers.
+    They are added so the set describes what this deployment reaches — which is what the derivation
+    is for — but nothing in this file enforces them. Measured: both reach an off-allowlist host
+    with `_refused` at 0.
+
     A *manifest*-supplied host — a warehouse ELN's `connection:`, a result sink's, a delivery
     channel's, an external vector store reached through `module:callable` — is still not derived
     from anything, because it is not on this object at all: those blocks are the deployment's own
@@ -285,13 +323,21 @@ def arm(allowed: Iterable[str] = ()) -> None:
     def getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
         _check((host, port))
         results = original_getaddrinfo(host, port, *args, **kwargs)
-        # Record the IPs an allowed name resolved to, so the subsequent `connect` to one of them is
-        # permitted. Only when the *name* was not itself an IP literal (an IP literal resolving to
-        # itself is already covered by the allowlist / loopback check).
-        for entry in results:
-            sockaddr = entry[4] if len(entry) > 4 else None
-            if isinstance(sockaddr, tuple) and sockaddr and isinstance(sockaddr[0], str):
-                _resolved_ips.add(sockaddr[0])
+        # Record the IPs an **allowlisted** name resolved to, so the subsequent `connect` to one of
+        # them is permitted. Only the allowlist branch, and that qualifier is the fix rather than a
+        # restatement: `_check` has three ways to pass, and one of them — `is_loopback_host` — is
+        # answered *by name*, without resolving anything. So `localhost` used to deposit whatever
+        # it resolved to into a set `_check` then trusted permanently and port-independently, with
+        # no re-derivation. A second A record on that name (a hosts file, a split-horizon resolver)
+        # would have become a standing allowlist entry for an address the guard otherwise refuses.
+        # Nothing is lost by narrowing it: a loopback address is already exempt by address, so the
+        # only entries this set ever needed are the ones an allowlisted name produced.
+        name = _host_of((host, port))
+        if name is not None and name.strip("[]").lower() in _allowed:
+            for entry in results:
+                sockaddr = entry[4] if len(entry) > 4 else None
+                if isinstance(sockaddr, tuple) and sockaddr and isinstance(sockaddr[0], str):
+                    _resolved_ips.add(sockaddr[0])
         return results
 
     def gethostbyname(hostname: Any) -> Any:
@@ -523,6 +569,14 @@ def _publish_armed() -> None:
 
 
 def _reset_for_tests(allowed: Iterable[str] = ()) -> None:
-    """Re-derive the allowlist without re-patching. Tests only — the patch itself is idempotent."""
+    """Re-derive the allowlist without re-patching. Tests only — the patch itself is idempotent.
+
+    **A pooled connection opened while a host was allowed survives its removal**, because `_check`
+    is a connect-time hook: measured, a warm `httpx` pool returned 200 from a de-allowlisted host
+    with the counter unmoved. That is unreachable in production — the allowlist is derived once at
+    `chemclaw.core.config` import and never changes for the life of the process — so it is stated
+    here rather than filed, at the one function that can make the allowlist move. A future "reload
+    config" feature would make it real, and would need to close pools rather than only re-derive.
+    """
     global _allowed
     _allowed = frozenset(allowed)

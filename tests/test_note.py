@@ -338,3 +338,49 @@ def test_a_calculation_citation_still_refuses_what_is_not_a_key() -> None:
     for bad in ["the GFN2 run", "xtb@GFN2-xTB", "xtb@GFN2-xTB:onlyonehash", "@:::", "xtb:a:b"]:
         with pytest.raises(_ValidationError):
             Note(id="n", type="observation", calc_refs=[bad])
+
+
+def test_a_note_written_to_the_graph_carries_no_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git is the one store that leaves the pod, and nothing scrubbed what was committed into it.
+
+    Since `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` a note is written the moment it
+    is learned, `created_by: agent`, and the writer commits and pushes it. A note *body* is model
+    prose over whatever the turn discussed — a pasted credential, an untrusted share document's
+    contents, a chemist's question — and `render_note` serialises it verbatim.
+
+    Measured before the fix: a body holding an LLM key and a warehouse DSN password rendered both
+    into the committed file, while the identical strings in a log line came out `***` from the same
+    process's own inventory. That asymmetry is the finding — and it matters more here than on the
+    log path, because `deploy/knowledge-sync.sh` pushes the tree to a remote and a secret in a
+    merged commit survives every later correction. Contradiction and supersession, which are the
+    stated safety argument for writing knowledge directly, cannot reach it.
+
+    A redaction is applied rather than a refusal: a note that names its secret `***` is still the
+    record, and a false positive is visible and correctable while a committed credential is not.
+    """
+    from chemclaw.kg.record import _note_file
+
+    monkeypatch.setenv("CHEMCLAW_LLM_API_KEY", "MARKERLLMKEY9a4x")
+    monkeypatch.setattr(
+        "chemclaw.core.config.settings.postgres_dsn",
+        "postgresql://svc:MARKERPGPW9a1x@wh.internal/db",
+    )
+    note = Note(
+        id="leaky-note",
+        type="observation",
+        created_by="agent",
+        body=(
+            "The chemist pasted: export CHEMCLAW_LLM_API_KEY=MARKERLLMKEY9a4x and the warehouse "
+            "DSN postgresql://svc:MARKERPGPW9a1x@wh.internal/db while asking about CX-4711."
+        ),
+    )
+    content = _note_file(note, "knowledge").content
+    assert "MARKERLLMKEY9a4x" not in content, content
+    assert "MARKERPGPW9a1x" not in content, content
+    # The note is still the note: the prose around the secret, the frontmatter and the compound
+    # id all survive. Redaction is not truncation.
+    assert "CX-4711" in content
+    assert "created_by: agent" in content
+    assert "id: leaky-note" in content

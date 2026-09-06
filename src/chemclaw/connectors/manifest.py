@@ -47,6 +47,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chemclaw.core.http import is_loopback_url
+from chemclaw.core.manifest_io import MAX_MANIFEST_TEXT_CHARS
 
 # A job parameter's declared type, mapped to a Python annotation by `connectors.jobs`.
 # Deliberately a *closed* set: the generated pydantic model becomes the JSON schema the model
@@ -310,7 +311,7 @@ class JobParam(BaseModel):
 
     name: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
     type: JobParamType
-    description: str = Field(min_length=1)
+    description: str = Field(min_length=1, max_length=MAX_MANIFEST_TEXT_CHARS)
     required: bool = True
 
 
@@ -429,8 +430,16 @@ class JobSpec(BaseModel):
     workflow: str = Field(min_length=1)
     # The first line of the generated tool's docstring — what the model reads when deciding to
     # call it. `description` carries the rest (when to use it, what the id is for, idempotency).
-    summary: str = Field(min_length=1)
-    description: str = ""
+    # Bounded, because this text *is* the prompt. `jobs.build_job_tool` puts both verbatim into
+    # the generated tool's docstring, which is what the model is sent on every call, and neither
+    # field had a maximum: measured, a 5.4 MB `connector.yaml` produced a 5,200,664-character tool
+    # docstring — roughly 1.3 million tokens from one file — with `connector-validate` reporting
+    # nothing. `tests/test_context_floor.py` is the ratchet on the total prefix, but it measures
+    # the graph built from the *shipped* bundles, so an out-of-tree bundle on `connectors_dir` —
+    # the supported way to add a capability — is outside it by construction. This is the bound
+    # such a bundle is held to instead.
+    summary: str = Field(min_length=1, max_length=MAX_MANIFEST_TEXT_CHARS)
+    description: str = Field(default="", max_length=MAX_MANIFEST_TEXT_CHARS)
     # A job declares its launch arguments one of two ways, and the choice is about *fidelity*,
     # not taste. `params` is the easy path: flat, closed-type arguments declared inline, which
     # covers a job whose input is a handful of scalars (a SMILES, a method name, a count).
@@ -601,7 +610,7 @@ class ConnectorManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9-]*$")
-    description: str = Field(min_length=1)
+    description: str = Field(min_length=1, max_length=MAX_MANIFEST_TEXT_CHARS)
     endpoint: Endpoint | None = Field(default=None, discriminator="transport")
     jobs: list[JobSpec] = Field(default_factory=list)
     # Names of the `SKILL.md` folders under this bundle's `skills/` dir and the profile files

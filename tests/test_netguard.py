@@ -1189,3 +1189,141 @@ def test_the_environment_store_is_read_the_way_httpx_reads_it(
         assert _trusts(gateway_client_kwargs(""), port), (
             "SSL_CERT_FILE is set and its issuer must be the one that is trusted"
         )
+
+
+# The modules that build an httpx client without `trust_env=False`, each with the reason it is
+# tolerated. Every one is a *lane*, never a served path: `cli/live_*` and `evals/live.py` drive the
+# live/e2e lane against a loopback mock or a named gateway, and `cli/phoenix_publish.py` posts an
+# eval run to a locally-run Phoenix. None of them runs inside a pod that serves a chemist.
+#
+# It is a list rather than an absence because the fix belongs in those files and this file does not
+# own them; `docs/planning/BACKLOG.md` carries the row. What the list does buy is the ratchet: a
+# *new* client anywhere else fails on the day it is written, which is what the claim in
+# `core/netguard.py`'s docstring was standing in for and could not do.
+_TRUST_ENV_LANE_EXEMPTIONS = {
+    "src/chemclaw/cli/live_probes.py",
+    "src/chemclaw/cli/live_storm.py",
+    "src/chemclaw/cli/phoenix_publish.py",
+    "src/chemclaw/evals/live.py",
+}
+
+
+def _httpx_client_constructions() -> list[tuple[str, int, bool]]:
+    """Every `httpx.Client`/`AsyncClient` construction in `src/`, and whether it refuses the env.
+
+    A `**gateway_client_kwargs(...)` unpacking counts as compliant, whether inline or through a
+    local name bound to that call: that mapping's whole point is that `trust_env=False` is
+    unconditional in it (`core/http.py`), and the two call sites that use it are the LLM gateway
+    and the embeddings client — the two the proxy ADR was written about. Bare `**kwargs` from
+    anywhere else does *not* count, so the escape hatch is one named function rather than a shape.
+    """
+    src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    found: list[tuple[str, int, bool]] = []
+    for path in sorted(src.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        bound = {
+            target.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and getattr(node.value.func, "id", "") == "gateway_client_kwargs"
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name not in ("Client", "AsyncClient"):
+                continue
+            refuses = any(
+                keyword.arg == "trust_env"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value is False
+                for keyword in node.keywords
+            ) or any(
+                keyword.arg is None
+                and (
+                    (
+                        isinstance(keyword.value, ast.Call)
+                        and getattr(keyword.value.func, "id", "") == "gateway_client_kwargs"
+                    )
+                    or (isinstance(keyword.value, ast.Name) and keyword.value.id in bound)
+                )
+                for keyword in node.keywords
+            )
+            found.append((path.relative_to(src.parents[1]).as_posix(), node.lineno, refuses))
+    return found
+
+
+def test_every_served_http_client_refuses_the_ambient_proxy() -> None:
+    """`trust_env=False` is a property of the tree, not a sentence in a docstring.
+
+    **This is the mitigation the module docstring was already asserting.** It said flatly that
+    "every first-party HTTP client here passes `trust_env=False`", and that claim is the entire
+    correctness argument for `_env_reading_destinations` charging two destinations instead of
+    twelve — if a served client reads the environment, the boot refusal is not looking at it and
+    the socket guard cannot see it either, because a proxy moves the destination out of the
+    address (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`).
+
+    Measured when this test was written, the sentence was false for six clients. All six are in the
+    live/eval lane, so the *served* half of the claim held — but nothing was keeping it true, and
+    the next client to be added would have been the one that mattered. `httpx` defaults
+    `trust_env` to True, so this is a property that decays by omission rather than by edit.
+
+    Verified to bite: deleting `"trust_env": False` from `core/http.gateway_client_kwargs` turns
+    this red. The first version of this test did *not* — it accepted the unpacking on the strength
+    of the function's name, so the one escape hatch it grants was the one thing it did not check,
+    which is the shape the whole finding is about. The mapping is therefore asserted for real,
+    against the live function, before the scan is trusted.
+    """
+    assert gateway_client_kwargs("").get("trust_env") is False, (
+        "`gateway_client_kwargs` is the exemption the scan below grants by name; if it stops "
+        "refusing the environment, every client built from it reads a proxy variable again."
+    )
+    offenders = sorted(
+        f"{module}:{line}"
+        for module, line, refuses in _httpx_client_constructions()
+        if not refuses and module not in _TRUST_ENV_LANE_EXEMPTIONS
+    )
+    assert not offenders, (
+        f"{offenders} build an httpx client without `trust_env=False`. A proxy variable on the pod "
+        "would carry that traffic to a host of the setter's choosing — past the egress guard, "
+        "which sees only the dial to the proxy, and past a NetworkPolicy when the proxy is a "
+        "loopback sidecar. Pass `trust_env=False`, or `**gateway_client_kwargs()`."
+    )
+
+
+def test_a_loopback_name_does_not_seed_the_resolved_ip_allowlist() -> None:
+    """`_resolved_ips` is the *allowlist* branch's memory, and it was recording the other branch.
+
+    `getaddrinfo` recorded every returned sockaddr, including for a host that passed `_check` only
+    because `is_loopback_host` answered by **name** — `localhost` is trusted without resolution.
+    Measured before the fix: resolving `localhost` put `127.0.0.1` into `_resolved_ips`, where it
+    stays for the life of the process and is consulted port-independently by `_check` with no
+    re-derivation. A second A record on `localhost` (a hosts file, a split-horizon resolver) would
+    therefore have converted a name the guard never resolved into a permanent allowlist entry for
+    an address the guard would otherwise refuse.
+
+    The entry buys nothing even when it is harmless: a loopback IP is already exempt by
+    `is_loopback_host`, so the only addresses the set needs to hold are the ones an *allowlisted*
+    name resolved to.
+    """
+    saved = set(netguard._resolved_ips)
+    try:
+        netguard._reset_for_tests(["allowed.example"])
+        netguard._resolved_ips.clear()
+        socket.getaddrinfo("localhost", 0)
+        assert netguard._resolved_ips == set(), (
+            "resolving a host that is trusted by name, not by allowlist, seeded `_resolved_ips`"
+        )
+        # The allowlist branch still records, because that is what makes the guard work at all:
+        # a legitimate call resolves an allowed name and then connects to one of the IPs it got.
+        netguard._reset_for_tests(["localhost"])
+        socket.getaddrinfo("localhost", 0)
+        assert netguard._resolved_ips, "an allowlisted name must still record what it resolved to"
+    finally:
+        netguard._resolved_ips.clear()
+        netguard._resolved_ips.update(saved)
+        netguard._reset_for_tests(netguard.derive_allowed(settings))

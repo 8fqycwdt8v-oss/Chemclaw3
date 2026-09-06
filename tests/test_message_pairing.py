@@ -155,6 +155,29 @@ def test_a_row_in_neither_shape_is_unreadable_rather_than_pairing_free() -> None
     assert stored_call_ids({"contents": "not a list"}) is None
 
 
+def test_a_payload_that_is_not_a_mapping_is_unreadable_rather_than_a_crash() -> None:
+    """`message` is a bare `jsonb` column, and the annotation that says `Mapping` decides nothing.
+
+    Measured against the unguarded function, all five of these raised `AttributeError: 'str' object
+    has no attribute 'get'` — two lines *before* `_prune_session_messages`'s per-session
+    `unreadable_rows` skip, so one bad row took the whole `session_messages` pass down and every
+    session stopped being pruned. `session_store.message_from_row` guards the same column the same
+    way; the defect was that the two readers of one column disagreed, and the one that disagreed
+    was the one that deletes.
+
+    The string case is the one worth naming: `"contents" in payload` is a *substring* test on a
+    string, so a row whose text happens to contain the word took the MAF branch and raised there
+    instead.
+    """
+    for payload in ("contents of a corrupted row", "plain prose", [1, 2, 3], 42, True):
+        assert stored_call_ids(payload, LANGCHAIN_SHAPE) is None, (  # type: ignore[arg-type]
+            f"{payload!r} was not reported as unreadable"
+        )
+        assert stored_call_ids(payload) is None, (  # type: ignore[arg-type]
+            f"{payload!r} was not reported as unreadable without a stamp"
+        )
+
+
 def test_an_unreadable_row_takes_its_whole_session_out_of_the_sweep() -> None:
     """Refusing the row is not enough, and that is the subtle half.
 

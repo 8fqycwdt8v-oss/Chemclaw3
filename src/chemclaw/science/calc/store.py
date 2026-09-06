@@ -30,6 +30,18 @@ logger = logging.getLogger(__name__)
 # models; the store persists the plain dict so it stays calculator-agnostic.
 ResultPayload = dict[str, Any]
 
+
+class CorruptCacheRow(ValueError):
+    """A value in or headed for `calculation_results` is not a result this cache can hand back.
+
+    Its own type because the two things it separates are acted on differently: "this row is not a
+    result" is an operator's job (delete the row, let the next call recompute), while a
+    `ValidationError` from a calculator's own model is a code change. `psycopg` raising
+    `TypeError: the JSON object must be str, bytes or bytearray, not list` is neither, and is what
+    a non-object row used to produce.
+    """
+
+
 # The version of **ChemClaw's own** contribution to a stored result — the half no `calc_version`
 # covers.
 #
@@ -178,6 +190,57 @@ class CalculationKey(BaseModel):
     def as_str(self) -> str:
         """Flat string form for use as a storage/index key."""
         return f"{self.calc_type}@{self.calc_version}:{self.input_hash}:{self.params_hash}"
+
+
+def checked_payload(key: CalculationKey, value: object) -> ResultPayload:
+    """`value` as a result payload, or `CorruptCacheRow` naming the key it is stored under.
+
+    **The one shape contract this store may hold, and the reason it is only this one.**
+    `calculation_results` is a cache keyed by an opaque address onto an opaque payload, and its own
+    query model refuses any predicate on that payload because "a `total_energy_hartree > x`
+    predicate would put one calculator's schema inside the thing that persists all of them"
+    (D-2026-08-25). The physics — and therefore every field name — lives in `Chemclaw3-mcp`
+    (`D-2026-08-16-the-physics-leaves-the-cache-stays`), so this repository cannot check what a
+    result *says*. What it can check is what `ResultPayload` already declares it to be: a non-empty
+    JSON object. That is not one calculator's schema, it is the store's own type, and enforcing a
+    declared type is not the predicate the query model refuses.
+
+    **Both halves were measured reachable and neither failed usefully.** A `{"energy": "not a
+    number"}` row returned `hit=True computes=0` and flowed out as the tool's answer, permanently,
+    because D-011 never recomputes a persisted result and `calculation_results` is never pruned; a
+    jsonb array, string, number or `null` — all storable under `JSONB NOT NULL` — reached
+    `json.loads` with a non-string and raised `TypeError`, and one such row took `find`'s whole
+    browse down with it. Emptiness is the half this can act on: `{}` is not a result under any
+    calculator, and it is precisely what a truncated or failed call to the calculation server
+    degrades into — `remote_compute` returns `dict[str, Any]` and is persisted unvalidated, so the
+    sibling fleet could poison this cache permanently by returning `{}` once. A wrong *value* under
+    a right key stays undetectable here and is stated rather than fixed: catching it needs the
+    calculator's schema, which is deliberately not in this repository.
+
+    Args:
+        key: The address the payload is stored under, so the message names the row to act on.
+        value: The candidate payload — from the database on a read, from a calculator on a write.
+
+    Returns:
+        `value` unchanged, once it is a non-empty mapping.
+
+    Raises:
+        CorruptCacheRow: `value` is not a JSON object, or is an empty one.
+    """
+    if not isinstance(value, dict):
+        raise CorruptCacheRow(
+            f"calculation_results row {key.as_str()!r} holds {type(value).__name__} where a JSON "
+            "object is required. The column is bare `JSONB NOT NULL`, so this row was written by "
+            "something other than this store; delete it and the next call recomputes."
+        )
+    if not value:
+        raise CorruptCacheRow(
+            f"calculation_results row {key.as_str()!r} holds an empty result. No calculator "
+            "produces one — an empty object is what a truncated or failed call to the calculation "
+            "server degrades into — and D-011 would make it permanent, so it is refused rather "
+            "than cached or handed back."
+        )
+    return value
 
 
 class StoredResult(BaseModel):
@@ -427,6 +490,13 @@ async def cached_compute(
     A failed computation fails every waiter with the same exception and clears the slot, so the
     next attempt starts fresh rather than awaiting a corpse.
 
+    **What `compute` returns is checked for shape before it is persisted, and only for shape.**
+    `checked_payload` holds that argument; the reason it is *here* is that this is the one
+    lookup-before-compute path, so it is the one door a calculation server's answer comes through,
+    and D-011 makes anything that gets past it permanent — `calculation_results` is never pruned
+    and a persisted result is never recomputed. Refusing `{}` costs a failed tool call; caching it
+    costs that key forever.
+
     Args:
         store: The backend to read from and write to.
         key: The versioned identity of this calculation.
@@ -480,7 +550,7 @@ async def cached_compute(
         )
         # Monotonic, so a clock adjustment mid-calculation cannot record a negative or absurd cost.
         started = time.perf_counter()
-        result = await compute()
+        result = checked_payload(key, await compute())
         elapsed = time.perf_counter() - started
         await store.put(
             StoredResult(key=key, result=result, compute_seconds=elapsed, structure_id=structure_id)

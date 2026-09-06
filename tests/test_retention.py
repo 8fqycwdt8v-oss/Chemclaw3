@@ -10,7 +10,7 @@ that a deployment must opt in before anything is deleted.
 """
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 import pytest
@@ -34,6 +34,7 @@ from chemclaw.durable.retention import (
     _SESSION_SCOPED_ROWS,
     RetentionOutcome,
     _Budget,
+    _prune_checkpoints,
     _sweep_once,
     _window_days,
     prune_expired_rows,
@@ -1002,20 +1003,88 @@ def test_the_pass_stops_when_its_budget_is_spent_and_says_so() -> None:
     assert outcome.sessions_deferred == 1, "the pass stopped early and reported a drained backlog"
 
 
+def test_one_unreadable_row_does_not_stop_the_pass_for_every_other_session() -> None:
+    """The per-session skip only works if the row reaches it, and one shape did not.
+
+    `session_messages.message` is a bare `jsonb` column, so a scalar is storable, and
+    `stored_call_ids` raised `AttributeError` on it two lines *before* the `unreadable_rows` branch
+    written for exactly this — inside a list comprehension outside any `try`. Measured, that took
+    the whole `session_messages` pass down: every session stopped being pruned, the activity failed,
+    and Temporal retried it to exhaustion. Which is verbatim the failure the comment above that
+    call site records as already fixed once, through a different door.
+
+    The second session is the assertion, not the first: refusing the bad row is only half of it, and
+    a sweep that refused the bad row by *stopping* would pass a test that looked only at the row.
+    """
+
+    async def _run() -> tuple[int, int]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        try:
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    for session_id in ("retention-unreadable", "retention-beside-it"):
+                        await cur.execute(
+                            "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
+                        )
+                    await cur.execute(
+                        "INSERT INTO session_messages "
+                        "(session_id, message, message_shape, created_at) "
+                        "VALUES ('retention-unreadable', %s, 'langchain', "
+                        "now() - make_interval(days => 400))",
+                        (Jsonb("contents of a corrupted row"),),
+                    )
+                    await cur.execute(
+                        "INSERT INTO session_messages "
+                        "(session_id, message, message_shape, created_at) "
+                        "VALUES ('retention-beside-it', %s, 'langchain', "
+                        "now() - make_interval(days => 400))",
+                        (Jsonb(message_to_dict(HumanMessage(content="an old question"))),),
+                    )
+                await conn.commit()
+            async with db.connection(settings.postgres_dsn) as conn:
+                await retention._prune_session_messages(conn, 365)
+                async with conn.cursor() as cur:
+                    counts = []
+                    for session_id in ("retention-unreadable", "retention-beside-it"):
+                        await cur.execute(
+                            "SELECT count(*) FROM session_messages WHERE session_id = %s",
+                            (session_id,),
+                        )
+                        row = await cur.fetchone()
+                        counts.append(int(row[0]) if row else 0)
+            return counts[0], counts[1]
+        finally:
+            monkeypatch.undo()
+
+    unreadable, beside_it = asyncio.run(_run())
+    assert unreadable == 1, "the unreadable row was pruned instead of being refused"
+    assert beside_it == 0, (
+        "an expired row in a different session survived, so one bad row still stops the pass"
+    )
+
+
 # --- The LangGraph checkpoint tables: pruned by thread, skipped when absent --------------------
 
 
-async def _seed_thread(thread_id: str, *, age_days: int) -> None:
-    """One thread with a single checkpoint of the given age, plus its blob and write rows."""
+async def _seed_thread(thread_id: str, *, age_days: int, checkpoint_id: str = "ckpt-1") -> None:
+    """One thread with a single checkpoint of the given age, plus its blob and write rows.
+
+    `checkpoint_id` so a second call can play the part of a turn landing on a thread that already
+    has rows, which is what `_TurnDuringSweep` needs; it commits on its own connection, as a turn
+    on the checkpointer's `autocommit=True` pool does.
+    """
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "INSERT INTO checkpoints "
                 "(thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata) "
-                "VALUES (%s, '', 'ckpt-1', %s, '{}'::jsonb)",
+                "VALUES (%s, '', %s, %s, '{}'::jsonb)",
                 (
                     thread_id,
-                    Jsonb({"v": 1, "id": "ckpt-1", "ts": f"__ts_{age_days}__"}),
+                    checkpoint_id,
+                    Jsonb({"v": 1, "id": checkpoint_id, "ts": f"__ts_{age_days}__"}),
                 ),
             )
             # The payload's `ts` is what dates a checkpoint, and it has to be a real timestamp
@@ -1023,20 +1092,21 @@ async def _seed_thread(thread_id: str, *, age_days: int) -> None:
             # cannot disagree, exactly as the sweep's own cutoff is.
             await cur.execute(
                 "UPDATE checkpoints SET checkpoint = jsonb_set(checkpoint, '{ts}', "
-                "to_jsonb((now() - make_interval(days => %s))::text)) WHERE thread_id = %s",
-                (age_days, thread_id),
+                "to_jsonb((now() - make_interval(days => %s))::text)) "
+                "WHERE thread_id = %s AND checkpoint_id = %s",
+                (age_days, thread_id, checkpoint_id),
             )
             await cur.execute(
                 "INSERT INTO checkpoint_blobs "
                 "(thread_id, checkpoint_ns, channel, version, type, blob) "
-                "VALUES (%s, '', 'messages', '1', 'msgpack', %s)",
-                (thread_id, b"payload"),
+                "VALUES (%s, '', 'messages', %s, 'msgpack', %s)",
+                (thread_id, checkpoint_id, b"payload"),
             )
             await cur.execute(
                 "INSERT INTO checkpoint_writes "
                 "(thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, blob) "
-                "VALUES (%s, '', 'ckpt-1', 'task-1', 0, 'messages', 'msgpack', %s)",
-                (thread_id, b"payload"),
+                "VALUES (%s, '', %s, 'task-1', 0, 'messages', 'msgpack', %s)",
+                (thread_id, checkpoint_id, b"payload"),
             )
         await conn.commit()
 
@@ -1100,6 +1170,116 @@ def test_an_expired_thread_leaves_none_of_its_three_tables_behind() -> None:
     )
     assert outcome.deleted["checkpoint_blobs"] == 1, (
         f"the pass did not report what it removed per table: {outcome.deleted}"
+    )
+
+
+class _TurnDuringSweep:
+    """A connection whose cursor lands a committed checkpoint write after the sweep's first DELETE.
+
+    This is the race as it actually happens rather than a simulation of it: the checkpointer's pool
+    is `autocommit=True` on purpose, so a live turn's rows are committed the instant it writes them,
+    on a connection the sweep's transaction knows nothing about. Interleaving here rather than with
+    real concurrency because the window is one statement wide and a sleep-based test of it would be
+    flaky in the direction that passes.
+    """
+
+    def __init__(self, conn: Any, thread_id: str) -> None:
+        self._conn = conn
+        self._thread_id = thread_id
+        self._landed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+    def cursor(self, *args: Any, **kwargs: Any) -> Any:
+        inner = self._conn.cursor(*args, **kwargs)
+        outer = self
+
+        class _Wrapped:
+            async def __aenter__(self) -> Any:
+                return _Interleaving(await inner.__aenter__(), outer)
+
+            async def __aexit__(self, *exc: Any) -> Any:
+                return await inner.__aexit__(*exc)
+
+        return _Wrapped()
+
+
+class _Interleaving:
+    """The cursor wrapper that commits the racing turn's rows after the first DELETE."""
+
+    def __init__(self, cur: Any, owner: _TurnDuringSweep) -> None:
+        self._cur = cur
+        self._owner = owner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cur, name)
+
+    async def execute(self, query: Any, params: Any = None, **kwargs: Any) -> Any:
+        result = await self._cur.execute(query, params, **kwargs)
+        if str(query).lstrip().upper().startswith("DELETE") and not self._owner._landed:
+            self._owner._landed = True
+            await _seed_thread(self._owner._thread_id, age_days=0, checkpoint_id="ckpt-2")
+        return result
+
+
+def test_a_thread_that_takes_a_turn_mid_sweep_keeps_the_blobs_that_turn_wrote() -> None:
+    """The measured data-loss race: a live turn landing between two of the sweep's DELETEs.
+
+    Driven against the real `_prune_checkpoints`, this used to leave the thread's new `checkpoints`
+    row standing with **none** of its blobs — `agent/checkpointer.py`'s own worst case, a turn that
+    "resumes with the conversation dropped and answers normally". Reversing the delete order was
+    measured and does not fix it; what does is that both statements re-ask their question inside
+    the sweep's own transaction.
+
+    The assertion is on the *blobs*, not on the checkpoint row: the row surviving is what the old
+    behaviour did too, and it is the payload table that decides whether the thread reads back as
+    itself or as empty.
+    """
+
+    async def _run() -> dict[str, int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        thread = "retention-raced-thread"
+        await _seed_thread(thread, age_days=90)
+        async with db.connection(settings.postgres_dsn) as conn:
+            # `_TurnDuringSweep` proxies a real connection and cannot subclass one: it exists to
+            # land a *committed* turn between two of the sweep's statements, which needs a hook on
+            # `execute`, and psycopg's `AsyncConnection` is not written to be subclassed for that.
+            # Cast rather than widen `_prune_checkpoints`' signature — the production seam takes a
+            # real connection and should keep saying so.
+            await _prune_checkpoints(
+                cast("psycopg.AsyncConnection[tuple[Any, ...]]", _TurnDuringSweep(conn, thread)), 30
+            )
+        return await _thread_row_counts(thread)
+
+    counts = asyncio.run(_run())
+    assert counts["checkpoint_blobs"] > 0, (
+        "the turn that landed mid-sweep lost its blobs: the thread now resumes as an empty "
+        f"conversation ({counts})"
+    )
+    assert counts["checkpoints"] > 0, f"the racing turn's checkpoint row was taken too ({counts})"
+
+
+def test_the_checkpoint_sweep_covers_exactly_the_checkpointer_s_tables() -> None:
+    """The sweep names its tables in two statements now, so nothing may fall between them.
+
+    `_prune_checkpoints` no longer runs one loop over `CHECKPOINT_TABLES`: `checkpoints` carries
+    the expiry re-check and the other two carry the orphan guard. That split is what a fourth
+    checkpointer table would land in the middle of, so the tuple and what the sweep reports are
+    pinned against each other.
+    """
+
+    async def _run() -> dict[str, int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _seed_thread("retention-covered-thread", age_days=90)
+        async with db.connection(settings.postgres_dsn) as conn:
+            deleted, _, _ = await _prune_checkpoints(conn, 30)
+        return deleted
+
+    assert set(asyncio.run(_run())) == set(CHECKPOINT_TABLES), (
+        "the sweep reported a different set of tables than the checkpointer declares"
     )
 
 

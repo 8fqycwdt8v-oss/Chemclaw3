@@ -25,6 +25,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
+from chemclaw.core.logging import redact_secrets
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.note import Note, note_relative_path
 from chemclaw.kg.render import render_note
@@ -117,10 +118,31 @@ class NoteWriter(Protocol):
 def _note_file(
     note: Note, directory: str, *, overwrite: bool = True, amendment: bool = False
 ) -> NoteFile:
-    """Where one note lands in the knowledge tree, and what is written there."""
+    """Where one note lands in the knowledge tree, and what is written there.
+
+    **The rendering is redacted, and this is the only store here that needed saying so.** A note
+    body is model prose over whatever the turn discussed — a pasted credential, an untrusted share
+    document's contents, a chemist's question — and `render_note` serialises it verbatim. Nothing
+    on this path consulted the value inventory that scrubs the *identical strings* out of a log
+    line in the same process. Measured: an LLM key and a warehouse DSN password, both held by this
+    process, were committed into a note.
+
+    Two properties of git make that worse than the log leak it mirrors rather than equal to it.
+    Git is the one store that **leaves the pod** (`deploy/knowledge-sync.sh` pushes to a remote),
+    and it is **append-only in practice** — a secret in a merged commit survives every later
+    correction, so the contradiction/supersession controls that
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` names as the safety argument for
+    writing knowledge directly cannot reach it.
+
+    **Redaction, not refusal**, and applied to the *rendered* bytes rather than to `note.body`: a
+    frontmatter field carries a secret exactly as easily as the body does, and one call covers
+    both. A note that names its credential `***` is still the record; refusing would fail a turn's
+    knowledge write deep in the writer for a defect the chemist did not cause. A false positive
+    here is visible in the file and correctable by a later note — a committed credential is not.
+    """
     return NoteFile(
         path=f"{directory}/{note_relative_path(note.type, note.id)}",
-        content=render_note(note),
+        content=redact_secrets(render_note(note)),
         overwrite=overwrite,
         amendment=amendment,
     )

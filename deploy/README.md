@@ -116,18 +116,31 @@ over, so it gets its own section beside the ones that can.
 
 `expensive: true` in a connector manifest now derives into the trigger gate, and that gate fails
 closed on an empty role set rather than open. Under the shipped `CHEMCLAW_ENTRA_REQUIRED=true`, with
-this unset, the following are refused for every authenticated user:
+this unset, **every action the trigger gate protects is refused for every authenticated user** —
+not a shortlist of them.
 
-| Job | Bundle |
-|---|---|
-| `compute_interaction_energy` | `connectors/calc` |
-| `sample_conformers` | `connectors/calc` |
-| `start_optimization_campaign` | `connectors/bo` |
+This section used to name three jobs in a table and say "nothing else breaks". Measured on one
+checkout's enabled bundles it was seventeen — including two that the table's own "Bundle" column
+could not have held, because core owns them and no manifest declares them. A mitigation for a
+silent failure, under-reporting that failure by more than five times. It is not replaced with a fresher table, because the set is not this repository's to hold —
+most of it is declared by bundles served out of `Chemclaw3-mcp`, so any list here goes stale on
+somebody else's merge (the same problem `SERVED_ELSEWHERE` records for the context floor). What
+this deployment closes is a question its own enabled bundles answer:
 
-Nothing else breaks: the pod boots, both probes pass, reads and knowledge lookups work, and a
-chemist asking for a DFT run is told they lack a privileged role. That combination — healthy
-deployment, one capability silently shut — is why this is documented at the same volume as a
-crash-loop rather than in a comment nobody reads at 2am.
+```console
+$ uv run python -c "from chemclaw.agent.authz import expensive_actions; print(chr(10).join(sorted(expensive_actions())))"
+```
+
+Three sources feed it and each owns what it knows: every job an enabled manifest declares
+`expensive: true`, the durable work core itself owns (`CORE_EXPENSIVE_ACTIONS` in
+`src/chemclaw/agent/authz.py`), and anything `CHEMCLAW_ENTRA_EXPENSIVE_ACTIONS` adds.
+`tests/test_authz.py` runs that command's own payload and compares it with the live set, so the
+instruction above cannot rot into a table again.
+
+What does *not* break: the pod boots, both probes pass, reads and knowledge lookups work, and a
+chemist asking for a conformer search is told they lack a privileged role. That combination —
+healthy deployment, a whole tier of capability silently shut — is why this is documented at the
+same volume as a crash-loop rather than in a comment nobody reads at 2am.
 
 **The remedy is this setting alone.** Set it to a comma list of the Entra app roles your chemists
 hold; `CHEMCLAW_ENTRA_EXPENSIVE_ACTIONS` is *not* needed beside it, because the action set comes from

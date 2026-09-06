@@ -12,7 +12,8 @@ Two gates, one home, so authorization is never scattered across tools and layers
   (`chemclaw.agent.tool_authz`), generalizing the coarse gate so per-tool RBAC does not have to be
   hand-
   wired into each tool. Config: `tool_role_gates` (tool → allowed roles) + `tool_authz_default`,
-  with the built-in `DEFAULT_WRITE_TOOL_GATES` closing the write tools out of the box.
+  with the built-in `DEFAULT_WRITE_TOOL_GATES` closing three knowledge-graph writers out of
+  the box — three names, not the write surface; its own comment says what carries the rest.
 
 Both read the turn's ambient identity (`chemclaw.core.identity_context`) and are active only when
 `entra_required` (a real deployment with real Entra roles); in local dev they are open, so the app
@@ -82,11 +83,33 @@ CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset(
     }
 )
 
-# The write/side-effect tools gated to `entra_privileged_role_set` when the operator has NOT
-# configured an explicit `tool_role_gates` entry for them. Under `tool_authz_default="allow"`
-# every *read* tool stays open (the dev-friendly posture), but a tool that launches a job or
-# mutates state must never be callable by any authenticated user just because nobody remembered
-# to gate it — writes are closed by default, opened by explicit operator config.
+# The three knowledge-graph writers gated to `entra_privileged_role_set` when the operator has NOT
+# configured an explicit `tool_role_gates` entry for them — and **three is the whole of it**. Under
+# `tool_authz_default="allow"` every *read* tool stays open (the dev-friendly posture), and so does
+# most of the write surface; this set is not what closes it.
+#
+# This comment used to end "writes are closed by default, opened by explicit operator config",
+# which is a claim about the side-effecting surface and false of it. Measured under the shipped
+# chart posture (`entra_required=true`, `tool_authz_default=allow`, `tool_role_gates` and
+# `entra_privileged_roles` both empty) with an authenticated actor holding no roles:
+# `authorize_tool` refuses exactly these three, `authorize_trigger` refuses the declared-expensive
+# jobs, and what
+# passes *both* gates includes every template launcher — durable work that RBAC alone leaves open to
+# any authenticated user. No count is written here, because a count in prose is a claim about a
+# commit (`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`) and this surface grows with
+# every enabled bundle; `tests/test_authz.py` measures all three sets against the live surface
+# instead — see `test_the_built_in_write_gate_closes_three_knowledge_writers`.
+#
+# **What closes the rest is the plan gate, and the division is deliberate**
+# (`D-2026-09-06-the-write-gate-is-three-names-and-the-plan-gate-carries-the-rest`). The shipped
+# chart sets `CHEMCLAW_HARNESS_ENABLED=true` / `CHEMCLAW_HARNESS_AUTONOMY=plan_only`, so a human
+# approves the plan before any of them runs, and that gate governs the *act* rather than latching
+# onto the session (`agent/plan_gate.py`, D-167). The residual is therefore stated rather than
+# implied: with the harness off, under `execute` autonomy, or for a call inside an already-approved
+# plan, a role-less authenticated user reaches a durable launcher with no RBAC underneath. Widening
+# this set is what would change that, and it is deliberately not done here — membership costs an
+# unconfigured deployment access to a tool it can call today, so the widening belongs in an
+# operator's `tool_role_gates`, not in a default that arrives with an upgrade.
 #
 # The `index_molecule`/`index_reaction` entries were removed with the tools themselves
 # (D-2026-08-08-a-served-tool-is-a-reachable-tool): they were served on the unauthenticated `/mcp`
