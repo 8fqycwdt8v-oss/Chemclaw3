@@ -165,12 +165,12 @@ def test_a_reminder_counts_only_while_the_request_is_open() -> None:
         await migrated_db_or_skip()
         await _clean()
         await _open("pending-chase")
-        await pending_store.record_reminder("pending-chase")
-        await pending_store.record_reminder("pending-chase")
+        await pending_store.record_reminder("pending-chase", 1)
+        await pending_store.record_reminder("pending-chase", 2)
         await pending_store.settle_request(
             "pending-chase", state="expired", answered_by="", answer={}
         )
-        await pending_store.record_reminder("pending-chase")
+        await pending_store.record_reminder("pending-chase", 3)
 
         stored = await pending_store.get_request("pending-chase")
         assert stored is not None
@@ -196,7 +196,7 @@ def test_asking_again_after_a_deadline_lapsed_reopens_the_row() -> None:
         request_id = "req-reask"
         await _clean()
         await _open(request_id, days=1, run_id="run-1")
-        await pending_store.record_reminder(request_id)
+        await pending_store.record_reminder(request_id, 1)
         await pending_store.settle_request(request_id, state="expired", answered_by="", answer={})
 
         stored = await pending_store.get_request(request_id)
@@ -328,5 +328,46 @@ def test_an_expiry_does_not_claim_somebody_answered() -> None:
         )
         answered = await pending_store.get_request("req-answered-stamp")
         assert answered is not None and answered.answered_at, "a real answer lost its timestamp"
+
+    asyncio.run(_run())
+
+
+def test_a_redelivered_reminder_does_not_count_one_escalation_twice() -> None:
+    """A Temporal activity is at-least-once, so the write it makes has to be.
+
+    `record_reminder_activity` ran `reminders = reminders + 1` under a 5-attempt retry policy, and
+    an execution whose UPDATE commits and whose completion report is then lost — a worker that
+    dies, a broker that misses the response, an attempt that overruns its own `start_to_close`
+    after committing — is redelivered and increments again. Established on a real broker before the
+    fix: one escalation, two attempts, `reminders = 2` against `AwaitAnswerWorkflow._reminders` of
+    1 — and this column is what an inbox shows and what `AwaitOutcome.reminders` is compared
+    against, so the two counters silently disagreed.
+
+    Driven as the redelivery rather than as the broker, because what has to hold is a property of
+    the *write*: the same call made twice with the same replay-stable number leaves the same row.
+    The second half is the one that keeps the fix honest — a `GREATEST` that never advanced would
+    pass the first assertion and record nothing.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clean()
+        await _open("pending-redelivered")
+
+        # One escalation, delivered twice: the workflow's own count is 1 on both attempts.
+        await pending_store.record_reminder("pending-redelivered", 1)
+        await pending_store.record_reminder("pending-redelivered", 1)
+        stored = await pending_store.get_request("pending-redelivered")
+        assert stored is not None
+        assert stored.reminders == 1, (
+            "the redelivered attempt counted the same escalation a second time, so the row and "
+            "the workflow disagree about how often somebody was chased"
+        )
+
+        # And the next escalation still lands, including after a redelivery it did not see.
+        await pending_store.record_reminder("pending-redelivered", 2)
+        stored = await pending_store.get_request("pending-redelivered")
+        assert stored is not None
+        assert stored.reminders == 2
 
     asyncio.run(_run())

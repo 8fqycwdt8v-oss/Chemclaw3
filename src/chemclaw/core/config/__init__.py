@@ -123,22 +123,25 @@ _TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
 # neither of which the parse can see. See `_dial_is_offline` below.
 PG_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 
-# `durable/connector_job.py::_FINISH_STEPS`, restated because it cannot be imported.
+# `durable/connector_job.py::finish_headroom`, restated because it cannot be imported.
 #
 # `ConnectorJobWorkflow` is bounded by `wrapper_execution_timeout()` — its child's whole ceiling
-# plus one activity's wall clock for each of the four things the wrapper still owes after that
-# child returns (the durable record, the results offer, the note PR-gate, the session push-back).
-# That number is what a template `job` step is actually bounded by, and
-# `_the_template_run_ceiling_covers_one_step` below has to clear it.
+# plus what the wrapper still owes after that child returns: settle the effect ledger, write the
+# durable record, offer the result, write the note, push back to the session. Each is a queue wait
+# plus a work budget, and the budgets differ — two of the writes are light enough to pass
+# `light_write_queue_wait_timeout()` while the others carry core's hour.
+#
+# **This used to restate that as a count**, `activity_timeout_seconds * 4`, which bounds none of
+# them: it made every post-child step cost one activity's wall clock, and the validator below
+# therefore cleared a bound 12,810 s short of the one a `job` step actually carries. A wrapper that
+# hit its own ceiling was reaped before it could write its failure record or push back, so the
+# chemist was told nothing.
 #
 # It is a literal here and a literal there because `chemclaw.core` imports no sibling
 # (`tests/test_layering.py`, `core/README.md`), so this module cannot call the function that owns
 # the arithmetic. A restatement nothing checks would be the duplication moved rather than removed,
-# so `tests/test_template_job_step.py` asserts the two constants agree *and* that the full
-# identity `wrapper_execution_timeout() == connector_job_timeout_seconds + activity_timeout_seconds
-# * _WRAPPER_FINISH_STEPS` still holds — a fifth post-child step turns that red instead of leaving
-# this validator clearing a bound 30 s short.
-_WRAPPER_FINISH_STEPS = 4
+# so `tests/test_template_job_step.py` drives this validator against the live
+# `wrapper_execution_timeout()` — a restatement that drifts fails there rather than here.
 
 
 def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
@@ -948,8 +951,10 @@ class Settings(
         that costs the most.** `template_step_timeout_seconds` (900 s) is the `start_to_close` of an
         `agent` or a `tool` step, both of which are activities. A `job` step is not an activity: it
         starts `ConnectorJobWorkflow` as a child under `wrapper_execution_timeout()`
-        (`durable/template_job.py`), which is `connector_job_timeout_seconds` plus the wrapper's
-        four post-child steps — 18,120 s against a run ceiling of 7,200 s when this was measured.
+        (`durable/template_job.py`), which is `connector_job_timeout_seconds` plus what the
+        wrapper's five post-child steps may spend — 18,120 s against a run ceiling of 7,200 s when
+        this was first measured, and more since, because that headroom was then found to be counted
+        rather than summed.
         So a CREST search well inside its own budget ended the whole run as a silent `TIMED_OUT`:
         an execution timeout is not delivered to workflow code, so `TemplateWorkflow`'s `except
         BaseException -> _notify_failure` never ran, the chemist was told nothing on the session
@@ -969,17 +974,21 @@ class Settings(
         # `_the_job_ceiling_covers_the_activity_it_bounds` already uses one level down: naming one
         # step kind is how this rule came to be checking 900 s against an 18,120 s bound. A new
         # step kind with its own ceiling gets covered by being added here.
-        job_step = (
-            self.connector_job_timeout_seconds
-            + self.activity_timeout_seconds * _WRAPPER_FINISH_STEPS
+        job_step = self.connector_job_timeout_seconds + (
+            self.activity_queue_wait_seconds * 3
+            + self.template_step_timeout_seconds * 2
+            + self.activity_timeout_seconds * 2
+            + self.job_record_timeout_seconds
+            + self.result_publish_timeout_seconds
+            + self.note_write_timeout_seconds
         )
         longest, budget = max(
             (
                 (self.template_step_timeout_seconds, "template_step_timeout_seconds"),
                 (
                     job_step,
-                    "connector_job_timeout_seconds + activity_timeout_seconds x "
-                    f"{_WRAPPER_FINISH_STEPS}, the ceiling a `job` step carries",
+                    "connector_job_timeout_seconds plus what the wrapper's five post-child "
+                    "steps may spend, the ceiling a `job` step carries",
                 ),
             )
         )

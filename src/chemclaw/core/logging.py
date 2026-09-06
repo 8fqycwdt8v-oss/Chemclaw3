@@ -946,11 +946,25 @@ _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     # excluded instead: `MAX_TOKENS=40960000` and `PROMPT_TOKENS: 12345678` are token *accounting*,
     # which is the number this whole change exists to make visible, and redacting it would be this
     # rule eating the thing it was shipped beside.
+    #
+    # **`_ENV=` in front of a bare identifier is the second carve-out, and it is narrower than the
+    # one that was rejected above on purpose.** A key ending `_ENV` holds a variable *name* by this
+    # tree's own convention — `core/connect.py`'s `ENV_SUFFIX`, and `_SECRET_ENV_SETTINGS` below,
+    # whose comment argues that redacting a name "would scrub the variable name out of every line
+    # that helpfully tells an operator which credential to set". This rule was doing exactly that:
+    # `CHEMCLAW_CALC_SERVER_TOKEN_ENV=CHEMCLAW_CALC_TOKEN`, the shape `.env.example` carries three
+    # times and a `docker run -e` line repeats, came out with the answer replaced and the question
+    # kept. Exempting the key alone would have been the leak — an operator who pastes the token
+    # itself into a `*_TOKEN_ENV` variable would log it in the clear — and exempting the *value*
+    # alone would drop every uppercase credential, base32 among them. Both conditions together are
+    # the `NAME=NAME` shape and nothing else: fixed-width lookbehind, single greedy run, no new
+    # backtracking.
     re.compile(
         r"(?<![A-Za-z0-9_])"
         r"(?=[A-Z0-9_]{0,128}?(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|CREDENTIAL))"
         r"(?P<keep>[A-Z][A-Z0-9_]*[\"']?\s*[=:]\s*[\"']?)"
-        r"(?![0-9]{1,255}(?![A-Za-z0-9_\-]))" + _OPAQUE + r"{8,255}"
+        r"(?![0-9]{1,255}(?![A-Za-z0-9_\-]))"
+        r"(?!(?<=_ENV=)[A-Z][A-Z0-9_]*(?![A-Za-z0-9_\-]))" + _OPAQUE + r"{8,255}"
     ),
     # Two vendor-issued shapes whose prefix *is* the anchor, so neither needs a key name beside it:
     # AWS access-key ids and Slack tokens. Both are minted elsewhere and pasted into environments

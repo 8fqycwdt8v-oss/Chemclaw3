@@ -74,11 +74,17 @@ _JOBS = """
     LIMIT %s
 """
 
-_REQUEUE = """
+# One definition of "retired", shared by the reset and by the count a dry run reports, so the two
+# can never disagree about which rows the operator is being told about.
+_RETIRED = "WHERE state = 'failed'"
+
+_REQUEUE = f"""
     UPDATE result_publications
     SET state = 'pending', attempts = 0, last_error = ''
-    WHERE state = 'failed'
+    {_RETIRED}
 """
+
+_COUNT_RETIRED = f"SELECT count(*) FROM result_publications {_RETIRED}"
 
 
 async def backfill_cached(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
@@ -170,14 +176,25 @@ async def backfill_jobs(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
             )
 
 
-async def requeue_failed() -> int:
-    """Return retired rows to the queue. Returns how many were reset.
+async def requeue_failed(*, dry_run: bool = False) -> int:
+    """Return retired rows to the queue. Returns how many were reset, or would be under `dry_run`.
 
     A row that spent its attempt budget is kept rather than deleted, precisely so this is possible:
     once the cause is fixed — the site ran the DDL, the credential was rotated — an operator puts
     them back rather than re-deriving them.
+
+    `dry_run` counts instead of resetting, because this is the one write a preview must not make:
+    the CLI ran it unconditionally and then printed "dry run: nothing was written", so previewing a
+    backfill un-retired every dead-lettered publication in the deployment — clearing the recorded
+    error that *is* the record of what did not publish, and redelivering the rows on the next
+    drain. Defaulted rather than required, unlike the walks' own `dry_run`: the durable republish
+    job has no preview mode and asks for the write.
     """
     async with db.connection(settings.postgres_dsn) as conn:
+        if dry_run:
+            cursor = await conn.execute(_COUNT_RETIRED)
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
         cursor = await conn.execute(_REQUEUE)
         await conn.commit()
         return int(cursor.rowcount)

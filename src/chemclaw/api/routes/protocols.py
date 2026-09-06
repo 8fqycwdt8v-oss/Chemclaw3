@@ -23,6 +23,7 @@ already take: a design is a piece of shared laboratory work, and a chemist who d
 exactly who needs to read it before running it.
 """
 
+import asyncio
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Response
@@ -295,11 +296,21 @@ async def post_revision(
     checks = run_checks(
         body.document, stage="protocol" if body.document.has_protocol else "request"
     )
-    changed = diff_designs(
-        previous.design,
-        body.document,
-        from_revision=body.parent_revision,
-        to_revision=body.parent_revision + 1,
+    # **In a thread, because what the diff itself could not remove is still seconds of loop.**
+    # `diff_designs` now orders only the paths that differ, which took a chemist's edit at every
+    # count ceiling from 1.67 s to 0.18 s — but two ceiling-sized revisions that share no
+    # identifier genuinely differ in 208,213 paths and cost **3.2 s** to compare and order, and
+    # that is real work rather than waste. `service_uvicorn_workers` is refused above 1, so on the
+    # loop that is every other chemist's SSE stream and both kubelet probes; in a thread it is this
+    # request's latency. `run_checks` above stays inline: 47 ms at the same ceilings.
+    changed = (
+        await asyncio.to_thread(
+            diff_designs,
+            previous.design,
+            body.document,
+            from_revision=body.parent_revision,
+            to_revision=body.parent_revision + 1,
+        )
     ).paths
     try:
         revision = await store.append(
@@ -345,7 +356,11 @@ async def get_protocol_diff(
     after = await store.read(design_id, to_revision or None)
     if before is None or after is None:
         raise HTTPException(status_code=404, detail=f"no such revision of {design_id!r}")
-    return diff_designs(
+    # In a thread for the reason `post_revision` gives, and this is the cheaper route to reach it:
+    # a read needs no write to replay, and nothing rate-limits it (`service_rate_limit_per_minute`
+    # ships at 0.0).
+    return await asyncio.to_thread(
+        diff_designs,
         before.design,
         after.design,
         from_revision=before.revision,

@@ -576,21 +576,24 @@ class AgentSettings(BaseSettings):
     #
     # **The default is the old 7,200 s plus the one bound it never counted.** Eight steps at the
     # step budget is what sized 7,200, and that arithmetic silently assumed every step is an
-    # activity. A `job` step is a child workflow bounded by `wrapper_execution_timeout()` =
-    # `connector_job_timeout_seconds` + 4 × `activity_timeout_seconds`, which was two and a half
-    # times the whole run it sat inside, so seven of the nine shipped templates could end as a
-    # silent TIMED_OUT. That bound plus the entire eight-ordinary-step allowance this setting used
-    # to be: 25,320 + 7,200 = 32,520. Every shipped template is one `job` step plus at most two
-    # ordinary ones, so the margin is real rather than nominal. Stated as a literal rather than
-    # derived, because a default that moved with `connector_job_timeout_seconds` would hide the
-    # relation the validator exists to make loud — a site that raises the job ceiling is refused at
-    # startup and told to raise this too.
+    # activity. A `job` step is a child workflow bounded by `wrapper_execution_timeout()`, which was
+    # two and a half times the whole run it sat inside, so seven of the nine shipped templates could
+    # end as a silent TIMED_OUT. That bound plus the entire eight-ordinary-step allowance this
+    # setting used to be. Every shipped template is one `job` step plus at most two ordinary ones,
+    # so the margin is real rather than nominal. Stated as a literal rather than derived, because a
+    # default that moved with `connector_job_timeout_seconds` would hide the relation the validator
+    # exists to make loud — a site that raises the job ceiling is refused at startup and told to
+    # raise this too.
     #
-    # **Which is exactly what happened to this number.** The job ceiling went 18,000 -> 25,200 so
-    # that a bundle activity's queue wait could be its headroom rather than a fraction of it
-    # (`durable/publish.py::connector_queue_wait_timeout`), which moved the `job` step's bound to
-    # 25,320 — equal to this default, and equality is what the validator calls the defect.
-    template_run_timeout_seconds: float = Field(default=32520.0, gt=0)
+    # **Which is exactly what happened to this number, twice.** The job ceiling went 18,000 ->
+    # 25,200 so that a bundle activity's queue wait could be its headroom rather than a fraction of
+    # it (`durable/publish.py::connector_queue_wait_timeout`), which moved the `job` step's bound to
+    # 25,320 — equal to the then-default, and equality is what the validator calls the defect. Then
+    # the wrapper's post-child headroom turned out to be counted rather than summed: `4 x
+    # activity_timeout_seconds` charged one activity's wall clock for each of five steps whose real
+    # budgets are their own `schedule_to_start + start_to_close`, two of them a light write's 900 s
+    # and the rest core's hour. The honest bound is 38,130, so this is 38,130 + 7,200.
+    template_run_timeout_seconds: float = Field(default=45330.0, gt=0)
 
     @property
     def templates_dirs(self) -> list[str]:

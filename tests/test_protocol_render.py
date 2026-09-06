@@ -474,6 +474,25 @@ def test_one_experiment_run_in_triplicate_is_one_experiment_and_three_runs() -> 
     assert "1 experiment, 3 runs" in summarise(design, [])
 
 
+def test_a_body_with_no_arms_declared_is_not_summarised_as_one_experiment() -> None:
+    """Zero arms is a count nobody wrote, and it reads as one on the sentence built to be quoted.
+
+    `summarise` decided this with `== 1` until the four hand-written copies of the condition were
+    consolidated onto `is_single_experiment`, which is `<= 1` — right for the check exemptions it
+    also drives, and wrong for a number being reported. A charge table and a procedure with no arm
+    declared came back as "1 experiment", to the chemist and to a model quoting
+    `ProtocolReceipt.summary` without re-reading the design.
+    """
+    design = _design(
+        arms=[],
+        base=ProtocolBody(charge=[ChargeLine(component="SM", limiting=True, equivalents=1.0)]),
+    )
+    assert design.has_protocol and design.is_single_experiment
+    sentence = summarise(design, [])
+    assert "1 experiment" not in sentence
+    assert "no arms declared" in sentence
+
+
 def test_a_one_arm_design_that_declares_a_factor_is_still_a_screen() -> None:
     """The opposite error, and the replicate rule must not reintroduce it.
 

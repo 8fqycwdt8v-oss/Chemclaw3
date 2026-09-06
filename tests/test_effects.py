@@ -20,7 +20,7 @@ import pytest
 from pydantic import ValidationError
 
 from chemclaw.connectors import jobs as connector_jobs
-from chemclaw.connectors.manifest import EffectSpec, JobSpec
+from chemclaw.connectors.manifest import ConnectorManifest, EffectSpec, JobSpec
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.durable import connector_job
@@ -90,6 +90,33 @@ def test_a_compensating_effect_names_what_undoes_it_and_others_may_not() -> None
     # And the two other kinds are declarable with nothing further.
     assert _job(system="the QMS", reversal="irreversible").effect is not None
     assert _job(system="the LIMS", reversal="idempotent").effect is not None
+
+
+def _bundle(*jobs: JobSpec) -> ConnectorManifest:
+    """A bundle declaring exactly these jobs, with nothing else to distract the validator."""
+    return ConnectorManifest(
+        name="site", description="a bundle that acts on a system we do not own", jobs=list(jobs)
+    )
+
+
+def test_a_named_compensation_has_to_be_a_job_this_bundle_declares() -> None:
+    """The half of the claim `EffectSpec` could not check, because a job cannot see its siblings.
+
+    Nothing *runs* a compensation, and that is a decision rather than an omission: naming one tells
+    an operator which job undoes this one, and launching it is their call through the ordinary
+    launcher. Which is precisely why the name has to resolve — the field's whole value is that
+    somebody can act on it, so a manifest could otherwise declare a reversibility naming a job that
+    does not exist, and the empty-string case is already refused for exactly that reason.
+    """
+    with pytest.raises(ValidationError, match="names compensation"):
+        _bundle(_job(system="the LIMS", reversal="compensating", compensation="retract_it"))
+
+    retract = JobSpec(name="retract_it", workflow="RetractWorkflow", summary="undo the submission")
+    resolved = _bundle(
+        _job(system="the LIMS", reversal="compensating", compensation="retract_it"), retract
+    )
+    assert resolved.jobs[0].effect is not None
+    assert resolved.jobs[0].effect.compensation == "retract_it"
 
 
 def test_the_ledger_records_the_attempt_before_it_is_made() -> None:
@@ -439,4 +466,57 @@ def test_an_unrouted_irreversible_approval_is_refused_rather_than_opened() -> No
     )
     assert "asked_of=job.effect_approver" in approve, (
         "the approval wait is raised unrouted, which opens the anyone-authenticated branch"
+    )
+
+
+def test_the_ledger_publishes_no_reader_nothing_in_this_repository_names() -> None:
+    """Every public name here is reached from somewhere; two were reached from nowhere at all.
+
+    `effects_for_session` had **zero** callers — no `src/`, no `tests/`, no route, no CLI — while
+    its docstring called itself "the evidence pack's read"; `operations/evidence_pack.assemble` has
+    always issued its own `SELECT ... FROM effects WHERE session_id = %s` instead, and
+    `infra/sql/078_effects_session_index.sql` justifies its index for both readers. `Unsettled`,
+    the model carrying the operator-facing `meaning` sentence, had no reader either. Both are the
+    `map_to_hpc_identity` shape D-2026-08-15 deleted 254 lines for and the `audit_events.agent`
+    shape D-2026-08-26 wrote an absence test for: a surface that is described but not served, which
+    reads as a control that exists.
+
+    The rule is deliberately "named anywhere in this repository" rather than "called from `src/`".
+    `get_effect` and `unsettled` are reached only from this file, and that is a different thing:
+    they are the store's own accessors, exercised as the read-back of the write path under test,
+    and deleting them would put raw SQL in a test instead of removing a claim. What no rule here can
+    check is the one gap the module docstring now states plainly — `unsettled` is served by no
+    operator surface — because "a name nothing reaches" and "a name only a person could reach" are
+    not distinguishable from inside the tree.
+    """
+    import ast
+
+    ledger = SRC / "durable" / "effect_ledger.py"
+    public = sorted(
+        node.name
+        for node in ast.parse(ledger.read_text()).body
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef | ast.ClassDef)
+        and not node.name.startswith("_")
+    )
+    assert public, "the scan found no definitions at all, so it is proving nothing"
+
+    # Identifiers as *code*, not as text: this test's own docstring names both deleted readers, and
+    # a substring scan over the tree would therefore report them as reached by the test that exists
+    # to say they were not.
+    named: set[str] = set()
+    for tree in (SRC, Path(__file__).parent):
+        for path in sorted(tree.rglob("*.py")):
+            if path == ledger:
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.Name):
+                    named.add(node.id)
+                elif isinstance(node, ast.Attribute):
+                    named.add(node.attr)
+                elif isinstance(node, ast.alias):
+                    named.add(node.name.rsplit(".", 1)[-1])
+    unreached = [name for name in public if name not in named]
+    assert unreached == [], (
+        f"{unreached} is published by the effect ledger and named nowhere else in the tree — a "
+        "reader that exists only in its own module is a claim that something is observable"
     )

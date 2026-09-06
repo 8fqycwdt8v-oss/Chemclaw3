@@ -754,6 +754,39 @@ def test_a_coarser_re_chunk_leaves_no_trace_of_the_finer_one(tmp_path: Path) -> 
     assert _served_chunk_sizes(index, SOURCE) == sorted(coarse_sizes, reverse=True)
 
 
+def test_a_share_indexed_under_the_previous_text_rule_is_re_read_and_re_cut(
+    tmp_path: Path,
+) -> None:
+    """The rows a deployment already holds are the other half of the sign-deletion fix.
+
+    Splitting `upsert`'s parameter repairs what is written next; every chunk already in
+    `document_chunks` still holds the mutated text, and the crawl skips a file whose fingerprint
+    has not moved. `_CHUNK_TEXT_VERSION` in `chunking_key` is what makes the next crawl re-read
+    and re-cut them, the same lever `_NOTE_TEXT_VERSION` is for notes. Driven by aging the stored
+    rows back to the boundaries-only spelling a pre-fix deployment wrote.
+    """
+    index = InMemoryDocumentIndex()
+    share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    binding = load_binding(share)
+    asyncio.run(sync_share(SOURCE, binding, index))
+
+    aged = f"{binding.chunk_chars}:{binding.chunk_overlap_chars}"
+    assert binding.chunking_key != aged, "the text rule is not part of the chunk's identity"
+    index._files = {
+        key: file.model_copy(update={"chunking_key": aged}) for key, file in index._files.items()
+    }
+    index._chunks = {
+        (doc, aged, ordinal): chunk.model_copy(update={"chunking_key": aged})
+        for (doc, _, ordinal), chunk in index._chunks.items()
+    }
+    index._keys = {(doc, aged, ordinal): key for (doc, _, ordinal), key in index._keys.items()}
+
+    report = asyncio.run(sync_share(SOURCE, binding, index))
+
+    assert report.indexed > 0, "the aged rows were adopted as current and never rewritten"
+    assert {row[1] for row in index._chunks} == {binding.chunking_key}
+
+
 def _served_chunk_sizes(index: InMemoryDocumentIndex, source: str) -> list[int]:
     """The length of every chunk this source's search can actually cite, longest first.
 
@@ -1947,6 +1980,103 @@ def test_both_backends_read_the_same_whole_document() -> None:
             assert await index.stored_document("other-share", "doc-1", "400:40", 1_000_000) is None
 
         assert results[0] == results[1], "the two backends disagree about the stored document"
+
+    asyncio.run(_run())
+
+
+def test_the_durable_backend_stores_the_documents_own_text_and_still_finds_the_number() -> None:
+    """A stored chunk is the document's text; only what feeds the tsvector is normalised.
+
+    `upsert` bound one `normalize_search_text` result to both the `content` column and
+    `to_tsvector`, so an SOP saying "cool to -78 °C" was stored, served and read back as
+    " 78 °C" — a sign flip in the excerpt a chemist cites, in a column `note_index` does not
+    have and so never had this defect. Both halves are asserted here because splitting the
+    parameter could have been "fixed" by dropping the normalisation, which is the regression
+    `core.fulltext` measured: `78` has to reach `-78`, and `108-24-7` has to keep working.
+    """
+    raw = "The mixture was cooled to -78 C over -0.5 h; CAS 108-24-7 was charged."
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE document_files, document_chunks")
+            await conn.commit()
+
+        (vector,) = await asyncio.to_thread(embed_texts, [raw])
+        key = embedding_config_key()
+        file_row = FileRecord(
+            path="SOPs/cryo.txt",
+            source=SOURCE,
+            doc_id="doc-1",
+            fingerprint="1:2",
+            chunking_key="400:40",
+        )
+        chunk = ChunkRecord(
+            doc_id="doc-1",
+            chunking_key="400:40",
+            ordinal=0,
+            content=raw,
+            embedding=vector,
+        )
+        for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
+            await index.upsert([file_row], [chunk], key)
+            stored = await index.stored_document(SOURCE, "doc-1", "400:40", 1_000_000)
+            assert stored is not None
+            assert stored.pieces[0].content == raw, (
+                f"{type(index).__name__} rewrote the document's own text"
+            )
+
+        durable = PostgresDocumentIndex()
+        hits = await durable.search_lexical(SOURCE, "cooled", 5, DocumentFilter())
+        assert [hit.content for hit in hits] == [raw], "the served excerpt is not the stored text"
+        # The normalisation is still doing its job on the derivation, which is the whole reason
+        # the two are bound separately rather than the parameter simply removed.
+        assert await durable.search_lexical(SOURCE, "78", 5, DocumentFilter()), (
+            "a cryogenic temperature is unreachable again"
+        )
+        assert await durable.search_lexical(SOURCE, "108-24-7", 5, DocumentFilter()), (
+            "the CAS number stopped matching"
+        )
+
+    asyncio.run(_run())
+
+
+def test_one_unstorable_document_costs_the_document_and_not_the_pass(tmp_path: Path) -> None:
+    """A NUL byte on a share used to kill the whole crawl, permanently — against the real database.
+
+    A NUL is valid UTF-8, so the decode keeps it and `.strip()` does not remove it, and Postgres
+    refuses one in a `text` column. `DocumentIndex.upsert` has no per-file handler, so the write
+    took the good documents parsed in the same slice with it; the crawl keeps no cross-run cursor,
+    so every later run walked to the same file and died the same way. Driven against
+    `PostgresDocumentIndex` because that is the only backend the fault exists on — the in-memory
+    reference stores anything, which is why no test could see this.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE document_files, document_chunks")
+            await conn.commit()
+
+        root = tmp_path / "nul-share"
+        (root / "docs").mkdir(parents=True)
+        (root / "docs" / "good.txt").write_text("A report about amide couplings.")
+        (root / "docs" / "mid.txt").write_bytes(b"Batch record\x00 for lot 42, yield 88%.")
+        (root / "docs" / "zzz.txt").write_text("A report sorted after the bad one.")
+        binding = load_binding(
+            {
+                "mount": str(root),
+                "public": True,
+                "roots": [{"path": "docs"}],
+                "extensions": [".txt"],
+            }
+        )
+
+        report = await sync_share(SOURCE, binding, PostgresDocumentIndex(), limit=100)
+
+        assert report.scanned == 3
+        assert report.indexed == 2, "the readable documents did not survive the unstorable one"
+        assert report.skipped_unreadable == 1
 
     asyncio.run(_run())
 

@@ -8,45 +8,30 @@ answer — without any live model (a fake streaming agent is injected).
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from typing import Any
 
 from chemclaw.agent.session import TurnSession
 from chemclaw.api.events import ErrorEvent, Event, TokenEvent, ToolCallEvent
 from chemclaw.api.runner import run_turn
-from tests.fakes import FakeUpdate
 from tests.fakes_turn import Piece, ScriptedTurn
 
 
-class _ToolContent:
-    """A minimal function-call-shaped content (name + arguments), as the runner duck-types."""
-
-    def __init__(self, name: str, arguments: str) -> None:
-        self.name = name
-        self.arguments = arguments
-
-
 class _FakeAgent(ScriptedTurn):
-    """A fake agent whose turn is a scripted update sequence: one tool call, then two tokens.
+    """A fake agent whose turn is two streamed text pieces.
 
-    The pieces are streamed-update doubles rather than plain text, because what is under test is
-    the *event* mapping — a tool call arriving before any prose. The whole event sequence for a
-    scripted tool-calling turn is `tests/test_langgraph_stream.py`'s conformance test; this file
-    pins the serialization and the error path.
+    Deliberately prose only: the whole event sequence for a tool-calling turn is
+    `tests/test_langgraph_stream.py`'s conformance test, driven on a real compiled graph, and this
+    file pins the serialization and the error path. It used to yield streamed-update doubles for
+    the previous engine's shape, which no engine has produced since the LangGraph rebuild.
     """
 
     def create_session(self, *, session_id: str) -> TurnSession:
         """The one non-streaming method the front door calls on an agent."""
         return TurnSession(session_id=session_id)
 
-    async def stream(self, message: str) -> AsyncIterator[Any]:
-        """A call content, then two text updates.
-
-        Typed `Any` rather than `Piece` because these pieces are already update doubles — the shared
-        rendering has nothing to add to a content the runner duck-types.
-        """
-        yield FakeUpdate(contents=[_ToolContent("gather_evidence", '{"query": "aldol"}')])
-        yield FakeUpdate(text="The ")
-        yield FakeUpdate(text="answer.")
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
+        """Two text pieces, which is all the error path below needs to be overridden."""
+        yield "The "
+        yield "answer."
 
 
 def test_events_round_trip_with_type_discriminator() -> None:

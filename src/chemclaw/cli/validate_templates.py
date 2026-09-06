@@ -213,7 +213,22 @@ class _Surface(NamedTuple):
 
     @classmethod
     def resolve(cls) -> "_Surface":
-        """Derive the whole surface once. The call order matters — see `_resolvable_signatures`."""
+        """Derive the whole surface once. The call order matters — see `_resolvable_signatures`.
+
+        Registering the file profiles is part of resolving, not something each caller does first.
+        `registered_profile_names()` holds only the built-in `default` until `load_profiles()` has
+        run, and `main` resolved the surface before anything had — so from the CI gate every
+        shipped profile read as unknown, a template naming one was rejected, and rule 3 of
+        `_write_tool_problems` could never fire, because an unknown profile falls back to the whole
+        tool surface. The load is idempotent, so resolving twice registers once.
+
+        Raises:
+            ProfileError: When a profile file is malformed, or two claim one name. Both callers
+                report it rather than raising, the way every other problem here is reported.
+        """
+        from chemclaw.agent.profile_discovery import load_profiles
+
+        load_profiles()
         return cls(
             tools=_available_tools(),
             jobs=_available_jobs(),
@@ -365,27 +380,24 @@ def validate_templates(surface: _Surface | None = None) -> list[str]:
     already refuse one, and this gate printed its green line over an empty directory and over a
     path that does not exist alike.
     """
-    # Profiles are files too, and a template may name one — so they have to be registered before the
-    # check can tell "unknown profile" from "not loaded yet".
-    from chemclaw.agent.profile_discovery import load_profiles
-
     try:
-        load_profiles()
         found = discovered()
+        if not found:
+            # Zero templates is not a clean sheet, it is a gate with nothing to check — the same
+            # refusal `validate_datasources` and `validate_connectors` make, for the same reason.
+            # An empty directory and one that does not exist both arrive here identically, and
+            # both are what a mis-set `CHEMCLAW_TEMPLATES_DIR` or an image that failed to ship
+            # `data/templates/` look like. Every `run_*` launcher the agent advertises is backed
+            # by one of these files.
+            return [
+                f"no templates discovered under {settings.templates_dir!r} — every `run_*` "
+                "launcher would be unavailable, and this gate would have checked nothing"
+            ]
+        # Resolved once for the whole run, not once per template — see `_Surface`, which is also
+        # where the file profiles a template may name are registered.
+        surface = surface if surface is not None else _Surface.resolve()
     except ValueError as exc:  # ProfileError and TemplateError are both ValueError
         return [str(exc)]
-    if not found:
-        # Zero templates is not a clean sheet, it is a gate with nothing to check — the same
-        # refusal `validate_datasources` and `validate_connectors` make, for the same reason. An
-        # empty directory and one that does not exist both arrive here identically, and both are
-        # what a mis-set `CHEMCLAW_TEMPLATES_DIR` or an image that failed to ship `data/templates/`
-        # look like. Every `run_*` launcher the agent advertises is backed by one of these files.
-        return [
-            f"no templates discovered under {settings.templates_dir!r} — every `run_*` launcher "
-            "would be unavailable, and this gate would have checked nothing"
-        ]
-    # Resolved once for the whole run, not once per template — see `_Surface`.
-    surface = surface if surface is not None else _Surface.resolve()
     problems = [
         problem for template in found.values() for problem in _step_problems(template, surface)
     ]
@@ -414,17 +426,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     # One surface for both halves of the report: `validate_templates` would otherwise resolve it
     # and `unchecked_arguments` resolve the identical thing again, at ~5 s a time.
     #
-    # **Guarded, because this is where an invalid *manifest* surfaces.** Resolving the surface
-    # reaches `available_tool_names`, which asks the template registry for the `run_*` launchers and
-    # so loads every file — before the step checker below has run a single check. A template with an
-    # unknown `${inputs.x}` or a forward `${steps.y.result}` therefore raised straight through
-    # `main`, and the operator got a pydantic traceback where every sibling validator prints a
-    # problem line. The exit code was 1 either way, so CI was never misled: what was wrong is that
-    # the gate failed *looking like a crash*, which `validate_kg.main` argues against in as many
-    # words. Reported through the same block as every other problem, so there is one report shape.
+    # **Guarded, because this is where an invalid *manifest* or *profile* surfaces.** Resolving the
+    # surface registers the profile files and reaches `available_tool_names`, which asks the
+    # template registry for the `run_*` launchers and so loads every file — before the step checker
+    # below has run a single check. A template with an unknown `${inputs.x}` or a forward
+    # `${steps.y.result}` therefore raised straight through `main`, and the operator got a pydantic
+    # traceback where every sibling validator prints a problem line. The exit code was 1 either
+    # way, so CI was never misled: what was wrong is that the gate failed *looking like a crash*,
+    # which `validate_kg.main` argues against in as many words. Reported through the same block as
+    # every other problem, so there is one report shape.
     try:
         surface = _Surface.resolve()
-    except TemplateError as exc:
+    except ValueError as exc:  # ProfileError and TemplateError are both ValueError
         problems = [str(exc)]
     else:
         problems = validate_templates(surface)

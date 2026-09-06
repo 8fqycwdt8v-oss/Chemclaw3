@@ -39,7 +39,7 @@ from chemclaw.agent.chemclaw_agent import (
     harness_tool_names,
     subagent_tool_names,
 )
-from chemclaw.agent.langgraph_agent import build_langgraph_agent, skills_backend
+from chemclaw.agent.langgraph_agent import _labelled, build_langgraph_agent, skills_backend
 from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.plan_gate import PLAN_GATE_REASON, plan_approval_refusal, plan_identity
 from chemclaw.agent.profiles import AgentProfile, get_profile
@@ -483,6 +483,28 @@ def test_the_backend_narrows_skills_by_the_shared_predicate(
 
     assert graph == permitted, "the backend and the shared predicate disagreed about visibility"
     assert gated not in graph, "the fixture must gate something for this to mean anything"
+
+
+def test_two_skills_trees_cannot_be_labelled_the_same_thing() -> None:
+    """The label is a route prefix, so a duplicate silently drops a tree from the backend.
+
+    `_labelled` suffixed a colliding base with `-<n>` without asking whether the suffixed name was
+    itself taken — and a tree literally named `a-1` takes it. `skills_backend` builds its routes as
+    a dict comprehension over these pairs, so the duplicate key kept the last tree and dropped the
+    other, while `_skills_middleware` went on publishing `/a-1` twice in the system prompt: one
+    tree's skills advertised at a path that resolves to a different tree, with nothing raised.
+
+    The layout is contrived, which is exactly why it is asserted rather than left to review — the
+    function's own docstring claims the suffix "keeps the function total".
+    """
+    labelled = _labelled(["a/skills", "a-1/skills", "b/a/skills"])
+
+    labels = [label for label, _directory in labelled]
+    assert len(set(labels)) == len(labelled), f"two trees share a label: {labels}"
+    # The comprehension `skills_backend` uses, so the assertion is about what the backend routes
+    # rather than about the labels alone.
+    routes = {f"/{label}/": directory for label, directory in labelled}
+    assert len(routes) == len(labelled), "a skills tree was dropped from the backend's routes"
 
 
 def _skill_names(backend: Any) -> set[str]:

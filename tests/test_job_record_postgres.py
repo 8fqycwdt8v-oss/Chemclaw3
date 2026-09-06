@@ -265,3 +265,91 @@ def test_a_second_run_under_one_id_does_not_keep_the_first_runs_attribution() ->
         assert stored.result == {"best": {"value": -0.4}}
 
     asyncio.run(_run())
+
+
+def test_a_second_failed_template_run_states_its_own_steps_and_not_the_first_runs() -> None:
+    """The same splice again, through the columns the *failure* upsert refused to refresh.
+
+    `_MUTABLE` closed this for `requested_by`; the result-column exclusion reopened it for the one
+    kind of failure record that carries a result. `connector_job.failed_job_record` fills none of
+    the five, which is what the exclusion protects — but `template_job.failed_template_record`
+    fills `result` and `payload_kind` on purpose, because "a five-step procedure that died at step
+    four ran four real steps, and discarding them would lose the work". `TemplateWorkflow` launches
+    under `ALLOW_DUPLICATE_FAILED_ONLY`, so re-running a failed template is the ordinary case, and
+    the surviving row said run 2's actor and run 2's failing step beside run 1's step results —
+    read back by `find_past_jobs`, `operations.job_activity` and the evidence pack alike.
+
+    Both halves are asserted, because either alone is satisfiable by the wrong statement: the
+    second run's steps must land, and the first run's must be gone.
+    """
+
+    async def _run() -> None:
+        sink = await _sink_or_skip()
+        first = JobRecord(
+            job_id="pg-failed-template-1",
+            connector="template",
+            job="hazard-briefing",
+            requested_by="oid-alice",
+            payload={"smiles": "run-1"},
+            result={"steps": {"screen": "run1-screen", "write": "run1-write"}},
+            payload_kind="template",
+            state="failed",
+            failure_reason="step 'review': boom-1",
+        )
+        await sink.record(first)
+        await sink.record(
+            first.model_copy(
+                update={
+                    "requested_by": "oid-bob",
+                    "payload": {"smiles": "run-2"},
+                    "result": {"steps": {"screen": "run2-screen"}},
+                    "failure_reason": "step 'write': boom-2",
+                }
+            )
+        )
+
+        stored = await read_job_record("pg-failed-template-1")
+        assert stored is not None
+        assert stored.requested_by == "oid-bob"
+        assert stored.failure_reason == "step 'write': boom-2"
+        assert stored.result == {"steps": {"screen": "run2-screen"}}, (
+            "the row states run 2's actor and failing step beside run 1's step results — a run "
+            "that never produced them"
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_failure_that_produced_nothing_still_never_erases_a_landed_result() -> None:
+    """And the protection the exclusion was built for, which the record-shaped test must keep.
+
+    `connector_job._record_run` can commit and then overrun its own timeout, leaving a completed
+    row behind while the workflow believes there is none — so the failure record it then writes
+    lands on top of the science. `failed_job_record` fills none of the five result columns, so it
+    must refresh none of them. Asserted beside the test above because the two are the same
+    decision read from opposite ends, and a fix for one that broke the other would look green.
+    """
+
+    async def _run() -> None:
+        sink = await _sink_or_skip()
+        await sink.record(_CAMPAIGN.model_copy(update={"job_id": "pg-failure-over-result-1"}))
+        await sink.record(
+            JobRecord(
+                job_id="pg-failure-over-result-1",
+                connector="bo",
+                job="start_optimization_campaign",
+                requested_by="oid-42",
+                state="failed",
+                failure_reason="ValueError: the campaign blew up after recording",
+            )
+        )
+
+        stored = await read_job_record("pg-failure-over-result-1")
+        assert stored is not None
+        assert stored.state == "failed"
+        assert stored.failure_reason.startswith("ValueError:")
+        assert stored.result == _CAMPAIGN.result, "the bookkeeping erased the science"
+        assert stored.summary == _CAMPAIGN.summary
+        assert stored.note_id == _CAMPAIGN.note_id
+
+    asyncio.run(_run())

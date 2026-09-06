@@ -141,9 +141,11 @@ def _labelled(items: list[Any], identifier: str | None) -> list[tuple[str, Any]]
     # `max_length` ceilings and can no longer be posted, so **the ceilings are what closed that,
     # not this line.** At the largest list those ceilings now admit (1536, a full plate) the scan
     # costs 22.4 ms against this `Counter`'s 0.107 ms, and a design at every count ceiling diffs in
-    # **~0.3 s** — re-measured, because the 0.060 s this line quoted was taken on one filling of the
-    # free-text fields and stated as though the ceilings fixed it (see `models.py`'s note on the
-    # three-row sweep). The right claim for `Counter` here is that it keeps a bounded cost flat
+    # **0.18 s** — the third figure this clause has carried and the first taken on a document with
+    # every count actually at its ceiling. The ~0.3 s it said before was a shape a third of that
+    # size; at the real ceilings the diff cost 1.67 s until `diff_designs` stopped ordering paths
+    # nobody asked for (see `models.py`'s note on the three-row sweep, and `diff_designs` itself).
+    # The right claim for `Counter` here is that it keeps a bounded cost flat
     # rather than quadratic in the bound; the earlier comment credited it with the 46 s, which was
     # false.
     repeated = {label for label, n in Counter(labels).items() if n > 1}
@@ -212,7 +214,20 @@ def diff_designs(
     left = flatten(before.model_dump(mode="json"))
     right = flatten(after.model_dump(mode="json"))
     changes: list[FieldChange] = []
-    for path in sorted(set(left) | set(right), key=_reading_order):
+    # **Ordered after the comparison, not before it, because the sort is the whole cost and almost
+    # none of it is on paths the caller will ever see.** `sorted(set(left) | set(right))` built a
+    # `_reading_order` key for every path in the *document* and then discarded all but the handful
+    # that moved: measured at every count ceiling (50 factors x 96 levels x 1536 arms x 500 charge
+    # lines, a legal 1.66 MB body inside `service_max_request_bytes`), a chemist's one-field edit
+    # cost **1.67 s** of `sorted` over 105,869 paths to report a diff of one. Both HTTP routes and
+    # `draft_experiment_protocol` call this inline on a loop `service_uvicorn_workers` refuses to
+    # run more than one of, so that was every other chemist's SSE stream and both kubelet probes
+    # stalled for the whole of it. Sorting only what differs is the same list — the key is a total
+    # order over distinct paths, and a subset of a totally ordered set keeps its relative order —
+    # and the same edit now costs **0.18 s** — 1.5x-1.7x what flattening the two documents costs on
+    # its own, which is the work no diff can avoid and what `tests/test_protocol_diff.py` bounds it
+    # against.
+    for path in set(left) | set(right):
         old, new = left.get(path), right.get(path)
         if path not in right:
             # **An appearing or vanishing path whose value is empty is not a change.** `flatten`
@@ -232,4 +247,5 @@ def diff_designs(
             changes.append(
                 FieldChange(path=path, kind="changed", before=_render(old), after=_render(new))
             )
+    changes.sort(key=lambda change: _reading_order(change.path))
     return DesignDiff(from_revision=from_revision, to_revision=to_revision, changes=changes)

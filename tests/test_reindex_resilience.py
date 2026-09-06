@@ -66,6 +66,42 @@ def test_a_note_that_stops_parsing_is_kept_in_the_index_rather_than_retired(
     )
 
 
+def test_a_readme_is_not_reported_as_a_note_that_did_not_parse(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The alarm above fired on the shipped corpus, permanently, on a committed README.
+
+    `note_file_fingerprints` keys **every** `*.md` under the tree by its stem, so subtracting the
+    parsed note ids from it counts a file that was never a note. `knowledge/README.md` is exactly
+    that file and it is committed, so every scheduled re-index warned that one note had dropped out
+    of both derived legs — which is the alarm that exists to say a real one had. A standing false
+    positive makes a real one indistinguishable from the baseline.
+
+    Both halves are asserted here: the README is silent, and a note whose frontmatter is genuinely
+    broken still says so.
+    """
+    index = InMemoryNoteIndex()
+    _corpus(tmp_path, 3)
+    (tmp_path / "README.md").write_text(
+        "# Knowledge\n\nHow this tree is organised.\n", encoding="utf-8"
+    )
+
+    with caplog.at_level("WARNING", logger="chemclaw.retrieval.vector_index"):
+        assert asyncio.run(reindex_notes(index, notes_dir=str(tmp_path))) == 3
+    assert not [record for record in caplog.records if "did not parse" in record.message], (
+        "a file with no frontmatter is not a note, so it never dropped out of anything"
+    )
+
+    (tmp_path / "note-001.md").write_text("---\nid: [unclosed\n---\n\nbroken\n", encoding="utf-8")
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="chemclaw.retrieval.vector_index"):
+        asyncio.run(reindex_notes(index, notes_dir=str(tmp_path)))
+    said = [record for record in caplog.records if "did not parse" in record.message]
+    assert said and "note-001" in said[0].getMessage(), (
+        "the alarm must still fire for a note that really did stop parsing"
+    )
+
+
 def test_a_note_the_embedder_refuses_costs_its_own_batch_and_no_more(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

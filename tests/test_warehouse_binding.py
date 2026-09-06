@@ -11,6 +11,7 @@ being enabled.
 """
 
 import os
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -370,6 +371,33 @@ def test_a_key_the_driver_will_not_take_fails_as_this_seams_error_at_connect_tim
     }
     with pytest.raises(BindingError, match="role"):
         open_connection(block, error=BindingError, what="warehouse connection")
+
+
+def test_a_driver_whose_signature_cannot_be_read_still_fails_as_this_seams_error() -> None:
+    """A C `connect` has no introspectable signature, and the check for one raised past the seam.
+
+    `inspect.signature` answers a callable it cannot read with `ValueError`, not `TypeError` —
+    `sqlite3.connect` and `duckdb.connect` both do it, and a DuckDB export is one of the databases
+    `core/connect.py`'s generality claim names. `signature_mismatch` caught only `TypeError`, so
+    that `ValueError` left `open_connection` unnamed: past the `error` parameter that exists so a
+    broken binding fails this seam as `BindingError` and the publish seam as `SinkConnectionError`,
+    and out of `make datasource-validate` as a traceback naming neither the manifest nor the driver.
+
+    Both halves are asserted, because "it opens" alone would pass on a check that had been deleted:
+    a keyword the driver *does* refuse must still be refused, by the constructor if not offline.
+    """
+    from chemclaw.core.connect import open_connection, signature_mismatch
+
+    block = {"driver": "sqlite3:connect", "database": ":memory:"}
+    assert signature_mismatch(sqlite3.connect, block) == ""
+    connection = open_connection(block, error=BindingError, what="warehouse connection")
+    assert isinstance(connection, sqlite3.Connection)
+    connection.close()
+
+    with pytest.raises(TypeError):
+        open_connection(
+            {**block, "role": "CHEMCLAW_READER"}, error=BindingError, what="warehouse connection"
+        )
 
 
 @pytest.mark.parametrize("source", ["eln-databricks", "pistachio"])

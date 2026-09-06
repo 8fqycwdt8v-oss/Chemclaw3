@@ -127,11 +127,6 @@ def _normalize(name: str) -> str:
     return name.strip().lower()
 
 
-def is_supported(name: str) -> bool:
-    """Whether GFN2-xTB's ALPB model has parameters for this solvent name."""
-    return _normalize(name) in ALPB_SOLVENTS
-
-
 def unsupported(names: list[str]) -> list[str]:
     """The names ALPB has no parameters for, in the order given, deduplicated by normalised form.
 

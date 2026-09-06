@@ -8,8 +8,10 @@ no bundle has a second way in.
 
 import ast
 import asyncio
+import logging
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -22,7 +24,7 @@ from chemclaw.kg.git_writer import (
     _replace_atomically,
 )
 from chemclaw.kg.note import Note
-from chemclaw.kg.record import NoteFile, NoteWrite
+from chemclaw.kg.record import NoteFile, NoteWrite, record_note
 
 
 def _clone(remote: Path, dest: Path) -> Path:
@@ -189,6 +191,94 @@ def test_a_failure_before_the_commit_leaves_no_note_in_the_tree(tmp_path: Path) 
         check=True,
     ).stdout
     assert status.strip() == ""
+
+
+def _refuse_every_commit(work: Path) -> Path:
+    """Install a `pre-commit` hook that fails, and return it — a site policy hook, as deployed."""
+    hook = work / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho 'site policy hook says no' >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    return hook
+
+
+def test_a_failed_commit_leaves_nothing_staged_and_the_pod_can_write_again(
+    tmp_path: Path,
+) -> None:
+    """A commit that fails after `git add` un-stages what it staged — or it wedges the pod.
+
+    The failure is real rather than injected: a `pre-commit` hook that exits non-zero, which is
+    also what an `index.lock` or `_exec`'s timeout kill looks like from here. The rollback used to
+    restore only the *working tree*, so the retracted blob stayed in the index. Two things follow,
+    and both are asserted: the un-published content sits staged in the clone an operator and the
+    knowledge-sync sidecar share, and the next `merge --ff-only` refuses because of it — after
+    which `_replay_our_unpushed_commits` finds no commits of ours to replay and refuses in turn,
+    so **every** later write on this pod fails forever.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    note = work / "knowledge" / "job-result" / "job-x.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("original body\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-q", "-m", "seed note"], check=True)
+    subprocess.run(["git", "-C", str(work), "push", "-q", "origin", "main"], check=True)
+
+    hook = _refuse_every_commit(work)
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitWriteError, match="site policy hook"):
+        asyncio.run(writer.write(_note_write("job-x", content="NEW BODY\n")))
+
+    assert note.read_text(encoding="utf-8") == "original body\n", "the tree is restored"
+    status = subprocess.run(
+        ["git", "-C", str(work), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert status.strip() == "", f"the index still holds the retracted write: {status!r}"
+
+    # The hook is fixed (or the lock cleared), and meanwhile another pod moved the same file.
+    hook.unlink()
+    other = _clone(remote, tmp_path / "other")
+    (other / "knowledge" / "job-result" / "job-x.md").write_text(
+        "from another pod\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "-C", str(other), "commit", "-q", "-am", "other pod"], check=True)
+    subprocess.run(["git", "-C", str(other), "push", "-q", "origin", "main"], check=True)
+
+    outcome = asyncio.run(writer.write(_note_write("job-y", content="Y\n")))
+    assert outcome.written is True
+    assert (work / "knowledge" / "job-result" / "job-y.md").exists()
+
+
+def test_a_checkout_with_no_local_commits_is_not_reported_as_unauthored_ones(
+    tmp_path: Path,
+) -> None:
+    """A dirty checkout that blocks the fast-forward says so, rather than naming 0 commits.
+
+    `_replay_our_unpushed_commits` is reached on *any* failed fast-forward, and a person's
+    uncommitted edit in the notes clone is one of them. The arithmetic then reported
+    `0 local commit(s) this system did not write` — a refusal naming commits that do not exist,
+    which sends an operator looking for a rebase problem instead of at their own working tree.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    note = work / "knowledge" / "job-result" / "job-x.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("original body\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-q", "-m", "seed note"], check=True)
+    subprocess.run(["git", "-C", str(work), "push", "-q", "origin", "main"], check=True)
+
+    other = _clone(remote, tmp_path / "other")
+    (other / "knowledge" / "job-result" / "job-x.md").write_text("elsewhere\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(other), "commit", "-q", "-am", "other pod"], check=True)
+    subprocess.run(["git", "-C", str(other), "push", "-q", "origin", "main"], check=True)
+    # A person editing the notes clone by hand, uncommitted — the fast-forward cannot proceed.
+    note.write_text("a person was editing this\n", encoding="utf-8")
+
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitRemoteError, match="holds no local commits to replay") as raised:
+        asyncio.run(writer.write(_note_write("job-y", content="Y\n")))
+    assert "0 local commit(s)" not in str(raised.value)
 
 
 def test_a_write_busts_a_readers_cache_because_it_does_touch_their_tree(
@@ -837,6 +927,62 @@ def test_an_agent_write_may_not_overwrite_a_note_a_human_authored(tmp_path: Path
             )
         )
     assert "2-MeTHF" in curated.read_text(encoding="utf-8"), "the chemist's note is untouched"
+
+
+def test_a_retirement_of_a_persons_note_is_dropped_and_the_new_note_still_lands(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The refusal above applies to the subject note, and must not take the unit down with it.
+
+    `record_failure` puts the `failure-mode` note and the retirement of what it refutes in **one**
+    `NoteWrite`, and the writer validated every file before writing any — so refusing the
+    retirement discarded the observation as well. That is the shipped case rather than an edge:
+    every `playbook` a refutation exists to refute is human-authored, and the refusal even told
+    the caller to "record a new note that contradicts it instead", which is exactly what it had
+    just thrown away.
+
+    So the amendment steps aside and says so, leaving what `close_refuted_note` documents as the
+    truthful state for a claim this system may not close: the curated note stays open and served,
+    and the new note marks it as contradicted.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    curated = work / "knowledge" / "playbook" / "playbook-suzuki.md"
+    curated.parent.mkdir(parents=True)
+    curated.write_text(
+        "---\nid: playbook-suzuki\ntype: playbook\ncreated_by: human\n---\nPd(dppf)Cl2, 2-MeTHF.\n",
+        encoding="utf-8",
+    )
+    for command in (["add", "-A"], ["commit", "-qm", "curated"], ["push", "-q", "origin", "main"]):
+        subprocess.run(["git", "-C", str(work), *command], check=True)
+
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+    failure = Note(
+        id="failure-suzuki-degassing",
+        type="failure-mode",
+        created_by="agent",
+        body="[[contradicts:playbook-suzuki]] did not hold: the coupling stalled at 12%.",
+    )
+    retirement = Note(
+        id="playbook-suzuki",
+        type="playbook",
+        created_by="human",
+        valid_to=date(2026, 3, 1),
+        body="Pd(dppf)Cl2, 2-MeTHF.\n\nRefuted by [[failure-suzuki-degassing]].",
+    )
+    with caplog.at_level(logging.WARNING, logger="chemclaw.kg.git_writer"):
+        reference = asyncio.run(
+            record_note(failure, writer, knowledge_dir="knowledge", superseded=[retirement])
+        )
+
+    assert len(reference) == 40, "the failure note landed in a commit of its own"
+    landed = work / "knowledge" / "failure-mode" / "failure-suzuki-degassing.md"
+    assert landed.exists(), "the observation is the highest-value half and must survive"
+    curated_now = curated.read_text(encoding="utf-8")
+    assert "valid_to" not in curated_now, "the chemist's note keeps its open validity window"
+    assert "2-MeTHF" in curated_now
+    assert any("amendment_left_alone" in record.message for record in caplog.records), (
+        "dropping a person's retirement silently would be the other half of the same defect"
+    )
 
 
 def test_a_note_is_replaced_in_one_step_so_a_reader_never_sees_half_of_it(tmp_path: Path) -> None:

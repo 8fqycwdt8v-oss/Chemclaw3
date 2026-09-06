@@ -160,6 +160,44 @@ def test_labelling_stamps_the_row_out_of_the_stale_set_and_a_version_bump_puts_i
     _both_backends(_body)
 
 
+def test_a_derived_phase_is_paired_to_its_species_by_ordinal_in_both_backends() -> None:
+    """The two backends have to agree about *which species* an answer is about.
+
+    `PostgresLabelIndex` matches `ordinal` in its `UPDATE`; the in-memory index zipped the two
+    lists by position. Measured on this same reaction with the derived species handed back
+    reversed — the shape a labeller that groups by role produces — bromobenzene came back
+
+        in-memory  ordinal 0 Brc1ccccc1  PRODUCT
+        postgres   ordinal 0 Brc1ccccc1  STARTING_MATERIAL
+
+    from one `store_labels` call, and a short answer was truncated in one backend and applied in
+    the other. `_carry_species` one method up already pairs the record phase by ordinal for the
+    same reason.
+    """
+
+    async def _body(index: LabelIndex, tag: str) -> None:
+        label = _label(f"{tag}-reordered")
+        await index.record(label)
+        derived = _derived(label)
+        await index.store_labels(
+            derived.model_copy(update={"species": list(reversed(derived.species))}), _VERSION
+        )
+
+        [stored] = [
+            row
+            for row in await index.stale("rxnlabel@2:roles1", limit=50, sources=[_SOURCE])
+            if row.reaction_id == f"{tag}-reordered"
+        ]
+        assert [(s.ordinal, s.smiles, s.derived_role) for s in stored.species] == [
+            (0, "Brc1ccccc1", SpeciesRole.STARTING_MATERIAL),
+            (1, "NC1CCCCC1", SpeciesRole.STARTING_MATERIAL),
+            (2, "CC#N", SpeciesRole.SOLVENT),
+            (3, "c1ccc(NC2CCCCC2)cc1", SpeciesRole.PRODUCT),
+        ]
+
+    _both_backends(_body)
+
+
 def test_re_ingesting_an_unchanged_reaction_keeps_its_labels() -> None:
     """A note edit must not silently discard a backfill that took days."""
 

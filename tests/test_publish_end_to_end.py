@@ -300,3 +300,33 @@ def test_a_schema_cannot_smuggle_a_second_libpq_option_past_the_timeout_bound() 
             await benign.aclose()
 
     asyncio.run(_run())
+
+
+def test_the_seeded_no_conditions_row_is_the_one_the_writer_points_at() -> None:
+    """The seed must name the id the projector derives, or it seeds a row nothing joins to.
+
+    `condition_set` is content-addressed like every other key here: a calculator with no conditions
+    of its own publishes `Conditions()`, whose `condition_id` is a hash. The seed wrote the literal
+    `cond_unspecified` while the DDL comment told consumers that row is "the condition set every
+    calculator with no conditions of its own points at" — so a consumer following that advice
+    joined on a name no calculation has ever carried and got zero rows, forever, with a second
+    all-null row sitting beside it under the derived id. Asserted against a database with the
+    shipped DDL and seed actually applied, which is what the earlier claim would have survived.
+    """
+    from chemclaw.publish.record import Conditions
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        dsn = settings.postgres_dsn
+        await _create_store(dsn)
+
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            await conn.execute(f"SET search_path={_STORE}")
+            seeded = await _rows(conn, "SELECT condition_id FROM condition_set ORDER BY 1")
+
+        assert [row[0] for row in seeded] == [Conditions().condition_id], (
+            "the seeded no-conditions row must carry the id `Conditions()` derives, or nothing "
+            "the writer publishes ever points at it"
+        )
+
+    asyncio.run(_run())

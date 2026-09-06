@@ -7,6 +7,7 @@ version.
 """
 
 import asyncio
+from datetime import datetime
 
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.migrate import migrate
@@ -103,6 +104,35 @@ def test_a_rewrite_without_a_cost_keeps_what_the_original_miss_measured() -> Non
     measured, after_rewrite = asyncio.run(_run())
     assert measured == 310.5
     assert after_rewrite == 310.5, "a costless rewrite erased what the original miss cost"
+
+
+def test_a_rewrite_keeps_the_date_the_value_was_computed() -> None:
+    """`created_at` answers "when was this computed", so a rewrite must not move it.
+
+    The key is content-addressed: a second `put` under it is the same calculation being rewritten
+    — a backfill, an `ArrayOffloadingStore` offload, an admin correction — not a new one. The
+    upsert nonetheless set `created_at = now()`, so a rewrite restamped the row as freshly
+    computed, `find`'s newest-first order and its `since`/`until` window described the last
+    *write*, and `find_calculations` promises "results computed at or after it". Measured before
+    the fix on this shape: a row computed at 09:33:39 came back reading 09:33:40 after a backfill
+    that ran no calculator. `InMemoryStore` keeps whatever date the caller stored, so the two
+    backends disagreed as well.
+    """
+
+    async def _run() -> tuple[datetime | None, datetime | None]:
+        store = await _store_or_skip()
+        key = CalculationKey.build("pgdate", "v1", inputs={"smiles": "pg-date-CCO"})
+        query = CalculationQuery(calc_type="pgdate", limit=5)
+        await store.put(StoredResult(key=key, result={"energy": -1.0}, compute_seconds=42.0))
+        [first] = await store.find(query)
+        await asyncio.sleep(0.05)
+        await store.put(StoredResult(key=key, result={"energy": -1.0}, provenance="backfill"))
+        [second] = await store.find(query)
+        return first.created_at, second.created_at
+
+    computed_at, after_rewrite = asyncio.run(_run())
+    assert computed_at is not None
+    assert after_rewrite == computed_at, "a rewrite restamped the row as newly computed"
 
 
 def test_version_bump_is_a_distinct_row() -> None:

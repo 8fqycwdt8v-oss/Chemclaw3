@@ -269,6 +269,35 @@ def test_a_figure_no_tool_returned_is_simply_not_on_the_verified_list() -> None:
     assert outcome.verified_numbers == ["100"]
 
 
+def test_an_unreadable_figure_costs_that_figure_and_not_the_turn() -> None:
+    """A value the harness cannot read is an observation, never a network failure.
+
+    `float(value) for value in event.get("numbers", [])` sat inside the stream loop, and that
+    loop's `except` catches `ValueError`. So one non-numeric entry raised out of the `async for`:
+    every later event was dropped — the answer with them — and the turn was stamped
+    `transport_error="ValueError: could not convert string to float: 'n/a'"`, which
+    `cli/live_probes.py` then lists under "failed silently". A defect in the system under test,
+    filed as the network between us and it, on a turn that in fact answered.
+    """
+    with pytest.raises(ValueError):
+        float("n/a")  # the entry below really is one this harness cannot read
+
+    outcome = _run(
+        _probe(),
+        {
+            "type": "tool_result",
+            "tool": "compute_reaction_energy",
+            "preview": "-12.5 kcal/mol",
+            "numbers": [-12.5, "n/a", 3.0],
+        },
+        {"type": "answer", "text": "The energy is -12.5 kcal/mol with a 3.0 kcal/mol barrier."},
+    )
+    assert outcome.transport_error is None
+    assert outcome.answered is True
+    # The readable figures are still what the answer is checked against; only the bad one is lost.
+    assert outcome.verified_numbers == ["-12.5", "3.0"]
+
+
 def test_a_hyphen_suffixed_id_does_not_ground_its_prefix() -> None:
     """Set membership closed a hole the substring scan had, and this pins it closed.
 

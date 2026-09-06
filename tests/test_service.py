@@ -8,12 +8,14 @@ per turn via a spy tool.
 
 import asyncio
 import json
+import re
 import socket
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, MutableMapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -108,6 +110,49 @@ def _client(
 ) -> TestClient:
     """The app under test as a `TestClient`, with no connectors by default."""
     return TestClient(_app(agent, connector_factory=connector_factory))
+
+
+def test_every_name_the_front_door_re_exports_has_a_reader() -> None:
+    """`__all__` here is a *test seam*, and a name in it with no reader is dead weight.
+
+    The list documents itself as "collaborators the suite patches on this module; routes read them
+    through it at call time", which makes it the one place an import can survive both ruff and a
+    reviewer: being in `__all__` is what keeps F401 quiet. `request_note_reindex` did exactly that
+    — no route read `front_door.request_note_reindex`, no test patched it, and its only production
+    starter is a merge webhook this app does not serve.
+
+    Four ways to be read, because the list holds four kinds of name: a route reading it back
+    through this module at call time, `create_app` calling it here, a test patching it by dotted
+    path, and a test importing it from here (the types and pure helpers, which moved but kept this
+    module as their front page).
+    """
+    import chemclaw.api.app as app_module
+
+    root = Path(__file__).resolve().parents[1]
+    api = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (root / "src" / "chemclaw" / "api").rglob("*.py")
+        if path.name != "app.py"
+    )
+    own = (root / "src" / "chemclaw" / "api" / "app.py").read_text(encoding="utf-8")
+    suite = "\n".join(path.read_text(encoding="utf-8") for path in root.rglob("tests/*.py"))
+    imported: set[str] = set()
+    for match in re.finditer(r"from chemclaw\.api\.app import ([^\n(]+|\([^)]*\))", suite):
+        imported |= {name.strip("() \n") for name in match.group(1).split(",")}
+
+    unread = [
+        name
+        for name in app_module.__all__
+        if name != "create_app"
+        and f"front_door.{name}" not in api
+        and not re.search(r"(?<![.\w])" + re.escape(name) + r"\(", own)
+        and f"chemclaw.api.app.{name}" not in suite
+        and name not in imported
+    ]
+    assert unread == [], (
+        f"{unread} is re-exported by chemclaw.api.app and read by nothing — no route, no call "
+        "here, no patch and no test import. Being in `__all__` is what keeps the import lint-clean."
+    )
 
 
 def test_healthz_is_ok() -> None:

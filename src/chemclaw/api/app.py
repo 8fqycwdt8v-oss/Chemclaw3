@@ -37,7 +37,7 @@ from fastapi.staticfiles import StaticFiles
 
 from chemclaw.agent.checkpointer import close_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs, history_provider
-from chemclaw.agent.durable_tools import cancel_job, job_status, request_note_reindex
+from chemclaw.agent.durable_tools import cancel_job, job_status
 from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.plan_approval_store import plan_approval_store
@@ -112,7 +112,6 @@ __all__ = [
     "job_status",
     "load_tool_result",
     "probe_connectors",
-    "request_note_reindex",
     "search_job_records",
     "stream_new_events",
 ]

@@ -22,6 +22,7 @@ from typing import cast
 
 from pydantic import BaseModel, Field
 from temporalio import activity, workflow
+from temporalio.exceptions import is_cancelled_exception
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
@@ -223,7 +224,20 @@ class CommitmentSyncWorkflow:
                         retry_policy=BAD_DATA_RETRY,
                     )
                 )
-            except Exception:
+            except Exception as exc:
+                # **A cancel is not a source failure, and this clause cannot tell them apart on
+                # its own.** Temporal delivers a workflow cancellation to the awaiting
+                # `execute_activity` as an `ActivityError` with a
+                # `temporalio.exceptions.CancelledError` cause, so reject-and-continue absorbed it:
+                # measured on a real broker, a cancel issued while `src-b` was in flight booked
+                # `src-b` as a zero-result failed export, mirrored `src-c` normally after the SDK's
+                # `uncancel`, and ended the run COMPLETED — a report that reads as a healthy pass
+                # with one broken source, for an operator who asked the mirror to stop.
+                # `eln_sync.py`'s identical loop already carries this guard and the measurement
+                # behind it; `is_cancelled_exception` is the SDK's own predicate, so nothing here
+                # restates a shape upstream owns.
+                if is_cancelled_exception(exc):
+                    raise
                 workflow.logger.warning("commitment mirror failed for source %s", source)
                 report.results.append(CommitmentSyncResult(source=source))
         return report

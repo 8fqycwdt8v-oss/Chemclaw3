@@ -27,6 +27,7 @@ from chemclaw.agent.compaction import (
     RecordContextCompaction,
     context_compaction_middleware,
 )
+from chemclaw.agent.context_budget import begin_context_watch, end_context_watch
 from chemclaw.core.metrics import METRICS
 
 
@@ -266,3 +267,51 @@ def test_the_module_does_not_claim_a_guard_over_upstreams_own_copy_and_count() -
         "upstream now copies inside the loop; the narrowing in this module's docstring should be "
         "re-derived against the new shape"
     )
+
+
+def test_a_later_call_that_drops_a_conversation_group_is_announced_too(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The record follows the high-water reduction, which is what its own docstring promised.
+
+    The two edits have opposite consequences and this line is the only thing that tells them apart,
+    so announcing the *first* reduction of a turn hides the destructive one whenever the lossless
+    one fired earlier — which is the ordinary order, because tool-result clearing runs before the
+    conversation window has anything to cut. Measured before the fix: a turn whose first call
+    reclaimed by clearing alone and whose second dropped four conversation groups emitted exactly
+    one `context.compacted`, reading `conversation_groups_dropped=0`, while
+    `chemclaw_context_reclaimed_tokens_total` — which *was* high-watered — went on rising.
+
+    The third call re-derives the second's standing reduction, and must stay silent: the edits are
+    non-destructive, so a per-call line would repeat the same reduction on every model call of the
+    turn.
+    """
+    thread = _thread(6)
+    # The lossless edit alone: every tool result replaced, every conversation group still sent.
+    cleared = [
+        ToolMessage(content="cleared", tool_call_id=message.tool_call_id)
+        if isinstance(message, ToolMessage)
+        else message
+        for message in thread
+    ]
+    # The destructive edit on top of it: the window keeps the last two groups.
+    dropped = cleared[-8:]
+
+    token = begin_context_watch()
+    try:
+        with caplog.at_level(logging.INFO):
+            record = RecordContextCompaction()
+            record.wrap_model_call(_request(thread, cleared), lambda request: None)
+            first = [line for line in caplog.messages if "reclaimed ~" in line]
+            record.wrap_model_call(_request(thread, dropped), lambda request: None)
+            record.wrap_model_call(_request(thread, dropped), lambda request: None)
+    finally:
+        end_context_watch(token)
+
+    announced = [line for line in caplog.messages if "reclaimed ~" in line]
+    assert len(first) == 1, first
+    assert "dropped 0 conversation group(s)" in first[0]
+    assert len(announced) == 2, (
+        f"the destructive edit was never announced (or was announced per call): {announced}"
+    )
+    assert "dropped 4 conversation group(s)" in announced[1]

@@ -761,7 +761,9 @@ def test_a_species_distribution_publishes_candidates_not_subject_members() -> No
 
     assert record.subject.kind == "system"
     assert [c.score for c in record.candidates] == [0.93, 0.07]
-    assert all(c.score_property == "population" for c in record.candidates)
+    # `species_population`, not `population`: the latter is registered at conformer scope, and a
+    # candidate row scored with it contradicts the table `scope_kind` places it in.
+    assert all(c.score_property == "species_population" for c in record.candidates)
     assert record.candidates[0].detail["label"] == "diketo"
 
 

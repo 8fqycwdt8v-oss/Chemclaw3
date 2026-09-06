@@ -203,8 +203,8 @@ _register(Unit("eV", "energy_per_amount", 96.485_332), "electronvolt")
 # where *both* families register the prefix: `M`/`m` and `mM`/`mm` were both present and correct,
 # and the very next rung down was not — `nM` was absent, so nanomolar folded to the *nanometre*
 # already there and `Measurement.of(50, "nM").compare(Measurement.of(1, "mm"))` answered instead of
-# refusing, while `same_dimension("nM", "uM")` was False and a legitimate 50 nM against a 0.1 µM
-# limit was refused with "cannot compare length with concentration".
+# refusing, while `nM` and `uM` came out as different dimensions and a legitimate 50 nM against a
+# 0.1 µM limit was refused with "cannot compare length with concentration".
 #
 # So every rung either exists on both sides or on neither — and "or on neither" is not a figure of
 # speech. The first version of this fix registered `pM` with the note that it "has no length twin
@@ -372,11 +372,6 @@ class Measurement:
         if self.unit.symbol:
             text += f" {self.unit.symbol}"
         return f"{text} ({self.basis})" if self.basis else text
-
-
-def same_dimension(first: str, second: str) -> bool:
-    """Whether two unit spellings measure the same kind of thing. Raises on an unknown one."""
-    return parse_unit(first).dimension == parse_unit(second).dimension
 
 
 def reconcile(value: float, reported: str, expected: str) -> float:

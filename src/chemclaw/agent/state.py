@@ -69,6 +69,7 @@ from collections.abc import Sequence
 from typing import Annotated, Any, NotRequired
 
 from langchain.agents.middleware.todo import PlanningState
+from langchain_core.messages import AIMessage
 from langgraph.channels.untracked_value import UntrackedValue
 
 from chemclaw.core.config import settings
@@ -272,11 +273,23 @@ def turn_config(thread_id: str | None = None) -> dict[str, Any]:
 
 
 def answer_text(result: Any) -> str:
-    """The final assistant text out of a completed graph turn — the output side of `turn_input`.
+    """The final assistant text out of a graph turn — the output side of `turn_input`.
 
     The graph returns its whole message list rather than a single `response.text`, so the answer is
-    the last message's content. Joined across content blocks because a model may answer in parts,
-    and coerced with `str` so a caller never fails on a shape the model managed to produce.
+    the last *assistant* message's content. Joined across content blocks because a model may answer
+    in parts, and coerced with `str` so a caller never fails on a shape the model managed to
+    produce.
+
+    **The last `AIMessage`, not the last message, and the difference is a whole class of turn.**
+    Both caps end the run from `before_model` — which runs *after* the tool node — so a turn stopped
+    by `loop_cap.enforce_loop_cap` or `spend_cap.enforce_spend_cap` deterministically leaves a
+    `ToolMessage` last, for any cap at all. Taking the tail unconditionally then returned the
+    **tool's own output** as the turn's answer: measured at `harness_max_loop_iterations=3` on the
+    compiled graph, a capped turn answered `'No files found'` — the `ls` body — which `cli/chat.py`
+    printed to the chemist and `durable/template_activities.run_agent_step` interpolated into every
+    later step of its template as `${steps.<id>.result}`. A `ToolMessage` is never the agent's
+    answer, so a capped turn yields the last assistant text it managed, or `""` when that iteration
+    produced none — which both callers already settle as an empty answer.
 
     **One definition, because there were two.** `cli/chat.py` and `durable/template_activities.py`
     each carried a byte-identical copy — the only exact structural clone in the tree — so the
@@ -285,9 +298,12 @@ def answer_text(result: Any) -> str:
     a new one: this is the third function about the shape of a turn.
     """
     messages = result.get("messages") or []
-    if not messages:
+    answer = next(
+        (message for message in reversed(messages) if isinstance(message, AIMessage)), None
+    )
+    if answer is None:
         return ""
-    content = messages[-1].content
+    content = answer.content
     if isinstance(content, str):
         return content
     if isinstance(content, list):

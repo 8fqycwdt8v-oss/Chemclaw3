@@ -139,9 +139,18 @@ _SETTLE = """
     WHERE request_id = %s AND state = 'waiting'
 """
 
+# **A running total, not an increment, because an activity is at-least-once.** `reminders =
+# reminders + 1` under a 5-attempt retry policy counts one escalation twice whenever an execution
+# commits and its completion report is then lost — a worker that dies, a broker that misses the
+# response, or simply an attempt that overruns its own `start_to_close_timeout` after the UPDATE.
+# Established on a real broker: one escalation, two attempts, `reminders = 2` against the
+# workflow's own `self._reminders` of 1 — and that column is what an inbox shows and what
+# `AwaitOutcome.reminders` is compared against. `GREATEST` makes the redelivered attempt a no-op
+# and keeps the two counters one number, because the value written is the workflow's replay-stable
+# total rather than a delta.
 _REMIND = """
     UPDATE pending_requests
-    SET reminders = reminders + 1, reminded_at = now()
+    SET reminders = GREATEST(reminders, %s), reminded_at = now()
     WHERE request_id = %s AND state = 'waiting'
 """
 
@@ -213,10 +222,15 @@ async def settle_request(
         return cursor.rowcount == 1
 
 
-async def record_reminder(request_id: str) -> None:
-    """Count one escalation against a still-open request."""
+async def record_reminder(request_id: str, count: int) -> None:
+    """Record how many escalations a still-open request has had — see `_REMIND` for why a total.
+
+    Args:
+        request_id: The wait being chased.
+        count: The asking workflow's own running escalation count, which is replay-stable.
+    """
     async with _connect() as conn:
-        await conn.execute(_REMIND, (request_id,))
+        await conn.execute(_REMIND, (count, request_id))
 
 
 def _row(values: tuple[Any, ...]) -> PendingRequest:

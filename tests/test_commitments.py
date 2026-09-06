@@ -614,3 +614,82 @@ def test_the_commitment_cursor_does_not_share_a_row_with_the_eln_sync() -> None:
         "the commitment mirror writes the bare source name again, so it shares the ELN sync's row"
     )
     assert "load_cursor(source)" not in source and "store_cursor(source," not in source
+
+
+def test_cancelling_a_mirror_stops_it_instead_of_skipping_the_source_in_flight() -> None:
+    """A cancel must end the run, and the skip-one-source clause is exactly where that can be lost.
+
+    `eln_sync.py` already carries this guard and the measurement behind it; this loop is the other
+    reject-and-continue drain and it shipped with a *wider* catch and none. Temporal delivers a
+    workflow cancellation to the awaiting `execute_activity` as an `ActivityError` whose cause is
+    `temporalio.exceptions.CancelledError` — the same exception the clause catches to drop one
+    broken export. Absorbed, `cancel` becomes "book whichever source is in flight as a zero-result
+    failure and carry on": measured before the fix, the run mirrored the remaining source after the
+    cancel and ended COMPLETED, so an operator cancelling a mirror got no cancellation, no failure,
+    and a report that reads as a healthy pass with one broken source.
+
+    Driven on the **real-time** server for `start_local_env_or_skip`'s reason: this is a wall-clock
+    event reaching a run that is still going, and time skipping would fast-forward the in-flight
+    activity instead of letting the cancel arrive during it.
+
+    Asserted on the run's *status*, because the failure being pinned is a run that ends
+    successfully, and on the source *after* the cancelled one, because the harm is the work that
+    happened after the cancel rather than the exception that did not.
+    """
+    import contextlib
+    from typing import Any
+
+    from temporalio import activity
+    from temporalio.client import Client, WorkflowFailureError
+    from temporalio.worker import Worker
+
+    from chemclaw.durable.commitment_sync import CommitmentSyncResult, CommitmentSyncWorkflow
+    from tests.temporal_env import pydantic_client, start_local_env_or_skip
+
+    queue = "test-commitment-cancel"
+    mirrored: list[str] = []
+    in_flight = asyncio.Event()
+
+    @activity.defn(name="list_commitment_sources_activity")
+    async def three_sources() -> list[str]:
+        return ["src-a", "src-b", "src-c"]
+
+    @activity.defn(name="mirror_commitments_activity")
+    async def mirror(source: str) -> CommitmentSyncResult:
+        """`src-b` hangs so the cancel lands during it; `src-c` is the one that must not run."""
+        if source == "src-b":
+            in_flight.set()
+            while True:
+                await asyncio.sleep(0.05)
+        mirrored.append(source)
+        return CommitmentSyncResult(source=source, mirrored=1)
+
+    async def _run() -> Any:
+        async with await start_local_env_or_skip() as env:
+            client: Client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue=queue,
+                workflows=[CommitmentSyncWorkflow],
+                activities=[three_sources, mirror],
+            ):
+                handle = await client.start_workflow(
+                    CommitmentSyncWorkflow.run, id="commitment-sync-cancelled", task_queue=queue
+                )
+                await asyncio.wait_for(in_flight.wait(), timeout=60)
+                await handle.cancel()
+                with contextlib.suppress(WorkflowFailureError):
+                    await asyncio.wait_for(handle.result(), timeout=60)
+                return (await handle.describe()).status
+
+    status = asyncio.run(_run())
+
+    assert status.name == "CANCELED", (
+        f"the cancelled mirror ended {status!r}; a cancel absorbed by the per-source skip makes "
+        "this run unstoppable — it books the source in flight as a failed export and mirrors the "
+        "rest"
+    )
+    assert "src-c" not in mirrored, (
+        "the source after the cancelled one was mirrored anyway: the cancel skipped one source "
+        "instead of stopping the run"
+    )

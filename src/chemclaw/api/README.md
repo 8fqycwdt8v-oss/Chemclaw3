@@ -8,7 +8,7 @@ resource — see `api/routes/README.md`), reading process state through `state.p
 `CurrentSession`, hold/proposal gates); `schemas.py` the wire shapes; `middleware.py` the
 cross-cutting HTTP armor. `runner.py` owns the per-turn lifecycle (build or
 resolve the agent, open the MCP tool sessions, stream events, close them), with the three pure
-readers that lifecycle uses beside it — `runner_trace.py` (reassemble a streamed tool call),
+readers that lifecycle uses beside it — `runner_trace.py` (the events a tool call and its result become),
 `runner_usage.py` (the turn's token arithmetic), `runner_answer.py` (score the final answer);
 `auth.py` is the single
 authorization gate; `events.py` the SSE envelope; `budget.py` the per-turn cost meter. The

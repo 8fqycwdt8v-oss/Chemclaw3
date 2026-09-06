@@ -53,7 +53,7 @@ from chemclaw.kg.note import Note
 from chemclaw.kg.record import record_note
 from chemclaw.memory.jobs import SynthesisUnit
 from tests.fixtures.connectors.fixture.workflows import FixtureJobWorkflow
-from tests.temporal_env import pydantic_client, start_env_or_skip
+from tests.temporal_env import pydantic_client, start_env_or_skip, start_local_env_or_skip
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "connectors"
 _CONNECTOR_QUEUE = "connector-fixture"
@@ -644,3 +644,128 @@ def test_the_suspension_declaration_travels_from_the_manifest_to_the_started_chi
     asyncio.run(ConnectorJobWorkflow().run(started))
     (start,) = starts
     assert start["execution_timeout"] is None
+
+
+# --- the headroom the wrapper keeps for what it owes *after* its child ---------------------------
+
+# The scaled configuration below, and why each number is what it is. The relation under test is
+# `wrapper_execution_timeout() - connector_job_timeout_seconds` against what the post-child steps
+# may spend, so only the ratio matters and the shipped seconds would make this a seven-hour test.
+#
+# `_LATE_SECONDS` is the one number that is not arbitrary: it stands in for the wait these writes
+# were bounded against. `durable/publish.py::light_write_queue_wait_timeout` measures the expected
+# wait for a slot on `background-jobs` at ~150 s at target load and 41.6 s behind a full slate —
+# both far over the 120 s the old count-based headroom reserved for the whole finish path, which is
+# why "the queue was busy" and "the job's failure was never recorded" used to be the same event.
+_SCALED = {
+    "connector_job_timeout_seconds": 2.0,
+    # The old reservation was `activity_timeout_seconds * 4`, so this fixes the old headroom at 4 s.
+    "activity_timeout_seconds": 1.0,
+    "job_record_timeout_seconds": 1.0,
+    "result_publish_timeout_seconds": 1.0,
+    "note_write_timeout_seconds": 1.0,
+    # The two queue bounds the post-child steps actually pass, kept well above the old headroom —
+    # which is the whole defect: a step permitted 30 s of queue wait inside a 4 s reservation.
+    "template_step_timeout_seconds": 30.0,
+    "activity_queue_wait_seconds": 30.0,
+}
+_LATE_SECONDS = 8.0
+
+
+def test_a_job_that_fails_records_and_says_so_even_when_the_write_queue_is_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child that hit its own ceiling must still reach `job_records` and the chemist.
+
+    The wrapper reserved `activity_timeout_seconds * 4` — 120 s at the shipped defaults — for
+    everything it does after its child returns, while `_record_run` and the failure push-back each
+    pass `light_write_queue_wait_timeout()` (900 s) as their `schedule_to_start` and the other
+    three post-child steps pass core's hour. So the reservation was smaller than either half of the
+    failure path was permitted to wait, and a job that hit its own ceiling — the bounded, intended
+    outcome — was reaped as `TIMED_OUT` before it could write the failure row or push `job_failed`
+    back. A workflow execution timeout is not delivered to workflow code, so the `except
+    BaseException` clause that exists for exactly this never ran: the failure this function's own
+    docstring says it prevents, produced by its own arithmetic.
+
+    Driven on the **real-time** dev server rather than the time-skipping one, for the reason
+    `tests/temporal_env.py` gives: the thing under test is a wall-clock race between the wrapper's
+    ceiling and a worker that is not there yet, and time skipping would fast-forward past both.
+
+    The activities are hosted by a *second* worker started `_LATE_SECONDS` in, which is what queue
+    pressure looks like from the wrapper's side — the task is dispatched and nobody claims it yet.
+    Both assertions are about what survives that: the durable row and the message. On the old
+    reservation neither existed and the run's own status said `TIMED_OUT`, which names neither the
+    child's failure nor the queue.
+    """
+    for name, value in _SCALED.items():
+        monkeypatch.setattr(settings, name, value)
+    monkeypatch.setattr("chemclaw.core.config.settings.background_task_queue", _CORE_QUEUE)
+
+    recorded: list[JobRecord] = []
+    notified: list[tuple[str, str, dict[str, Any]]] = []
+
+    class _CapturingSink:
+        async def record(self, record: JobRecord) -> None:
+            recorded.append(record)
+
+    async def _fake_record(*args: Any, **kwargs: Any) -> None:
+        bound = inspect.signature(record_session_event).bind(*args, **kwargs)
+        notified.append(
+            (bound.arguments["session_id"], bound.arguments["kind"], bound.arguments["payload"])
+        )
+
+    monkeypatch.setattr("chemclaw.durable.job_record.default_job_record_sink", _CapturingSink)
+    monkeypatch.setattr("chemclaw.durable.notify.record_session_event", _fake_record)
+
+    status: list[str] = []
+
+    async def _run() -> None:
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+            # Workflow tasks only: the writes below have nowhere to run until the late worker is up.
+            core = Worker(client, task_queue=_CORE_QUEUE, workflows=[ConnectorJobWorkflow])
+            connector = Worker(client, task_queue=_CONNECTOR_QUEUE, workflows=[FixtureJobWorkflow])
+            writes = Worker(
+                client,
+                task_queue=_CORE_QUEUE,
+                activities=[record_session_event_activity, record_job],
+            )
+
+            async def _start_writes_late() -> None:
+                await asyncio.sleep(_LATE_SECONDS)
+                async with writes:
+                    await asyncio.sleep(_LATE_SECONDS)
+
+            async with core, connector:
+                late = asyncio.create_task(_start_writes_late())
+                handle = await client.start_workflow(
+                    ConnectorJobWorkflow.run,
+                    _CEILING_JOB.model_copy(
+                        update={
+                            "payload": {"subject": "boom"},
+                            "session_id": _SESSION,
+                            "timeout_seconds": None,
+                        }
+                    ),
+                    id="wrapper-headroom-under-a-busy-queue",
+                    task_queue=_CORE_QUEUE,
+                    execution_timeout=wrapper_execution_timeout(),
+                )
+                with pytest.raises(WorkflowFailureError):
+                    await handle.result()
+                described = (await handle.describe()).status
+                assert described is not None, "a described execution always carries a status"
+                status.append(described.name)
+                await late
+
+    asyncio.run(_run())
+
+    assert status == ["FAILED"], (
+        "the wrapper was reaped by its own execution timeout instead of failing on its child's "
+        "failure, so nothing below it ran"
+    )
+    assert [record.state for record in recorded] == ["failed"], (
+        "the failure row is the durable copy; without it the run exists only in Temporal's history"
+    )
+    assert [kind for _, kind, _ in notified] == ["job_failed"]
+    assert "the fixture job was asked to fail" in notified[0][2]["reason"]

@@ -332,8 +332,8 @@ def _transcript(
             continue
         # `message_text`, not the raw attribute: it is the same flattening `graph_stream` hashed
         # when the turn ran, which is the whole reason the computed ref matches a stored blob. A
-        # result that came back empty gets no ref, matching `runner_trace._result_text`, which
-        # declines to store one — so the two agree on which results are fetchable.
+        # result that came back empty gets no ref here: there is nothing for a surface to fetch,
+        # and `fetchable` is what decides in every other case.
         text = message_text(message)
         ref = content_address(text) if text else ""
         results[str(call_id)] = (

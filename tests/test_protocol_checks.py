@@ -15,11 +15,11 @@ from pydantic import ValidationError
 
 from chemclaw.protocols.checks import (
     _AGREEMENT_FRACTION,
+    _CHECKS,
     arms_are_distinct,
     atom_balance,
     blockers,
     charge_is_consistent,
-    check_ids,
     components_resolve,
     controls_present,
     coverage_is_stated,
@@ -900,11 +900,21 @@ def test_coverage_is_stated_counts_neither_controls_nor_replicates_as_coverage()
 # --- the set as a whole -------------------------------------------------------------------------
 
 
-def test_check_ids_matches_what_run_checks_actually_produces() -> None:
-    """Both directions: no id is advertised that nothing produces, and none is produced unlisted.
+def _check_ids() -> tuple[str, ...]:
+    """Every check id `_CHECKS` declares, in its declared order.
 
-    A UI legend and a stored verdict are read against `check_ids()`, so a check renamed on one side
-    only would leave a row nothing explains — or a legend entry nothing ever fills. Asserted at both
+    Read off `_CHECKS` rather than through a public `check_ids()`, which was a function whose only
+    caller was this file — its docstring named "a UI legend" as the other one, and the UI is
+    `Chemclaw3_ui`, which cannot import a Python function. `_CHECKS` is the declaration itself.
+    """
+    return tuple(check.__name__ for check in _CHECKS)
+
+
+def test_check_ids_matches_what_run_checks_actually_produces() -> None:
+    """Both directions: no id is declared that nothing produces, and none is produced undeclared.
+
+    A stored verdict is read row by row against the declared set, so a check renamed on one side
+    only would leave a row nothing explains — or a declared id nothing ever fills. Asserted at both
     stages, because a stage that quietly dropped a check would show a shorter list to a chemist who
     has no way to tell that from a check that passed.
     """
@@ -914,16 +924,16 @@ def test_check_ids_matches_what_run_checks_actually_produces() -> None:
         for stage in stages:
             produced = [check.check_id for check in run_checks(design, stage=stage)]
             assert len(produced) == len(set(produced))
-            assert set(produced) == set(check_ids())
-            assert produced == list(check_ids())
+            assert set(produced) == set(_check_ids())
+            assert produced == list(_check_ids())
 
 
 def test_run_checks_keeps_its_declared_reading_order() -> None:
     """Unreadable first, then arithmetically wrong, then missing, then merely worth knowing."""
-    assert check_ids()[0] == "is_a_protocol"
-    assert check_ids()[1] == "components_resolve"
-    assert check_ids()[-1] == "coverage_is_stated"
-    assert check_ids().index("charge_is_consistent") < check_ids().index("evidence_present")
+    assert _check_ids()[0] == "is_a_protocol"
+    assert _check_ids()[1] == "components_resolve"
+    assert _check_ids()[-1] == "coverage_is_stated"
+    assert _check_ids().index("charge_is_consistent") < _check_ids().index("evidence_present")
 
 
 def test_blockers_selects_exactly_the_failed_blocking_checks() -> None:

@@ -42,8 +42,14 @@ _UPSERT = """
         END,
         -- Keep the recorded cost when a rewrite does not carry one, so a backfill or a
         -- re-`put` of an existing payload cannot erase what the original miss measured.
-        compute_seconds = COALESCE(EXCLUDED.compute_seconds, calculation_results.compute_seconds),
-        created_at = now()
+        compute_seconds = COALESCE(EXCLUDED.compute_seconds, calculation_results.compute_seconds)
+        -- `created_at` is deliberately not in this list, by the same rule again: the key is
+        -- content-addressed, so a second `put` under it is the *same* calculation being rewritten
+        -- — a backfill, an `ArrayOffloadingStore` rewrite — and `created_at = now()` restamped it
+        -- as newly computed. `find`'s `since`/`until` and its newest-first order then described
+        -- the last write, while `find_calculations` promises "results computed at or after it"
+        -- and D-163 gives the column as "when the value was computed". `InMemoryStore` never
+        -- restamped, so the two backends disagreed as well.
 """
 
 _SELECT = (

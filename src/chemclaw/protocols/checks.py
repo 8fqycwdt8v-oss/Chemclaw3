@@ -961,8 +961,3 @@ def run_checks(design: ExperimentDesign, *, stage: CheckStage = "protocol") -> l
 def blockers(checks: list[ProtocolCheck]) -> list[ProtocolCheck]:
     """The checks that failed at `blocker` severity."""
     return [c for c in checks if c.severity == "blocker" and not c.passed]
-
-
-def check_ids() -> tuple[str, ...]:
-    """Every check id this module produces — what a UI legend and a test enumerate against."""
-    return tuple(check.__name__ for check in _CHECKS)

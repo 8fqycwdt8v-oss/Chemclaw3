@@ -159,8 +159,10 @@ class CalculationKey(BaseModel):
     ) -> "CalculationKey":
         """Construct a key by hashing the inputs and parameters.
 
-        The single place a key is assembled, which is why `CALCULATION_EPOCH` is folded in here:
-        no calculator can be keyed without it, and none has to remember to ask.
+        Not the live path — see the class docstring: every `calc` key in a deployment is assembled
+        by `connectors.calc.remote.remote_key` from the four parts the calculation server returns,
+        which folds `CALCULATION_EPOCH` in there. This is the fold the suite can exercise, and the
+        two are separate code: a new way of assembling a key is a new place to fold the epoch.
         """
         return cls(
             calc_type=calc_type,

@@ -54,6 +54,7 @@ is a list of what upstream declared the week it was written.
 
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -194,11 +195,22 @@ class NarrowedSkillsBackend(FilesystemBackend):
         return super().read(file_path, offset, limit)
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
-        """Match files, dropping every hit outside a permitted skill."""
+        """Match files, dropping every hit outside a permitted skill.
+
+        **Narrowed with `replace`, not rebuilt.** `GlobResult` carries `truncated` beside `error`
+        and `matches` — upstream sets it when the walk's wall-clock budget expired — and a rebuild
+        naming two of the three fields reset it to `False`, so a partial walk was reported to the
+        model as the whole tree. That is the defect this repository names elsewhere: `NoteSearch`
+        carries `total_matches`/`widened` because "a capped list with no marker reads as the whole
+        corpus" (D-066 #4). `replace` also carries whatever field upstream adds next, which is the
+        argument `tool_framing._rewritten_block` makes for a content block's other keys — and this
+        gate only ever *removes* from the list, so nothing it does can make a complete result
+        partial or the reverse.
+        """
         result = super().glob(pattern, path)
         if not result.matches:
             return result
-        return GlobResult(error=result.error, matches=self._permitted(result.matches))
+        return replace(result, matches=self._permitted(result.matches))
 
     def grep(
         self,
@@ -216,12 +228,17 @@ class NarrowedSkillsBackend(FilesystemBackend):
         push the cap down to the backend or apply it itself, so an override that quietly dropped
         them would change how many matches a caller gets depending on which class is underneath.
         Filtering after the fact is still correct with a cap in play — `max_count` bounds what the
-        tree returns, and this gate only ever removes from that.
+        tree returns, and this gate only ever removes from that. But *saying* the cap fired is a
+        separate obligation, and the rebuild this used to do dropped it: measured, a base backend
+        answering `truncated=True` over two of five matches came back from here `truncated=False`,
+        and `_format_grep_tool_result` appends its truncation note only when the flag is set. So the
+        model read a cut match list as the complete one. `replace` carries it, for the reason
+        `glob` above spells out.
         """
         result = super().grep(pattern, path, glob, max_count=max_count, context_lines=context_lines)
         if not result.matches:
             return result
-        return GrepResult(error=result.error, matches=self._permitted(result.matches))
+        return replace(result, matches=self._permitted(result.matches))
 
     def _permitted(self, hits: list[Any]) -> list[Any]:
         """The hits naming a path this turn may reach."""
@@ -289,9 +306,3 @@ def _path_of(hit: Any) -> str:
 # Pinned against the prompt by `tests/test_skill_backend.py` rather than trusted, for the reason
 # D-117 gives: a name space that drifts silently is one every validator built on it then gets wrong.
 SKILL_READ_TOOL = "read_file"
-
-# What the prompt asks for, and the reason it does: SKILL.md bodies are long, and deepagents' own
-# instruction is to "pass limit=1000 since the default of 100 lines is too small for most skill
-# files". The default lives here rather than in the model's hands so a skill is not silently
-# truncated when the model forgets.
-_SKILL_READ_LIMIT = 1000

@@ -74,10 +74,11 @@ class ToolCall:
 
     `fragments` is the knob that matters. The OpenAI Responses client emits every
     `response.function_call_arguments.delta` carrying *both* the name and a non-empty argument
-    fragment, and `api/runner_trace.py::ToolCallTrace.feed` treats "name and arguments" as a whole,
-    non-streamed call — so N fragments may well produce N `ToolCallEvent`s each holding a partial
-    document rather than one holding the reassembled JSON. That is a hypothesis, not a finding;
-    this field is how the storm settles it by measurement.
+    fragment, which is the shape that once made the front door announce N `ToolCallEvent`s for one
+    call, each holding a partial argument document. Nothing reassembles fragments any more — the
+    graph hands a finished tool call over on its `updates` stream and `api/graph_stream.py`
+    deliberately does not read the fragmented chunks — so this field now exercises the *client*
+    against a real streamed call rather than a reassembler downstream of it.
     """
 
     tool: str

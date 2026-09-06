@@ -65,12 +65,6 @@ from chemclaw.evals.probe import Probe
 # arbitrary, and a rule like "skip anything without a dash" would silently drop a real probe.
 _NOT_TRANSCRIPTS = frozenset({"grades.json", "evidence.json", "summary.md"})
 
-# What one probe's turn is recorded as having cost when the outcome carries no latency. Phoenix
-# requires a start and an end on every run, and refusing to publish a probe for want of a duration
-# would drop exactly the failed turns most worth looking at — a transport error is the case where
-# `latency_seconds` is most likely missing and least likely irrelevant.
-_UNKNOWN_DURATION = timedelta(0)
-
 
 @dataclass(frozen=True)
 class PublishedRun:
@@ -195,6 +189,8 @@ def _evaluations(
     collapsing it "mislabelled 65 of 190 probes and inflated the headline unserved rate from at
     most 22 to 87", and `evals.live.degradation_findings` already guards on `probe.expects_tools`.
     The distinction survived in the labels and died in the numbers everything is compared on.
+    A third was found later, on `failed_loudly`, where the guard and the value disagreed in both
+    directions at once — the comment beside that row says what it published and what it now does.
     """
     if outcome.expected_tools_met is not None:
         yield {
@@ -220,13 +216,26 @@ def _evaluations(
     }
     # A failure the chemist can see is a different outcome from a failure they cannot, which is why
     # `failed_loudly` is recorded rather than folded into `answered`.
-    if outcome.error_code or outcome.transport_error:
+    #
+    # **The guard and the value disagreed on both edges, and each edge published a number nobody
+    # measured.** `failed_loudly` is `tools_failed or error_code`, and the row was gated on
+    # `error_code or transport_error`: a turn whose tools fell over with no `error` event was
+    # `True` and published *nothing*, so the aggregate excluded exactly the runs it counts; and a
+    # turn that died in transport was `False` and published **0.0** — "this run did not fail
+    # loudly" — under the label `transport_error`. Every observed turn publishes the flag now, so
+    # the aggregate is the run's loud-failure *rate* rather than a constant 1.0 over the turns that
+    # happened to carry an error code.
+    #
+    # A transport death publishes no row at all, by the rule this function's docstring already
+    # states: the stream broke, so whether the system announced its own failure is a thing this run
+    # did not observe. It is not lost — `publish_run` stamps the run itself with `error=`.
+    if outcome.transport_error is None:
         yield {
             "name": "failed_loudly",
             "annotator_kind": "CODE",
             "score": 1.0 if outcome.failed_loudly else 0.0,
-            "label": outcome.error_code or "transport_error",
-            "explanation": outcome.transport_error,
+            "label": outcome.error_code or ("tool_failed" if outcome.tools_failed else "clean"),
+            "explanation": ", ".join(outcome.tools_failed) or None,
         }
     if judgement is not None:
         verdict = str(judgement.get("verdict", "ungraded"))
@@ -249,13 +258,13 @@ def _window(outcome: ProbeOutcome, at: datetime) -> tuple[datetime, datetime]:
     The transcripts hold a duration and no wall-clock, so the caller supplies the anchor. That is
     stated rather than hidden: an archived run's runs are stamped at publish time, and the number
     that carries meaning is the *span*, not the instant.
+
+    There is no "unknown duration" arm, and the one that stood here protected nothing:
+    `ProbeOutcome.latency_seconds` is a required `float` defaulting to `0.0`, which pydantic
+    refuses to make `None`, so the guard was always true and the zero-width window it fell back to
+    is the one a turn with no latency already produces.
     """
-    duration = (
-        timedelta(seconds=outcome.latency_seconds)
-        if outcome.latency_seconds is not None
-        else _UNKNOWN_DURATION
-    )
-    return at, at + duration
+    return at, at + timedelta(seconds=outcome.latency_seconds)
 
 
 def publish_corpus(

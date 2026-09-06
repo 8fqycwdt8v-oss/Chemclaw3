@@ -447,17 +447,27 @@ class ExperimentDesign(BaseModel):
     #
     # **The cost at that ceiling is a diff time, not a byte count, and this comment used to quote a
     # byte count as though the ceilings fixed it.** They do not: they bound *counts*, and the free
-    # text inside those counts is bounded only by the body cap. Measured at 1536 arms with every
-    # count at its own ceiling, varying only how full the notes and rationales are:
+    # text inside those counts is bounded only by the body cap. Re-measured with every count
+    # actually at its ceiling — 50 factors x 96 levels, 1536 arms, 500 charge lines — varying only
+    # how full the notes and rationales are, over a diff of one edited field:
     #
-    #     empty free text     482 KB   diff 0.329 s
-    #     short notes         572 KB   diff 0.278 s
-    #     long notes         1382 KB   diff 0.282 s
+    #     empty free text    1618 KB   105,869 paths   diff 0.18 s
+    #     short notes        1748 KB   105,869 paths   diff 0.19 s
+    #     long notes         4464 KB   105,869 paths   diff 0.18 s   (past the 4 MB body cap)
     #
     # So the diff time is flat in the bytes and set by the path count — which is the measurement
-    # that says these ceilings, and not the body cap, are what bound the cost. The single figure
-    # that stood here (414 KB, 0.060 s) was one sample of a two-variable space quoted as a
-    # constant, and it was low on both axes.
+    # that says these ceilings, and not the body cap, are what bound the cost.
+    #
+    # **The three rows that stood here (482/572/1382 KB, ~0.3 s) were not that shape, and the
+    # sentence above them said they were.** The emptiest legal design with every count at its
+    # ceiling is 1.6 MB, so 482 KB was measured with something well below one of them — and at the
+    # real ceilings the diff cost **1.67 s**, not 0.33 s: one authenticated request holding the
+    # pod's only event loop for most of two seconds, inside every declared bound, which is the
+    # stall this paragraph claims to have closed. What brought it to 0.18 s was `diff_designs`
+    # ordering only the paths that *differ* rather than every path in the document; these ceilings
+    # bound the count being ordered, and the two together are the control. The single figure before
+    # those rows (414 KB, 0.060 s) was one sample of a two-variable space quoted as a constant, and
+    # it was low on both axes.
     #
     # **Every collection in this module is bounded, and the comment here used to say otherwise.**
     # It read "what is bounded is the lists a diff keys by an identifier, which are the six in

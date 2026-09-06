@@ -15,7 +15,6 @@ import pytest
 from chemclaw.science.calc.solvents import (
     ALPB_SOLVENTS,
     SUGGESTED_SOLVENTS,
-    is_supported,
     require_supported_solvents,
     unsupported,
 )
@@ -113,10 +112,15 @@ def test_the_suggested_shortlist_only_names_supported_solvents() -> None:
 
 
 def test_a_name_is_matched_case_insensitively_and_trimmed() -> None:
-    """Matching is tblite's way, so a stricter check here would refuse a name the method takes."""
-    assert is_supported("THF")
-    assert is_supported(" Water ")
-    assert not is_supported("2-MeTHF")
+    """Matching is tblite's way, so a stricter check here would refuse a name the method takes.
+
+    Asserted through `unsupported`, which is the path a launch precondition takes. It used to be
+    asserted through `is_supported`, a one-line public wrapper over the same membership test whose
+    only caller was this test — `unsupported` spelled the test inline rather than calling it — so
+    the function was dead and duplicated at once, and the property it stood for is `_normalize`'s.
+    """
+    assert unsupported(["THF", " Water "]) == []
+    assert unsupported(["2-MeTHF"]) == ["2-MeTHF"]
 
 
 def test_a_solvent_screen_naming_an_unparameterized_solvent_is_refused_at_launch() -> None:

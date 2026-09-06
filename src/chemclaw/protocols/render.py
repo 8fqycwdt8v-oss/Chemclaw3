@@ -232,10 +232,18 @@ def summarise(design: ExperimentDesign, checks: list[ProtocolCheck]) -> str:
         shape = "the structured ask, no procedure yet"
     elif design.is_single_experiment:
         # **The design, not the ask.** This branched on `request.mode`, so a 4-arm 2-factor plate
-        # whose ask still said `single` summarised as "1 experiment". `== 1` rather than `<= 1`:
-        # the first rewrite swallowed the zero-arm case too and described a body with no arms
-        # declared as one experiment, which is a count nobody wrote.
-        shape = "1 experiment"
+        # whose ask still said `single` summarised as "1 experiment".
+        #
+        # **And a body with no arms declared is not one experiment either.** `summarise` spelled
+        # this condition out as `== 1` for exactly that reason; consolidating the four hand-written
+        # copies onto `ExperimentDesign.is_single_experiment` (D-2026-08-30) put a `<= 1` in its
+        # place and swallowed the zero-arm case a second time — a charge table and a procedure with
+        # no arm declared reported "1 experiment", a count nobody wrote, on the one sentence
+        # `ProtocolReceipt.summary` exists so a model can quote it without re-reading the design.
+        # The predicate stays `<= 1`, which is right for the check exemptions it also drives; the
+        # distinction belongs here, where the number is being *reported* rather than used to decide
+        # that a comparison would be meaningless.
+        shape = "1 experiment" if design.distinct_arms else "a procedure with no arms declared"
         # The runs are not lost with the word: a triplicate is one experiment and three arms, and
         # a summary saying only "1 experiment" would hide two of them.
         if len(design.arms) > 1:

@@ -280,12 +280,13 @@ def percentiles(results: Sequence[TurnResult]) -> tuple[float, float]:
 async def family_c_shapes() -> list[Finding]:
     """C · the same call delivered whole, fragmented, and in parallel.
 
-    The hypothesis, from reading `api/runner_trace.py` against the Responses client rather than
-    from running it: every `response.function_call_arguments.delta` carries **both** the name and a
-    non-empty fragment, and `ToolCallTrace.feed` treats "name and arguments" as a complete,
-    non-streamed call — so it overwrites the accumulated fragments and flushes immediately. If that
-    is right, an 8-fragment call emits 8 `tool_call` events each holding a partial document, rather
-    than one holding the reassembled JSON.
+    The hypothesis, from reading the stream path against the Responses client rather than from
+    running it: every `response.function_call_arguments.delta` carries **both** the name and a
+    non-empty fragment, so a reader treating "name and arguments" as a complete, non-streamed call
+    overwrites the accumulated fragments and emits immediately. If that is right, an 8-fragment call
+    emits 8 `tool_call` events each holding a partial document, rather than one holding the whole
+    JSON. (The chunk reassembler this was first written against is gone — it was measured to be
+    unreachable — so what is under test is what `graph_stream` itself puts on the wire.)
 
     One event per call id is correct. Anything else is the defect, and this is the measurement that
     decides which — the `openai_compatible` path has never been exercised live.

@@ -152,7 +152,7 @@ def _worker(client: Client, projection: _Projection) -> Worker:
         )
         return True
 
-    async def remind_activity(request_id: str) -> None:
+    async def remind_activity(request_id: str, count: int = 0) -> None:
         projection.reminders.append(request_id)
 
     async def notify_activity(payload: object) -> None:
@@ -490,7 +490,7 @@ def test_a_wait_started_as_a_child_settles_when_its_parent_dies() -> None:
         """Registered because the wait calls it, and not recorded because it is not asserted."""
         return True
 
-    async def _remind(request_id: str) -> None: ...
+    async def _remind(request_id: str, count: int = 0) -> None: ...
 
     async def _notify(payload: object) -> None: ...
 

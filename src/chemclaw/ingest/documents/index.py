@@ -788,7 +788,7 @@ class PostgresDocumentIndex:
             "(doc_id, ordinal, content, coordinate, embedding, lexeme, embedding_key, "
             "chunking_key) "
             f"VALUES (%(doc)s, %(ord)s, %(content)s, %(coord)s, %(emb)s::vector({width}), "
-            "to_tsvector('english', %(content)s), %(key)s, %(chunking)s) "
+            "to_tsvector('english', %(search)s), %(key)s, %(chunking)s) "
             "ON CONFLICT (doc_id, chunking_key, ordinal) DO UPDATE SET "
             "content = EXCLUDED.content, coordinate = EXCLUDED.coordinate, "
             "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme, "
@@ -992,8 +992,17 @@ class PostgresDocumentIndex:
                     {
                         "doc": chunk.doc_id,
                         "ord": chunk.ordinal,
-                        # Normalised on the way in, exactly as the query is on the way out.
-                        "content": normalize_search_text(chunk.content),
+                        # The document's own text, byte for byte: `content` is what a reader
+                        # gets back — the excerpt a chemist cites, a whole SOP read through
+                        # `stored_document`, the text `reembed_stale` re-embeds. Only the
+                        # *derivation* is normalised, on the next line.
+                        "content": chunk.content,
+                        # Normalised on the way in, exactly as the query is on the way out:
+                        # `chemclaw.core.fulltext` owns that rule and both sides must apply it.
+                        # Bound separately from `content` because the rule detaches a sign from
+                        # the number it precedes, which is right for a lexeme and destructive for
+                        # stored prose — one parameter for both served `-78 °C` as ` 78 °C`.
+                        "search": normalize_search_text(chunk.content),
                         "coord": chunk.coordinate,
                         "emb": self._chunk_vector(chunk),
                         "key": key,

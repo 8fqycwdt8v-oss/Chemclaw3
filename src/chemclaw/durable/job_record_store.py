@@ -10,9 +10,10 @@ Writes are an **upsert on `job_id`**, not an append. The id is the deterministic
 failed job legitimately produces a second, better result for the same id — so "the record of this
 run" must have exactly one row in all three cases.
 
-**Two upserts, because a failure record and a result record do not carry the same facts.** A
-completed record refreshes every mutable column; a failed one refreshes only the columns
-`failed_job_record` actually fills, and never clears the five that describe what a run *produced*.
+**Two upserts, because a record with nothing to say about a result must not say it loudly enough
+to erase one.** A completed record refreshes every mutable column; so does a failed one that
+carries a result of its own (a template run keeps the steps that did complete). A failed record
+that leaves all five result columns empty refreshes only the rest, and never clears them.
 Measured on 2026-08-28 against a live database: writing a failure record over the completed row
 for one job id turned
 `{'summary': 'dG = -12.3 kJ/mol', 'result': {'dg': -12.3}, 'note_id': 'note-1',
@@ -22,10 +23,10 @@ result of a finished run destroyed by the bookkeeping of the step that failed af
 reachable whenever the record activity commits and then overruns its own timeout (`record_job`'s
 docstring names exactly that case), because the workflow then believes no row was written.
 
-The asymmetry is the point rather than an omission: a *completed* record is the whole account of a
-run and replaces the row entire, which is what lets a re-run of a failed job supersede it. A
-*failed* record is an account of how a run ended, and it has nothing to say about a result — so it
-says nothing, instead of saying nothing loudly enough to erase one.
+The asymmetry is the point rather than an omission: a record that is the whole account of a run
+replaces the row entire, which is what lets a re-run of a failed job supersede it. A record that
+has nothing to say about a result says nothing, instead of saying nothing loudly enough to erase
+one. Which of the two a failure is depends on the failure — see `_says_nothing_about_a_result`.
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -70,12 +71,31 @@ _MUTABLE = (
     "failure_reason",
 )
 
-# The five columns that say what a run *produced*. `failed_job_record` fills none of them — a
-# failure has no envelope to take one from — so a failure write must leave whatever is already
-# there rather than refreshing five empties over it. Named once and subtracted, so a new result
+# The five columns that say what a run *produced*. Named once and subtracted, so a new result
 # column is protected by being added here instead of by remembering to omit it from a second SQL
 # literal.
 _RESULT_COLUMNS = ("summary", "result", "note_id", "calc_refs", "payload_kind")
+
+
+def _says_nothing_about_a_result(record: JobRecord) -> bool:
+    """Whether this record leaves every result column empty, and so must not clear one.
+
+    **The property is the record's, not its state's, and reading it as the state's reopened the
+    self-contradicting row `_MUTABLE` above was fixed to close.** `connector_job.failed_job_record`
+    fills none of these — a failure has no envelope to take one from — which is where the
+    protection below comes from. `template_job.failed_template_record` fills `result` and
+    `payload_kind`, deliberately and with its own docstring saying why: "a five-step procedure that
+    died at step four ran four real steps, and discarding them would lose the work." Choosing the
+    narrow upsert on `state == "failed"` refused to write those, and `TemplateWorkflow` launches
+    under `ALLOW_DUPLICATE_FAILED_ONLY`, so a re-run of a failed template is the ordinary case.
+    Measured against the live database: a second failed run kept the *first* run's step results
+    beside the second run's payload, actor and failing step — a row saying bob failed at step `a`
+    while carrying results for steps `a` and `b` that his run never produced, read back by
+    `find_past_jobs`, `operations.job_activity` and `evidence_pack.assemble` alike.
+    """
+    return not (
+        record.summary or record.result or record.note_id or record.calc_refs or record.payload_kind
+    )
 
 
 def _upsert(columns: tuple[str, ...]) -> str:
@@ -92,7 +112,10 @@ def _upsert(columns: tuple[str, ...]) -> str:
 
 
 _UPSERT = _upsert(_MUTABLE)
-_FAIL_UPSERT = _upsert(tuple(c for c in _MUTABLE if c not in _RESULT_COLUMNS))
+# Named for what it does rather than for who calls it: it was `_FAIL_UPSERT`, and reading
+# "the failure statement" as "the statement every failure takes" is what put a template
+# run's own steps behind it.
+_KEEP_RESULT_UPSERT = _upsert(tuple(c for c in _MUTABLE if c not in _RESULT_COLUMNS))
 
 _SELECT_ONE = f"SELECT {_COLUMNS}, completed_at FROM job_records WHERE job_id = %s"
 
@@ -141,14 +164,16 @@ class PostgresJobRecordSink:
     """Writes each finished job's record to `job_records`, one connection per record."""
 
     async def record(self, record: JobRecord) -> None:
-        """Insert the record, refreshing what this kind of record is entitled to refresh.
+        """Insert the record, refreshing what this particular record is entitled to refresh.
 
-        A completed record replaces the row entire; a failed one sets how the run ended and leaves
-        the result columns alone. See the module docstring for the measurement behind the split.
+        A record carrying a result replaces the row entire; a failure that carries none sets how
+        the run ended and leaves the result columns alone. See the module docstring for the
+        measurement behind the split, and `_says_nothing_about_a_result` for why the test is the
+        record rather than its state.
         """
         async with _connect() as conn:
             await conn.execute(
-                _FAIL_UPSERT if record.state == "failed" else _UPSERT,
+                _KEEP_RESULT_UPSERT if _says_nothing_about_a_result(record) else _UPSERT,
                 (
                     record.job_id,
                     record.connector,

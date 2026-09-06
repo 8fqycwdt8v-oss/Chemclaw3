@@ -102,6 +102,16 @@ class RootBinding(BaseModel):
         return self
 
 
+# The version of the rule that decides what a stored chunk's `content` holds, folded into
+# `chunking_key` so a change to it re-reads and re-cuts every already-indexed document. Bump it
+# whenever the text a fresh index would store differs from the text an existing row holds — the
+# lever `chemclaw.retrieval.vector_index._NOTE_TEXT_VERSION` is for notes, and for the same reason:
+# a fix to the write path reaches a deployment's own corpus only when its rows are rewritten.
+# `ctv2` is the commit that stopped `PostgresDocumentIndex.upsert` binding one normalised string to
+# both `content` and the tsvector, which stored, served and read back `-78 °C` as ` 78 °C`.
+_CHUNK_TEXT_VERSION = "ctv2"
+
+
 class DocumentShareBinding(BaseModel):
     """Everything about one mounted share: where it is, what to read, and who may read it."""
 
@@ -162,8 +172,13 @@ class DocumentShareBinding(BaseModel):
         change here has to re-read the file *and* re-chunk it, and neither gate can see one from the
         other's side. Defined on the binding because the binding is where these two numbers live;
         one definition, so the file rows and the chunk rows cannot be written under two spellings.
+
+        `_CHUNK_TEXT_VERSION` rides along for the same reason it does in
+        `chemclaw.retrieval.vector_index`: what a stored row holds is decided by the rule that
+        wrote it as much as by the boundaries that cut it, and only a key change makes an existing
+        deployment re-read its own share.
         """
-        return f"{self.chunk_chars}:{self.chunk_overlap_chars}"
+        return f"{self.chunk_chars}:{self.chunk_overlap_chars}:{_CHUNK_TEXT_VERSION}"
 
     @model_validator(mode="after")
     def _is_coherent(self) -> Self:

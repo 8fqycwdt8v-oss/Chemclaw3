@@ -93,11 +93,15 @@ def rows_for(
                 }
             )
         if member.structure_id:
+            # The address, its compound and its electronic state — no coordinates, no atom count.
+            # Both were columns until `002_structure_loses_the_columns_no_writer_fills.sql`: this
+            # builder and the conformer one below are the table's only writers and neither has
+            # either fact, so both hardcoded `0` and `{}` and every published geometry was recorded
+            # as having no atoms. The coordinates ride in `calculation_payload`, whole.
             structures.append(
                 {
                     "structure_id": member.structure_id,
                     "compound_id": member.compound_id or None,
-                    "atom_count": 0,
                     # **Never fabricated.** These were `or 0` and `or 1` while no projector set
                     # either, so every anion and every radical this writer published was recorded
                     # as a neutral closed-shell singlet — and the values are not unknowable: they
@@ -107,7 +111,6 @@ def rows_for(
                     "charge": member.charge,
                     "multiplicity": member.multiplicity,
                     "origin_calc_ref": "",
-                    "geometry": {},
                     "created_at": now,
                 }
             )
@@ -132,11 +135,9 @@ def rows_for(
             {
                 "structure_id": conformer.structure_id,
                 "compound_id": (record.subject.members[0].compound_id or None),
-                "atom_count": 0,
                 "charge": conformer.charge,
                 "multiplicity": conformer.multiplicity,
                 "origin_calc_ref": record.calc_ref,
-                "geometry": {},
                 "created_at": now,
             }
         )
@@ -381,8 +382,6 @@ PRESERVE_ON_BLANK: dict[str, tuple[str, ...]] = {
     "structure": (
         "origin_calc_ref",
         "compound_id",
-        "atom_count",
-        "geometry",
         "charge",
         "multiplicity",
     ),
@@ -412,16 +411,14 @@ TABLE_ORDER: tuple[str, ...] = (
 
 
 # What "the writer did not know" looks like per column, for `PRESERVE_ON_BLANK`. Typed, because
-# `NULLIF` compares values: an empty string is not a blank integer and neither is an empty object.
+# `NULLIF` compares values: an empty string is not a blank integer.
 _BLANKS: dict[str, str] = {
     "origin_calc_ref": "''",
     "compound_id": "''",
-    "atom_count": "0",
-    "geometry": "'{}'::jsonb",
     # `NULLIF(x, NULL)` is `x` (the comparison is NULL, so the CASE takes its ELSE branch), and
     # `NULLIF(NULL, NULL)` is NULL — so the generated `COALESCE(NULLIF(EXCLUDED.charge, NULL),
     # structure.charge)` keeps a stated value and leaves the stored one alone when nothing was
-    # stated. Spelled through the same generator as the other four rather than special-cased.
+    # stated. Spelled through the same generator as the other two rather than special-cased.
     "charge": "NULL",
     "multiplicity": "NULL",
 }

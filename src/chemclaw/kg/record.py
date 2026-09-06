@@ -31,7 +31,7 @@ from chemclaw.kg.render import render_note
 
 
 class NoteFile(BaseModel):
-    """One file a write puts on disk: where it goes, what it contains, and whether it may replace.
+    """One file a write puts on disk: where it goes, what it contains, and how it may replace.
 
     `overwrite=False` marks a *dependency* — a file included so the subject note's links resolve,
     re-rendered from source data on every write that touches it. Such a file is written only when
@@ -39,6 +39,13 @@ class NoteFile(BaseModel):
     before, so writing it is normally a no-op, but the moment a human has edited the copy on disk
     (hazard prose on a compound note, a tag) an unconditional write silently reverts their edit.
     The subject note keeps the default — replacing it is what a re-write *is*.
+
+    `amendment=True` marks a *retirement* — an existing note rewritten in place with its validity
+    window closed. It is a second, independent question from `overwrite`, and it exists because
+    the answers differ over a note a **human** wrote: the writer refuses the subject outright
+    (writing an agent note over a curated one at the same id is forgery), and leaves an amendment
+    alone (the person's file is untouched and the *new* note still lands). Before the split, one
+    curated file made the whole unit fail — see `git_writer._refuse_to_clobber_a_person`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -46,6 +53,7 @@ class NoteFile(BaseModel):
     path: str
     content: str
     overwrite: bool = True
+    amendment: bool = False
 
 
 # What a commit subject may contain, checked here rather than at the subprocess: `git_writer._git`
@@ -106,12 +114,15 @@ class NoteWriter(Protocol):
         ...
 
 
-def _note_file(note: Note, directory: str, *, overwrite: bool = True) -> NoteFile:
+def _note_file(
+    note: Note, directory: str, *, overwrite: bool = True, amendment: bool = False
+) -> NoteFile:
     """Where one note lands in the knowledge tree, and what is written there."""
     return NoteFile(
         path=f"{directory}/{note_relative_path(note.type, note.id)}",
         content=render_note(note),
         overwrite=overwrite,
+        amendment=amendment,
     )
 
 
@@ -152,12 +163,14 @@ def _build_write(
         files.append(_note_file(dependency, directory, overwrite=False))
     files.append(_note_file(note, directory))
     # Retirements *do* overwrite: each is the file's own content (human edits included) with
-    # `valid_to` closed and the successor named, and rewriting that copy is the point.
+    # `valid_to` closed and the successor named, and rewriting that copy is the point. They are
+    # also the only files marked `amendment`, which is what keeps a retirement the writer may not
+    # make from taking the subject note down with it.
     for retired in superseded or ():
         if retired.id in seen:
             continue
         seen.add(retired.id)
-        files.append(_note_file(retired, directory))
+        files.append(_note_file(retired, directory, amendment=True))
 
     extra = f" with {len(files) - 1} supporting note(s)" if len(files) > 1 else ""
     return NoteWrite(files=files, message=f"Add {note.type} note: {note.id}{extra}")
@@ -186,6 +199,11 @@ async def record_note(
         knowledge_dir: Override the configured notes directory.
         dependencies: Notes to write first so its links resolve.
         superseded: Retired copies of notes this one replaces; written last, and overwritten.
+            A retirement of a note a **human** wrote is left alone rather than made — the writer
+            may not close a curated note's validity window in place — and the subject note lands
+            regardless, marking the untouched note as contradicted. That is a WARNING in the
+            writer's log and nothing this function returns: what a caller is handed is the
+            reference for what landed.
 
     Returns:
         The writer's reference for what landed — a commit, or the unchanged tree.

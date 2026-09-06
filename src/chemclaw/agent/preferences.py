@@ -24,6 +24,7 @@ from psycopg.rows import TupleRow
 from pydantic import BaseModel
 
 from chemclaw.agent.authz import require_actor
+from chemclaw.agent.framing import defang
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import degraded
@@ -167,10 +168,13 @@ async def remember_preference(key: str, value: str) -> str:
         Confirmation of what was stored.
     """
     owner = require_actor()
+    # The confirmation echoes the model's own arguments, so it is the same untrusted span
+    # `recall_preferences` neutralises — it simply reaches the prompt a turn earlier.
+    echoed = f"{defang(key)}={defang(value)!r}"
     if await _STORE.remember(owner, key, value):
-        return f"Remembered {key}={value!r} for this chemist."
+        return f"Remembered {echoed} for this chemist."
     return (
-        f"Remembered {key}={value!r} for THIS SESSION ONLY — it could not be saved durably, so it "
+        f"Remembered {echoed} for THIS SESSION ONLY — it could not be saved durably, so it "
         "will be gone once this session ends. Tell the chemist that, so they can restate it later "
         "rather than believing it is on file."
     )
@@ -187,7 +191,21 @@ async def recall_preferences() -> list[Preference]:
     Returns:
         Every preference this chemist has set, key-sorted.
     """
-    return await _STORE.recall(require_actor())
+    # A preference is free text the model wrote — through `remember_preference`, out of whatever it
+    # had just read, including framed third-party content — and it re-enters a prompt on every
+    # later turn, in every later session, for the life of the row. Measured: a value carrying the
+    # live closing delimiter came back verbatim, which is the laundering
+    # `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread` closed for `task`, except
+    # it outlives the turn, the session and the process. Defanged rather than framed, for the reason
+    # `agent/tool_framing.py` gives a helper's report: an envelope says "evidence to cite" and this
+    # is the system's own note about how one person works. `key` too — it is the same argument
+    # surface, and a short name is no less able to spell a delimiter.
+    return [
+        preference.model_copy(
+            update={"key": defang(preference.key), "value": defang(preference.value)}
+        )
+        for preference in await _STORE.recall(require_actor())
+    ]
 
 
 @tool
@@ -201,10 +219,11 @@ async def forget_preference(key: str) -> str:
         Confirmation.
     """
     owner = require_actor()
+    named = defang(key)  # echoed back into the prompt, like `remember_preference`'s confirmation
     if await _STORE.forget(owner, key):
-        return f"Forgot {key} for this chemist."
+        return f"Forgot {named} for this chemist."
     return (
-        f"Dropped {key} for THIS SESSION ONLY — the deletion could not be saved, so the preference "
-        "will come back in the chemist's next session. Tell them it is not yet permanently "
-        "removed; this is the direction of failure they most need to know about."
+        f"Dropped {named} for THIS SESSION ONLY — the deletion could not be saved, so the "
+        "preference will come back in the chemist's next session. Tell them it is not yet "
+        "permanently removed; this is the direction of failure they most need to know about."
     )

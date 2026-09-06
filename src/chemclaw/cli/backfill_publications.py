@@ -39,8 +39,12 @@ async def _run(args: argparse.Namespace) -> int:
         return 1
 
     if args.requeue:
-        reset = await requeue_failed()
-        logger.info("returned %d retired publication(s) to the queue", reset)
+        reset = await requeue_failed(dry_run=args.dry_run)
+        logger.info(
+            "%d retired publication(s) %s the queue",
+            reset,
+            "would return to" if args.dry_run else "returned to",
+        )
 
     total_queued = 0
     for label, walk in (("calculation cache", backfill_cached), ("job records", backfill_jobs)):

@@ -213,9 +213,23 @@ async def settle_pending_request_activity(payload: _SettleInput) -> bool:
 
 @durable_activity("background")
 @activity.defn
-async def record_reminder_activity(request_id: str) -> None:
-    """Count one escalation against a still-open request."""
-    await pending_store.record_reminder(request_id)
+async def record_reminder_activity(request_id: str, count: int = 0) -> None:
+    """Record the asking workflow's escalation count against a still-open request.
+
+    The count travels rather than being derived here, because a Temporal activity is at-least-once
+    and `reminders = reminders + 1` therefore counts one escalation twice whenever an execution
+    commits and its completion report is lost. `pending_store._REMIND` carries the measurement and
+    the `GREATEST` that makes a redelivery a no-op.
+
+    **`count` has a default only for the wire, and the default is safe because the value is a
+    total.** A task scheduled by a worker that predates this parameter and started by one that does
+    not would fail to decode, and this activity is dispatched without a `try` inside
+    `AwaitAnswerWorkflow`, so a redeploy landing in that window would fail the whole wait — a
+    question abandoned to fix a miscount. With the default, that one tick records no count and the
+    *next* escalation writes the workflow's running total, which catches the row up. An
+    undercount that self-heals is the smaller harm; nothing here treats 0 as an escalation.
+    """
+    await pending_store.record_reminder(request_id, count)
 
 
 @durable_workflow("background")
@@ -355,7 +369,10 @@ class AwaitAnswerWorkflow:
                 self._reminders += 1
                 await workflow.execute_activity(
                     record_reminder_activity,
-                    request_id,
+                    # The workflow's own count, not an instruction to add one: it is rebuilt
+                    # identically on replay, so a redelivered attempt writes the same number twice
+                    # instead of counting the same escalation twice.
+                    args=[request_id, self._reminders],
                     start_to_close_timeout=timedelta(
                         seconds=settings.awaiting_activity_timeout_seconds
                     ),

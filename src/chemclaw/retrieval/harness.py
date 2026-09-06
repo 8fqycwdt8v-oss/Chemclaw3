@@ -189,7 +189,23 @@ async def gather_section(
     The shared sweep also brings what this path never had: a per-source counter, a stream event, and
     the `failed` channel that says which sources could not be asked. Concurrency is preserved (it
     was the reason the original `gather` existed, and `sweep_sources` fans out the same way), and so
-    is argument order, which the fusion downstream treats as load-bearing.
+    is argument order, which decides which leg's chunk represents a note several legs found.
+
+    **The lists are merged rather than concatenated, and this used to concatenate.** Every text
+    retriever excerpts the same note body, so a note any two legs return arrived twice — measured
+    over the committed corpus on `graph,vector,lexical`, the query "yield" produced 24 chunks over
+    13 notes, and `report_note` renders one bullet per chunk: 11 of the 24 bullets in the drafted
+    report repeated a note already cited above them, identical excerpt, identical citation,
+    differing only in a trailing `via graph` / `via vector` / `via lexical`. That is exactly the
+    reading `report_note`'s conflict warning exists to prevent — "two independent confirmations" —
+    reached from the other side, in the one artifact a chemist signs. The conversational path has
+    always deduplicated (`hybrid`'s RRF keys on the note, the round-robin on `(note, content)`), so
+    the two paths disagreed about what "the evidence" is.
+
+    The key is `(note, content)`, which is `_interleave_dedup`'s and for its reason: two genuinely
+    different excerpts of one note are two pieces of evidence and a report has no budget cap to
+    spend on them. What is dropped is only a byte-identical repeat. The order is left alone —
+    fusing here would re-rank a section for a gain the missing dedup is not about.
 
     `retrieval_failed` is now set from *any* failed source rather than from an exception escaping.
     That is the honest reading of what the flag documents — a section a chemist signs must not let
@@ -201,7 +217,15 @@ async def gather_section(
         section.query,
         section.filters,
     )
-    evidence = [chunk for chunks in ranked_lists for chunk in chunks]
+    seen: set[tuple[str, str]] = set()
+    evidence: list[EvidenceChunk] = []
+    for chunks in ranked_lists:
+        for chunk in chunks:
+            key = (chunk.source_note_id, chunk.content)
+            if key in seen:
+                continue
+            seen.add(key)
+            evidence.append(chunk)
     # A skip counts as incompleteness here, deliberately: for the conversational sweep a declined
     # source is an answer the model can relay, but a *report* is signed by a chemist, and a
     # section swept without the share leg (an unentitled service actor, a filter the source

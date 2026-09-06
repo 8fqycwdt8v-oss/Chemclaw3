@@ -20,6 +20,7 @@ reversal, which prose in `DEFERRED.md` could not.
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -233,7 +234,7 @@ def test_attachments_are_bounded_per_session() -> None:
 # --- IDEA-6: corpus backfill ------------------------------------------------------------------
 
 
-def test_a_document_becomes_one_verbatim_pr_gated_note(tmp_path: Path) -> None:
+def test_a_document_becomes_one_verbatim_note(tmp_path: Path) -> None:
     """A backfill makes documents *reachable*; deciding what they mean is not its job.
 
     An LLM-summarized backfill would put thousands of unreviewed paraphrases into the corpus.
@@ -241,7 +242,9 @@ def test_a_document_becomes_one_verbatim_pr_gated_note(tmp_path: Path) -> None:
     path = tmp_path / "sop.md"
     body = b"# Coupling SOP\n\nUse 1.2 equiv DIPEA in 2-MeTHF."
     note = note_for_document(path, body, tags=["PRJ-1"])
-    assert note.created_by == "agent"  # so it must pass the PR-gate
+    # `agent`, which `record_note` requires and D-160 puts on every machine-written note so a
+    # chemist can tell it from curated knowledge at the point of use.
+    assert note.created_by == "agent"
     assert "Use 1.2 equiv DIPEA in 2-MeTHF." in note.body
     assert note.tags == ["PRJ-1"]
     assert note.source == "backfill:sop.md"
@@ -373,3 +376,42 @@ def test_a_measurement_with_no_prediction_survives_and_scores_the_next_one(
     calibration = asyncio.run(_run())
     assert calibration.n == 1, "the measurement was discarded, so the later prediction scored 0"
     assert calibration.bias == pytest.approx(0.5)
+
+
+def test_the_dry_run_help_describes_the_write_the_real_run_makes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The sentence an operator reads while deciding whether the non-dry-run is safe.
+
+    `--dry-run`'s help promised a run that opened "no branch", from the era when a backfill
+    proposed a pull request a human merged. `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
+    deleted that gate: `record_note` commits onto the notes repository's base branch, so a bare
+    `python -m chemclaw.cli.backfill_corpus <dir>` writes one note per document straight into
+    `knowledge/`. Both halves are asserted in one test because the defect is the gap between them —
+    the help was checkable prose about a write path nothing had re-read.
+    """
+    from chemclaw.cli import backfill_corpus
+
+    (tmp_path / "sop.md").write_text("# Coupling SOP\n\nUse 1.2 equiv DIPEA.", encoding="utf-8")
+    recorded: list[str] = []
+
+    async def _record(note: Any, _writer: Any) -> str:
+        recorded.append(note.id)
+        return f"knowledge/{note.id}.md"
+
+    monkeypatch.setattr(backfill_corpus, "default_writer", lambda: object())
+    monkeypatch.setattr(backfill_corpus, "record_note", _record)
+
+    written, skipped = asyncio.run(backfill_corpus.backfill(tmp_path, tags=[], dry_run=False))
+    assert (written, skipped) == (1, 0)
+    assert len(recorded) == 1, "the non-dry-run writes the note; nothing gates it"
+
+    with pytest.raises(SystemExit):
+        backfill_corpus.main(["--help"])
+    help_text = capsys.readouterr().out
+
+    assert "without committing anything" in help_text
+    assert "opening any branch" not in help_text, (
+        "the run commits onto the notes repository's base branch — a --help promising a branch "
+        "for review is the sentence an operator trusts while deciding this is safe"
+    )

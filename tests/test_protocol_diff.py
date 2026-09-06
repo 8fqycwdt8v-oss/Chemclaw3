@@ -9,6 +9,7 @@ If the first half broke, a chemist's plate-map reshuffle would drown every real 
 the second broke, reordering a procedure would be invisible to the miner that reads these paths.
 """
 
+import time
 from typing import Any
 
 from chemclaw.protocols.diff import _reading_order, diff_designs, flatten
@@ -21,6 +22,7 @@ from chemclaw.protocols.models import (
     Factor,
     FactorLevel,
     ProtocolArm,
+    ProtocolBody,
     ProtocolStep,
     ProtocolStepKind,
     Setpoints,
@@ -259,3 +261,73 @@ def test_the_reading_order_is_a_total_order_over_distinct_paths() -> None:
     # A stable sort agrees with itself whatever the key; two *different* input orders agreeing is
     # what says the key separates them rather than leaving it to however the set iterated.
     assert sorted(colliding, key=_reading_order) == sorted(shuffled, key=_reading_order)
+
+
+def _at_the_count_ceilings(equivalents: float) -> ExperimentDesign:
+    """A legal design with every count `ExperimentDesign` bounds at its own ceiling.
+
+    50 factors of 96 levels, 1536 arms, 500 charge lines — 1.6 MB of JSON, inside the 4 MB
+    `service_max_request_bytes` a browser may post to `POST /protocols/{design_id}/revisions`, and
+    105,869 flattened paths. `equivalents` moves exactly one of them.
+    """
+    factors = [
+        Factor(
+            name=f"f{index}",
+            kind="categorical",
+            levels=[FactorLevel(label=f"l{level}") for level in range(96)],
+        )
+        for index in range(50)
+    ]
+    return ExperimentDesign(
+        request=_request(mode="screen"),
+        base=ProtocolBody(
+            charge=[
+                ChargeLine(
+                    component=f"c{index}",
+                    limiting=index == 0,
+                    equivalents=equivalents if index == 1 else 1.0,
+                )
+                for index in range(500)
+            ]
+        ),
+        factors=factors,
+        arms=[
+            ProtocolArm(
+                arm_id=f"A{index}",
+                levels={factor.name: factor.levels[index % 96].label for factor in factors},
+            )
+            for index in range(1536)
+        ],
+    )
+
+
+def test_a_diff_costs_what_the_answer_is_worth_and_not_what_the_document_weighs() -> None:
+    """One edited field at every declared count ceiling, measured against the work it cannot avoid.
+
+    `diff_designs` used to `sorted(set(left) | set(right), key=_reading_order)` — a reading-order
+    key for every path in the *document*, thrown away for all but the handful that moved. Measured
+    at the ceilings, a chemist changing one number cost **1.67 s** of sorting 105,869 paths to
+    report a diff of one, on a loop `service_uvicorn_workers` refuses to run more than one of: every
+    other chemist's SSE stream and both kubelet probes stalled for the whole of it. Ordering only
+    what differs made the same edit **0.18 s**.
+
+    **The bound is a ratio against `flatten`, not a number of seconds**, because the seconds are a
+    property of whatever machine runs this and the claim is not: flattening both documents is the
+    work every diff must do whatever it reports, so the whole call costing a small multiple of it
+    is what says the cost tracks the answer. Measured 1.5x-1.7x here against the 15x the full sort
+    charged.
+    """
+    before = _at_the_count_ceilings(2.0)
+    after = _at_the_count_ceilings(3.0)
+
+    start = time.perf_counter()
+    flatten(before.model_dump(mode="json"))
+    flatten(after.model_dump(mode="json"))
+    unavoidable = time.perf_counter() - start
+
+    start = time.perf_counter()
+    changes = diff_designs(before, after)
+    whole = time.perf_counter() - start
+
+    assert changes.paths == ["base.charge.c1.equivalents"]
+    assert whole < 4 * unavoidable, f"{whole:.3f}s against {unavoidable:.3f}s of flattening"

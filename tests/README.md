@@ -9,8 +9,8 @@ Temporal harnesses (their tests skip when the service is absent — that is why 
 skips and CI does not), `fixtures/` the sample data.
 
 Four modules hold shared **doubles**, and which one you want depends on how much of the engine you
-mean to exercise. `fakes.py` is the streamed-update double `runner_trace` is fed plus the ASGI
-client; `fakes_langgraph.py` is `ScriptedChatModel`, a model that replays a fixed script of tool
+mean to exercise. `fakes.py` is the ASGI client and the model that accepts tool binding;
+`fakes_langgraph.py` is `ScriptedChatModel`, a model that replays a fixed script of tool
 calls and answers, for tests that drive a compiled graph directly; `fakes_turn.py` is
 `ScriptedTurn`, one turn's behaviour written once and injected through `run_turn`'s `graph_factory`
 — the seam a turn is driven through, so a test never needs a model credential; `legacy_rows.py`

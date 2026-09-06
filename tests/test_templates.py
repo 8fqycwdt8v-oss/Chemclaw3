@@ -24,8 +24,13 @@ from typing import Any
 import pytest
 from langchain_core.tools import tool as tool_decorator
 from pydantic import ValidationError
+from temporalio.client import WorkflowExecutionStatus
+from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.service import RPCError, RPCStatusCode
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
+from chemclaw.core.turn_signals import JobSignal
 from chemclaw.templates.manifest import AgentStep, Template
 from chemclaw.templates.registry import (
     TemplateError,
@@ -35,6 +40,7 @@ from chemclaw.templates.registry import (
     tool_name,
 )
 from chemclaw.templates.resolve import UnresolvedReference, resolve
+from tests.signals import collect_signals
 
 _MINIMAL = {
     "summary": "Do the thing.",
@@ -1057,3 +1063,111 @@ def test_the_validator_reports_an_invalid_manifest_as_a_problem_not_a_traceback(
     printed = capsys.readouterr().out
     assert "template validation failed:" in printed
     assert "unknown 'inputs.nosuch'" in printed
+
+
+class _RefusingClient:
+    """A Temporal client whose `start_workflow` fails, and which can describe the run it names.
+
+    Both halves of the launch failure this pins are properties of the *client*, so the fake is one
+    object: `error` is what the start raises, `status` is what a rejoined run describes as.
+    """
+
+    def __init__(self, error: Exception, status: WorkflowExecutionStatus | None = None) -> None:
+        self.error = error
+        self.status = status
+
+    async def start_workflow(self, _run: Any, _arg: Any, **_kwargs: Any) -> Any:
+        raise self.error
+
+    def get_workflow_handle(self, workflow_id: str, **_kwargs: Any) -> Any:
+        status = self.status
+
+        class _Handle:
+            id = workflow_id
+
+            async def describe(self) -> Any:
+                return type("Description", (), {"status": status})()
+
+        return _Handle()
+
+
+def _refusing(monkeypatch: pytest.MonkeyPatch, client: _RefusingClient) -> None:
+    """Point the launcher at `client`, with an actor to attribute the launch to."""
+
+    async def connect() -> _RefusingClient:
+        return client
+
+    monkeypatch.setattr("chemclaw.templates.registry.connect", connect)
+    monkeypatch.setattr("chemclaw.templates.registry.require_actor", lambda: "chemist@lab")
+
+
+def test_relaunching_a_running_template_announces_the_run_it_rejoined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate launch is the idempotency contract succeeding, and it has to be *said*.
+
+    This branch returned the id and told nobody: no `JobSignal` reached the turn, `started_jobs`
+    stayed empty, `agent/job_results.py` had nothing to wait on, and the second chemist to ask for
+    a running template — or the same one re-asking — was told "in progress" with no row that a
+    later `job_completed` could clear. `connectors/jobs.py` documents having fixed exactly this for
+    jobs; the template launcher is that launcher minus the fix.
+    """
+    _refusing(
+        monkeypatch,
+        _RefusingClient(
+            WorkflowAlreadyStartedError("already", "TemplateWorkflow", run_id=None),
+            status=WorkflowExecutionStatus.RUNNING,
+        ),
+    )
+    tool = build_template_tool(_template())
+
+    run_id, signals = asyncio.run(collect_signals(lambda: tool(params={})))
+
+    assert signals == [JobSignal(job_id=run_id, kind="template:probe")]
+
+
+def test_a_rejoined_template_that_is_no_longer_running_is_not_announced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`RUNNING`, not "not completed" — the distinction the announcement rests on.
+
+    A finished, failed or cancelled run will never emit the `job_completed` that clears an
+    announced row, so announcing one would draw a row nothing takes away. The id still comes back:
+    the rejoin succeeded either way.
+    """
+    _refusing(
+        monkeypatch,
+        _RefusingClient(
+            WorkflowAlreadyStartedError("already", "TemplateWorkflow", run_id=None),
+            status=WorkflowExecutionStatus.COMPLETED,
+        ),
+    )
+    tool = build_template_tool(_template())
+
+    run_id, signals = asyncio.run(collect_signals(lambda: tool(params={})))
+
+    assert signals == []
+    assert run_id.startswith("template-probe-")
+
+
+def test_a_broker_fault_at_launch_reaches_the_model_as_a_written_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`connect()` frames an unreachable broker; this is the call *after* it, which did not.
+
+    A queue with no worker, a transient RPC timeout or a serialization error escaped raw, and
+    `agent/tool_authz.surface_domain_errors` classifies an `RPCError` as neither a `ChemclawError`
+    nor a transport failure — so the model was handed `unexpected_error_result()` about a template
+    that may or may not have started. The sibling launcher frames it as a `ConnectorJobError` with
+    the check to run before relaunching, and that is what a template must say too.
+    """
+    _refusing(monkeypatch, _RefusingClient(RPCError("no worker", RPCStatusCode.UNAVAILABLE, b"")))
+    tool = build_template_tool(_template())
+
+    with pytest.raises(TemplateError) as raised:
+        asyncio.run(tool(params={}))
+
+    assert isinstance(raised.value, ChemclawError)
+    assert "get_durable_job_status" in str(raised.value), (
+        "the refusal has to name the check a chemist runs before relaunching"
+    )

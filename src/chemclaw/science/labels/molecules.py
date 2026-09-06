@@ -126,6 +126,13 @@ class CorpusMolecules:
         cannot tell a complete negative from a capped one will report "no precedent exists" for a
         corpus whose one match it never looked at.
 
+        **Truncation is observed rather than inferred, the same way `molfp.search` observes it**:
+        the screen asks for one row past the cap and reports "there were more", because
+        `len(candidates) == limit` cannot tell "there were more" from "that was all of them" and so
+        turned a corpus sitting exactly on the cap into a `PARTIAL: … this is a sample rather than
+        the complete set` verdict over a complete answer. One extra row is the whole cost, and it
+        is dropped before the verify.
+
         **The verify runs off the event loop, under a wall-clock bound, over a bounded query** —
         the three protections `molfp.find_substructure_matches` has always applied to the other
         substructure surface and this one applied none of. It matters more here, not less: `smarts`
@@ -147,14 +154,18 @@ class CorpusMolecules:
         """
         query = compile_query(smarts)
         bits = query_bit_indices(query)
+        # One row past the cap, so truncation is observed rather than inferred.
+        over_cap = limit + 1
         sql, params = (
-            (self._SCREEN, {"bits": bits, "limit": limit})
+            (self._SCREEN, {"bits": bits, "limit": over_cap})
             if bits
-            else (self._ALL, {"limit": limit})
+            else (self._ALL, {"limit": over_cap})
         )
         async with self._connection() as conn, conn.cursor() as cur:
             await cur.execute(sql, params)
-            candidates = [str(row[0]) for row in await cur.fetchall()]
+            probed = [str(row[0]) for row in await cur.fetchall()]
+        truncated = len(probed) > limit
+        candidates = probed[:limit]
         if not bits:
             log.info(
                 "substructure query %r sets no pattern bits, so the screen could not narrow the "
@@ -173,4 +184,4 @@ class CorpusMolecules:
                 f"{len(candidates)} molecule(s); narrow the pattern "
                 "(or raise CHEMCLAW_SUBSTRUCTURE_MATCH_TIMEOUT_SECONDS)"
             ) from exc
-        return verified, len(candidates) == limit
+        return verified, truncated

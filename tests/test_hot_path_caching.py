@@ -60,6 +60,9 @@ def test_connector_probes_share_one_http_client(monkeypatch: pytest.MonkeyPatch)
 
         def __init__(self, name: str) -> None:
             self.name = name
+            # Every manifest is asked about its durable half too, so `jobs` is part of "what the
+            # probe reads" — a real `ConnectorManifest` always has it, defaulted to empty.
+            self.jobs: list[object] = []
             # `tools` is irrelevant to a health probe and may not be empty: an endpoint that
             # declares nothing used to bind whatever a server advertised, unclassified.
             self.endpoint = HttpEndpoint(

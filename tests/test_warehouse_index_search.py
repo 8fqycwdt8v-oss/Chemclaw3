@@ -191,6 +191,27 @@ async def test_a_filtered_search_sends_its_eligibility_before_the_top_k() -> Non
 
 
 @_sync
+async def test_an_empty_filter_value_is_not_a_filter() -> None:
+    """`tag=""` is what a model passes for an optional string it has nothing to say about.
+
+    `gather_evidence` puts `tag` in `filters` whenever it is not `None`, and this asked whether the
+    key was *present* while `sql.vector_predicates` asks whether it is *truthy* — so an empty tag
+    took the scope branch and built a scope query with no predicate in it, enumerating the whole
+    relation. On a corpus large enough to be index-ranked that exceeds the cap and the whole leg
+    fails, telling the operator to narrow a filter the query never carried.
+    """
+    retriever = _retriever(
+        await _store_ranked("ester formation", "RX-1"), filter_columns={"tag": "PROJECT_CODE"}
+    )
+    chunks = await retriever.retrieve("ester formation", {"tag": ""})
+
+    assert [chunk.source_note_id for chunk in chunks] == ["pistachio:RX-1"]
+    assert len(warehouse_fake.NEXT.executed) == 1, (  # type: ignore[union-attr]
+        "an empty filter still cost a scope query"
+    )
+
+
+@_sync
 async def test_a_scope_too_broad_to_send_is_refused_rather_than_truncated() -> None:
     """A silently cut eligibility set is a wrong answer that reads as a thin corpus.
 

@@ -52,6 +52,7 @@ from chemclaw.ingest.eln.ord import (
     Role,
     StepKind,
 )
+from chemclaw.ingest.rejections import record_refusals
 
 logger = logging.getLogger(__name__)
 
@@ -135,9 +136,10 @@ class JsonExportAdapter:
         """Read from the given directory, or the configured `eln_export_dir`.
 
         `name` is the data source this adapter *is*, passed by the registry from the manifest
-        (`ingest/sources/registry.py::_build_ingest_half`). It reaches the two WARNINGs below,
-        which are the only signal an admin gets that a specific export file was dropped — and a
-        deployment running two JSON drop directories got two identical lines naming neither.
+        (`ingest/sources/registry.py::_build_ingest_half`). It names every WARNING below — which
+        are the only signal an admin gets that a specific export file was dropped — and is the
+        rejection ledger's `source`, so two JSON drop directories are two ledgers rather than one
+        bucket each evicting the other's rows.
         """
         self._dir = Path(export_dir if export_dir is not None else settings.eln_export_dir)
         self._source = name or "eln-json"
@@ -149,15 +151,22 @@ class JsonExportAdapter:
         payload, missing/bad timestamp) is skipped, not raised: one broken export file
         must not abort the whole fetch (same skip-and-continue stance as
         `chemclaw.kg.graph.load_notes`). Such a file cannot become a `RawEntry`, so it never reaches
-        the sync report — instead it is logged at WARNING here, the one signal an admin gets
-        that a specific export file was dropped.
+        the sync report — it is logged at WARNING here *and* written to the rejection ledger, on
+        the argument `D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask` makes: nothing
+        downstream can know the file existed, so a chemist asking about the entry it held would
+        otherwise get "I have no such record" rather than the reason.
 
         A file whose payload predates `since` but which *arrived* after it is a late arrival: it
         is filtered out here and on every later run, so it is collected and reported in one
-        aggregated WARNING (`warn_late_arrivals`) instead of vanishing silently.
+        aggregated WARNING (`warn_late_arrivals`) and filed under the same rule, instead of
+        vanishing silently.
         """
         entries: list[RawEntry] = []
         late: list[str] = []
+        # entry id -> why it was refused. A dict, because one file is refused once per fetch and
+        # the ledger is keyed the same way. The file stem is the only id there is for a payload
+        # that never parsed, so nothing in it can be trusted to name the entry.
+        refused: dict[str, str] = {}
         for path in sorted(self._dir.glob("*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -165,6 +174,7 @@ class JsonExportAdapter:
                     logger.warning(
                         "%s: skipping ELN export %s: not a JSON object", self._source, path.name
                     )
+                    refused[path.stem] = f"{path.name} is not a JSON object, so it is not an entry"
                     continue
                 created = _parse_timestamp(payload.get("timestamp"), path)
                 # An in-place amendment keeps `timestamp` and moves this one, so filtering on
@@ -174,6 +184,7 @@ class JsonExportAdapter:
                 logger.warning(
                     "%s: skipping unreadable ELN export %s: %s", self._source, path.name, exc
                 )
+                refused[path.stem] = f"unreadable ELN export {path.name}: {exc}"
                 continue
             if entry_window(created, modified) >= since:
                 entries.append(
@@ -186,8 +197,17 @@ class JsonExportAdapter:
                 )
             elif is_late_arrival(path, since):
                 late.append(path.name)
-        warn_late_arrivals(logger, "ELN JSON export", late)
+                refused[path.stem] = (
+                    f"{path.name} arrived after the sync cursor but carries an older timestamp "
+                    f"({created.isoformat()}), so no scheduled run will fetch it; re-run the sync "
+                    "from an explicit earlier `since` to backfill it"
+                )
+        # The source, not the format: this is the one line reporting files that are silently never
+        # ingested, and a deployment running two JSON drop directories got two identical lines
+        # naming neither.
+        warn_late_arrivals(logger, self._source, late)
         entries.sort(key=lambda e: e.created_at)
+        await record_refusals(self._source, refused)
         return entries
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:

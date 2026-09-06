@@ -471,7 +471,8 @@ ever written into a bundle.
 
 **Troubleshooting.** Each enabled connector is probed as one of five states: `healthy`,
 `unreachable` (the health route did not answer), `unpolled` (Temporal answered and nothing polls the
-bundle's `connector-<name>` queue — a jobs-only bundle whose worker fleet is at zero), `unknown` (the
+bundle's `connector-<name>` queue — a bundle that owns durable work and whose worker fleet is at
+zero, whether or not it also serves an endpoint), `unknown` (the
 queue could not be asked at all, so reachability was not determined; this neither counts nor gates,
 because a broker outage is one fault shared by every durable bundle) or `unprobed` (nothing to ask —
 no `health_url` declared and no durable work, honest for a third-party server). `unreachable` and

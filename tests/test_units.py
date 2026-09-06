@@ -13,7 +13,17 @@ is the wiring: the ledger's unit and the reported unit have to meet somewhere, a
 
 import pytest
 
-from chemclaw.core.units import Measurement, UnitError, parse_unit, reconcile, same_dimension
+from chemclaw.core.units import Measurement, UnitError, parse_unit, reconcile
+
+
+def _same_dimension(first: str, second: str) -> bool:
+    """The comparison `Measurement.to` and `Measurement.compare` make, spelled out.
+
+    Here rather than in `core/units.py`, where it was a public function whose only caller was this
+    file: the dimension table is what the refusals below rest on, and the surface that reads it in
+    production is `parse_unit(...).dimension` on those two methods.
+    """
+    return parse_unit(first).dimension == parse_unit(second).dimension
 
 
 def test_a_conversion_is_the_number_a_chemist_would_write() -> None:
@@ -69,10 +79,10 @@ def test_comparing_across_dimensions_refuses_rather_than_ordering_floats() -> No
 
 def test_a_fraction_and_a_ppm_are_the_same_dimension_and_a_mass_is_not() -> None:
     """The dimension table is what makes the refusals above land where they should."""
-    assert same_dimension("%", "ppm")
-    assert same_dimension("mg", "kg")
-    assert not same_dimension("%", "mg")
-    assert not same_dimension("M", "mg/mL")
+    assert _same_dimension("%", "ppm")
+    assert _same_dimension("mg", "kg")
+    assert not _same_dimension("%", "mg")
+    assert not _same_dimension("M", "mg/mL")
 
 
 def test_molarity_and_mass_concentration_are_deliberately_not_convertible() -> None:
@@ -116,8 +126,8 @@ def test_a_log_scale_is_its_own_dimension() -> None:
     Both carry no units and calling them "dimensionless" would make them interconvertible with each
     other and with `%` — so a pKa reported into the solubility ledger would be accepted silently.
     """
-    assert not same_dimension("log S", "pKa")
-    assert not same_dimension("log S", "")
+    assert not _same_dimension("log S", "pKa")
+    assert not _same_dimension("log S", "")
     with pytest.raises(UnitError):
         Measurement.of(4.7, "pKa").to("log S")
 

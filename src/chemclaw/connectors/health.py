@@ -25,6 +25,12 @@ capability is whether *anything is polling* the queue its jobs run on, so that i
 trips `connectors_required` exactly as `unreachable` does, because a job started onto a queue nobody
 polls is not slow — it is a chemist told "running" until the 25-hour job timeout expires.
 
+**A bundle that has both halves is asked both questions**, and its verdict is the worse of the two
+(`_folded`). `calc` and `bo` serve an endpoint *and* own durable jobs, and the question used to be
+an `elif`: their queues — 13 of this fleet's 14 declared jobs — were never asked about at all, so a
+worker fleet at zero replicas read as `healthy` behind a live MCP pod. The two halves fail
+independently and name different deployments, which is why both reasons survive into the detail.
+
 **A probe that could not run says so instead of guessing.** A broker outage is not the same fact as
 a queue with no poller, and reporting one as the other would turn every Temporal restart into a boot
 failure (`D-2026-08-08-an-outage-is-not-a-missing-job`). So only a *successful* `DescribeTaskQueue`
@@ -285,6 +291,46 @@ async def _probe_queues(targets: list[tuple[str, str]], budget: float) -> list[C
         ]
 
 
+def _folded(verdicts: list[ConnectorHealth]) -> list[ConnectorHealth]:
+    """One row per connector, worst half first, with every half's reason kept.
+
+    A bundle with an endpoint *and* jobs is probed twice and is only as usable as its worse half,
+    so that is the state reported: a healthy MCP pod does not make a queue nobody polls reachable,
+    and neither does a polled queue make a dark endpoint dialable. Down before undetermined before
+    healthy, because a half that could not be asked is not evidence that the bundle is fine — the
+    same reason `unknown` exists at all — while `unprobed` is last so it can only ever be the state
+    of a bundle with nothing to ask.
+
+    The details are joined rather than picked, because both halves' reasons are what an operator
+    acts on and they name different deployments: one is a server pod, the other a worker fleet.
+    A connector with a single half folds to itself, unchanged.
+    """
+    #: Worst first. Membership in `UNHEALTHY_STATES` is what counts and gates; this is only the
+    #: order two verdicts about one connector are resolved in, so the two down states may sit in
+    #: either order and do.
+    severity: tuple[ConnectorState, ...] = (
+        "unreachable",
+        "unpolled",
+        "unknown",
+        "healthy",
+        "unprobed",
+    )
+    halves: dict[str, list[ConnectorHealth]] = {}
+    for verdict in verdicts:
+        halves.setdefault(verdict.name, []).append(verdict)
+    folded = []
+    for name, both in halves.items():
+        both.sort(key=lambda health: severity.index(health.state))
+        folded.append(
+            ConnectorHealth(
+                name=name,
+                state=both[0].state,
+                detail="; ".join(health.detail for health in both if health.detail),
+            )
+        )
+    return sorted(folded, key=lambda health: health.name)
+
+
 async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]:
     """Probe every enabled connector concurrently; never raises, so a caller can always report.
 
@@ -300,9 +346,16 @@ async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]
     the probes inside each: a deployment with both kinds of bundle pays the slower of the HTTP fan
     out and the queue fan out, not their sum.
 
-    Which half a bundle is in follows from what it *is*. An HTTP health route is the direct question
-    and wins where there is one; a bundle with no health route but with `jobs:` is reachable exactly
-    when something polls its queue; a bundle with neither has nothing to ask and stays `unprobed`.
+    **Which halves a bundle is asked about follows from what it *has*, and a bundle can have both.**
+    An HTTP health route is asked as the direct question, and `jobs:` is asked as "does anything
+    poll the queue that work runs on" — *additively*, because a bundle that has both has two ways
+    to be unusable. This used to be an `elif`, so the endpoint answered for the whole bundle and
+    `calc`'s twelve jobs and `bo`'s one — 13 of the 14 this fleet declares — had their queues
+    probed by nobody: `connector-worker-calc` at zero replicas read as `healthy`, the gauge stayed
+    at 0, and `connectors_required` started a service whose CREST searches would sit in a queue
+    until the job ceiling expired. That is verbatim the failure the queue probe was built for
+    (`D-2026-08-27-a-queue-with-no-poller-is-unreachable`, which names this gap as its own
+    follow-up). A bundle with neither has nothing to ask and stays `unprobed`.
     """
     bound = settings.connector_health_timeout_seconds if budget is None else budget
     endpoints: list[tuple[str, str]] = []
@@ -315,17 +368,18 @@ async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]
         probe_url = health_url(manifest)
         if probe_url:
             endpoints.append((manifest.name, probe_url))
-        elif manifest.jobs:
-            # No health route, but durable work of its own: ask the queue that work runs on.
+        if manifest.jobs:
+            # Durable work of its own: ask the queue that work runs on, whether or not it also
+            # serves an endpoint.
             queues.append((manifest.name, bundle_queue(manifest.name)))
-        else:
+        if not probe_url and not manifest.jobs:
             # Nothing to ask: no endpoint and no durable work, stdio (spawned per turn), or an
             # HTTP endpoint that declares no health route.
             unprobed.append(ConnectorHealth(name=manifest.name, state="unprobed"))
     probed, polled = await asyncio.gather(
         _probe_endpoints(endpoints, bound), _probe_queues(queues, bound)
     )
-    return sorted([*probed, *polled, *unprobed], key=lambda health: health.name)
+    return _folded([*probed, *polled, *unprobed])
 
 
 async def check_connectors_at_startup() -> list[ConnectorHealth]:

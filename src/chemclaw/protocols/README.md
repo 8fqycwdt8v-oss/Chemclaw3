@@ -33,7 +33,7 @@ written once. A second "HTE campaign" type would have duplicated all five.
 | Module | What it is |
 | --- | --- |
 | `models.py` | The shape. Short docstrings on purpose — pydantic ships a class docstring as the JSON-schema `description` on every turn, so rationale lives in `#` comments. |
-| `checks.py` | The deterministic verdicts, computed from the design and never asked of a model. `check_ids()` is the list; a number here would be a second one that goes stale. A check answers about the *design*, so what a document has to be well-formed at all — unique ids, a `replicate_of` that names a real arm — is a `models.py` validator instead. |
+| `checks.py` | The deterministic verdicts, computed from the design and never asked of a model. `_CHECKS` is the list; a number here would be a second one that goes stale. A check answers about the *design*, so what a document has to be well-formed at all — unique ids, a `replicate_of` that names a real arm — is a `models.py` validator instead. |
 | `layout.py` | Plate arithmetic: formats, well labels, placement, run order. No chemistry. |
 | `diff.py` | What changed between two revisions, as dotted paths. |
 | `render.py` | The receipt a tool returns, the run sheet, and the Markdown a chemist reads. |

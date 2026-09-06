@@ -879,6 +879,17 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "learned this region.",
         scope="candidate",
     ),
+    _d(
+        "species_population",
+        "dimensionless",
+        "",
+        "Boltzmann population of one species in a distribution — a tautomer or a protonation "
+        "state — at the stated temperature. Its own name rather than `population`, which is "
+        "registered per *conformer* and lives in the `conformer` table: a species distribution "
+        "scores `calculation_candidate` rows, and `score_property` naming a conformer-scope "
+        "quantity contradicted the placement `scope_kind` exists to state.",
+        scope="candidate",
+    ),
 )
 
 # Indexed once at import: the lookup every write does, and the thing a validator scans.

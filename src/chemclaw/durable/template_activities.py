@@ -40,8 +40,10 @@ from chemclaw.agent.context_budget import (
     current_context,
     end_context_watch,
 )
+from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
+from chemclaw.agent.spend_cap import spend_capped
 from chemclaw.agent.state import answer_text, turn_config, turn_input
 from chemclaw.agent.tool_invocation import invoke_governed
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
@@ -638,19 +640,27 @@ async def run_agent_step(step: AgentStepInput) -> str:
                     correlation_id=step.identity.correlation_id,
                     connectors=connectors,
                 )
-                # No thread — a template step is one bounded turn — but the step ceiling still
-                # applies, and it is the only thing that applies: this path runs with the harness
-                # off, and `_harness_middleware` attaches `enforce_loop_cap` only with the harness,
-                # so nothing here stops the loop gracefully. `turn_config()` sets
+                # No thread — a template step is one bounded turn — but two graceful bounds
+                # apply, and this comment used to say there were none. `_harness_middleware`
+                # attaches both caps *unconditionally*, harness or not, so a looping step is
+                # stopped by `enforce_loop_cap` and an expensive one by `enforce_spend_cap`; only
+                # `TodoListMiddleware` is still harness-only, which is the discretion this step
+                # exists without. The two readers below are what make either stop
+                # visible, because a graceful stop *returns* — it is otherwise indistinguishable
+                # from a turn that finished its work, which is the defect `agent/loop_cap.py`
+                # exists to fix and which this step ate: a truncated runaway booked
+                # `outcome="answered"` and handed the next step of the template a partial answer
+                # with nothing saying so.
+                #
+                # Behind them the step ceiling still applies: `turn_config()` sets
                 # `agent_recursion_limit` unconditionally (verified — the config carries no
-                # thread-dependent branch), which is what keeps a looping step from inheriting
-                # `create_agent`'s baked 9999. The cap is deliberately *not* attached instead: it
-                # comes bundled with `TodoListMiddleware`, and a todo list is the discretion this
-                # step exists without. What the ceiling cannot do is let the partial answer out, so
-                # a step that reaches it raises with no result to read — which is exactly why the
-                # meter is a callback on `turn_config()` rather than a sum over the returned
-                # messages, and is what makes that runaway visible in `chemclaw_tokens_total`
-                # rather than free and silent. Measured: 52 paid model calls, 6,240 tokens, booked.
+                # thread-dependent branch), which is what keeps a step that outruns both from
+                # inheriting `create_agent`'s baked 9999. What the ceiling cannot do is let the
+                # partial answer out, so a step that reaches it raises with no result to read —
+                # which is exactly why the meter is a callback on `turn_config()` rather than a sum
+                # over the returned messages, and is what makes that runaway visible in
+                # `chemclaw_tokens_total` rather than free and silent. Measured: 52 paid model
+                # calls, 6,240 tokens, booked.
                 result = await beating(
                     graph.ainvoke(turn_input(step.prompt), {**turn_config(), "callbacks": [meter]}),
                     f"template agent step {step.step_id or step.profile or 'agent'}",
@@ -662,7 +672,19 @@ async def run_agent_step(step: AgentStepInput) -> str:
                 # `answered = True`, so the silent turn books `completed=False` — and a step that
                 # returned nothing hands the next step of the template nothing.
                 answered = bool(answer)
-                outcome = "answered" if answered else "empty_answer"
+                # Both caps before `answered`, and in this order, because that is
+                # `api/runner._settle_outcome`'s ranking and one vocabulary must mean one thing on
+                # both writers of `turn_costs`: a capped turn *does* deliver the partial answer it
+                # managed, so ranking `answered` first would make both endings unreachable, and the
+                # iteration cap is attached first, so a turn over both ceilings is the one that
+                # jumps. `completed` stays `answered` for the reason the chat path gives — it is a
+                # billing question, and the chemist got the tokens' partial answer either way.
+                if loop_capped(result):
+                    outcome = "loop_capped"
+                elif spend_capped(result):
+                    outcome = "spend_capped"
+                else:
+                    outcome = "answered" if answered else "empty_answer"
                 return answer
         except asyncio.CancelledError:
             # A Temporal activity cancellation — the workflow was cancelled, the worker is
@@ -719,9 +741,12 @@ def _book_step_spend(
     cannot tell a 2026-08 backfill row from a step booked today, and the index on that column
     indexes a value that means two things. The vocabulary is
     `api/runner._OUTCOMES`, and it is spelled out here rather than imported because `durable` may
-    not import `api` (`tests/test_layering.py`); what this writer can produce is four of the six —
-    `answered`, `empty_answer`, `errored`, `abandoned` — and `run_agent_step` says at each raise
-    site why the other two are not among them.
+    not import `api` (`tests/test_layering.py`); what this writer can produce is six of the seven —
+    `answered`, `loop_capped`, `spend_capped`, `empty_answer`, `errored`, `abandoned` — and
+    `run_agent_step` says at each raise site why `timed_out` is not among them and why a step that
+    hits the recursion ceiling is `errored`. The two cap outcomes were missing until the readers
+    that produce them were wired up: both caps end a turn by *returning*, so a capped step booked
+    `answered` like any other.
 
     **The cost row's key is the run's correlation id plus the step id.** `turn_costs` upserts on
     `correlation_id` (`agent/turn_cost_store.py`) — deliberately, so a retried write replaces rather

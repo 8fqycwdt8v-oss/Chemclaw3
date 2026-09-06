@@ -768,18 +768,30 @@ def _labelled(dirs: list[str]) -> list[tuple[str, str]]:
     leaves the configured root as itself; a numeric suffix settles anything still colliding, which
     keeps the function total rather than correct-until-someone-nests-two-trees-alike.
 
+    **The suffix is searched, not counted, and counting it was not total either.** A per-base
+    counter emits `a-1` for the second `a` without asking whether a tree is *already* labelled
+    `a-1` — which one named `a-1/skills` is. Measured on
+    `['a/skills', 'a-1/skills', 'b/a/skills']`: two trees came back labelled `a-1`, so
+    `skills_backend`'s dict comprehension silently dropped one of them (last write wins) while
+    `_skills_middleware` went on publishing `/a-1` twice in the system prompt — one tree's skills
+    advertised at a path that resolves to another tree's, with nothing raised anywhere. The loop
+    below tracks the labels actually emitted, so the candidate is advanced until it is free.
+
     Order follows `dirs`, so precedence is unchanged: `SkillsMiddleware` loads sources in order and
     a later one wins, matching the first-wins rule the previous framework's file source applied once
     the list is read the way each library reads it.
     """
-    seen: dict[str, int] = {}
+    used: set[str] = set()
     labelled: list[tuple[str, str]] = []
     for directory in dirs:
         path = Path(directory)
         base = path.parent.name if path.name == "skills" and path.parent.name else path.name
-        count = seen.get(base, 0)
-        seen[base] = count + 1
-        labelled.append((base if not count else f"{base}-{count}", directory))
+        label, count = base, 0
+        while label in used:
+            count += 1
+            label = f"{base}-{count}"
+        used.add(label)
+        labelled.append((label, directory))
     return labelled
 
 

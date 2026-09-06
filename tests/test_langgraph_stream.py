@@ -129,11 +129,17 @@ def test_the_trace_the_answer_gate_reads_is_populated() -> None:
     engine that emitted every event correctly and left these empty would route every answer to
     review as unsupported, and the events would give no hint why.
     """
-    _events, trace, _usage = _drive(
+    events, trace, _usage = _drive(
         [{"name": "ask_clarifying_question", "args": {"question": "x"}}, "done"]
     )
     assert trace.called_tools == ["ask_clarifying_question"]
     assert len(trace.outputs) == 1
+    # And nothing the trace knows about stayed off the stream. The runner used to drain a
+    # `tool_trace.flush()` after this stream ended, for a call whose arguments finished on the
+    # previous engine's final update; the `updates` stream carries a call whole, so there is
+    # nothing left open and the loop was deleted. This is the property that makes that true.
+    calls = [event for event in events if isinstance(event, ToolCallEvent)]
+    assert [call.tool for call in calls] == trace.called_tools
 
 
 def test_a_turn_with_no_tool_call_emits_only_its_tokens() -> None:

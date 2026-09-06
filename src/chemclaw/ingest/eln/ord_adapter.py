@@ -174,7 +174,10 @@ class OrdJsonAdapter:
                     f"({created.isoformat()}), so no scheduled run will fetch it; re-run the sync "
                     "from an explicit earlier `since` to backfill it"
                 )
-        warn_late_arrivals(logger, "ORD export", late)
+        # The source, not the format: this is the one line reporting files that are silently never
+        # ingested, and a deployment running two ORD drop directories got two identical lines
+        # naming neither.
+        warn_late_arrivals(logger, self._source, late)
         entries.sort(key=lambda e: e.created_at)
         await record_refusals(self._source, refused)
         return entries
