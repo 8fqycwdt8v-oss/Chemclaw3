@@ -477,7 +477,10 @@ that bundle's own MCP server pods dispatch straight from a tool call and are bou
 local (`D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling`). Its ceiling ships as `0`,
 undeclared, because it describes a pod in another release; set it to what that server admits.
 
-**Thirty-six alerts across eight groups, and five dashboards for what is left.** The rule file's own
+**Eight alert groups, and five dashboards for what is left.** The number of *alerts* is not written
+here — two documents stated it, disagreed with each other (thirty-six against thirty-five) and were
+both a quarter under the file by the time anyone checked. `templates/prometheusrule.yaml` is the
+roster and `tests/test_deploy_chart.py` renders it. The rule file's own
 header names the three absences it was written against — "no PrometheusRule anywhere in the repo, no
 SLO, and no Alertmanager route" — and all three are now closed:
 `templates/prometheusrule.yaml` covers records, correctness, availability, cost, fleet liveness

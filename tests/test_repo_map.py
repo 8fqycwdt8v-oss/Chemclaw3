@@ -546,3 +546,52 @@ def test_the_phony_list_and_the_target_list_are_the_same_list() -> None:
         f"targets missing from .PHONY: {sorted(set(targets) - phony)}; "
         f".PHONY names with no target: {sorted(phony - set(targets))}"
     )
+
+
+def _data_row() -> str:
+    """`ARCHITECTURE.md`'s single `data/` row, which enumerates the corpora inline."""
+    for line in (_ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8").splitlines():
+        if line.startswith("| `data/` |"):
+            return line
+    raise AssertionError("ARCHITECTURE.md has no `data/` row")
+
+
+def _data_readme_table() -> str:
+    """Only the table rows of `data/README.md`.
+
+    Its prose names two directories that are *not* under `data/` — `knowledge/` and `skills/`,
+    deliberately at the root — so a whole-file scan would read the exception as a claim.
+    """
+    return "\n".join(
+        line
+        for line in (_ROOT / "data" / "README.md").read_text(encoding="utf-8").splitlines()
+        if line.startswith("| `")
+    )
+
+
+def test_both_maps_of_data_name_every_corpus_that_exists() -> None:
+    """The one map tier in this tree that had no both-directions check, and it was wrong.
+
+    `ARCHITECTURE.md`'s `data/` row and `data/README.md`'s table both listed five corpora against
+    six on disk: `commitments/` was in neither, though it has its own README and its own setting
+    (`CHEMCLAW_COMMITMENT_EXPORT_DIR`). Nothing caught it — `test_the_map_lists_every_directory…`
+    checks top-level directories and `src/` subpackages, and
+    `test_every_runtime_data_directory_actually_exists` walks `_RUNTIME_DATA`, which is the level
+    *above*. So the corpus tier was mapped twice and checked never.
+
+    The omission was the worst available one: `commitment_export_dir` exists precisely because that
+    directory's absence is *silent* — "a wrong directory reached a project leader as a truthful
+    empty portfolio" — so the corpus a reader most needs the map to mention is the one it left out.
+    """
+    on_disk = _tracked_directories(_ROOT / "data")
+    assert on_disk, "found no corpora under data/ — this test would assert nothing"
+
+    row, table = _data_row(), _data_readme_table()
+    for name in sorted(on_disk):
+        assert f"`{name}/`" in table, f"data/README.md's table has no row for data/{name}/"
+        assert f"`{name}/`" in row, f"ARCHITECTURE.md's `data/` row does not name data/{name}/"
+
+    for document, text in (("ARCHITECTURE.md's `data/` row", row), ("data/README.md", table)):
+        named = {match.rstrip("/") for match in re.findall(r"`([a-z0-9][a-z0-9-]*/)`", text)}
+        gone = sorted(named - on_disk - {"data"})
+        assert not gone, f"{document} names corpora that are not there: {gone}"

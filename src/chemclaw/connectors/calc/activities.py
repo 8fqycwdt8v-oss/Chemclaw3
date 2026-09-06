@@ -33,7 +33,8 @@ the standard Temporal split the QM job already follows.
 
 It runs on the bundle's own worker (`chemclaw.connectors.calc.worker`), not core's, and is
 registered there explicitly rather than through `chemclaw.durable.registry` — that registry serves
-core's two queues, and a connector's queue is the connector's own business.
+core's queue, and a connector's queue is the connector's own business. Core owns exactly one
+(D-006, and `durable/registry.py` says so ten files away); this said "two".
 """
 
 from collections.abc import Awaitable, Iterator

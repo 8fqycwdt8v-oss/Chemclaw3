@@ -22,11 +22,14 @@ cost).
 **When one of these fails**, the fix is never to update the number here and move on. Each assertion
 names the first-party module that reads the shape; go and read it, decide whether the dependency is
 still the right one, and record the answer in an ADR if it changed. That is the whole point of
-having them in one file: a bump becomes one conversation instead of six surprises.
+having them in one file: a bump becomes one conversation instead of one surprise per reader.
+**How many couplings there are is this file's own length, not a number in a sentence** — the six
+above are what the D-2026-08-14 pass found, and the file has grown well past them since.
 """
 
 import asyncio
 import inspect
+from types import SimpleNamespace
 from typing import Any, get_type_hints
 
 import pytest
@@ -815,16 +818,20 @@ def test_the_gateway_client_still_publishes_cache_tokens_under_the_two_flat_keys
         "when it does, so agent/turn_usage needs the `_cache_creation` helper back"
     )
 
-    # **The flatness is conditional, and the condition is a request parameter.** With
-    # `service_tier` set to `priority` or `flex`, the same function prefixes both keys —
-    # `flex_cache_read`, `priority_cache_creation` — and `turn_usage` reads the bare names only,
-    # so on those tiers every cache read would be booked as full-price input and
-    # `turn_costs.cache_write_tokens` would sit at zero on a deployment that writes a cache every
-    # turn. Latent rather than live: nothing in this repository sets `service_tier`, there is no
-    # setting for it, and `ChatOpenAI` defaults it to `None` — which is what the second assertion
-    # pins. Asserted rather than fixed because a `startswith` read in `turn_usage` would be a
-    # guess about a tier nobody here can select; whoever adds the setting gets this failure and
-    # the reason with it.
+    # **The flatness is conditional, and the condition is not a request parameter — it is the
+    # response's.** With a service tier in play the same function prefixes both keys —
+    # `flex_cache_read`, `priority_cache_creation` — and `_create_chat_result` takes that tier off
+    # the **response body**, so a gateway alone can trigger it with nothing set on this side.
+    #
+    # This paragraph used to say the opposite and drew the wrong conclusion from it: "latent rather
+    # than live: nothing in this repository sets `service_tier` … asserted rather than fixed
+    # because a `startswith` read in `turn_usage` would be a guess about a tier nobody here can
+    # select". Measured 2026-09-06 against a gateway that reports `service_tier: "priority"` on the
+    # terminal chunk, a 1,000-prompt / 400-cached reply booked `input 1,000, cache_read 0` — every
+    # cached token priced as fresh input, and `chemclaw_cache_read_tokens_total` flat on exactly
+    # the deployment whose caching it is the only way to see. `graph_usage_tokens` reads both keys
+    # by suffix now (`_cache_detail`), so what this pins is the *shape* the suffix read depends on:
+    # the prefix is a prefix, joined by one underscore, and the two names are unchanged after it.
     tiered = _create_usage_metadata(
         {
             "prompt_tokens": 1000,
@@ -835,15 +842,48 @@ def test_the_gateway_client_still_publishes_cache_tokens_under_the_two_flat_keys
         "flex",
     )
     tiered_details = tiered["input_token_details"]
-    assert "cache_read" not in tiered_details and "flex_cache_read" in tiered_details, (
-        "langchain_openai changed how service_tier prefixes the cache keys; agent/turn_usage "
-        "reads the bare names, so a tiered deployment's cache reads would be billed as input"
+    assert "flex_cache_read" in tiered_details and "flex_cache_creation" in tiered_details, (
+        "langchain_openai changed how service_tier prefixes the cache keys; "
+        "agent/turn_usage._cache_detail matches `<tier>_cache_read`/`<tier>_cache_creation` by "
+        "suffix, so a tiered deployment's cache reads would be billed as fresh input again"
     )
     from langchain_openai import ChatOpenAI
 
     assert ChatOpenAI(model="x", api_key="k").service_tier is None, (  # type: ignore[arg-type]
-        "ChatOpenAI now defaults service_tier to a value; agent/turn_usage reads the unprefixed "
-        "cache keys and would silently stop finding them"
+        "ChatOpenAI now defaults service_tier to a value; that is not itself a defect any more "
+        "(the keys are read by suffix), but it changes what an untiered deployment is sent"
+    )
+
+
+def test_a_failed_model_call_still_carries_the_gateways_own_usage_block() -> None:
+    """`on_llm_error`'s `response=` kwarg, and the raw body under `response_metadata["body"]`.
+
+    `agent/turn_usage.error_result_usage` reads exactly that, and it is the whole reason the
+    verifier's degrade path books the provider's **measured** numbers rather than an estimate: with
+    `method="json_schema"` the reply is validated inside the OpenAI SDK, so a reply missing a field
+    raises before `_agenerate_with_cache` returns, `on_llm_end` never fires, and the only thing
+    left is what `langchain_core._generate_response_from_error` puts on the error's `LLMResult`.
+    Measured 2026-09-06: 5,500 tokens the gateway served and nothing booked.
+
+    Two halves, both load-bearing. If upstream stops attaching the body, the judge's failed calls
+    go back to booking zero — silently, which is why this is a pin and not a comment. If it stops
+    passing `response=` at all, the same. Asserted against the private helper because that is what
+    builds the shape; the handler contract itself is public.
+    """
+    from langchain_core.language_models.chat_models import _generate_response_from_error
+
+    error = ValueError("bad reply")
+    error.response = SimpleNamespace(  # type: ignore[attr-defined]
+        json=lambda: {"usage": {"prompt_tokens": 5000, "completion_tokens": 500}},
+        status_code=200,
+    )
+    generations = _generate_response_from_error(error)
+    assert generations, "langchain_core no longer builds a generation from a failed call"
+    body = generations[0].message.response_metadata.get("body")
+    assert isinstance(body, dict) and body.get("usage"), (
+        "langchain_core stopped putting the failing call's raw HTTP body on the error result — "
+        "agent/turn_usage.error_result_usage reads it, and the verifier's degrade path would book "
+        "zero against a request the gateway billed in full"
     )
 
 

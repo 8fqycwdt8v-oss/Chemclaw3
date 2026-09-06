@@ -10,6 +10,7 @@ a `CHEMCLAW_*` setting, so a deployment can mount its own without rebuilding the
 | `profiles/` | agent profiles selecting across skills and tools | `CHEMCLAW_PROFILES_DIR` |
 | `vendored/` | build-time datasets, with their provenance | `CHEMCLAW_VENDORED_DATASET_DIR` |
 | `eln-exports/` | sample ELN drops for the JSON and ORD adapters | `CHEMCLAW_ELN_EXPORT_DIR` |
+| `commitments/` | a programme's committed work, mirrored in by the `commitments-json` source | `CHEMCLAW_COMMITMENT_EXPORT_DIR` |
 
 `evals/`, `templates/` and `profiles/` moved here in D-156. The first two used to sit at the
 repository root, where they shared a name with the code packages `chemclaw.evals` and

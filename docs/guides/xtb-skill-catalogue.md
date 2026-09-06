@@ -189,8 +189,10 @@ asked most often:
 **Gated on X5/X6:** `redox-and-electrochemistry`, `stereochemical-outcome`,
 `conformational-polymorph-risk`.
 
-The distribution is the argument: **19 of the 28 skills in this catalogue are gated on X3 or
-X4.** The judgment layer is not what is missing — the capability under it is.
+The distribution is the argument: **most of the skills listed in this section are gated on X3 or
+X4** — count the two lists above rather than trusting a figure here, which is what this sentence
+used to carry and never matched any partition of its own enumeration. The judgment layer is not what
+is missing — the capability under it is.
 
 
 ---

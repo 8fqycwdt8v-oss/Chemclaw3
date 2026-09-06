@@ -55,8 +55,10 @@ def _routes_asked(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Record every route key `build_langgraph_agent` asks the provider seam to build a model for.
 
     The model a compiled graph will call is not reachable from the graph: LangGraph's model node is
-    a closure, and prising the client back out of it would be a seventh reader of a shape upstream
-    never promised — the exact thing `tests/test_upstream_surface.py` exists to count. So these two
+    a closure, and prising the client back out of it would be one more reader of a shape upstream
+    never promised — the exact thing `tests/test_upstream_surface.py` exists to hold in one place.
+    (It said "a seventh", from the six the D-2026-08-14 pass found; that file is far past six now
+    and a fixed ordinal here would keep saying otherwise.) So these two
     tests assert the claim `_resolve_chat_model` actually makes, which is about *construction*: a
     routed profile builds a client from its route, and an unrouted one builds nothing at all because
     a usable client already exists. `build_chat_model` is the one place a model is built, which is
@@ -78,8 +80,8 @@ def _tool_names(graph: Any) -> set[str]:
     A private shape, and deliberately reached from a test rather than from `src/`. `ToolNode` is
     where a tool becomes *callable* — `wrap_model_call`'s `request.override(tools=…)` narrows only
     what the model is shown — so this is the one reading that answers "what can this graph run".
-    `tests/test_upstream_surface.py` is where couplings like this are counted; putting it in `src/`
-    would add a seventh.
+    `tests/test_upstream_surface.py` is where couplings like this are kept; putting it in `src/`
+    would add one more.
     """
     return set(graph.nodes["tools"].bound.tools_by_name)
 

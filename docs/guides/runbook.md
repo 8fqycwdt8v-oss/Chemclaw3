@@ -479,9 +479,13 @@ on who hosts it); only the deployment differs, per D-2026-08-09-a-connector-we-d
    then put the token in the secret set the pods already mount. Both halves are needed and the
    second is the one that gets missed: a NetworkPolicy egress rule restricts by port independently
    of the destination list, so a server on its own port is dropped no matter what you add to
-   `egressDestinations`. Only assume `egressPorts.https` covers it if the server really is on 443 —
-   the three bundles `Chemclaw3-mcp` serves are plain HTTP on 8858/8859/8860, and each needed its
-   own entry.
+   `egressDestinations`. Only assume `egressPorts.https` covers it if the server really is on 443.
+   Every sibling server `Chemclaw3-mcp` runs is plain HTTP on a port of its own, and
+   `deploy/helm/chemclaw/values.yaml`'s `networkPolicy.egressPorts` is the maintained roster of
+   which — **one entry per server**, because each is free to land on a different port in your
+   namespace and a number repeated here would only be right by coincidence. Read it there; a port
+   list in this page is how two of those servers stayed silently dropped while this paragraph read
+   as complete.
 
 The tools such a server exposes are still read/compute only, still narrowed by `tools:`, and still
 carry the turn's identity headers as *advisory* context — a connector outside our trust boundary
@@ -524,8 +528,9 @@ physics behind `calc` is served there too — `CHEMCLAW_CALC_SERVER_URL` and `CH
 even though the `calc` bundle's own tools, cache and durable jobs stay in this release.
 
 **`chem` is declared here and served elsewhere.** Its capability is `Chemclaw3-mcp`'s
-`servers/chem` on port 8858, so this release renders no Deployment and no Service for it and dials
-the address in `connectors.chem.url` instead (D-2026-08-09). Two things that are the operator's,
+`servers/chem`, so this release renders no Deployment and no Service for it and dials the address
+in `connectors.chem.url` instead (D-2026-08-09) — that value and its `networkPolicy.egressPorts`
+entry are where the port lives, because it is the sibling release's to choose. Two things that are the operator's,
 because the chart cannot do them: add the host to `networkPolicy.egressDestinations`, and provide
 `CHEMCLAW_CHEM_TOKEN` — that server enforces a bearer on `/mcp` itself, so a missing credential is
 a refused call rather than an open one. `calc`, `bo` and `results` each declare `jobs:` and therefore own
@@ -958,7 +963,9 @@ connector port and the worker probe port.
 ## (x-b) Make the monitoring stack actually collect this
 
 **Do this before believing anything above.** The chart ships a ServiceMonitor, a PodMonitor and a
-PrometheusRule with thirty-five alerts; on a stock OpenShift cluster **all three are inert custom
+PrometheusRule (`deploy/helm/chemclaw/templates/prometheusrule.yaml` is the roster; no count is
+written here, because the one that was said thirty-five while the file held a quarter more again);
+on a stock OpenShift cluster **all three are inert custom
 resources**. `oc get servicemonitor` lists them, nothing scrapes, no rule ever loads, and there is
 no error anywhere — a deployment in this state is indistinguishable, from inside, from a healthy
 one. It is the single most likely way this system ships and observes nothing.
@@ -1891,8 +1898,8 @@ per-user equivalent.
 
 ### Offboard: erase their data
 
-Removing the role stops new access and deletes nothing. Per-actor rows live in nine tables, split
-into two tiers by one rule — **the conversation is erasable, the record is not**:
+Removing the role stops new access and deletes nothing. Per-actor rows are split into two tiers by
+one rule — **the conversation is erasable, the record is not**:
 
 ```bash
 make user-erase ACTOR=<entra-oid>            # dry run: real counts, writes nothing
@@ -1900,11 +1907,21 @@ make user-erase ACTOR=<entra-oid> APPLY=1    # commits
 ```
 
 It removes their sessions, messages, events, turn lease, preferences and watch subscriptions. It
-**keeps and counts** the rows that attribute scientific work to them — `audit_events`,
-`plan_approvals`, `note_proposals`, `bo_suggestions`, `job_records`, `turn_costs` — and prints the
-reason beside each. That is not a limitation to work around: an attributable record that can be
-deleted on request is not an attributable record, and for a tool call that changed nothing durable
-the trail is the only place it is recorded at all. The application credential cannot delete from
+**keeps and counts** the rows that attribute scientific work to them, and prints the reason beside
+each.
+
+**Do not enumerate either tier from this page — run the dry run and read what it prints.** The
+tables are `agent/leaver.py`'s `_ERASE`, `_RETAINED` and `_RETAINED_IN_PAYLOAD`, and the report
+above names every one of them with its row count, plus the reason for each retained table and a
+third section for the tables it can neither clear nor count. Neither tier is short, and the retained
+one is not only the audit trail: it also holds the durable-effect, pending-request, BO-campaign and
+experiment-protocol tables, each of which names a person, and one row in that tier records a
+delivery to an external results store this system cannot erase from at all. A data-protection answer
+assembled from a list in a document is an answer about the commit that document was written on.
+
+That is not a limitation to work around: an attributable record that can be deleted on request is
+not an attributable record, and for a tool call that changed nothing durable the trail is the only
+place it is recorded at all. The application credential cannot delete from
 `audit_events` either — the grant withholds DELETE (see *Splitting the database principal*). If a
 data-protection obligation reaches the retained tier, that is a decision to take with the record's
 owner.

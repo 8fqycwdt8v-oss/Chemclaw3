@@ -2,9 +2,11 @@
 
 **What a programme has committed to, mirrored in from the system that owns it.**
 
-Nine of nineteen `manager` bucket-C probes in `data/evals/probes/` needed one object this schema did
-not have: a unit of committed work. Seventy-three migrations, and `project` was a nullable text tag
-on `reaction_records` — a facet on a row, not an entity.
+Measured 2026-08-29 against the then-current corpus: nine of the nineteen `manager` bucket-C probes
+in `data/evals/probes/` needed one object this schema did not have — a unit of committed work. (That
+denominator is a fact about that commit and is not maintained; the corpus has since been rebucketed
+and holds fewer. The argument is what the nine wanted, not the ratio.) Eighty-odd migrations in, and
+`project` was still a nullable text tag on `reaction_records` — a facet on a row, not an entity.
 
 ## A mirror, not a plan
 
