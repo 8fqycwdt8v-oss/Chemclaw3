@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -117,12 +118,22 @@ class PostgresWarehouse:
         schema: str = "",
         dsn: str = "",
         query_timeout_seconds: int = 60,
+        connect_timeout_seconds: int = 10,
     ) -> None:
         """Hold the connection parameters; connect on the first cursor.
 
         A `dsn` wins when given, because a site with an existing connection string should not have
         to decompose it. `schema` becomes a `search_path` option rather than a qualified table name
         in every statement, which is what keeps the SQL generator free of site-specific identifiers.
+
+        `connect_timeout_seconds` bounds the **handshake**, which `query_timeout_seconds` does not:
+        `statement_timeout` starts counting once there is a session to run a statement in. Measured
+        against a socket that accepts and never speaks — a stale DNS record, a firewall DROP, a
+        load balancer with no backends — a sink with `query_timeout_seconds=2` was **still blocked
+        after 20 s**. That is the concrete generator for a drain that hangs: it burns an attempt on
+        every claimed row without marking any of them, and holds the pass against every other sink.
+        Ten seconds, because a results warehouse that has not completed a TCP+TLS+auth handshake in
+        ten is down, and the drain runs again in `result_publish_schedule_minutes`.
         """
         if not 1 <= query_timeout_seconds <= 3600:
             # `statement_timeout=0` is Postgres' spelling of *no* timeout, so an out-of-range value
@@ -134,6 +145,15 @@ class PostgresWarehouse:
                 "`query_timeout_seconds` must be between 1 and 3600; "
                 f"got {query_timeout_seconds}, and 0 means no statement timeout at all"
             )
+        if not 1 <= connect_timeout_seconds <= 3600:
+            # Checked on the same terms as the statement bound above, and for the sharper reason:
+            # libpq reads `connect_timeout=0` as *no* timeout, so an out-of-range value here
+            # restores exactly the unbounded handshake this argument exists to end.
+            raise SinkConnectionError(
+                "`connect_timeout_seconds` must be between 1 and 3600; "
+                f"got {connect_timeout_seconds}, and 0 means no connect timeout at all"
+            )
+        self._connect_timeout = connect_timeout_seconds
         options = [f"-c statement_timeout={int(query_timeout_seconds * 1000)}"]
         if schema:
             # **Checked, because this one reaches a process argument rather than a statement.**
@@ -184,13 +204,34 @@ class PostgresWarehouse:
     async def _connection(self) -> psycopg.AsyncConnection[Any]:
         """The live connection, opened on first use and reopened if it was closed."""
         if self._conn is None or self._conn.closed:
+            # **Not passed when the site's own connection string already sets one.** A keyword wins
+            # over a conninfo key in psycopg, so passing it unconditionally would silently overrule
+            # a `connect_timeout` a DBA had deliberately written into the `dsn` — the one form of
+            # this binding where the site can already express the bound. Absent there, this is the
+            # only thing standing between a blackholed warehouse and an unbounded drain.
+            # `dict[str, Any]`, not `dict[str, int]`: `connect()` is an overloaded signature and
+            # mypy matches `**kwargs` against each overload's positional parameters, so a narrowed
+            # value type is reported against `AdaptContext`, `str` and the cursor factory in turn.
+            timeout: dict[str, Any] = (
+                {}
+                if self._dsn and "connect_timeout" in conninfo_to_dict(self._dsn)
+                else {"connect_timeout": self._connect_timeout}
+            )
             if self._dsn:
                 self._conn = await psycopg.AsyncConnection.connect(
-                    self._dsn, options=self._options, row_factory=dict_row, autocommit=True
+                    self._dsn,
+                    options=self._options,
+                    row_factory=dict_row,
+                    autocommit=True,
+                    **timeout,
                 )
             else:
                 self._conn = await psycopg.AsyncConnection.connect(
-                    options=self._options, row_factory=dict_row, autocommit=True, **self._parts
+                    options=self._options,
+                    row_factory=dict_row,
+                    autocommit=True,
+                    **self._parts,
+                    **timeout,
                 )
         return self._conn
 

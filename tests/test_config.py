@@ -4,6 +4,7 @@ These prove the two contracts the rest of the system relies on: sane defaults
 load with no `.env`, and any value is overridable via a prefixed env var.
 """
 
+import ast
 import logging
 import os
 import re
@@ -16,7 +17,7 @@ from typing import Any
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from chemclaw.core.config import Settings
+from chemclaw.core.config import _BOUNDED_DRAINS, Settings
 
 # `CHEMCLAW_FOO=...`, optionally commented out (a documented-but-unset key, e.g. the JSON
 # spec tokens). Both forms count as "documented" for the parity test below.
@@ -1799,4 +1800,72 @@ def test_the_refusal_prints_a_breakdown_that_reaches_its_own_number() -> None:
         assert wide * per_pool + narrow == total, (
             f"{label}: the refusal says {total} and shows {wide}x{per_pool} + {narrow} = "
             f"{wide * per_pool + narrow}"
+        )
+
+
+def test_every_bounded_drain_can_finish_a_run_inside_the_ceiling_that_kills_it() -> None:
+    """The shipped defaults must let a bounded run complete, not be killed near the end of one.
+
+    Four Schedules bound their own run by an iteration count and continue as new; the ceiling on
+    that run is `schedule_run_timeout_seconds`. The product was never checked and did not fit: at
+    the shipped defaults `corpus_sync`, `document_sync` and `label_sync` each needed 90,900 s of
+    activity budget (270,900 s for the document share, whose loop dispatches three) against an
+    86,400 s ceiling. A run killed there is a `TIMED_OUT` no `except` sees, and two of these jobs
+    keep no row between *fires*, so the next one starts from page one — a day of a worker slot for
+    zero net progress.
+
+    Asserted on the live settings rather than on the literals, so a site that lowers the ceiling or
+    raises a chunk budget in ENV is held to the same rule the validator refuses on.
+    """
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    for iterations_name, budget_name, per_iteration in _BOUNDED_DRAINS:
+        iterations = getattr(settings, iterations_name)
+        budget = getattr(settings, budget_name)
+        needed = budget * (1 + iterations * per_iteration)
+        assert needed <= settings.schedule_run_timeout_seconds, (
+            f"{iterations_name}={iterations} needs {needed}s of activity budget against a "
+            f"{settings.schedule_run_timeout_seconds}s run ceiling"
+        )
+
+
+def test_the_dispatch_count_each_bounded_drain_declares_is_the_one_it_runs() -> None:
+    """`_BOUNDED_DRAINS`' third column is derived from the workflow's loop, never trusted.
+
+    The arithmetic above multiplies an iteration count by how many activities one iteration
+    dispatches, and that is a property of a `while` body no `Settings` object can see. Declared in
+    config and checked here against each workflow's own source: a loop that gains a fourth dispatch
+    fails this rather than silently needing a third more of a ceiling nobody re-derived.
+
+    Counted by walking the `run` method's AST and asking which dispatch calls sit inside a loop —
+    the same question `tests/test_activity_queue_bound.py` asks of the whole tree, narrowed to one
+    method — because a regex over `execute_activity` cannot tell the loop's dispatches from the
+    planning call that precedes it.
+    """
+    dispatch = {"execute_activity", "execute_local_activity", "start_activity"}
+    src = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "durable"
+    for iterations_name, _budget, declared in _BOUNDED_DRAINS:
+        module = src / f"{iterations_name.removesuffix('_max_iterations')}.py"
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        runs = [
+            n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "run"
+        ]
+        assert len(runs) == 1, f"{module.name} no longer has exactly one workflow `run`"
+        in_a_loop = {
+            id(n)
+            for loop in ast.walk(runs[0])
+            if isinstance(loop, ast.While | ast.For)
+            for n in ast.walk(loop)
+        }
+        counted = sum(
+            1
+            for n in ast.walk(runs[0])
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr in dispatch
+            and id(n) in in_a_loop
+        )
+        assert counted == declared, (
+            f"{module.name}'s drain loop dispatches {counted} activities per iteration, but "
+            f"_BOUNDED_DRAINS declares {declared} — the run-ceiling arithmetic is now wrong by "
+            f"a factor of {counted / declared:.2f}"
         )

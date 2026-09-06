@@ -365,3 +365,92 @@ def test_an_empty_key_is_not_a_key() -> None:
 
     with pytest.raises(ValidationError):
         CalculationKey(calc_type="", calc_version="", input_hash="", params_hash="")
+
+
+def test_a_crash_between_the_two_writes_costs_a_recompute_and_never_a_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The order of `put` and the publish is what decides which half a hard kill can lose.
+
+    Persist-then-publish is the intuitive order and loses publications with no trace, because D-011
+    is what makes the loss permanent: the row is in the cache, so every later call for that key is
+    a *hit* that returns above the publish and never reaches it again. Measured on the old order —
+    `computes=1 publishes=[]`, `chemclaw_results_queued_total` unmoved, indistinguishable from a
+    calculation nobody ran, and `publish backfill` the only recovery with no Schedule running it.
+
+    Reversed, the same kill leaves a queued row and no cache row: the retry recomputes (paid once)
+    and re-enqueues onto the outbox's `ON CONFLICT … DO NOTHING`. Driven with a `BaseException`
+    between the two, which is what a kill is from the caller's side — nothing in `cached_compute`
+    may treat it as a failed calculation either.
+    """
+
+    async def _run() -> None:
+        store = InMemoryStore()
+        key = CalculationKey.build("xtb", "gfn2", inputs={"smiles": "CCO"})
+        computes = 0
+        published: list[str] = []
+
+        async def compute() -> dict[str, int]:
+            nonlocal computes
+            computes += 1
+            return {"energy": 42}
+
+        async def dies(*_args: object, **_kwargs: object) -> None:
+            raise KeyboardInterrupt("the pod was evicted between the two writes")
+
+        monkeypatch.setattr(store_module, "publish_stored_result", dies)
+        with pytest.raises(KeyboardInterrupt):
+            await cached_compute(store, key, compute)
+
+        async def records(published_key: CalculationKey, *_a: object, **_k: object) -> None:
+            published.append(published_key.as_str())
+
+        monkeypatch.setattr(store_module, "publish_stored_result", records)
+        _result, was_cached = await cached_compute(store, key, compute)
+
+        assert was_cached is False, (
+            "nothing may be cached that was not offered first: a hit here is the state that makes "
+            "the lost publication permanent under D-011"
+        )
+        assert computes == 2, "the recompute is the price, and it is paid exactly once"
+        assert published == [key.as_str()]
+
+    asyncio.run(_run())
+
+
+def test_the_publish_is_offered_before_the_row_is_persisted() -> None:
+    """The same invariant read off the order of the two calls rather than off a crash.
+
+    Stated as an order because that is what the guarantee *is*: "persisted implies offered" is
+    checkable for the next writer that pairs a `put` with `publish_stored_result`, and it is false
+    the moment a `put` lands first.
+    """
+
+    async def _run() -> None:
+        events: list[str] = []
+
+        class _RecordingStore(InMemoryStore):
+            async def put(self, stored: StoredResult) -> None:
+                events.append("put")
+                await super().put(stored)
+
+        async def compute() -> dict[str, int]:
+            return {"energy": 42}
+
+        async def publish(*_a: object, **_k: object) -> None:
+            events.append("publish")
+
+        original = store_module.publish_stored_result
+        store_module.publish_stored_result = publish
+        try:
+            await cached_compute(
+                _RecordingStore(),
+                CalculationKey.build("xtb", "gfn2", inputs={"smiles": "CCO"}),
+                compute,
+            )
+        finally:
+            store_module.publish_stored_result = original
+
+        assert events == ["publish", "put"]
+
+    asyncio.run(_run())

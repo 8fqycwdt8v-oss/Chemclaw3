@@ -31,7 +31,12 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.errors import ChemclawError
     from chemclaw.durable.registry import durable_activity, durable_workflow
-    from chemclaw.ingest.eln.adapter import RawEntry, entry_window, fetch_was_truncated
+    from chemclaw.ingest.eln.adapter import (
+        RawEntry,
+        accepts_a_limit,
+        entry_window,
+        fetch_was_truncated,
+    )
     from chemclaw.ingest.eln.cursor import load_cursor, store_cursor
     from chemclaw.ingest.eln.ord import OrdReaction
     from chemclaw.ingest.eln.records import default_record_store
@@ -178,6 +183,19 @@ class _BoundedIngest:
         self._limit = limit
         self.truncated = False
 
+    async def _fetch(self, since: datetime, limit: int | None) -> list[RawEntry]:
+        """Ask the wrapped adapter for entries, offering `limit` only if it takes one.
+
+        `ElnAdapter.fetch_new_entries` publishes a one-argument signature and D-120 promises a new
+        source costs zero core edits, so an out-of-tree adapter written to that signature must not
+        be handed a second positional argument — it would raise `TypeError` on its first chunk.
+        `accepts_a_limit` is the capability probe, beside `fetch_was_truncated`, which asks the
+        same kind of question about the same seam.
+        """
+        if limit is not None and accepts_a_limit(self._inner):
+            return await self._inner.fetch_new_entries(since, limit)  # type: ignore[call-arg]
+        return await self._inner.fetch_new_entries(since)
+
     async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
         """Fetch from the wrapped adapter: the overlap plus the oldest `limit` new entries.
 
@@ -194,9 +212,21 @@ class _BoundedIngest:
 
         `ingest/eln/warehouse/sql.py` already orders and limits on `COALESCE(modified, created)`,
         so this also makes the in-process cap agree with the page boundary the source itself cut.
+
+        **The bound is now offered to the source as well as applied here, and only on the chunks
+        where the two mean the same thing.** Truncating after the read is what made a chunked drain
+        re-read the whole outstanding set per chunk — O(corpus²/batch); the warehouse adapter turns
+        `limit` into its `LIMIT` and stops asking for 5,000 rows to keep 100. It is offered only
+        when `since >= self._since`, which is exactly a chunk with no overlap rewind behind it: on
+        the *first* chunk of a run the caller's floor sits `eln_sync_overlap_seconds` before the
+        cursor, so a `limit` applied at that floor would be spent on the overlap replay and could
+        return a chunk of nothing but already-ingested entries — a fetch that reports itself
+        truncated while the cursor cannot advance, which is the wedge the workflow's own guard
+        stops loudly. Every continuation chunk, which is what a large drain is made of, is bounded.
         """
+        bounded = since >= self._since
         entries = sorted(
-            await self._inner.fetch_new_entries(since),
+            await self._fetch(since, self._limit if bounded else None),
             key=lambda entry: (entry_window(entry.created_at, entry.modified_at), entry.entry_id),
         )
         overlap = [

@@ -83,8 +83,8 @@ class _ListAdapter(JsonExportAdapter):
         super().__init__("/nonexistent")
         self._entries = entries
 
-    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
-        """Return the fixed list."""
+    async def fetch_new_entries(self, since: datetime, limit: int | None = None) -> list[RawEntry]:
+        """Return the fixed list, ignoring `limit` as both file-drop adapters do."""
         return self._entries
 
 

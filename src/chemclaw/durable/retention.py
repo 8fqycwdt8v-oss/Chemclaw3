@@ -518,13 +518,20 @@ _ANALYZE_THREADS = "ANALYZE checkpoints"
 #    alone. The old checkpoints already deleted are lost history for a thread that came back to
 #    life, which is a shorter `aget_state_history` rather than a state that reads back empty.
 #
-# **What is left is one statement's snapshot wide, and it is not closed here.** A turn whose blobs
-# commit before `_DELETE_ORPHANED` takes its snapshot and whose `checkpoints` row commits after it
-# still loses them — `aput` writes blobs first and the checkpoint row second, and nothing
-# synchronises the two parties without a lock on the turn-serving write path. That residual is why
-# the guard that matters is on the *read*: `agent/checkpointer._refuse_if_values_are_missing`
-# refuses a checkpoint that has lost values it was written holding, whatever route it took to get
-# there.
+# **This paragraph used to name a residual that does not exist, and it was the written
+# justification for the read guard.** It said a turn whose blobs commit before `_DELETE_ORPHANED`
+# takes its snapshot and whose `checkpoints` row commits after it still loses them, on the premise
+# that `aput` writes the two separately. Measured in wave 6: `aput` runs its statements in a
+# psycopg pipeline, and a pipeline on an autocommit connection is **one** transaction —
+# `txid_current()` is identical across it, and a concurrent poller observing the thread saw only
+# `(0,0)` and `(1,1)`, never a half-written pair. So the two parties are synchronised by the
+# writer's own transaction and this route is closed.
+#
+# `agent/checkpointer._refuse_if_values_are_missing` still matters, and this is its real
+# justification: a torn thread has producers this sweep is not one of, and cannot be — a restore
+# to a point in time, hand surgery on the tables, a future upstream change that stops pipelining.
+# A guard on the read is right because it is the last place that can tell, not because the write
+# path leaves a window open.
 
 # The one table of the three that dates a thread, and therefore the one the expiry re-check runs
 # against; the other two are swept only where it has left nothing behind.

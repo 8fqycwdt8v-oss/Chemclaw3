@@ -10,8 +10,9 @@ default**. A system that began shipping every calculation to a destination on a 
 chose would be the exact failure this seam exists to make deliberate.
 """
 
+import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -21,8 +22,9 @@ from pydantic import ValidationError
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.manifest_io import read_manifest, resolve_driver, within_root
-from chemclaw.publish.driver import ResultSink
+from chemclaw.publish.driver import ResultSink, SinkUnavailableError
 from chemclaw.publish.manifest import ResultSinkManifest
+from chemclaw.publish.record import ResultRecord
 
 logger = logging.getLogger(__name__)
 
@@ -128,12 +130,72 @@ def _resolve(reference: str) -> Callable[..., Any]:
     return resolved
 
 
+class _BoundedSink:
+    """A sink whose every call is bounded by `result_publish_timeout_seconds`.
+
+    **The setting was documented as a per-`deliver` ceiling and enforced by nobody.** Its own
+    declaration reads *"how long one `deliver` may take before the drain gives up on that batch and
+    leaves its rows pending"*; what actually existed was the *activity's*
+    `result_publish_timeout_seconds x len(sinks)` — one budget for the whole sequential loop. So a
+    single hanging destination consumed the entire pass and every sink later in
+    `CHEMCLAW_RESULT_SINKS` was never reached. Measured with `alpha` hanging and `beta` healthy
+    over eight passes: `beta` was claimed **zero** times, its rows sat at `attempts=0` with no
+    `last_error`, and nothing distinguished "starved" from "nothing to send" — while
+    `durable/publish_results.py`'s module docstring gave two failure domains as the reason for the
+    design. That is true of the *rows* and was false of the *pass*.
+
+    **Here rather than in the drain loop, because the bound belongs to the seam.** Every sink this
+    registry builds is bounded, so the guarantee does not depend on which caller drains — the
+    backfill CLI and any later caller get it for free — and the activity's `x len(sinks)` budget
+    becomes the honest sum of N per-sink budgets rather than one pool the first sink can drink.
+
+    A timeout is a `SinkUnavailableError`: the destination did not answer, which is the retryable
+    half of the contract, and it is what puts the reason into `result_publications.last_error`
+    where an operator reads it. `aclose` is bounded too and *swallows* its timeout — a driver that
+    will not let go of a connection must not also cost the next sink its pass, and the drain calls
+    it from a `finally` that has nothing to do with delivery.
+    """
+
+    def __init__(self, name: str, sink: ResultSink, timeout_seconds: float) -> None:
+        """Wrap `sink`, naming it for the errors and log lines this class raises."""
+        self._name = name
+        self._sink = sink
+        self._timeout = timeout_seconds
+
+    async def deliver(self, records: Sequence[ResultRecord]) -> None:
+        """Deliver, giving up at the per-sink ceiling rather than holding the pass."""
+        try:
+            async with asyncio.timeout(self._timeout):
+                await self._sink.deliver(records)
+        except TimeoutError as exc:
+            raise SinkUnavailableError(
+                f"result sink {self._name!r} did not finish delivering {len(records)} row(s) "
+                f"within result_publish_timeout_seconds ({self._timeout}s); the batch stays "
+                "pending"
+            ) from exc
+
+    async def aclose(self) -> None:
+        """Release the sink, bounded — a driver that will not close must not starve the next one."""
+        try:
+            async with asyncio.timeout(self._timeout):
+                await self._sink.aclose()
+        except TimeoutError:
+            logger.warning(
+                "result sink %r did not close within %ss; continuing to the next sink",
+                self._name,
+                self._timeout,
+            )
+
+
 def build(manifest: ResultSinkManifest) -> ResultSink:
-    """Build the sink a manifest describes.
+    """Build the sink a manifest describes, bounded by the per-sink delivery ceiling.
 
     Deliberately uncached: a sink holds a connection, and a cached one would outlive a credential
     rotation. The drain builds per run, which is coarse enough that the construction cost does not
     matter and fine enough that a rotated secret takes effect on the next pass.
+
+    What comes back is a `_BoundedSink` around the driver, never the driver itself — see that
+    class for the starvation that made the wrapper the seam's job rather than a caller's.
     """
     factory = _resolve(manifest.driver)
     try:
@@ -155,4 +217,6 @@ def build(manifest: ResultSinkManifest) -> ResultSink:
             f"result sink {manifest.name!r}: {manifest.driver!r} did not build a ResultSink "
             "(it must expose an async `deliver(records)`)"
         )
-    return sink
+    # Checked *before* wrapping, so the error still names what the driver failed to be rather than
+    # what this module wrapped it in.
+    return _BoundedSink(manifest.name, sink, settings.result_publish_timeout_seconds)

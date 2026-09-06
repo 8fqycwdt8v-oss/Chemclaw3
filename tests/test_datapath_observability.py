@@ -693,8 +693,15 @@ def test_the_outbox_backlog_is_a_count_and_an_age(monkeypatch: pytest.MonkeyPatc
     Executed on the old formula: queued=10, published=0, failures=50, and the true pending row
     count was 0. The age is what separates a backlog of five that turns over every second from a
     backlog of five that has not moved since Tuesday.
+
+    The probe sink is enabled for the duration, because the reading is deliberately scoped to the
+    *enabled* set: rows queued for a sink an operator removed from `CHEMCLAW_RESULT_SINKS` are
+    drained by nobody and pruned by nobody, and counting them here made
+    `ChemclawResultOutboxStuck` page permanently for a destination that was switched off on
+    purpose. Those rows are reported on the degradation series instead.
     """
     asyncio.run(migrated_db_or_skip())
+    monkeypatch.setattr(outbox, "enabled_names", lambda: ["lims"])
 
     async def run() -> None:
         async with db.connection(settings.postgres_dsn) as conn:

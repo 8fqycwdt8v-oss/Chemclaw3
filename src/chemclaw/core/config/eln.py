@@ -47,7 +47,14 @@ class ElnSettings(BaseSettings):
     # the batch size above, against a warehouse ELN sized at ~700,000 — and was *terminated*, which
     # is not a failure and so retries nothing and pushes nothing back. Same default and same
     # reasoning as `label_sync_max_iterations` and `document_sync_max_iterations`.
-    eln_sync_max_iterations: int = Field(default=100, ge=1)
+    # **Derived from `schedule_run_timeout_seconds` rather than chosen**, and it moved from 100
+    # to 90 when that arithmetic was first done: `_a_bounded_run_fits_the_ceiling_that_kills_it`
+    # refuses a count whose iterations cannot finish inside the `run_timeout` on the very run
+    # they bound. At 100 its three-dispatch loop was 90,300 s against 86,400 s. What the cut costs
+    # is one extra `continue_as_new`
+    # per 90 iterations and nothing else — the hop carries the drain's position — and what it
+    # buys is that a run large enough to use its budget is no longer killed near the end of one.
+    eln_sync_max_iterations: int = Field(default=90, ge=1)
     # Dead-worker detection for the (long-running) sync activity: it heartbeats while it
     # ingests, so Temporal notices a dead worker within this window instead of waiting out the
     # whole `eln_sync_timeout_seconds` start-to-close before retrying elsewhere.

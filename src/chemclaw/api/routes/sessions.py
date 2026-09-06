@@ -32,12 +32,12 @@ from chemclaw.api.schemas import (
     _transcript,
 )
 from chemclaw.api.state import (
-    _WORKER_ID,
     SessionOwners,
     SessionTurns,
     _claim_turn_slot,
     _release_turn_claim,
     _release_turn_slot,
+    claim_holder,
     state,
 )
 from chemclaw.core.config import settings
@@ -158,7 +158,7 @@ async def fork_session_route(
     try:
         if claims is not None:
             claimed = await claims.claim(
-                session_id, _WORKER_ID, settings.service_turn_claim_lease_seconds
+                session_id, claim_holder(slot), settings.service_turn_claim_lease_seconds
             )
             if not claimed:
                 raise HTTPException(
@@ -183,7 +183,7 @@ async def fork_session_route(
             # when the caller is cancelled, and a bare `await` in a cancelled task raises at its
             # first suspension point, so the release would start on every abandoned fork and finish
             # on none.
-            await _release_turn_claim(claims, session_id)
+            await _release_turn_claim(claims, session_id, claim_holder(slot))
     front.live_sessions.add(child_id, TurnSession(session_id=child_id), principal.oid, live.profile)
     log_event(
         logger,
@@ -357,7 +357,7 @@ async def delete_session(
     try:
         lease = settings.service_turn_claim_lease_seconds
         if claims is not None:
-            claimed = await claims.claim(session_id, _WORKER_ID, lease)
+            claimed = await claims.claim(session_id, claim_holder(slot), lease)
             if not claimed:
                 raise HTTPException(
                     status_code=409,
@@ -399,7 +399,7 @@ async def delete_session(
             # caller is cancelled, and a bare `await` in a cancelled task raises at its first
             # suspension point, so the release would start on every abandoned delete and finish on
             # none.
-            await _release_turn_claim(claims, session_id)
+            await _release_turn_claim(claims, session_id, claim_holder(slot))
     return Response(status_code=204)
 
 

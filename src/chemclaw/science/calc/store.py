@@ -552,13 +552,35 @@ async def cached_compute(
         started = time.perf_counter()
         result = checked_payload(key, await compute())
         elapsed = time.perf_counter() - started
+        # **Offered before it is persisted, and the order is the whole of the guarantee.**
+        # On the miss branch only — a cache *hit* returns above without touching either write,
+        # which keeps them off the hottest read in the system, the same reason
+        # `calculation_results` deliberately carries no `last_access_at`. A repeat call costs what
+        # it always cost.
+        #
+        # Persist-then-publish is the intuitive order and it loses publications with no trace.
+        # D-011 is what makes the loss permanent rather than self-healing: a crash between the two
+        # leaves the row in the cache, so every later call for this key is a *hit* that returns
+        # above and never reaches the publish again. Measured with a kill between them —
+        # `computes=1 publishes=[]`, `chemclaw_results_queued_total` unmoved, indistinguishable
+        # from a calculation nobody ran — and the only recovery is `publish backfill`, a CLI that
+        # `durable/schedules.py` runs on no Schedule.
+        #
+        # Reversed, the same crash leaves a queued row and no cache row: the next call recomputes
+        # (the cost D-011 exists to avoid, paid once) and re-enqueues onto the outbox's
+        # `ON CONFLICT (sink, calc_ref, schema_version) DO NOTHING`, so nothing duplicates and
+        # nothing is lost. That trades an undetectable permanent gap for a bounded, self-healing
+        # recompute, and it makes the invariant `publish_stored_result`'s docstring already claims
+        # — "persisted implies offered" — true of the cache rather than merely intended.
+        #
+        # Nothing here depends on the row existing first: the outbox row carries the projected
+        # payload itself, not a reference into `calculation_results`. And this cannot fail the
+        # calculation, because `enqueue_payload` never raises — the polarity that is also why the
+        # reverse order looked safe.
+        await publish_stored_result(key, result, compute_seconds=elapsed, structure_id=structure_id)
         await store.put(
             StoredResult(key=key, result=result, compute_seconds=elapsed, structure_id=structure_id)
         )
-        # On the miss branch only. A cache *hit* returns above without touching this, which keeps
-        # the write off the hottest read in the system — the same reason `calculation_results`
-        # deliberately carries no `last_access_at`. A repeat call costs what it always cost.
-        await publish_stored_result(key, result, compute_seconds=elapsed, structure_id=structure_id)
         future.set_result((result, False))
         return result, False
     except BaseException as exc:
@@ -594,7 +616,10 @@ async def publish_stored_result(
 
     **Public, and paired with `put` rather than with `cached_compute`.** Every writer to the
     calculation store is a producer of publishable science, and this used to be private to the one
-    writer that goes through `cached_compute` below. The second writer — the removed DFT bundle's
+    writer that goes through `cached_compute` below. The pairing is *ordered*, and `cached_compute`
+    states why: this runs **before** the `put`, so a crash between them costs a recompute instead
+    of losing the publication under D-011's own guarantee. The second writer — the removed DFT
+    bundle's
     `persist_qm_result`, which could not use `cached_compute` because its computation happened on a
     cluster rather than behind a callable — was therefore missed, and DFT published on backfill and
     never live. It stays public and stays paired with the write rather than with `cached_compute`,
@@ -607,8 +632,10 @@ async def publish_stored_result(
     configured should never load at all. `publishing_enabled()` is a list lookup, so the whole
     subsystem costs one comparison when it is off.
 
-    Never raises. The calculation succeeded and is already persisted; a results store that cannot
-    be queued to is strictly less important than returning the science.
+    Never raises. The calculation succeeded; a results store that cannot be queued to is strictly
+    less important than returning the science. (This used to say "and is already persisted", which
+    the ordering above makes false at the one call site that has to be right about it — the point
+    of the order is that the persist has *not* happened yet.)
     """
     from chemclaw.publish.outbox import enqueue_payload
 

@@ -32,6 +32,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.eln.cursor import load_cursor, store_cursor
     from chemclaw.ingest.sources.registry import active_commitment_sources, make_data_source
 
+from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 
@@ -118,6 +119,26 @@ async def sweep_withdrawn(source: str, marked_at: datetime) -> int:
 @activity.defn
 async def mirror_commitments_activity(source: str) -> CommitmentSyncResult:
     """Fetch one source's commitments since its cursor, upsert them, and sweep what it withdrew.
+
+    **Heartbeating, which it was not, and it was the only long core background activity that was
+    not.** The pass reaches an external portfolio system and then writes every row it got back, so
+    a worker that dies mid-mirror reports nothing until the whole `commitment_sync_timeout_seconds`
+    start-to-close lapses — five minutes in which the redelivery that would have salvaged the pass
+    is not scheduled. The work is opaque (one export call, one bulk upsert, no unit boundary to
+    report progress at), which is exactly the shape `durable/heartbeat.py::beating` was extracted
+    for. The eager pre-beat is there for the same reason the ELN sync's is: `beating()` waits one
+    interval before its first beat, and a small portfolio finishes inside it.
+    """
+    activity.heartbeat()
+    return await beating(
+        _mirror_one_source(source),
+        f"commitment mirror {source}",
+        settings.commitment_sync_heartbeat_timeout_seconds,
+    )
+
+
+async def _mirror_one_source(source: str) -> CommitmentSyncResult:
+    """The pass itself, so the activity above is the heartbeat wrapper and nothing else.
 
     The cursor is advanced only after the write commits, the ordering every sync here uses: a crash
     between fetching and storing must cause a re-read, not a silent skip. A re-read is free, because
@@ -221,6 +242,9 @@ class CommitmentSyncWorkflow:
                         source,
                         start_to_close_timeout=timeout,
                         schedule_to_start_timeout=queue_wait_timeout(),
+                        heartbeat_timeout=timedelta(
+                            seconds=settings.commitment_sync_heartbeat_timeout_seconds
+                        ),
                         retry_policy=BAD_DATA_RETRY,
                     )
                 )

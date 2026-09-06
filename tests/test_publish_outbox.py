@@ -11,6 +11,7 @@ Three properties, and each was a design decision rather than an implementation d
 """
 
 import asyncio
+import logging
 from typing import Any
 
 import psycopg
@@ -584,6 +585,15 @@ def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
     is there. The bound's own job is the other case: a worker that claimed and then *died*, leaving
     the row pending with its attempts spent. Without the predicate that row is claimed forever, and
     a destination that is genuinely rejecting it is retried without limit.
+
+    **The second assertion used to read `("pending", 2)`, and that was this file asserting the
+    defect.** "Still pending" was a *proxy* for "the bound did the work, not the state" — but a row
+    left pending with its budget spent is unclaimable, uncounted as a dead letter, ageing forever
+    in the gauge the stuck-outbox alert reads, and unreachable by `--requeue`. `_REAP_EXHAUSTED`
+    now names that transition, so the row comes to rest in `'failed'`, which is where every one of
+    those readers can see it. The proxy is gone and the invariant it stood for is asserted directly
+    instead: the reap and the claim *partition* the pending set on the same bound, so a row one
+    attempt short is still handed out and a row at the bound is retired.
     """
 
     async def _run() -> None:
@@ -594,8 +604,19 @@ def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
             await _reset(conn)
         await outbox.enqueue([_record("abandoned")])
 
-        # Two claims, no failure reported — two workers that died mid-delivery.
+        # One claim short of the bound: still pending, still claimable, not reaped.
         assert len(await outbox.claim("alpha", 10)) == 1
+        async with outbox._connect("test_fixture") as conn:
+            cursor = await conn.execute(
+                "SELECT state, attempts FROM result_publications WHERE calc_ref = 'abandoned'"
+            )
+            assert await cursor.fetchone() == ("pending", 1), (
+                "a row with attempts left must not be retired — the reap and the claim partition "
+                "the pending set on the bound, and this is the claim's side of it"
+            )
+
+        # The second claim spends the last attempt and reports no failure — a worker that died
+        # mid-delivery.
         assert len(await outbox.claim("alpha", 10)) == 1
         assert await outbox.claim("alpha", 10) == [], "a row out of attempts was claimed again"
 
@@ -603,8 +624,9 @@ def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
             cursor = await conn.execute(
                 "SELECT state, attempts FROM result_publications WHERE calc_ref = 'abandoned'"
             )
-            assert await cursor.fetchone() == ("pending", 2), (
-                "the row must still be pending — this is the bound doing the work, not the state"
+            assert await cursor.fetchone() == ("failed", 2), (
+                "a spent row must come to rest where the dead-letter gauge and --requeue can see "
+                "it, not in a fourth state nothing names"
             )
 
     asyncio.run(_run())
@@ -655,5 +677,180 @@ def test_a_document_this_system_already_queued_stays_readable(
         stored = claimed[0][2]
         record = ResultRecord.model_validate(stored)
         assert [fact.property for fact in record.properties] == ["relative_energy"]
+
+    asyncio.run(_run())
+
+
+def test_a_row_that_spends_its_budget_without_an_outcome_is_retired_not_stranded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass that dies between the claim and the mark must not strand the row forever.
+
+    `_CLAIM` spends the attempt and commits before the delivery, deliberately — so a pod eviction,
+    an activity timeout or the per-sink delivery ceiling leaves the row `pending` with an attempt
+    spent and no `last_error`. That is fine until the *last* attempt, at which point the row was in
+    a fourth state the three-state contract does not name: excluded from `_CLAIM` by
+    `attempts < max` so never delivered again, not `'failed'` so never counted as a dead letter,
+    still `'pending'` so counted and ageing forever in the two gauges `ChemclawResultOutboxStuck`
+    reads, and unmatched by `requeue_failed` so the documented remedy reset nothing.
+
+    Measured on the unfixed outbox: eight interrupted passes left `('alpha','stranded','pending',8,
+    '')`, `claim()` returned `[]`, and `requeue_failed()` reset **0** rows.
+
+    The interruption is simulated by claiming and never marking, which is exactly what every one of
+    those failures leaves behind — the accounting is identical whether the pass died in Temporal,
+    in the pod, or at the ceiling.
+    """
+    from chemclaw.publish import backfill
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect("test_fixture") as conn:
+            await _reset(conn)
+        assert await outbox.enqueue([_record("stranded")]) == 1
+
+        for _ in range(settings.result_publish_max_attempts):
+            assert len(await outbox.claim("alpha", 10)) == 1, "the row must stay claimable"
+        # The pass that finds the budget spent is the one that has to say so.
+        assert await outbox.claim("alpha", 10) == []
+
+        async with outbox._connect("test_fixture") as conn:
+            cursor = await conn.execute(
+                "SELECT state, attempts, last_error FROM result_publications WHERE calc_ref = %s",
+                ("stranded",),
+            )
+            row = await cursor.fetchone()
+        assert row is not None
+        state, attempts, last_error = row
+        assert state == "failed", (
+            "a row whose budget is spent with no outcome recorded is a dead letter; leaving it "
+            "'pending' hides it from the dead-letter gauge and from --requeue while it pages "
+            "forever on the age gauge"
+        )
+        assert attempts == settings.result_publish_max_attempts
+        assert "without an outcome" in last_error, (
+            "the retirement must say why, because this cause is not the destination's failure and "
+            "an operator reading `last_error` would otherwise see an empty string"
+        )
+
+        # The documented remedy now reaches it, which is the whole point of the state it is in.
+        assert await backfill.requeue_failed(dry_run=True) == 1
+        assert await backfill.requeue_failed() == 1
+        async with outbox._connect("test_fixture") as conn:
+            cursor = await conn.execute(
+                "SELECT state, attempts FROM result_publications WHERE calc_ref = %s",
+                ("stranded",),
+            )
+            assert await cursor.fetchone() == ("pending", 0)
+
+    asyncio.run(_run())
+
+
+def test_the_real_failure_reason_outranks_the_reaper_s_generic_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row that *did* record why it failed keeps that reason when it is retired.
+
+    The reaper writes `last_error` only when it is empty. An operator opening a dead letter needs
+    the destination's own account of the failure — "connection refused", "no such column" — not
+    this system's account of its own bookkeeping.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect("test_fixture") as conn:
+            await _reset(conn)
+        await outbox.enqueue([_record("has-a-reason")])
+        claimed = await outbox.claim("alpha", 10)
+        await outbox.mark_failed([claimed[0][0]], "connection refused by the results warehouse")
+        # Spend the rest of the budget the silent way, then let the next claim retire it.
+        for _ in range(settings.result_publish_max_attempts - 1):
+            await outbox.claim("alpha", 10)
+        await outbox.claim("alpha", 10)
+
+        async with outbox._connect("test_fixture") as conn:
+            cursor = await conn.execute(
+                "SELECT state, last_error FROM result_publications WHERE calc_ref = %s",
+                ("has-a-reason",),
+            )
+            row = await cursor.fetchone()
+        assert row == ("failed", "connection refused by the results warehouse")
+
+    asyncio.run(_run())
+
+
+def test_an_emptied_queue_reads_as_zero_seconds_behind_not_as_fifty_six_years(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The healthiest state the drain has must not be its worst gauge reading.
+
+    `_replace` keeps a sink that has fallen to zero in the gauge family rather than dropping it,
+    which is right — a disappearing series silently stops an alert evaluating. But the family it
+    zeroes holds an *epoch*, and `_oldest_pending_seconds` subtracted it from the clock. Measured
+    on a sink whose queue had just drained:
+    `chemclaw_outbox_oldest_pending_seconds{sink="alpha"} = 1788721651` — about 56 years —
+    so `ChemclawResultOutboxStuck` fires at its maximum reading on every deployment the first time
+    a sink clears its backlog.
+
+    `refresh_backlog`'s own docstring already claimed the fixed behaviour ("which reads as '0
+    seconds behind', the honest answer for an empty queue"); the arithmetic said the opposite.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect("test_fixture") as conn:
+            await _reset(conn)
+        await outbox.enqueue([_record("drains-to-empty")])
+        await outbox.refresh_backlog()
+        assert outbox._oldest_pending_seconds()["alpha"] < 60.0
+
+        claimed = await outbox.claim("alpha", 10)
+        await outbox.mark_delivered([claimed[0][0]])
+        await outbox.refresh_backlog()
+
+        assert outbox._PENDING_GAUGE["alpha"] == 0.0, "the series must stay, reading zero"
+        assert outbox._oldest_pending_seconds()["alpha"] == 0.0, (
+            "an empty queue is zero seconds behind; anything else pages when nothing is wrong"
+        )
+
+    asyncio.run(_run())
+
+
+def test_rows_for_a_disabled_sink_stop_paging_and_are_reported_instead(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Turning a destination off must not leave an alert nobody can silence.
+
+    `enqueue` writes one row per *currently enabled* sink and the drain iterates *currently
+    enabled* manifests, while the backlog read took every row regardless. Measured: with `beta`
+    removed from the enable list its row was drained by nobody, pruned by nobody (retention sweeps
+    `delivered` only), requeued by nobody, and read `chemclaw_outbox_pending{sink="beta"} 1.0`
+    forever — so `ChemclawResultOutboxStuck` fired permanently for a destination the operator had
+    deliberately turned off.
+
+    The rows are not forgotten: they are reported once per pass on the degradation series, which is
+    a different fact wanting a different, non-paging rule.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha", "beta")
+        async with outbox._connect("test_fixture") as conn:
+            await _reset(conn)
+        assert await outbox.enqueue([_record("orphaned")]) == 2
+
+        _with_sink(monkeypatch, "alpha")
+        with caplog.at_level(logging.WARNING):
+            await outbox.refresh_backlog()
+
+        assert "beta" not in outbox._PENDING_GAUGE or outbox._PENDING_GAUGE["beta"] == 0.0, (
+            "a sink nothing drains must not be counted as a backlog the drain is behind on"
+        )
+        assert any("no longer enabled" in record.getMessage() for record in caplog.records), (
+            "the stranded rows must still be reported — silence is how they are forgotten"
+        )
 
     asyncio.run(_run())

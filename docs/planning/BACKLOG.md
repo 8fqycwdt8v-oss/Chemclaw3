@@ -345,6 +345,24 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
+- [ ] **The result outbox has no claim lease, so two overlapping drains spend one row's budget
+      twice** — [S], found 2026-09-06 in the wave-6 delivery review
+      (`D-2026-09-06-a-response-class-nobody-named-is-a-delivery-nobody-made`, decision 3).
+      `_CLAIM` spends the attempt and commits before the delivery by design, so `SKIP LOCKED`
+      excludes only the *claim*, which lasts milliseconds — and the case the comment named (a
+      scheduled drain plus an operator's manual one) overlaps over the *delivery*, which lasts
+      seconds to a minute. Measured with a 1.0 s sink and a second drain started 0.3 s in: both
+      delivered the same row, `attempts=2`. Duplicate delivery is harmless (every far-side key is a
+      content hash, verified over three redeliveries), so the harm is that an attempt budget of 8
+      empties after 4 real attempts against one destination's outage. The reaper added in that ADR
+      makes the outcome an honest dead letter rather than a zombie, so this is no longer a
+      *lost-row* defect — it is a budget that is half what it says. The fix is a lease:
+      `state='in_flight'` plus `claimed_at` in `infra/sql/050_result_publications.sql` (a new
+      migration and a widened `CHECK`), set by `_CLAIM`, cleared by `mark_delivered`/`mark_failed`,
+      and returned to `pending` by a reaper on age — at which point the second run skips the row by
+      *predicate* rather than by lock duration and `_CLAIM`'s comment becomes true as written. It is
+      a schema change, which is why it is a row here rather than part of that commit.
+
 - [ ] **The two eval gates score literals written in their own case files** — [M], same review.
       11 of 13 baseline metrics are read from the case file rather than computed, so a metric that
       stops measuring and answers "perfect" passes both `make eval-strict` and
@@ -495,6 +513,36 @@ topic).
       one question these gauges are read for together — is the pool full *and* are callers waiting
       — which is exactly the saturation reading D-119 introduced them for. A single cached snapshot
       per scrape, or one gauge family. Anchor: `core/db.py::bind_pool_metrics`.
+
+- [ ] **A backfill drop directory re-refuses every file it has already ingested** — [M], found and
+      measured 2026-09-06 (`D-2026-09-06-a-bound-applied-after-the-read-is-not-a-bound-on-it`
+      states it rather than fixing it). `is_late_arrival` is handed the *chunk* cursor, not the
+      run's floor, so once a drain advances past a file's payload timestamp the file re-qualifies
+      as a late arrival on every later chunk if its mtime is still after the cursor — which is
+      exactly a bulk-copy backfill, where mtime is the copy time and the payloads are old.
+      Measured on a 3,000-file corpus at the shipped batch: the drain goes from 2.55 s to 9.99 s,
+      and `ingest_rejections` fills with a *growing* set of false rows (99, then 199, then 299…)
+      each saying no scheduled run will fetch an entry that has already been ingested — a chemist
+      asking about that entry is told the reason it was refused, about a record that is in the
+      corpus. The honest fix hands the adapter the run's floor beside the chunk's, which is a
+      second parameter; overloading the new `limit` to mean "this is a continuation" is two
+      spellings of one thing and was declined. Anchor: `ingest/eln/adapter.py::is_late_arrival`,
+      `ingest/eln/json_adapter.py::_scan`, `ingest/eln/ord_adapter.py::_scan`.
+
+- [ ] **`BoCampaignWorkflow` runs four sequential activities under a ceiling that funds one** —
+      [M], measured 2026-09-06. `connector_queue_wait_timeout`'s "fits by construction" argument is
+      a bound on **one** `q + w`: at the shipped numbers 10,170 + 300 = 10,470 s against a 25,200 s
+      `connector_job_timeout_seconds`. But the BO child runs `propose_initial`, `_evaluate(seed)`,
+      `propose_next`, `_evaluate` and `record_round` — at minimum four before a one-round campaign
+      can finish, so 4 × 10,470 = 41,880 s over the ceiling, reachable on four waits of ~6,300 s
+      each, well inside what the bound permits as normal. The docstring's own justification for one
+      generous wait per queue — "what has to fit is the worst composite on it" — is the sentence
+      this falsifies: the worst composite on `connector-bo` is `N × (q + w)`. The elegant fix is
+      `continue_as_new` per round rather than at the rounds bound (`_carry_on` already carries
+      exactly the state a round boundary needs), so the execution ceiling bounds a *round*; dividing
+      the headroom by a declared per-child activity count is the fragile alternative. It lives in
+      `connectors/bo/workflows.py`, so it is that bundle's change rather than core's. Anchors:
+      `durable/publish.py::connector_queue_wait_timeout`, `connectors/bo/workflows.py`.
 
 ## 4 — Operating it
 

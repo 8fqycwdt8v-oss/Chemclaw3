@@ -52,7 +52,14 @@ class LabelSettings(BaseModel):
     label_batch_size: int = Field(default=200, ge=1, le=500)
     # How many batches one workflow run drains before `continue_as_new`. Event history is bounded,
     # and a 13M-row corpus at 200 a batch is 65,000 batches — far past what one run may hold.
-    label_sync_max_iterations: int = Field(default=100, ge=1)
+    # **Derived from `schedule_run_timeout_seconds` rather than chosen**, and it moved from 100
+    # to 90 when that arithmetic was first done: `_a_bounded_run_fits_the_ceiling_that_kills_it`
+    # refuses a count whose iterations cannot finish inside the `run_timeout` on the very run
+    # they bound. At 100 that was 90,900 s of activity budget against 86,400 s. What the cut costs
+    # is one extra `continue_as_new`
+    # per 90 iterations and nothing else — the hop carries the drain's position — and what it
+    # buys is that a run large enough to use its budget is no longer killed near the end of one.
+    label_sync_max_iterations: int = Field(default=90, ge=1)
     # The drain activity's start-to-close. Its own field rather than a shared one because each
     # drain in this tree is paced by a different downstream (`eln_sync_timeout_seconds`,
     # `document_sync_timeout_seconds`), and one number for all of them would be wrong for each.
@@ -67,7 +74,15 @@ class LabelSettings(BaseModel):
     # `fetch_limit` where that is lower, so a site can cap it without a redeploy of this.
     corpus_page_size: int = Field(default=1_000, ge=1)
     # How many pages one workflow run drains before `continue_as_new`.
-    corpus_sync_max_iterations: int = Field(default=100, ge=1)
+    # **Derived from `schedule_run_timeout_seconds` rather than chosen**, and it moved from 100
+    # to 90 when that arithmetic was first done: `_a_bounded_run_fits_the_ceiling_that_kills_it`
+    # refuses a count whose iterations cannot finish inside the `run_timeout` on the very run
+    # they bound. At 100 that was 90,900 s of activity budget against 86,400 s, and a killed
+    # release-mode drain keeps no cursor, so the next fire restarted from page one. What the cut
+    # costs is one extra `continue_as_new`
+    # per 90 iterations and nothing else — the hop carries the drain's position — and what it
+    # buys is that a run large enough to use its budget is no longer killed near the end of one.
+    corpus_sync_max_iterations: int = Field(default=90, ge=1)
     # The drain activity's start-to-close and its heartbeat bound. A page is a warehouse query plus
     # a fingerprint per distinct structure — minutes, with no natural progress point.
     corpus_sync_timeout_seconds: float = Field(default=900.0, gt=0)

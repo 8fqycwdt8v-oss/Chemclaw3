@@ -39,7 +39,12 @@ with workflow.unsafe.imports_passed_through():
 
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.durable.orchestrator import fan_out
-from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry, queue_wait_timeout
+from chemclaw.durable.publish import (
+    BAD_DATA_RETRY,
+    fan_out_queue_wait_timeout,
+    note_publish_retry,
+    queue_wait_timeout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +217,11 @@ class PublishNoteWorkflow:
             publish_memory_note_activity,
             unit,
             start_to_close_timeout=timedelta(seconds=settings.note_write_timeout_seconds),
-            schedule_to_start_timeout=queue_wait_timeout(),
+            # The fan-out wait rather than core's hour, for the reason
+            # `fan_out_queue_wait_timeout` gives: 3,600 + 120 does not fit a 3,600 ceiling, so a
+            # note parked on an unserved queue ended as a bare child execution timeout instead of
+            # the named activity failure `fan_out` logs and counts.
+            schedule_to_start_timeout=fan_out_queue_wait_timeout(),
             retry_policy=note_publish_retry(),
         )
 

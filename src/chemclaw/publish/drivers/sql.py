@@ -24,9 +24,15 @@ from collections.abc import Sequence
 from typing import Any
 
 from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.ingest.eln.warehouse.driver import Warehouse, WarehouseQueryError
 from chemclaw.publish.connect import SinkConnectionError, open_connection
-from chemclaw.publish.dialect import TABLE_ORDER, rows_for, upsert_statement
+from chemclaw.publish.dialect import (
+    REQUIRED_COLUMNS,
+    TABLE_ORDER,
+    rows_for,
+    upsert_statement,
+)
 from chemclaw.publish.driver import SinkRejectedError, SinkUnavailableError
 from chemclaw.publish.record import ResultRecord
 
@@ -80,6 +86,10 @@ class SqlResultSink:
         self._schema = str(self._connection_binding.get("schema") or "")
         self._warehouse: Warehouse | None = None
         self._columns: dict[str, set[str]] | None = None
+        # Which optional columns this sink has already reported as absent, per table. Scoped to the
+        # sink's life, which is one drain pass — so a persistent lag is reported once a pass rather
+        # than once a row, and a site that applies the migration stops being reported at all.
+        self._reported: dict[str, set[str]] = {}
 
     async def aclose(self) -> None:
         """Close the held connection and forget the probed schema.
@@ -92,6 +102,7 @@ class SqlResultSink:
         warehouse = self._warehouse
         self._warehouse = None
         self._columns = None
+        self._reported = {}
         closer = getattr(warehouse, "aclose", None)
         if closer is not None:
             # Not every `Warehouse` holds something to close — the Protocol does not require it of
@@ -167,8 +178,81 @@ class SqlResultSink:
                 f"result sink {self._name!r}: the target has no {', '.join(missing)}. "
                 "Run `python -m chemclaw.cli.sink_schema` and apply the printed DDL."
             )
+        # **A column that carries a measurement is checked here, with the tables.** See
+        # `dialect.REQUIRED_COLUMNS` for why a *lag* and a *hole* are not the same fault: the
+        # omission filter below is right for a provenance column a later release added, and was
+        # silently dropping the value itself.
+        for table, required in sorted(REQUIRED_COLUMNS.items()):
+            absent = sorted(required - found[table])
+            if absent:
+                raise SinkRejectedError(
+                    f"result sink {self._name!r}: {table} lacks {', '.join(absent)}, which "
+                    "carry the measurement rather than describe it — a row written without them "
+                    "would assert less than it claims. Run `python -m chemclaw.cli.sink_schema` "
+                    "and apply the printed DDL."
+                )
+        await self._refuse_an_unseeded_registry(warehouse)
         self._columns = found
         return found
+
+    async def _refuse_an_unseeded_registry(self, warehouse: Warehouse) -> None:
+        """Refuse a store whose `property_definition` is empty, before any row is written.
+
+        **The bootstrap is a loaded gun without this.** `schema/result-store/` is where CLAUDE.md
+        points a site — *"the schema ships in `schema/result-store/` and a site creates it"* — and
+        the directory holds the DDL and **no registry rows**; those come from
+        `sink_schema --seed`, which only `README.md` mentions. Applying the directory alone
+        therefore builds a store that accepts every spine row and refuses every fact row on a
+        foreign key, and the missing-*table* probe above cannot see it because every table is
+        there.
+
+        Measured on exactly that store: the delivery raised, and the far side kept
+        `calculation 1 / subject 1 / calculation_payload 1 / property_value 0` — a calculation row
+        with zero facts, which a `GROUP BY` over `property_value` reads as a calculation that
+        produced nothing. An orphan spine row is worse than absence, because it is counted.
+
+        Refused *before* the write rather than after it, which is the whole point: the write is
+        row-by-row on an autocommit connection with no transaction to roll back, so the only place
+        this fault can be caught without leaving residue is ahead of the first statement.
+        """
+        async with warehouse.cursor() as cursor:
+            await cursor.execute("SELECT count(*) AS n FROM property_definition", [])
+            rows = await cursor.fetchall()
+        count = int(next(iter(rows[0].values())) if rows else 0)
+        if count == 0:
+            raise SinkRejectedError(
+                f"result sink {self._name!r}: property_definition is empty, so every fact row "
+                "would be refused by its foreign key while the spine rows landed — leaving "
+                "calculations with no measurements. Run "
+                "`python -m chemclaw.cli.sink_schema --seed` and apply it."
+            )
+
+    def _report_dropped(self, table: str, dropped: set[str]) -> None:
+        """Say once per table what this site's schema cannot hold — not once per row.
+
+        Two changes to a bare `logger.warning`, and both were measured problems. It fired **per
+        row**, so at `result_publish_batch_size=100` a site one migration behind produced a hundred
+        identical lines per table per pass; and it was a plain log line, so nothing counted it and
+        nothing alerted. `degraded()` is this tree's one answer for "we continued with less" — it
+        counts and then logs — and WARNING rather than the default ERROR because this arm is the
+        *sanctioned* case: an optional column absent on an older store, which the additive-migration
+        rule says reads correctly as "not recorded".
+        """
+        seen = self._reported.setdefault(table, set())
+        if dropped <= seen:
+            return
+        seen |= dropped
+        degraded(
+            logger,
+            "result_sink_schema_lag",
+            "result sink %s: %s lacks %s; those values are not published (this site's schema is "
+            "behind this release — run `python -m chemclaw.cli.sink_schema`)",
+            self._name,
+            table,
+            ", ".join(sorted(dropped)),
+            level=logging.WARNING,
+            exc_info=False,
+        )
 
     async def deliver(self, records: Sequence[ResultRecord]) -> None:
         """Write every record's rows, in dependency order, idempotently.
@@ -183,7 +267,23 @@ class SqlResultSink:
         try:
             warehouse = self._connect()
             columns_by_table = await self._known_columns(warehouse)
-        except (ConnectionError, OSError) as exc:
+        except SinkRejectedError:
+            # The site's schema is the problem — a missing table names its own remedy. Re-raised
+            # unchanged, ahead of the availability arm below, because it is the one connect-time
+            # failure a retry cannot fix.
+            raise
+        except Exception as exc:
+            # **Every other failure to reach the destination, not just
+            # `ConnectionError`/`OSError`.**
+            # The vendor driver's own exception types are not in this module's vocabulary and must
+            # not be: the seam's contract is that a *content* failure arrives as
+            # `WarehouseQueryError` (or, here, `SinkRejectedError`), so anything else at connect
+            # time is by definition the destination not working. Measured before this widening
+            # against a Postgres that was simply down: `psycopg.OperationalError` is neither a
+            # `ConnectionError` nor an `OSError`, so it escaped this handler entirely and reached
+            # `durable/publish_results._drain_one`'s generic arm — which treats a failure as a
+            # *poison record* and replays the batch one row at a time. A warehouse that was down
+            # therefore dead-lettered every record as though its content were bad.
             raise SinkUnavailableError(f"result sink {self._name!r} is unreachable: {exc}") from exc
 
         for record in records:
@@ -198,16 +298,13 @@ class SqlResultSink:
                 for row in rows:
                     # Omit what the site does not have, rather than failing the row. A column added
                     # by a later release is absent here, and absent reads correctly as "not
-                    # recorded" — which is what the additive-migration rule guarantees.
+                    # recorded" — which is what the additive-migration rule guarantees. The columns
+                    # for which that is *not* true were refused at the probe (`REQUIRED_COLUMNS`),
+                    # so everything reaching this line is genuinely optional.
                     usable = {key: value for key, value in row.items() if key in known}
                     dropped = set(row) - set(usable)
                     if dropped:
-                        logger.warning(
-                            "result sink %s: %s lacks %s; those values are not published",
-                            self._name,
-                            table,
-                            ", ".join(sorted(dropped)),
-                        )
+                        self._report_dropped(table, dropped)
                     statement = upsert_statement(table, tuple(usable), warehouse.placeholder)
                     try:
                         async with warehouse.cursor() as cursor:
@@ -217,7 +314,12 @@ class SqlResultSink:
                             f"result sink {self._name!r} refused a {table} row for "
                             f"{record.calc_ref!r}: {exc}"
                         ) from exc
-                    except (ConnectionError, OSError) as exc:
+                    except Exception as exc:
+                        # The same widening as the connect arm, for the same reason: the driver's
+                        # docstring says a server that goes away "passes through as itself, because
+                        # that one genuinely is worth retrying" — and this handler was the place
+                        # that turned the retry back off, because `psycopg.OperationalError` is
+                        # neither of the two classes it named.
                         raise SinkUnavailableError(
                             f"result sink {self._name!r} became unreachable mid-batch: {exc}"
                         ) from exc

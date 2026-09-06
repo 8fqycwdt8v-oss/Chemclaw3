@@ -37,4 +37,12 @@ class ReportSettings(BaseSettings):
     # and is meant as a "this is stuck" bound rather than a service level. `Settings` checks it
     # against the section budget it has to contain, so lowering it below that budget is refused
     # rather than silently pre-empting work that was still running.
+    #
+    # **It has to contain the child's queue wait as well as its work, and for a while it did not.**
+    # Both children passed core's flat hour as their `schedule_to_start`, which is this very
+    # number, so the composite `q + w` was 3,900 s under a 3,600 s ceiling and the child's own
+    # schedule-to-start expiry was unreachable — every parked child came back as a bare execution
+    # timeout, delivered to no workflow code. `durable/publish.py::fan_out_queue_wait_timeout`
+    # now derives the children's wait from what is left of this ceiling, so raising or lowering it
+    # moves the wait with it and the composite fits by construction.
     fan_out_child_timeout_seconds: float = Field(default=3600.0, gt=0)

@@ -101,7 +101,7 @@ class OrdJsonAdapter:
         self._dir = Path(export_dir if export_dir is not None else settings.ord_export_dir)
         self._source = name or DEFAULT_LEDGER_SOURCE
 
-    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+    async def fetch_new_entries(self, since: datetime, limit: int | None = None) -> list[RawEntry]:
         """Return ORD messages created at or after `since`, oldest first.
 
         A file that cannot be read/parsed at all, or that carries no usable creation
@@ -135,7 +135,17 @@ class OrdJsonAdapter:
         `JsonExportAdapter.fetch_new_entries` states — the same defect in the same shape, and ORD
         messages are the heavier files: measured 2026-09-06 with a 1 ms heartbeat on the same loop,
         a 10,000-message directory blocked it for **937.4 ms**, the worst gap equal to the whole
-        scan. The quadratic re-read across a chunked drain is untouched here too.
+        scan.
+
+        **`limit` is accepted and ignored for the reason the free-text adapter gives**: this scan
+        is ordered by filename and a message's window is inside the payload, so breaking it at
+        `limit` returns an arbitrary subset and the cursor then advances past the entries the break
+        discarded. The quadratic re-read across a chunked drain stays, and is bounded by the
+        directory rather than by the corpus.
+
+        Args:
+            since: The window floor; messages at or after it are returned.
+            limit: Accepted for the protocol and unused — see above.
         """
         entries, late, refused = await asyncio.to_thread(self._scan, since)
         # The source, not the format: this is the one line reporting files that are silently never

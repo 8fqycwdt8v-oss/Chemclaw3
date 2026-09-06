@@ -31,6 +31,7 @@ carrying an argument nobody checked.
 
 import ast
 import asyncio
+import re
 from pathlib import Path
 
 import pytest
@@ -48,7 +49,7 @@ with workflow.unsafe.imports_passed_through():
 
     from chemclaw.core.config import settings
     from chemclaw.durable.note_index import NoteReindexWorkflow
-    from chemclaw.durable.publish import connector_queue_wait_timeout
+    from chemclaw.durable.publish import connector_queue_wait_timeout, fan_out_queue_wait_timeout
     from tests.temporal_env import pydantic_client, start_env_or_skip
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
@@ -287,3 +288,61 @@ def test_the_job_ceiling_funds_exactly_one_worst_case_attempt_at_any_setting(
         "a second full-length attempt fits, so the ceiling now funds retries and "
         "`_the_job_ceiling_covers_the_activity_it_bounds` may say so"
     )
+
+
+@pytest.mark.parametrize("ceiling", [3600.0, 7200.0, 86400.0])
+def test_the_fan_out_ceiling_funds_one_worst_case_child_at_any_setting(
+    monkeypatch: pytest.MonkeyPatch, ceiling: float
+) -> None:
+    """The twin of the rule above, on the pair that shipped without it.
+
+    `fan_out_child_timeout_seconds` bounds a report section and a note publish, and both children
+    passed core's flat `queue_wait_timeout()` — 3,600 s — as their `schedule_to_start` under a
+    3,600 s ceiling. So the composite a child may legally spend was `3,600 + 300 = 3,900` against
+    3,600: the ceiling was *equal to the wait it had to contain*, and the child's own
+    SCHEDULE_TO_START expiry — the failure `ReportSectionWorkflow`'s `except ActivityError`
+    degrades on and `activity_failure_reason` names — could never be reached. Driven on the real
+    broker at 1000:1 the child came back as a bare `ChildWorkflowError`, which `fan_out` drops
+    without a cause.
+
+    Parametrized over three ceilings rather than asserting the shipped numbers, for the reason its
+    twin gives: `fan_out_queue_wait_timeout` is derived as `C - w - a`, so `q + w == C - a` at
+    every ceiling and a re-derivation as a fraction of `C` is what would move it.
+    """
+    monkeypatch.setattr(settings, "fan_out_child_timeout_seconds", ceiling)
+    longest, _budget = settings.longest_fan_out_activity
+    overhead = settings.activity_timeout_seconds
+    one_attempt = fan_out_queue_wait_timeout().total_seconds() + longest
+
+    assert one_attempt == ceiling - overhead
+    assert one_attempt < ceiling, (
+        "the ceiling must strictly exceed one worst-case child, or the child's own "
+        "schedule-to-start expiry is pre-empted by the parent's execution timeout"
+    )
+
+
+def test_every_fan_out_child_waits_on_the_fan_out_bound_not_on_cores_hour() -> None:
+    """Each `fan_out` child's activity passes the derived wait, and the walk says which children.
+
+    The composite above fits by construction only for a call site that *uses* the derived wait, and
+    the defect this closes was precisely that two sites did not. Asserted against the source of the
+    two child workflows rather than by driving them, because what is wrong in the broken shape is a
+    keyword argument's value and nothing about a green run says which timeout was passed.
+    """
+    children = {
+        "durable/report_workflow.py": "ReportSectionWorkflow",
+        "durable/memory_jobs.py": "PublishNoteWorkflow",
+    }
+    for module, child in children.items():
+        text = (_SRC / module).read_text()
+        after = text.split(f"class {child}:", 1)[1]
+        # The class body ends at the first line that starts in column 0 again — the next
+        # decorator, def or class. Splitting on the decorator alone ran past the end of the
+        # file when the child is the last decorated thing in its module, which would let a
+        # *different* function's queue bound satisfy the assertion below.
+        body = re.split(r"\n(?=\S)", after, maxsplit=1)[0]
+        assert "schedule_to_start_timeout=fan_out_queue_wait_timeout()" in body, (
+            f"{child} ({module}) does not bound its queue wait with fan_out_queue_wait_timeout(); "
+            "core's hour equals the fan-out ceiling, so its degradation path is unreachable"
+        )
+        assert "schedule_to_start_timeout=queue_wait_timeout()" not in body

@@ -79,6 +79,42 @@ async def _run_child(
     )
 
 
+def _refuse_a_child_that_cannot_fail(child: Any) -> None:
+    """Refuse a `fan_out` child that has not declared how it fails, at the seam that depends on it.
+
+    The contract is already written down — `fan_out`'s own `retry_policy` doc says a child raising
+    a plain exception needs `@workflow.defn(failure_exception_types=[...])` "or it will hang
+    instead of being dropped" — and until now nothing checked it *here*. What it costs when it is
+    missed is not a failure: the SDK parks the plain exception in an internal task-failure loop
+    that ignores `retry_policy` entirely, so the child is only freed by `execution_timeout`, and
+    the fan-out then logs it with the same line a genuinely hung child gets. Measured over three
+    children (ok / raise / hang), the raising one and the hanging one produced the identical
+    "Child Workflow execution timed out" and cost `fan_out_child_timeout_seconds` apiece — an hour
+    of somebody's time spent on a distinction the log had erased.
+
+    **Checked over what is passed rather than over a registry.** `tests/test_workflow_registry.py`
+    already asserts the declaration for the *job path*, so a bundle added later is covered without
+    editing a test; what neither that check nor the six deliberate parkers it allows can see is a
+    third `fan_out` caller whose child is on neither list. This is the one place that knows the
+    child is a fan-out child.
+
+    A `child` carrying no `__temporal_workflow_definition` at all is left alone: it is a test
+    double standing in for the SDK, not a workflow whose failure mode is in question, and the two
+    existing `fan_out` unit tests pass exactly that.
+    """
+    definition = getattr(child, "__temporal_workflow_definition", None)
+    if definition is None:
+        return
+    if not getattr(definition, "failure_exception_types", ()):
+        raise ValueError(
+            f"{getattr(definition, 'name', child)!r} is passed to fan_out without "
+            "failure_exception_types, so a plain exception raised in it would park in the SDK's "
+            "task-failure loop rather than fail: the fan-out could not drop it, and it would cost "
+            "the full fan_out_child_timeout_seconds and log as a timeout. Declare "
+            "@workflow.defn(failure_exception_types=[...]) on it."
+        )
+
+
 async def fan_out(
     child: Any,
     inputs: Sequence[Any],
@@ -98,6 +134,10 @@ async def fan_out(
     uncaught `ActivityError` from its own `execute_activity`, as in `PublishNoteWorkflow`) is fine
     as-is; a child that raises a plain exception directly needs
     `@workflow.defn(failure_exception_types=[...])` or it will hang instead of being dropped.
+    **That sentence is now enforced here rather than only stated** — see
+    `_refuse_a_child_that_cannot_fail`, which refuses an undeclared workflow class at the top of
+    this function, because the log line the omission produces is indistinguishable from a genuinely
+    hung child and costs `fan_out_child_timeout_seconds` before it says anything at all.
 
     Args:
         child: The child workflow class to start (its `run` method is invoked with one input).
@@ -147,6 +187,7 @@ async def fan_out(
         )
     if limit < 1:
         raise ValueError(f"max_parallel must be >= 1, got {limit}")
+    _refuse_a_child_that_cannot_fail(child)
     parent_id = workflow.info().workflow_id
     indexed = list(enumerate(inputs))
     results: list[Any] = []

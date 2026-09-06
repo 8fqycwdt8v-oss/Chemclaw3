@@ -7,6 +7,7 @@ identical no matter which ELN is wired. There is no universal ELN abstraction �
 per source (docs/planning/DEFERRED.md: generalize only from a third source).
 """
 
+import inspect
 from datetime import UTC, datetime
 from logging import Logger
 from pathlib import Path
@@ -140,6 +141,31 @@ class ElnAdapter(Protocol):
         compare the later of the two against `since` and set `RawEntry.modified_at` — otherwise a
         correction to an old entry is never fetched, and the sync cannot notice what it never
         sees. `entry_window` is that comparison, written once so two adapters cannot disagree.
+
+        **`limit` bounds the read, where the read can be bounded.** The durable sync drains a
+        source in chunks and truncates what it gets back to `eln_sync_batch_size`
+        (`durable/eln_sync.py::_BoundedIngest`) — so without this, every chunk re-read the whole
+        outstanding set to keep a hundredth of it, and a drain cost O(corpus²/batch). Measured on a
+        3,000-file drop: 30 chunks, 90,000 file reads, 2.55 s against 0.31 s for a corpus a third
+        the size. Passing the number down lets a source that can push the bound into its own read
+        do so; the warehouse adapter turns it into its `LIMIT`, cutting a continuation
+        chunk's read from the binding's page (500 rows by default) to the chunk (100).
+
+        It is a **capability, not a requirement**, on the same terms as `fetch_was_truncated`
+        below: an adapter that cannot bound its read may ignore it, because the caller truncates
+        anyway. What an adapter may **never** do is return a non-prefix subset — the entries it
+        withholds must all be *later*, in `entry_window` order, than every entry it returns.
+        Anything else advances the cursor past an entry that was never offered, and no later fetch
+        offers it again. That is why the file-drop adapters ignore this: their scan is ordered by
+        filename and an entry's window is inside the payload, so a break in that scan drops
+        entries the cursor then skips for good.
+
+        `None` means unbounded, which is what a caller reading a whole corpus passes.
+
+        Args:
+            since: The fetch floor — entries at or after it, in `entry_window` order.
+            limit: At most this many entries *strictly newer* than `since`; entries at or before
+                it (the sync's overlap replay) are not counted against it. `None` is unbounded.
         """
         ...
 
@@ -155,6 +181,35 @@ class BoundedFetch(Protocol):
     def fetch_truncated(self) -> bool:
         """Whether the last `fetch_new_entries` stopped at its own limit with rows still waiting."""
         ...
+
+
+def accepts_a_limit(adapter: object) -> bool:
+    """Whether `adapter.fetch_new_entries` will take the optional `limit` this sync can offer.
+
+    **A capability, asked for, rather than a parameter every adapter must grow** — the same shape
+    as `fetch_was_truncated` above and for a sharper version of the same reason. Bounding the read
+    rather than the result was measured worth having (a continuation chunk dropped from 500 rows
+    to 100), and the first cut of it put `limit` into the `ElnAdapter` protocol. That is a
+    breaking change to the one seam D-120 promises is not one: "a new source is one
+    `ingest/sources/<name>/datasource.yaml` folder plus its name in `CHEMCLAW_DATA_SOURCES`, with
+    **zero** core edits". An out-of-tree adapter written to the documented signature would have
+    been called with two positional arguments and raised `TypeError` on its first chunk.
+
+    So the protocol keeps the signature it published, an adapter that *can* bound its read simply
+    declares the parameter, and this is how the caller finds out. `inspect.signature` rather than
+    a `runtime_checkable` Protocol because structural checks see method *names*, not their
+    parameters — the distinction this question is entirely about.
+    """
+    fetch = getattr(adapter, "fetch_new_entries", None)
+    if fetch is None:
+        return False
+    try:
+        return "limit" in inspect.signature(fetch).parameters
+    except (TypeError, ValueError):
+        # A builtin or a C-implemented callable has no introspectable signature. Unbounded is the
+        # safe answer: the sync bounds the result instead, which is what it did for every adapter
+        # before this existed.
+        return False
 
 
 def fetch_was_truncated(adapter: object) -> bool:
@@ -249,8 +304,16 @@ class DatedIngest:
         """
         return self._inner
 
-    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
-        """Delegate unchanged — dating is purely a mapping concern."""
+    async def fetch_new_entries(self, since: datetime, limit: int | None = None) -> list[RawEntry]:
+        """Delegate unchanged — dating is purely a mapping concern, and so is bounding.
+
+        The wrapper declares `limit` so `accepts_a_limit` answers `True` for a source whose adapter
+        can bound its read; it forwards one only when the wrapped adapter actually takes it, for
+        the reason that function gives. A wrapper that advertised a capability its inner adapter
+        lacks would move the `TypeError` rather than prevent it.
+        """
+        if limit is not None and accepts_a_limit(self._inner):
+            return await self._inner.fetch_new_entries(since, limit)  # type: ignore[call-arg]
         return await self._inner.fetch_new_entries(since)
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:

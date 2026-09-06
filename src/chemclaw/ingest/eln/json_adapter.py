@@ -145,7 +145,7 @@ class JsonExportAdapter:
         self._dir = Path(export_dir if export_dir is not None else settings.eln_export_dir)
         self._source = name or "eln-json"
 
-    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+    async def fetch_new_entries(self, since: datetime, limit: int | None = None) -> list[RawEntry]:
         """Return entries whose `timestamp` is at or after `since`, oldest first.
 
         A file that cannot be read or parsed at all (I/O error, corrupt JSON, non-object
@@ -175,10 +175,28 @@ class JsonExportAdapter:
         scan** — so a corpus large enough to exceed `eln_sync_heartbeat_timeout_seconds` starves
         the heartbeat the sync depends on and Temporal redelivers an activity that blocks again.
 
-        What this does **not** fix is that the batch cap is applied after the read: a chunked drain
-        re-reads the whole directory per chunk, which is quadratic in the corpus. Bounding the read
-        needs `fetch_new_entries` to be told the chunk size, which is a change to the `ElnAdapter`
-        protocol and to `durable/eln_sync.py`'s `_BoundedIngest`, and it is a `BACKLOG.md` row.
+        **`limit` is accepted and deliberately ignored, and that is the honest answer here rather
+        than a missing feature.** The protocol now carries the chunk size so a source can push the
+        bound into its own read — the warehouse adapter turns it into a `LIMIT`, which is what
+        stops a chunked drain re-reading a table per chunk. A file drop cannot: this scan is
+        ordered by *filename* and an entry's window lives inside the payload, so breaking the scan
+        at `limit` files returns an arbitrary subset of the outstanding entries rather than the
+        oldest ones. The cursor then advances past every entry the break discarded whose window was
+        earlier, and no later fetch offers those files again — the same permanent, silent loss
+        `_BoundedIngest`'s own docstring measured at 50 of 150 when its cap read the wrong
+        timestamp. A bounded *read* here needs an index this directory does not have.
+
+        So the residual is stated rather than deferred: a chunked drain re-scans the whole
+        directory per chunk, which is O(corpus²/batch) in file reads. Measured on real-shaped
+        exports with the batch at 100 — 1,000 files, 10 chunks, 0.31 s; 3,000 files, 30 chunks,
+        2.55 s. One scan is 62 ms per 3,000 files (11 ms glob, 28 ms read, 14 ms parse, 9 ms
+        model), so the per-chunk cost is small and the *product* is what grows. A site whose drop
+        directory is large enough for that to matter wants the warehouse adapter, which is bounded,
+        rather than a faster scan of a directory that has to be read whole.
+
+        Args:
+            since: The window floor; entries at or after it are returned.
+            limit: Accepted for the protocol and unused — see above.
         """
         entries, late, refused = await asyncio.to_thread(self._scan, since)
         # The source, not the format: this is the one line reporting files that are silently never

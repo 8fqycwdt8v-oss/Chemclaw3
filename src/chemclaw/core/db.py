@@ -706,8 +706,16 @@ def register_pool(pool: Any) -> None:
     For the one pool that is genuinely somebody else's: the LangGraph checkpointer's autocommit
     pool (`agent/checkpointer.py`), which every turn's state write goes through. It was invisible
     to `pool_stats` and to `chemclaw_pg_pool_max_size`, so a turn-serving process could open twice
-    what it reported, and a saturated checkpointer stalled turns inside `AsyncPostgresSaver` while
-    `chemclaw_pg_pool_requests_waiting` read 0.
+    what it reported.
+
+    **What registration does not close, and this docstring used to claim it did**: the second half
+    of that sentence read "and a saturated checkpointer stalled turns inside `AsyncPostgresSaver`
+    while `chemclaw_pg_pool_requests_waiting` read 0". Registering the pool does not fix that,
+    because the queue is not the pool's. `AsyncPostgresSaver._cursor` takes the saver's own
+    `asyncio.Lock` *before* it asks the pool for a connection, so turns pile up on the lock and the
+    pool sees one caller. Measured during a deliberate stall: `requests_waiting` still 0.
+    `chemclaw_checkpointer_statements_waiting` is the gauge that moves for that, bound by the
+    module that owns the lock.
 
     Registration only — the caller keeps the lifecycle, because `close_checkpointer` owns when that
     pool opens and closes and a second closer is how a live pool gets shut under a running turn.

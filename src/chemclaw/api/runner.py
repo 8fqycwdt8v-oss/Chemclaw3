@@ -397,6 +397,13 @@ async def run_turn(
                 # The claim is atomic, so a live tab's tailer and this turn cannot both deliver
                 # one row; whichever asks first wins, and both audiences are told the same way.
                 user_input = await _with_pushed_job_results(session.session_id, user_message)
+                # **One carry for the whole turn, because a turn can be two graph invocations.**
+                # `model_calls` and `billed_tokens` are untracked channels, so a resume on the same
+                # thread starts them at zero and gets a second full allowance of both caps —
+                # measured, and exactly contrary to `agent/spend_cap.py`'s stated unit ("one budget
+                # spans a turn that delegates"). Passing the same dict to both runs is what makes
+                # the caps the turn's rather than each invocation's.
+                cap_carry: dict[str, Any] = {}
                 async for event in _stream_into(
                     graph_events(
                         graph,
@@ -406,6 +413,7 @@ async def run_turn(
                         on_signal=ledger.note_signal,
                         usage=ledger.usage,
                         exchanges=ledger.exchanges,
+                        carry=cap_carry,
                     ),
                     ledger,
                 ):
@@ -427,6 +435,7 @@ async def run_turn(
                     trace=tool_trace,
                     session=session,
                     ledger=ledger,
+                    carry=cap_carry,
                 ):
                     yield event
             capped = _loop_cap_event(session, ledger)
@@ -971,6 +980,7 @@ async def _resume_on_job_results(
     trace: ToolCallTrace,
     session: TurnSession,
     ledger: _TurnLedger,
+    carry: dict[str, Any],
 ) -> AsyncIterator[Event]:
     """Continue this same turn with the results of the durable jobs it launched (gap AGT-2).
 
@@ -990,6 +1000,15 @@ async def _resume_on_job_results(
     `run_complete` is cleared for the duration and set again after: the resume drives a *second*
     model run, which can half-write exactly like the first — so the exchange is incomplete again
     until it returns, and a teardown landing inside it must roll the turn back after all.
+
+    **`carry` is what makes the turn's caps span both runs**, and its absence was the one place
+    where "a turn" and "a graph invocation" came apart. `ChemclawState.model_calls` and
+    `billed_tokens` are `UntrackedValue` channels, so this second invocation used to start both at
+    zero — a fresh 25-iteration loop cap and a fresh `agent_max_turn_billed_tokens` for a run that
+    describes itself, one line above, as the same turn. (`ledger.usage` was threaded through both
+    all along, so `turn_costs` and `api/budget.py` always saw the total; only the two *in-graph*
+    caps doubled.) Both are off in the shipped configuration, which is why this was found by
+    reading rather than by an incident.
     """
     if not (ledger.started_jobs and settings.mid_turn_resume_enabled):
         return
@@ -1010,6 +1029,7 @@ async def _resume_on_job_results(
             on_signal=lambda _signal: None,
             usage=ledger.usage,
             exchanges=ledger.exchanges,
+            carry=carry,
         ),
         ledger,
     ):
@@ -1319,22 +1339,52 @@ def _roll_back_unfinished(
     docstring says must not happen. `answered` is kept beside it for the cost ledger, whose question
     genuinely is "did the user get an answer".
 
-    **Only `session.state` is rolled back, and that is the whole rollback now.** It used to have a
-    durable half: a pre-turn watermark over `session_messages`, because the previous engine wrote
-    the stored thread incrementally and fed it back to the model, so a disconnect mid-tool-call
-    committed a `tool_use` with no matching `tool_result` and every later turn replayed it — the
-    model rejected the thread outright ("tool_use ids found without tool_result blocks") and one
-    dropped connection permanently bricked the conversation. The graph reads its own checkpointer
-    instead, and `_record_transcript` writes the user message and the answer together in one call
-    once the answer exists, so the transcript is written once, after the answer: a teardown either
-    lands before it and leaves nothing behind, or lands after it and finds a complete exchange.
-    There is no third outcome (D-2026-08-10 §2).
+    **Only `session.state` is rolled back, and there is nothing here that rolls back a
+    checkpoint.** It used to have a durable half: a pre-turn watermark over `session_messages`,
+    because the previous engine wrote the stored thread incrementally and fed it back to the model,
+    so a disconnect mid-tool-call committed a `tool_use` with no matching `tool_result` and every
+    later turn replayed it — the model rejected the thread outright ("tool_use ids found without
+    tool_result blocks") and one dropped connection permanently bricked the conversation. The graph
+    reads its own checkpointer instead, and `_record_transcript` writes the user message and the
+    answer together in one call once the answer exists.
+
+    **So the transcript is all-or-nothing across a teardown and the thread is not, and this
+    docstring used to claim there was "no third outcome".** There is, it is this branch, and it was
+    measured: a real `run_turn` cancelled between the graph run and `_record_transcript` left
+    `checkpoints: 8, session_messages: 0` — the model sees the question and the answer, the chemist
+    sees neither, and the next turn answers out of a context the chemist cannot read ("as I said
+    above", about something that is not on their screen). The checkpoint is committed by the graph
+    the instant it is written, on the checkpointer's autocommit pool, and nothing in this process
+    owns it by then. Keeping the exchange is still the right call — the alternative is deleting a
+    *complete, correctly paired* exchange because a client dropped — so what changes is that the
+    divergence is counted rather than denied.
+
+    **The counter names one branch and not the whole class**, deliberately. The same divergence
+    arrives on the ordinary failure path (a gateway that refuses one model call leaves the
+    chemist's question in the checkpoint and no transcript row) and after a turn cancelled
+    mid-tool. This branch is the one place the runner *knowingly* keeps a turn it knows the
+    transcript will not get, so it is the one place that can say so honestly; the others are not
+    counted here and are named so that a zero is not read as "this cannot happen". Closing the
+    class rather than counting it means projecting the transcript from the checkpoint stream, which
+    `_record_transcript` already names as the alternative it declined — on cost, before divergence
+    was the reason.
     """
     if ledger.answered or ledger.run_complete:
+        if not ledger.answered:
+            # `run_complete and not answered`: the graph finished and committed the exchange to the
+            # checkpointer, and `_record_transcript` — which runs after `run_complete` is set —
+            # never got there. The two records of one conversation now differ by exactly one turn.
+            METRICS.increment("chemclaw_transcript_thread_divergence_total")
         logger.warning(
             "turn for session %s was torn down after its exchange completed (client "
-            "disconnect or the front door's turn deadline); the committed turn is kept",
+            "disconnect or the front door's turn deadline); the committed turn is kept%s",
             session.session_id,
+            (
+                ""
+                if ledger.answered
+                else " — it is in the checkpointer and not in the transcript, so the chemist's "
+                "view of this session is one turn behind the model's"
+            ),
         )
         return
     logger.warning(
@@ -1845,8 +1895,13 @@ async def _record_transcript(
     **Written from the turn's own text, which is the trade this being "the light option" names.**
     The alternative is projecting from the checkpoint stream, which survives a process that dies
     mid-turn because the checkpoint is already committed. This runs after the answer is assembled,
-    so a turn killed before it answers leaves no transcript row — and that is the same exchange the
-    teardown path deliberately rolls back anyway, so the two agree about what a half-turn is worth.
+    so a turn killed before it answers leaves no transcript row — **and the checkpoint it leaves
+    behind is not rolled back to match.** This paragraph used to end "so the two agree about what a
+    half-turn is worth", and they do not: `_roll_back_unfinished` reverts `session.state` and
+    nothing else, so a teardown landing after the graph run and before this call leaves the
+    exchange in the model's record and out of the chemist's. Measured at `checkpoints: 8,
+    session_messages: 0`; counted at `chemclaw_transcript_thread_divergence_total`; the whole
+    argument, and why the exchange is kept rather than deleted, is in `_roll_back_unfinished`.
 
     **The tool exchanges are stored too, and leaving them out was a silent regression.** The route
     projects `tool_calls` and each call's `result_ref` out of these rows

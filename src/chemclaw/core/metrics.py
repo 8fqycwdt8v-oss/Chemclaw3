@@ -134,6 +134,21 @@ _COUNTERS: dict[str, str] = {
     # invisible in every other signal — a live turn made 29 tool calls and emitted an empty answer
     # with no error, and only a count makes that a trend anyone can watch rather than an anecdote.
     "chemclaw_turn_empty_answers_total": "Turns that ended without producing any answer text.",
+    # **The two records of one conversation, and how often they part company.** The transcript
+    # (`session_messages`, what a chemist sees on reload) is written once after the answer exists;
+    # the checkpoint (what the *model* is built from next turn) is written incrementally by the
+    # graph on an autocommit pool and is never rolled back. A teardown between the two leaves the
+    # model holding an exchange the chemist cannot see. Measured on a real cancelled turn at
+    # `checkpoints: 8, session_messages: 0` — with the runner logging "the committed turn is kept"
+    # and two docstrings claiming this outcome did not exist.
+    #
+    # It counts the one branch that *knowingly* keeps such a turn, not the whole class: the same
+    # divergence arrives on the gateway-failure path and after a cancellation mid-tool, and neither
+    # is counted here. So a rising series is real and a flat one is not proof of agreement.
+    "chemclaw_transcript_thread_divergence_total": (
+        "Turns whose exchange was kept in the checkpointer while the transcript never got it, so "
+        "the chemist's view of that session is one turn behind the model's."
+    ),
     # The result-publication path (D-2026-08-25). Three counters and a gauge, because the three
     # failure modes are genuinely different and one series carrying all of them would be
     # unactionable: a record that could not be *queued* is a local database problem, a record that
@@ -770,6 +785,14 @@ _HISTOGRAMS: dict[str, str] = {
         "most expensive work in the system."
     ),
     "chemclaw_sink_delivery_seconds": "Wall-clock duration of one delivery to a result sink.",
+    # The other half of the gauge above: how long a turn actually waited. The gauge says a queue
+    # exists right now, this says what it cost — and it is the only bound there is, because
+    # `asyncio.Lock` has no timeout, so `checkpointer._translating` (which exists to turn a
+    # checkpointer stall into a retryable error) never fires: nothing raises. Measured at 612 ms
+    # with eight turns and a zero-latency model.
+    "chemclaw_checkpointer_lock_wait_seconds": (
+        "Wall-clock time one checkpointer statement spent waiting for the saver's lock."
+    ),
 }
 
 # Per-histogram bucket boundaries. A histogram's buckets are part of its Prometheus identity, so
@@ -783,6 +806,7 @@ _HISTOGRAM_BUCKETS: dict[str, tuple[float, ...]] = {
     "chemclaw_model_call_duration_seconds": _CALL_BUCKETS,
     "chemclaw_evidence_source_seconds": _CALL_BUCKETS,
     "chemclaw_embedding_duration_seconds": _CALL_BUCKETS,
+    "chemclaw_checkpointer_lock_wait_seconds": _CALL_BUCKETS,
     "chemclaw_db_query_duration_seconds": _CALL_BUCKETS,
     "chemclaw_sink_delivery_seconds": _CALL_BUCKETS,
 }
@@ -977,6 +1001,18 @@ _GAUGES: dict[str, str] = {
     "chemclaw_pg_pool_size": "Connections held across this process's Postgres pools.",
     "chemclaw_pg_pool_available": "Pooled connections currently idle and available.",
     "chemclaw_pg_pool_requests_waiting": "Callers blocked waiting for a pooled connection.",
+    # **The queue in front of the checkpointer is not the pool's, and the gauge above cannot see
+    # it.** `AsyncPostgresSaver._cursor` opens `async with self.lock, get_connection(...)`, so every
+    # checkpointer statement in the pod serializes on one `asyncio.Lock` *before* it asks the pool
+    # for anything. Measured: 8 concurrent turns on 8 different threads gave max concurrency 1
+    # inside the saver and 612 ms of waiting, and during a full stall `pg_pool_requests_waiting`
+    # read 0 — which is the exact symptom `core/db.register_pool`'s docstring claimed it had
+    # closed. `pool_available: 0` is not a substitute either: a pool that can only ever hold one
+    # connection reads 0-available whenever it is used at all.
+    "chemclaw_checkpointer_statements_waiting": (
+        "Turns queued on the checkpointer's own lock, waiting to run one statement. Above zero "
+        "means the pod is serializing turn-state writes, which no pool metric can show."
+    ),
     # The connection budget's two sides, the same pairing `chemclaw_turn_capacity` and
     # `chemclaw_fleet_turn_ceiling` make one subject over: `sum()` of the per-process ceiling is
     # what this deployment may open, and the declared number is what the server will serve. Config

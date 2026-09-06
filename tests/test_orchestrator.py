@@ -172,3 +172,50 @@ def test_a_dropped_child_is_counted_when_not_replaying(monkeypatch: pytest.Monke
 
     assert result == []
     assert METRICS.value("chemclaw_fan_out_children_dropped_total") == before + 1
+
+
+@workflow.defn
+class _UndeclaredChildWorkflow:
+    """A child that declared no `failure_exception_types` — the state the guard below refuses.
+
+    Module level rather than local, because `@workflow.run` refuses a local class outright: the
+    thing under test is a real workflow definition, not a stub.
+    """
+
+    @workflow.run
+    async def run(self, value: int) -> int:
+        return value
+
+
+def test_fan_out_refuses_a_child_that_declared_no_way_to_fail() -> None:
+    """A child that cannot fail does not fail — it *parks*, and the log calls that a timeout.
+
+    Measured over three children (ok / raise / hang): the raising one and the hanging one produced
+    the identical `fan-out child … failed and was dropped: Child Workflow execution timed out`,
+    each after the full `fan_out_child_timeout_seconds`, because the SDK put the plain `ValueError`
+    into the task-failure loop that ignores `retry_policy` and only `execution_timeout` freed it.
+    An hour of somebody's time went on a distinction the log had erased.
+
+    `tests/test_workflow_registry.py` already asserts the declaration over the *job path* registry,
+    which is what covers a bundle added later; what neither it nor the six deliberate parkers it
+    allows can see is a third `fan_out` caller whose child is on neither list. This checks the
+    child that is actually passed, at the one seam that knows it is a fan-out child.
+    """
+    with pytest.raises(ValueError, match="failure_exception_types"):
+        asyncio.run(fan_out(_UndeclaredChildWorkflow, [1], id_prefix="t", max_parallel=1))
+
+
+def test_fan_out_accepts_the_children_it_actually_ships_with() -> None:
+    """The guard is a declaration check, not a registry lookup, so it must not refuse a real child.
+
+    Driven over both shipped `fan_out` children and over the double the two unit tests above pass:
+    a `child` carrying no `__temporal_workflow_definition` is a stand-in for the SDK rather than a
+    workflow whose failure mode is in question, and refusing it would break the seam this guard
+    exists to protect.
+    """
+    from chemclaw.durable.memory_jobs import PublishNoteWorkflow
+    from chemclaw.durable.orchestrator import _refuse_a_child_that_cannot_fail
+    from chemclaw.durable.report_workflow import ReportSectionWorkflow
+
+    for child in (PublishNoteWorkflow, ReportSectionWorkflow, _DoublerWorkflow, object()):
+        _refuse_a_child_that_cannot_fail(child)

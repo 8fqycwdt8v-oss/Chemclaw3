@@ -26,10 +26,17 @@ from chemclaw.agent.leaver import (
     _ERASE,
     _RETAINED,
     _RETAINED_IN_PAYLOAD,
+    ErasureError,
+    _residue_columns,
+    _residue_for,
     erase_actor,
     retention_reasons,
 )
-from chemclaw.agent.session_store import SessionOwnerStore
+from chemclaw.agent.session_store import (
+    SessionOwnerStore,
+    SessionTurnClaims,
+    _session_delete_statements,
+)
 from chemclaw.cli.erase_actor import main as erase_actor_main
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
@@ -793,3 +800,132 @@ def test_the_cli_reports_a_statement_level_database_error_instead_of_raising() -
         settings.postgres_dsn = original
     assert code == 1, "a statement-level database error must be reported, not raised"
     assert "erasure failed" in stderr.getvalue()
+
+
+# --- A sweep and a live turn are two writers, and only one of them was guarded. ---------------
+
+
+_FRAN = "oid-fran"
+
+
+async def _claim(session_id: str, holder: str) -> bool:
+    """Take the session's durable turn claim the way a running turn does."""
+    return await SessionTurnClaims().claim(session_id, holder, 60.0)
+
+
+def test_an_erasure_refuses_while_a_turn_holds_one_of_the_persons_sessions() -> None:
+    """The guard both single-session paths had and the fleet-wide sweep did not.
+
+    Measured before this guard existed, against a real graph on a real checkpointer: the sweep
+    reported 15 checkpoints, 2 messages and the ownership row erased; the still-running turn then
+    rewrote its whole in-memory message list back onto the thread; and the conversation from
+    *before* the erasure was in the database again in full — under a session id whose
+    `session_owners` row was gone, which puts it beyond `delete_session`, beyond the retention
+    sweep and beyond a second `erase_actor`, all three of which reach a session through that row.
+    A second erasure erased nothing and printed zeros, which reads as "there were none".
+
+    So the run is refused, and the refusal names the session an operator has to deal with.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _seed(_FRAN, "sess-fran-live")
+        assert await _claim("sess-fran-live", "some-other-worker")
+        try:
+            with pytest.raises(ErasureError) as caught:
+                await erase_actor(_FRAN, apply=True)
+            assert "sess-fran-live" in str(caught.value)
+            # And it refused *before* deleting anything, rather than part-way through.
+            assert await _count("session_owners", "owner", _FRAN) == 1
+            assert await _count("session_messages", "session_id", "sess-fran-live") == 1
+        finally:
+            await SessionTurnClaims().release("sess-fran-live", "some-other-worker")
+
+    asyncio.run(_run())
+
+
+def test_a_refused_erasure_gives_back_every_claim_it_took() -> None:
+    """A refusal must leave the fleet exactly as it found it, or it locks out the sessions it read.
+
+    The sweep claims every one of the person's sessions before it touches a table, so a refusal on
+    the last one has already taken the others. Releasing them is what keeps a refused erasure from
+    costing a chemist a whole lease of 409s on conversations that were never busy.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _seed(_FRAN, "sess-fran-a")
+        await _seed(_FRAN, "sess-fran-b")
+        assert await _claim("sess-fran-b", "some-other-worker")
+        try:
+            with pytest.raises(ErasureError):
+                await erase_actor(_FRAN, apply=True)
+            # The quiet session is claimable again by somebody else, so the erasure kept nothing.
+            assert await _claim("sess-fran-a", "a-later-turn")
+            await SessionTurnClaims().release("sess-fran-a", "a-later-turn")
+        finally:
+            await SessionTurnClaims().release("sess-fran-b", "some-other-worker")
+
+    asyncio.run(_run())
+
+
+def test_a_quiet_session_is_erased_and_the_sweep_holds_no_claim_afterwards() -> None:
+    """The ordinary path still erases, and the claim it took to do so does not outlive it."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _seed(_FRAN, "sess-fran-quiet")
+        report = await erase_actor(_FRAN, apply=True)
+        assert report.erased["session_messages"] >= 1
+        assert await _count("session_owners", "owner", _FRAN) == 0
+        assert await _count("session_turns", "session_id", "sess-fran-quiet") == 0
+        assert report.residue == {}, "a clean run leaves nothing behind and must say so"
+
+    asyncio.run(_run())
+
+
+def test_a_row_that_comes_back_under_an_erased_session_is_counted_not_missed() -> None:
+    """The half the claims cannot cover: a write this sweep could not have refused.
+
+    A lease that lapsed under a sweep wider than one lease, a session created between the
+    enumeration and the commit, or a deployment where nothing takes a durable claim at all
+    (`api/state._default_turn_claims` returns `None` off the Postgres session store) all land the
+    same way — a row under a session id whose ownership row is gone. Re-running the erasure is not
+    the remedy, because that is exactly what cannot find it, so the count is the remedy: it turns
+    an unreachable residue into a report that says so.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _seed(_FRAN, "sess-fran-residue")
+        await erase_actor(_FRAN, apply=True)
+        # What a turn that outlived the sweep leaves behind: a row keyed by the session, with no
+        # ownership row to find it by.
+        async with await connect(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)",
+                    ("sess-fran-residue", '{"role": "assistant", "content": "after the sweep"}'),
+                )
+            await conn.commit()
+        residue = await _residue_for(["sess-fran-residue"])
+        assert residue.get("session_messages") == 1, residue
+
+    asyncio.run(_run())
+
+
+def test_the_residue_probe_asks_about_every_table_a_session_delete_names() -> None:
+    """The probe is derived from the delete, so a table added to one is asked about by the other.
+
+    A hand-written second list of "where a session's rows live" is the failure this whole check
+    exists to catch, one indirection out: it would go stale in silence and the residue count would
+    return zeros for the table that actually came back.
+    """
+    named = {table for table, _ in _residue_columns()}
+    for table, _ in _session_delete_statements():
+        if table == "tool_result_blobs":
+            # Content-addressed and carrying no session of its own — reached through its link,
+            # which is the row this probe counts instead.
+            assert "tool_result_links" in named
+            continue
+        assert table in named, f"{table} is deleted per session but never re-counted"

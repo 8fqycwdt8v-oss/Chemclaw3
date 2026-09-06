@@ -778,3 +778,51 @@ def test_an_unparseable_tool_call_reaches_the_stream_as_a_real_tool_failed_event
     assert not [event for event in events if event.type == "tool_result"], (
         "a call that could not run must not also produce a result the model is told to weigh"
     )
+
+
+def test_a_mid_turn_resume_continues_the_turns_caps_instead_of_restarting_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One turn, two graph invocations, one allowance.
+
+    `ChemclawState.model_calls` and `billed_tokens` are `UntrackedValue` channels — never
+    checkpointed, so a new invocation on the same thread starts them at 0. That is correct and
+    deliberate at a *turn* boundary, and `api/runner._resume_on_job_results` is the one place it is
+    not one: it is a second `graph_events` over the same thread describing itself as continuing
+    "the same turn", so it used to hand that turn a fresh 25-iteration loop cap and a fresh
+    `agent_max_turn_billed_tokens`.
+
+    Driven here through the same `carry` dict the runner passes to both runs, against a real
+    compiled graph and a real `enforce_loop_cap`: the second run's first model call must be counted
+    as the turn's *next* call, not as its first.
+    """
+    from chemclaw.core.config import settings
+
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 25)
+    trace = ToolCallTrace()
+    usage = _Usage()
+    carry: dict[str, Any] = {}
+
+    async def _run() -> None:
+        graph = build_langgraph_agent(
+            ScriptedChatModel(["first", "second"]),
+            audit_sink=NullAuditSink(),
+        )
+        config = {"configurable": {"thread_id": "t-resume-caps"}}
+        for message in ("hello", "and the job results"):
+            async for _event in graph_events(
+                graph,
+                message,
+                config=config,
+                trace=trace,
+                on_signal=lambda _signal: None,
+                usage=usage,
+                carry=carry,
+            ):
+                pass
+
+    asyncio.run(_run())
+    assert carry.get("model_calls") == 2, (
+        "the resume restarted the turn's model-call count, so one turn got two allowances of "
+        f"both in-graph caps; the carry reads {carry}"
+    )
