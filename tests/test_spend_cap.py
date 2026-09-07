@@ -560,6 +560,18 @@ def test_a_fan_outs_watch_agrees_with_the_channel_the_cap_reads(watch: Any) -> N
     )
 
 
+def test_a_turn_with_no_watch_has_billed_exactly_nothing() -> None:
+    """Off the request path the answer is 0, and "0" is a claim rather than a placeholder.
+
+    Every existing reader of this function drives it inside a watch, so `else 0` could become
+    `else 1` with the four tests that reach it green. The number is not decorative: the runner puts
+    it beside the refusal a chemist reads, because "the turn stopped" and "the turn stopped after
+    1.2 million tokens" are different messages — and a fabricated token there is spend nothing
+    made, reported to the person paying for it.
+    """
+    assert turn_billed_tokens() == 0
+
+
 def test_each_cap_marks_its_watch_through_its_own_public_recorder() -> None:
     """`enforce_spend_cap` records the cap the way `enforce_loop_cap` does — through the recorder.
 

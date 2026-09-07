@@ -22,10 +22,12 @@ from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.tool_authz import (
     SYSTEM_SPEECH_MARK,
     announce_tool_failures,
+    dry_run_refusal,
     enforce_tool_authz,
     surface_authorization_denials,
     surface_domain_errors,
 )
+from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
@@ -208,6 +210,32 @@ def _drive(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
         return await call_next()
 
     asyncio.run(run_middleware(enforce_tool_authz, ctx, _handler))
+
+
+def test_the_dry_run_refusal_reads_the_arguments_and_not_only_the_name() -> None:
+    """One tool name, two destinations, and only the arguments tell them apart.
+
+    `write_file` under `/memories/` outlives the session; the same verb under `/scratch/` dies with
+    the turn, and a dry run that denies the agent its own notepad is a dry run of nothing. That is
+    the entire reason `dry_run_refusal` takes `arguments` at all — and every dry-run test in the
+    repository used a tool whose classification its *name* settles, so the parameter could be
+    replaced by `None` and 118 tests still passed. A parameter no caller's tests can distinguish is
+    the shape `D-2026-08-15` deleted three modules for; this asserts the caller instead.
+    """
+    token = set_dry_run(True)
+    try:
+        durable = dry_run_refusal("write_file", {"file_path": "/memories/solvents.md"})
+        scratch = dry_run_refusal("write_file", {"file_path": "/scratch/working.md"})
+        unreadable = dry_run_refusal("write_file", {})
+    finally:
+        reset_dry_run(token)
+
+    assert durable is not None, "a dry run let a durable memory write through"
+    assert "write_file" in str(durable)
+    assert scratch is None, "a dry run denied the turn its own scratchpad"
+    # A malformed argument counts as durable: a gate that opens on input it cannot read is a gate
+    # bypassable by malformed input (`authz.writes_durable_memory`).
+    assert unreadable is not None
 
 
 def test_middleware_blocks_a_denied_call_before_the_tool_runs(

@@ -22,7 +22,12 @@ from langchain_core.tools import StructuredTool
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.context_budget import estimate_tool_schemas
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.tool_result_size import bound_tool_results, bounded_content
+from chemclaw.agent.tool_result_size import (
+    _notice,
+    bound_tool_results,
+    bounded_content,
+    bounded_for_batch,
+)
 from chemclaw.connectors.transport import SERVED_BY
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
@@ -101,6 +106,128 @@ def test_the_cap_can_be_switched_off() -> None:
     bounded, removed = bounded_content(content, "read_document", 0)
 
     assert bounded is content and removed == 0
+
+
+def test_switching_the_cap_off_reaches_the_share_arithmetic_as_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0 means "no ceiling" all the way through, and only the *callee* was ever asked.
+
+    `test_the_cap_can_be_switched_off` above proves `bounded_content(..., 0)` is a no-op. Nothing
+    asserted that `bounded_for_batch` hands it 0 when `agent_max_tool_result_chars` is 0 — and that
+    translation is where the meaning lives, because the share is `max(ceiling // width, 1)` and the
+    floor is deliberately *not* applied when the ceiling is off. Measured with `else 1` in that
+    conditional: a 5,000-character result comes back as **62 characters** of notice saying it was
+    cut, in every deployment that switched the cap off, with this whole file green. The rule was
+    tested; the translation the rule depends on was not.
+
+    Identity rather than equality, because "unchanged" is what `bound_tool_results` reads to decide
+    whether to copy the message at all.
+    """
+    monkeypatch.setattr(settings, "agent_max_tool_result_chars", 0)
+    content = "A" * 5_000
+    before = METRICS.value("chemclaw_tool_results_truncated_total")
+
+    out = bounded_for_batch(cast(Any, _Request("read_document")), content)
+
+    assert out is content, f"the ceiling was off and {5_000 - len(out)} characters went anyway"
+    assert METRICS.value("chemclaw_tool_results_truncated_total") == before, (
+        "a result was counted as truncated while the cap was off"
+    )
+
+
+def test_a_result_of_exactly_the_limit_is_not_cut() -> None:
+    """`<=`, not `<`: at the ceiling exactly there is nothing to reclaim and nothing to say.
+
+    The boundary is the only place "at most `limit` characters" is an interesting claim, and it is
+    where this file used to stop — every fixture sat comfortably either side. One character in from
+    it, the cut is the one this module's own docstring calls the defect it exists to prevent: a
+    result at the ceiling replaced by a shorter result plus a notice, which is the truncation that
+    grew what it bounded re-entering by the other door.
+    """
+    at_limit = "A" * 1_000
+    bounded, removed = bounded_content(at_limit, "read_document", 1_000)
+
+    assert bounded is at_limit and removed == 0
+
+    over_by_one, removed_over = bounded_content("A" * 1_001, "read_document", 1_000)
+
+    assert removed_over > 0 and len(over_by_one) <= 1_000
+
+
+def test_a_limit_of_exactly_the_notice_keeps_the_explanatory_form_and_no_text() -> None:
+    """`limit == widest` is where the two notice forms and the `kept` floor all disagree.
+
+    Below the widest form of the sentence the brief form is used; at it exactly the explanatory
+    form fits, and the whole share is spent on it — `kept` is 0, not 1. Three mutations of this
+    function disagree about this single point (`limit < widest` -> `<=`, `max(limit - widest, 0)`
+    -> `1`, and the at-the-limit branch above) and 126 tests could not tell any of them apart,
+    because no fixture ever put `limit` there.
+    """
+    total = 5_000
+    widest = len(_notice("read_document", total, total))
+
+    bounded, removed = bounded_content("A" * total, "read_document", widest)
+
+    assert len(bounded) <= widest, "the bound returned more than the limit it was given"
+    assert "removed from the middle" in bounded, "the brief form was used where the full one fits"
+    assert removed == total, "a character of the tool's own text was kept inside the notice's share"
+
+
+def test_the_head_and_tail_budgets_are_spent_down_across_every_block() -> None:
+    """Three text blocks, because at two the accumulation is indistinguishable from a reset.
+
+    `_kept` walks the spans spending one head budget and one tail budget down across all of them.
+    Every fixture in this file had one text block or two, and with two the second walk's `-=` is
+    reached at most once — so `head_budget -= len(...)` could become `head_budget = len(...)` and
+    all 18 tests in the repository that execute `_kept` still passed. Under that mutation the
+    budget *resets* at every block, so a result is bounded per block rather than in total: measured
+    here, 3,042 characters of tool text against a 2,000 limit. The share `bounded_for_batch`
+    divides is then not a ceiling at all, which is the property this whole module is for.
+
+    The same fixture pins the three things the walk owes its caller besides the total: the head
+    survives, the tail survives (the tail budget is spent down too, and a reset there loses it
+    outright), and the notice lands on a block that survives `_rebuilt` rather than on the trailing
+    image, whose text `_rebuilt` discards.
+    """
+    limit = 2_000
+    image = {"type": "image", "source": {"data": "abc"}}
+    content: list[Any] = ["A" * 40_000, "B" * 40_000, "C" * 40_000, image]
+
+    bounded, removed = bounded_content(content, "sweep", limit)
+
+    text = "".join(block for block in bounded if isinstance(block, str))
+    assert len(text) <= limit, f"three blocks kept {len(text)} characters against a {limit} limit"
+    assert text.startswith("A"), "the head of the first block went"
+    assert text.endswith("C"), "the tail of the last block went"
+    assert "removed from the middle" in text, "the cut landed somewhere the rebuild discards it"
+    assert image in bounded, "a block with no text span was dropped"
+    assert removed > 0
+
+
+def test_a_string_block_carries_the_notice_when_the_first_block_cannot() -> None:
+    """The same silent-cut guard, for the block shape an in-process tool returns.
+
+    `test_a_cut_is_not_silent_when_the_first_block_carries_no_text` proves this for a list of
+    *dicts*. A content list may also hold bare strings, and `_carrier`'s test for one is
+    `isinstance(block, str) or carries_text` — the `or` arm, which no fixture reached. Mutated to
+    `and`, no bare string is ever a carrier, the notice is computed for the leading image, and
+    `_rebuilt` discards the text of a block that carries none: the result is shortened by 9,000
+    characters with nothing in it saying so.
+
+    Driven below the explanatory notice's own length on purpose, because that is the only share at
+    which the head budget is 0 and the carrier — rather than where the budget ran out — decides
+    where the sentence lands.
+    """
+    image = {"type": "image", "source": {"data": "abc"}}
+    content: list[Any] = [image, "y" * 9_000]
+
+    bounded, removed = bounded_content(content, "sweep", 50)
+
+    assert removed == 9_000
+    text = "".join(block for block in bounded if isinstance(block, str))
+    assert "chars cut" in text, "the result was shortened and nothing in it says so"
+    assert image in bounded
 
 
 def test_an_oversized_result_is_bounded_on_its_way_to_the_model(

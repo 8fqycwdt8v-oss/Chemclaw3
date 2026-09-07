@@ -692,6 +692,40 @@ def test_a_block_list_gets_one_envelope_and_not_one_per_block() -> None:
     assert len(joined) < sum(len(block["text"]) for block in blocks) + 200
 
 
+def test_a_list_of_bare_strings_is_framed_and_a_spanless_block_is_left_alone() -> None:
+    """The commonest block shape an MCP server returns, and the one no fixture here used.
+
+    `ToolMessage.content` is `str | list[str | dict]` by LangChain's own annotation, and every
+    list-shaped fixture in this file holds dicts. So the arm of `_carries_text` that answers for a
+    *bare string* had no test at all: it could return `False` for every string and the whole file
+    stayed green, with the result reaching the model unframed — no envelope, and therefore no mark
+    saying the text is evidence rather than instruction, which is the one thing this middleware is
+    for.
+
+    The image block is the other half of the same predicate. It carries no span, so it is neither
+    framed nor defanged and passes through untouched — and asking whether it does forces the two
+    `isinstance` tests to be a conjunction: relaxed to a disjunction, a block with no `text` key at
+    all is treated as carrying one and the framer raises on a shape a server is entitled to send.
+    An empty text block is the same question a third way: present, readable, and nothing to cite.
+    """
+    image = {"type": "image", "data": "…"}
+    content: list[Any] = ["first span", image, {"type": "text", "text": ""}, "last span"]
+    request = tool_request("blocky", tool=_Stamped())
+
+    async def handler(_: Any) -> Any:
+        return ToolMessage(content=list(content), tool_call_id="call-1")
+
+    message = asyncio.run(run_middleware(frame_connector_results, request, handler))
+
+    joined = "".join(_text_spans(message.content))
+    assert joined.count(f"<{ENVELOPE_TAG} ") == 1, "a list of bare strings was never framed"
+    assert joined.count(f"</{ENVELOPE_TAG}>") == 1
+    assert message.content[0].startswith(f'<{ENVELOPE_TAG} id="fakeconn:blocky">')
+    assert message.content[-1].endswith(f"</{ENVELOPE_TAG}>")
+    assert image in message.content, "a block with no text span was rewritten or dropped"
+    assert {"type": "text", "text": ""} in message.content, "an empty span carried a delimiter"
+
+
 def test_every_block_of_a_list_is_still_defanged() -> None:
     """One envelope, but the neutralisation is still per block — or a middle block could close it.
 

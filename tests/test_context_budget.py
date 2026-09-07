@@ -27,8 +27,10 @@ from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from chemclaw.agent.context_budget import (
+    _MAX_REPORTED_FLOORS,
     _SCHEMA_TOKENS,
     MeasureRequestPrefix,
+    _Calibration,
     _prefix,
     begin_context_watch,
     current_context,
@@ -108,6 +110,91 @@ def test_the_first_sample_is_believed_and_is_the_sample() -> None:
         f"a second sample of 1.0 left the ratio at {estimator_ratio()}; bias correction must not "
         "turn the average into a high-water mark"
     )
+
+
+def test_a_fresh_calibration_answers_with_its_first_sample() -> None:
+    """The seed is 1.0, and every test in this file reached that fact through `reset()` instead.
+
+    `_CALIBRATION` is built once at module scope and the autouse fixture above re-seeds it through
+    `reset()`, so `__init__`'s own `self._ratio = 1.0` had exactly one executing test in the whole
+    repository and it reached it by *importing the module*. Seeded at 2.0 instead, a fresh process's
+    first sample comes back as 11.5 rather than 2.5 — clamped to the maximum factor, so every pod's
+    opening calls budget at a quarter of what was asked for — and the suite stays green, because
+    `reset()` puts 1.0 back before any assertion looks.
+
+    Constructed here rather than reached through the singleton, which is the whole point: a class
+    whose constructor no test runs is a constructor no test asserts.
+    """
+    fresh = _Calibration()
+
+    assert fresh.ratio() == 1.0, "an uncalibrated process must change nothing"
+
+    fresh.note(10_000, 25_000)
+
+    assert fresh.ratio() == pytest.approx(2.5, abs=1e-9), (
+        f"one sample of 2.5 came back as {fresh.ratio()}: the bias correction divides out a seed "
+        "of 1.0, so a constructor that seeds anything else answers with the seed instead"
+    )
+
+
+def test_the_plausible_band_includes_its_own_endpoints() -> None:
+    """`_SANE` is a closed interval, and which way it closes decides whether a sample is believed.
+
+    The band exists to drop a measurement fault — usage reported for a different request — rather
+    than a tokenizer difference, so its endpoints are plausible ratios and are kept. Nothing
+    asserted that: both `<=` could become `<` and 249 tests could not tell, because every sample
+    any test feeds sits comfortably inside.
+
+    Driven downwards from an already-calibrated ratio, because `ratio()` clamps at 1.0 from below
+    and a low sample is otherwise invisible from outside — the observable consequence of accepting
+    0.2 is that it *pulls a high average down*, which is exactly the safety property the clamp is
+    there to bound.
+    """
+    _observe(4.0)
+    for _ in range(40):
+        note_model_call(10_000, 2_000)  # sample 0.2 — the lower endpoint, and accepted
+
+    assert estimator_ratio() == 1.0, (
+        "a run of samples at the band's lower endpoint left the ratio high: the endpoint was "
+        "dropped as a fault"
+    )
+
+    reset_calibration()
+    _observe(4.0)
+    for _ in range(40):
+        note_model_call(10_000, 1_990)  # sample 0.199 — outside, and dropped
+
+    assert estimator_ratio() == pytest.approx(4.0, abs=0.05), (
+        "a sample below the band moved the ratio; the fault filter is not filtering"
+    )
+
+    reset_calibration()
+    for _ in range(40):
+        note_model_call(10_000, 80_000)  # sample 8.0 — the upper endpoint, and accepted
+
+    assert estimator_ratio() == settings.agent_context_calibration_max_factor, (
+        "the band's upper endpoint was dropped, so a genuinely expensive tokenizer is unlearnable"
+    )
+
+    reset_calibration()
+    for _ in range(40):
+        note_model_call(10_000, 80_010)  # sample 8.001 — outside, and dropped
+
+    assert estimator_ratio() == 1.0, "a sample above the band moved the ratio"
+
+
+def test_a_one_token_estimate_is_a_sample_rather_than_a_fault() -> None:
+    """The guard rejects *non-positive* estimates, and `<= 1` is a different rule with no test.
+
+    `test_a_nonsense_sample_is_dropped` pins `note(0, n)` and `note(n, 0)`. Neither of them can
+    distinguish `estimated <= 0` from `estimated <= 1`, and the second silently discards a real
+    call — small, but it is the one every degenerate request makes, and a filter that widens
+    without saying so is how a calibration stops calibrating.
+    """
+    for _ in range(40):
+        note_model_call(1, 4)
+
+    assert estimator_ratio() == pytest.approx(4.0, abs=0.05)
 
 
 def test_a_measured_underestimate_tightens_the_trigger() -> None:
@@ -303,6 +390,150 @@ def test_a_budget_the_prefix_exhausts_floors_at_one_and_says_so(
         f"the warning does not name the budget and the prefix an operator has to reconcile: {said}"
     )
     assert getattr(caplog.records[0], "event", None) == "context.trigger_floored"
+
+
+def test_a_trigger_of_exactly_one_is_a_budget_and_not_a_floor(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One estimated token of thread is the smallest budget there is; it is not the floor.
+
+    The floor and the smallest budget return the **same number**, so the only observable difference
+    between them is the WARNING — which is the whole point of reporting it, since a deployment that
+    asked for a tiny thread allowance and one that asked for a negative one behave identically and
+    need to be told apart. `trigger < 1` could therefore become `<= 1` or `< 2` and 299 tests could
+    not tell, because none of them drove the boundary: the test above drives 0 and below, this one
+    drives exactly 1 and asserts the line is *not* emitted.
+
+    The pair is run against one prefix so the two budgets differ by exactly one token, which is the
+    only way the two predicates disagree.
+    """
+    monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
+    reset_floor_reports()
+    token = _prefix.set(50_000)
+    try:
+        with caplog.at_level(logging.WARNING, logger="chemclaw.agent.context_budget"):
+            assert effective_trigger(50_001) == 1, "the smallest real budget is 1, not the floor"
+            assert caplog.records == [], (
+                "a budget leaving the thread one token was reported as floored: "
+                f"{[r.message for r in caplog.records]}"
+            )
+
+            assert effective_trigger(50_000) == 1, "one token less leaves nothing and must floor"
+            assert len(caplog.records) == 1, "the floor one token down was not reported"
+    finally:
+        _prefix.reset(token)
+
+    said = caplog.records[0]
+    assert getattr(said, "configured_tokens", None) == 50_000
+    assert getattr(said, "prefix_tokens", None) == 50_000
+    assert getattr(said, "window_tokens", None) == 0
+    assert getattr(said, "estimator_ratio", None) == 1.0
+
+
+def test_the_floor_report_stops_at_its_own_cap(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The once-per-key set is bounded, because a key is three numbers a caller chooses.
+
+    `_note_floored_trigger` de-duplicates on `(configured, prefix, window)` and the prefix moves
+    with the bound tool surface, so the set is not closed by construction — `_MAX_REPORTED_FLOORS`
+    is what stops a pathological deployment turning a once-per-condition warning into a log per
+    model call. Nothing drove it: `>=` and `>` are the same for every key count any test reached.
+    """
+    monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
+    reset_floor_reports()
+    token = _prefix.set(50_000)
+    try:
+        with caplog.at_level(logging.WARNING, logger="chemclaw.agent.context_budget"):
+            for offset in range(_MAX_REPORTED_FLOORS):
+                assert effective_trigger(1_000 + offset) == 1
+            assert len(caplog.records) == _MAX_REPORTED_FLOORS, (
+                "a distinct floor below the cap went unreported"
+            )
+
+            assert effective_trigger(1_000 + _MAX_REPORTED_FLOORS) == 1
+            assert len(caplog.records) == _MAX_REPORTED_FLOORS, (
+                "the cap is off by one: a key past it was still reported"
+            )
+    finally:
+        _prefix.reset(token)
+        reset_floor_reports()
+
+
+def test_the_ambient_prefix_is_put_back_after_the_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A contextvar that is set and never reset is one turn's prefix budgeting the next one.
+
+    Every existing assertion about this middleware reads `prefix_tokens()` from *inside* the
+    handler, which proves the value is published and says nothing about the `finally`. Inverted to
+    `if token is None`, the reset never runs on the path that matters and the ambient keeps the
+    last measured prefix for whatever runs next in that context — a background sweep, the next turn
+    on a reused context — while every test still passes.
+
+    All three exits, because the guard is about which of them own a token: a call that returns, a
+    call that raises, and a call whose measurement failed and therefore set nothing at all.
+    """
+    outer = _prefix.set(4_321)
+    try:
+        request = _request(system="you are a process chemist. " * 100)
+        middleware = MeasureRequestPrefix()
+        inside: list[int] = []
+
+        def handler(_: Any) -> str:
+            inside.append(prefix_tokens())
+            return "done"
+
+        middleware.wrap_model_call(request, handler)
+
+        assert inside[0] != 4_321, "the fixture never published a prefix, so it asserts nothing"
+        assert prefix_tokens() == 4_321, "the ambient prefix was not restored after a normal return"
+
+        def raising(_: Any) -> str:
+            raise RuntimeError("the model call failed")
+
+        with pytest.raises(RuntimeError):
+            middleware.wrap_model_call(request, raising)
+
+        assert prefix_tokens() == 4_321, "the ambient prefix was not restored after a raise"
+
+        assert asyncio.run(_ambient_after_an_async_call(middleware, request)) == 4_321, (
+            "the ambient prefix was not restored on the async path — the one a turn takes"
+        )
+
+        monkeypatch.setattr(
+            MeasureRequestPrefix, "_measure", lambda *_: (_ for _ in ()).throw(ValueError("nope"))
+        )
+        middleware.wrap_model_call(request, handler)
+
+        assert inside[-1] == 4_321, (
+            "an unmeasurable prefix replaced the ambient rather than left it"
+        )
+        assert prefix_tokens() == 4_321, (
+            "an unmeasurable prefix disturbed the ambient on the way out"
+        )
+    finally:
+        _prefix.reset(outer)
+
+
+async def _ambient_after_an_async_call(middleware: Any, request: Any) -> int:
+    """The ambient prefix after `awrap_model_call`, read in the context the call ran in.
+
+    Read inside the coroutine on purpose: `asyncio.run` copies the context, so a contextvar the
+    call leaks would be invisible to an assertion made after it returns — which is how the async
+    half of this guard stayed unasserted while the sync half was pinned.
+    """
+    seeded = _prefix.set(4_321)
+    try:
+        inside: list[int] = []
+
+        async def ahandler(_: Any) -> str:
+            inside.append(prefix_tokens())
+            return "done"
+
+        await middleware.awrap_model_call(request, ahandler)
+        assert inside[0] != 4_321, "the async fixture never published a prefix"
+        return prefix_tokens()
+    finally:
+        _prefix.reset(seeded)
 
 
 def _request(*, system: str) -> Any:
