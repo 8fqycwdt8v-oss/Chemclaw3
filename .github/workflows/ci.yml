@@ -168,8 +168,9 @@ jobs:
       - name: Apply database migrations
         run: make db-migrate
 
-      # `cov`, not `test`: the 80% floor is a regression gate, and it is measured over the shipped
-      # package set (enforced by tests/test_packaging.py) so it measures what a deployment runs.
+      # `cov`, not `test`: the coverage floor (`fail_under` in `pyproject.toml`, the one place the
+      # number lives) is a regression gate, and it is measured over the shipped package set
+      # (enforced by tests/test_packaging.py) so it measures what a deployment runs.
       #
       # Lint and type used to ride along on this line and now run in `static` above, in parallel.
       # They are still gates and still block a merge; what changed is that they no longer report

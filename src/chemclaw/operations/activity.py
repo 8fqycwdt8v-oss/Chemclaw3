@@ -214,13 +214,39 @@ class Authorship(BaseModel):
 
 
 class ActorSpend(BaseModel):
-    """One actor's turns over a window. Tokens and wall clock, never words."""
+    """One actor's turns over a window. Tokens and wall clock, never words.
+
+    **All six spend columns, because reading two of them answered 1.9% of the question.** Measured
+    2026-09-06: an actor with one cached turn (600 input, 250 output, 400 cache-read, 300
+    cache-write) and one abandoned turn (43,506 estimated) was reported as having spent **850**
+    tokens against ~45,000. `cache_read_tokens`, `cache_write_tokens` and `estimated_tokens` were
+    in the table, in `TurnCost`, on every counter — and in no query — so this reading understated
+    exactly the two populations it exists to find: a deployment that caches heavily, and turns
+    abandoned late.
+
+    `billed_tokens` is the four measured columns summed, which is the same number
+    `chemclaw_tokens_total` publishes and the same number `TurnUsage.total` meters, so a sum here
+    and a sum there answer the same question. `estimated_tokens` stays out of it and beside it: it
+    is what the gateway billed and never reported, and the rule this record inherits from
+    `TurnCost` is that an inferred number never passes for a provider's. **The whole bill is the
+    two added together**, and a caller that adds them should say so.
+    """
 
     actor: str
     turns: int = 0
     completed_turns: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # Priced differently from the pair above — a cache read is roughly an order of magnitude
+    # cheaper than a fresh input token, a write dearer — which is the only reason `turn_costs`
+    # keeps them as separate columns and the only reason they are separate fields here.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    # Inferred, never measured: the estimated prompt of a request in flight when the turn was torn
+    # down. Separate so a reader can ask what fraction of an actor's spend is inference.
+    estimated_tokens: int = 0
+    # The four measured columns, summed — what the provider actually reported for this actor.
+    billed_tokens: int = 0
     duration_seconds: float = 0.0
     tool_calls: int = 0
     tool_refusals: int = 0
@@ -449,11 +475,20 @@ async def authorship(window: Window) -> Authorship:
     )
 
 
+# **Every spend column, not two of them.** This read `sum(input_tokens), sum(output_tokens)` and
+# nothing else, so an actor whose turns were cached or abandoned was reported at a fraction of what
+# they cost — measured, 850 tokens against ~45,000. The four measured columns are summed into
+# `billed_tokens` in SQL rather than in Python so the total and its parts cannot disagree, and
+# `estimated_tokens` is selected beside them rather than into them.
 _SPEND = """
     SELECT actor,
            count(*),
            count(*) FILTER (WHERE completed),
-           sum(input_tokens), sum(output_tokens), sum(duration_seconds),
+           sum(input_tokens), sum(output_tokens),
+           sum(cache_read_tokens), sum(cache_write_tokens),
+           sum(estimated_tokens),
+           sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens),
+           sum(duration_seconds),
            sum(coalesce(tool_calls, 0)), sum(coalesce(tool_refusals, 0)),
            sum(coalesce(jobs_started, 0))
     FROM turn_costs
@@ -476,14 +511,30 @@ async def spend(window: Window) -> Spend:
             completed_turns=int(completed),
             input_tokens=int(inp or 0),
             output_tokens=int(out or 0),
+            cache_read_tokens=int(cache_read or 0),
+            cache_write_tokens=int(cache_write or 0),
+            estimated_tokens=int(estimated or 0),
+            billed_tokens=int(billed or 0),
             duration_seconds=float(duration or 0.0),
             tool_calls=int(calls or 0),
             tool_refusals=int(refusals or 0),
             jobs_started=int(jobs or 0),
         )
-        for actor, turns, completed, inp, out, duration, calls, refusals, jobs in await _rows(
-            _SPEND, [window.since, window.until]
-        )
+        for (
+            actor,
+            turns,
+            completed,
+            inp,
+            out,
+            cache_read,
+            cache_write,
+            estimated,
+            billed,
+            duration,
+            calls,
+            refusals,
+            jobs,
+        ) in await _rows(_SPEND, [window.since, window.until])
     ]
     return Spend(
         coverage=Coverage.of(window, sum(actor.turns for actor in actors)),

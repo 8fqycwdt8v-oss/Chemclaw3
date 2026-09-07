@@ -230,7 +230,21 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_protocol_digests_total": (
         "Protocols handed to the condenser, by outcome (extracted / degraded / oversized)."
     ),
-    "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
+    # **This and `turn_costs.jobs_started` count different things under one name**, and both
+    # placements are individually right. This one increments the moment `start_workflow` returns,
+    # because a workflow did start; the row's field is fed by `JobStartedEvent`, which
+    # `connectors/jobs.py` announces only when the run is *still going* after the inline wait —
+    # deliberately, because an announcement for a finished run draws a surface row that no
+    # `job_completed` will ever clear. Measured 2026-09-06: a job that finished inside the turn
+    # moved this by 1 and the row by 0; a rejoined run still running moved the row by 1 and this
+    # by 0. Five of the seven declared jobs carry `inline_wait_seconds`, so on a calc-heavy
+    # deployment the first case is the common one and this counter climbs while every cost row
+    # reads `jobs_started = 0`. Read this as launches and the row as *jobs a turn left running*.
+    "chemclaw_jobs_started_total": (
+        "Durable jobs launched by an agent tool — every start, whether or not the run outlived "
+        "the turn. Not the same population as `turn_costs.jobs_started`, which counts the jobs a "
+        "turn left still running; a job that finishes inside its turn is in this one only."
+    ),
     # The job→session mailbox's failure signal. `notify_session_best_effort` swallows a failed
     # push-back by design (the science is the result; the notification is not), which made a
     # fleet-wide outage of the channel — a dead background queue, a full mailbox table —
@@ -409,6 +423,30 @@ _COUNTERS: dict[str, str] = {
         "(REV-9). Kept because the column and the counter are what would show a gateway that does "
         "report one."
     ),
+    # **What the gateway billed and never reported**, published beside the four it did rather than
+    # summed into them. `stream_options.include_usage` puts a request's usage on the terminal chunk
+    # only, so a turn the client abandons mid-message is billed by the provider and reported by
+    # nobody: `agent/turn_usage.InFlightPrompts` estimates it, `turn_costs.estimated_tokens` records
+    # it and `api/budget.py` is charged for it — and until 2026-09-06 **no series carried it**, so
+    # the fleet-wide answer to "what is this deployment costing per hour" under-reported by the
+    # whole prompt of every abandoned turn. Measured: two identical turns, one completed and one
+    # killed at 4 s, moved `chemclaw_tokens_total` by 42,481 and **0** against a gateway that
+    # billed 42,448 both times.
+    #
+    # **A separate counter rather than a label, which is what the argument against it actually
+    # asked for.** `api/runner._book_turn_spend` declined this on the grounds that "a distinction a
+    # declared counter's label set cannot carry belongs in a structured record" — true of a label,
+    # and the reason the four measured series must not absorb an inferred number: a
+    # `chemclaw_tokens_total` that silently mixed the two would make every existing panel a
+    # different question. Two series answer it exactly, and a panel can then show measured and
+    # inferred spend side by side, which is the reading the record was standing in for.
+    "chemclaw_estimated_tokens_total": (
+        "Model tokens a turn was billed for that the provider never reported — the estimated "
+        "prompt of every request still in flight when a turn was torn down (a disconnect, the "
+        "Stop button, a wall-clock deadline). **Inferred, never measured**: read it beside "
+        "`chemclaw_tokens_total`, never added into it without saying so. A flat zero means every "
+        "turn reached its terminal usage frame, which is the healthy reading."
+    ),
     # Whether the context policy is running, and what it is buying. Two counters because they
     # answer two operator questions and neither answers the other: the first says the mechanism
     # fired at all, the second says whether the budget is set anywhere near the traffic. Both exist
@@ -546,9 +584,27 @@ _COUNTERS: dict[str, str] = {
     # inside the SDK looked identical to one retrying none, a provider rate-limiting us had no
     # counter distinct from the front door's own limiter, and `RunnableWithFallbacks` absorbing
     # 100% of traffic onto the fallback endpoint produced no log line and no metric.
+    # **Graph model calls, which is not every provider call**, and the HELP text below says so
+    # because the name cannot. `_observe` is reached only from `RecordModelCalls`, a
+    # `wrap_model_call` middleware, so a call that is not a graph node is invisible to both this
+    # and the duration histogram: the verifier's judge and its band rerolls, and every call
+    # `agent/condense.py` makes from inside a tool body. Measured 2026-09-06 — a plain turn made 2
+    # provider calls and counted 2; a verified turn made 3 and counted 2; a turn with a model call
+    # in a tool body made 3 and counted 2.
+    #
+    # **Qualified rather than widened.** The alternative is moving the observation onto the
+    # callback seam the token meters use, and it does not reduce to a smaller change: `outcome` and
+    # duration come from wrapping the call, so a callback implementation is a second pairing of
+    # start and end per run id — and attaching it to the off-graph call site alone would produce a
+    # third population (graph calls plus the judge, still without the tool-body calls), which is a
+    # worse boundary than a clean one that is written down. The token counters already answer "what
+    # did every call cost"; this one answers "how is the graph's own model traffic behaving".
     "chemclaw_model_calls_total": (
-        "Model calls, by outcome (ok / rate_limited / context_length / timeout / transport / "
-        "error). There is no `provider` label: every call goes to one gateway "
+        "Model calls **made from a graph node**, by outcome (ok / rate_limited / context_length / "
+        "timeout / transport / error). Calls made outside the graph are not here — the verifier's "
+        "judge and any call a tool body makes — so this is not the gateway's whole request rate; "
+        "`chemclaw_tokens_total` is metered on the callback seam and does see all of them. There "
+        "is no `provider` label: every call goes to one gateway "
         "(D-2026-09-04-a-gateway-is-the-only-provider), and a label with one value is cardinality "
         "that answers nothing."
     ),
@@ -613,6 +669,19 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_calc_cache_total": (
         "Calculation-cache lookups, by outcome (hit / shared / miss) — `shared` is a concurrent "
         "miss on one key that `cached_compute` single-flighted onto another caller's computation."
+    ),
+    # **The count is not the value, and for a long time it was all there was.** A thousand avoided
+    # millisecond lookups and one avoided nineteen-minute CREST search moved the counter above by
+    # 1,000 and 1. `StoredResult.compute_seconds` is on the row and was read on every hit and
+    # discarded, so "is the cache earning its keep" was answerable in lookups and not in the unit
+    # the lever is measured in. Measured 2026-09-06: 8 concurrent misses plus 3 reads on one 0.30 s
+    # key reported `miss=1, shared=7, hit=3` and no series said 3 seconds.
+    "chemclaw_calc_cache_seconds_saved_total": (
+        "Calculator wall-clock seconds a cache lookup did not have to spend — the "
+        "`compute_seconds` of the stored result on a hit, and of the computation a `shared` "
+        "waiter joined. Zero for a row that records no cost (a measured value, a backfill), never "
+        "a fabricated zero. Read beside `chemclaw_calc_cache_total`: that one says how often the "
+        "cache answered, this one says what it was worth."
     ),
     # The backend refusing for *capacity* rather than for bad data — the third category
     # `durable/publish.py` gained when a pod-full refusal stopped being classified as a permanent
@@ -768,7 +837,11 @@ _HISTOGRAMS: dict[str, str] = {
     "chemclaw_http_request_duration_seconds": (
         "Wall-clock duration of one HTTP request, by route template."
     ),
-    "chemclaw_model_call_duration_seconds": "Wall-clock duration of one model call.",
+    "chemclaw_model_call_duration_seconds": (
+        "Wall-clock duration of one model call **made from a graph node** — the same population "
+        "as `chemclaw_model_calls_total` and, for the same reason, not every request the gateway "
+        "serves. An operator asking 'is the endpoint slow' is sampling the graph's traffic."
+    ),
     "chemclaw_evidence_source_seconds": (
         "Wall-clock duration of one retrieval leg within an evidence sweep, by source."
     ),
@@ -864,6 +937,9 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_output_tokens_total": ("profile",),
     "chemclaw_cache_read_tokens_total": ("profile",),
     "chemclaw_cache_write_tokens_total": ("profile",),
+    # The same `profile` label as the four measured series, so measured and inferred spend can be
+    # summed over the same axis and compared without a join.
+    "chemclaw_estimated_tokens_total": ("profile",),
     # Bounded by `CHEMCLAW_DELIVERY_CHANNELS` — a deployment's own list of channel folder names,
     # never a caller's string. Same rule as every label here.
     "chemclaw_deliveries_total": ("channel",),

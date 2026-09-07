@@ -203,8 +203,14 @@
           "expr": "sum by (outcome) (rate(chemclaw_calc_cache_total[15m]))",
           "legendFormat": "{{outcome}}",
           "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_calc_cache_seconds_saved_total[15m]))",
+          "legendFormat": "calculator seconds saved/s",
+          "refId": "B"
         }
-      ]
+      ],
+      "description": "Lookups by outcome, and what they were worth. `hit` answered from the store, `shared` joined another caller's in-flight computation, `miss` computed. The seconds series is the wall clock those hits and shares did not spend — a thousand avoided millisecond lookups and one avoided nineteen-minute CREST search are the same number of lookups and not the same saving, so read the rate against the count rather than instead of it."
     },
     {
       "id": 8,
@@ -924,7 +930,7 @@
       "id": 20,
       "type": "graph",
       "title": "Turns whose transcript and thread parted company",
-      "description": "The two records of one conversation: the transcript a chemist sees on reload, and the checkpoint the model is rebuilt from. A teardown between the two leaves the model holding an exchange the chemist cannot see. Counts one branch \u2014 a completed run that never answered \u2014 and deliberately not the whole class, so a flat line is not proof of agreement.",
+      "description": "The two records of one conversation: the transcript a chemist sees on reload, and the checkpoint the model is rebuilt from. A teardown between the two leaves the model holding an exchange the chemist cannot see. Counts one branch — a completed run that never answered — and deliberately not the whole class, so a flat line is not proof of agreement.",
       "gridPos": {
         "h": 8,
         "w": 12,

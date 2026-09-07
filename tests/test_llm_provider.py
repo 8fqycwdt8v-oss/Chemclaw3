@@ -49,6 +49,22 @@ _TYPES_ONLY: dict[str, str] = {
     "cli/mock_llm.py": "the mock gateway serves the protocol; it emits frames, it does not dial",
 }
 
+# Modules that name a provider distribution for one *function*, and neither dial nor deserialise a
+# frame. A third bucket rather than a stretched second one: `_TYPES_ONLY`'s assertion is that the
+# target is a `.types` module, which is what makes granting that row safe, and widening it to admit
+# a helper would have retired the check that the row rests on.
+_HELPERS_ONLY: dict[str, str] = {
+    "agent/turn_usage.py": (
+        "reads `_create_usage_metadata` to normalise the usage block of a call the gateway billed "
+        'and nothing metered: with `method="json_schema"` the SDK parses inside `_agenerate`, so '
+        "a judge reply that fails validation raises before `on_llm_end` and booked 1,100 tokens of "
+        "a served 6,600 — the verifier's own documented degrade path. Re-implementing that "
+        "normalisation would put a silently-drifting copy of upstream's shape here, including the "
+        "cache-token detail keys a `service_tier` response prefixes; "
+        "`tests/test_upstream_surface.py` drives the real function so a rename turns red there"
+    ),
+}
+
 
 def _provider_imports() -> dict[str, list[str]]:
     """Every first-party import of a provider distribution, as {relative path: [targets]}."""
@@ -76,11 +92,12 @@ def test_a_provider_client_class_is_imported_only_at_the_two_declared_seams() ->
     nothing enforces is the shape this repository has a standing rule against, so the sentence was
     narrowed to what the tree actually guarantees and this is what holds it there.
     """
-    declared = set(_CLIENT_SEAMS) | set(_TYPES_ONLY)
+    declared = set(_CLIENT_SEAMS) | set(_TYPES_ONLY) | set(_HELPERS_ONLY)
     found = _provider_imports()
     assert set(found) == declared, (
         "a module gained or lost a provider-SDK import. Every one is a decision about where a "
-        "prompt can go, so declare it in _CLIENT_SEAMS/_TYPES_ONLY with its reason. "
+        "prompt can go, so declare it in _CLIENT_SEAMS/_TYPES_ONLY/_HELPERS_ONLY with its "
+        "reason. "
         f"unexpected: {sorted(set(found) - declared)}; "
         f"stale rows: {sorted(declared - set(found))}"
     )
@@ -99,6 +116,32 @@ def test_a_types_only_module_holds_no_client() -> None:
                 f"{path} imports {target!r}, which is not a response-type module. "
                 f"{_TYPES_ONLY[path]} — a client here would be a second way out of the pod."
             )
+
+
+def test_a_helper_only_module_holds_no_client() -> None:
+    """A module granted one function may not also name something that dials.
+
+    The same distinction `_TYPES_ONLY` rests on, asked of a different grant: importing a helper is
+    borrowing an arithmetic, importing a client is opening a second way out of the pod. Asserted by
+    name rather than by module path, because a helper lives beside the client class it belongs to —
+    `_create_usage_metadata` and `ChatOpenAI` are both in `langchain_openai.chat_models.base`, so
+    the module tells you nothing and only the imported symbol does.
+    """
+    for path, reason in _HELPERS_ONLY.items():
+        tree = ast.parse((_SRC / path).read_text(encoding="utf-8"), filename=path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.level:
+                continue
+            if not node.module or node.module.split(".")[0] not in _PROVIDER_ROOTS:
+                continue
+            for alias in node.names:
+                # Leading underscores stripped first: the question is whether the name is a
+                # function or a class, and `_create_usage_metadata` is private *and* a function.
+                assert alias.name.lstrip("_")[:1].islower(), (
+                    f"{path} imports {alias.name!r} from {node.module!r}, which names a class "
+                    f"rather than a function. {reason} — a client here would be a second way out "
+                    "of the pod."
+                )
 
 
 def test_no_first_party_module_imports_the_anthropic_sdk() -> None:

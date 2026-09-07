@@ -45,7 +45,13 @@ __all__ = [
 
 @runtime_checkable
 class DataSource(Protocol):
-    """A named attachment point exposing an optional ingest and/or an optional retrieve half.
+    """A named attachment point exposing any of three optional halves.
+
+    The halves are `ingest`, `retrieve` and `commitments` — a source provides whichever it can and
+    `None` for the rest. This said "an optional ingest and/or an optional retrieve half" with
+    `commitments` declared ten lines below it, which is the wrong place for that gap: the docstring
+    is what a reader writing a new source meets first, and it taught them a commitments-only source
+    is not a source.
 
     Members are read-only (properties), so a `frozen` implementation like `SourceSpec` satisfies the
     contract — nothing reassigns a source's halves after it is built.
@@ -76,8 +82,10 @@ class DataSource(Protocol):
 class SourceSpec:
     """The concrete `DataSource` a registry entry builds: a name plus whichever halves it provides.
 
-    Constructing one with neither half is a programming error — a source that can be neither
-    ingested from nor retrieved from is not a source — so it is rejected at build time.
+    Constructing one with no half at all is a programming error — a source that can be neither
+    ingested from, retrieved from nor asked for committed work is not a source — so it is rejected
+    at build time. `__post_init__` below is where the three are checked; do not restate their number
+    here, which is how this docstring came to say "neither" over a three-way test.
     """
 
     name: str

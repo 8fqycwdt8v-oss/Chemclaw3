@@ -60,20 +60,54 @@ def _observe(ratio: float, calls: int = 40) -> None:
         note_model_call(10_000, int(10_000 * ratio))
 
 
-def test_an_uncalibrated_process_changes_nothing() -> None:
-    """Below the sample floor the trigger is exactly the configured number.
+def test_a_process_with_no_sample_yet_changes_nothing() -> None:
+    """Before anything has been observed the trigger is exactly the configured number.
 
     The property that makes this safe to ship: a deployment that upgrades and observes nothing gets
-    the behaviour it had, and the first turns of a fresh process are not budgeted against one
-    unusual sample.
+    the behaviour it had. It is a claim about *zero* samples, and it used to be a claim about the
+    first twenty — see the test below for why that stopped being the shape.
     """
     assert estimator_ratio() == 1.0
     assert effective_trigger(100_000) == 100_000
 
-    note_model_call(10_000, 22_000)
 
-    assert estimator_ratio() == 1.0, "one call moved the budget"
-    assert effective_trigger(100_000) == 100_000
+def test_the_first_sample_is_believed_and_is_the_sample() -> None:
+    """One observation calibrates the budget, and calibrates it to what was observed.
+
+    **Two defects in one call, and the second hid the first.** `agent_context_calibration_min_calls`
+    shipped at 20, so a process's first twenty model calls budgeted at the uncalibrated end — the
+    *loose* end, since the ratio is clamped at 1.0 from below and believing a sample can therefore
+    only tighten. And the average itself was seeded at 1.0 with `_ALPHA = 0.1`, so even with the
+    floor lowered the answer stays mostly the seed for ~20 samples: the seed is divided back out
+    now, which is the ordinary EWMA bias correction.
+
+    Measured 2026-09-06 on a compiled graph with the connector surface bound, shipped defaults, a
+    dense connector-JSON thread and a 128k window declared — model calls that went out over the
+    123,904 tokens such a model accepts: **20** as shipped, **19** with the floor alone at 1, **1**
+    with both. `core/config/agent.py` carries the argument; this is the arithmetic.
+
+    Asserted as an identity rather than an inequality on purpose: after exactly one sample the
+    answer is that sample, which is what "the seed is divided back out" means and what a bare
+    `> 1.0` could not tell from the old 1.0675.
+    """
+    note_model_call(10_000, 16_000)
+
+    assert estimator_ratio() == pytest.approx(1.6, abs=1e-9), (
+        "one observation of a request billed 1.6x its estimate did not reach the budget as 1.6 — "
+        "either the sample floor is above 1 again, or the EWMA is still answering with its seed"
+    )
+    # 100,000 billed tokens converted at 1.6 — a band rather than 62,500 exactly, because the
+    # reconstructed ratio carries a last-bit residue and `effective_trigger` truncates.
+    assert 62_499 <= effective_trigger(100_000) <= 62_500
+
+    # And it is still an average, not a latch: a second, cheaper observation moves it back toward
+    # what has now been seen twice, weighted by `_ALPHA`.
+    note_model_call(10_000, 10_000)
+
+    assert 1.0 < estimator_ratio() < 1.6, (
+        f"a second sample of 1.0 left the ratio at {estimator_ratio()}; bias correction must not "
+        "turn the average into a high-water mark"
+    )
 
 
 def test_a_measured_underestimate_tightens_the_trigger() -> None:
@@ -383,9 +417,21 @@ def test_a_clean_overrun_reading_means_the_request_fits_its_budget(
     request left at a 128k model with the counter flat. The prefix is charged unconditionally now,
     so the invariant gets stronger rather than being relaxed:
 
-    - **Always**: `sent <= effective_trigger(budget)` implies `prefix + sent * ratio <= budget`.
+    - **Always**: `sent <= effective_trigger(budget)` implies `(prefix + sent) * ratio <= budget`.
       That is the whole of what the setting now means — a bound on the *request*, not on the
       thread — and it holds with no window declared, which is every shipped deployment.
+
+      **The parenthesis is the correction, and this sweep shipped without it.** It read
+      `prefix + sent * ratio <= budget`, which charges the measured ratio to the thread alone and
+      so asserts that the prefix bills at exactly one billed token per estimated one. Nothing
+      measured that; measured 2026-09-06 the `default` prefix bills 0.985 and a connector-JSON
+      thread ~1.6, so the blend `note_model_call` folds is dragged toward the prefix and the thread
+      is permitted to grow into the difference. `effective_trigger` divided by that blend and this
+      sweep multiplied by it in the same asymmetric way, so the two agreed with each other at every
+      one of these points while a driven request billed 140,500 against a 119,000 budget. Written
+      whole, this sweep is red against the old arithmetic at every point with `ratio > 1` and
+      `prefix > 0` — it is the unit-level half of
+      `tests/test_compaction.py::test_a_calibrated_process_does_not_bill_past_its_budget`.
     - **And where a window is declared**, additionally `prefix + sent + llm_max_tokens <= window`,
       which is D-2026-08-28's property, kept: the window arm still caps the budget at
       `window - llm_max_tokens` before the prefix comes off.
@@ -432,7 +478,7 @@ def test_a_clean_overrun_reading_means_the_request_fits_its_budget(
                         for sent in {0, 1, trigger // 2, trigger - 1, trigger}:
                             if sent < 0 or sent > trigger:
                                 continue
-                            fits_budget = prefix + sent * estimator_ratio() <= budget
+                            fits_budget = (prefix + sent) * estimator_ratio() <= budget
                             fits_window = (not window) or (prefix + sent + reservation <= window)
                             if not window:
                                 undeclared_points += 1

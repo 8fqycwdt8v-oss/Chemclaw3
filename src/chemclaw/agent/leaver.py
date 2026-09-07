@@ -2,7 +2,9 @@
 
 **The question this answers is "someone left, now what?"** Removing an Entra app role stops new
 access immediately and is the whole of *authorization* offboarding — but it deletes nothing, and
-this system stores per-actor rows in nine tables. Until this module there was no answer at all to
+this system stores per-actor rows across the tables `_ERASE`, `_RETAINED` and
+`_RETAINED_IN_PAYLOAD` name below — not a short list, and not the "nine tables" this line said
+while the erasable tier alone had grown past it. Until this module there was no answer at all to
 "remove their data", which is a question a regulated deployment will be asked and which nobody
 should be answering with hand-written SQL at the time it is asked.
 
@@ -14,7 +16,10 @@ is built on. Two tiers:
   interest to anyone else (`agent/preferences.py` makes the same argument for why a preference is
   not a knowledge note). Nothing here is evidence about the chemistry.
 - **Retained — the record.** The audit trail, plan approvals, note proposals, BO suggestions, job
-  records and turn costs. Each says *who did what to the science*, and an attributable record that
+  records, turn costs, durable effects, pending requests, BO campaigns and the experiment-protocol
+  tables — `_RETAINED` and `_RETAINED_IN_PAYLOAD` are the list, each entry carrying its own reason,
+  and the report prints them rather than asking anyone to keep a copy in prose. Each says *who did
+  what to the science*, and an attributable record that
   can be deleted on request is not an attributable record: a result someone cites is only as good as
   the ability to say later who produced it and on whose authority.
 

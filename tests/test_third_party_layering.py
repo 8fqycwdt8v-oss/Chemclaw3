@@ -370,11 +370,27 @@ _KNOWN_LEAKS: dict[Site, str] = {
 # a private one. Nothing in that argument is about any particular vendor, so the rule is not
 # restricted to `_STACKS`'s roots; `pydantic._internal` is the same bet. Keyed by (file, target).
 _KNOWN_PRIVATE_IMPORTS: dict[Site, str] = {
-    # Empty, and that is the point of keeping it: the two rows that lived here were removed rather
-    # than re-blessed, and then the framework they named was removed too. The dict stays because
-    # the ratchet above is what deleted those rows — a private import that gains a public home, or
-    # goes away, loses its row on the next run — and because an empty allow-list is the only shape
-    # that makes "there are none" an assertion rather than an absence.
+    # It was empty for a while, and that emptiness was the point: the two rows that lived here were
+    # removed rather than re-blessed, and then the framework they named was removed too. The ratchet
+    # above is what deleted them — a private import that gains a public home, or goes away, loses
+    # its row on the next run.
+    (
+        "src/chemclaw/agent/turn_usage.py",
+        "langchain_openai.chat_models.base._create_usage_metadata",
+    ): (
+        "**The alternative to this row is a second parser of a shape upstream owns.** A judge "
+        "reply that fails validation raises inside the SDK before `_agenerate` returns, so "
+        "`on_llm_end` "
+        "never fires and the call books nothing — measured, 1,100 tokens booked of a served 6,600, "
+        "on the verifier's own documented degrade path. The raw HTTP body arrives on "
+        "`on_llm_error`, and this is the function that turns a provider's usage block into the "
+        "shape the rest of this system counts in. Re-implementing it here would put a copy of "
+        "upstream's normalisation — including the cache-token detail keys, which a `service_tier` "
+        "response prefixes — in a module that would then drift silently. Declared instead, and "
+        "*asserted*: `tests/test_upstream_surface.py` drives the real function so a rename or a "
+        "changed output turns red there, which is this repository's answer to a coupling upstream "
+        "never promised."
+    ),
 }
 
 

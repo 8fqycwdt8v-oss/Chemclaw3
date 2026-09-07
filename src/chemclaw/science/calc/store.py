@@ -455,7 +455,7 @@ def _matches(stored: StoredResult, query: CalculationQuery) -> bool:
 #: case was neither shared nor deferred: it simply failed, for a cache that exists to stay out of
 #: the way. Weak on the loop so a ledger dies with the loop it belongs to rather than being keyed
 #: by an `id()` a later loop can be handed again.
-_Ledger = dict[str, "asyncio.Future[tuple[ResultPayload, bool]]"]
+_Ledger = dict[str, "asyncio.Future[tuple[ResultPayload, float]]"]
 _IN_FLIGHT: "WeakKeyDictionary[asyncio.AbstractEventLoop, _Ledger]" = WeakKeyDictionary()
 
 
@@ -526,6 +526,7 @@ async def cached_compute(
         # that answers the recurring troubleshooting question "why did this recompute?".
         logger.debug("calc cache hit: %s", key.as_str())
         record_metric(lambda m: m.increment("chemclaw_calc_cache_total", labels={"outcome": "hit"}))
+        _credit_saved_seconds(hit.compute_seconds)
         return hit.result, True
     slot = key.as_str()
     in_flight = _in_flight()
@@ -539,9 +540,17 @@ async def cached_compute(
         record_metric(
             lambda m: m.increment("chemclaw_calc_cache_total", labels={"outcome": "shared"})
         )
-        result, _ = await asyncio.shield(waiting)
+        result, saved = await asyncio.shield(waiting)
+        # Valued only once the computation it joined has finished, which is the earliest moment its
+        # cost is known — and correctly never, if that computation was cancelled, because this
+        # waiter then raises and saved nobody anything.
+        _credit_saved_seconds(saved)
         return result, True
-    future: asyncio.Future[tuple[ResultPayload, bool]] = asyncio.get_running_loop().create_future()
+    # **The future carries the computation's own wall clock, not a `was_cached` flag.** It used to
+    # carry `False`, which every waiter discarded — a constant the computer already knew. What a
+    # waiter cannot know and needs is what the computation it joined *cost*, because that is what
+    # its own single-flight join saved (see `_credit_saved_seconds`).
+    future: asyncio.Future[tuple[ResultPayload, float]] = asyncio.get_running_loop().create_future()
     in_flight[slot] = future
     try:
         logger.debug("calc cache miss, computing: %s", slot)
@@ -581,7 +590,7 @@ async def cached_compute(
         await store.put(
             StoredResult(key=key, result=result, compute_seconds=elapsed, structure_id=structure_id)
         )
-        future.set_result((result, False))
+        future.set_result((result, elapsed))
         return result, False
     except BaseException as exc:
         # Cancellation included: a waiter must never hang on a future its computer abandoned.
@@ -592,6 +601,29 @@ async def cached_compute(
         raise
     finally:
         in_flight.pop(slot, None)
+
+
+def _credit_saved_seconds(compute_seconds: float | None) -> None:
+    """Count the wall clock a lookup did not have to spend, once it is known.
+
+    **The cache's hits were counted and never valued.** `chemclaw_calc_cache_total` says how many
+    lookups avoided a computation, and D-011 — "a persisted result is never recomputed" — is called
+    the largest cost lever in this system; the only reading of it was a *count*, so a thousand
+    avoided millisecond lookups and one avoided nineteen-minute CREST search were a thousand-to-one
+    ratio in favour of the wrong one. `StoredResult.compute_seconds` was selected on every hit
+    (`postgres_store._SELECT`) and discarded. Measured 2026-09-06: 8 concurrent misses plus 3 later
+    reads on one 0.30 s key reported `miss=1, shared=7, hit=3` and nothing anywhere said 3 seconds.
+
+    `None` is the honest reading for a row that arrived some other way — a measured value, a
+    backfill — and books nothing rather than a zero, the same rule the token counters follow.
+
+    Args:
+        compute_seconds: What the avoided computation cost, or `None` where the row does not say.
+    """
+    if compute_seconds:
+        record_metric(
+            lambda m: m.increment("chemclaw_calc_cache_seconds_saved_total", float(compute_seconds))
+        )
 
 
 class _Abandoned(Exception):

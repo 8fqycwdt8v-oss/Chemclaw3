@@ -231,10 +231,19 @@ def test_abandoned_turn_still_books_its_tokens() -> None:
 
     The second assertion is the other half of that: the estimate binds the *budget* and is not
     published as measured spend, so `chemclaw_tokens_total` stays exactly where it was.
+
+    **And the third is that it is published at all**, which it was not until 2026-09-06. The
+    estimate reached the budget, the `turn_costs` row and the `turn.finished` log line and no
+    series — so the fleet-wide rate an operator watches under-reported by the whole prompt of every
+    abandoned turn, which is precisely the population this test exists for. Measured, two identical
+    turns against a gateway billing 42,448 each moved `chemclaw_tokens_total` by 42,481 and **0**.
+    `chemclaw_estimated_tokens_total` is the second series; the two must move in opposite
+    directions on this turn, which is what makes them readable side by side.
     """
     budget = _RecordingBudget()
     agent = _EndlessAgent()
     measured_before = METRICS.value("chemclaw_tokens_total")
+    inferred_before = METRICS.value("chemclaw_estimated_tokens_total")
 
     async def _abandon() -> None:
         stream = _closable(
@@ -269,6 +278,11 @@ def test_abandoned_turn_still_books_its_tokens() -> None:
     assert tokens > 0, "the prompt this turn had already been billed for was booked as free"
     assert METRICS.value("chemclaw_tokens_total") == measured_before, (
         "an estimate was published as though a provider had reported it"
+    )
+    inferred = METRICS.value("chemclaw_estimated_tokens_total") - inferred_before
+    assert inferred == tokens, (
+        "the tokens this turn was billed for reached the budget and no counter, so the fleet-wide "
+        "spend rate under-reports every abandoned turn by its whole prompt"
     )
 
 

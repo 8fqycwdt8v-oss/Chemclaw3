@@ -1,8 +1,9 @@
 """The commitment mirror: a unit of committed work, and the join only this system can make.
 
-Nine of nineteen `manager` bucket-C probes needed one object the schema did not have. Seventy-three
-migrations, and `project` was a nullable text tag on `reaction_records` — a facet on a row, not an
-entity.
+Measured 2026-08-29: nine of the then-nineteen `manager` bucket-C probes needed one object the
+schema did not have. Eighty-odd migrations in, and `project` was still a nullable text tag on
+`reaction_records` — a facet on a row, not an entity. (The probe corpus has been rebucketed since;
+the denominator is a fact about that commit, not a figure anyone maintains.)
 
 The properties asserted here are the ones that keep this a *mirror* rather than a second plan: it
 converges on the source's snapshot rather than accumulating, it reports its own staleness, it never

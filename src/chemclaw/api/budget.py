@@ -1,11 +1,24 @@
 """Per-session and per-user turn/token budgets — the runaway-cost guard (plan F-budget).
 
-A single agent turn is already iteration-capped (`harness_max_loop_iterations`), so one turn
-cannot loop forever. But nothing caps the *number* of
+A single agent turn is iteration-capped (`harness_max_loop_iterations`), so one turn cannot loop
+forever. But nothing caps the *number* of
 turns, so a client — or an automated job→session push-back loop re-waking a session — could keep
 posting turns and accumulate unbounded LLM spend. This tracker is the missing ceiling above the
 per-turn loop cap: the front door meters each turn's reported token usage and counts turns per
 session and per user, and refuses (HTTP 429) a turn that would exceed a configured cap.
+
+**One turn cannot loop forever; one turn can spend without a bound, and this module cannot see it.**
+That sentence used to read "so one turn cannot loop forever" with the *therefore* left implicit, and
+the implication is false: an iteration is not a unit of cost. `check()` runs before a turn against
+usage already booked and `record()` books a turn after it ended, so the single thing neither half
+observes is a turn spending while it runs — measured 2026-09-06 at **250,000 tokens in one turn
+against a 1,000-token session cap**, refused only on the turn after. That is the "$400 in twenty
+minutes" failure this module was written against, arriving through the door it left open, and it is
+`agent/spend_cap.py` that closes it: a per-turn ceiling enforced in `before_model` and metered off
+the response, configured by `agent_max_turn_billed_tokens`. It ships at 0 (no cap) for the reason
+that setting states, so **in the shipped configuration nothing bounds a single turn's spend** and
+`budget_max_tokens_per_user` is the only real ceiling — per process, and reset by restart or LRU
+eviction. Read this module's caps as bounding a *sequence* of turns, never one of them.
 
 Scope is deliberately in-process and best-effort — the counters reset on restart. That bounds a
 running process's runaway (the "$400 in twenty minutes" failure), which is what the per-turn loop
@@ -63,10 +76,12 @@ class BudgetTracker:
     """In-process meter + admission gate for agent-turn cost, keyed by session and by user.
 
     `check` refuses (pre-turn) a turn that would breach a cap; `record` books a completed turn's
-    turn-count and token usage. A lock guards the counters because the ASGI server runs turns for
-    different sessions concurrently. `check` and `record` are separate calls, so a bounded number
-    of in-flight turns may pass `check` before any of them `record` — an overshoot acceptable for a
-    best-effort guard, not an exact accountant. **That bound is a property of where `check` is
+    turn-count and token usage. Neither runs *inside* a turn — see the module docstring for what
+    that means and which guard covers it. A lock guards the counters because the ASGI server runs
+    turns for different sessions concurrently. `check` and `record` are separate calls, so a
+    bounded number of in-flight turns may pass `check` before any of them `record` — an overshoot
+    acceptable for a best-effort guard, not an exact accountant. **That bound is a property of
+    where `check` is
     called, not of this class**, and it was false until the front door re-checked *after* taking an
     admission permit: checking only at request entry made the overshoot the number of concurrent
     requests instead (measured: 40 turns against a 1-turn cap with 8 permits). It is

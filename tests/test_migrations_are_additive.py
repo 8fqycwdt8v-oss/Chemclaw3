@@ -120,6 +120,13 @@ _BREAKS_PREVIOUS_IMAGE = re.compile(
 # an exempted migration still fails — an exemption is granted to statements somebody read, not to a
 # filename.
 _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "088_turn_cost_identity.sql": (
+        "D-2026-09-06-an-id-a-caller-chooses-is-not-a-key",
+        (
+            "ALTER TABLE turn_costs DROP CONSTRAINT",
+            "ALTER TABLE turn_costs ADD PRIMARY KEY",
+        ),
+    ),
     "058_note_proposal_superseded.sql": (
         # Reviewed, and it does not in fact end the rollback: the drop-and-re-add *widens* the
         # state CHECK, and the previous image only ever writes the old, still-allowed states —

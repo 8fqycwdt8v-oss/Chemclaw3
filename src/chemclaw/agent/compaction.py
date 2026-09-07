@@ -31,9 +31,18 @@ strategy over the persisted history so the next turn "started smaller", and the 
 the durable half of that named the reason it was wrong: a context heuristic must not edit a record
 somebody else's policy governs. The checkpointer is turn state rather than the durable record — that
 is `session_messages` — but the same argument applies to it one step down, and a reduction that is
-recomputed costs an estimator pass while a reduction that is *applied* costs history. What bounds
-the checkpoint tables is age, in `durable/retention.py`, which is the policy statement a deployment
-actually makes.
+recomputed costs an estimator pass while a reduction that is *applied* costs history.
+
+**What bounds the checkpoint tables is now two things, and only one of them is a policy.** Age, in
+`durable/retention.py`, is the deployment's own statement about how long a thread is kept — and it
+is off by default, so on a shipped deployment it bounded nothing. Beside it,
+`agent/checkpointer._PRUNE_SUPERSEDED` drops the *copies* a turn superseded: every superstep
+rewrites the whole message list, so a thread stored O(turns²) bytes of copies its newest checkpoint
+still holds in full (measured: 40 turns of conversation, 10.3 MB of `checkpoint_blobs`, 520 rows,
+reduced to 757 kB and 15 rows with the thread resuming identical). That is deduplication rather
+than disposal, which is why it does not contradict the paragraph above: no record is edited, and
+nothing a reader could ask for is gone
+(`D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record`).
 
 **One thing is lost against D-025 and it is named rather than glossed.** Its
 `ToolResultCompactionStrategy` collapsed an older tool result "into a short cited
@@ -790,10 +799,18 @@ def _record_overrun(request: ModelRequest[Any], sent: int) -> None:
 
     **The window-aware arm this function was once going to grow is still not built, and for a
     better reason than before.** Swept over (window, prefix, reservation, budget, ratio),
-    `sent <= effective_trigger(budget)` implies `prefix + sent * ratio <= budget` — and, where a
+    `sent <= effective_trigger(budget)` implies `(prefix + sent) * ratio <= budget` — and, where a
     window is declared, that the request fits it — in every combination except the degenerate corner
     where the prefix exhausts the budget outright, where the trigger floors at 1 so any real thread
     ticks anyway. `tests/test_context_budget.py` holds that sweep.
+
+    **That invariant used to be written `prefix + sent * ratio <= budget`, and both the sweep and
+    `effective_trigger` agreed with each other because both said it.** The ratio is measured over
+    the *whole* request, so charging it to the thread alone assumes the prefix bills at exactly 1.0
+    — an assumption nothing measured, and false: measured 2026-09-06, this repository's `default`
+    prefix bills 0.985 and a connector-JSON thread ~1.6, and the request the policy read as clean
+    billed 140,500 against a 119,000 budget. `agent/context_budget.effective_trigger` now converts
+    the budget whole, which is what makes the parenthesis above true rather than assumed.
 
     Once per turn, for the same reason every other number here is high-water marked: the edits are
     non-destructive, so a standing overrun is re-derived on every model call of the turn.
@@ -829,8 +846,10 @@ def _note_billing(request: ModelRequest[Any], response: Any) -> None:
 
     **The one place both numbers exist.** The estimate is computed here to decide whether a
     reduction happened; the bill arrives on the response of the very call this middleware wraps.
-    Nothing compared them, so the budget stayed denominated in a unit measured to be 2.2x off on
-    the payload class it governs (`agent/context_budget.py` carries the measurement).
+    Nothing compared them, so the budget stayed denominated in a unit that undercounts the payload
+    class it governs by a quarter to two thirds (`agent/context_budget.py` carries the
+    measurement, re-taken 2026-09-06 against the fleet's own results; the 2.2x this sentence used
+    to name does not reproduce).
 
     The estimate is the *whole* request — the ambient prefix plus the messages actually sent —
     because `input_tokens` counts the whole request and half a comparison is not one.

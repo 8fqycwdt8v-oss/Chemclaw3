@@ -55,6 +55,30 @@ NotesFingerprint = frozenset[tuple[str, int, int]]
 _CACHE_LOCK = threading.Lock()
 _NOTES_CACHE: dict[str, tuple[NotesFingerprint, list[Note]]] = {}
 
+# Per-**file** parse results, keyed by directory then by path, so a corpus that changed by one note
+# is re-parsed by one note (`D-2026-09-06-one-note-changed-is-not-the-corpus-changed`).
+#
+# **The cache above answers "has anything changed"; this one answers "what".** `invalidate_cache`
+# clears every directory on every note write — deliberately, because under-clearing serves a note
+# the caller just wrote as absent — and `kg/git_writer.py` calls it on every write. Since
+# `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` the agent is a writer, so the corpus
+# changes at *usage* rate, and the next reader paid a full re-parse of everything: measured,
+# 155 / 688 / 2,969 ms of `load_notes` at 1,000 / 5,000 / 20,000 notes, and 4,032 ms of
+# `build_graph` after touching one file. A third of that is taken from the event loop even under
+# `to_thread`, because the parse holds the GIL.
+#
+# The entry is `(mtime_ns, size, outcome)` — the same two stat fields `_dir_fingerprint` already
+# compares, so the two agree by construction rather than by a second convention. The outcome is the
+# parsed `Note`, `None` for a file `read_note` says is not a note, or the `NoteError` message, so a
+# reused entry re-emits exactly the warning, the metric and the summary count a fresh parse would:
+# the log's denominator is a property of the corpus, not of what this process happened to re-read.
+#
+# **Not cleared by `invalidate_cache`, which is the whole point.** It holds no aggregate — every
+# entry is independently keyed on the file's own stat — so it cannot serve a stale corpus the way
+# `_NOTES_CACHE` can. Entries for files that are gone are dropped by the scan that no longer
+# mentions them. Memory is dict overhead over `Note` objects `_NOTES_CACHE` is holding anyway.
+_PARSED_FILES: dict[str, dict[str, tuple[int, int, Note | str | None]]] = {}
+
 # Assembled-graph cache, same key and same fingerprint as `_NOTES_CACHE`. The notes cache spares the
 # parse, but every `find_notes`/`expand_note` call still re-added every node and edge — measured at
 # ~86 ms per call for 10k notes, and the agent's documented flow (`find_notes` then `expand_note`)
@@ -234,6 +258,63 @@ def dangling_links(notes: list[Note]) -> list[tuple[str, str]]:
     )
 
 
+def _parsed_files(notes_dir: Path) -> list[tuple[Path, os.stat_result]]:
+    """The tree's note files, with the per-file parse cache trimmed to exactly them.
+
+    Materialized rather than yielded because the trim needs the whole set: an entry whose file is
+    gone has to be dropped, and a generator would leave it until the next full pass. That is not
+    only memory — a path deleted and later recreated with a *smaller* file at the same `mtime_ns`
+    would otherwise be served from the stale entry.
+    """
+    found = list(scan_notes_dir(notes_dir))
+    if not settings.graph_cache_enabled:
+        return found
+    live = {str(path) for path, _ in found}
+    with _CACHE_LOCK:
+        cached = _PARSED_FILES.setdefault(str(notes_dir), {})
+        for gone in [key for key in cached if key not in live]:
+            del cached[gone]
+    return found
+
+
+def _note_for(notes_dir: Path, path: Path, stat: os.stat_result) -> tuple[Note | str | None, int]:
+    """One file's parse outcome, reused when its `(mtime_ns, size)` has not moved.
+
+    Returns `(outcome, reused)` where the outcome is the parsed `Note`, `None` for a file that is
+    not a note, or the `NoteError`'s message — the three cases `_parse_notes` already distinguishes
+    — and `reused` is 1 when nothing was read from disk. Kept as a tuple rather than raising through
+    the cache because a cached *failure* has to reproduce the same warning and the same metric: the
+    per-file line names the file to fix, and a corpus with four thousand bad notes must not look
+    like one with two just because this process read neither of them again.
+
+    The stat is the one the scan already took, so this adds no syscall of its own.
+
+    Args:
+        notes_dir: The corpus this file belongs to — the cache's first key.
+        path: The note file.
+        stat: That file's stat from the same scan the fingerprint was taken from.
+
+    Returns:
+        The parse outcome and 1 if it came from the cache, else 0.
+    """
+    signature = (stat.st_mtime_ns, stat.st_size)
+    key = str(path)
+    if settings.graph_cache_enabled:
+        with _CACHE_LOCK:
+            entry = _PARSED_FILES.get(str(notes_dir), {}).get(key)
+        if entry is not None and (entry[0], entry[1]) == signature:
+            return entry[2], 1
+    outcome: Note | str | None
+    try:
+        outcome = read_note(path)
+    except NoteError as exc:
+        outcome = str(exc)
+    if settings.graph_cache_enabled:
+        with _CACHE_LOCK:
+            _PARSED_FILES.setdefault(str(notes_dir), {})[key] = (*signature, outcome)
+    return outcome, 0
+
+
 def _parse_notes(notes_dir: Path) -> list[Note]:
     """Parse every note under `notes_dir` (recursively), skipping non-note and invalid files.
 
@@ -258,11 +339,12 @@ def _parse_notes(notes_dir: Path) -> list[Note]:
     notes: dict[str, tuple[Path, Note]] = {}
     unparseable = 0
     duplicate = 0
-    for path, _ in scan_notes_dir(notes_dir):
-        try:
-            note = read_note(path)
-        except NoteError as exc:
-            log.warning("skipping unparseable note %s: %s", path, exc)
+    reused = 0
+    for path, stat in _parsed_files(notes_dir):
+        note, reused_this = _note_for(notes_dir, path, stat)
+        reused += reused_this
+        if isinstance(note, str):
+            log.warning("skipping unparseable note %s: %s", path, note)
             record_metric(lambda m: m.increment("chemclaw_notes_unparseable_total"))
             unparseable += 1
             continue
@@ -290,16 +372,18 @@ def _parse_notes(notes_dir: Path) -> list[Note]:
     log_event(
         log,
         "kg.indexed",
-        "parsed %d note(s) from %s in %.3fs (%d unparseable, %d duplicate id)",
+        "parsed %d note(s) from %s in %.3fs (%d unparseable, %d duplicate id, %d reused)",
         len(notes),
         notes_dir,
         time.perf_counter() - started,
         unparseable,
         duplicate,
+        reused,
         level=logging.INFO if skipped else logging.DEBUG,
         notes=len(notes),
         unparseable=unparseable,
         duplicate_id=duplicate,
+        reused=reused,
         duration_s=round(time.perf_counter() - started, 3),
     )
     return [note for _, note in notes.values()]

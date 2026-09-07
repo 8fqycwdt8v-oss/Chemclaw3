@@ -4565,3 +4565,133 @@ def test_service_account_does_not_automount_the_api_token() -> None:
         "automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}"
         in config
     )
+
+
+# The `egressPorts` entries that are not a sibling MCP server: this release's own infrastructure,
+# whose ports the runbook's connector section has no reason to enumerate either way.
+_INFRASTRUCTURE_EGRESS = frozenset({"postgres", "temporal", "https", "llm", "otel"})
+
+
+def test_the_runbook_connector_section_defers_the_sibling_ports_to_the_chart() -> None:
+    """The step that exists to prevent a silent NetworkPolicy drop listed three ports out of five.
+
+    It read "the three bundles `Chemclaw3-mcp` serves are plain HTTP on 8858/8859/8860" — two wrong
+    things cancelling into a plausible sentence. "Three bundles" counts the bundles this repo
+    declares with an `endpoint:` and no `server/` (chem, safety, **rxnpredict**); "8858/8859/8860"
+    is a different triple (chem, safety, **calc**). The intersection omits `rxnpredict` (8857) and
+    `rxnlabel` (8865), which `egressPorts` has entries for — so an operator following the paragraph
+    opens three ports and two servers stay dropped, which is the exact failure the surrounding
+    sentence warns about. `values.yaml` calls that omission "the misreading this chart used to
+    ship": the chart was fixed and the runbook was not.
+
+    So the assertion is that the section carries **no** sibling port literal and points at
+    `networkPolicy.egressPorts` instead — one maintained roster, in the file a deployer edits.
+    """
+    ports = _values()["networkPolicy"]["egressPorts"]
+    siblings = {name: port for name, port in ports.items() if name not in _INFRASTRUCTURE_EGRESS}
+    assert len(siblings) >= 2, f"egressPorts no longer names sibling servers: {ports}"
+
+    runbook = (DEPLOY.parent / "docs" / "guides" / "runbook.md").read_text()
+    heading = "## (iv) Add a capability"
+    assert heading in runbook, "the connector section has been renamed"
+    section = runbook.split(heading, 1)[1].split("\n## ", 1)[0]
+
+    literals = sorted(
+        f"{name} ({port})" for name, port in siblings.items() if re.search(rf"\b{port}\b", section)
+    )
+    assert not literals, (
+        f"the connector section states sibling ports {literals}; a port list here goes stale "
+        "against `networkPolicy.egressPorts`, and a NetworkPolicy drop is silent — point at "
+        "`deploy/helm/chemclaw/values.yaml` rather than repeating its numbers"
+    )
+    assert "networkPolicy.egressPorts" in section, (
+        "the connector section no longer names `networkPolicy.egressPorts`, which is the only "
+        "maintained list of which port each sibling server is on"
+    )
+
+
+def test_no_shipped_document_states_a_coverage_floor_other_than_fail_under() -> None:
+    """`pyproject.toml` moved the floor 80 -> 84 and two readers did not move with it.
+
+    `tests/README.md` and this repository's own CI workflow both went on saying "the 80% floor" —
+    and an audit had already reported that exact mismatch in both files, after which a second
+    finding recorded "the earlier documented 80/84 mismatch is fixed here" while `ci.yml` was never
+    touched. A prose claim that a number was corrected, over a number that is still wrong, is the
+    defect one level up, so the fix was to delete both figures rather than re-transcribe them —
+    `CLAUDE.md` already says only "`make cov` adds the coverage floor".
+
+    This asserts the deletion holds: a shipped `.md` or workflow may name the floor, but it may not
+    state a percentage for it. `docs/archive/`, `docs/decisions/` and `tasks/` are excluded — a
+    merged ADR and an archived report are accurate about the commit they describe.
+    """
+    import tomllib
+
+    root = DEPLOY.parent
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    fail_under = pyproject["tool"]["coverage"]["report"]["fail_under"]
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "*.md", ".github/workflows/*.yml"],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=root,
+    ).stdout.split()
+    # A percentage and the word "floor" in one sentence, on a line that is talking about coverage.
+    stated = re.compile(
+        r"(\d+(?:\.\d+)?)\s*%[^.\n]{0,60}?\bfloor\b|\bfloor\b[^.\n]{0,60}?(\d+(?:\.\d+)?)\s*%"
+    )
+    about_coverage = re.compile(r"\bcov\b|coverage|fail_under", re.IGNORECASE)
+
+    offenders: list[str] = []
+    for relative in tracked:
+        if relative.startswith(("docs/archive/", "docs/decisions/", "tasks/")):
+            continue
+        for number, line in enumerate(
+            (root / relative).read_text(encoding="utf-8").splitlines(), 1
+        ):
+            if not about_coverage.search(line):
+                continue
+            match = stated.search(line)
+            if match and (match.group(1) or match.group(2)) != str(fail_under):
+                offenders.append(f"{relative}:{number}: {line.strip()}")
+    assert not offenders, (
+        f"these state a coverage floor that is not `fail_under` ({fail_under}): {offenders}. "
+        "Name `fail_under` in `pyproject.toml` rather than repeating a percentage."
+    )
+
+
+def test_no_shipped_document_states_how_many_alerts_the_rule_file_holds() -> None:
+    """Two documents stated the alert count, disagreed with each other, and were both a quarter low.
+
+    `deploy/README.md` opened a section "Thirty-six alerts across eight groups"; `runbook.md` §(x-b)
+    said "a PrometheusRule with thirty-five alerts". The rendered rule file holds considerably more
+    than either, and the *groups* and *dashboards* in the same sentences were right — so only the
+    number that grows with every added alert had rotted, in the direction that understates an
+    operator's alerting and noise surface. That the two disagreed is the diagnostic: at most one
+    could ever have been right and no reader could tell which.
+
+    The fix was to stop stating it, which is what `api/routes/README.md` ("**No count is written
+    here**") and `deploy/README.md`'s own runbook-index sentence already do three lines below the
+    offender. This asserts the roster stays the roster: no alert *count* in either document, while
+    the group and dashboard counts stay checked by their own tests.
+    """
+    rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    alerts = len(re.findall(r"^\s*- alert:", rule, re.MULTILINE))
+    assert alerts > 10, f"prometheusrule.yaml no longer looks like a rule file ({alerts} alerts)"
+
+    numbers = (
+        r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|"
+        r"twenty-\w+|thirty-\w+|forty-\w+|fifty-\w+|\d{2,}"
+    )
+    stated = re.compile(rf"\b({numbers})\s+alerts?\b", re.IGNORECASE)
+    offenders: list[str] = []
+    for document in (DEPLOY / "README.md", DEPLOY.parent / "docs" / "guides" / "runbook.md"):
+        for number, line in enumerate(document.read_text().splitlines(), 1):
+            match = stated.search(line)
+            if match:
+                offenders.append(f"{document.name}:{number}: {match.group(0)!r}")
+    assert not offenders, (
+        f"these state an alert count against {alerts} in the rendered rule file: {offenders}. "
+        "Name `templates/prometheusrule.yaml` instead — it is the roster, and it grows."
+    )

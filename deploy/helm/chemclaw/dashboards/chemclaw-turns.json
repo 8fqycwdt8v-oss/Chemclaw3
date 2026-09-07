@@ -565,6 +565,67 @@
           "refId": "I"
         }
       ]
+    },
+    {
+      "id": 13,
+      "type": "graph",
+      "title": "Measured against inferred spend",
+      "description": "Tokens the provider reported, beside tokens it billed and never reported. A gateway puts a request's usage on the terminal chunk only, so a turn torn down mid-message — a disconnect, the Stop button, a wall-clock deadline — is billed and reported by nobody; the second series is this system's estimate of those requests' prompts. A rising inferred rate is turns being abandoned late, which is the cheapest way to spend money the measured series cannot see. Never add the two without saying which half is inferred.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_tokens_total[5m]))",
+          "legendFormat": "measured",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_estimated_tokens_total[5m]))",
+          "legendFormat": "inferred (abandoned turns)",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (profile) (rate(chemclaw_estimated_tokens_total[5m]))",
+          "legendFormat": "inferred {{profile}}",
+          "refId": "C"
+        }
+      ]
     }
   ],
   "refresh": "30s",

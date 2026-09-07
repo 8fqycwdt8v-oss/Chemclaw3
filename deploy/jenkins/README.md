@@ -1,7 +1,8 @@
 # Jenkins delivery
 
 GitHub Actions is the **gate**; Jenkins is the **delivery**. `.github/workflows/ci.yml` decides
-whether a commit is allowed to exist (`make lint type cov`, the eleven validators, a chart render);
+whether a commit is allowed to exist (`make lint type cov`, every validator the `ci` recipe runs,
+a chart render);
 `image.yml` proves the image builds and every component imports as a non-root UID. Neither can push
 to a registry or reach a cluster, and that gap is what these pipelines close — it is the
 `docs/planning/DEFERRED.md` row "Push-to-registry + `helm upgrade` rollout".

@@ -17,6 +17,8 @@ Postgres-backed and skipped where no database is reachable, like every other sto
 import asyncio
 import contextlib
 import io
+import re
+from pathlib import Path
 
 import pytest
 from psycopg.types.json import Jsonb
@@ -42,6 +44,16 @@ from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.durable.digest import digest_channel
 from tests.pg import migrated_db_or_skip
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _runbook_section(text: str, heading: str) -> str:
+    """One `###` section of the runbook, heading to the next heading of any level."""
+    assert heading in text, f"{heading!r} is gone from the runbook"
+    body = text.split(heading, 1)[1]
+    return re.split(r"\n#{2,3} ", body, maxsplit=1)[0]
+
 
 # The column *spellings* this system uses for a person that are not covered by the `_by` suffix
 # below. Not every TEXT column — a derived set needs a vocabulary, and this is the irregular half
@@ -929,3 +941,47 @@ def test_the_residue_probe_asks_about_every_table_a_session_delete_names() -> No
             assert "tool_result_links" in named
             continue
         assert table in named, f"{table} is deleted per session but never re-counted"
+
+
+def test_the_runbook_offboarding_section_names_no_table_and_points_at_the_constants() -> None:
+    """The section a data-protection request is answered from may not carry a list of tables.
+
+    It carried one, and it was half a list: "Per-actor rows live in nine tables" over six retained
+    tables named, against `_ERASE` 12 + `_RETAINED` 12 + `_RETAINED_IN_PAYLOAD` 1 = 25 tables, 13
+    of them retained. "Nine" is reconstructible as `_ERASE` before the checkpointer and store
+    tables joined it, so it was true once and the tier grew under it in silence — while the seven
+    omitted retained tables (`effects`, `pending_requests`, the three `experiment_protocol_*`,
+    `bo_campaigns`, `result_publications`) each name a person. A DPO enumerating the retained tier
+    from that paragraph reported six tables and was wrong about seven more, including the one whose
+    data has already left for a store this system cannot erase from.
+
+    So the assertion is the cheap direction this repository keeps choosing (`api/routes/README.md`,
+    `deploy/README.md`'s expensive-actions section): the section names **no** table, states no
+    count of tables, and names the three constants instead — the dry run already prints every table
+    with its row count and its retention reason, so the maintained list is the command's output.
+    """
+    text = (_REPO_ROOT / "docs" / "guides" / "runbook.md").read_text(encoding="utf-8")
+    section = _runbook_section(text, "### Offboard: erase their data")
+
+    tables = (
+        {table for table, _ in _ERASE}
+        | {table for table, _, _ in _RETAINED}
+        | {table for table, _, _, _ in _RETAINED_IN_PAYLOAD}
+    )
+    # `audit_events` is exempt: the section cites the grant that withholds DELETE from it, which is
+    # a statement about a privilege rather than an enumeration of the tier.
+    named = sorted(t for t in tables - {"audit_events"} if f"`{t}`" in section)
+    assert not named, (
+        f"the offboarding section names {named}; a list of tables here goes stale under the tier "
+        "it describes — name `_ERASE`/`_RETAINED`/`_RETAINED_IN_PAYLOAD` and the dry run instead"
+    )
+    for constant in ("`_ERASE`", "`_RETAINED`", "`_RETAINED_IN_PAYLOAD`"):
+        assert constant in section, f"the offboarding section no longer points at {constant}"
+    counted = re.search(
+        r"\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+)\s+tables\b",
+        section,
+    )
+    assert counted is None, (
+        f"the offboarding section states a table count ({counted.group(0)!r}); the tiers are "
+        "counted by the dry run, not by this document"
+    )

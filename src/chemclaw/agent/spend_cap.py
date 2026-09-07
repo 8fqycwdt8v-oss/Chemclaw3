@@ -9,11 +9,14 @@ millions. The iteration cap cannot tell those apart, and nothing else was watchi
 refuses a turn that would breach a cap — but `check()` runs *before* a turn against usage already
 booked, and `record()` books a turn *after* it ended. Both halves sit outside the turn, so the one
 thing neither can observe is a turn spending without a bound while it runs. That module's own
-docstring states the belief that leaves the hole: "A single agent turn is already iteration-capped
-(`harness_max_loop_iterations`), so one turn cannot loop forever." One turn cannot *loop* forever.
-One turn can *spend* without a bound, and the session budget learns about it one turn too late —
-which is exactly the "$400 in twenty minutes" failure that module was written against, arriving
-through the door it left open.
+docstring used to state the belief that leaves the hole — "A single agent turn is already
+iteration-capped (`harness_max_loop_iterations`), so one turn cannot loop forever" — and now states
+the correction instead, because a sentence quoted here as wrong and left standing there is a
+correction nobody reading that module receives. One turn cannot *loop* forever. One turn can *spend*
+without a bound, and the session budget learns about it one turn too late — which is exactly the
+"$400 in twenty minutes" failure that module was written against, arriving through the door it left
+open. **Measured 2026-09-06**: one turn served 25 gateway calls of 10,000 tokens against a
+1,000-token session cap — 250,000 tokens, 250x the cap, refused only on the turn after.
 
 So this is the same guard shape in the other unit, and it is deliberately the same shape rather
 than a new one:

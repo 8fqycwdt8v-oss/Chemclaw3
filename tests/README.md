@@ -1,7 +1,9 @@
 # `tests/` — the suite, and several gates that are not about behaviour
 
 Run it with `make test`, one file with `pytest tests/test_x.py::test_name`, one pattern with
-`pytest -k "substring"`. `make check` adds lint and `mypy --strict`; `make cov` adds the 80% floor.
+`pytest -k "substring"`. `make check` adds lint and `mypy --strict`; `make cov` adds the coverage
+floor — `fail_under` in `pyproject.toml` is the one place that number lives. It is not restated
+here, because it moved once already and two documents went on quoting the old value.
 CI runs exactly these targets, so a green `make` locally is a green CI.
 
 `conftest.py` holds the shared fixtures, `pg.py` and `temporal_env.py` the optional Postgres and
@@ -80,5 +82,7 @@ ran, and reading one as a numerical failure has already cost this repository a w
 six agents worked against for hours. `tests/test_suite_timeouts.py` pins both the scaling and that
 section.
 
-CI does not set it (the gate runs in ~5 minutes on a dedicated runner); it is for a developer
+CI does not set it — a dedicated runner has the whole machine, and no committed probe measures
+how long the gate takes there, so no duration is claimed here (the "~5 minutes" this line used to
+give was nobody's to maintain; the Actions run page is the live figure). It is for a developer
 machine or a sandbox running several jobs at once.

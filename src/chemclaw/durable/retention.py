@@ -55,12 +55,21 @@ to be exhaustive, not asserted to be.
   them per actor (`agent/leaver.py`); disposal did not, so a deployment that erased nobody kept
   every turn's state for its whole life.
 
-  Pruned by **thread**, not by row. A checkpoint chains to the one before it through
-  `parent_checkpoint_id`, so deleting the old rows inside a live thread would leave the survivors
-  pointing at nothing; a thread expires whole, when its newest checkpoint does. All three tables go
-  in one transaction, against the per-table rule below, because they are one thread's state split
-  across three keys with no foreign key to enforce it — `_prune_checkpoints` says what committing
-  them separately would cost.
+  Pruned by **thread**, not by row: a thread expires whole, when its newest checkpoint does. All
+  three tables go in one transaction, against the per-table rule below, because they are one
+  thread's state split across three keys with no foreign key to enforce it — `_prune_checkpoints`
+  says what committing them separately would cost.
+
+  **This used to say deleting rows inside a live thread was impossible, and that sentence was the
+  only thing holding the largest growth defect in the system open for six review waves.** It read:
+  "A checkpoint chains to the one before it through `parent_checkpoint_id`, so deleting the old rows
+  inside a live thread would leave the survivors pointing at nothing." Measured, it does not — a
+  dangling `parent_checkpoint_id` costs `aget_state_history` depth and time-travel, and neither has
+  a caller in `src/`. `D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record` carries the run
+  and the argument; the prune itself lives in `agent/checkpointer._PRUNE_SUPERSEDED`, because a
+  thread still in use has to be bounded by the writer rather than by a job on a daily clock.
+  **That is a different question from this window**, which disposes of a thread that has stopped,
+  and both are needed: one bounds the copies inside a live thread, the other disposes of the thread.
 
   **No migration can add an index to them, and no migration can `ANALYZE` them either.**
   `infra/sql` is applied by a `pre-install` hook Job that completes before any app container starts,
@@ -414,9 +423,12 @@ _NOT_PRUNED: dict[str, str] = {
 }
 
 # The expired threads. The rule is the only correct one and has never changed: **a thread is expired
-# exactly when its newest checkpoint is older than the cutoff.** The unit of disposal is a thread —
-# `parent_checkpoint_id` chains a thread's checkpoints, so removing the old ones from a thread still
-# in use would leave the survivors pointing at rows that are gone.
+# exactly when its newest checkpoint is older than the cutoff.** The unit of *disposal* is a thread.
+#
+# This comment used to give a second reason — that removing the old rows from a thread still in use
+# would leave the survivors pointing at rows that are gone — and it was false. See the module
+# docstring: a live thread's superseded checkpoints are pruned by the writer
+# (`agent/checkpointer._PRUNE_SUPERSEDED`), which is why the depth figures below moved.
 #
 # **This statement was once replaced by a `WITH RECURSIVE` loose index scan and the replacement was
 # reverted, because the premise it rested on was measured false.** That premise was: "an aggregate
@@ -435,10 +447,29 @@ _NOT_PRUNED: dict[str, str] = {
 # **2.5 ms** against the walk's **23.2 ms** — the "first pass against a deployment that never
 # pruned" case the walk was written for, where the walk is 9x slower.
 #
+# **Three checkpoints a thread was never a shipped thread's depth, and this comparison was taken at
+# it.** A turn with one tool call writes **13** `checkpoints` rows, so a 40-turn session held 520 —
+# 173x this benchmark's per-thread depth — and the cap bounds *threads* while the streaming
+# group-by reads all of their rows. Re-measured this session on one shared table, cap 501,
+# `ANALYZE` immediately before, load average 1.05-1.43 (so the millisecond figures are soft and the
+# ratios are not): 20 000 x 3 all expired **2.4 ms**; 20 000 x 13 **6.8 ms**; 2 000 x 520
+# **281.8 ms**, 117x the documented figure for the identical capped statement.
+#
+# What makes those numbers historical rather than a live cost is
+# `D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record`: a thread is now bounded at
+# `checkpoint_retain_per_thread` plus one turn's writes — about 16 rows — however long its session
+# runs, so the depth this statement groups over no longer grows with session length. It is stated
+# here rather than left to be re-derived because this comment's own basis is what went stale.
+#
 # **The steady state is what decides it.** Retention runs daily, so every pass after the first faces
 # a backlog that is *sparse*: nearly every thread is live and the few expired ones may be anywhere
 # in `thread_id` order. No statement can be bounded by the cap there — finding the expired minority
-# means visiting every thread, and the only question is what one visit costs. This statement pays
+# means visiting every thread, and the only question is what one visit costs. Measured with 2%
+# expired on the same table: 20 000 x 13 goes **6.8 -> 248.9 ms** for the identical statement and
+# the identical cap, and 2 000 x 520 spends **1 181.7 ms scanning 1.04 M rows to retire 40
+# threads**. Bounding the depth (above) is what turns the first of those into 20 000 x 3's
+# **59.8 ms**; the sparsity multiplier itself is untouched by it and needs the durable resume
+# watermark this comment's neighbour already identifies as the missing piece. This statement pays
 # **one streaming index pass**: on 200 000 live threads / 600 000 rows it reads every row exactly
 # once in **593 ms**. The walk pays a random index probe *plus* a correlated `max()` per thread:
 # **8 147 ms** for the same answer, 13.7x worse, and it read 2.6x the table (26 003 scan rows on a

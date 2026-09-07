@@ -91,10 +91,30 @@ class MemorySettings(BaseSettings):
     # not in the schema anybody reviews. Erasure already reached them (`agent/leaver.py`); only
     # disposal did not, so a deployment that erased no one accumulated every turn's state forever.
     #
-    # Pruned by **thread**, not by row: a checkpoint's `parent_checkpoint_id` chains it to the one
-    # before, so deleting the old rows inside a live thread would leave a chain pointing at nothing.
-    # A thread expires when its newest checkpoint does.
+    # This window disposes of a thread **whole**, when its newest checkpoint is older than the
+    # cutoff. It is not what bounds a thread that is still in use — that is
+    # `checkpoint_retain_per_thread` below, and the two answer different questions: this one is
+    # disposal (a policy a deployment states), that one is deduplication of superseded copies.
+    # This comment used to carry the claim that in-thread pruning is impossible at all;
+    # `D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record` measured it false.
     retention_checkpoints_days: int = Field(default=0, ge=0)
+    # How many checkpoints per `(thread_id, checkpoint_ns)` survive one turn's prune. **Not a
+    # retention window, which is why it has a non-zero default and is not gated on
+    # `retention_enabled`.** Every superstep of every turn rewrites the whole `messages` channel, so
+    # a thread stores `O(turns^2)` bytes of *superseded copies of state its newest checkpoint still
+    # holds in full*: measured, a 40-turn thread carrying 139.6 kB of conversation stored 10.3 MB of
+    # `checkpoint_blobs` across 520 `checkpoints` rows. Deleting those copies disposes of no
+    # record — nothing a chemist, the model, `session_fork` or `plan_state` reads changes — so it
+    # is not a policy decision the way "keep a conversation for N years" is, and defaulting it
+    # to 0 would leave every shipped deployment paying the quadratic.
+    #
+    # 3 rather than 1: 1 was measured working, including under concurrent live turns, but a margin
+    # costs ~25 kB a thread and removes the need to reason about a partially-written superstep at
+    # all. 0 disables the prune, which is the escape hatch for a deployment that wants LangGraph
+    # time-travel over a thread's whole history — nothing in `src/` uses it (`aget_state_history`
+    # has no caller and the one `aget_tuple` passes `thread_id` alone), which is what makes the
+    # default safe.
+    checkpoint_retain_per_thread: int = Field(default=3, ge=0)
     # How many expired sessions one conversation-prune pass may work
     # (D-2026-08-05-a-sweep-that-commits-once). The conversation prune costs three round trips per
     # session — it cannot be one `DELETE`, because whether an expired row may go depends on rows

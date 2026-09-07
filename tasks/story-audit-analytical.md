@@ -4,8 +4,8 @@
 (`predict_pka`, `predict_logd`, `predict_developability_profile` — `logd.py:3` names HPLC
 mobile-phase pH selection as its motivating use case) and nothing else in this section. Every
 remaining story fails on the same single missing thing: **there is no `method` note type**.
-`KNOWN_NOTE_TYPES` (`kg/note.py:118-134`) holds eleven types, all of them about a *reaction* or a
-distillation over reactions; nothing can record "here is the method we ran, on what, when, and how
+`KNOWN_NOTE_TYPES` (`kg/note.py`) holds only types about a *reaction* or a distillation over
+reactions — the count is not written here, because it said eleven over a set of ten; nothing can record "here is the method we ran, on what, when, and how
 it performed". Four of the five stories here ask for precedent over methods, so all four are
 blocked by one schema addition rather than by four different problems. The retrieval, ranking,
 time-ordering and notification machinery they would need on top already exists and is generic.

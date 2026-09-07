@@ -700,6 +700,24 @@ class _TurnLedger:
                 self.tool_failures += 1
             else:
                 self.tool_refusals += 1
+            # **A call that was refused or raised consulted nothing, so it is taken back out.**
+            # Both counts are taken on the `ToolCallEvent`, which is the *attempt*; measured
+            # 2026-09-06, a turn making one successful `find_notes`, one repeat-refused
+            # `find_notes` and one `expand_note` that raised booked `retrieval_calls = 3` while the
+            # record was consulted once. For the field's own 0-vs-nonzero question that is
+            # harmless, and for any rate it is a threefold overstatement of the one behaviour the
+            # retrieval obligation exists to move. A repeat refusal is the clearest case: it is
+            # refused *because* an identical call already happened, and that one is already
+            # counted here.
+            #
+            # Counted forward and reversed, rather than deferred to the outcome, because the
+            # `ToolCallEvent` is where the tool's *name* is classified and a failure event may
+            # arrive for a call this turn never saw start (a subagent's, a resumed run's) — so
+            # `max(…, 0)` is the floor rather than an assertion that the pairing is total.
+            if event.tool in knowledge_read_tools():
+                self.retrieval_calls = max(self.retrieval_calls - 1, 0)
+            elif event.tool in KNOWLEDGE_WRITE_TOOLS:
+                self.capture_calls = max(self.capture_calls - 1, 0)
         elif isinstance(event, JobStartedEvent):
             self.jobs_started += 1
         elif isinstance(event, AnswerEvent):
@@ -1677,12 +1695,14 @@ def _book_turn_spend(
         output_tokens=ledger.usage.output,
         # **Beside the measured pair, never summed into it.** The budget is metered on the sum,
         # because a cost guard has to bind on the whole bill; what is *published* keeps the two
-        # apart, so an inferred number can never pass for a provider's. It lands here rather than
-        # on a counter for the reason `agent/compaction._announce` gives about its own two edits:
-        # a distinction a declared counter's label set cannot carry belongs in a structured record,
-        # where it is a field rather than a series nobody declared a reader for. The same number
-        # goes onto the turn's `turn_costs` row (migration 087) in its own column, so the durable
-        # ledger stops reading 0/0 for a turn that really spent.
+        # apart, so an inferred number can never pass for a provider's. It lands here, on the
+        # turn's `turn_costs` row (migration 087) **and** on `chemclaw_estimated_tokens_total` —
+        # three places, each answering a different question, and the third was missing until
+        # 2026-09-06. This comment used to say a counter was the wrong instrument, citing
+        # `agent/compaction._announce` on a distinction "a declared counter's label set cannot
+        # carry". That is an argument against a *label* on the measured series, and it stands; a
+        # separate series carries the distinction without touching what the four measured ones
+        # mean, and a rate is what a deployment reads when nobody is looking at a row.
         estimated_tokens=estimated,
         tool_calls=ledger.tool_calls,
         tool_failures=ledger.tool_failures,
@@ -1711,6 +1731,17 @@ def _book_turn_spend(
         ("chemclaw_output_tokens_total", ledger.usage.output),
         ("chemclaw_cache_read_tokens_total", ledger.usage.cache_read),
         ("chemclaw_cache_write_tokens_total", ledger.usage.cache_write),
+        # **The fifth is inferred, and it is a fifth series rather than part of the first.** The
+        # estimate already reached the budget and the ledger row and stopped there, so the
+        # fleet-wide rate under-reported by the whole prompt of every abandoned turn — measured
+        # 2026-09-06, two identical turns against a gateway billing 42,448 each moved
+        # `chemclaw_tokens_total` by 42,481 and **0**, which is exactly the population wave 4
+        # identified as an attack ("drop the connection just before the answer"). The paragraph
+        # below argued against carrying it and was right about a *label*: a declared counter's
+        # label set cannot hold measured-versus-inferred without changing what every existing panel
+        # means. It is a distinction a second series carries exactly, which is what the dashboard
+        # panel beside `chemclaw_tokens_total` now shows.
+        ("chemclaw_estimated_tokens_total", estimated),
     ):
         if value:
             METRICS.increment(name, float(value), spend_labels)

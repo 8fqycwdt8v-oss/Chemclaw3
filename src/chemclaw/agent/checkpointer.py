@@ -71,10 +71,19 @@ the thread, the missing channels and the remedy.
 
 **Only the channels this repository declares, and that is the whole point of the exclusion.**
 `ChemclawState` extends langchain's `PlanningState`, from which `messages`, `jump_to`,
-`structured_response` and `todos` arrive. A stamp over all six would move on any langchain minor
-bump that adds or renames one of *its* channels, refusing every in-flight thread in the fleet on a
-dependency change nobody associated with turn state — the guard causing the exact harm it exists to
-prevent. Middleware channels are outside it for a second reason: `create_agent` merges those in and
+`structured_response` and `todos` arrive. A stamp over *every* name
+`ChemclawState.__annotations__` reports would move on any langchain minor bump that adds or renames
+one of *its* channels, refusing every in-flight thread in the fleet on a dependency change nobody
+associated with turn state — the guard causing the exact harm it exists to prevent.
+
+**No count is written here, and that is deliberate.** This paragraph and `_first_party_channels`
+both said "six" over a state that had grown to eight — the two halves moved when `loop_cap` and
+`spend_cap` added channels, and neither sentence's author was editing this file. The set is
+derivable, so `tests/test_checkpointer_schema.py::test_the_declared_channels_partition_the_state`
+asserts the partition instead: what this repository declares plus what the base declares is exactly
+what the state declares, with nothing in both and nothing in neither.
+
+Middleware channels are outside it for a second reason: `create_agent` merges those in and
 this module cannot see them without importing the agent builder that imports it.
 
 **What is not caught, and where the refusal is deliberately wider than the failure.** Not caught: a
@@ -225,6 +234,85 @@ def _initialization_lock() -> asyncio.Lock:
 CHECKPOINT_TABLES: tuple[str, ...] = ("checkpoints", "checkpoint_blobs", "checkpoint_writes")
 
 
+# One turn's prune of the copies the newest checkpoint has superseded
+# (`D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record`).
+#
+# **What it is for.** Every superstep of every turn rewrites the whole `messages` channel, so a
+# thread stores four full copies of its entire conversation per turn and its blob bytes go as the
+# square of its turn count. Measured on one thread, one tool call a turn: 0.881 / 3.524 / 7.930 /
+# 14.098 MB of `checkpoint_blobs` at 10 / 20 / 30 / 40 turns — 1 : 4 : 9 : 16 against n**2's
+# 1 : 4 : 9 : 16 — for 139.6 kB of conversation at the end of it, 109x. Nothing bounded that.
+# `retention_checkpoints_days` disposes of a thread that has *stopped*; a thread still in use was
+# bounded by nothing at all, and the reason it stayed that way for six review waves was a sentence
+# rather than a defect: `durable/retention.py` said in-thread pruning would leave "survivors
+# pointing at nothing". Measured, it does not — the ADR carries the run.
+#
+# **A version floor, not a `NOT IN` set, and that is what makes it safe beside a live turn.**
+# LangGraph channel versions are zero-padded monotone counters (`000...040.0.5709...`), so a row
+# written *after* this statement's snapshot sorts above every floor it computed and cannot be
+# deleted. That closes the window `D-2026-09-06-a-sweep-and-a-live-turn-are-two-writers` left open
+# for `durable/retention.py`'s `_DELETE_ORPHANED`, which reasons from a `NOT EXISTS` instead.
+# One statement, so on this autocommit pool it is one transaction: a concurrent reader sees the
+# thread before it or after it, never mid-prune.
+#
+# **Partitioned by `checkpoint_ns`, which is the caveat that would have been found in production.**
+# A turn that spawns the `task` helper writes a subgraph namespace beside the root one on the *same*
+# `thread_id` — measured, one `tools:<uuid>` namespace per `task` call, 7 `checkpoints` and 3
+# `checkpoint_blobs` each, and a *new* namespace every call. The review that asked for the partition
+# expected over-pruning: a thread-wide floor taking a live helper's namespace whole. Measured, that
+# is not this statement's failure — `oldest_kept` groups by `checkpoint_ns`, so a namespace with no
+# row in the global top-K gets no floor and is simply never touched. With the `PARTITION BY` removed
+# and nothing else changed, the root namespace went 52 -> 3 either way while every helper namespace
+# went 7 -> 3 partitioned and stayed at **7** unpartitioned: a leak that grows with helper use
+# rather than a loss. Over-pruning stays possible only in the window where a helper's own
+# checkpoints are the newest on the thread, and one `PARTITION BY` closes both.
+# `tests/test_checkpointer_prune.py` drives a real `task` call rather than asserting either.
+#
+# **The `EXISTS` is conservative in the safe direction.** A blob whose channel appears in no kept
+# checkpoint's `channel_versions` is *not* deleted: the floor for it does not exist, so the clause
+# is false and the row stays. Leaving a row nothing references costs bytes; deleting one something
+# references costs the conversation.
+_PRUNE_SUPERSEDED = """
+WITH ranked AS (
+    SELECT checkpoint_ns, checkpoint_id, checkpoint,
+           row_number() OVER (PARTITION BY checkpoint_ns ORDER BY checkpoint_id DESC) AS rn
+      FROM checkpoints WHERE thread_id = %(thread)s
+),
+kept AS (SELECT checkpoint_ns, checkpoint_id, checkpoint FROM ranked WHERE rn <= %(keep)s),
+floors AS (
+    SELECT kept.checkpoint_ns AS ns, versions.key AS channel, min(versions.value) AS floor_version
+      FROM kept, jsonb_each_text(kept.checkpoint -> 'channel_versions') AS versions
+     GROUP BY 1, 2
+),
+oldest_kept AS (
+    SELECT checkpoint_ns AS ns, min(checkpoint_id) AS floor_id FROM kept GROUP BY 1
+),
+pruned_checkpoints AS (
+    DELETE FROM checkpoints c USING oldest_kept
+     WHERE c.thread_id = %(thread)s AND c.checkpoint_ns = oldest_kept.ns
+       AND c.checkpoint_id < oldest_kept.floor_id
+    RETURNING 1
+),
+pruned_writes AS (
+    DELETE FROM checkpoint_writes w USING oldest_kept
+     WHERE w.thread_id = %(thread)s AND w.checkpoint_ns = oldest_kept.ns
+       AND w.checkpoint_id < oldest_kept.floor_id
+    RETURNING 1
+),
+pruned_blobs AS (
+    DELETE FROM checkpoint_blobs b
+     WHERE b.thread_id = %(thread)s
+       AND EXISTS (SELECT 1 FROM floors f
+                    WHERE f.ns = b.checkpoint_ns AND f.channel = b.channel
+                      AND b.version < f.floor_version)
+    RETURNING 1
+)
+SELECT (SELECT count(*) FROM pruned_checkpoints),
+       (SELECT count(*) FROM pruned_writes),
+       (SELECT count(*) FROM pruned_blobs)
+"""
+
+
 def checkpoint_thread_delete_statements(match: str) -> tuple[tuple[str, str], ...]:
     """The three per-thread DELETEs, in an order a concurrent turn cannot tear.
 
@@ -324,9 +412,10 @@ def _first_party_channels(state: Any) -> tuple[str, ...]:
 
     **The base's channels are subtracted, and that is the reason this function exists rather than a
     one-line `get_type_hints`.** A `TypedDict` merges its bases' annotations into its own
-    `__annotations__` (measured on 3.11: `ChemclawState.__annotations__` reports all six channels,
-    four of them langchain's), so "what this repository declares" is not directly readable and has
-    to be computed by difference. `__orig_bases__` is where the pre-merge base list survives. It is
+    `__annotations__` (measured on 3.11: `ChemclawState.__annotations__` reports langchain's
+    channels beside this repository's, indistinguishably), so "what this repository declares" is not
+    directly readable and has to be computed by difference. `__orig_bases__` is where the
+    pre-merge base list survives. It is
     only populated when a base is generic — true of `PlanningState`, which extends
     `AgentState[ResponseT]` — so the subtraction can silently become a no-op if that ever changes;
     `tests/test_checkpointer_schema.py` asserts the result stays disjoint from the upstream base's
@@ -580,6 +669,10 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         pool; that function holds the measurements and why it is `OperationalError` rather than
         `psycopg.Error`.
 
+        **And one write of every turn also prunes what it superseded** — `_prune_superseded` says
+        when and why, and `_PRUNE_SUPERSEDED` says what and how safely. After the write rather than
+        before it, so a thread is never smaller than the checkpoint that is about to replace it.
+
         Raises:
             ConnectionError: The checkpoint could not be written.
         """
@@ -596,7 +689,60 @@ class SchemaStampedSaver(AsyncPostgresSaver):
             },
         )
         async with _translating("write", config):
-            return await super().aput(config, checkpoint, stamped, new_versions)
+            written = await super().aput(config, checkpoint, stamped, new_versions)
+        await self._prune_superseded(config, metadata)
+        return written
+
+    async def _prune_superseded(self, config: RunnableConfig, metadata: CheckpointMetadata) -> None:
+        """Delete the copies this thread's newest checkpoints have superseded.
+
+        `_PRUNE_SUPERSEDED` carries the statement, the measurement and why a version floor is the
+        predicate. This method is only the *when* and the *whether*.
+
+        **Once a turn, on the root namespace's input checkpoint.** A turn writes thirteen
+        checkpoints and pruning after each of them was measured — it bounds the thread more tightly
+        (3 rows against 15) and costs 2.88 s of extra statements over 40 turns against 0.88 s, on a
+        pool whose every statement already queues behind one process-wide lock. `source == "input"`
+        is LangGraph's own `CheckpointMetadata` literal and is written exactly once per `ainvoke`
+        per namespace, which makes "one prune per turn" a property of upstream's write pattern
+        rather than a counter this class would have to keep. Restricted to `checkpoint_ns == ""`
+        because the statement already prunes every namespace of the thread, so a helper's own input
+        checkpoint would only repeat the same work.
+
+        **The residual is stated rather than implied**: pruning at the turn boundary bounds a thread
+        at the retained checkpoints plus one turn's writes, so a single runaway turn is bounded by
+        the loop cap and not by this. And the *write* volume stays quadratic under any prune — that
+        is upstream's `_dump_blobs` rewriting the whole `messages` channel per superstep, and only a
+        destructive trim of state would reach it, which
+        `D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has` forbids.
+
+        **A failure here does not fail the turn.** The checkpoint is already written and committed;
+        this is housekeeping on a separate statement, and taking a chemist's answer away because a
+        `DELETE` could not run would trade a bounded disk cost for a lost turn. It is logged at
+        WARNING rather than swallowed, so a prune that never works is visible.
+
+        Args:
+            config: The `configurable` of the write, naming the thread and the namespace.
+            metadata: The checkpoint's metadata, read for upstream's `source`.
+        """
+        keep = settings.checkpoint_retain_per_thread
+        configurable = config.get("configurable", {})
+        thread_id = configurable.get("thread_id")
+        if not keep or not thread_id:
+            return
+        if configurable.get("checkpoint_ns") or metadata.get("source") != "input":
+            return
+        try:
+            async with self._cursor() as cur:
+                await cur.execute(_PRUNE_SUPERSEDED, {"thread": thread_id, "keep": keep})
+                await cur.fetchone()
+        except psycopg.Error as exc:
+            logger.warning(
+                "could not prune superseded checkpoints for session %s: %s; the thread is intact "
+                "and keeps every superseded copy until this succeeds",
+                thread_id,
+                exc,
+            )
 
     async def aput_writes(
         self,
