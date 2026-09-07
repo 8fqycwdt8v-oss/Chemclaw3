@@ -87,22 +87,24 @@ posture deliberately is a close; a row nobody ever revisits is not.
 Sorted by which they are, because the two need different work:
 
 **Actionable — close them**
-- [ ] W9.1 The retention sweep's missing resume watermark (steady-state pass walks the whole table)
-- [ ] W9.2 An erasure that races a live turn cannot be completed by re-running it
-- [ ] W9.3 `_assemble_graph` rebuilds every node and edge on any corpus change (~1,450 ms at 20k)
-- [ ] W9.4 The outbox double-claim, which needs the lease column a comment already describes
-- [ ] W9.5 A bulk ELN backfill re-qualifies every ingested file per chunk, writing false rejections
-- [ ] W9.6 The nine reference stores no configuration can select
-- [ ] W9.7 The system-speech mark is plaintext in every refusal and `_defang` has no pass for it
+- [x] W9.1 The retention sweep's missing resume watermark (steady-state pass walks the whole table)
+- [x] W9.2 An erasure that races a live turn cannot be completed by re-running it
+- [x] W9.3 `_assemble_graph` rebuilds every node and edge on any corpus change (~1,450 ms at 20k)
+- [x] W9.4 The outbox double-claim, which needs the lease column a comment already describes
+- [x] W9.5 A bulk ELN backfill re-qualifies every ingested file per chunk, writing false rejections
+- [x] W9.6 The nine reference stores no configuration can select
+- [x] W9.7 The system-speech mark is plaintext in every refusal and `_defang` has no pass for it
 
 **Decisions, not patches — take them or record why not**
-- [ ] W9.8 `CREATE ON SCHEMA public`: choose the narrower posture or write the ADR keeping this one
+*(Three were taken. Two are marked `[~]`: recorded as not-taken with the trade stated, because
+they change what the system keeps or what every turn costs.)*
+- [x] W9.8 `CREATE ON SCHEMA public`: choose the narrower posture or write the ADR keeping this one
 - [ ] W9.9 The checkpointer's quadratic WAL — only destructive trimming reaches it, and that
       contradicts a merged decision. Decide it or state the trade in an ADR.
-- [ ] W9.10 The sweep/turn write race the read guard only detects — a lock on the turn-serving
+- [x] W9.10 The sweep/turn write race the read guard only detects — a lock on the turn-serving
       write path is the cost; decide whether it is worth paying.
 
-- [ ] W9 gate, PR, merge on green
+- [x] W9 gate, PR, merge on green
 
 Same rules as waves 4-8: disjoint file sets, reproduce before fixing, every fix
 ships with a test watched failing, never edit a merged ADR, and no agent runs
@@ -192,3 +194,30 @@ zero metrics with no producer, zero unread corpora. The untested layering rule �
 capability code lives in a bundle or in `science/` — holds by hand-audit. And
 CLAUDE.md's subagent arithmetic, the paragraph most likely to have rotted,
 measured correct on every figure.
+
+### Wave 9 — the register, worked down
+
+Nine items closed, two decisions deliberately left to the maintainer with their
+trade stated. What made this wave different: **three of the four agents
+overturned the premise of the row they were handed.**
+
+- The graph optimisation was worth *nothing* as first built — 1,618 against
+  1,584 ms — because the git writer discards the cache after every write. And
+  its own break-even was reasoned at a sixth of the corpus, measured at 42%.
+- The store row's premise was false: one of its nine is reachable, because a
+  setting takes a `module:callable`. Two more of its four claims were backwards
+  (coverage) or nil (the type gate).
+- The retention row asked for a watermark; a sparse pass turned out to be
+  irreducible, and the real cost was a drain restarting at the top every sweep —
+  13,499 → 1,492 ms on a first pass, with no migration, table or grant.
+- The erasure row said residual rows needed owner rights; the rows were never
+  beyond the app's privileges, the *query* was.
+
+Two defects were found that no row named: `read_corpus` returned **5 of 12
+entries with `complete=True`** — one page, silently, so a deployment's knowledge
+corpus was its oldest entries — and `ANALYZE` ran per sweep rather than per pass,
+10.8 s of a 13.8 s drain.
+
+And closing the forgeable system-speech mark exposed a live defect in the fix
+itself: `_refusal_message` defangs what it is handed, so the new pass escaped
+*the system's own* mark.
