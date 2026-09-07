@@ -116,7 +116,10 @@ def test_no_shipped_module_constructs_a_reference_oracle() -> None:
                 else None
             )
             if name in ORACLES and path != definitions[name]:
-                offenders.append(f"{path.relative_to(SRC.parent)}:{node.lineno} names {name}")
+                # `getattr`, because `lineno` lives on statement and expression nodes
+                # rather than on `ast.AST` itself, and the walk yields both.
+                line = getattr(node, "lineno", 0)
+                offenders.append(f"{path.relative_to(SRC.parent)}:{line} names {name}")
     assert offenders == [], (
         "a shipped module reaches a reference oracle, so it is no longer test-only:\n  "
         + "\n  ".join(offenders)
