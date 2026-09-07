@@ -29,6 +29,21 @@ startup against the live tool surface, and one naming a tool or an argument the 
 refuses to serve rather than quietly producing a green run over nothing. `adversarial=True` opts out
 of that check — explicitly, per behaviour, because emitting what the real tool would reject is
 precisely what the adversarial family is for.
+
+**Every green result in the live lane is evidence about this file, so where it is kinder than a
+gateway it disables a control**
+(`D-2026-09-07-a-mock-that-answers-unasked-hides-the-lane-that-asks-nothing`).
+Measured against a real OpenAI-compatible endpoint on 2026-09-07, three things here were generous
+in ways that made a real deployment's failure unreachable: usage was reported on a stream that had
+not asked for it (so `llm_stream_usage=False` — the escape hatch that books **zero** on every turn —
+looked exactly like the metered configuration), the input bill was a constant (so
+`context_budget`'s calibration could only ever read its 1.0 clamp), and no request could be refused
+for its own size (so `classify_model_failure`'s `context_length` label had no lane at all).
+`tests/test_mock_llm_contract.py` is what holds the wire to the measured shapes now, and it is also
+the first thing in this suite to drive a turn through this mock at all — a frame-shape regression in
+`_chat_stream` was caught by nothing before it. The general rule it leaves behind: **a mock may be
+narrower than the endpoint it stands in for, never more forgiving** — an omission costs coverage
+loudly, and a kindness costs it silently.
 """
 
 from __future__ import annotations
@@ -110,10 +125,52 @@ class Behaviour:
     http_status: int = 200
     # Skip the startup validation below. Only the adversarial family sets this.
     adversarial: bool = False
-    # Tokens reported on `response.completed`. Without a usage block `usage_tokens` records zero
+    # Tokens reported as this request's input. Without a usage block `usage_tokens` records zero
     # and budget admission is silently never pressured — the run would "pass" a gate it never met.
-    input_tokens: int = 900
+    #
+    # **A constant by default, and `None` is what a calibration lane needs.** A real gateway bills
+    # for the request it was sent: measured 2026-09-07 against the gateway, one prompt of 25, 2,500
+    # and 100,000 characters billed 12, 321 and 12,509 input tokens. This mock billed 900 for all
+    # three. That is not merely unrealistic — it disables a control:
+    # `agent/context_budget._Calibration` divides billed by estimated (chars/4) and clamps the
+    # result at 1.0 from below, so a lane whose billed input never grows can only ever observe a
+    # ratio *under* 1 and therefore reports exactly 1.0 forever. Measured over 50 calls of a
+    # 10,000-token estimate: `estimator_ratio()` = 1.0 on this mock's numbers, 1.34 on the fleet's
+    # real ones. The EWMA, `agent_context_calibration_max_factor` and the whole ">1.0 tightens the
+    # budget" branch that D-2026-08-28 and D-2026-09-04 rest on are unreachable from any lane.
+    #
+    # `None` therefore bills the *serialized request* at `input_tokens_per_char`, so a thread that
+    # grows costs more and a behaviour that names a factor above 0.25 (the estimator's own chars/4)
+    # drives a calibration ratio above 1 — including above `max_factor`, which is the arm nothing
+    # but a hand-fed unit test has ever driven. The constant stays the default because a behaviour
+    # asserting a fixed token count needs determinism, and because every existing lane is written
+    # against it.
+    input_tokens: int | None = 900
+    # Billed input tokens per character of serialized request, when `input_tokens` is None. 0.25 is
+    # `count_tokens_approximately`'s own chars/4, i.e. an endpoint this system estimates perfectly;
+    # a larger value is a tokenizer this system undercounts, which is the direction that matters.
+    input_tokens_per_char: float = 0.25
     output_tokens: int = 120
+    # The cached share of the input, published as `prompt_tokens_details.cached_tokens` — the key
+    # `langchain_openai._create_usage_metadata` turns into `input_token_details["cache_read"]` and
+    # `agent/turn_usage.graph_usage_tokens` subtracts back out of priced input. Omitted from the
+    # wire entirely when 0, which is what the gateway this mock is measured against does, so the
+    # default request is byte-identical to the one every lane already gets.
+    cached_tokens: int = 0
+    # `service_tier` on the response body. Only `priority` and `flex` mean anything: upstream reads
+    # the tier off the *response* and prefixes both cache keys with it (`priority_cache_read`), and
+    # `turn_usage._cache_detail` matches by suffix for exactly that reason. That suffix match has
+    # never been driven by anything but a hand-built mapping; this is the knob that lets a lane
+    # drive it over the wire.
+    service_tier: str = ""
+    # Refuse any request whose billed input exceeds this, the way a real gateway refuses a thread
+    # that no longer fits: HTTP 400, `invalid_request_error`, "prompt is too long: N tokens > M
+    # maximum" — the vendor wording `llm_provider._CONTEXT_LENGTH_MARKERS` already matches.
+    # 0 means never. This is the only failure `http_status` cannot express, because it is a property
+    # of the *request* rather than of the behaviour: the same behaviour serves a short thread and
+    # refuses a grown one, which is what makes `classify_model_failure`'s `context_length` label —
+    # and the compaction policy that exists to prevent it — reachable from a lane at all.
+    refuse_over_input_tokens: int = 0
 
 
 def already_has_tool_results(payload: dict[str, Any]) -> bool:
@@ -157,6 +214,18 @@ def _validate(behaviour: Behaviour) -> None:
     from chemclaw.agent.chemclaw_agent import available_tool_names
     from chemclaw.core.tool_registry import registered_tools
 
+    # Checked before the adversarial opt-out, because `adversarial` waives the *tool surface* check
+    # — the thing a deliberately malformed call is for — and says nothing about this mock's own
+    # arithmetic. A behaviour that refuses over a token count while billing a constant would refuse
+    # every request or none, whatever the thread did, which is the opposite of the request-level
+    # failure the knob exists to produce.
+    if behaviour.refuse_over_input_tokens and behaviour.input_tokens is not None:
+        raise ValueError(
+            f"behaviour {behaviour.name!r} refuses over "
+            f"{behaviour.refuse_over_input_tokens} input tokens while billing a constant "
+            f"{behaviour.input_tokens}. Set `input_tokens=None` so the bill follows the request, "
+            "or the refusal is a property of the behaviour rather than of the thread."
+        )
     if behaviour.adversarial:
         return
     known = set(available_tool_names())
@@ -261,7 +330,69 @@ def _fragments(document: str, count: int) -> list[str]:
     return pieces
 
 
-def _response_object(response_id: str, model: str, behaviour: Behaviour) -> dict[str, Any]:
+def _billed_input_tokens(behaviour: Behaviour, payload: dict[str, Any]) -> int:
+    """What this request is billed for its input: a constant, or the request's own size.
+
+    The size is the *serialized request* rather than the message text, because that is what the
+    thing being calibrated measures: `agent/context_budget` estimates prefix and thread together —
+    system message, skills listing, every bound tool schema — and comparing a bill for the messages
+    against an estimate of the whole request is the half-a-comparison defect
+    `D-2026-09-05-a-ratchet-that-re-derives-half-its-basis-bounds-half-a-request` is about, one
+    layer down.
+
+    Never 0: `note_model_call` drops a sample with a non-positive bill, so a mock that billed 0 for
+    an empty request would look like a lane that measured nothing rather than one that measured a
+    tiny request.
+    """
+    if behaviour.input_tokens is not None:
+        return behaviour.input_tokens
+    return max(1, round(len(json.dumps(payload)) * behaviour.input_tokens_per_char))
+
+
+def _chat_usage(behaviour: Behaviour, billed_input: int) -> dict[str, Any]:
+    """The chat-completions `usage` block, with the cached breakdown only when there is one.
+
+    `prompt_tokens` *includes* the cached share — OpenAI's own definition, and what
+    `turn_usage.graph_usage_tokens` subtracts back out — so a behaviour naming `cached_tokens`
+    does not add to the bill, it says how much of it was cheap.
+    """
+    usage: dict[str, Any] = {
+        "prompt_tokens": billed_input,
+        "completion_tokens": behaviour.output_tokens,
+        "total_tokens": billed_input + behaviour.output_tokens,
+    }
+    if behaviour.cached_tokens:
+        usage["prompt_tokens_details"] = {"cached_tokens": behaviour.cached_tokens}
+    return usage
+
+
+def _oversize_refusal(billed_input: int, limit: int) -> JSONResponse:
+    """The 400 a real gateway returns for a thread that no longer fits, field for field.
+
+    Measured 2026-09-07 against the gateway: `{"error": {"code": "invalid_request_error",
+    "message": "prompt is too long: 300024 tokens > 200000 maximum", "type":
+    "invalid_request_error", "param": null}}`. The wording is the vendor's, relayed through the
+    gateway, which is why `llm_provider._CONTEXT_LENGTH_MARKERS` matches on it — and this is the
+    only way anything in this tree reaches `classify_model_failure`'s `context_length` label
+    without hand-building an exception.
+    """
+    message = f"prompt is too long: {billed_input} tokens > {limit} maximum"
+    return JSONResponse(
+        {
+            "error": {
+                "code": "invalid_request_error",
+                "message": message,
+                "type": "invalid_request_error",
+                "param": None,
+            }
+        },
+        status_code=400,
+    )
+
+
+def _response_object(
+    response_id: str, model: str, behaviour: Behaviour, billed_input: int
+) -> dict[str, Any]:
     """The `Response` body both the streaming and non-streaming paths report.
 
     `status` is always `completed`. `in_progress` or `queued` makes the client mint a continuation
@@ -278,16 +409,21 @@ def _response_object(response_id: str, model: str, behaviour: Behaviour) -> dict
         "tool_choice": "auto",
         "tools": [],
         "usage": {
-            "input_tokens": behaviour.input_tokens,
-            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+            "input_tokens": billed_input,
+            "input_tokens_details": {
+                "cached_tokens": behaviour.cached_tokens,
+                "cache_write_tokens": 0,
+            },
             "output_tokens": behaviour.output_tokens,
             "output_tokens_details": {"reasoning_tokens": 0},
-            "total_tokens": behaviour.input_tokens + behaviour.output_tokens,
+            "total_tokens": billed_input + behaviour.output_tokens,
         },
     }
 
 
-async def _stream(behaviour: Behaviour, model: str, response_id: str) -> AsyncIterator[str]:
+async def _stream(
+    behaviour: Behaviour, model: str, response_id: str, billed_input: int
+) -> AsyncIterator[str]:
     """The SSE frames for one turn, in the order the SDK's discriminated union accepts them.
 
     Every frame is constructed as the SDK's own model and dumped, rather than hand-written JSON:
@@ -308,7 +444,7 @@ async def _stream(behaviour: Behaviour, model: str, response_id: str) -> AsyncIt
     # Validated into the SDK's own `Response` rather than passed as a dict: the client deserializes
     # every frame before the agent sees it, so a body this mock got subtly wrong would raise inside
     # SDK and read as an application defect. Building through the model makes that unshippable.
-    body = Response.model_validate(_response_object(response_id, model, behaviour))
+    body = Response.model_validate(_response_object(response_id, model, behaviour, billed_input))
     sequence = 0
 
     def frame(event: Any) -> str:
@@ -380,7 +516,14 @@ async def _stream(behaviour: Behaviour, model: str, response_id: str) -> AsyncIt
     yield "data: [DONE]\n\n"
 
 
-async def _chat_stream(behaviour: Behaviour, model: str, completion_id: str) -> AsyncIterator[str]:
+async def _chat_stream(
+    behaviour: Behaviour,
+    model: str,
+    completion_id: str,
+    billed_input: int,
+    *,
+    include_usage: bool,
+) -> AsyncIterator[str]:
     """The same turn as `_stream`, in chat-completions frames.
 
     A second encoding of one behaviour rather than a second mock, because the behaviour catalogue —
@@ -396,6 +539,15 @@ async def _chat_stream(behaviour: Behaviour, model: str, completion_id: str) -> 
     carries only an argument fragment against the same `index`. Sending the name again on a
     fragment makes the client assemble two calls out of one — the reassembly hazard `graph_stream`
     refuses to read calls from the token stream because of.
+
+    Args:
+        behaviour: The turn to encode — its calls, its prose and its billed output.
+        model: The model name to echo back on every chunk.
+        completion_id: The `chatcmpl-…` id every chunk of this turn carries.
+        billed_input: What `_billed_input_tokens` decided this request costs in input.
+        include_usage: Whether the request sent `stream_options.include_usage`. See the terminal
+            frame below — a gateway reports streamed usage only when asked, and this mock used to
+            report it either way.
     """
     from openai.types.chat import ChatCompletionChunk
 
@@ -409,6 +561,9 @@ async def _chat_stream(behaviour: Behaviour, model: str, completion_id: str) -> 
                 "created": created,
                 "model": model,
                 "choices": [{"index": 0, "finish_reason": None, **choice}],
+                # Upstream reads the tier off the chunk and prefixes both cache keys with it, so
+                # this has to ride every frame the usage might land on rather than the body alone.
+                **({"service_tier": behaviour.service_tier} if behaviour.service_tier else {}),
                 **extra,
             }
         )
@@ -452,16 +607,24 @@ async def _chat_stream(behaviour: Behaviour, model: str, completion_id: str) -> 
         for chunk_text in (behaviour.text[i : i + 40] for i in range(0, len(behaviour.text), 40)):
             yield frame({"delta": {"content": chunk_text}})
 
-    # Usage rides the final frame, which is what `stream_options.include_usage` asks for and what
-    # `api/runner_usage.graph_usage_tokens` meters the turn from. Omitting it would meter every
-    # mock turn at zero and silently disarm the budget guard under the storm.
+    # Usage rides the final frame — measured 2026-09-07 against the gateway, which puts it on the
+    # same chunk as `finish_reason` rather than on a trailing choice-less one — and the turn is
+    # metered from it by `graph_usage_tokens`. Omitting it meters every turn at zero and silently
+    # disarms the budget guard under the storm, which is why it is here at all.
+    #
+    # **And it is emitted only when the request asked, because a gateway only answers when asked.**
+    # Measured the same day, streaming with no `stream_options`: this mock put usage on 1 of 7
+    # frames, the gateway on 0 of 7; through `ChatOpenAI(stream_usage=False)` the mock reported
+    # `input_tokens: 900` and the gateway reported `usage_metadata: None`. `llm_stream_usage` exists
+    # as the escape hatch for an endpoint that rejects `stream_options`, and turning it off books
+    # **zero** on every turn — `turn_usage`, `api/budget.py`, `agent/spend_cap.py` and
+    # `context_budget.note_model_call` all read that one field. Reporting usage unasked made that
+    # lane invisible: every mock-driven run showed a fully metered turn for a configuration that
+    # meters nothing. `_openai_compatible_model`'s docstring records this exact failure having
+    # shipped once already, and the mock was the reason it could not recur *visibly*.
     yield frame(
         {"delta": {}, "finish_reason": "tool_calls" if behaviour.calls else "stop"},
-        usage={
-            "prompt_tokens": behaviour.input_tokens,
-            "completion_tokens": behaviour.output_tokens,
-            "total_tokens": behaviour.input_tokens + behaviour.output_tokens,
-        },
+        **({"usage": _chat_usage(behaviour, billed_input)} if include_usage else {}),
     )
     yield "data: [DONE]\n\n"
 
@@ -502,6 +665,10 @@ def build_app(mock: MockLlm) -> FastAPI:
                 {"error": {"message": "injected failure", "type": "server_error"}},
                 status_code=behaviour.http_status,
             )
+        billed_input = _billed_input_tokens(behaviour, payload)
+        # After the injected status, because a behaviour that declares a failure means that one.
+        if behaviour.refuse_over_input_tokens and billed_input > behaviour.refuse_over_input_tokens:
+            return _oversize_refusal(billed_input, behaviour.refuse_over_input_tokens)
         model = str(payload.get("model", "mock"))
         # Minted here, not inside the stream, because the id has to be bound to this behaviour
         # *before* the next call in the chain can arrive asking about it.
@@ -509,9 +676,10 @@ def build_app(mock: MockLlm) -> FastAPI:
         mock.remember(response_id, behaviour)
         if payload.get("stream"):
             return StreamingResponse(
-                _stream(behaviour, model, response_id), media_type="text/event-stream"
+                _stream(behaviour, model, response_id, billed_input),
+                media_type="text/event-stream",
             )
-        body = _response_object(response_id, model, behaviour)
+        body = _response_object(response_id, model, behaviour, billed_input)
         body["output"] = [
             {
                 "id": f"msg_{uuid.uuid4().hex[:16]}",
@@ -545,32 +713,39 @@ def build_app(mock: MockLlm) -> FastAPI:
                 {"error": {"message": "injected failure", "type": "server_error"}},
                 status_code=behaviour.http_status,
             )
+        billed_input = _billed_input_tokens(behaviour, payload)
+        if behaviour.refuse_over_input_tokens and billed_input > behaviour.refuse_over_input_tokens:
+            return _oversize_refusal(billed_input, behaviour.refuse_over_input_tokens)
         model = str(payload.get("model", "mock"))
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         if payload.get("stream"):
+            options = payload.get("stream_options")
+            include_usage = bool(isinstance(options, dict) and options.get("include_usage"))
             return StreamingResponse(
-                _chat_stream(behaviour, model, completion_id), media_type="text/event-stream"
+                _chat_stream(
+                    behaviour, model, completion_id, billed_input, include_usage=include_usage
+                ),
+                media_type="text/event-stream",
             )
-        return JSONResponse(
-            {
-                "id": completion_id,
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": behaviour.text},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": behaviour.input_tokens,
-                    "completion_tokens": behaviour.output_tokens,
-                    "total_tokens": behaviour.input_tokens + behaviour.output_tokens,
-                },
-            }
-        )
+        # The non-streaming body always carries usage, on this mock and on the gateway measured
+        # beside it: `stream_options` is a *streaming* option and has nothing to say here.
+        body: dict[str, Any] = {
+            "id": completion_id,
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": behaviour.text},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": _chat_usage(behaviour, billed_input),
+        }
+        if behaviour.service_tier:
+            body["service_tier"] = behaviour.service_tier
+        return JSONResponse(body)
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request) -> Any:

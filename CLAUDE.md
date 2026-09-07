@@ -289,6 +289,16 @@ this repository holds them to, and
 `test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_bound` runs the sibling's
 own servers against it — skipping, with the reason in the message, where there is no sibling
 checkout, because a check that quietly shrinks is worse than one that says what it did not look at.
+**That sentence described a control that had never run anywhere**
+(`D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it`): the ratchet searched one
+path in one casing under one variable while `infra/live/siblings.sh` — merged the same day, its own
+header describing this bug being fixed — searched four under two, so on the container this
+repository provisions the live lanes resolved the fleet and the test skipped. One resolution now,
+the shell's, asked by `tests/siblings.py` rather than copied into it; a skip is counted by
+`tests/conftest.py::_report_sibling_skips`, which two sentences in that ratchet already claimed
+existed and did not; and what the fleet declares is compared against what this tree declares by
+`tests/test_sibling_manifest_agreement.py`, down to the `calc` seam's hardcoded tool names, which
+no manifest covers in either direction.
 
 Its first consequence is that the compaction defaults
 were derived against the smaller prefix, so `agent_tool_result_clear_trigger` was floored at 1 while

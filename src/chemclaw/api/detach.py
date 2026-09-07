@@ -31,11 +31,15 @@ in the pump is what keeps both held while the model is genuinely still working �
 The **admission permit** is the exception, and it was not one until it was measured. That permit
 is not per session: it is the process's shared `service_max_concurrent_turns` semaphore, so
 holding it for a detached turn charges *everyone else on the replica* for work nobody is watching.
-Eight fresh sessions POSTed and hung up left 0 of the shipped 8 permits free and shed every other
-chemist's turn as `queued` then `error`, for up to `service_turn_timeout_seconds` — reachable by a
-flaky mobile network, a crashed tab, or a UI that retries on disconnect, where the retry *adds* a
-holder rather than replacing one. Before this module existed a disconnect returned the permit
-immediately, so the failure was self-limiting. So the permit is released at the detach, through
+Measured by POSTing and hanging up one fresh session per permit: every permit on the replica was
+held, and every other chemist's turn was shed as `queued` then `error`, for up to
+`service_turn_timeout_seconds` — reachable by a flaky mobile network, a crashed tab, or a UI that
+retries on disconnect, where the retry *adds* a holder rather than replacing one. The cap is a
+setting (`core/config/service.py`) and this paragraph names no value for it on purpose: the
+measurement is "one hung-up client per permit", which holds at whatever the cap is, and the number
+this sentence used to carry was 8 while the shipped default had moved to 12. Before this module
+existed a disconnect returned the permit immediately, so the failure was self-limiting. So the
+permit is released at the detach, through
 `on_detach`: admission is fairness to a *waiting client*, and a detached turn has none. What still
 bounds the detached turn is what always did — the loop cap, `service_turn_timeout_seconds` ticking
 inside the pump, and the per-user token budget where one is configured — and it stays visible,

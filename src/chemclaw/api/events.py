@@ -63,9 +63,12 @@ class PlanEvent(BaseModel):
 #
 # **Empty means the main agent**, and that is what keeps the field additive: every event emitted
 # before teams existed came from the single agent, so an existing consumer that ignores this reads
-# exactly what it read before. A specialist's name is its profile name (`evidence`, `safety`, …),
-# which is the same string the `handoff` event carries and the same one the audit trail records —
-# one name for one actor, across the stream, the trail and the profile that defined it.
+# exactly what it read before. The only other value produced today is the literal `"subagent"`:
+# the graph namespace says an event came from below the root and carries no name to read
+# (`D-2026-08-11-the-specialists-name-is-not-in-the-namespace`), and the one carrier that did hold
+# a name went with its producer in
+# `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`. A surface must therefore
+# treat this as "not the main agent", never as an agent's identity.
 #
 # Only the events a specialist can actually raise carry it. A `queued` or `capability_degraded`
 # event is a property of the *turn*, decided before any routing happens, so attributing it to an
@@ -99,8 +102,8 @@ class TokenEvent(BaseModel):
     unattributed specialist chunk is not a mislabelled trace line — it is another agent's working
     notes spliced into the answer a chemist reads, interleaved with the supervisor's own text in
     whatever order the two happened to produce it. The runner therefore concatenates only the
-    unattributed ones, and a surface rendering a timeline still sees a specialist's output land
-    inside its handoff span.
+    unattributed ones, and a surface rendering a timeline can still show the marked chunks as work
+    from below the root.
 
     Dropping a specialist's tokens outright was the other candidate and is worse: it makes the
     delegation silent for the entire time it runs, which is the longest part of a delegated turn.
@@ -568,40 +571,6 @@ class EvidenceSourceEvent(BaseModel):
     failed: bool = False
 
 
-class HandoffEvent(BaseModel):
-    """The turn was routed to a specialist, or handed back (M9).
-
-    A team's work is only legible if the routing is. Without this, a chemist watching a turn sees
-    a supervisor fall silent and a different set of tools start running, with nothing saying why —
-    and the durable record has the same gap, because the trace *is* the record. That is the whole
-    argument for a supervisor over a swarm (the subagent ADR of 2026-08-10): every delegation
-    decision passes through one node and is therefore observable.
-
-    `to` is the specialist being entered, or empty when control returns to the main agent — so a
-    surface can render a turn's routing as a path rather than as a set of disconnected arrivals.
-    `reason` is the supervisor's own stated reason where it gave one; it is prose for a human and
-    nothing branches on it.
-
-    **Nothing raises it.** It was raised by `agent/team.running_specialist`, the contextmanager
-    that bracketed the interval the audit trail attributed to a specialist, so the span a surface
-    drew and the span the record claimed were one `try`/`finally`. That module went with the
-    specialist team (D-2026-08-15). It shipped for one release as a declared member nothing produced
-    (`D-2026-08-11-a-handoff-is-observable-where-the-specialist-runs`).
-
-    Like every other signal-borne event, emitted only where a consumer is draining the graph's
-    custom stream: absence means "not reported", never "no delegation happened".
-
-    **Nothing produces it today** — the specialist team was deleted in D-2026-08-15 — and it is kept
-    declared rather than removed because dropping a member of this union is a coordinated change
-    across `Chemclaw3_ui` and `Chemclaw3_mock`. It is the one member whose absence is expected to
-    be temporary: subagents return for isolation and parallel fan-out, and this is what they raise.
-    """
-
-    type: Literal["handoff"] = "handoff"
-    to: str
-    reason: str = ""
-
-
 # The closed set of events a turn can emit. New surfaces switch on `type`; adding an event is a new
 # class here plus one branch in the runner and the UI — never a bespoke per-surface stream.
 Event = (
@@ -621,6 +590,5 @@ Event = (
     | ToolFailedEvent
     | ToolResultEvent
     | EvidenceSourceEvent
-    | HandoffEvent
     | ErrorEvent
 )

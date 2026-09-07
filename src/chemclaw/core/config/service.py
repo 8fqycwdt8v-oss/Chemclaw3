@@ -140,7 +140,7 @@ class ServiceSettings(BaseSettings):
     # `asyncio.to_thread` pool they all share (`core/executor.py`). They exist for the calls that
     # are microseconds long and must never wait behind a corpus parse or an embedding: bearer-token
     # validation on every request, a readiness probe, an SSE reconnect. Without a sized pool the
-    # loop's stock default is `min(32, cpu_count + 4)` — 8 on a 4-CPU pod, which is exactly
+    # loop's stock default is `min(32, cpu_count + 4)` — 8 on a 4-CPU pod, which is *below*
     # `service_max_concurrent_turns`, so the admission cap could fill the pool on its own and
     # authentication latency became a function of corpus size (measured: a queued short call waited
     # 0.2 ms at 1 concurrent `load_notes`, 565.5 ms at 8, 813.4 ms at 16). The *reserved* half is

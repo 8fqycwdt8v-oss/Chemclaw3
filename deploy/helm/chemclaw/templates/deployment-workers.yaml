@@ -71,6 +71,7 @@ The connector workers below keep the default on purpose;
           volumeMounts:
             {{- include "chemclaw.tlsMount" . | nindent 12 }}
             {{- include "chemclaw.knowledgeMounts" . | nindent 12 }}
+            {{- include "chemclaw.extraConnectorMounts" . | nindent 12 }}
             {{- include "chemclaw.documentShareMount" . | nindent 12 }}
         {{- include "chemclaw.knowledgeSidecar" . | nindent 8 }}
       {{- /* The clone before the publish — see `deployment-service.yaml`. */}}

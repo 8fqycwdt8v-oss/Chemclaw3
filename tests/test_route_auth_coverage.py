@@ -65,8 +65,11 @@ _PROBE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
 # This declaration exists because excluding them silently is how `/openapi.json` stayed
 # unauthenticated: `openapi_url` defaults to a plain `Route`, the sweep below skipped it for the
 # perfectly true reason that it has no dependency tree, and the full route/parameter/model surface
-# was readable by anyone who could reach the pod. `create_app` now passes `openapi_url=None`; this
-# is what stops it — or any other ungatable route — from coming back unnoticed.
+# was readable by anyone who could reach the pod. `create_app` still passes `openapi_url=None` and
+# serves the document from an `APIRoute` of its own instead
+# (`D-2026-09-07-a-contract-check-that-cannot-reach-the-contract`), so the schema is inside the
+# sweep rather than beside it; this declaration is what stops FastAPI's plain `Route` — or any
+# other ungatable route — from coming back unnoticed.
 _UNGATABLE_SURFACE: frozenset[tuple[str, str]] = frozenset({("Mount", "")})
 
 
@@ -208,15 +211,42 @@ def test_the_bundled_ui_is_reachable_in_dev_and_absent_under_enforcement(
         assert enforced.get("/app.js").status_code == 404
 
 
-def test_the_openapi_schema_is_not_served() -> None:
-    """`/openapi.json` must 404: it is the concrete route this file failed to see (review finding).
+def test_the_openapi_schema_is_served_through_the_one_gate() -> None:
+    """`/openapi.json` is an `APIRoute` behind `require_principal` — served, and inside the sweep.
 
-    Asserted through the real ASGI stack rather than by reading `app.openapi_url`, because what
-    matters is what a caller can fetch with no credential — the schema documents every route,
-    parameter and model the service has.
+    It was closed outright between `D-2026-08-06-the-caller-chooses-the-kid-not-the-workload` and
+    `D-2026-09-07-a-contract-check-that-cannot-reach-the-contract`, on the stated ground that
+    nothing consumed it. Something does: `Chemclaw3_ui/scripts/check-openapi.mjs` fetches this
+    document and diffs the BFF whitelist against the routes it publishes — measured against the
+    running service, that check exited 1 on a 404 and had therefore never run.
+
+    Two assertions, and the second is the one that keeps the original decision's invariant. The
+    document is fetchable, *and* the route resolving it carries the gate — so it is now covered by
+    the sweep at the top of this file rather than sitting beside it as a plain `Route` no
+    dependency could reach, which is the shape that made it unauthenticated in the first place.
     """
-    with TestClient(_built_app()) as client:
-        assert client.get("/openapi.json").status_code == 404
+    app = _built_app()
+    assert ("/openapi.json", "GET") not in _unauthenticated_routes(app), (
+        "the schema route must resolve through `require_principal` like every other API route"
+    )
+    with TestClient(app) as client:
+        response = client.get("/openapi.json")
+        assert response.status_code == 200
+        assert "/sessions" in response.json()["paths"]
+
+
+def test_the_openapi_schema_is_refused_without_a_token_under_enforcement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The half that matters: in the posture the chart ships, an anonymous caller gets nothing.
+
+    The original defect was that the full route, parameter and model surface was readable by anyone
+    who could reach the pod. Serving the document again re-opens exactly that question, so it is
+    answered over the wire in the enforced posture rather than by reading a dependency tree — 401,
+    the same answer every other route gives an unauthenticated caller.
+    """
+    with TestClient(_enforced_app(monkeypatch)) as client:
+        assert client.get("/openapi.json").status_code == 401
 
 
 def test_mutation_proof_re_enabling_the_openapi_route_fails_the_surface_check() -> None:
@@ -224,6 +254,10 @@ def test_mutation_proof_re_enabling_the_openapi_route_fails_the_surface_check() 
 
     Re-registers the schema route the way FastAPI would if `openapi_url` were set again; the check
     must name it. Without this, the assertion above is a test that has never been seen to fail.
+
+    Still the regression it always was, and serving the schema from an `APIRoute` is why: the two
+    shapes answer the same path and only one of them can be gated, so "`/openapi.json` responds"
+    is not the property worth asserting — "no plain `Route` serves it" is.
     """
     app = _built_app()
 

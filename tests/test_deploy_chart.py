@@ -4695,3 +4695,217 @@ def test_no_shipped_document_states_how_many_alerts_the_rule_file_holds() -> Non
         f"these state an alert count against {alerts} in the rendered rule file: {offenders}. "
         "Name `templates/prometheusrule.yaml` instead — it is the roster, and it grows."
     )
+
+
+# --- The D-120 seam on the target stack -------------------------------------------------------
+#
+# D-120 states the connector seam as "a new bundle is one directory plus its name in
+# `CHEMCLAW_DATA_SOURCES`/`CHEMCLAW_CONNECTORS_DIR`, with zero core edits", and the fleet's
+# `manifests/README.md` says the same in the other direction: "registering this whole fleet is one
+# environment variable and no code change on either side". Both were true of `make connectors` and
+# false of the chart, in two places measured on 2026-09-07 — see
+# `docs/decisions/D-2026-09-07-a-seam-that-stops-at-the-chart-is-not-a-seam.md`. These are the two
+# halves, each asserted against a **rendered** manifest rather than the template text, because both
+# defects were of the shape "the value is accepted and nothing comes out".
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_an_egress_port_an_operator_adds_actually_reaches_the_policy() -> None:
+    """`networkPolicy.egressPorts` is a map, and the rule used to emit six hand-named keys of it.
+
+    `test_no_egress_port_is_declared_without_being_emitted` in `tests/test_helm_chart.py` asks this
+    of the entries **this file ships** and reads the template as text, so it could only ever see
+    the keys somebody had already written a line for. An operator adding their own — which is
+    exactly what a third-party bundle on its own port needs — added a key the template does not
+    name, and a NetworkPolicy drop is silent: the connector reports as merely unreachable and its
+    tools degrade.
+
+    Measured before the fix: `--set networkPolicy.egressPorts.props=8850` rendered **zero**
+    occurrences of `port: 8850`.
+    """
+    rendered = _render("--set", "networkPolicy.egressPorts.props=8850").stdout
+    policies = [
+        document
+        for document in yaml.safe_load_all(rendered)
+        if document and document.get("kind") == "NetworkPolicy" and "egress" in document["spec"]
+    ]
+    assert policies, "the render produced no egress NetworkPolicy"
+    permitted = {
+        port["port"]
+        for policy in policies
+        for rule in policy["spec"]["egress"]
+        for port in rule["ports"]
+    }
+    assert 8850 in permitted, (
+        "networkPolicy.egressPorts.props=8850 was accepted and never emitted, so every packet to "
+        "that bundle is dropped whatever egressDestinations says. The rule permits "
+        f"{sorted(permitted)}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_every_declared_egress_port_reaches_the_rendered_policy() -> None:
+    """The other direction of the test above, over the roster this chart ships.
+
+    A port entry no rule emits permits nothing, and reads in review as a control that had been set
+    up. `tests/test_helm_chart.py` used to ask this as `f"egressPorts.{key}" in <template text>` —
+    which answers "did somebody write a line naming this key", a question that stops meaning
+    anything once the rule ranges the map, and that never reached a key an operator adds in their
+    own values file.
+    """
+    rendered = _render().stdout
+    permitted = {
+        port["port"]
+        for document in yaml.safe_load_all(rendered)
+        if document and document.get("kind") == "NetworkPolicy" and "egress" in document["spec"]
+        for rule in document["spec"]["egress"]
+        for port in rule["ports"]
+    }
+    ports = _values()["networkPolicy"]["egressPorts"]
+    assert ports, "networkPolicy.egressPorts is empty; this test would assert nothing"
+    unemitted = sorted(key for key, port in ports.items() if port not in permitted)
+    assert not unemitted, (
+        f"networkPolicy.egressPorts declares {unemitted}, which the rendered policy does not "
+        f"permit. It permits {sorted(permitted)}."
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_bundle_this_image_does_not_ship_can_be_mounted_and_discovered() -> None:
+    """A third-party bundle needs its manifest on `CHEMCLAW_CONNECTORS_DIR`; the chart had no value.
+
+    The image ships `src/chemclaw/connectors` and nothing else, and no chart value set that
+    variable or mounted anything into a pod — so `Chemclaw3-mcp`'s `props` and `pyexec`, both real
+    and both shipped, were unreachable from an OpenShift release by any means short of editing the
+    chart. Worse than unreachable, measured: `chemclaw.connectorsEnabled` derives from the same
+    `connectors:` block, so an operator following D-120 gets `props` into
+    `CHEMCLAW_CONNECTORS_ENABLED` with no bundle behind it, and `registry.enabled()` raises
+    `ConnectorError: connectors_enabled names unknown connector(s) ['props']` — in every pod, at
+    import, as a crash loop.
+
+    Asserted over every pod spec the render produces rather than over the ConfigMap alone, because
+    the variable is set once in a ConfigMap every component reads: a mount present on some pods and
+    absent on others is that same crash loop on the pods that missed it.
+
+    **Two exemptions, both measured rather than assumed.** The knowledge-sync containers are
+    recognised by what they run — `/usr/local/bin/chemclaw-knowledge-sync` is a shell script that
+    constructs no `Settings`. The `migrate` and `convert` hook Jobs are named, because no manifest
+    field distinguishes them: importing `chemclaw.core.migrate` and
+    `chemclaw.agent.message_migration` under `CHEMCLAW_CONNECTORS_ENABLED=molfp:props` leaves
+    `chemclaw.connectors.registry` out of `sys.modules` entirely, so neither can raise on a name it
+    cannot discover. They are exempt in the direction that matters too: `migrate` is a
+    `pre-install` hook, and a hook Job that mounts an operator-supplied ConfigMap cannot start
+    until that object exists, which would make a first install fail on a directory it never reads.
+    The set is asserted to be exactly those two, so a third component quietly losing the mount is a
+    failure rather than a widening.
+    """
+    rendered = _render(
+        "--set",
+        "extraConnectors.bundles[0].name=props",
+        "--set",
+        "extraConnectors.bundles[0].configMap=chemclaw-connector-props",
+    ).stdout
+    documents = [document for document in yaml.safe_load_all(rendered) if document]
+
+    values = _values()["extraConnectors"]
+    expected = f"{values['mountPath']}:{values['shippedPath']}"
+    configmaps = [
+        document
+        for document in documents
+        if document["kind"] == "ConfigMap"
+        and "CHEMCLAW_CONNECTORS_DIR" in (document.get("data") or {})
+    ]
+    assert configmaps, (
+        "no rendered ConfigMap sets CHEMCLAW_CONNECTORS_DIR, so the mounted bundle is invisible to "
+        "discovery while `CHEMCLAW_CONNECTORS_ENABLED` already names it"
+    )
+    for configmap in configmaps:
+        assert configmap["data"]["CHEMCLAW_CONNECTORS_DIR"] == expected, (
+            f"{configmap['metadata']['name']} sets CHEMCLAW_CONNECTORS_DIR to "
+            f"{configmap['data']['CHEMCLAW_CONNECTORS_DIR']!r}, not {expected!r}"
+        )
+
+    mount = f"{values['mountPath']}/props"
+    exempt = {"chemclaw-migrate", "chemclaw-convert"}
+    workloads = {
+        f"{document['kind']}/{document['metadata']['name']}": spec
+        for document in documents
+        if (spec := _pod_spec(document)) is not None
+    }
+    assert workloads, "the render produced no workload to check"
+
+    carried = {
+        name
+        for name, spec in workloads.items()
+        if any(
+            volume.get("configMap", {}).get("name") == "chemclaw-connector-props"
+            for volume in spec.get("volumes") or []
+        )
+    }
+    skipped = {name for name in workloads if name.split("/", 1)[1] in exempt}
+    assert {name.split("/", 1)[1] for name in workloads} & exempt == exempt, (
+        f"the exemption names {sorted(exempt)}, and the render has no such workload"
+    )
+    assert carried == set(workloads) - skipped, (
+        "the mounted bundle reaches a set of pods that is not 'everything but the two migration "
+        f"hooks': carried by {sorted(carried)}, exempt {sorted(skipped)}, all "
+        f"{sorted(workloads)}"
+    )
+
+    missing: list[str] = []
+    for name in sorted(carried):
+        spec = workloads[name]
+        for container in spec["containers"] + (spec.get("initContainers") or []):
+            command = container.get("command") or []
+            if command and command[0].endswith("chemclaw-knowledge-sync"):
+                continue
+            paths = {m["mountPath"] for m in container.get("volumeMounts") or []}
+            if mount not in paths:
+                missing.append(f"{name}/{container['name']}: does not mount {mount}")
+    assert not missing, (
+        "every pod reads CHEMCLAW_CONNECTORS_DIR from the shared ConfigMap, so one that declares "
+        "the volume and does not mount it crash-loops on `connectors_enabled names unknown "
+        "connector(s)` all the same:\n" + "\n".join(missing)
+    )
+
+
+def _pod_spec(document: dict[str, Any]) -> dict[str, Any] | None:
+    """The `PodSpec` of any workload document, or `None` for objects that have none."""
+    if document.get("kind") in ("Deployment", "StatefulSet", "DaemonSet"):
+        return dict(document["spec"]["template"]["spec"])
+    if document.get("kind") == "Job":
+        return dict(document["spec"]["template"]["spec"])
+    return None
+
+
+def test_the_shipped_connector_path_is_the_path_the_image_has() -> None:
+    """`extraConnectors.shippedPath` restates the image's layout, so it is derived and compared.
+
+    Setting `CHEMCLAW_CONNECTORS_DIR` replaces `connectors_dir`'s default outright — it is a plain
+    pathsep list with no "and also the built-in" token — so the chart has to name the directory the
+    image already ships, and that is a fact `deploy/Containerfile` owns rather than `values.yaml`.
+    A wrong value there is the quiet direction of this whole finding: `_bundle_dirs` skips a
+    directory that is not there without a word, so the release would mount `props` and lose `calc`,
+    `bo`, `molfp`, `rxnfp`, `results`, `chem` and `safety` — and then fail loudly on
+    `connectors_enabled`, naming a bundle that *is* mounted as the one it cannot find.
+
+    Derived from the two sources that between them decide it: the Containerfile's `WORKDIR` and its
+    `COPY src ./src` (an editable install, so the package stays under `/app/src`), and this
+    package's own location relative to the checkout.
+    """
+    import chemclaw.connectors
+
+    containerfile = (DEPLOY / "Containerfile").read_text(encoding="utf-8")
+    workdir = re.search(r"^WORKDIR (\S+)", containerfile, flags=re.MULTILINE)
+    assert workdir, "deploy/Containerfile declares no WORKDIR"
+    assert re.search(r"^COPY src \./src$", containerfile, flags=re.MULTILINE), (
+        "deploy/Containerfile no longer copies `src` to the workdir, so the path "
+        "`extraConnectors.shippedPath` is derived from is no longer how the image is built"
+    )
+    package = Path(chemclaw.connectors.__file__).resolve().parent
+    relative = package.relative_to(DEPLOY.parent)
+    expected = f"{workdir.group(1).rstrip('/')}/{relative}"
+    assert _values()["extraConnectors"]["shippedPath"] == expected, (
+        f"extraConnectors.shippedPath is {_values()['extraConnectors']['shippedPath']!r}; the "
+        f"image puts the shipped bundles at {expected!r}"
+    )

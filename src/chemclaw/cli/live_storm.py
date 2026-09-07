@@ -904,6 +904,56 @@ async def family_h_edges() -> list[Finding]:
         )
     )
 
+    # The estimator calibration, driven rather than reasoned about. Every other behaviour in the
+    # catalogue bills a constant `input_tokens`, so `billed / estimated` is always far below 1 and
+    # `_Calibration.ratio()` clamps to 1.0 — which left the EWMA and the *tightening* branch that
+    # `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` and
+    # `D-2026-09-04-a-budget-that-excludes-the-prefix-is-not-a-budget` both rest on exercised by no
+    # lane anywhere, only by unit tests with hand-fed numbers. `h-size-billed` bills the serialized
+    # request at 0.5 tokens per character, roughly twice the chars/4 estimator, so the ratio this
+    # asserts is the one direction that can only tighten a budget and never loosen it.
+    (sized,) = await storm("h-size-billed", turns=1, concurrency=1)
+    billed = await _scalar(
+        "select coalesce(sum(input_tokens), 0) from turn_costs where session_id = %s",
+        (sized.session_id,),
+    )
+    estimated = await _scalar(
+        "select coalesce(sum(estimated_tokens), 0) from turn_costs where session_id = %s",
+        (sized.session_id,),
+    )
+    findings.append(
+        Finding(
+            family="H",
+            name="a request-sized bill drives the estimator ratio above 1",
+            ok=sized.status == 200 and billed > estimated > 0,
+            observed=f"turn_costs billed={billed} estimated={estimated} for this session",
+            detail=(
+                "every other behaviour bills a constant, which clamps the ratio to 1.0 and leaves "
+                "the tightening branch two budget decisions rest on unexercised by any lane"
+            ),
+        )
+    )
+
+    # The one request-level refusal that unlocks a label nothing else reaches.
+    # `Behaviour.http_status` injects a failure per behaviour and every such injection classifies
+    # as the generic `error`;
+    # only an oversize request reaches `_is_context_length`, and the marker it matches
+    # ("prompt is too long") was measured against a real gateway before this behaviour copied it.
+    # The turn must still end somewhere a client can read, which is what `_completed_without_dying`
+    # asks — a refused request is not licence to drop the stream.
+    (oversize,) = await storm("h-oversize", turns=1, concurrency=1)
+    findings.append(
+        Finding(
+            family="H",
+            name="an endpoint refusing an oversize request is classified, not just failed",
+            ok=_completed_without_dying(oversize),
+            observed=(
+                f"HTTP {oversize.status}, answered={oversize.answered}, error={oversize.error_code}"
+            ),
+            detail="the label space is rate_limited/context_length/timeout/transport/error",
+        )
+    )
+
     audit_before = await _scalar("select count(*) from audit_events")
     (inj,) = await storm("h-injection", turns=1, concurrency=1)
     audit_after = await _scalar("select count(*) from audit_events")

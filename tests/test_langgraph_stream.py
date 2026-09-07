@@ -22,7 +22,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.api.events import HandoffEvent, ToolCallEvent, ToolResultEvent
+from chemclaw.api.events import ToolCallEvent, ToolResultEvent
 from chemclaw.api.graph_stream import graph_events
 from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.core.turn_signals import _KEY as SIGNAL_KEY
@@ -180,23 +180,6 @@ def test_an_unrouted_turn_attributes_nothing() -> None:
         [{"name": "ask_clarifying_question", "args": {"question": "which route?"}}, "done"]
     )
     assert {event.agent for event in events if hasattr(event, "agent")} == {""}
-
-
-def test_the_handoff_event_round_trips_with_its_discriminator() -> None:
-    """The union member serializes like every other one — `type` first, defaults omitted.
-
-    Declared and unproduced: its signal and the conversion that raised it went in
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`, because the producer had
-    already gone with the specialist team (D-2026-08-15) and a signal nothing emits is a promise the
-    shipped code does not keep. The *event* stays because dropping a member of this union is a
-    coordinated change across `Chemclaw3_ui` and `Chemclaw3_mock` — so its wire form still has to be
-    the one those repositories parse, which is what this pins.
-    """
-    assert HandoffEvent(to="safety", reason="hazard check").model_dump() == {
-        "type": "handoff",
-        "to": "safety",
-        "reason": "hazard check",
-    }
 
 
 def test_an_event_from_the_main_agent_carries_no_attribution() -> None:
@@ -442,8 +425,10 @@ def test_a_failed_tool_call_produces_one_event_and_no_evidence() -> None:
 def test_work_from_below_the_root_is_marked_and_its_plan_withheld() -> None:
     """`agent=""` means the main agent, so emitting a helper's work that way is a false statement.
 
-    `agent` is threaded from the handoff pair, and nothing has raised a handoff since the specialist
-    team was deleted — so it is permanently empty. `updates` payloads from a nested Pregel were then
+    `agent` used to be threaded from the handoff pair, and its producer went with the specialist
+    team — so for a while it was permanently empty, and this test's own assertion below is what
+    that is not any more: the namespace marks work from below the root as `"subagent"`.
+    `updates` payloads from a nested Pregel were before that
     handled identically to the root's: a helper's tool calls and results joined
     `ToolCallTrace.outputs` and the parent session's fetchable refs indistinguishably from the
     supervisor's own work, and its `write_todos` surfaced as a root `PlanEvent` that *replaced* the

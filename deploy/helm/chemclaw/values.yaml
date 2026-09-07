@@ -298,7 +298,7 @@ connectors:
     # the host needs a `networkPolicy.egressDestinations` entry, and `CHEMCLAW_SAFETY_TOKEN` has to
     # be provided or every call is refused.
     server: true
-    url: http://chemclaw3-mcp-safety:8859/mcp
+    url: http://chemclaw-mcp-safety:8859/mcp
   chem:
     enabled: true
     # **`server: true` *and* a `url:`** — the shape D-2026-08-09 built for a connector this release
@@ -318,7 +318,7 @@ connectors:
     # `networkPolicy.egressDestinations`, and provide `CHEMCLAW_CHEM_TOKEN` — the server enforces a
     # bearer on `/mcp` itself, so a missing credential is a refused call rather than an open one.
     server: true
-    url: http://chemclaw3-mcp-chem:8858/mcp
+    url: http://chemclaw-mcp-chem:8858/mcp
   rxnpredict:
     # Reaction and condition prediction by ensemble (`Chemclaw3-mcp`'s `servers/rxnpredict`, port
     # 8857). The same shape as `chem` and `safety` above, for the same reason and with the same two
@@ -332,7 +332,7 @@ connectors:
     # posture every other externally-hosted bundle here already has.
     enabled: true
     server: true
-    url: http://chemclaw3-mcp-rxnpredict:8857/mcp
+    url: http://chemclaw-mcp-rxnpredict:8857/mcp
   calc:
     enabled: true
     server: true
@@ -381,6 +381,62 @@ connectors:
 # per-connector: they are separate Services, so there is no port to deconflict, and a single number
 # keeps the computed URL map and the probes trivially consistent.
 connectorPort: 8080
+
+# Connector bundles this image does **not** ship — `Chemclaw3-mcp`'s `manifests/` and any private
+# bundle a site keeps of its own (D-120, `D-2026-09-07-a-seam-that-stops-at-the-chart-is-not-a-seam`).
+#
+# D-120 states the seam as "one `connector.yaml` folder plus its name in `CHEMCLAW_CONNECTORS_DIR`,
+# with zero core edits", and the fleet's `manifests/README.md` says the same from its side: "one
+# environment variable and no code change on either side". That was true of `make connectors` and
+# false of this chart, which set that variable nowhere and mounted nothing — so `props` and
+# `pyexec`, two real shipped capabilities, could not be reached from an OpenShift release at all.
+#
+# **And the failure was not a quiet absence.** `chemclaw.connectorsEnabled` derives from the
+# `connectors:` block above, so an operator who followed D-120 got `props` into
+# `CHEMCLAW_CONNECTORS_ENABLED` with no bundle behind it, and `registry.enabled()` refuses that by
+# design — `connectors_enabled names unknown connector(s) ['props']`, raised at import, in every
+# pod at once. The seam's own loud guard, reached through a door the chart left shut.
+#
+# Each entry is one ConfigMap mounted read-only at `mountPath/<name>`, so the ConfigMap's keys are
+# that bundle's files and `connector.yaml` is the one that has to be there. A ConfigMap rather than
+# a generic volume passthrough because it is the route the sibling's `docs/integration.md` already
+# documents ("mount `manifests/` as a ConfigMap and prepend it to `CHEMCLAW_CONNECTORS_DIR`"), and
+# because it keeps the two release cycles independent, which is the point of that repository
+# existing separately. Several bundles from one ConfigMap is the same object listed several times,
+# each entry naming the subdirectory it becomes.
+#
+#   extraConnectors:
+#     bundles:
+#       - name: props
+#         configMap: chemclaw-connector-props
+#       - name: pyexec
+#         configMap: chemclaw-connector-pyexec
+#
+# Three things stay the operator's, exactly as they are for `connectors.chem` / `safety` /
+# `rxnpredict` — the entry under `connectors:` above that gives the bundle its `url:` and turns it
+# on, a `networkPolicy.egressPorts` entry carrying the port that address dials, and its bearer in
+# `secrets.optionalKeys`. All three are map-valued and reach the render on their own; only the
+# manifest directory needed a value, and only the egress port needed the rule to stop hand-naming
+# its keys.
+extraConnectors:
+  bundles: []
+  # Where those ConfigMaps are assembled, and the directory prepended to CHEMCLAW_CONNECTORS_DIR.
+  # Earlier directories win a name collision (`registry._bundle_dirs`, "the same precedence a
+  # `PATH` entry has"), so a bundle here overrides a shipped one of the same name — which the
+  # fleet's `manifests/` uses on purpose for `chem` and `safety`, both complete ports carrying
+  # their bundle's name. That is a real capability and a real footgun, and it is stated here rather
+  # than left to be discovered from the ordering.
+  mountPath: /etc/chemclaw/connectors
+  # Where the image keeps the bundles it *does* ship. `CHEMCLAW_CONNECTORS_DIR` replaces the code
+  # default outright rather than extending it (`connectors_dir` is a plain pathsep list), so the
+  # shipped directory has to be named again the moment the variable is set at all — leave it out
+  # and a release gains `props` and loses `calc`, `bo` and the rest.
+  #
+  # It is `WORKDIR` plus the layout `deploy/Containerfile` copies (`COPY src ./src`, an editable
+  # install), which makes it a second statement of something the image owns. So it is checked
+  # rather than trusted: `tests/test_deploy_chart.py::test_the_shipped_connector_path_is_the_path_the_image_has`
+  # derives it from the Containerfile and this package's own location.
+  shippedPath: /app/src/chemclaw/connectors
 
 # How long a process is allowed to take to come up, and how patiently it is then watched.
 #
@@ -770,11 +826,28 @@ config:
   # job's activity, reach out to for the arithmetic itself. Left unset, the code default
   # (`http://127.0.0.1:8860/mcp`) stands in-cluster and every calculation dials a port nothing
   # listens on — silently, because the pod's own `/healthz` never touches it and the probes stay
-  # green. Named `chemclaw3-mcp-calc` for the same reason `connectors.chem.url` /
-  # `connectors.safety.url` name their siblings: whatever Service the sibling repo's chart gives
-  # its `calc` server in this namespace — and stating it here is also what puts a host on the wire
-  # every one of those calls crosses, which the NetworkPolicy's egress destinations then have to
-  # name.
+  # green. Named `chemclaw-mcp-calc` for the same reason `connectors.chem.url` /
+  # `connectors.safety.url` name their siblings: it is the Service `Chemclaw3-mcp`'s
+  # `servers/calc/deploy/service.yaml` creates in this namespace — and stating it here is also what
+  # puts a host on the wire every one of those calls crosses, which the NetworkPolicy's egress
+  # destinations then have to name.
+  #
+  # **That rule was stated here, correctly, above a name that broke it.** This value read
+  # `chemclaw3-mcp-calc` — one character the fleet does not have — so every calculation this
+  # system performs dialled an NXDOMAIN, silently, for the reason the paragraph above gives, and
+  # `connectors.chem`/`safety`/`rxnpredict` and `CHEMCLAW_RXNLABEL_SERVER_URL` carried the same
+  # spelling. A comment restating a rule cannot check a value against it, so
+  # `tests/test_helm_chart.py::test_every_fleet_address_names_a_service_the_sibling_actually_creates`
+  # reads `servers/*/deploy/service.yaml` out of the sibling checkout and compares names and ports
+  # — skipping, and naming every address it therefore did not check, where there is no checkout.
+  #
+  # **The bare short name is the address, not an abbreviation of a longer one.** The fleet's own
+  # `deploy/networkpolicy.yaml` admits its caller with a *bare* `podSelector`
+  # (`app.kubernetes.io/name: chemclaw`), which in a NetworkPolicy means the policy's own
+  # namespace — so a namespace-qualified address (`chemclaw-mcp-calc.chemclaw-tools.svc`, the form
+  # the sibling's `docs/integration.md` writes) resolves in DNS and is then dropped by the server's
+  # own ingress rule. A cross-namespace deployment is a change on that side first; this chart
+  # addressing the fleet beside it is the shipped, working shape.
   #
   # **One occurrence, and that is the point.** This key was declared twice in this block, top and
   # bottom, and a YAML mapping with a duplicate key is not an error to any parser here: Helm and
@@ -782,7 +855,7 @@ config:
   # one that sat directly under its own explanation of why the key exists — rendered a ConfigMap
   # that still named this address, and hit exactly the failure that explanation described.
   # `tests/test_helm_chart.py::test_no_values_key_is_declared_twice` is what keeps it at one.
-  CHEMCLAW_CALC_SERVER_URL: "http://chemclaw3-mcp-calc:8860/mcp"
+  CHEMCLAW_CALC_SERVER_URL: "http://chemclaw-mcp-calc:8860/mcp"
   # How long this repository's calc client may wait on that server, stated here rather than left to
   # the code default for one reason: **the chart derives a connector pod's shutdown ceiling from
   # them** (`chemclaw.connectorGracePeriod`). A pod grace period shorter than the call it is holding
@@ -830,11 +903,12 @@ config:
   # off `CHEMCLAW_CONNECTORS_DIR` (it is an internal primitive, not a tool the agent chooses).
   #
   # Inert until a corpus is attached: with no reactions-providing source, no Schedule exists and
-  # nothing dials this. Named `chemclaw3-mcp-rxnlabel` for the reason `chemclaw3-mcp-calc` is —
-  # whatever Service the sibling repo's chart gives that server in this namespace. Its bearer is
+  # nothing dials this. Named `chemclaw-mcp-rxnlabel` for the reason `chemclaw-mcp-calc` is — it
+  # is the Service the sibling's `servers/rxnlabel/deploy/service.yaml` creates in this namespace,
+  # and the same cross-repo test checks it. Its bearer is
   # `secrets.optionalKeys.rxnlabelToken`, and its port is `networkPolicy.egressPorts.rxnlabel`;
   # both are needed, because an egress rule restricts by port independently of `to:`.
-  CHEMCLAW_RXNLABEL_SERVER_URL: "http://chemclaw3-mcp-rxnlabel:8865/mcp"
+  CHEMCLAW_RXNLABEL_SERVER_URL: "http://chemclaw-mcp-rxnlabel:8865/mcp"
   # Entra identity is mandatory system-wide (the one exception is the generic LLM credential).
   CHEMCLAW_ENTRA_REQUIRED: "true"
   CHEMCLAW_ENTRA_TENANT_ID: "00000000-0000-0000-0000-000000000000"

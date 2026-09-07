@@ -63,8 +63,10 @@ argument since M7 and this file's call omitted it, so every figure above describ
 runs: the fixture bound the in-process surface while a shipped turn binds that *plus* every enabled
 bundle's endpoint tools. `_connector_tools` closes it by running this repository's own manifests
 through its own narrowing and its own MCP loader — derived from the tree rather than transcribed —
-and `SERVED_ELSEWHERE` names the bundles whose servers live in `Chemclaw3-mcp`, which no test here
-can measure at any price.
+and `SERVED_ELSEWHERE` names the bundles whose servers live in `Chemclaw3-mcp`, which this
+interpreter cannot import at any price. The allowance test below measures them across a process
+boundary instead — in that repository's own interpreter, over a checkout `infra/live/siblings.sh`
+locates — and skips loudly where there is no checkout of it.
 """
 
 from __future__ import annotations
@@ -72,6 +74,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections.abc import Iterable
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -97,6 +100,13 @@ from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.connectors.registry import enabled, server_tools_module
 from chemclaw.connectors.transport import _allowed
 from chemclaw.core.config import Settings
+from tests.siblings import (
+    SIBLING_SKIP,
+    bundles_declared_here,
+    fleet_published_bundles,
+    sibling_python,
+    sibling_root,
+)
 
 # Discovered at import, not in a fixture: `registered_profile_names()` parametrises the test below
 # and parametrisation is evaluated at *collection*, before any fixture runs. With the load in a
@@ -528,7 +538,15 @@ def _tool_schema(tool: Any) -> str:
 
 
 #: The endpoint-bearing bundles this repository declares but does not serve, so their tool schemas
-#: cannot be measured here at any price.
+#: cannot be measured *in this interpreter* — only across a process boundary, from a checkout of
+#: the repository that builds them, which is what the allowance test below does.
+#:
+#: **This said "cannot be measured here at any price" and the paragraph forty lines down described
+#: the test that measures them.** Two sentences in one comment, the first denying what the second
+#: reports; the first was true when it was written and survived the commit that made it false,
+#: which is `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` on a claim rather than a
+#: number. What is genuinely out of reach is importing `chemclaw_mcp_chem` from *this* workspace,
+#: and that is the sentence the module docstring now carries.
 #:
 #: `chem`, `rxnpredict` and `safety` are `Chemclaw3-mcp`'s servers (`D-2026-08-09-a-connector-we-do-
 #: not-run`): this tree holds their `connector.yaml` and none of their code, so what their schemas
@@ -567,8 +585,36 @@ SERVED_ELSEWHERE = frozenset({"chem", "rxnpredict", "safety"})
 #: quietly shrinks is worse than one that says what it did not look at — the argument
 #: `cli/validate_connectors.py::unverified_tool_surfaces` makes about the identical blind spot one
 #: layer over. A skip is not a pass: CI without the sibling learns nothing here, and
-#: `tests/conftest.py`'s epilogue is what makes that visible.
+#: `tests/conftest.py::_report_sibling_skips` is what makes that visible — and it did not exist
+#: when this sentence was first written, which made this the same kind of claim about a control
+#: that `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` is about. It was
+#: made true rather than corrected: `-ra` prints the skip in a list nobody reads, and the epilogue
+#: is the part of a run that says what the run is not evidence about.
 SERVED_ELSEWHERE_ALLOWANCE = 11_000
+
+#: What the fleet's **whole** published `manifests/` directory costs, as a second and looser bound.
+#:
+#: `SERVED_ELSEWHERE_ALLOWANCE` above covers only the bundles *this* repository also declares,
+#: which is the right basis for `PREFIX_BOUND`: the shipped Helm chart's `connectors:` block has an
+#: entry for every bundle in this tree and none for anything else, so a chart deployment binds no
+#: fleet-only bundle at all, and charging it for one would tighten both compaction defaults for a
+#: surface it never sends.
+#:
+#: **But one configuration in this tree does mount the whole directory.**
+#: `infra/live/e2e-full-stack/up.sh` puts `$MCP_REPO/manifests` on `CHEMCLAW_CONNECTORS_DIR`, so
+#: that lane also binds `props` and `pyexec` — and its prefix is over `PREFIX_BOUND` by roughly
+#: those two bundles' schemas, which leaves the clear trigger's thread allowance short of the
+#: 30,000 `core/config/agent.py` derives it to be. That is stated rather than absorbed: raising
+#: `SERVED_ELSEWHERE_ALLOWANCE` to cover it would move both defaults for every deployment on
+#: account of a lane that talks to `chemclaw.cli.mock_llm`.
+#:
+#: What this bounds instead is the *growth* of the half nothing else here watches. A bundle the
+#: fleet adds to `manifests/` lands in this total and nowhere else in this repository, which is the
+#: answer to "what goes red when the fleet adds a bundle?" — previously nothing, unless the fleet
+#: also added its manifest here. Measured 2026-09-07 against the checkout beside this one: 13,942
+#: tokens over 28 tools (`chem` 5,577 / 12, `props` 2,936 / 6, `pyexec` 1,142 / 1, `rxnpredict`
+#: 2,655 / 6, `safety` 1,632 / 3). The headroom is the same 11.5% and for the same reason.
+FLEET_PUBLISHED_ALLOWANCE = 15_500
 
 #: The whole static prefix a shipped `default` turn may cost, as a bound: this file's ceiling plus
 #: the allowance for what it cannot see.
@@ -1069,27 +1115,83 @@ print(json.dumps({name: asyncio.run(dump(name)) for name in sys.argv[1:]}))
 def _sibling_python() -> tuple[Path | None, str]:
     """The sibling checkout's own interpreter, or `None` and the reason there is not one.
 
-    `CHEMCLAW_MCP_CHECKOUT` overrides the search so a CI job that clones the sibling somewhere
-    else can still measure; the default is the directory beside this repository, which is where
-    `infra/live/e2e-full-stack/up.sh` expects the family to sit.
+    **The search is `infra/live/siblings.sh`'s, asked rather than reimplemented** — see
+    `tests/siblings.py` for why a second copy of it was the defect this delegation ends, and
+    `test_the_ratchet_finds_the_checkout_the_live_lane_finds` for the assertion that keeps the two
+    from parting again. `CHEMCLAW_MCP_REPO` and `CHEMCLAW_MCP_CHECKOUT` both override it, so a CI
+    job that clones the sibling somewhere else can still measure whichever name it already sets.
     """
-    import os
-
-    # `Path("")` is `Path(".")` and is truthy, so the empty override has to be rejected as a
-    # *string* — the first version of this fell into exactly that and measured this repository's
-    # own `.venv` against the sibling's allowance.
-    declared = os.environ.get("CHEMCLAW_MCP_CHECKOUT", "").strip()
-    root = Path(declared) if declared else Path(__file__).resolve().parents[2] / "Chemclaw3-mcp"
-    if not root.is_dir():
-        return None, f"no Chemclaw3-mcp checkout at {root} (set CHEMCLAW_MCP_CHECKOUT)"
-    interpreter = root / ".venv" / "bin" / "python"
-    if not interpreter.exists():
-        return None, f"{root} has no .venv — run `make install` there to measure its schemas"
-    return interpreter, ""
+    return sibling_python("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
 
 
-def _served_elsewhere_tokens() -> tuple[dict[str, tuple[int, int]], str]:
-    """Per-bundle `(tools, tokens)` for `SERVED_ELSEWHERE`, or an empty mapping and the reason.
+def test_the_ratchet_finds_the_checkout_the_live_lane_finds() -> None:
+    """This file's sibling search and `infra/live/siblings.sh`'s must resolve the same tree.
+
+    **The one assertion that would have caught the whole of this.** Both landed on 2026-09-06, in
+    different pull requests: `infra/live/siblings.sh` unified the live lanes onto four candidate
+    paths in two casings under two variables, with a header describing exactly this bug being
+    fixed — and `_sibling_python`, merged the same day, searched one path in one casing under one
+    variable. On the container this repository's own tooling provisions, with the fleet at
+    `../8fqycwdt8v-oss/chemclaw3-mcp`, `make live-up` resolved it and the test below skipped. So
+    the allowance, `PREFIX_BOUND`, and both compaction defaults derived from it had never been
+    checked by a machine anywhere, and the skip that said so was indistinguishable from the skip
+    a machine with no checkout prints.
+
+    A skip here is honest — no checkout is no checkout — but a skip *beside* a live-lane hit is
+    the defect, and that is the only case this fails on.
+    """
+    root, live_reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
+    if root is None:
+        pytest.skip(f"{SIBLING_SKIP} neither search has one to find: {live_reason}")
+    interpreter, ratchet_reason = _sibling_python()
+    assert interpreter is not None or ".venv" in ratchet_reason, (
+        f"`infra/live/siblings.sh` resolves Chemclaw3-mcp to {root} and this file does not: "
+        f"{ratchet_reason}. Two searches for one checkout is what that script exists to have "
+        "ended; the consequence here is not a wrong answer but a control that skips on a machine "
+        "which could have run it."
+    )
+
+
+def test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_allowance() -> None:
+    """`SERVED_ELSEWHERE` is a claim about the *sibling's* tree, so the sibling's tree answers it.
+
+    The neighbouring completeness test iterates `enabled()`, which under `make test` and CI reads
+    only this tree's `connectors/` — so a bundle whose manifest lives next door is structurally
+    invisible to it, and the honest answer to "what goes red when the fleet adds a bundle?" was
+    "nothing, unless the fleet also adds its manifest to *this* repository". This is the half that
+    reads the other tree.
+
+    **What it does not do is widen the allowance to cover the fleet's own bundles**, and that is a
+    decision rather than an omission (`D-2026-09-07-a-claim-about-another-repository-is-checked-by-
+    reading-it`). `props` and `pyexec` are declared only in `Chemclaw3-mcp`; no chart entry mounts
+    them and no `enabled()` here returns them, so charging them to `PREFIX_BOUND` would raise both
+    compaction defaults for every deployment on account of two bundles those deployments do not
+    bind. What they cost is bounded by `FLEET_PUBLISHED_ALLOWANCE` below instead, which is where
+    the configuration that *does* mount them — `infra/live/e2e-full-stack/up.sh` — is priced.
+
+    Needs a checkout and not a built `.venv`: reading the fleet's manifests is a shallow clone's
+    worth of work, which is the half of this file that could plausibly run in CI.
+    """
+    root, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
+    if root is None:
+        pytest.skip(
+            f"{SIBLING_SKIP} the fleet's published manifests were NOT read: {reason}. Whether "
+            f"SERVED_ELSEWHERE ({', '.join(sorted(SERVED_ELSEWHERE))}) is still what both "
+            "repositories declare is unchecked in this run."
+        )
+    published = set(fleet_published_bundles(root))
+    assert published & set(bundles_declared_here()) == SERVED_ELSEWHERE, (
+        f"the fleet publishes {sorted(published)} and this repository declares "
+        f"{sorted(set(bundles_declared_here()))}; the names in both are "
+        f"{sorted(published & set(bundles_declared_here()))} where SERVED_ELSEWHERE says "
+        f"{sorted(SERVED_ELSEWHERE)}. A name in both trees is a bundle this repository declares "
+        "and does not serve, so its schemas are charged to SERVED_ELSEWHERE_ALLOWANCE and through "
+        "it to PREFIX_BOUND and both compaction defaults."
+    )
+
+
+def _sibling_tool_tokens(names: Iterable[str]) -> tuple[dict[str, tuple[int, int]], str]:
+    """Per-bundle `(tools, tokens)` for `names`, or an empty mapping and the reason there is none.
 
     Never raises for a missing or broken sibling: this file's job is to bound *this* repository's
     prefix, and a checkout somebody has not built is a fact about their laptop rather than a
@@ -1101,10 +1203,10 @@ def _served_elsewhere_tokens() -> tuple[dict[str, tuple[int, int]], str]:
     interpreter, reason = _sibling_python()
     if interpreter is None:
         return {}, reason
-    names = sorted(SERVED_ELSEWHERE)
+    wanted = sorted(names)
     try:
         completed = subprocess.run(
-            [str(interpreter), "-c", _SIBLING_DUMP, *names],
+            [str(interpreter), "-c", _SIBLING_DUMP, *wanted],
             capture_output=True,
             text=True,
             timeout=300,
@@ -1154,13 +1256,15 @@ def test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_boun
     **A skip, loudly, rather than a green line.** A test that needs somebody else's checkout cannot
     be a hard requirement of this suite; the failure mode `cli/validate_connectors.py::
     unverified_tool_surfaces` names is a check that quietly narrows to what it can reach. So the
-    skip message says which bundles went unmeasured and why, and `tests/conftest.py`'s epilogue
-    counts it — the run then states what it is not evidence about instead of implying it checked.
+    skip message says which bundles went unmeasured and why, and
+    `tests/conftest.py::_report_sibling_skips` counts it — the run then states what it is not
+    evidence about instead of implying it checked. That reporter is newer than this sentence,
+    which asserted it for a day while `grep` for a sibling in `tests/conftest.py` found nothing.
     """
-    measured, reason = _served_elsewhere_tokens()
+    measured, reason = _sibling_tool_tokens(SERVED_ELSEWHERE)
     if not measured:
         pytest.skip(
-            f"the {len(SERVED_ELSEWHERE)} bundles served from Chemclaw3-mcp "
+            f"{SIBLING_SKIP} the {len(SERVED_ELSEWHERE)} bundles served from Chemclaw3-mcp "
             f"({', '.join(sorted(SERVED_ELSEWHERE))}) were NOT measured: {reason}. "
             f"SERVED_ELSEWHERE_ALLOWANCE ({SERVED_ELSEWHERE_ALLOWANCE}) and therefore PREFIX_BOUND "
             f"({PREFIX_BOUND}) are unchecked in this run, and both compaction defaults are derived "
@@ -1180,6 +1284,41 @@ def test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_boun
         "and `agent_context_token_budget` from — so raising it is a change to both defaults and to "
         "what every request may cost, not a bump. Raise all three together, or narrow a schema in "
         "Chemclaw3-mcp."
+    )
+
+
+def test_the_whole_directory_the_e2e_lane_mounts_is_bounded_too() -> None:
+    """`FLEET_PUBLISHED_ALLOWANCE` bounds every bundle the fleet publishes, not only the shared.
+
+    The test above bounds what `PREFIX_BOUND` is built from and therefore what a chart deployment
+    pays. This one bounds what `infra/live/e2e-full-stack/up.sh` puts on
+    `CHEMCLAW_CONNECTORS_DIR` — the fleet's whole `manifests/` directory — because that lane binds
+    two bundles no `enabled()` in this suite returns, and nothing in this repository was watching
+    their schemas grow at all.
+
+    It is a bound on somebody else's tree and it can only skip or fail; it can never be the thing
+    that *sets* a default here, which is why it is a second constant rather than a larger first
+    one. Read `D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it` for why the
+    e2e lane's excess over `PREFIX_BOUND` is stated rather than absorbed.
+    """
+    root, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
+    published = sorted(fleet_published_bundles(root)) if root is not None else []
+    measured, dump_reason = _sibling_tool_tokens(published) if published else ({}, reason)
+    if not measured:
+        pytest.skip(
+            f"{SIBLING_SKIP} the fleet's published bundles were NOT measured: {dump_reason}. "
+            f"FLEET_PUBLISHED_ALLOWANCE ({FLEET_PUBLISHED_ALLOWANCE}) is unchecked in this run, "
+            "so nothing here is evidence about what `infra/live/e2e-full-stack/up.sh` binds."
+        )
+    total = sum(tokens for _tools, tokens in measured.values())
+    breakdown = ", ".join(
+        f"{name} {tokens} / {tools}" for name, (tools, tokens) in sorted(measured.items())
+    )
+    assert total <= FLEET_PUBLISHED_ALLOWANCE, (
+        f"the fleet's published manifests now cost {total} tokens ({breakdown}) against an "
+        f"allowance of {FLEET_PUBLISHED_ALLOWANCE}. Every deployment that points "
+        "CHEMCLAW_CONNECTORS_DIR at that directory — `infra/live/e2e-full-stack/up.sh` does — pays "
+        "this on every model call, on top of what this file's own ceiling bounds."
     )
 
 

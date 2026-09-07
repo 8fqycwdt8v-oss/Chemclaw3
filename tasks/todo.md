@@ -55,26 +55,26 @@ All three siblings are checked out (`/home/user/8fqycwdt8v-oss/chemclaw3-mcp`,
 `/home/user/chemclaw3_mock`, `/home/user/chemclaw3_ui`). Fixes there ship as **their own PR in
 that repo**, per CLAUDE.md — never proxied through this one.
 
-- [ ] W10.1 `connector.yaml` in both directions: this repo's loader against every manifest the
+- [x] W10.1 `connector.yaml` in both directions: this repo's loader against every manifest the
       fleet actually serves. A field this side ignores, a field that side needs and this side
       drops, a bundle that loads here and fails there. Same for `datasource.yaml` and the sink
       manifest against any real consumer.
-- [ ] W10.2 The calc seam (`CHEMCLAW_CALC_SERVER_URL`): request/response shapes, error and timeout
+- [x] W10.2 The calc seam (`CHEMCLAW_CALC_SERVER_URL`): request/response shapes, error and timeout
       semantics, and the item wave 5 deferred as needing the other repo — **a wrong value under a
       right cache key**. Does D-011's key name every input that changes the answer (method,
       solvent model, charge/multiplicity, server version)? Drive it: change an input the key omits
       and see whether the stale value comes back.
-- [ ] W10.3 `SERVED_ELSEWHERE_ALLOWANCE`: run the sibling's own servers against the ratchet,
+- [x] W10.3 `SERVED_ELSEWHERE_ALLOWANCE`: run the sibling's own servers against the ratchet,
       measure today's real bound-tool prefix with connectors bound, and check the skip path is
       honest about what it did not look at.
-- [ ] W10.4 The mock's fidelity. Every green test resting on `Chemclaw3_mock` or
+- [x] W10.4 The mock's fidelity. Every green test resting on `Chemclaw3_mock` or
       `chemclaw.cli.mock_llm` is evidence about **the mock**. Diff the mock's surface against the
       real one it stands for: usage fields, streaming/tool-call shapes, JWKS/OIDC claims, error
       bodies. Where they diverge, that divergence is the size of the untested gap.
-- [ ] W10.5 The UI contract: every SSE event name and field the front door emits against what
+- [x] W10.5 The UI contract: every SSE event name and field the front door emits against what
       `Chemclaw3_ui` consumes, and its e2e/full-stack config against what this repo actually
       serves. A renamed field is a silent break in the direction no test here can see.
-- [ ] W10 fix stage (per repo), gate, PR, merge on green
+- [x] W10 fix stage (per repo), gate, PR, merge on green
 
 ## Wave 11 — The science: units, magnitudes, and identity
 
@@ -167,4 +167,85 @@ the point of use, and contradiction. Wave 8 asked whether those exist. This asks
 
 ## Review
 
-*(written at the close of wave 15)*
+*(the closing review is written at the end of wave 15; each wave adds its own section)*
+
+### Wave 10 — the fleet seam (MERGED: mock #12, fleet #51, UI #70)
+
+Four repositories, four PRs, and the thing worth recording is that **the seam was
+wrong in the direction no single-repo review can see**: every defect below was a
+name, a number or a shape that one repository wrote down about another and nothing
+ever read back.
+
+**The chart dialled five hostnames that do not exist.** `chemclaw3-mcp-*` against
+the fleet's `chemclaw-mcp-*` — one character, five NXDOMAINs, one of them the
+address every calculation uses with no second tier behind it. What makes it a
+defect rather than a preference is that `values.yaml` *stated the correct rule*
+("whatever Service the sibling repo's chart gives its server") in the comment
+directly above the wrong name. The same mismatch stood a third time in the release
+descriptor, patching a Deployment and a container that both do not exist.
+
+**A wrong value under a right cache key was real**, and it was the item wave 5
+deferred as unsettleable from this side. `xtb_bond_order_threshold` was read inside
+the payload constructor, outside any spec: acetic acid at 0.5 → 7 bonds, at 0.05 →
+9 bonds, **identical key**, and driven through this repo's cache seam the second
+pod received the first's answer. It is a *filter*, so it breaks the fleet's own
+written rule that an unkeyed argument may permute an answer and may not remove
+from it — and those bonds are projected into a published record that is never
+pruned.
+
+**The cross-repo bound had never been checked by a machine.** The ratchet searched
+one path in one casing under one variable; `infra/live/siblings.sh` searched four
+under two, and its own header describes fixing that bug — the same day, in another
+PR. So on the one machine with the fleet checked out, the live lanes resolved it
+and the ratchet skipped.
+
+**Every mock-driven lane was reporting a fully metered turn that a real gateway
+would not.** The mock published `usage` unasked, so `llm_stream_usage=False` books
+zero tokens on every turn — a failure this repository has shipped once already —
+and its constant bill clamped the estimator ratio to 1.0 forever, leaving the
+tightening branch two merged budget decisions rest on exercised by nothing.
+
+### Where measurement overturned the brief — four times in six agents
+
+The rule added for this wave paid for itself immediately:
+
+1. The fleet publishes **five** connectors, not six: `calc` and `rxnlabel` declare
+   a `mount:` key this repository's manifest model refuses outright.
+2. `SERVED_ELSEWHERE` was **not** widened as briefed — that would have raised
+   `PREFIX_BOUND` and both compaction defaults for every deployment on account of
+   two bundles only the mock-LLM lane binds. The fleet's whole published directory
+   got its own bound instead, and the e2e lane's 2,560-token excess is stated
+   rather than absorbed.
+3. The 403 Retry button does not exist: `retryable` drives exactly one banner, and
+   the endpoint behind it has no 403 source. The mapping was still wrong and was
+   fixed; the refusal UI was not built for a banner that cannot appear.
+4. The 503 "at capacity" copy is not a defect — the JWKS outage carries its own
+   `detail` and the mapper prefers it.
+
+Two more were declined with the measurement: 401/404 request-level mock branches
+(both land on the same `error` label an injected status already reaches, so they
+unlock nothing), and keying `crest_perceive_max_atoms` (a CREST ensemble is
+already not a function of its key, so keying a deterministic field on a
+non-deterministic payload buys nothing and re-addresses the most expensive rows in
+the system — recorded for a maintainer rather than taken silently).
+
+### What the review did to itself, again
+
+Two of this wave's own repairs contained the defect the wave exists to find. The
+orchestrator shipped a stray line into a behaviour catalogue and a lint-red guard;
+and the first A/B of the "no behaviour goes undriven" guard *passed* against a
+mutation, because the guard is a substring scan and the renamed name still
+contained the original. The real removal then failed it correctly. A guard whose
+own prose satisfies it is worth knowing about.
+
+### Deliberately open, with the reason
+
+- **CI does not clone the fleet**, so the new cross-repo checks skip there. The
+  skip is loud and the suite epilogue now names it, and the tests do run wherever
+  a checkout exists. Cloning a sibling in CI needs a token the workflow may not
+  have; attempting it blind risks red CI for an access reason rather than a code
+  one. What would change the answer: confirming the runner can read the sibling.
+- **`check-openapi.mjs` sends no bearer token**, so now that the schema is served
+  behind `require_principal` it can run against a dev deployment and not an
+  enforced one. Not a break — it could reach nothing at all before.
+
