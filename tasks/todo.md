@@ -77,6 +77,37 @@ Rules carried forward from waves 1-3 (they were earned):
 - [x] W8.5 The four items waves 1-3 deliberately left open, re-decided with measurement
 - [x] W8 fix stage, gate, PR, merge on green
 
+## Wave 9 — the register, worked down
+
+Waves 4-8 found and measured the defects. What is left is a register, and a row
+that reads as pending forever is the thing `DEFERRED.md`'s own rules forbid. So
+this wave closes what is actionable and *decides* what is not — an ADR taking a
+posture deliberately is a close; a row nobody ever revisits is not.
+
+Sorted by which they are, because the two need different work:
+
+**Actionable — close them**
+- [ ] W9.1 The retention sweep's missing resume watermark (steady-state pass walks the whole table)
+- [ ] W9.2 An erasure that races a live turn cannot be completed by re-running it
+- [ ] W9.3 `_assemble_graph` rebuilds every node and edge on any corpus change (~1,450 ms at 20k)
+- [ ] W9.4 The outbox double-claim, which needs the lease column a comment already describes
+- [ ] W9.5 A bulk ELN backfill re-qualifies every ingested file per chunk, writing false rejections
+- [ ] W9.6 The nine reference stores no configuration can select
+- [ ] W9.7 The system-speech mark is plaintext in every refusal and `_defang` has no pass for it
+
+**Decisions, not patches — take them or record why not**
+- [ ] W9.8 `CREATE ON SCHEMA public`: choose the narrower posture or write the ADR keeping this one
+- [ ] W9.9 The checkpointer's quadratic WAL — only destructive trimming reaches it, and that
+      contradicts a merged decision. Decide it or state the trade in an ADR.
+- [ ] W9.10 The sweep/turn write race the read guard only detects — a lock on the turn-serving
+      write path is the cost; decide whether it is worth paying.
+
+- [ ] W9 gate, PR, merge on green
+
+Same rules as waves 4-8: disjoint file sets, reproduce before fixing, every fix
+ships with a test watched failing, never edit a merged ADR, and no agent runs
+`git checkout --`/`stash`/`reset`.
+
 ## Review
 
 Five waves (4-8) on top of the first three. Each was reviewed by a fan-out of
