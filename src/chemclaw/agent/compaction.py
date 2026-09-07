@@ -131,6 +131,7 @@ from chemclaw.agent.context_budget import (
     note_model_call,
     prefix_tokens,
 )
+from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
 from chemclaw.agent.repeat_guard import forget_calls
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
@@ -154,9 +155,36 @@ logger = logging.getLogger(__name__)
 # result, tens of times, in exactly the situation where the budget is already spent. The guidance is
 # paid for once instead, in the system prompt (`chemclaw_agent`), where a sentence costs one copy
 # rather than twenty.
-TOOL_RESULT_PLACEHOLDER = (
-    "[Earlier tool result dropped to stay inside this session's context budget.]"
-)
+#
+# **And it carries the system-speech mark, which it did not until `framing._MARK_FORGERY`
+# existed.** This sentence sits in a *tool result* — the position the safety floor otherwise
+# classes as data never to be trusted — and thirteen words are thirteen words any server can type,
+# so the floor had withdrawn the promise and told the model to read the placeholder "as a hint and
+# not as proof". That was the honest thing to say while nothing defanged the mark. Now something
+# does, on every path untrusted text reaches the model by, so the promise is keepable and is kept.
+#
+# The cost is the one the withdrawal named, measured rather than estimated: 26 characters and
+# ~7 estimated tokens per cleared result. Over the 18-result sweep the shipped settings produce,
+# 108 tokens — against 1,458 reclaimed on 400-character results (7.4%), 17,658 on 4 kB ones (0.6%)
+# and 179,658 on results at the per-result ceiling (0.06%). The expensive end of that range is the
+# end where the clearing was not worth running anyway; at the sizes that actually cross the trigger
+# the mark is noise, and what it buys is a marker the model may act on rather than guess about.
+_PLACEHOLDER_SENTENCE = "Earlier tool result dropped to stay inside this session's context budget."
+
+
+def _placeholder(extra: str = "") -> str:
+    """The one spelling of a cleared result: the sentence, any addition, then the mark.
+
+    A function rather than two string literals because the citation branch below rebuilds the
+    placeholder with the note ids appended, and it used to do that by slicing `[:-1]` off the
+    constant to get its closing bracket back — which silently produced `[system <nonce> It cited:`
+    the moment the mark moved inside those brackets. Composing from one sentence makes the two
+    renderings the same object rather than two strings a reader has to keep in step.
+    """
+    return f"[{_PLACEHOLDER_SENTENCE}{extra}] {SYSTEM_SPEECH_MARK}"
+
+
+TOOL_RESULT_PLACEHOLDER = _placeholder()
 
 # The note ids inside a cleared result, so a citation index survives a clearing that its bodies do
 # not. Reads `EvidenceChunk.source_note_id` out of the result's own repr — this repository's model,
@@ -305,9 +333,9 @@ class ClearOlderToolResultsEdit(ContextEdit):
                 continue
             named = cited[:_MAX_NAMED_CITATIONS]
             more = "" if len(cited) == len(named) else f", and {len(cited) - len(named)} more"
-            message.content = (
-                f"{self.placeholder[:-1]} It cited: {', '.join(named)}{more}. "
-                "Call expand_note on any of these to read it again.]"
+            message.content = _placeholder(
+                f" It cited: {', '.join(named)}{more}. "
+                "Call expand_note on any of these to read it again."
             )
 
 

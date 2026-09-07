@@ -32,6 +32,8 @@ from chemclaw.agent.leaver import (
     _residue_columns,
     _residue_for,
     erase_actor,
+    finish_erasure,
+    finish_leaves,
     retention_reasons,
 )
 from chemclaw.agent.session_store import (
@@ -43,7 +45,7 @@ from chemclaw.cli.erase_actor import main as erase_actor_main
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.durable.digest import digest_channel
-from tests.pg import migrated_db_or_skip
+from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -920,8 +922,12 @@ def test_a_row_that_comes_back_under_an_erased_session_is_counted_not_missed() -
                     ("sess-fran-residue", '{"role": "assistant", "content": "after the sweep"}'),
                 )
             await conn.commit()
-        residue = await _residue_for(["sess-fran-residue"])
+        residue, holding = await _residue_for(["sess-fran-residue"])
         assert residue.get("session_messages") == 1, residue
+        assert holding == ["sess-fran-residue"], (
+            "the probe counted the residue and did not say which session it is under; the count "
+            "alone names no remedy, because `session_owners` no longer answers that question"
+        )
 
     asyncio.run(_run())
 
@@ -985,3 +991,214 @@ def test_the_runbook_offboarding_section_names_no_table_and_points_at_the_consta
         f"the offboarding section states a table count ({counted.group(0)!r}); the tiers are "
         "counted by the dry run, not by this document"
     )
+
+
+# --- Finishing an erasure a live turn interrupted -----------------------------------------------
+
+_GRETA = "oid-greta"
+
+
+async def _write_racing_rows(session_id: str, *, messages: int = 0, checkpoints: int = 0) -> None:
+    """What a turn that outlived the sweep leaves behind, on its own committed connection.
+
+    Two shapes rather than one, and separately, because the two records of a conversation can
+    disagree by exactly one turn (`D-2026-09-06-an-erasure-that-races-a-live-turn-is-not-an-
+    erasure`: a turn cancelled between the graph run and the transcript write leaves
+    `checkpoints: 8, session_messages: 0`). A residue is therefore not reliably both, and a finish
+    that only worked when both were present would fail on the commoner half.
+    """
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            for index in range(messages):
+                await cur.execute(
+                    "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)",
+                    (session_id, Jsonb({"role": "assistant", "content": f"after {index}"})),
+                )
+            for index in range(checkpoints):
+                await cur.execute(
+                    "INSERT INTO checkpoints "
+                    "(thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata) "
+                    "VALUES (%s, '', %s, %s, '{}'::jsonb)",
+                    (
+                        session_id,
+                        f"ckpt-{index}",
+                        Jsonb({"v": 1, "id": f"ckpt-{index}", "ts": "2026-09-07T00:00:00+00:00"}),
+                    ),
+                )
+        await conn.commit()
+
+
+def test_an_erasure_a_live_turn_interrupted_is_finished_by_session_id() -> None:
+    """The remedy `residue` names, end to end: erase, race, finish, prove it is gone.
+
+    **Reproduced before it was fixed, with the numbers.** A session is erased; a turn commits two
+    messages afterwards; `_residue_for` sees them. A second `erase_actor` for the same person then
+    reports **zeros in every table** — it reaches the session through `session_owners`, which the
+    first run deleted — and the rows are still there. That is the state
+    `D-2026-09-06-an-erasure-that-races-a-live-turn-is-not-an-erasure` closed on, and its last line
+    is "It stays open".
+
+    What closes it is that the residue was never out of the runtime role's reach; the *query* that
+    finds it was. `finish_erasure` deletes by session id through
+    `session_store._session_delete_statements()` — the same statements `delete_session` already
+    runs, none of which reads `session_owners`.
+
+    Watched failing with `_delete_orphaned_sessions` replaced by one that filters its targets
+    through `session_owners` first, which is what every session-scoped route in this system did
+    before this one: `removed_total == 0` and the residue still standing.
+    """
+
+    async def _run() -> tuple[dict[str, int], list[str], dict[str, int], int, bool, dict[str, int]]:
+        await migrated_db_or_skip()
+        await _seed(_GRETA, "sess-greta-residue")
+        await erase_actor(_GRETA, apply=True)
+        await _write_racing_rows("sess-greta-residue", messages=2)
+        residue, sessions = await _residue_for(["sess-greta-residue"])
+        rerun = await erase_actor(_GRETA, apply=True)
+        finished = await finish_erasure(sessions, apply=True)
+        after, _ = await _residue_for(["sess-greta-residue"])
+        return residue, sessions, rerun.erased, finished.removed_total, finished.finished, after
+
+    residue, sessions, rerun, removed, finished, after = asyncio.run(_run())
+
+    assert residue.get("session_messages") == 2, residue
+    assert sessions == ["sess-greta-residue"], (
+        f"the residue named {sessions}; the session ids are what the remedy takes"
+    )
+    assert not any(rerun.values()), (
+        f"re-running the actor erasure reached rows it should not be able to find: {rerun}. If "
+        "this ever passes, the premise of the finish route has changed and it should be revisited."
+    )
+    assert removed >= 2, f"the finish removed {removed} rows and the residue was two messages"
+    assert finished, "the finish reported itself unfinished"
+    assert after == {}, f"rows survived the finish: {after}"
+
+
+def test_a_residue_that_is_only_graph_state_is_finished_too() -> None:
+    """A residue is not reliably both records of the conversation, and the finish must not need it.
+
+    The transcript and the checkpoint stream can differ by exactly one turn — measured on a real
+    `run_turn` cancelled between the graph run and the transcript write: `checkpoints: 8,
+    session_messages: 0`, the model seeing the exchange and the chemist seeing neither. So the
+    residue a racing turn leaves may be graph state with no message row at all, and a finish that
+    reported "nothing to do" there would leave the conversation itself recoverable from the
+    checkpointer while claiming the erasure was complete.
+    """
+
+    async def _run() -> tuple[dict[str, int], int, dict[str, int]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _seed(_GRETA, "sess-greta-graph")
+        await erase_actor(_GRETA, apply=True)
+        await _write_racing_rows("sess-greta-graph", checkpoints=3)
+        residue, sessions = await _residue_for(["sess-greta-graph"])
+        finished = await finish_erasure(sessions, apply=True)
+        after, _ = await _residue_for(["sess-greta-graph"])
+        return residue, finished.removed.get("checkpoints", 0), after
+
+    residue, removed, after = asyncio.run(_run())
+
+    assert residue == {"checkpoints": 3}, (
+        f"the probe read {residue}; a residue with no transcript row is the commoner half of the "
+        "divergence and has to be visible on its own"
+    )
+    assert removed == 3, f"the finish removed {removed} checkpoint rows of three"
+    assert after == {}, f"graph state survived the finish: {after}"
+
+
+def test_finishing_refuses_a_session_that_still_has_an_owner() -> None:
+    """The safety property of the finish route: it can only clear what is already orphaned.
+
+    Without this, `--finish <any session id>` would be an unscoped conversation delete that skips
+    the ownership check every other path in this system makes — a bigger hole than the one this
+    route closes. A session that still has an ownership row is reachable by its owner and by the
+    actor erasure, so this refuses it by name rather than deleting it.
+    """
+
+    async def _run() -> tuple[dict[str, str], int, int]:
+        await migrated_db_or_skip()
+        await _seed(_BEN, "sess-ben-owned")
+        report = await finish_erasure(["sess-ben-owned"], apply=True)
+        return (
+            report.refused,
+            report.removed_total,
+            await _count("session_messages", "session_id", "sess-ben-owned"),
+        )
+
+    refused, removed, still_there = asyncio.run(_run())
+
+    assert "sess-ben-owned" in refused, f"an owned session was not refused: {refused}"
+    assert removed == 0, f"the finish deleted {removed} rows of a session that is still owned"
+    assert still_there >= 1, "an owned session's messages were deleted by the finish route"
+
+
+def test_the_finish_says_what_it_leaves_behind() -> None:
+    """Every table this route cannot clear is named, for the reason the erasure names its own.
+
+    `tool_result_links` is the one, and by design: `infra/sql/grants/app_privileges.sql` withholds
+    DELETE on it so a link can only disappear behind the content-addressed blob it points at. A
+    finish that silently omitted it would be claiming a completeness it has not got, and one that
+    reported it as *remaining* would read as unfinished for ever.
+    """
+    leaves = dict(finish_leaves())
+    assert "tool_result_links" in leaves, (
+        "the finish route deletes every table a session delete names except this one, and a table "
+        "it does not touch has to be in the report rather than absent from it"
+    )
+    for table, why in leaves.items():
+        assert len(why.split()) >= 8, f"{table} is named without a reason a reader can act on"
+
+
+def test_the_cli_finishes_a_residue_and_says_so_in_its_exit_code() -> None:
+    """The remedy is one command away from the failure that names it, and it is scriptable.
+
+    The actor form exits `2` when it leaves a residue, which is what tells an operator's script the
+    erasure did not finish. Before the finish route that exit code named a condition with no next
+    command — the report said "an operator with owner rights has to remove these rows" and gave
+    them neither the session ids nor a way to do it. So the pair is asserted together: the actor run
+    exits `2` and prints the session ids, and the finish run over exactly those ids exits `0`.
+    """
+
+    async def _seed_residue() -> str:
+        await migrated_db_or_skip()
+        await _seed(_GRETA, "sess-greta-cli")
+        await erase_actor(_GRETA, apply=True)
+        await _write_racing_rows("sess-greta-cli", messages=1)
+        return "sess-greta-cli"
+
+    session_id = asyncio.run(_seed_residue())
+
+    reported = io.StringIO()
+    with contextlib.redirect_stdout(reported):
+        # A second actor run, which is what an operator would try first: it finds the residue it
+        # left behind, because the probe reads by session id even though the sweep cannot.
+        first_code = erase_actor_main([_GRETA, "--apply"])
+    finish = io.StringIO()
+    with contextlib.redirect_stdout(finish):
+        second_code = erase_actor_main(["--finish", session_id, "--apply"])
+    left = asyncio.run(_count("session_messages", "session_id", session_id))
+
+    assert first_code in (0, 2), first_code
+    assert second_code == 0, f"the finish reported itself unfinished: {finish.getvalue()}"
+    assert left == 0, f"{left} row(s) survived the finish"
+    assert "--finish" in reported.getvalue() or first_code == 0, (
+        "an actor run that reports a residue must print the command that clears it, not only the "
+        f"counts: {reported.getvalue()}"
+    )
+
+
+def test_the_cli_refuses_an_actor_and_a_finish_in_one_run() -> None:
+    """Two halves of one operation, never both at once.
+
+    They target different things — a person, and a set of orphaned session ids — and a run that
+    accepted both would have to guess which scoping the `--apply` belongs to. `argparse`'s
+    mutually-exclusive group cannot express this once `actor` is optional (it means "at most one"),
+    so the rule is checked explicitly and this is what holds it.
+    """
+    with pytest.raises(SystemExit) as refused:
+        erase_actor_main([_GRETA, "--finish", "sess-anything"])
+    assert refused.value.code == 2, "argparse exits 2 on a usage error"
+
+    with pytest.raises(SystemExit) as empty:
+        erase_actor_main([])
+    assert empty.value.code == 2

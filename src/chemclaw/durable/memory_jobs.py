@@ -25,6 +25,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.errors import ChemclawError
     from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.ingest.eln.adapter import entry_window, fetch_was_truncated
     from chemclaw.ingest.eln.compound import compound_dependencies
     from chemclaw.ingest.eln.ord import OrdReaction
     from chemclaw.ingest.sources.registry import active_ingest_sources
@@ -83,22 +84,57 @@ async def read_corpus() -> CorpusRead:
 
     Returns a `CorpusRead` rather than the bare list so a skipped entry is a fact the caller can
     act on instead of a silence — see that model.
+
+    **Read to the end of each source, not to the end of its first page.** One fetch from
+    `datetime.min` is the whole corpus for a drop directory, which reads its directory in one go,
+    and it is *one page* for a source that pages: measured against the warehouse adapter over a
+    12-row corpus at `fetch_limit: 5`, this saw **5 of 12** and returned `complete=True`, so the
+    three memory miners would distil their notes from the oldest 500 rows of an ELN at the shipped
+    binding default with nothing saying so. The loop advances the fetch floor to the newest
+    watermark it has seen and stops when a page offers nothing new — the same shape the durable
+    sync's chunk loop has, and inclusive-`since` boundary rows are what `seen` filters out.
+
+    **A source that says rows are still waiting and cannot hand them over makes the read
+    incomplete**, on the same rule an unmappable entry does: a corpus this pass could not finish
+    reading must not reach a miner looking like the whole record. That is the warehouse adapter's
+    un-crossable watermark block (`_MAX_TIE_PAGES`), which reports itself truncated forever.
+
+    The cost this makes real is stated rather than hidden: a scheduled memory run now reads the
+    *whole* source three times, once per miner activity, where before it read three pages. That is
+    the scan `docs/planning/BACKLOG.md` carries a row for, and it is the right way round — a
+    complete read that costs what it costs, rather than a cheap one that is wrong.
     """
-    since = datetime.min.replace(tzinfo=UTC)
     reactions: list[OrdReaction] = []
     skipped = 0
+    unfinished: list[str] = []
     for adapter in active_ingest_sources():
-        for raw in await adapter.fetch_new_entries(since):
-            try:
-                reactions.append(adapter.map_to_ord(raw))
-            except ChemclawError as exc:
-                # A malformed entry is the sync's problem to report, not this job's — skip it
-                # and move on. Catch only ChemclawError (the bad-data contract), so an
-                # unexpected error surfaces instead of being silently dropped; log the skip
-                # so a corpus that quietly loses reactions is diagnosable.
-                logger.info("memory job skipped an unmappable ELN entry: %s", exc)
-                skipped += 1
-                continue
+        # Per source, because entry ids are only unique within one.
+        seen: set[str] = set()
+        since = datetime.min.replace(tzinfo=UTC)
+        while True:
+            page = await adapter.fetch_new_entries(since)
+            fresh = [raw for raw in page if raw.entry_id not in seen]
+            if not fresh:
+                # Nothing new: either the source is exhausted, or it is stuck on a page it cannot
+                # get past. The second is what `fetch_was_truncated` still being true means.
+                if fetch_was_truncated(adapter):
+                    unfinished.append(getattr(adapter, "name", type(adapter).__name__))
+                break
+            seen.update(raw.entry_id for raw in fresh)
+            for raw in fresh:
+                try:
+                    reactions.append(adapter.map_to_ord(raw))
+                except ChemclawError as exc:
+                    # A malformed entry is the sync's problem to report, not this job's — skip it
+                    # and move on. Catch only ChemclawError (the bad-data contract), so an
+                    # unexpected error surfaces instead of being silently dropped; log the skip
+                    # so a corpus that quietly loses reactions is diagnosable.
+                    logger.info("memory job skipped an unmappable ELN entry: %s", exc)
+                    skipped += 1
+                    continue
+            if not fetch_was_truncated(adapter):
+                break
+            since = max(entry_window(raw.created_at, raw.modified_at) for raw in fresh)
     if skipped:
         logger.warning(
             "memory corpus read is incomplete: %d entr(y/ies) could not be mapped, so this pass "
@@ -106,7 +142,14 @@ async def read_corpus() -> CorpusRead:
             skipped,
             len(reactions),
         )
-    return CorpusRead(reactions=reactions, complete=not skipped)
+    if unfinished:
+        logger.warning(
+            "memory corpus read is incomplete: %s still reported rows waiting after the last page "
+            "it could serve, so this pass saw %d reaction(s) and not the whole record",
+            ", ".join(unfinished),
+            len(reactions),
+        )
+    return CorpusRead(reactions=reactions, complete=not skipped and not unfinished)
 
 
 # The builders run in a worker thread, not on the activity's event loop. Each one does full DRFP

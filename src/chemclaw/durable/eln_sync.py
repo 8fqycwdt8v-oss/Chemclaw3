@@ -21,6 +21,7 @@ swap them for in-memory stores.
 """
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from temporalio import activity, workflow
 from temporalio.exceptions import ActivityError, is_cancelled_exception
@@ -33,6 +34,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.ingest.eln.adapter import (
         RawEntry,
+        accepts_a_late_arrival_switch,
         accepts_a_limit,
         entry_window,
         fetch_was_truncated,
@@ -177,24 +179,34 @@ class _BoundedIngest:
     into "come back", which either advances the cursor or trips the guard out loud.
     """
 
-    def __init__(self, inner: IngestHalf, since: datetime, limit: int) -> None:
+    def __init__(
+        self, inner: IngestHalf, since: datetime, limit: int, *, first_chunk: bool = True
+    ) -> None:
         self._inner = inner
         self._since = since
         self._limit = limit
+        self._first_chunk = first_chunk
         self.truncated = False
 
     async def _fetch(self, since: datetime, limit: int | None) -> list[RawEntry]:
-        """Ask the wrapped adapter for entries, offering `limit` only if it takes one.
+        """Ask the wrapped adapter for entries, offering each capability only if it takes it.
 
         `ElnAdapter.fetch_new_entries` publishes a one-argument signature and D-120 promises a new
         source costs zero core edits, so an out-of-tree adapter written to that signature must not
-        be handed a second positional argument — it would raise `TypeError` on its first chunk.
-        `accepts_a_limit` is the capability probe, beside `fetch_was_truncated`, which asks the
-        same kind of question about the same seam.
+        be handed arguments it never declared — it would raise `TypeError` on its first chunk.
+        `accepts_a_limit` and `accepts_a_late_arrival_switch` are the capability probes, beside
+        `fetch_was_truncated`, which asks the same kind of question about the same seam.
+
+        **The late-arrival switch is passed only to say "not this chunk".** `True` is what every
+        adapter already does, so sending it would break an adapter that predates the flag for no
+        change in behaviour.
         """
+        extra: dict[str, Any] = {}
         if limit is not None and accepts_a_limit(self._inner):
-            return await self._inner.fetch_new_entries(since, limit)  # type: ignore[call-arg]
-        return await self._inner.fetch_new_entries(since)
+            extra["limit"] = limit
+        if not self._first_chunk and accepts_a_late_arrival_switch(self._inner):
+            extra["report_late_arrivals"] = False
+        return await self._inner.fetch_new_entries(since, **extra)
 
     async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
         """Fetch from the wrapped adapter: the overlap plus the oldest `limit` new entries.
@@ -291,7 +303,12 @@ async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = T
     ingest = data_source.ingest
     if ingest is None:  # names come from the ingest-filtered set, so this is a wiring bug
         raise ChemclawError(f"data source {source!r} has no ingest half")
-    bounded = _BoundedIngest(ingest, since, settings.eln_sync_batch_size)
+    # `apply_overlap` is what makes this the run's *first* chunk: the only chunk whose floor
+    # reaches behind the cursor, and therefore the only one that can answer "will any scheduled run
+    # fetch this file". A continuation chunk's floor is the advancing cursor, and every file
+    # between the two was ingested by this very run — judging lateness there re-refuses what the
+    # drain just took in, growing by a batch per chunk. See `ingest/eln/adapter.is_late_arrival`.
+    bounded = _BoundedIngest(ingest, since, settings.eln_sync_batch_size, first_chunk=apply_overlap)
     # First beat immediately (a fast sync may finish before `beating()`'s first interval elapses),
     # then it keeps beating for as long as the chunk actually takes.
     activity.heartbeat()

@@ -173,8 +173,33 @@ def _joined(node: ast.JoinedStr) -> str:
     )
 
 
+def _docstrings(tree: ast.Module) -> set[int]:
+    """The `id()` of every docstring constant in `tree` — module, class, function and async.
+
+    The header of this file says docstrings are "excluded by construction: `ast` only yields string
+    *constants*". That sentence is about *comments*, and it was being read as covering docstrings,
+    which are constants like any other. It held only because this repository's prose about SQL
+    rarely also spells a statement — and it stops holding the moment a scan looks for DDL:
+    `durable/retention.py`'s module docstring explains at length why a `CREATE INDEX` on the
+    checkpoint tables is rejected, and the word "deleted" three lines up is enough to get the whole
+    paragraph past `_LOOKS_LIKE_SQL`.
+    """
+    found: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        first = node.body[0] if node.body else None
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            found.add(id(first.value))
+    return found
+
+
 def _sql_literals(path: Path) -> list[str]:
-    """Every string in a module that looks like SQL, whitespace-flattened.
+    """Every string in a module that looks like SQL, whitespace-flattened, docstrings excluded.
 
     Flattened because these statements are assembled from adjacent string literals across several
     lines, so `INSERT INTO x` and its `ON CONFLICT` clause are rarely on one line — Python has
@@ -182,10 +207,12 @@ def _sql_literals(path: Path) -> list[str]:
     for the interpolated ones.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    prose = _docstrings(tree)
     texts: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            texts.append(node.value)
+            if id(node) not in prose:
+                texts.append(node.value)
         elif isinstance(node, ast.JoinedStr):
             texts.append(_joined(node))
     return [re.sub(r"\s+", " ", text) for text in texts if _LOOKS_LIKE_SQL.search(text)]
@@ -355,3 +382,52 @@ def test_the_grants_are_not_numbered_migrations() -> None:
         "the grant file is inside the tracked migration set, so it would be applied exactly once"
     )
     assert [path.name for path in grant_files()] == [_GRANTS.name]
+
+
+# Modules whose SQL literals are the *migrator's*, not a runtime process's, plus the one module
+# that only discusses DDL in prose. `core/migrate.py` is what `make db-migrate` runs under the
+# owning principal; `core/grants.py` applies `app_privileges.sql` beside it. Anything else issuing
+# DDL is a runtime process doing it, which is the thing the guard below is about.
+_MIGRATOR_MODULES = {"core/migrate.py", "core/grants.py"}
+
+# DDL a *runtime* process must never issue. `CREATE INDEX` is deliberately absent from the pattern's
+# own vocabulary only in the sense that it is covered: the point is the schema-level right, and a
+# first-party `CREATE INDEX` on a table it does not own needs the same conversation.
+_DDL = re.compile(
+    r"\b(CREATE|DROP)\s+(TABLE|INDEX|SCHEMA|EXTENSION|FUNCTION|VIEW|SEQUENCE)\b|\bALTER\s+TABLE\b",
+    re.I,
+)
+
+
+def test_the_only_ddl_a_runtime_process_issues_is_upstreams_setup() -> None:
+    """`D-2026-09-07-the-app-is-its-own-migrator-for-the-tables-it-owns`'s premise, as a guard.
+
+    That ADR keeps `GRANT CREATE ON SCHEMA public` deliberately, and its whole argument is that the
+    only DDL a runtime process issues is upstream's `AsyncPostgresSaver.setup()` and
+    `AsyncPostgresStore.setup()` — eight tables LangGraph keeps its own turn state in, migrated
+    under an advisory lock by `agent/checkpointer.py::_setup_once`. The privilege is therefore
+    "what upstream's checkpointer needs", which is a bounded thing to grant.
+
+    **If a first-party module ever issues DDL, that stops being true**, and the privilege becomes
+    "what this application does" — a different decision, taken by whoever writes the statement
+    rather than by anyone reading the grant file. Measured when the ADR was written: no such
+    literal existed outside the migrator. This is what makes the premise fail loudly instead of
+    quietly ceasing to hold.
+
+    It does **not** forbid the DDL. It forbids it arriving without the ADR being revisited, which
+    is the same shape as `_ADMIN_ONLY_MODULES` one function up: a declared exception, not a ban.
+    """
+    offenders: list[str] = []
+    for path in sorted(_SRC.rglob("*.py")):
+        relative = path.relative_to(_SRC).as_posix()
+        if relative in _MIGRATOR_MODULES:
+            continue
+        for statement in _sql_literals(path):
+            if _DDL.search(statement):
+                offenders.append(f"{relative}: {statement[:90]}")
+    assert offenders == [], (
+        "a runtime module issues DDL, so the runtime role's `CREATE ON SCHEMA public` is no longer "
+        "bounded by what upstream's checkpointer needs — revisit "
+        "D-2026-09-07-the-app-is-its-own-migrator-for-the-tables-it-owns before adding it:\n  "
+        + "\n  ".join(offenders)
+    )

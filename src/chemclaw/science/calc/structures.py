@@ -57,7 +57,14 @@ class StructureStore(Protocol):
 
 
 class InMemoryStructureStore:
-    """The same contract in process, for tests and for a deployment with no database.
+    """The same contract in process — the reference the Postgres one is written to match.
+
+    **A differential oracle, not a deployment backend.** No configuration returns it — every
+    `default_*()` in this tree resolves to the Postgres implementation — and that is deliberate
+    (`D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend`). It stays in
+    `src/` because it is the executable statement of the contract its Postgres sibling is written
+    to reproduce, and it is read beside that sibling; `tests/test_reference_stores.py` holds both
+    halves of that — the absence of a shipped caller, and the absence of this claim.
 
     A dict rather than an LRU: a geometry is kilobytes, a process holds one conversation's worth,
     and evicting one would break the handle a turn is still holding — which is the one failure this

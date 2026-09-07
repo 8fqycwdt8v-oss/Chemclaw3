@@ -48,43 +48,52 @@ _ENQUEUE = """
     ON CONFLICT (sink, calc_ref, schema_version) DO NOTHING
 """
 
-# **Claiming spends the attempt, in the same statement that selects the row.** A plain
-# `SELECT ... FOR UPDATE SKIP LOCKED` is not enough here: the lock lasts only as long as the
-# transaction, and this one has to commit before the delivery is attempted — a delivery can take
-# the better part of a minute and must not hold a row lock across it. So two runs overlapping (a
-# scheduled drain and an operator's manual one) would both see the same pending rows, deliver them
-# twice and each record a failure, double-counting the attempt budget against one destination's
-# outage.
+# "Nobody is working on this row": it has never been claimed, or it was released by
+# `mark_delivered`/`mark_failed`, or the claimer that took it is past the ceiling Temporal itself
+# gives the drain activity (`result_publish_lease_seconds`) and is therefore gone. One fragment
+# rather than two spellings, because `_CLAIM` and `_REAP_EXHAUSTED` have to agree exactly on it:
+# if the reaper's idea of an abandoned claim were wider than the claim's, it would dead-letter a
+# row another drain is delivering at that moment, and the real failure reason would be lost behind
+# the reaper's generic one.
+_UNLEASED = "(claimed_at IS NULL OR claimed_at < now() - make_interval(secs => %s))"
+
+# **A claim is a lease, and the lease is what makes two overlapping drains safe.**
 #
-# Incrementing inside the claim narrows that and **does not close it, which this comment used to
-# claim.** `SKIP LOCKED` excludes only *overlapping transactions*, and this one commits immediately
-# — deliberately, so no lock is held across the delivery. The second run's claim therefore happens
-# *after* that commit, sees a row that is still `pending` with `attempts < max`, and claims it
-# again. The scenario named above overlaps over the **delivery** (seconds to a minute), not over
-# the claim (milliseconds), so the lock argument never engages for the case it was written for.
-# Measured with a sink taking 1.0 s and a second drain started 0.3 s in: both drains delivered the
-# same row and it came to rest at `attempts=2` for one delivery.
+# Claiming spends the attempt in the same statement that selects the row, and commits before the
+# delivery is attempted — a delivery can take the better part of a minute and must not hold a row
+# lock across it. That is why `FOR UPDATE SKIP LOCKED` alone was never enough here, which this
+# comment used to claim it was: `SKIP LOCKED` excludes only *overlapping transactions*, and this
+# one lasts milliseconds, while the case it was written for — a scheduled drain plus an operator's
+# manual one — overlaps over the **delivery**, which lasts seconds to a minute. The second run's
+# claim therefore happened after the first's commit, saw a row that was still `pending` with
+# `attempts < max`, and claimed it again. Measured with a 1.0 s sink and a second drain started
+# 0.3 s in: both drains delivered the same row and it came to rest at `attempts=2` for one
+# delivery. Duplicate *delivery* is safe — every key on the far side is a content hash, and the
+# shipped SQL sink was driven three times over one record and converged exactly — so the harm was
+# the accounting: an attempt budget of 8 that empties after 4 real attempts against one
+# destination's outage, retiring rows a recovering destination would have accepted.
 #
-# What that costs and what it does not: duplicate *delivery* is safe — every key on the far side is
-# a content hash, and the shipped SQL sink was driven three times over one record and converged
-# exactly — so the harm is the accounting, an attempt budget that empties at 2x under two
-# concurrent drains. Closing it properly needs a **lease**: a claim that moves the row out of
-# `pending` (`state='in_flight'` plus a `claimed_at`, reaped back by a later pass), so the second
-# run skips it by predicate rather than by lock duration. That is a column and a `CHECK` in
-# `infra/sql/050_result_publications.sql` — a change this module cannot make alone, so it is
-# written down here and in `docs/planning/BACKLOG.md` rather than described as done. The reaper
-# below is the half that *is* in reach, and it turns the doubled burn from a permanent zombie into
-# an honest dead letter an operator can requeue.
+# `claimed_at` closes it by *predicate* rather than by lock duration: a row this pass has claimed
+# is not claimable again until its lease expires, so the second run steps over it whether or not
+# the first is still inside a transaction.
+#
+# **A lease is a timestamp, not a fourth state** (D-2026-09-07). The obvious spelling,
+# `state='in_flight'`, takes this table from three states to four and every reader of the column
+# has to learn it — `_PENDING` and `_ORPHANED` would have to add it back to keep counting an
+# undelivered row as backlog, `_MARK_FAILED`'s `state = 'pending'` guard would have to move, and an
+# abandoned claim would need a *second* reaper to return it to `pending`. A leased row is still
+# `pending`, because that is the truth: it has not been delivered. So every existing reader stays
+# correct and `_REAP_EXHAUSTED` below keeps working unchanged.
 #
 # Oldest first, so a backlog drains in the order it accumulated and a burst of fresh results cannot
 # starve what was already waiting.
-_CLAIM = """
+_CLAIM = f"""
     UPDATE result_publications
-    SET attempts = attempts + 1
+    SET attempts = attempts + 1, claimed_at = now()
     WHERE id IN (
         SELECT id
         FROM result_publications
-        WHERE sink = %s AND state = 'pending' AND attempts < %s
+        WHERE sink = %s AND state = 'pending' AND attempts < %s AND {_UNLEASED}
         ORDER BY enqueued_at
         LIMIT %s
         FOR UPDATE SKIP LOCKED
@@ -114,17 +123,26 @@ _CLAIM = """
 #
 # `last_error` is written only when empty, so the last *real* failure a pass did record outranks
 # this generic one — the reason an operator needs is the destination's, not the reaper's.
-_REAP_EXHAUSTED = """
+#
+# **`_UNLEASED` is what keeps "no outcome recorded" true.** Since a claim is a lease, a row can be
+# `pending` with its budget spent *and* be in somebody's hands right now — the drain that spent the
+# last attempt is delivering it. Retiring that row would dead-letter a delivery in progress and,
+# because `_MARK_FAILED` guards on `state = 'pending'`, the destination's own account of the
+# failure would then be dropped in favour of the generic sentence below. Bounded by the same
+# predicate the claim uses, this statement can only reach a row nobody is working on.
+_REAP_EXHAUSTED = f"""
     UPDATE result_publications
     SET state = 'failed',
         last_error = CASE WHEN last_error = '' THEN %s ELSE last_error END
-    WHERE sink = %s AND state = 'pending' AND attempts >= %s
+    WHERE sink = %s AND state = 'pending' AND attempts >= %s AND {_UNLEASED}
     RETURNING id
 """
 
+# Releases the lease as well as recording the outcome: `claimed_at = NULL` is what "nobody is
+# working on this row" means, and a delivered row is nobody's.
 _MARK_DELIVERED = """
     UPDATE result_publications
-    SET state = 'delivered', delivered_at = now(), last_error = ''
+    SET state = 'delivered', delivered_at = now(), last_error = '', claimed_at = NULL
     WHERE id = ANY(%s)
 """
 
@@ -147,9 +165,14 @@ _MARK_DELIVERED = """
 # is `pending` by construction (`_CLAIM` spends the attempt and leaves the state alone) — so it is
 # narrower than `state <> 'failed'` for free, and a `delivered` row can no longer be walked
 # backwards into `failed` by a mis-partitioned id list either.
+# **`claimed_at = NULL` is the other half of retrying at all.** A row whose attempt failed goes
+# back into the queue, and a row that is still leased is not in the queue — so without the release
+# a destination's outage would cost one retry per *lease period* rather than one per drain pass,
+# which at the shipped numbers is the difference between the next pass and two minutes of nothing.
 _MARK_FAILED = """
     UPDATE result_publications
     SET last_error = %s,
+        claimed_at = NULL,
         state = CASE WHEN attempts >= %s THEN 'failed' ELSE 'pending' END
     WHERE id = ANY(%s) AND state = 'pending'
     RETURNING state
@@ -380,11 +403,18 @@ async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
     **Claiming spends the attempt** — see `_CLAIM` for why that has to happen in the same statement
     rather than after the delivery.
 
-    **Not a transaction the caller holds.** The claim commits before anything is delivered, because
-    a delivery can take the better part of a minute and must not hold row locks across it. So a
-    worker that dies mid-delivery leaves its rows `pending` with one attempt spent, and the next
-    run picks them up — at-least-once, which is exactly what the content-addressed upserts on the
-    far end are built for.
+    **Not a transaction the caller holds; a lease.** The claim commits before anything is
+    delivered, because a delivery can take the better part of a minute and must not hold row locks
+    across it — so the exclusion that stops a second drain re-delivering the same row cannot be the
+    lock. `claimed_at` is that exclusion, and `result_publish_lease_seconds` is how long it lasts:
+    the drain activity's own `start_to_close` ceiling, past which Temporal has already given up on
+    the claimer.
+
+    **So a worker that dies mid-delivery leaves its rows leased, and they come back by predicate.**
+    The next claim for that sink after the lease expires takes them, with one attempt spent for the
+    pass that died — at-least-once, which is exactly what the content-addressed upserts on the far
+    end are built for. There is no second timer and no sweeper to schedule: the recovery happens in
+    the statement that would otherwise skip the row.
 
     **And when the budget runs out that way, this retires the row rather than stranding it.** The
     sentence above was true for every attempt but the last: a row that spent its eighth attempt
@@ -404,10 +434,12 @@ async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
     `durable/publish_results._drain_result_publications`.
     """
     budget = settings.result_publish_max_attempts
+    lease = settings.result_publish_lease_seconds
     async with _connect("outbox_claim") as conn:
         # Reaped in the same transaction as the claim, so a row can never be both retired here and
         # handed out below: the `attempts >= budget` reap and the `attempts < budget` claim
-        # partition the pending set, and one commit publishes both halves.
+        # partition the pending set, and one commit publishes both halves. Both halves are also
+        # bounded by the *same* lease, so neither can reach a row another drain is delivering.
         cursor = await conn.execute(
             _REAP_EXHAUSTED,
             (
@@ -417,10 +449,11 @@ async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
                 "once the destination is reachable.",
                 sink,
                 budget,
+                lease,
             ),
         )
         reaped = len(await cursor.fetchall())
-        cursor = await conn.execute(_CLAIM, (sink, budget, limit))
+        cursor = await conn.execute(_CLAIM, (sink, budget, lease, limit))
         rows = await cursor.fetchall()
         await conn.commit()
     if reaped:

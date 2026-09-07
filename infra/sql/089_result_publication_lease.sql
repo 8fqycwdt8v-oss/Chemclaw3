@@ -1,0 +1,44 @@
+-- A claim on an outbox row is a *lease*, so two overlapping drains cannot both deliver it
+-- (D-2026-09-07-a-claim-that-outlives-its-transaction-is-a-lease).
+--
+-- **What this closes.** `publish/outbox.py::_CLAIM` spends the attempt and commits *before* the
+-- delivery, deliberately: a delivery can take the better part of a minute and must not hold a row
+-- lock across it. `FOR UPDATE SKIP LOCKED` therefore excludes only overlapping *transactions*, and
+-- this one lasts milliseconds — while the case it was written for (a scheduled drain plus an
+-- operator's manual one) overlaps over the **delivery**, which lasts seconds to a minute. Measured
+-- with a 1.0 s sink and a second drain started 0.3 s in: both drains delivered the same row and it
+-- came to rest at `attempts=2` for one delivery, so an attempt budget of 8 empties after 4 real
+-- attempts against one destination's outage.
+--
+-- **A lease is a timestamp, not a fourth state.** The obvious spelling — `state='in_flight'` —
+-- was built far enough to price and rejected: it takes `result_publications` from three states to
+-- four, which every reader of the column then has to learn (`_PENDING` and `_ORPHANED` would have
+-- to add it back to keep counting an undelivered row as backlog, `_MARK_FAILED`'s `state =
+-- 'pending'` guard would have to move, `backfill --requeue` and `durable/retention.py` would each
+-- need re-reading), and it needs a *second* reaper to return an abandoned claim to `pending`.
+-- `claimed_at` alone needs none of that: a leased row is still `pending`, which is the truth — it
+-- has not been delivered — so every existing reader stays correct, and the exhausted-row reaper
+-- wave 6 added keeps working unchanged, because a claimer that died still leaves the row `pending`
+-- with its attempts spent. One nullable column, additive, no CHECK to widen.
+--
+-- **How an abandoned claim comes back, without a second timer nobody runs.** The lease expires by
+-- predicate, evaluated at the head of the next ordinary claim for that sink: a row is claimable
+-- when `claimed_at IS NULL` (never claimed, or released by `mark_delivered`/`mark_failed`) or when
+-- its lease is older than the drain activity's own `start_to_close` ceiling
+-- (`result_publish_lease_seconds`). Past that ceiling Temporal has already given up on the
+-- claimer, so no live delivery can be stolen; before it, no second drain can start one.
+--
+-- **Nullable with no default, and no backfill.** Every row written before this migration was
+-- claimed by a build that could not hold a lease, so `NULL` — "nobody is working on this" — is the
+-- correct reading of all of them, and it is the value that makes them immediately claimable.
+--
+-- **No index.** The claim already scans `result_publications_pending` (`(sink, enqueued_at) WHERE
+-- state = 'pending'`) in `enqueued_at` order and stops at `LIMIT`; the lease is a filter on rows
+-- that scan has already read, and the leased set is bounded by the batch size times the number of
+-- concurrent drains. An index on a column whose non-null population is a handful of rows would
+-- cost every claim a second write for nothing.
+--
+-- Additive with no default, so the previous image keeps writing this table unchanged
+-- (`tests/test_migrations_are_additive.py`). Applied by `make db-migrate` (idempotent).
+ALTER TABLE result_publications
+    ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;

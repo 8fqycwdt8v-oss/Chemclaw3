@@ -71,6 +71,23 @@ class PublishSettings(BaseSettings):
     result_publish_max_attempts: int = Field(default=8, gt=0)
 
     @property
+    def result_publish_lease_seconds(self) -> float:
+        """How long a claimed outbox row stays out of the queue before it is claimable again.
+
+        Derived rather than configured, because the number it has to be is not a free choice: it
+        is the drain activity's own `start_to_close` ceiling, which is what bounds how long a live
+        claimer can hold rows it has neither delivered nor marked. Below it a second drain steals
+        rows the first is still delivering, which is the double-claim this lease exists to close;
+        above it a row abandoned by a claimer that died waits longer than it has to. At the ceiling
+        exactly, Temporal has already given up on the claimer.
+
+        Read by `publish/outbox._CLAIM` and `_REAP_EXHAUSTED` as "nobody is working on this row",
+        and by `durable/publish_results.PublishResultsWorkflow` as the timeout it is derived from —
+        one expression in one place, so the lease and the budget it tracks cannot drift apart.
+        """
+        return self.result_publish_timeout_seconds * max(1, len(self.result_sink_list))
+
+    @property
     def result_sinks_dirs(self) -> list[str]:
         """The discovery path, split. Read this rather than the raw field."""
         return [d for d in self.result_sinks_dir.split(os.pathsep) if d]

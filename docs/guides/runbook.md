@@ -1929,6 +1929,28 @@ owner.
 The dry run executes the deletes and rolls back, so the number you sign off on is the number that
 will be deleted rather than a second query's guess at it.
 
+**If a turn was running while it swept, the run says so and exits `2`.** The command claims each of
+that person's sessions before it touches anything and refuses the whole run while one is busy — but
+a lease can lapse, a session can be created between the enumeration and the commit, and a deployment
+that does not run the Postgres session store takes no durable claim at all. In any of those a turn
+can commit rows *after* the sweep, under a session whose ownership row is already gone, and every
+actor-scoped route in this system finds a session through that row. **Re-running the erasure is
+therefore not the remedy** — it reaches nothing, and it prints zeros, which reads as success.
+
+The run prints the session ids and the command that clears them:
+
+```bash
+python -m chemclaw.cli.erase_actor --finish <session-id> [<session-id> ...]           # dry run
+python -m chemclaw.cli.erase_actor --finish <session-id> [<session-id> ...] --apply   # commits
+```
+
+Stop the turn first (`POST /sessions/{id}/turn/stop`), or the same thing happens again. This form
+deletes by session id, which is a route that never reads the ownership row, and it **refuses any
+session that still has one** — so it can only finish what is already orphaned and is not a way to
+delete somebody's live conversation. It runs on the application's own privileges: nothing here needs
+a database owner. Like the actor form it exits `2` if it wrote and did not finish, and its report
+names what it deliberately leaves behind.
+
 ## (xvi) Attach an external results database
 
 Every calculation this system performs is projected into a typed scientific record and delivered to

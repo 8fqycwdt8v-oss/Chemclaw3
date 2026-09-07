@@ -101,7 +101,9 @@ class OrdJsonAdapter:
         self._dir = Path(export_dir if export_dir is not None else settings.ord_export_dir)
         self._source = name or DEFAULT_LEDGER_SOURCE
 
-    async def fetch_new_entries(self, since: datetime, limit: int | None = None) -> list[RawEntry]:
+    async def fetch_new_entries(
+        self, since: datetime, limit: int | None = None, *, report_late_arrivals: bool = True
+    ) -> list[RawEntry]:
         """Return ORD messages created at or after `since`, oldest first.
 
         A file that cannot be read/parsed at all, or that carries no usable creation
@@ -146,8 +148,11 @@ class OrdJsonAdapter:
         Args:
             since: The window floor; messages at or after it are returned.
             limit: Accepted for the protocol and unused — see above.
+            report_late_arrivals: Whether `since` is the *run's* floor, so a file behind it
+                that arrived after it may be reported as one no scheduled run will fetch.
+                False on a continuation chunk — see `is_late_arrival`.
         """
-        entries, late, refused = await asyncio.to_thread(self._scan, since)
+        entries, late, refused = await asyncio.to_thread(self._scan, since, report_late_arrivals)
         # The source, not the format: this is the one line reporting files that are silently never
         # ingested, and a deployment running two ORD drop directories got two identical lines
         # naming neither.
@@ -155,10 +160,16 @@ class OrdJsonAdapter:
         await record_refusals(self._source, refused)
         return entries
 
-    def _scan(self, since: datetime) -> tuple[list[RawEntry], list[str], dict[str, str]]:
+    def _scan(
+        self, since: datetime, report_late_arrivals: bool
+    ) -> tuple[list[RawEntry], list[str], dict[str, str]]:
         """The whole blocking read, in one synchronous function so one thread can hold it.
 
         Args:
+            report_late_arrivals: whether `since` is the *run's* floor, so a file behind it
+                that arrived after it is one no scheduled run will fetch. False on a continuation
+                chunk, whose floor has already moved past files this same drain ingested — see
+                `is_late_arrival`.
             since: the window floor; messages at or after it are returned.
 
         Returns:
@@ -202,7 +213,7 @@ class OrdJsonAdapter:
                         payload=payload,
                     )
                 )
-            elif is_late_arrival(path, since):
+            elif report_late_arrivals and is_late_arrival(path, since):
                 late.append(path.name)
                 refused[path.stem] = (
                     f"{path.name} arrived after the sync cursor but carries an older timestamp "

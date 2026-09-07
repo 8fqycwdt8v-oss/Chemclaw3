@@ -769,7 +769,7 @@ def test_one_sweep_works_a_bounded_batch_and_reports_the_rest() -> None:
         monkeypatch.setattr(settings, "retention_session_events_days", 0)
         monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
         try:
-            first = await _sweep_once(_Budget())
+            first, _ = await _sweep_once(_Budget())
             return first, await _remaining(like)
         finally:
             monkeypatch.undo()
@@ -822,7 +822,7 @@ def test_an_age_cutoff_delete_is_batched_until_the_table_is_drained() -> None:
         ):
             monkeypatch.setattr(settings, name, 0)
         try:
-            outcome = await _sweep_once(_Budget())
+            outcome, _ = await _sweep_once(_Budget())
         finally:
             monkeypatch.undo()
 
@@ -1275,7 +1275,7 @@ def test_the_checkpoint_sweep_covers_exactly_the_checkpointer_s_tables() -> None
         await create_checkpoint_tables()
         await _seed_thread("retention-covered-thread", age_days=90)
         async with db.connection(settings.postgres_dsn) as conn:
-            deleted, _, _ = await _prune_checkpoints(conn, 30)
+            deleted, _, _, _ = await _prune_checkpoints(conn, 30)
         return deleted
 
     assert set(asyncio.run(_run())) == set(CHECKPOINT_TABLES), (
@@ -1309,7 +1309,7 @@ def test_the_checkpoint_sweep_says_that_it_left_threads_behind() -> None:
             # One sweep, not the whole pass: the cap bounds a batch and the pass now runs as many
             # batches as its budget affords (`test_the_pass_keeps_sweeping_until_the_backlog_is
             # _drained`), so driving the activity here would assert the convergence instead.
-            outcome = await _sweep_once(_Budget())
+            outcome, _ = await _sweep_once(_Budget())
             surviving = 0
             for index in range(5):
                 surviving += (await _thread_row_counts(f"retention-capped-{index}"))["checkpoints"]
@@ -1406,6 +1406,21 @@ _SCAN_CHECKPOINTS_PER_THREAD = 5
 # Far below the seeded thread count, so "the scan stopped early" is a difference of two orders of
 # magnitude rather than a rounding one.
 _SCAN_CAP = 20
+
+# The thread count the *no-statistics* plan test seeds, and it is thirty times the one above for a
+# reason worth writing down. `_EXPIRED_THREADS`' resume predicate (`thread_id > %s`) makes the
+# index path look cheaper to a planner with no statistics, so the pathological plan the sweep's
+# `ANALYZE` exists to prevent no longer appears at 2 000 threads — measured this session, 2 000,
+# 8 000, 16 000, 32 000 and 40 000 x 5 all plan as `Limit → GroupAggregate → Index Scan` unanalyzed,
+# and 60 000 x 5 (300 000 rows) is where `Gather Merge → Sort → HashAggregate → Seq Scan` comes
+# back: 328 ms unanalyzed against 0 ms once analyzed, on the identical statement.
+#
+# **The alternative was to ask at a larger cap, and it is wrong.** A cap of 500 against 2 000
+# threads reproduces the hazard at the small fixture — and it also makes the *analyzed* plan a seq
+# scan, correctly, because 500 of 2 000 groups is a quarter of the table. What the deployment has
+# is 500 of hundreds of thousands, so a cap-to-threads ratio that far off measures a different
+# question and would have made this test assert that `ANALYZE` does nothing.
+_SCAN_STATS_THREADS = 60000
 
 # The two backlog shapes the sweep actually meets, as `live_every` values for the bulk fixture: one
 # thread in `live_every` is *still in use* (its oldest checkpoints are past the cutoff, its newest
@@ -1560,9 +1575,9 @@ def test_the_thread_query_streams_the_primary_key_in_both_backlog_shapes(
                 # this plan is only available to a planner that has statistics for `checkpoints`.
                 await conn.execute(_ANALYZE_THREADS)
                 await conn.commit()
-            plan = await _plan_of(_EXPIRED_THREADS, (30, _SCAN_CAP + 1))
+            plan = await _plan_of(_EXPIRED_THREADS, ("", 30, _SCAN_CAP + 1))
             async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
-                await cur.execute(_EXPIRED_THREADS, (30, _SCAN_CAP + 1))
+                await cur.execute(_EXPIRED_THREADS, ("", 30, _SCAN_CAP + 1))
                 threads = [str(row[0]) for row in await cur.fetchall()]
             return plan, threads
         finally:
@@ -1644,13 +1659,13 @@ def test_the_sweep_gives_the_planner_the_statistics_no_migration_can() -> None:
         monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
         try:
             await _seed_checkpoint_threads(
-                _SCAN_THREADS, _SCAN_CHECKPOINTS_PER_THREAD, _SCAN_DENSE_LIVE_EVERY
+                _SCAN_STATS_THREADS, _SCAN_CHECKPOINTS_PER_THREAD, _SCAN_DENSE_LIVE_EVERY
             )
-            before = _plan_nodes(await _plan_of(_EXPIRED_THREADS, (30, _SCAN_CAP + 1)))
+            before = _plan_nodes(await _plan_of(_EXPIRED_THREADS, ("", 30, _SCAN_CAP + 1)))
             # One sweep: `ANALYZE` runs once per sweep, and driving the whole activity here would
             # drain a deliberately large seeded backlog two threads at a time.
             await _sweep_once(_Budget())
-            after = _plan_nodes(await _plan_of(_EXPIRED_THREADS, (30, _SCAN_CAP + 1)))
+            after = _plan_nodes(await _plan_of(_EXPIRED_THREADS, ("", 30, _SCAN_CAP + 1)))
             return (
                 [node["Node Type"] for node in before],
                 [node["Node Type"] for node in after],
@@ -1811,7 +1826,7 @@ async def _seed_raw_checkpoint(thread_id: str, payload: dict[str, Any]) -> None:
 async def _expired_threads(days: int, cap: int) -> list[str]:
     """The threads `_EXPIRED_THREADS` names as disposable: the sweep's question, asked alone."""
     async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
-        await cur.execute(_EXPIRED_THREADS, (days, cap))
+        await cur.execute(_EXPIRED_THREADS, ("", days, cap))
         return [str(row[0]) for row in await cur.fetchall()]
 
 
@@ -2144,7 +2159,7 @@ def test_the_ownership_sweep_works_a_bounded_batch_and_reports_the_rest() -> Non
         ):
             monkeypatch.setattr(settings, name, 0)
         try:
-            outcome = await _sweep_once(_Budget())
+            outcome, _ = await _sweep_once(_Budget())
         finally:
             monkeypatch.undo()
         return outcome, await _rows_left("session_owners")
@@ -2192,3 +2207,213 @@ def test_a_sweep_that_removes_nothing_ends_the_pass() -> None:
     drained = RetentionOutcome(deleted={"session_messages": 0}, skipped=[])
     assert not drained.has_tail()
     assert not drained.made_progress()
+
+
+# --- The resume position: a drain reads the table once, not once per capped batch ---------------
+
+
+async def _poison_thread(thread_id: str) -> None:
+    """A checkpoint whose `ts` is not a timestamp, planted below where a sweep resumes.
+
+    This is the tripwire the resume test rests on, and it is a documented behaviour of the sweep
+    rather than an invented one: `_prune_checkpoints`' docstring says a malformed `ts` fails the
+    pass loudly, because `(checkpoint->>'ts')::timestamptz` runs over **every row the grouping scan
+    reaches** and Postgres has no `TRY_CAST`. So a scan that re-walks the prefix it already cleared
+    raises here, and a scan that resumes past it never reads the row at all — which turns "did this
+    drain read the same region twice" from a stopwatch question into a deterministic one.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute(
+            "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, checkpoint, "
+            "metadata) VALUES (%s, '', 'poison', %s, '{}'::jsonb)",
+            (thread_id, Jsonb({"v": 1, "id": "poison", "ts": "not-a-timestamp"})),
+        )
+        await conn.commit()
+
+
+async def _surviving_threads() -> list[str]:
+    """Every thread still in `checkpoints`, asked without the cast a poison row would fail."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("SELECT DISTINCT thread_id FROM checkpoints ORDER BY 1")
+        return [str(row[0]) for row in await cur.fetchall()]
+
+
+def test_the_next_sweep_of_a_drain_starts_where_the_last_one_stopped() -> None:
+    """A drain visits every thread once, not once per capped batch.
+
+    **The cost this is about.** A pass sweeps until the backlog is empty, and every sweep used to
+    ask `_EXPIRED_THREADS` from the beginning of `thread_id` order — so sweep *k* walked past the
+    *k-1* batches it had already disposed of before reaching anything new, and the drain paid
+    Sigma-k whole-table scans where it needs one. Measured on 200 000 threads x 3 checkpoints with
+    2 000 expired and the shipped cap of 500, the four scans of one drain grew
+    280 -> 438 -> 666 -> 881 ms (2 265 ms) against a flat 294 / 235 / 231 / 237 (996 ms) resuming
+    from the last thread reached; on a first pass after enabling retention (50 000 threads, 20 000
+    expired, 40 sweeps) it is 2 698 ms against 357 ms, and the ratio is `(sweeps + 1) / 2`, so it
+    grows with the backlog rather than with the table.
+
+    **The assertion is not a stopwatch.** A wall-clock ratio on a shared runner is the kind of
+    evidence that passes in the direction nobody wants, so the observable is *which rows the second
+    scan reads*: a poison thread is planted below the resume position between the two sweeps, and
+    the cast that dates a checkpoint raises on it. A sweep that restarts from the beginning fails on
+    it; one that resumes never sees it. Watched failing with `resume_from` forced to `""`, which is
+    the statement exactly as it shipped: `psycopg.errors.InvalidDatetimeFormat` on the second sweep.
+
+    The table is emptied first because this asserts on *which* threads a capped scan reaches, which
+    is a claim about the whole table rather than about the rows this test seeded.
+    """
+
+    async def _run() -> tuple[str, dict[str, int], str, list[str]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 3)
+        await _clear_checkpoint_tables()
+        try:
+            for index in range(6):
+                await _seed_thread(f"zz-resume-{index:02d}", age_days=90)
+
+            async with db.connection(settings.postgres_dsn) as conn:
+                _, _, deferred, resume_from = await _prune_checkpoints(conn, 30)
+            assert deferred == 1, (
+                "the fixture did not outrun the cap, so there is nothing to resume"
+            )
+
+            # Below the resume position and expired: only a scan that re-walks the cleared prefix
+            # reads it.
+            await _poison_thread("zz-resume-00-poison")
+
+            async with db.connection(settings.postgres_dsn) as conn:
+                second, _, _, drained_at = await _prune_checkpoints(conn, 30, resume_from)
+            return resume_from, second, drained_at, await _surviving_threads()
+        finally:
+            monkeypatch.undo()
+            await _clear_checkpoint_tables()
+
+    resume_from, second, drained_at, survivors = asyncio.run(_run())
+
+    assert resume_from == "zz-resume-02", (
+        f"the capped sweep reported {resume_from!r} as where it stopped; it should be the last "
+        "thread the scan reached, which is what the next sweep of the pass starts after"
+    )
+    assert second["checkpoints"] == 3, (
+        f"the resumed sweep disposed of {second['checkpoints']} thread(s), not the remaining three"
+    )
+    assert survivors == ["zz-resume-00-poison"], (
+        f"the drain left expired threads behind: {survivors}. Only the poison row, which is not a "
+        "thread the sweep may date, should survive it."
+    )
+    assert drained_at == "", (
+        "a scan that came back under its cap has seen the table to its end, so it must report the "
+        "beginning as the place to resume — a position that only ever moves forward would leave "
+        "every thread beneath it unreachable"
+    )
+
+
+def test_every_pass_starts_at_the_beginning_of_the_table() -> None:
+    """The resume position dies with the pass, so nothing below it is ever stranded.
+
+    This is the property that made a *durable* watermark the wrong answer to
+    `docs/planning/BACKLOG.md`'s question. A position kept between passes would let a pass that ran
+    out of budget park a cursor part-way through `thread_id` order, and every thread beneath it
+    would then wait for a wrap — which is either an extra whole-table scan on every pass (measured
+    worse than the shipped statement at two sweeps) or a window in which a thread that expires
+    below the cursor is not disposed of. Threading the position through one pass has neither
+    problem, and this is the test of it: a thread that sorts *first* and expires *after* a pass has
+    already swept past its position is disposed of by the next pass, not by some later wrap.
+    """
+
+    async def _run() -> tuple[str, list[str]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 1)
+        await _clear_checkpoint_tables()
+        try:
+            await _seed_thread("zz-wrap-b", age_days=90)
+            await _seed_thread("zz-wrap-c", age_days=90)
+            # One pass: two capped sweeps, so it ends having reached the end of `thread_id` order.
+            await prune_expired_rows()
+            reached_the_end = await _surviving_threads()
+            # Now a thread that sorts before everything the pass looked at expires.
+            await _seed_thread("zz-wrap-a", age_days=90)
+            await prune_expired_rows()
+            return ", ".join(reached_the_end), await _surviving_threads()
+        finally:
+            monkeypatch.undo()
+            await _clear_checkpoint_tables()
+
+    after_first_pass, after_second_pass = asyncio.run(_run())
+
+    assert after_first_pass == "", f"the first pass left threads behind: {after_first_pass}"
+    assert after_second_pass == [], (
+        "a thread that expired below where the previous pass stopped was not disposed of: "
+        f"{after_second_pass}. The next pass must start at the beginning of the table."
+    )
+
+
+async def _analyze_count() -> int:
+    """How many times `checkpoints` has been analyzed, as Postgres itself counts it.
+
+    `pg_stat_force_next_flush()` first, because a backend's statistics are buffered and would
+    otherwise be read a sweep behind — which is the direction that makes this assertion pass.
+    """
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("SELECT pg_stat_force_next_flush()")
+        await cur.execute("SELECT current_schema()")
+        row = await cur.fetchone()
+        await cur.execute(
+            "SELECT analyze_count FROM pg_stat_user_tables "
+            "WHERE relname = 'checkpoints' AND schemaname = %s",
+            (str(row[0]) if row else "public",),
+        )
+        counted = await cur.fetchone()
+    return int(counted[0]) if counted else 0
+
+
+def test_a_drain_analyzes_the_table_once_and_not_once_per_sweep() -> None:
+    """`ANALYZE checkpoints` belongs to the pass, not to each of its sweeps.
+
+    The statistics exist so the *first* scan of a pass plans as a streaming walk of
+    `checkpoints_pkey`; every later sweep resumes inside that same plan. Analyzing again per sweep
+    was a fixed sub-second cost while a pass was one sweep, and stopped being one when
+    `_prune_expired_rows` became a loop — measured on 50 000 threads draining 20 000 expired at the
+    shipped cap of 500, the 40 sweeps of one drain spent **10.8 s of 13.8 s** re-analyzing, and the
+    same drain now costs 1.5 s.
+
+    Counted through `pg_stat_user_tables` rather than by intercepting statements, because what is
+    under test is whether Postgres was asked to do the work, and that is a thing Postgres will say.
+    """
+
+    async def _run() -> tuple[int, int, int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 1)
+        await _clear_checkpoint_tables()
+        try:
+            for index in range(3):
+                await _seed_thread(f"zz-analyze-{index:02d}", age_days=90)
+            before = await _analyze_count()
+            resume, sweeps = "", 0
+            while True:
+                async with db.connection(settings.postgres_dsn) as conn:
+                    _, _, deferred, resume = await _prune_checkpoints(conn, 30, resume)
+                sweeps += 1
+                if not deferred:
+                    break
+            return before, await _analyze_count(), sweeps
+        finally:
+            monkeypatch.undo()
+            await _clear_checkpoint_tables()
+
+    before, after, sweeps = asyncio.run(_run())
+
+    assert sweeps >= 3, f"the fixture drained in {sweeps} sweep(s), so there is nothing to count"
+    assert after - before == 1, (
+        f"the drain analyzed `checkpoints` {after - before} times over {sweeps} sweeps; the "
+        "statistics are what make the pass's first scan plan as an index walk, and every sweep "
+        "after it resumes inside that plan"
+    )

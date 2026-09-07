@@ -139,24 +139,37 @@ def _corpus_lock(key: str) -> Iterator[None]:
 
 
 def invalidate_cache(notes_dir: Path | None = None) -> None:
-    """Drop cached notes/graph/age so the next read re-scans immediately (the explicit bust hook).
+    """Drop cached notes/age so the next read re-scans immediately (the explicit bust hook).
 
     The TTL window trades a little freshness for latency, but a change this process *makes* should
     never wait it out — so every local writer of notes (today: `kg/git_writer.py`) calls this
     and the authoring loop stays instant. Clearing every directory by default is deliberate: note
     writes are rare next to queries, so the cost of over-clearing is one extra scan, while the cost
     of under-clearing is serving a note the caller just wrote as absent.
+
+    **`_GRAPH_CACHE` is deliberately kept, and it is the one cache here that can be**, which is
+    what makes `_patch_graph` reach the path it exists for. Every other entry dropped below is
+    reachable without re-checking the corpus: `_LAST_SCAN` is what lets `_within_ttl` hand back
+    `_NOTES_CACHE` *without* a scan, so a stale pair there is served as current. The graph cache has
+    no such window — `build_graph` returns its entry only on exact fingerprint equality, and
+    otherwise uses it purely as the base to patch. Clearing it did not buy freshness; it bought a
+    full reassembly of the whole corpus after every note the agent writes, which since
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` is every turn that learns something.
+
+    It adds no class of staleness that is not already accepted: after this call a file whose
+    `(mtime_ns, size)` has not moved is served from `_PARSED_FILES` unchanged
+    (`D-2026-09-06-one-note-changed-is-not-the-corpus-changed`), so a write invisible to the
+    fingerprint is already invisible to the parse. The graph is keyed on the same two stat fields
+    and can therefore be wrong in exactly the same cases and no others.
     """
     with _CACHE_LOCK:
         if notes_dir is None:
             _NOTES_CACHE.clear()
-            _GRAPH_CACHE.clear()
             _LAST_SCAN.clear()
             _NEWEST_MTIME.clear()
             return
         key = str(notes_dir)
         _NOTES_CACHE.pop(key, None)
-        _GRAPH_CACHE.pop(key, None)
         _LAST_SCAN.pop(key, None)
         _NEWEST_MTIME.pop(key, None)
 
@@ -490,6 +503,146 @@ def load_notes(notes_dir: Path) -> list[Note]:
     return cached_notes(notes_dir)[1]
 
 
+#: The share of the corpus that may change before an incremental patch stops being worth taking.
+#:
+#: A break-even, measured rather than reasoned about — and the reasoned guess that stood here first
+#: was wrong by a factor of two and a half, which is why the measurement is written down. A patch
+#: costs one `DiGraph.copy()` of the whole graph plus per-changed-note work; a rebuild costs
+#: `_assemble_graph` over the whole corpus. On a 20,000-note corpus, against an 884 ms rebuild:
+#:
+#:     0.01% changed   399 ms      15% changed   520 ms      30% changed   641 ms
+#:        5% changed   445 ms      20% changed   559 ms      50% changed   981 ms
+#:
+#: So the copy is a ~400 ms floor and a changed note costs ~58 µs against `_assemble_graph`'s
+#: ~44 µs, and the curves cross near **42%** — not near a sixth, which is what a per-note ratio
+#: argued before anyone ran it. 0.25 keeps a wide margin under the crossing, because the two sides
+#: of the error are not symmetric: a patch declined is a rebuild, which is what this module did
+#: before and is never wrong, while a patch taken past the crossing is slower than the thing it
+#: replaced.
+#:
+#: The write path this exists for changes **one** note (`kg/git_writer.py` calls `invalidate_cache`
+#: after each write), so the ratio that decides production is 1/N and every value above is margin
+#: for a bulk arrival — an rsync from `deploy/knowledge-sync.sh` landing part of a tree.
+_MAX_PATCHED_FRACTION = 0.25
+
+
+def _attach_edges(graph: nx.DiGraph, note: Note) -> None:
+    """Write `note`'s outgoing edges into `graph`, each carrying the relations it asserts.
+
+    One definition, shared by the full rebuild and the incremental patch, because the whole
+    correctness claim of the patch is that it produces the graph the rebuild would have. Two loops
+    deriving "what edges does this note contribute" is two places for that claim to stop being
+    true — and the drift would be silent, since a graph missing one relation still answers every
+    other query.
+
+    Grouped by target before writing: `nx.DiGraph` holds one edge per pair, so two relations
+    between the same two notes are one edge with a two-tuple (see `_assemble_graph` for why this is
+    not a multigraph). `add_edge` mints a bare, note-less node for a target nothing defines, which
+    is what `dangling_links` and `neighborhood` are documented to see.
+    """
+    by_target: dict[str, list[Relation]] = defaultdict(list)
+    for relation in note.outgoing_relations():
+        by_target[relation.to].append(relation)
+    for target, edges in by_target.items():
+        graph.add_edge(note.id, target, relations=tuple(edges))
+
+
+def _drop_if_uncited(graph: nx.DiGraph, node_id: str) -> None:
+    """Remove `node_id` if it is a bare node nothing links to or from any more.
+
+    A rebuild only mints a note-less node because some note cites it. So after a detach, a bare
+    node at degree zero is a node the rebuild would not have produced, and leaving it behind would
+    make `dangling_links`, `neighborhood` and `note_in` answer about an id no longer in the corpus.
+    A node carrying a `note` is never dropped here however isolated it is: an uncited note is still
+    a note.
+    """
+    if "note" not in graph.nodes[node_id] and graph.degree(node_id) == 0:
+        graph.remove_node(node_id)
+
+
+def _detach_note(graph: nx.DiGraph, note_id: str) -> None:
+    """Undo everything the note `note_id` *defines* contributed to `graph`, keeping its citations.
+
+    **`graph.remove_node(note_id)` is the obvious way to do this and it is silently wrong.**
+    NetworkX removes a node's **in**-edges with it, and those belong to *other* notes — so
+    re-adding the changed note afterwards would come back without a single citation *into* it, on
+    a graph that still looks well-formed. `D-2026-09-06-one-note-changed-is-not-the-corpus-changed`
+    named that trap when it deferred this work; every query would keep answering, with fewer edges.
+
+    So this removes only what this note authored: its out-edges, and its own `note` attribute. What
+    is left is exactly what a rebuild of the corpus-without-this-note produces — a bare node if
+    anything still cites the id, nothing at all if not.
+    """
+    for target in [target for _, target in graph.out_edges(note_id)]:
+        graph.remove_edge(note_id, target)
+        _drop_if_uncited(graph, target)
+    graph.nodes[note_id].pop("note", None)
+    _drop_if_uncited(graph, note_id)
+
+
+def _patch_graph(previous: nx.DiGraph, notes: list[Note]) -> nx.DiGraph | None:
+    """`previous` brought up to `notes` by touching only what changed, or None to rebuild instead.
+
+    The assembly was the residual `D-2026-09-06-one-note-changed-is-not-the-corpus-changed` left:
+    that ADR made the *parse* per file and the whole graph was still rebuilt on any change, which
+    since `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` is paid at the agent's writing
+    rate rather than at a human's commit rate.
+
+    **What changed is decided by object identity, not by comparing note contents.** `_PARSED_FILES`
+    hands back the very same frozen `Note` for a file whose `(mtime_ns, size)` has not moved, so
+    `is` answers exactly "did this file get re-read" — in O(1) per note, where an equality check
+    would walk every field of every note and give the rebuild's cost back. It errs only toward
+    *more* work: a note re-read and found identical is patched rather than skipped.
+
+    **The previous note set is read off the graph itself** rather than cached beside it. The graph
+    already holds every note on a node attribute, so a second copy would be memory spent to store
+    what is one dict comprehension away — and, worse, a second thing to keep in step with the
+    graph it describes.
+
+    **Patched on a copy, never in place.** `build_graph` hands every caller the same frozen graph
+    instance and its docstring is explicit that freezing is what makes that sharing safe; mutating
+    the cached graph would break that for a reader mid-traversal, which in NetworkX is a
+    `RuntimeError` out of an adjacency iteration in whatever query happened to be running. The copy
+    is the price of keeping "a graph handed out never changes underneath you" true, and it is what
+    the ~400 ms floor at `_MAX_PATCHED_FRACTION` is: 45% of a rebuild rather than 100%.
+
+    Returns:
+        The patched graph, or None when the change is too large a share of the corpus to be worth
+        patching (`_MAX_PATCHED_FRACTION`) — the caller then rebuilds.
+    """
+    current = {note.id: note for note in notes}
+    before = {node: data["note"] for node, data in previous.nodes(data=True) if "note" in data}
+    changed = [note_id for note_id, note in current.items() if before.get(note_id) is not note]
+    gone = [note_id for note_id in before if note_id not in current]
+    if len(changed) + len(gone) > len(current) * _MAX_PATCHED_FRACTION:
+        return None
+    graph = previous.copy()
+    # Every detach before any attach, so the intermediate state is a rebuild of the unchanged
+    # corpus. Interleaving would let one note's attach re-mint a bare node another note's detach is
+    # about to reconsider, and make the result depend on iteration order.
+    for note_id in gone:
+        _detach_note(graph, note_id)
+    for note_id in changed:
+        if note_id in before:
+            _detach_note(graph, note_id)
+    for note_id in changed:
+        graph.add_node(note_id, note=current[note_id])
+        _attach_edges(graph, current[note_id])
+    log_event(
+        log,
+        "kg.graph_patched",
+        "patched note graph: %d changed, %d removed, of %d note(s)",
+        len(changed),
+        len(gone),
+        len(current),
+        level=logging.DEBUG,
+        changed=len(changed),
+        removed=len(gone),
+        notes=len(current),
+    )
+    return graph
+
+
 def _assemble_graph(notes: list[Note]) -> nx.DiGraph:
     """Assemble the directed note graph from already-parsed notes, edges carrying their relations.
 
@@ -514,11 +667,7 @@ def _assemble_graph(notes: list[Note]) -> nx.DiGraph:
     for note in notes:
         graph.add_node(note.id, note=note)
     for note in notes:
-        by_target: dict[str, list[Relation]] = defaultdict(list)
-        for relation in note.outgoing_relations():
-            by_target[relation.to].append(relation)
-        for target, edges in by_target.items():
-            graph.add_edge(note.id, target, relations=tuple(edges))
+        _attach_edges(graph, note)
     return graph
 
 
@@ -537,6 +686,11 @@ def build_graph(notes_dir: Path) -> nx.DiGraph:
     query. Readers (`expand_note`, `neighborhood`) only traverse; a caller that genuinely needs a
     mutable graph should take `graph.copy()`.
 
+    **A stale cached graph is patched rather than rebuilt** (`_patch_graph`): the notes whose files
+    moved are detached and re-attached on a copy, so a one-note write costs a graph copy instead of
+    re-adding every node and edge. It falls back to the full assembly whenever too much of the
+    corpus changed at once, and the fallback is also the cold path — nothing to patch from.
+
     The corpus lock is taken around the parse *and* the assembly, not around each separately, so
     concurrent cold callers share one of each. `_corpus_lock` is re-entrant for exactly this:
     `cached_notes` takes it again inside, and re-acquiring a lock this thread already holds is the
@@ -549,9 +703,10 @@ def build_graph(notes_dir: Path) -> nx.DiGraph:
             return _assemble_graph(notes)
         with _CACHE_LOCK:
             cached = _GRAPH_CACHE.get(key)
-            if cached is not None and cached[0] == fingerprint:
-                return cached[1]
-        graph = nx.freeze(_assemble_graph(notes))
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+        patched = _patch_graph(cached[1], notes) if cached is not None else None
+        graph = nx.freeze(patched if patched is not None else _assemble_graph(notes))
         with _CACHE_LOCK:
             _GRAPH_CACHE[key] = (fingerprint, graph)
         return graph

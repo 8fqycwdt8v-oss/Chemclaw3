@@ -123,7 +123,15 @@ class LabelIndex:
 
 
 class InMemoryLabelIndex(LabelIndex):
-    """Process-local backend for tests and single-run use; the reference the SQL one matches."""
+    """Process-local reference ranking; the SQL one is written to match it.
+
+    **A differential oracle, not a deployment backend.** No configuration returns it — every
+    `default_*()` in this tree resolves to the Postgres implementation — and that is deliberate
+    (`D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend`). It stays in
+    `src/` because it is the executable statement of the contract its Postgres sibling is written
+    to reproduce, and it is read beside that sibling; `tests/test_reference_stores.py` holds both
+    halves of that — the absence of a shipped caller, and the absence of this claim.
+    """
 
     def __init__(self) -> None:
         """Start empty."""

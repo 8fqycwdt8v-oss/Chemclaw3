@@ -39,6 +39,7 @@ from chemclaw.agent.chemclaw_agent import (
     harness_tool_names,
     subagent_tool_names,
 )
+from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
 from chemclaw.agent.langgraph_agent import _labelled, build_langgraph_agent, skills_backend
 from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.plan_gate import PLAN_GATE_REASON, plan_approval_refusal, plan_identity
@@ -255,6 +256,18 @@ def _tool_result(result: Any) -> str:
     return str(tool_messages[0].content)
 
 
+def _as_the_model_sees_it(denial: str) -> str:
+    """`denial_result`'s sentence plus the mark `_refusal_message` appends to an access decision.
+
+    The two are composed apart on purpose: `_refusal_message` defangs what it is handed, and
+    `framing._MARK_FORGERY` escapes the system-speech mark like any other span, so a mark composed
+    into the sentence upstream of that pass reached the model as `&#91;system <nonce>]`. Spelled
+    out here rather than exported from `src/`, because the composition is the middleware's and a
+    helper in the shipped module would exist only for these four assertions.
+    """
+    return f"{denial} {SYSTEM_SPEECH_MARK}"
+
+
 def test_a_denied_call_reaches_the_model_as_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
     """The gate blocks the body and the converter hands the model the reason, not a bare failure.
 
@@ -306,7 +319,7 @@ def test_a_dry_run_refuses_a_side_effecting_tool(monkeypatch: pytest.MonkeyPatch
         reset_dry_run(token)
 
     assert expected is not None
-    assert content == denial_result(expected)
+    assert content == _as_the_model_sees_it(denial_result(expected))
 
 
 def test_a_repeated_call_is_refused_on_this_engine(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -598,7 +611,7 @@ def test_a_state_changing_call_is_refused_without_an_approved_plan(
     # is how a phrase of prose came to look load-bearing: three tests spelled it out, so it read
     # like a contract, and `evals/live.py` classified on a copy of it. What a consumer must key on
     # is the discriminator, and that is asserted on the wire in the test below.
-    assert content == denial_result(plan_approval_refusal(write_tool))
+    assert content == _as_the_model_sees_it(denial_result(plan_approval_refusal(write_tool)))
 
 
 def test_a_plan_refusal_reaches_the_stream_with_its_own_discriminator(
@@ -679,7 +692,9 @@ def test_a_read_only_call_is_untouched_by_the_gate(monkeypatch: pytest.MonkeyPat
     # Expressed against the refusal the gate would have produced, not against a phrase of it: the
     # claim is "this call was not gated", and a substring check made that claim depend on wording
     # nobody promised to keep.
-    assert content != denial_result(plan_approval_refusal("ask_clarifying_question"))
+    assert content != _as_the_model_sees_it(
+        denial_result(plan_approval_refusal("ask_clarifying_question"))
+    )
 
 
 def test_both_engines_hash_a_plan_to_the_same_identity() -> None:
@@ -720,7 +735,7 @@ def test_the_gate_is_absent_when_the_deployment_did_not_ask_for_it(
 
     # Same negative, same reason as above — the exact refusal this tool would have earned, rather
     # than a sentence fragment that only happens to appear in it.
-    assert content != denial_result(plan_approval_refusal(write_tool))
+    assert content != _as_the_model_sees_it(denial_result(plan_approval_refusal(write_tool)))
 
 
 def test_the_harness_adds_its_plan_tool_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:

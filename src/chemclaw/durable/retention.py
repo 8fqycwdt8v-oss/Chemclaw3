@@ -468,8 +468,9 @@ _NOT_PRUNED: dict[str, str] = {
 # expired on the same table: 20 000 x 13 goes **6.8 -> 248.9 ms** for the identical statement and
 # the identical cap, and 2 000 x 520 spends **1 181.7 ms scanning 1.04 M rows to retire 40
 # threads**. Bounding the depth (above) is what turns the first of those into 20 000 x 3's
-# **59.8 ms**; the sparsity multiplier itself is untouched by it and needs the durable resume
-# watermark this comment's neighbour already identifies as the missing piece. This statement pays
+# **59.8 ms**; the sparsity multiplier itself is untouched by it, and is untouched by the resume
+# cursor below too — see the paragraph after next, which says what a cursor does and does not buy.
+# This statement pays
 # **one streaming index pass**: on 200 000 live threads / 600 000 rows it reads every row exactly
 # once in **593 ms**. The walk pays a random index probe *plus* a correlated `max()` per thread:
 # **8 147 ms** for the same answer, 13.7x worse, and it read 2.6x the table (26 003 scan rows on a
@@ -483,7 +484,42 @@ _NOT_PRUNED: dict[str, str] = {
 # threads. Raising it to 20 000 costs 847 ms, already *slower* than this statement's full pass while
 # still covering 10%. The bounded walk is faster than this only in proportion to how much of the
 # table it refuses to look at; at equal coverage it loses by an order of magnitude, and buying
-# coverage back needs a durable resume watermark this job has nowhere to keep.
+# coverage back needs a resume position, which is what the paragraph below is about.
+#
+# **`thread_id > %s` is that resume position, and what it fixes is a cost nobody had measured: the
+# *drain* pays this scan once per capped batch rather than once.** A pass sweeps until the backlog
+# is empty (`_prune_expired_rows`), and every sweep used to start at the beginning of `thread_id`
+# order, so sweep k walked past the k-1 batches it had already disposed of before reaching anything
+# new — Sigma-k whole-table passes for a job that needs one. Measured on 200 000 threads x 3, 2 000
+# expired, cap 500: the four scans of one drain grew **280 -> 438 -> 666 -> 881 ms** (2 265 ms)
+# against a flat **294 / 235 / 231 / 237** (996 ms) resuming from the last thread reached, and end
+# to end through `_prune_checkpoints` itself **3 747 -> 1 516 ms**. On a first pass after enabling
+# retention (50 000 threads, 20 000 expired, 40 sweeps) it is **13 499 -> 1 492 ms**, because the
+# ratio is `(sweeps + 1) / 2` — it grows with the backlog rather than with the table. The plan is
+# unchanged and the resume position becomes an `Index Cond` on `checkpoints_pkey`, so the resumed
+# scan is a range scan rather than a filtered one. The control that says this is the right quantity:
+# a **sparse single-sweep** pass (20 000 threads x 3, 2% expired) measures 333 ms before and 338 ms
+# after — unchanged, as the paragraph below says it must be.
+#
+# **It does not make a sparse pass cheaper, and claiming it did would be the failure this module
+# keeps finding.** A single sweep that finds fewer expired threads than its cap still reads every
+# thread, because expiry lives in a JSON field of a table no migration may index (see the module
+# docstring: the only buildable form stores text and `max((...)::timestamptz)` never reads it). No
+# position in `thread_id` order changes that: what a cursor removes is the *repeat*, not the pass.
+# A pass that visits every thread once per drain instead of once per batch is the whole claim.
+#
+# **The cursor lives for one pass and is deliberately not durable, which is the register's question
+# answered rather than dodged.** `docs/planning/BACKLOG.md` carried this as "a watermark is a row
+# this job has nowhere to keep", and the shape it expected was a durable one — a small table, a row
+# in `sync_cursors`, a Temporal search attribute. Measured, that is the wrong bound: the repeat is
+# *within* one drain, because the deletions of pass N are still gone in pass N+1, so a pass that
+# starts at the beginning of the table walks a prefix that has nothing left in it. What a durable
+# cursor would buy on top of this is one table scan per pass, and only for a backlog so large that
+# a pass cannot drain it inside `retention_timeout_seconds` — and it would cost either a wrap scan
+# on every pass (measured worse than the shipped statement at two sweeps: 2T against 1.5T) or a
+# window in which a thread below a parked cursor is never reached. A position that dies with the
+# pass has neither: **every pass starts at the beginning of `thread_id` order**, so coverage is
+# whole by construction and there is no starvation case to reason about.
 #
 # So the fix for the no-statistics case is statistics, not a different statement — see
 # `_ANALYZE_THREADS`. `ORDER BY thread_id` is load-bearing rather than cosmetic: it is what makes
@@ -493,6 +529,7 @@ _NOT_PRUNED: dict[str, str] = {
 # exists at all. It is a probe, not a count — `RetentionOutcome` says so.
 _EXPIRED_THREADS = (
     "SELECT thread_id FROM checkpoints "
+    "WHERE thread_id > %s "
     "GROUP BY thread_id "
     "HAVING max((checkpoint->>'ts')::timestamptz) < now() - make_interval(days => %s) "
     "ORDER BY thread_id LIMIT %s"
@@ -509,12 +546,18 @@ _EXPIRED_THREADS = (
 # **2.5 ms** for the identical statement once analyzed. That window is real and it is exactly the
 # first pass on a fresh deployment; it closes at the first autovacuum analyze.
 #
-# So the sweep analyzes the table itself, every pass, immediately before asking the question. It is
-# cheap because `ANALYZE` samples rather than scans: **242 ms** on 600 000 rows, **424 ms** on
-# 3 000 000 — a fixed sub-second cost on a job that runs once a day, and it also refreshes the
-# statistics this sweep's own deletions invalidate. Measured, the new statistics take effect for
-# the planner **inside the sweep's own uncommitted transaction**, which is why this can sit one
+# So the sweep analyzes the table itself, immediately before asking the question. It is cheap
+# because `ANALYZE` samples rather than scans: **242 ms** on 600 000 rows, **424 ms** on 3 000 000 —
+# a fixed sub-second cost on a job that runs once a day. Measured, the new statistics take effect
+# for the planner **inside the sweep's own uncommitted transaction**, which is why this can sit one
 # statement ahead of the query it fixes rather than needing a connection of its own.
+#
+# **Once per pass, not once per sweep, and that sentence used to read "every pass" while the code
+# did it every sweep.** A pass became a loop when `_prune_expired_rows` started sweeping until the
+# backlog drained, and nothing re-read this comment: measured on 50 000 threads draining 20 000
+# expired at the shipped cap, the 40 sweeps of one drain spent **10.8 s of 13.8 s** here, on a
+# table whose plan did not change between them. `_prune_checkpoints` analyzes on the sweep that
+# starts at the top of the table and not on the ones resuming inside its plan.
 #
 # Unconditional rather than "only when the table has never been analyzed": the conditional needs
 # the `reltuples = -1` sentinel (a Postgres internal, version-dependent) to distinguish "never
@@ -522,6 +565,7 @@ _EXPIRED_THREADS = (
 # of a second a day does not buy that complexity. A role that does not own the table makes
 # `ANALYZE` a warning and a no-op rather than an error, so no privilege guard is needed either.
 _ANALYZE_THREADS = "ANALYZE checkpoints"
+
 
 # The two statements that make the checkpoint sweep survive a turn landing in the middle of it.
 #
@@ -949,9 +993,12 @@ async def _prune_expired_rows() -> RetentionOutcome:
     """
     budget = _Budget()
     total = RetentionOutcome(deleted={}, skipped=[])
+    # Where this pass's checkpoint-thread scan has got to. It starts at the beginning of the table
+    # on every pass and is not kept between them — `_EXPIRED_THREADS` carries why.
+    resume_threads_from = ""
     while True:
         with budget.measuring():
-            outcome = await _sweep_once(budget)
+            outcome, resume_threads_from = await _sweep_once(budget, resume_threads_from)
         for table, count in outcome.deleted.items():
             total.deleted[table] = total.deleted.get(table, 0) + count
         # The skips are a property of the configuration, not of the sweep, so the last pass's list
@@ -967,8 +1014,15 @@ async def _prune_expired_rows() -> RetentionOutcome:
             return total
 
 
-async def _sweep_once(budget: _Budget) -> RetentionOutcome:
+async def _sweep_once(
+    budget: _Budget, resume_threads_from: str = ""
+) -> tuple[RetentionOutcome, str]:
     """Delete rows past their table's retention window; return the per-table counts.
+
+    `resume_threads_from` is where the previous sweep *of this pass* left the checkpoint-thread
+    scan, and the second element of the return is where this one left it. It is threaded through
+    rather than kept anywhere, because the repeat it exists to remove is inside one drain:
+    `_EXPIRED_THREADS` carries the measurement and the argument against a durable position.
 
     Each table is pruned **and committed** in its own statement, so one failure cannot roll back
     the others — with one deliberate exception, the three checkpoint tables, which are one thread's
@@ -1041,7 +1095,9 @@ async def _sweep_once(budget: _Budget) -> RetentionOutcome:
                     # reports each table separately because that is what an operator can go and look
                     # at, and it commits itself, which is why no `commit()` follows this call
                     # either.
-                    counts, skipped, deferred = await _prune_checkpoints(conn, days)
+                    counts, skipped, deferred, resume_threads_from = await _prune_checkpoints(
+                        conn, days, resume_threads_from
+                    )
                     outcome.deleted.update(counts)
                     outcome.skipped.extend(skipped)
                     outcome.threads_deferred = deferred
@@ -1060,7 +1116,7 @@ async def _sweep_once(budget: _Budget) -> RetentionOutcome:
                     first_error = exc
     if first_error is not None:
         raise first_error
-    return outcome
+    return outcome, resume_threads_from
 
 
 async def _prune_by_age(
@@ -1283,11 +1339,13 @@ async def _prune_session_owners(
 
 
 async def _prune_checkpoints(
-    conn: AsyncConnection[TupleRow], days: int
-) -> tuple[dict[str, int], list[str], int]:
-    """Delete every trace of threads whose newest checkpoint has expired.
+    conn: AsyncConnection[TupleRow], days: int, resume_from: str = ""
+) -> tuple[dict[str, int], list[str], int, str]:
+    """Delete every trace of threads whose newest checkpoint has expired, after `resume_from`.
 
-    Returns `(rows deleted per table, tables skipped with the reason, 1 if a tail remains else 0)`.
+    Returns `(rows deleted per table, tables skipped with the reason, 1 if a tail remains else 0,
+    where the next sweep of this pass should start)`. The last element is `""` whenever the scan
+    reached the end of the table, which is also what a caller with no pass to resume passes in.
 
     **The pass analyzes `checkpoints` before it queries it, and that one statement is what bounds
     the work.** `_ANALYZE_THREADS` carries the measurement; the short version is that this table is
@@ -1302,6 +1360,13 @@ async def _prune_checkpoints(
     *deletion*, and what the analyzed plan buys is that the visit is one streaming index pass
     (593 ms over 200 000 live threads) rather than a random probe per thread (8 147 ms, and
     cancelled under a 2 s statement timeout).
+
+    **What `resume_from` buys is that a drain visits every thread once rather than once per capped
+    batch**, and that is a different quantity from the sentence above. A pass sweeps until the
+    backlog is empty, and each sweep used to restart at the beginning of `thread_id` order, so the
+    drain cost Sigma-k whole-table scans. The last thread this sweep reached is returned so the next
+    one starts after it; `_EXPIRED_THREADS`' comment carries the A/B and the reason the position
+    dies with the pass instead of being kept.
 
     **The cap is reported, for the reason `_prune_session_messages` reports its own** — and as a
     probe rather than a remainder (`RetentionOutcome` says why). One over the cap is selected
@@ -1363,17 +1428,27 @@ async def _prune_checkpoints(
         if missing:
             # All or nothing: the tables are created together by one `setup()`, so a partial set is
             # a schema nobody has, and guessing which half to prune would be inventing a case.
-            return {}, [f"{', '.join(missing)} (no checkpointer in this schema)"], 0
+            return {}, [f"{', '.join(missing)} (no checkpointer in this schema)"], 0, ""
         # Before the question, not after: `_EXPIRED_THREADS` only plans as a `LIMIT`-terminated
         # index scan when the planner has statistics for a table no migration can give them to.
-        await cur.execute(_ANALYZE_THREADS)
+        if not resume_from:
+            # **Once per pass, at its first sweep, not once per sweep.** The statistics exist to
+            # make the *first* scan of a pass plan as a streaming index walk, and every later sweep
+            # of that pass resumes inside the same plan. Analyzing again per sweep was a fixed
+            # sub-second cost when a pass was one sweep, and it stopped being one when the pass
+            # became a loop: measured on 50 000 threads draining 20 000 expired at the shipped cap,
+            # 40 sweeps spent **10.8 s of 13.8 s** re-analyzing a table whose plan did not change.
+            # What it gives up is the refresh of statistics this sweep's own deletions invalidate,
+            # and that only ever leaves the planner believing the table is *larger* than it is —
+            # the direction that keeps the conservative plan — until the next pass analyzes it.
+            await cur.execute(_ANALYZE_THREADS)
         cap = settings.retention_max_sessions_per_pass
-        await cur.execute(_EXPIRED_THREADS, (days, cap + 1))
+        await cur.execute(_EXPIRED_THREADS, (resume_from, days, cap + 1))
         found = [str(row[0]) for row in await cur.fetchall()]
         deferred = max(len(found) - cap, 0)
         threads = found[:cap]
         if not threads:
-            return dict.fromkeys(CHECKPOINT_TABLES, 0), [], 0
+            return dict.fromkeys(CHECKPOINT_TABLES, 0), [], 0, ""
         # Both statements re-ask their question inside this transaction;
         # `_DELETE_EXPIRED_CHECKPOINTS` carries the measurement and what the pair does not close.
         await cur.execute(_DELETE_EXPIRED_CHECKPOINTS, (threads, threads, days))
@@ -1394,7 +1469,9 @@ async def _prune_checkpoints(
         "" if len(swept) == len(threads) else " (the rest took a turn mid-sweep and stay)",
         "more remain for the next pass" if deferred else "the backlog is drained",
     )
-    return deleted, [], deferred
+    # The last thread this scan reached, and only when the cap cut it short: a scan that came back
+    # under its cap has seen the table to its end, so the next sweep starts at the beginning.
+    return deleted, [], deferred, threads[-1] if deferred else ""
 
 
 @durable_workflow("background")

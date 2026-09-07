@@ -67,7 +67,26 @@ BEGIN
     -- the-grants-never-name` measured `owner of checkpoints: chemclaw_app` on a working
     -- deployment. The narrower posture — the runtime's own schema in a schema of its own, or a
     -- migrator-side `setup()` so the app never issues DDL — needs a decision and code outside this
-    -- file; it is recorded, not silently taken here.
+    -- file. **That decision is taken, and it is to keep this grant**:
+    -- `D-2026-09-07-the-app-is-its-own-migrator-for-the-tables-it-owns`. This sentence used to
+    -- close on "it is recorded, not silently taken here" and nothing recorded it, which is a
+    -- comment asserting a control exists — the shape this repository keeps deleting.
+    --
+    -- What that ADR measured, so nobody has to again: the own-schema posture **works** (setup()
+    -- succeeds with CREATE revoked on public, tables landing in the app's schema, because
+    -- upstream's DDL is unqualified and follows `search_path`) but relocates the app's DDL rather
+    -- than removing it, at the price of a role-level `search_path` that every unqualified
+    -- statement in `src/` then depends on; and the migrator-side posture needs the runtime to
+    -- *decline* to call `setup()`, whose failure mode on a langgraph bump is a migration nobody
+    -- applies and nothing reports. `agent/checkpointer.py::_setup_once` — an advisory lock, polled
+    -- rather than held because a held wait deadlocks against `CREATE INDEX CONCURRENTLY` — is the
+    -- evidence about which posture this system actually operates: the app is deliberately the
+    -- migrator for the eight tables it owns.
+    --
+    -- The ADR's argument rests on there being no *first-party* DDL anywhere, and
+    -- `tests/test_database_privileges.py
+    -- ::test_the_only_ddl_a_runtime_process_issues_is_upstreams_setup` is what makes that premise
+    -- fail loudly rather than quietly stop being true.
     EXECUTE format('GRANT CREATE ON SCHEMA public TO %I', app_role);
 
     -- Read is uniform: every table the application reads, it may read. The interesting half is

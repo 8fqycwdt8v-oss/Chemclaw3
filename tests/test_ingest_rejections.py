@@ -23,6 +23,7 @@ Postgres-backed, because a ledger nothing durably wrote is the thing this replac
 import asyncio
 import json
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -816,6 +817,84 @@ def test_every_processed_refusal_reaches_the_ledger(
             "advanced past it, so no later run will ever offer it again"
         )
         await _clear(source)
+
+    asyncio.run(_run())
+
+
+def test_a_bulk_backfill_does_not_re_refuse_the_files_it_has_already_ingested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ledger row that says an ingested entry was never fetched is a record of the opposite.
+
+    **The defect.** `is_late_arrival` is handed the *chunk's* floor, and the chunk floor advances
+    with the drain. On a bulk-copy backfill — files whose mtime is the copy time and whose payload
+    timestamps are old, which is what copying a corpus into a drop directory produces — every file
+    the previous chunks ingested has a payload behind the new cursor and an mtime after it, so it
+    re-qualifies as a late arrival on every later chunk. Measured on a 3,000-file corpus at the
+    shipped batch size: 43,471 ledger writes across 30 chunks, growing 99, 199, 299 … per chunk,
+    each row saying "no scheduled run will fetch it" about an entry sitting in the corpus. A
+    chemist asking about that entry is told the reason it was refused.
+
+    **What the fix is.** Lateness is a question about the *run's* floor — will any scheduled run
+    ever fetch this file — and the run's floor is the one the first chunk reaches down to, behind
+    the cursor by `eln_sync_overlap_seconds`. A continuation chunk's floor is not that, and cannot
+    answer the question: every file between the two was fetched by this very run. So the scan
+    belongs to the chunk that has the overlap window, exactly as the overlap replay does, and
+    `_BoundedIngest` is told which chunk it is rather than inferring it.
+
+    Driven through the real activity over two chunks, because one chunk cannot show it.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        source = "ord-backfill"
+        await _clear(source)
+        monkeypatch.setattr(eln_sync, "_reaction_store", InMemoryFingerprintStore)
+        monkeypatch.setattr(eln_sync, "_molecule_store", InMemoryFingerprintStore)
+        monkeypatch.setattr(eln_sync, "_record_store", InMemoryReactionRecordStore)
+        monkeypatch.setattr(eln_sync, "_label_index", InMemoryLabelIndex)
+
+        drop = tmp_path / "drop"
+        drop.mkdir()
+        folder = tmp_path / "manifests" / source
+        folder.mkdir(parents=True)
+        (folder / "datasource.yaml").write_text(
+            f"name: {source}\n"
+            "description: An ORD corpus bulk-copied into a drop directory.\n"
+            "ingest: chemclaw.ingest.eln.ord_adapter:OrdJsonAdapter\n"
+            f"config:\n  export_dir: {drop}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path / "manifests"))
+        monkeypatch.setattr(settings, "eln_sync_batch_size", 4)
+
+        since = datetime(2026, 3, 10, tzinfo=UTC)
+        copied_at = time.time()
+        for index in range(10):
+            _write_at(drop, f"copied-{index}", since + timedelta(hours=index + 1), 42.0)
+            # The copy time, which is what a bulk copy leaves on every file it writes.
+            os.utime(drop / f"copied-{index}.json", (copied_at, copied_at))
+
+        first = await ActivityEnvironment().run(eln_sync.sync_eln_entries, source, since, True)
+        assert len(first.summary.ingested) == 4, "the first chunk takes one batch"
+        second = await ActivityEnvironment().run(
+            eln_sync.sync_eln_entries, source, first.summary.next_cursor, False
+        )
+        # Four new ones plus the boundary entry the inclusive cursor replays.
+        assert set(second.summary.ingested) >= {f"copied-{index}" for index in (4, 5, 6, 7)}, (
+            "the second chunk takes the next batch"
+        )
+
+        ingested = set(first.summary.ingested) | set(second.summary.ingested)
+        refused = {row[0] for row in await _rows(source)}
+        assert refused.isdisjoint(ingested), (
+            f"{len(refused & ingested)} ledger row(s) say a scheduled run will never fetch an "
+            "entry this drain has already ingested — the ledger is what a chemist is shown when "
+            "they ask why a record is missing, and these rows are about records that are present"
+        )
+        assert refused == set(), "nothing in this corpus was refused at all"
+        await _clear(source)
+        await _forget_records(source)
 
     asyncio.run(_run())
 

@@ -46,6 +46,27 @@ async def _reset(conn: psycopg.AsyncConnection[Any]) -> None:
     await conn.commit()
 
 
+def _with_a_short_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shorten the claim lease so an abandoned claim's expiry is real rather than hand-written.
+
+    A claim is a lease, so a pass that *dies* — a pod eviction, an activity timeout, the per-sink
+    ceiling — leaves the row held until that lease expires, and "the next pass picks it up" is only
+    true afterwards. Every test below that simulates a dead pass by claiming and never marking has
+    to let the lease run out, and letting the real predicate do it (rather than writing `claimed_at`
+    back in SQL) is what keeps the simulation the same shape as the failure it stands for.
+
+    The lease is derived from `result_publish_timeout_seconds`, so shortening that is how it is
+    shortened; there is no lease knob of its own, deliberately (see the config property).
+    """
+    monkeypatch.setattr(settings, "result_publish_timeout_seconds", 0.01)
+
+
+async def _claim_after_the_previous_pass_died(sink: str, limit: int = 10) -> list[Any]:
+    """Claim as the next scheduled pass would, once the dead pass's lease has expired."""
+    await asyncio.sleep(settings.result_publish_lease_seconds + 0.01)
+    return await outbox.claim(sink, limit)
+
+
 def _with_sink(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
     """Enable sinks without needing a manifest on disk.
 
@@ -219,13 +240,17 @@ def test_an_unprojectable_payload_does_not_raise_into_the_calculation(
 def test_claiming_a_row_spends_its_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
     """The attempt is spent by the claim, not by the failure report.
 
-    **This is what makes the budget correct when two runs overlap** — a scheduled drain and an
-    operator's manual one. The claim commits before anything is delivered, because a delivery can
-    take the better part of a minute and must not hold a row lock across it; so if the increment
-    happened in `mark_failed` instead, both runs would see the same pending rows, deliver them
-    twice and each record a failure. Duplicate delivery is safe (every key on the far side is a
-    content hash); an attempt budget emptying twice as fast is not, because it retires rows a
-    working destination would have accepted.
+    The increment has to happen in the claim rather than in `mark_failed`, because a pass that dies
+    between the two records no failure at all and must still have cost something — otherwise a row
+    whose delivery kills the worker every time is retried forever.
+
+    **This test used to assert the double-claim as the design.** It claimed twice with no mark
+    between them "as two overlapping runs would do" and asserted `attempts == 2`, on the argument
+    that spending the attempt in the claim is what keeps the budget correct when two runs overlap.
+    Spending it there is necessary and was never sufficient: measured with a 1.0 s sink and a
+    second drain started 0.3 s in, both drains *delivered* the row and it came to rest at
+    `attempts=2` for one delivery. So the second claim is the thing to refuse, and the assertion
+    below is now the one this file should always have made — one delivery, one attempt.
     """
 
     async def _run() -> None:
@@ -238,14 +263,29 @@ def test_claiming_a_row_spends_its_attempt(monkeypatch: pytest.MonkeyPatch) -> N
 
         # Two claims with no `mark_failed` between them — as two overlapping runs would do.
         assert len(await outbox.claim("alpha", 10)) == 1
-        assert len(await outbox.claim("alpha", 10)) == 1
+        assert await outbox.claim("alpha", 10) == [], (
+            "the row is leased to the first claim; a second overlapping run must not take it"
+        )
 
         async with outbox._connect("test_fixture") as conn:
             cursor = await conn.execute(
                 "SELECT attempts FROM result_publications WHERE calc_ref = 'counted'"
             )
             row = await cursor.fetchone()
-        assert row is not None and row[0] == 2, "each claim spends one attempt"
+        assert row is not None and row[0] == 1, "one claim spends one attempt"
+
+        # And the attempt is still the claim's rather than the report's: the failure that follows
+        # records the reason without charging a second one. Shortened only here, because the
+        # exclusion above is exactly what a full-length lease is for.
+        _with_a_short_lease(monkeypatch)
+        claimed = await _claim_after_the_previous_pass_died("alpha")
+        await outbox.mark_failed([claimed[0][0]], "the destination said no")
+        async with outbox._connect("test_fixture") as conn:
+            cursor = await conn.execute(
+                "SELECT attempts FROM result_publications WHERE calc_ref = 'counted'"
+            )
+            row = await cursor.fetchone()
+        assert row is not None and row[0] == 2
 
     asyncio.run(_run())
 
@@ -559,7 +599,9 @@ def test_two_workers_claiming_at_once_split_the_queue(monkeypatch: pytest.Monkey
 
         async with outbox._connect("test_fixture") as first:
             # Worker A, mid-claim: rows updated, transaction still open, locks still held.
-            cursor = await first.execute(outbox._CLAIM, ("alpha", 5, 2))
+            cursor = await first.execute(
+                outbox._CLAIM, ("alpha", 5, settings.result_publish_lease_seconds, 2)
+            )
             mine = {str(row[1]) for row in await cursor.fetchall()}
             # Worker B, on its own connection, against that live lock. Bounded well under the
             # statement timeout so a blocked claim is reported as a blocked claim.
@@ -601,6 +643,7 @@ def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
         monkeypatch.setattr(settings, "result_publish_max_attempts", 2)
+        _with_a_short_lease(monkeypatch)
         async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
         await outbox.enqueue([_record("abandoned")])
@@ -617,9 +660,11 @@ def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
             )
 
         # The second claim spends the last attempt and reports no failure — a worker that died
-        # mid-delivery.
-        assert len(await outbox.claim("alpha", 10)) == 1
-        assert await outbox.claim("alpha", 10) == [], "a row out of attempts was claimed again"
+        # mid-delivery, which is a lease nobody comes back for.
+        assert len(await _claim_after_the_previous_pass_died("alpha")) == 1
+        assert await _claim_after_the_previous_pass_died("alpha") == [], (
+            "a row out of attempts was claimed again"
+        )
 
         async with outbox._connect("test_fixture") as conn:
             cursor = await conn.execute(
@@ -700,21 +745,27 @@ def test_a_row_that_spends_its_budget_without_an_outcome_is_retired_not_stranded
 
     The interruption is simulated by claiming and never marking, which is exactly what every one of
     those failures leaves behind — the accounting is identical whether the pass died in Temporal,
-    in the pod, or at the ceiling.
+    in the pod, or at the ceiling. Since a claim is now a *lease*, that also means each simulated
+    pass has to let the dead one's lease expire before it can claim, which is the real recovery
+    path rather than a fixture convenience: nothing else runs, and the row comes back inside the
+    next ordinary claim.
     """
     from chemclaw.publish import backfill
 
     async def _run() -> None:
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
+        _with_a_short_lease(monkeypatch)
         async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
         assert await outbox.enqueue([_record("stranded")]) == 1
 
         for _ in range(settings.result_publish_max_attempts):
-            assert len(await outbox.claim("alpha", 10)) == 1, "the row must stay claimable"
+            assert len(await _claim_after_the_previous_pass_died("alpha")) == 1, (
+                "the row must come back once the dead pass's lease expires"
+            )
         # The pass that finds the budget spent is the one that has to say so.
-        assert await outbox.claim("alpha", 10) == []
+        assert await _claim_after_the_previous_pass_died("alpha") == []
 
         async with outbox._connect("test_fixture") as conn:
             cursor = await conn.execute(
@@ -761,15 +812,19 @@ def test_the_real_failure_reason_outranks_the_reaper_s_generic_one(
     async def _run() -> None:
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
+        _with_a_short_lease(monkeypatch)
         async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
         await outbox.enqueue([_record("has-a-reason")])
         claimed = await outbox.claim("alpha", 10)
         await outbox.mark_failed([claimed[0][0]], "connection refused by the results warehouse")
+        # A reported failure releases the lease as it records the reason, so the retry is the next
+        # pass rather than the next lease period — claimed straight away, with no wait.
+        assert len(await outbox.claim("alpha", 10)) == 1
         # Spend the rest of the budget the silent way, then let the next claim retire it.
-        for _ in range(settings.result_publish_max_attempts - 1):
-            await outbox.claim("alpha", 10)
-        await outbox.claim("alpha", 10)
+        for _ in range(settings.result_publish_max_attempts - 2):
+            await _claim_after_the_previous_pass_died("alpha")
+        await _claim_after_the_previous_pass_died("alpha")
 
         async with outbox._connect("test_fixture") as conn:
             cursor = await conn.execute(
@@ -913,5 +968,124 @@ def test_rows_for_a_disabled_sink_stop_paging_and_are_reported_instead(
         assert any("no longer enabled" in record.getMessage() for record in caplog.records), (
             "the stranded rows must still be reported — silence is how they are forgotten"
         )
+
+    asyncio.run(_run())
+
+
+def test_two_overlapping_drains_do_not_both_deliver_one_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The case `_CLAIM`'s comment was written for, driven rather than reasoned about.
+
+    A scheduled drain and an operator's manual one overlap over the **delivery**, which takes
+    seconds to a minute — not over the claim, which takes milliseconds. `FOR UPDATE SKIP LOCKED`
+    excludes only overlapping *transactions*, and the claim commits immediately by design so no row
+    lock is held across a delivery, so the second run's claim happens after that commit and sees a
+    row that is still `pending`. Measured on the unfixed outbox with a 1.0 s sink and a second
+    drain started 0.3 s in: **both** drains delivered the row and it came to rest at `attempts=2`
+    for one delivery — an attempt budget of 8 that empties after 4 real attempts against one
+    destination's outage.
+
+    What closes it is the lease: the claim moves the row out of `pending`, so the second run skips
+    it by predicate rather than by lock duration.
+    """
+    from chemclaw.durable import publish_results
+
+    delivered: list[str] = []
+
+    class _SlowSink:
+        """A destination that takes a second, which is what every real one does."""
+
+        async def deliver(self, records: Any) -> None:
+            await asyncio.sleep(1.0)
+            delivered.extend(record.calc_ref for record in records)
+
+        async def aclose(self) -> None:
+            """Holds nothing; present because `ResultSink` requires it of every sink."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect("test_fixture") as conn:
+            await _reset(conn)
+        assert await outbox.enqueue([_record("overlap")]) == 1
+
+        async def _manual_drain() -> Any:
+            # The operator, 0.3 s into the scheduled run's delivery.
+            await asyncio.sleep(0.3)
+            return await publish_results._drain_one("alpha", _SlowSink(), 10)
+
+        scheduled, manual = await asyncio.gather(
+            publish_results._drain_one("alpha", _SlowSink(), 10), _manual_drain()
+        )
+
+        assert delivered == ["overlap"], (
+            "two overlapping drains delivered one row twice; the second must skip it by predicate"
+        )
+        assert (scheduled.delivered, manual.delivered) == (1, 0)
+        async with outbox._connect("test_fixture") as conn:
+            cursor = await conn.execute(
+                "SELECT state, attempts FROM result_publications WHERE calc_ref = 'overlap'"
+            )
+            assert await cursor.fetchone() == ("delivered", 1), (
+                "one delivery must spend one attempt, not one per overlapping drain"
+            )
+
+    asyncio.run(_run())
+
+
+def test_a_lease_its_claimer_died_holding_returns_to_the_queue_on_the_next_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The crashed claimer, which is what a lease costs and has to pay for itself.
+
+    A claim that moves a row out of `pending` is a claim that can be abandoned: a pod eviction, an
+    activity `start_to_close` expiry or the per-sink ceiling leaves the row `in_flight` with nobody
+    coming back for it. Without a way out that row is worse than the doubled attempt it replaced —
+    it is invisible to the claim *and* to `--requeue`.
+
+    The way out is the lease's own predicate, evaluated at the head of the next ordinary claim for
+    that sink — not a second timer nobody runs. So this test never marks the row: it claims it,
+    proves no other drain can take it while the lease holds, lets the lease expire, and claims
+    again with nothing else having happened in between.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
+        # The lease is the drain activity's own ceiling; shortened here so the expiry is real
+        # rather than hand-written into `claimed_at`.
+        monkeypatch.setattr(settings, "result_publish_timeout_seconds", 0.5)
+        async with outbox._connect("test_fixture") as conn:
+            await _reset(conn)
+        assert await outbox.enqueue([_record("abandoned")]) == 1
+
+        assert len(await outbox.claim("alpha", 10)) == 1
+        assert await outbox.claim("alpha", 10) == [], (
+            "a second drain must not take a row the first is still delivering"
+        )
+        async with outbox._connect("test_fixture") as conn:
+            cursor = await conn.execute(
+                "SELECT state, attempts, claimed_at IS NOT NULL "
+                "FROM result_publications WHERE calc_ref = 'abandoned'"
+            )
+            # Still `pending`, which is the truth — it has not been delivered — and held by a
+            # lease, which is what the second claim above was refused by.
+            assert await cursor.fetchone() == ("pending", 1, True)
+
+        # The claimer died here: no `mark_delivered`, no `mark_failed`, ever.
+        await asyncio.sleep(settings.result_publish_lease_seconds + 0.1)
+
+        assert len(await outbox.claim("alpha", 10)) == 1, (
+            "an expired lease must return its row to the queue on the next ordinary claim"
+        )
+        async with outbox._connect("test_fixture") as conn:
+            cursor = await conn.execute(
+                "SELECT state, attempts FROM result_publications WHERE calc_ref = 'abandoned'"
+            )
+            assert await cursor.fetchone() == ("pending", 2), (
+                "the recovered row spends the second claim's attempt and no more"
+            )
 
     asyncio.run(_run())

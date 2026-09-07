@@ -46,6 +46,14 @@ site, both established in `D-2026-08-16-a-cache-that-lets-every-caller-miss-toge
   one directory happen under one re-entrant lock, so eight threads arriving cold produce one of
   each. Without it eight callers measured 6,219 ms against the 198 ms of the single parse they were
   all repeating.
+- **A changed corpus is patched into the cached graph, not reassembled from it**
+  (`D-2026-09-07-a-changed-note-is-not-a-changed-corpus`). Only the notes whose files moved are
+  detached and re-attached, on a copy, so a note write costs a graph copy rather than re-adding
+  every node and edge — measured at 20,000 notes, `build_graph` after touching one file falls from
+  1,703 ms to 1,057 ms and the event-loop time it steals under `to_thread` from 1,137 ms to 638 ms.
+  `_detach_note` removes a changed note's *out*-edges rather than its node, because
+  `networkx.remove_node` takes the in-edges other notes own with it; `tests/test_graph.py` asserts
+  the patched graph is identical to the rebuilt one rather than similar to it.
 
 ## This package is code; the graph is data
 

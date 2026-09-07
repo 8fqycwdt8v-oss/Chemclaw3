@@ -455,6 +455,13 @@ class ErasureReport:
     erased: dict[str, int] = field(default_factory=dict)
     retained: dict[str, int] = field(default_factory=dict)
     residue: dict[str, int] = field(default_factory=dict)
+    # The session ids the residue is under, so the operator has the *identifiers* and not only a
+    # count. Without them the report's own remedy — "remove these rows by session id" — named
+    # something an operator could not obtain: `session_owners` is gone by the time the count runs,
+    # so there is no query left that answers "which sessions were those". This is what makes the
+    # residue finishable rather than only reportable
+    # (D-2026-09-07-a-residue-nobody-can-name-is-a-residue-nobody-can-finish).
+    residue_sessions: list[str] = field(default_factory=list)
 
     @property
     def erased_total(self) -> int:
@@ -474,6 +481,10 @@ class ErasureReport:
         session's rows survive while its `session_owners` row does not, and every session-scoped
         sweep in this system finds a session through that row. `erase_actor` says so in its report
         and in an ERROR log line rather than returning a number an operator would read as success.
+
+        **Re-running is still not the remedy, and there is now one that is.** `finish_erasure`
+        takes the session ids off `residue_sessions` and deletes by id, which is a route that never
+        reads `session_owners` at all.
         """
         return sum(self.residue.values())
 
@@ -492,8 +503,8 @@ async def _actor_sessions(actors: list[str]) -> list[str]:
             return [str(row[0]) for row in await cur.fetchall()]
 
 
-async def _residue_for(sessions: list[str]) -> dict[str, int]:
-    """Count what still names these sessions, table by table — after their ownership rows are gone.
+async def _residue_for(sessions: list[str]) -> tuple[dict[str, int], list[str]]:
+    """Count what still names these sessions, and say which ones — after their owner rows are gone.
 
     The check that turns an unreachable residue into a loud "re-run this". It is the second half of
     the guard, not a duplicate of the first: the turn claims close the window a *claimed* session
@@ -504,21 +515,26 @@ async def _residue_for(sessions: list[str]) -> dict[str, int]:
     """
     probes = _residue_columns()
     residue: dict[str, int] = {}
+    holding: set[str] = set()
     async with db.connection(_session_dsn()) as conn:
         async with conn.cursor() as cur:
             present = await existing_tables(cur, {table for table, _ in probes})
             for table, column in probes:
                 if table not in present:
                     continue
+                # Grouped by the session column rather than counted flat, because the session ids
+                # are half the answer: `finish_erasure` deletes by id, and after this transaction
+                # `session_owners` no longer holds a query that could recover them.
                 await cur.execute(
-                    f"SELECT count(*) FROM {table} WHERE {column} = ANY(%(sessions)s)",
+                    f"SELECT {column}, count(*) FROM {table} "
+                    f"WHERE {column} = ANY(%(sessions)s) GROUP BY {column}",
                     {"sessions": sessions},
                 )
-                row = await cur.fetchone()
-                count = int(row[0]) if row else 0
-                if count:
-                    residue[table] = count
-    return residue
+                for session_id, count in await cur.fetchall():
+                    if int(count):
+                        residue[table] = residue.get(table, 0) + int(count)
+                        holding.add(str(session_id))
+    return residue, sorted(holding)
 
 
 async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
@@ -578,7 +594,7 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
         await _erase_within_claims(actors, report, apply=apply)
     if apply and sessions:
         try:
-            report.residue = await _residue_for(sessions)
+            report.residue, report.residue_sessions = await _residue_for(sessions)
         except psycopg.Error as exc:
             raise ErasureError(f"the database refused the erasure: {exc}") from exc
         if report.residue:
@@ -588,12 +604,14 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
             # line and `ErasureReport.residue` between them prevent.
             logger.error(
                 "erasure for actor %s is INCOMPLETE: %s row(s) came back under session id(s) "
-                "whose ownership row is gone, so no later erasure can reach them: %s. A turn was "
-                "running on one of these sessions while the sweep ran; stop it and have an "
-                "operator with owner rights remove these rows by session id.",
+                "whose ownership row is gone, so no *actor*-scoped erasure can reach them: %s. "
+                "A turn was running on one of these sessions while the sweep ran; stop it, then "
+                "finish the "
+                "erasure with `python -m chemclaw.cli.erase_actor --finish %s --apply`.",
                 actor,
                 report.residue_total,
                 ", ".join(f"{table}={count}" for table, count in sorted(report.residue.items())),
+                " ".join(report.residue_sessions),
             )
     logger.info(
         "erasure %s for actor: %d conversational row(s) across %d table(s); "
@@ -767,6 +785,179 @@ async def _erase_within_claims(actors: list[str], report: ErasureReport, *, appl
         # raising this seam's own error, which is a `ValueError` like every other
         # "this deployment is misconfigured" failure in the codebase.
         raise ErasureError(f"the database refused the erasure: {exc}") from exc
+
+
+# The one residue table `finish_erasure` cannot clear, and why that is a decision rather than a
+# gap. `infra/sql/grants/app_privileges.sql` withholds DELETE on `tool_result_links` on purpose —
+# "a link may only disappear behind its blob", because the blob is content-addressed and shared, so
+# a link deleted in front of it would either strand the bytes or take another session's result with
+# them. A link naming a session that resolves to nothing is collected by
+# `durable/retention.py`'s age sweep along with the blob it points at. Named here rather than
+# silently left out of the count, for the reason `_BEYOND_REACH` exists at all: a finish that
+# reported a table it never touched as zero would be claiming a completeness it has not got.
+_FINISH_LEAVES: dict[str, str] = {
+    _RESIDUE_LINK_TABLE: (
+        "the runtime role is denied DELETE here on purpose — a link may only disappear behind the "
+        "content-addressed blob it points at, and `durable/retention.py`'s "
+        "`retention_tool_results_days` sweep is what collects both"
+    ),
+}
+
+
+@dataclass
+class ResidueReport:
+    """What finishing an interrupted erasure removed, and what it could not.
+
+    Separate from `ErasureReport` rather than a mode of it, because the two answer different
+    questions and share no tier: an erasure is about a *person* and has a retained half it must
+    report; this is about a set of orphaned session ids and has none — the record tier is keyed by
+    actor and is not reachable from a session id at all, which is exactly why this route cannot be
+    used to erase anything the actor route would have kept.
+    """
+
+    sessions: list[str]
+    applied: bool
+    removed: dict[str, int] = field(default_factory=dict)
+    remaining: dict[str, int] = field(default_factory=dict)
+    refused: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def removed_total(self) -> int:
+        """How many rows this run removed, or would remove in a dry run."""
+        return sum(self.removed.values())
+
+    @property
+    def finished(self) -> bool:
+        """Whether every named session is now gone from every table this route can reach."""
+        return not self.remaining and not self.refused
+
+
+_STILL_OWNED = "SELECT session_id FROM session_owners WHERE session_id = ANY(%(sessions)s)"
+
+
+async def finish_erasure(sessions: list[str], *, apply: bool = False) -> ResidueReport:
+    """Delete an interrupted erasure's residue by session id, and prove it is gone.
+
+    **This is the remedy `erase_actor`'s residue report names, and it exists because the residue
+    was never out of reach — the *query* that finds it was.**
+    `D-2026-09-06-an-erasure-that-races-a-live-turn-is-not-an-erasure` ended on "an operator with
+    owner rights has to remove those rows by session id", and measuring that sentence is what
+    closed it: every statement this runs comes from `session_store._session_delete_statements()`,
+    the same set `delete_session` already executes against the runtime role's own privileges, and
+    not one of them reads `session_owners`. What the actor route cannot do is *find* the sessions,
+    because it reaches them through the ownership row it has already deleted — so the missing piece
+    was the identifiers, and `ErasureReport.residue_sessions` is now where they come from.
+
+    **A session that is still owned is refused, one by one, rather than deleted.** That is the
+    whole safety property of this route: it can only finish what is already beyond the actor
+    erasure. Without it, `--finish <any session id>` would be an unscoped conversation delete that
+    skips the ownership check every other path in this system makes, which is a bigger hole than
+    the one it closes.
+
+    **It takes the same durable turn claims and refuses the same way** (`_sessions_held`): the
+    residue exists precisely because a turn was writing, and finishing while that turn is still
+    running would produce a second residue under the same ids.
+
+    **The dry run is real, for `erase_actor`'s reason**: the DELETEs run and are rolled back, so the
+    counts an operator signs off on are the database's answer rather than a prediction.
+
+    Args:
+        sessions: The session ids to clear — `ErasureReport.residue_sessions`, verbatim.
+        apply: Commit. The default counts and rolls back.
+
+    Returns:
+        A `ResidueReport`: what went, what is still there afterwards, and any session refused
+        because it is still owned.
+
+    Raises:
+        ErasureError: no session was named, a turn is running on one of them, or the database
+            refused a statement.
+    """
+    named = [session_id for session_id in dict.fromkeys(sessions) if session_id.strip()]
+    if not named:
+        raise ErasureError("name at least one session id; refusing to finish an empty erasure")
+    report = ResidueReport(sessions=named, applied=apply)
+    try:
+        async with db.connection(_session_dsn()) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_STILL_OWNED, {"sessions": named})
+                for row in await cur.fetchall():
+                    report.refused[str(row[0])] = (
+                        "still has an ownership row, so it is reachable by the actor erasure and "
+                        "by its owner; this route only finishes what is already orphaned"
+                    )
+    except psycopg.Error as exc:
+        raise ErasureError(f"the database refused the erasure: {exc}") from exc
+    targets = [session_id for session_id in named if session_id not in report.refused]
+    if not targets:
+        return report
+    async with _sessions_held(targets):
+        await _delete_orphaned_sessions(targets, report, apply=apply)
+    if apply:
+        try:
+            report.remaining, _ = await _residue_for(targets)
+        except psycopg.Error as exc:
+            raise ErasureError(f"the database refused the erasure: {exc}") from exc
+        # The link table is expected to survive and says so in `_FINISH_LEAVES`; reporting it as
+        # "remaining" would make every finish read as unfinished for ever.
+        report.remaining.pop(_RESIDUE_LINK_TABLE, None)
+    if report.remaining:
+        logger.error(
+            "finishing the erasure of session(s) %s left %d row(s) behind: %s. Another turn wrote "
+            "to one of these sessions while this ran; stop it and run the same command again.",
+            " ".join(targets),
+            sum(report.remaining.values()),
+            ", ".join(f"{table}={count}" for table, count in sorted(report.remaining.items())),
+        )
+    else:
+        logger.info(
+            "erasure %s for %d orphaned session(s): %d row(s) across %d table(s)",
+            "finished" if apply else "previewed",
+            len(targets),
+            report.removed_total,
+            len([t for t, n in report.removed.items() if n]),
+        )
+    return report
+
+
+async def _delete_orphaned_sessions(
+    sessions: list[str], report: ResidueReport, *, apply: bool
+) -> None:
+    """Run the per-session deletes for every named session, in one transaction.
+
+    One transaction across all of them for `erase_actor`'s reason and one more: a finish
+    interrupted half way is a *second* partial erasure, under ids whose owner rows are already
+    gone, and the whole point of this route is that there is no third place to go.
+
+    Raises:
+        ErasureError: the database refused a statement.
+    """
+    statements = _session_delete_statements()
+    try:
+        async with db.connection(_session_dsn()) as conn:
+            async with conn.cursor() as cur:
+                present = await existing_tables(cur, {table for table, _ in statements})
+                for table, statement in statements:
+                    # Zero rather than absent, for the reason `_erase_within_claims` reports a
+                    # missing table as zero: a report whose keys vary by deployment is one an
+                    # operator cannot compare against another run.
+                    report.removed.setdefault(table, 0)
+                    if table not in present:
+                        continue
+                    for session_id in sessions:
+                        await cur.execute(statement, {"session_id": session_id})
+                        report.removed[table] += max(cur.rowcount, 0)
+            if apply:
+                await conn.commit()
+            else:
+                await conn.rollback()
+    except psycopg.Error as exc:
+        raise ErasureError(f"the database refused the erasure: {exc}") from exc
+
+
+def finish_leaves() -> tuple[tuple[str, str], ...]:
+    """(table, why) for what a finished erasure still leaves behind, so the CLI can print it."""
+    return tuple(_FINISH_LEAVES.items())
 
 
 def retention_reasons() -> tuple[tuple[str, str], ...]:

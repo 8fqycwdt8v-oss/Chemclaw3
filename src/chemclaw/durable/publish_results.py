@@ -254,10 +254,11 @@ class PublishResultsWorkflow:
         """Run one drain pass and return the per-sink account."""
         return await workflow.execute_activity(
             drain_result_publications,
-            start_to_close_timeout=timedelta(
-                seconds=settings.result_publish_timeout_seconds
-                * max(1, len(settings.result_sink_list))
-            ),
+            # The same number `publish/outbox.py` leases a claimed row for, and it has to be:
+            # the lease exists to keep a second drain off a row this activity still holds, so the
+            # moment it can no longer hold one is the moment the lease must end. One expression,
+            # in `result_publish_lease_seconds`, so the two cannot drift apart.
+            start_to_close_timeout=timedelta(seconds=settings.result_publish_lease_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
             # Without a heartbeat timeout the beats the activity now sends do nothing for failure
             # detection, and the budget above is the longest of the three core background

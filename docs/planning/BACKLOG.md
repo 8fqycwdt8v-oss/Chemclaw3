@@ -337,24 +337,6 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **The result outbox has no claim lease, so two overlapping drains spend one row's budget
-      twice** — [S], found 2026-09-06 in the wave-6 delivery review
-      (`D-2026-09-06-a-response-class-nobody-named-is-a-delivery-nobody-made`, decision 3).
-      `_CLAIM` spends the attempt and commits before the delivery by design, so `SKIP LOCKED`
-      excludes only the *claim*, which lasts milliseconds — and the case the comment named (a
-      scheduled drain plus an operator's manual one) overlaps over the *delivery*, which lasts
-      seconds to a minute. Measured with a 1.0 s sink and a second drain started 0.3 s in: both
-      delivered the same row, `attempts=2`. Duplicate delivery is harmless (every far-side key is a
-      content hash, verified over three redeliveries), so the harm is that an attempt budget of 8
-      empties after 4 real attempts against one destination's outage. The reaper added in that ADR
-      makes the outcome an honest dead letter rather than a zombie, so this is no longer a
-      *lost-row* defect — it is a budget that is half what it says. The fix is a lease:
-      `state='in_flight'` plus `claimed_at` in `infra/sql/050_result_publications.sql` (a new
-      migration and a widened `CHECK`), set by `_CLAIM`, cleared by `mark_delivered`/`mark_failed`,
-      and returned to `pending` by a reaper on age — at which point the second run skips the row by
-      *predicate* rather than by lock duration and `_CLAIM`'s comment becomes true as written. It is
-      a schema change, which is why it is a row here rather than part of that commit.
-
 - [ ] **The two eval gates score literals written in their own case files** — [M], same review.
       11 of 13 baseline metrics are read from the case file rather than computed, so a metric that
       stops measuring and answers "perfect" passes both `make eval-strict` and
@@ -505,21 +487,6 @@ topic).
       one question these gauges are read for together — is the pool full *and* are callers waiting
       — which is exactly the saturation reading D-119 introduced them for. A single cached snapshot
       per scrape, or one gauge family. Anchor: `core/db.py::bind_pool_metrics`.
-
-- [ ] **A backfill drop directory re-refuses every file it has already ingested** — [M], found and
-      measured 2026-09-06 (`D-2026-09-06-a-bound-applied-after-the-read-is-not-a-bound-on-it`
-      states it rather than fixing it). `is_late_arrival` is handed the *chunk* cursor, not the
-      run's floor, so once a drain advances past a file's payload timestamp the file re-qualifies
-      as a late arrival on every later chunk if its mtime is still after the cursor — which is
-      exactly a bulk-copy backfill, where mtime is the copy time and the payloads are old.
-      Measured on a 3,000-file corpus at the shipped batch: the drain goes from 2.55 s to 9.99 s,
-      and `ingest_rejections` fills with a *growing* set of false rows (99, then 199, then 299…)
-      each saying no scheduled run will fetch an entry that has already been ingested — a chemist
-      asking about that entry is told the reason it was refused, about a record that is in the
-      corpus. The honest fix hands the adapter the run's floor beside the chunk's, which is a
-      second parameter; overloading the new `limit` to mean "this is a continuation" is two
-      spellings of one thing and was declined. Anchor: `ingest/eln/adapter.py::is_late_arrival`,
-      `ingest/eln/json_adapter.py::_scan`, `ingest/eln/ord_adapter.py::_scan`.
 
 - [ ] **`BoCampaignWorkflow` runs four sequential activities under a ceiling that funds one** —
       [M], measured 2026-09-06. `connector_queue_wait_timeout`'s "fits by construction" argument is
@@ -750,19 +717,22 @@ topic).
       than riding along on someone else's. The SBOM is now `main`-only, so a scan reading it is
       `main`-only too.
 
-- [ ] **`read_corpus` re-reads the entire ELN from `datetime.min` on every call** — [M].
-      `durable/memory_jobs.py::read_corpus` calls
-      `fetch_new_entries(datetime.min.replace(tzinfo=UTC))` on
-      every ingest half, so each of the three memory jobs (`build_campaign_notes_activity`,
-      `build_playbook_notes_activity`, `build_optimization_notes_activity`) walks the whole record
-      from the beginning of time, once per activity. (This sentence also named `all_reactions()`,
-      which exists nowhere in `src/` — a reader following the anchor found nothing and had no way to
-      tell whether the row or the tree was wrong.) On the two
-      file-drop exports this costs nothing; against a real warehouse ELN it is a full table scan
-      per activity per scheduled run. `ElnAdapter` (`ingest/eln/adapter.py:128`) has exactly two
-      methods and neither is a fetch-by-id, so there is no cheaper read to reach for — closing this
-      means either a fetch-by-id on the adapter protocol (every source pays) or a derived store of
-      mapped `OrdReaction`s.
+- [ ] **A memory run reads every source whole, three times** — [M]. `durable/memory_jobs.py::
+      read_corpus` walks each active ingest source from `datetime.min` on every ingest half, so
+      each of the three memory jobs (`build_campaign_notes_activity`, `build_playbook_notes_
+      activity`, `build_optimization_notes_activity`) reads the whole record once per activity per
+      scheduled run.
+      **This row used to say the walk was a full table scan and that was false for the one shipped
+      source that pages** (`D-2026-09-07-a-corpus-read-that-stops-at-one-page-is-not-a-corpus`):
+      measured against the warehouse adapter over a 12-row corpus at `fetch_limit: 5`, `read_corpus`
+      returned **5 of 12** reactions and called the read `complete` — the oldest 500 entries of an ELN
+      at the shipped binding default, distilled into notes as what the deployment knows. That is
+      fixed: the read pages, and a source still reporting rows waiting makes the read incomplete.
+      The cost is what is left, and it is now real rather than hypothetical — the scan happens
+      because the read became correct. `ElnAdapter` (`ingest/eln/adapter.py`) has exactly two
+      methods and neither is a fetch-by-id, so there is still no cheaper read to reach for: closing
+      this means either a fetch-by-id on the adapter protocol (every source pays) or a derived
+      store of mapped `OrdReaction`s.
       **Found while building the protocol condenser and deliberately not fixed there**
       (`D-2026-08-25-the-structure-is-discarded-at-the-note-boundary` records the reasoning): a
       derived store would have answered it as a side effect, and answering a scaling problem as a
@@ -976,20 +946,6 @@ topic).
       that trade, not a patch. Anchors: `agent/checkpointer.py::_PRUNE_SUPERSEDED`,
       `core/config/memory.py::checkpoint_retain_per_thread`.
 
-- [ ] **The retention sweep has no durable resume watermark, so a sparse pass still visits every
-      thread** — [M], same ADR. Bounding depth takes the steady-state 20,000-thread pass from
-      248.9 ms to 59.8 ms, but finding an expired minority means walking the whole table each time;
-      `durable/retention.py:472,486` names the missing watermark twice in its own comments and the
-      register was silent about it. A watermark is a row this job has nowhere to keep, which is the
-      design question rather than the code.
-
-- [ ] **`_assemble_graph` rebuilds every node and edge on any corpus change** — [M], stated by
-      `D-2026-09-06-one-note-changed-is-not-the-corpus-changed`, which made the note *cache* per
-      file and left the assembly whole: ~**1,450 ms** of the 20,000-note figure. Patching it
-      incrementally means removing and re-adding one note's node, and that ADR flags the trap —
-      `networkx.remove_node` takes the node's in-edges with it, so a naive patch silently drops
-      every citation *into* the changed note. Anchor: `kg/graph.py::_assemble_graph`.
-
 - [ ] **The checkpoint sweep and a live turn are two writers, and only the read side notices** —
       [M], stated by `D-2026-09-06-a-sweep-and-a-live-turn-are-two-writers`. `aput` writes blobs
       first and the `checkpoints` row second, so a turn whose blobs land before `_DELETE_ORPHANED`'s
@@ -998,54 +954,6 @@ topic).
       parties without a lock on the turn-serving write path, and taking one there is the decision
       this row is for.
 
-- [ ] **An erasure that races a live turn cannot be completed by re-running it** — [M], stated by
-      `D-2026-09-06-an-erasure-that-races-a-live-turn-is-not-an-erasure`, whose own last line is
-      "It stays open". The fleet-wide sweep takes the turn claim and counts what it could not hold,
-      but the residual rows need an operator with owner rights to remove them by session id — a
-      re-run does not reach them — and the transcript and the checkpoint can diverge by one turn.
-      Anchor: `agent/leaver.py::_ERASE`, `durable/retention.py`.
-
-- [ ] **The runtime role holds `CREATE ON SCHEMA public`, and the narrower posture is not written
-      down anywhere** — [S]. `infra/sql/grants/app_privileges.sql:68-70` states the cost honestly
-      and then says the narrower posture — the runtime's own schema, or a migrator-side `setup()`
-      so the app never issues DDL — "needs a decision and code outside this file; **it is
-      recorded**, not silently taken here." It was not: `grep -rn 'narrower posture\|migrator-side'
-      docs/` returned nothing before this row, and
-      `D-2026-08-16-a-revoke-reaches-tables-the-grants-never-name` does not carry it either. A
-      comment asserting that a decision is recorded when it is not is a claim that a control exists,
-      which is the shape this repository has spent sweeps deleting. This row is what makes the
-      sentence true; closing it means choosing between the two postures, or writing the ADR that
-      keeps the current one deliberately.
-
-- [ ] **Nine reference stores ship inside the image and no configuration can select any** — [M],
-      opened by `D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`, which decided every
-      other item on its list and deliberately did not decide this one. 772 lines across
-      `ingest/documents/index.py` (`InMemoryDocumentIndex`, 277), `science/fingerprints/store.py`
-      (122), `science/labels/store.py` (117), `retrieval/vector_index.py` (96),
-      `ingest/eln/records.py` (56), `science/calc/store.py` (45), `science/calc/artifacts.py` (44),
-      `retrieval/vectors/memory.py` (40) and `science/calc/structures.py` (20). Each file's
-      `default_*()` returns the Postgres implementation **unconditionally** — the return annotation
-      is the concrete class, so no configuration branch is even expressible — and
-      `retrieval/vectors/registry.SHIPPED` holds `qdrant` and `databricks` only. By this
-      repository's own predicate (`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`: a thing no
-      configuration can reach is dead) they are dead code in the shipped wheel.
-      **They are also real coverage, which is why this is a row and not a deletion.**
-      `tests/test_store.py::test_find_matches_the_in_memory_backend` compares the Postgres answer
-      against the in-memory one, and `D-2026-08-08-a-test-that-survives-the-mutation-it-names` uses
-      `InMemoryStore` as the mutation target proving `default_store()` is Postgres-backed. These are
-      differential oracles, not mocks: `retrieval/vectors/memory.py`'s own docstring calls itself
-      "the definition of what the adapters are expected to agree with".
-      So the ask is **relocation to `tests/`, not deletion** — which is where a reference
-      implementation with no runtime selector belongs, and would take them out of the rootless
-      image, out of `mypy --strict`'s `src/` pass and out of the coverage denominator. The check
-      that the premise holds is the move itself: if relocating one breaks a non-test import, the
-      premise was wrong for that store and it stays.
-      **Not to be confused with `InMemoryCampaignStore`** (`science/bo/campaign_record.py`), which
-      `campaign_store()` selects under `session_store="memory"` and is a deployment backend by the
-      same predicate — `D-2026-08-27-a-bound-that-multiplies-and-a-record-that-survives-the-cancel`
-      says so explicitly. Closing this row means either doing the move, or deciding that a
-      Postgres-free single-user mode is intended and writing the `DEFERRED.md` row that says so
-      with its trigger — what may not happen is a third sweep re-finding nine undecided classes.
 
 ## 5 — Where the field moved past us
 
