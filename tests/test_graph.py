@@ -577,3 +577,226 @@ def test_a_file_that_is_deleted_leaves_no_entry_behind(tmp_path: Path) -> None:
     assert "b.md" not in "".join(graph._PARSED_FILES.get(str(directory), {})), (
         "the deleted file's parse entry survived the scan that no longer names it"
     )
+
+
+# --- Incremental assembly (D-2026-09-07-a-changed-note-is-not-a-changed-corpus) ----------------
+
+
+def _linked(id_: str, links: tuple[str, ...] = (), retires: str | None = None) -> str:
+    """A note whose body cites `links` (half of them through a typed edge), optionally retiring one.
+
+    The typed half and the `valid_to` half both matter to what the patch has to reproduce: an edge
+    carries a *tuple of `Relation`s* as an attribute, so a patch that rebuilt the topology and lost
+    the metadata would still pass a node-and-edge comparison.
+    """
+    body = " ".join(
+        f"[[precursor-of:{target}]]" if n % 2 else f"[[{target}]]" for n, target in enumerate(links)
+    )
+    retirement = (
+        ""
+        if retires is None
+        else f"relations:\n  - rel: supersedes\n    to: {retires}\n    valid_to: 2026-01-01\n"
+    )
+    return f"---\nid: {id_}\ntype: compound\n{retirement}---\n{body}\n"
+
+
+def _corpus(root: Path) -> None:
+    """A corpus with every shape an incremental patch has to get right.
+
+    `hub` is cited by ten notes, so removing its node would take ten edges that belong to *other*
+    notes; `mover` cites it; `doomed` is cited by `mourner`; `retiree` asserts a dated edge. Twelve
+    notes is also above the size at which `_MAX_PATCHED_FRACTION` lets a one-note change patch.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "hub.md").write_text(_linked("hub", ("doomed",)), encoding="utf-8")
+    for n in range(10):
+        (root / f"citer-{n}.md").write_text(_linked(f"citer-{n}", ("hub",)), encoding="utf-8")
+    (root / "mover.md").write_text(_linked("mover", ("hub", "nowhere")), encoding="utf-8")
+    (root / "doomed.md").write_text(_linked("doomed", ()), encoding="utf-8")
+    (root / "mourner.md").write_text(_linked("mourner", ("doomed",)), encoding="utf-8")
+    (root / "retiree.md").write_text(_linked("retiree", ("hub",), retires="hub"), encoding="utf-8")
+
+
+def _rebuilt(root: Path) -> "nx.DiGraph[str]":
+    """The graph a full reassembly of `root` produces — the only thing worth comparing against."""
+    return graph._assemble_graph(graph._parse_notes(root))
+
+
+def _assert_identical(patched: "nx.DiGraph[str]", rebuilt: "nx.DiGraph[str]") -> None:
+    """Assert two graphs are the same graph — nodes, edges, and every attribute on both.
+
+    Not "similar". The failure this guards is a patch that drops one citation *into* a changed
+    note, which leaves a graph that answers every other query correctly, so anything short of
+    equality against the rebuild can be passed by a wrong patch.
+    """
+    assert set(patched.nodes) == set(rebuilt.nodes)
+    assert {node: dict(data) for node, data in patched.nodes(data=True)} == {
+        node: dict(data) for node, data in rebuilt.nodes(data=True)
+    }
+    assert set(patched.edges) == set(rebuilt.edges)
+    assert {(u, v): dict(data) for u, v, data in patched.edges(data=True)} == {
+        (u, v): dict(data) for u, v, data in rebuilt.edges(data=True)
+    }
+
+
+def _fresh_caches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Caching on, TTL off — the patch path is about fingerprint moves, not about the TTL window."""
+    monkeypatch.setattr(settings, "graph_cache_enabled", True)
+    monkeypatch.setattr(settings, "graph_cache_ttl_seconds", 0.0)
+    graph._GRAPH_CACHE.clear()
+    graph._NOTES_CACHE.clear()
+    graph._PARSED_FILES.clear()
+    graph._LAST_SCAN.clear()
+
+
+def test_a_patched_graph_is_identical_to_the_rebuilt_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every corpus change, applied incrementally, gives the graph a full rebuild would give.
+
+    Runs the five shapes the patch has to survive — a note cited by others, a note citing a note
+    that then changes, a deletion, an addition, and a retirement — one at a time, comparing against
+    a fresh reassembly after each. Equality against the rebuild is the assertion that cannot be
+    fooled: a patch is only allowed to be faster, never to be a different answer.
+    """
+    _fresh_caches(monkeypatch)
+    _corpus(tmp_path)
+    _assert_identical(build_graph(tmp_path), _rebuilt(tmp_path))
+
+    # A note *cited by ten others* changes what it links to. `remove_node` would take those ten
+    # in-edges with it; nothing else in this test would notice, which is why it is here.
+    (tmp_path / "hub.md").write_text(_linked("hub", ("mourner", "retiree")), encoding="utf-8")
+    graph.invalidate_cache()
+    _assert_identical(build_graph(tmp_path), _rebuilt(tmp_path))
+
+    # A note whose only link pointed at a dangling id stops doing so: the bare node it minted has
+    # to go, or the graph keeps answering about an id no note cites.
+    (tmp_path / "mover.md").write_text(_linked("mover", ("hub",)), encoding="utf-8")
+    graph.invalidate_cache()
+    _assert_identical(build_graph(tmp_path), _rebuilt(tmp_path))
+
+    # A deletion, of a note something still cites — the node must survive as a bare, note-less one.
+    (tmp_path / "doomed.md").unlink()
+    graph.invalidate_cache()
+    _assert_identical(build_graph(tmp_path), _rebuilt(tmp_path))
+
+    # An addition that defines the id the deletion left dangling.
+    (tmp_path / "doomed.md").write_text(_linked("doomed", ("hub",)), encoding="utf-8")
+    graph.invalidate_cache()
+    _assert_identical(build_graph(tmp_path), _rebuilt(tmp_path))
+
+    # A retirement rewritten to a different target: the edge's `relations` tuple carries the
+    # `valid_to`, so this fails a patch that reproduces topology and drops edge metadata.
+    (tmp_path / "retiree.md").write_text(
+        _linked("retiree", ("hub",), retires="mourner"), encoding="utf-8"
+    )
+    graph.invalidate_cache()
+    _assert_identical(build_graph(tmp_path), _rebuilt(tmp_path))
+
+
+def test_changing_a_note_keeps_the_citations_into_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The trap `D-2026-09-06-one-note-changed-is-not-the-corpus-changed` named, asserted directly.
+
+    `networkx.remove_node` takes a node's **in**-edges with it, and those edges belong to other
+    notes. A patch that removed and re-added the changed note would leave a well-formed graph with
+    ten citations missing and every query still answering.
+    """
+    _fresh_caches(monkeypatch)
+    _corpus(tmp_path)
+    before = build_graph(tmp_path)
+    assert set(before.in_edges("hub")) == {(f"citer-{n}", "hub") for n in range(10)} | {
+        ("mover", "hub"),
+        ("retiree", "hub"),
+    }
+
+    (tmp_path / "hub.md").write_text(_linked("hub", ("mourner",)), encoding="utf-8")
+    graph.invalidate_cache()
+    after = build_graph(tmp_path)
+    assert set(after.in_edges("hub")) == set(before.in_edges("hub"))
+
+
+def test_one_changed_note_does_not_reassemble_the_whole_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A note write costs a patch, not a rebuild — counted, not timed.
+
+    Counting `_assemble_graph` calls rather than wall clock, for the reason
+    `D-2026-09-06-one-note-changed-is-not-the-corpus-changed` gives for counting `read_note` calls:
+    a timing threshold on a synthetic corpus asserts the machine's load. What changed is whether
+    the whole corpus is re-added.
+
+    The `invalidate_cache()` between the two builds is what `kg/git_writer.py` does after every
+    note write, so this is the shape of the production write path and not a contrived one.
+    """
+    _fresh_caches(monkeypatch)
+    assemblies = {"count": 0}
+    real_assemble = graph._assemble_graph
+
+    def _counting(notes: list) -> object:  # type: ignore[type-arg]
+        assemblies["count"] += 1
+        return real_assemble(notes)
+
+    monkeypatch.setattr(graph, "_assemble_graph", _counting)
+    _corpus(tmp_path)
+    build_graph(tmp_path)
+    assert assemblies["count"] == 1  # cold: there is nothing to patch from
+
+    (tmp_path / "hub.md").write_text(_linked("hub", ("mourner",)), encoding="utf-8")
+    graph.invalidate_cache()
+    patched = build_graph(tmp_path)
+    assert assemblies["count"] == 1  # the change was patched in
+    _assert_identical(patched, _rebuilt(tmp_path))
+
+
+def test_a_graph_already_handed_out_is_not_mutated_by_a_later_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Patching happens on a copy, so a reader mid-traversal never sees the graph move under it.
+
+    `build_graph` hands every caller the same frozen instance and says freezing is what makes that
+    sharing safe. In NetworkX a mutation during an adjacency iteration is a `RuntimeError` in
+    whatever query happened to be running, so this is the invariant the copy is bought with.
+    """
+    _fresh_caches(monkeypatch)
+    _corpus(tmp_path)
+    held = build_graph(tmp_path)
+    snapshot = (set(held.nodes), set(held.edges))
+
+    (tmp_path / "hub.md").write_text(_linked("hub", ("mourner",)), encoding="utf-8")
+    graph.invalidate_cache()
+    fresh = build_graph(tmp_path)
+
+    assert fresh is not held
+    assert (set(held.nodes), set(held.edges)) == snapshot
+    assert set(fresh.edges) != snapshot[1]
+
+
+def test_a_wholesale_change_falls_back_to_the_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past `_MAX_PATCHED_FRACTION` the patch is declined, a rebuild being the cheaper one there.
+
+    Declining is never wrong — it is what this module did before — so the bound is deliberately set
+    below the measured break-even rather than at it.
+    """
+    _fresh_caches(monkeypatch)
+    _corpus(tmp_path)
+    build_graph(tmp_path)
+    assemblies = {"count": 0}
+    real_assemble = graph._assemble_graph
+
+    def _counting(notes: list) -> object:  # type: ignore[type-arg]
+        assemblies["count"] += 1
+        return real_assemble(notes)
+
+    monkeypatch.setattr(graph, "_assemble_graph", _counting)
+    for n in range(10):
+        (tmp_path / f"citer-{n}.md").write_text(
+            _linked(f"citer-{n}", ("mourner",)), encoding="utf-8"
+        )
+    graph.invalidate_cache()
+    rebuilt = build_graph(tmp_path)
+    assert assemblies["count"] == 1
+    _assert_identical(rebuilt, _rebuilt(tmp_path))
