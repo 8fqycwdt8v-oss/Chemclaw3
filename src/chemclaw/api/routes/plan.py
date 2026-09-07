@@ -139,7 +139,10 @@ async def _owned_sessions(
     A registry that is not the durable store answers one call and is done: `page_for_owner` lives
     on `SessionOwnerStore` rather than on the `SessionOwners` protocol, and `GET /sessions` makes
     the same split for the same reason — a front door handed some other registry through
-    `create_app(owner_store=...)` can answer a listing but not resume one.
+    `create_app(owner_store=...)` can answer a listing but not resume one. **That is a test's
+    registry and not a site's**: `create_app`'s arguments are a test seam no configuration can
+    reach, and `api/state.py` builds a `SessionOwnerStore` in every shipped configuration, so the
+    early return below is exercised from `tests/` and nowhere else.
     """
     if not isinstance(owners, SessionOwnerStore):
         rows = await owners.list_for_owner(oid)

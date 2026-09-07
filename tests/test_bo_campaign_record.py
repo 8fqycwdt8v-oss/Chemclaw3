@@ -33,7 +33,6 @@ from chemclaw.science.bo.campaign_record import (
     read_campaign_thread,
     record_suggestion,
 )
-from chemclaw.science.bo.objectives import molecule_library_problem
 from chemclaw.science.bo.problem import (
     Candidate,
     CategoricalParameter,
@@ -45,6 +44,7 @@ from chemclaw.science.bo.problem import (
     OptimizationProblem,
     Parameter,
 )
+from tests.bo_harness import molecule_library_problem
 
 
 def _problem(*, upper: float = 100.0, ligands: tuple[str, ...] = ("PPh3", "dppf")) -> Any:

@@ -17,6 +17,7 @@ The two halves are tested together on purpose: a change that satisfies either al
 """
 
 import re
+from urllib.parse import urlsplit
 
 import pytest
 from pydantic import SecretStr
@@ -166,6 +167,43 @@ def test_a_secret_str_hides_its_value_from_the_shapes_that_leak() -> None:
     assert "sk-real-value" not in repr(holder.llm_api_key)
     assert "sk-real-value" not in str(holder.model_dump())
     assert holder.llm_api_key.get_secret_value() == "sk-real-value"
+
+
+def test_masking_a_dsn_leaves_a_dsn() -> None:
+    """The guard's *positive* property: everything that is not the password survives the mask.
+
+    Both existing tests of this function assert the password is **absent**, and absence is cheap —
+    `mask_dsn` returning `""`, or the userinfo becoming the string `"None"`, passes every one of
+    them. Measured with the whole userinfo line replaced by `None`, the masked DSN came back as
+    `postgresql://Nonehost:5432/db`: no password, no username, no port, and not a DSN.
+
+    That matters because this is a *serializer*. `model_dump()` is where an operator reads which
+    server a failing deployment was dialling — the module docstring calls that the whole reason the
+    host is not masked too — so a mask that destroys the rest of the URL trades a disclosure for a
+    diagnosis nobody can make.
+    """
+    from chemclaw.core.config.dsn import _MASK, mask_dsn
+
+    original = "postgresql://chemclaw:hunter2@db.internal:5433/chemclaw?sslmode=require"
+
+    masked = mask_dsn(original)
+    before, after = urlsplit(original), urlsplit(masked)
+
+    assert "hunter2" not in masked
+    assert after.password == _MASK
+    assert (after.scheme, after.username, after.hostname, after.port) == (
+        before.scheme,
+        before.username,
+        before.hostname,
+        before.port,
+    ), f"the mask changed something other than the password: {masked}"
+    assert (after.path, after.query) == (before.path, before.query)
+
+    # A DSN with no password is returned untouched — no userinfo, and therefore no stray `@`.
+    passwordless = "postgresql://db.internal:5432/chemclaw"
+    assert mask_dsn(passwordless) == passwordless
+    # And so is the libpq keyword spelling, which `core/logging` catches on the path it appears on.
+    assert mask_dsn("host=db.internal password=hunter2") == "host=db.internal password=hunter2"
 
 
 def test_the_envelope_nonce_is_derived_from_the_real_secret(

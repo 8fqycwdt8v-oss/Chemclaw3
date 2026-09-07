@@ -77,7 +77,6 @@ from chemclaw.durable.memory_jobs import (
     OptimizationCampaignWorkflow,
     PlaybookDistillationWorkflow,
 )
-from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.observation_jobs import ObservationPromotionWorkflow
 from chemclaw.durable.report_workflow import DevelopmentReportWorkflow
 from chemclaw.retrieval.harness import ReportRequest, ReportSection
@@ -642,32 +641,6 @@ def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:
         # bundle's, and an in-flight run started by the previous release. Idempotent either way.
         result=without_geometry(envelope.data),
     )
-
-
-async def request_note_reindex() -> str:
-    """Start a note-index rebuild now, returning the workflow id (gap SCH-6).
-
-    Deliberately **not** an agent tool: this is an operational trigger for a merge webhook, not
-    a capability the model should reach for mid-conversation. A deterministic id per calendar
-    minute collapses a burst of merge notifications into one rebuild — a git host can deliver
-    several within seconds, and rebuilding the whole index once per merge would be pure waste.
-    """
-    client = await connect()
-    # `workflow.now()` is unavailable outside a workflow, and the id must be stable within a
-    # short window rather than unique per call, so the minute bucket comes from the
-    # Temporal-independent clock here at the (non-durable) entry point.
-    bucket = datetime.now(UTC).strftime("%Y%m%d%H%M")
-    workflow_id = f"note-reindex-{bucket}"
-    try:
-        handle = await client.start_workflow(
-            NoteReindexWorkflow.run,
-            id=workflow_id,
-            task_queue=settings.background_task_queue,
-            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
-        )
-    except WorkflowAlreadyStartedError:
-        return workflow_id  # a rebuild for this minute is already running or done
-    return handle.id
 
 
 async def cancel_job(job_id: str) -> bool:

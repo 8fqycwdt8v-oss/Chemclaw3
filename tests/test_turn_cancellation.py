@@ -35,9 +35,12 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any, cast
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages.utils import count_tokens_approximately
 
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.turn_flags import is_dry_run
+from chemclaw.agent.turn_usage import _prompt_estimate
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import Event
 from chemclaw.api.runner import run_turn
@@ -284,6 +287,63 @@ def test_abandoned_turn_still_books_its_tokens() -> None:
         "the tokens this turn was billed for reached the budget and no counter, so the fleet-wide "
         "spend rate under-reports every abandoned turn by its whole prompt"
     )
+
+
+def test_an_abandoned_prompt_charges_the_system_message_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The subtraction that stops the prefix being counted twice, as arithmetic rather than a sign.
+
+    `prefix_tokens()` is the *whole* prefix — the system message plus every bound tool schema — and
+    the prompt handed to the callback already contains that system message, so the estimate is
+    `prompt + (prefix - system)`. The integration test above deliberately asserts "non-zero, in the
+    estimated series" rather than a figure, and it is right to: any number it named would be a
+    claim about how many tools this profile happens to bind. The cost of that choice is that the
+    minus can become a plus with the suite green — the abandoned turn is then billed roughly its
+    prefix twice, and a guard against free retries becomes an over-charge nothing would notice.
+
+    So the arithmetic is pinned here, against a stubbed prefix, which is the one form that pins it
+    without naming a deployment's number. The clamp is the second case: a prefix smaller than the
+    system message it contains is a measurement that disagrees with itself, and it books the
+    conversation rather than a negative.
+    """
+    system = SystemMessage(content="you are a process chemist. " * 100)
+    prompt = [system, HumanMessage(content="hello " * 50), AIMessage(content="hi " * 50)]
+    system_tokens = int(count_tokens_approximately([system]))
+    prompt_tokens = int(count_tokens_approximately(prompt))
+
+    monkeypatch.setattr("chemclaw.agent.turn_usage.prefix_tokens", lambda: 5_000)
+
+    assert _prompt_estimate([prompt]) == prompt_tokens + 5_000 - system_tokens, (
+        "the system message is inside `prefix_tokens()` and inside the prompt, so charging it "
+        "twice bills an abandoned turn its whole prefix over again"
+    )
+
+    monkeypatch.setattr("chemclaw.agent.turn_usage.prefix_tokens", lambda: 1)
+
+    assert _prompt_estimate([prompt]) == prompt_tokens, (
+        "a prefix smaller than the system message inside it booked a negative schema cost"
+    )
+
+
+def test_a_prompt_that_cannot_be_estimated_books_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """This runs on every model call's callback path, so it meters 0 rather than ending the turn.
+
+    Zero exactly, not "something small": the failure arm is what a deployment falls back to when
+    the message shape changes under it, and a fabricated token there is a spend nothing produced
+    charged against a budget an operator reads.
+    """
+
+    class _Hostile:
+        def __bool__(self) -> bool:
+            return True
+
+        def __getitem__(self, index: int) -> Any:
+            raise RuntimeError("not the shape upstream promised")
+
+    assert _prompt_estimate(_Hostile()) == 0
 
 
 def test_abandoned_turn_releases_its_permit_and_turn_slot() -> None:

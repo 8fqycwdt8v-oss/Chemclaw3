@@ -1,9 +1,9 @@
 """Retire memory notes whose cluster changed shape (BACKLOG follow-up to D-070/D-072).
 
 Campaign and playbook ids are anchored on a cluster's *smallest* member id (`chemclaw.memory.ids`),
-which
-keeps a note's id — and therefore its PR-gate branch and merged file — stable while the cluster
-**grows**: periodic re-synthesis updates it in place. Two other transitions were not covered:
+which keeps a note's id — and therefore the file it occupies in `knowledge/` — stable while the
+cluster **grows**: periodic re-synthesis updates it in place. Two other transitions were not
+covered:
 
 - **merge** — two clusters become one, whose anchor is one of the two old anchors, leaving the
   *loser's* note in the graph as current knowledge describing a subset that no longer exists;
@@ -19,13 +19,20 @@ in Git and remains reachable by id) plus a body line naming its replacement.
 Only notes this synthesis itself minted are candidates. "Same type, overlapping members" is not
 enough — see `_is_synthesis_minted` for the promoted-observation playbook it wrongly retired.
 
-The retired note points forward with a real `superseded-by` edge to the successor whose
-submission carries it (D-2026-08-27 wave). It used to be plain text only, because retirement and
-replacement went to *separate* PR branches and the link dangled if a reviewer merged the
-retirement first. The pair now rides one submission (`pr_gate.propose_note`'s `superseded`
-argument), so the link resolves on the very branch `kg-validate` checks — and the lineage becomes
-traversable instead of a text grep. A second successor (a split) is still named in prose only:
-it lives on a different branch, and linking it would restore the ordering trap for that one case.
+The retired note points forward with a real `superseded-by` edge to its successor (D-2026-08-27
+wave). It used to be plain text only, because retirement and replacement went to *separate* PR-gate
+branches and the link dangled if a reviewer merged the retirement first.
+
+**That reason is gone and the guarantee is not, which is why this paragraph is rewritten rather
+than deleted.** `D-2026-09-05-the-gate-is-deleted-not-dormant` removed the gate and every module
+behind it, so there is no `propose_note` and no branch for `kg-validate` to check. What replaces
+the branch as the unit is `kg/record.py`'s **write order** — dependencies, then the subject, then
+the retirements — chosen because a reader can now see a half-written unit, and stated there as the
+invariant that replaces "one PR is one reviewable change". The retirement is written last, after
+the successor it cites, so the edge cannot resolve to nothing at any instant a reader could
+observe. The cost is stated in `_build_write` rather than hidden: between those two writes both
+notes are current and retrieval can serve both. A second successor (a split) is still named in
+prose only.
 """
 
 from datetime import date
@@ -59,8 +66,9 @@ def supersede_updates(new_notes: list[Note], existing: list[Note], as_of: date) 
         as_of: The run's date, used as the retired note's `valid_to`.
 
     Returns:
-        One updated `Note` per superseded note, ready to go through the same PR-gate as the
-        new notes themselves. Deterministic order (by note id) so a re-run proposes the same set.
+        One updated `Note` per superseded note, written by the same path as the new notes
+        themselves (`kg/record.py`). Deterministic order (by note id) so a re-run yields the same
+        set.
     """
     new_ids = {note.id for note in new_notes}
     types = {note.type for note in new_notes}
@@ -86,10 +94,13 @@ def _is_synthesis_minted(note: Note) -> bool:
     an id anchored on the observation's *scope* rather than on the cluster's smallest member, so
     `distill_playbooks` can never re-mint it. It was therefore always "an id this run no longer
     mints" and was proposed for retirement on every run, carrying the body line "this cluster's
-    membership changed (merge or shrink)" — which is untrue of it. The PR-gate makes that a
-    misleading PR inviting a rubber-stamp, and merging one drops a human-approved playbook out of
-    every current-evidence sweep via `Note.is_current`. The same match caught human-authored notes
-    of a memory type, which at least failed loudly (`pr_gate.propose_note` refuses a `human` note).
+    membership changed (merge or shrink)" — which is untrue of it, and writing one drops a
+    human-approved playbook out of every current-evidence sweep via `Note.is_current`. There is no
+    review step left to catch that, which makes the lineage test the control rather than a
+    convenience. The same match caught human-authored notes
+    of a memory type; what stops that reaching a person's file is
+    `kg/git_writer._refuse_to_clobber_a_person`, which raises rather than overwrite a note a human
+    wrote — a real guard with a real caller, not the gate's vanished pre-flight check.
 
     Reconstructing the id is the whole check, and it lives in `chemclaw.memory.ids` beside the
     `stable_id` it inverts — `memory.playbook` asks the same question to state a note's provenance,

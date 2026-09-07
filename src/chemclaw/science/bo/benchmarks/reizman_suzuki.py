@@ -7,8 +7,9 @@ Summit — see data/NOTICE.md) is a discrete experimental grid, so we fit a ligh
 RandomForest surrogate to give a continuous objective for the BO loop — the same
 idea as Summit's ExperimentalEmulator, in a Python-3.11-native stack.
 
-`load_benchmark()` returns the `OptimizationProblem` plus an async objective that
-`chemclaw.science.bo.campaign.optimize` can drive.
+`load_benchmark()` returns the `OptimizationProblem` plus an async objective, which is what
+`objectives._reizman_suzuki` registers under `reizman_suzuki` for a durable campaign to resolve
+by name.
 """
 
 from collections.abc import Awaitable, Callable

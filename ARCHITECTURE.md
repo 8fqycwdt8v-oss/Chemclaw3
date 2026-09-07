@@ -154,15 +154,40 @@ This repository is the backend and orchestration core.
 
 ## Keeping this file true
 
-Adding a top-level directory, or a subpackage under `src/chemclaw/`, means adding a row here — and
-giving that directory a `README.md`, because GitHub renders one the moment a reader clicks the
-folder.
+Two obligations, and they have **different scopes** — which is stated in this shape because the
+paragraph that used to stand here claimed one scope for both and the test enforced a third
+(`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`).
 
-Both are **enforced, not requested**. `tests/test_repo_map.py` checks the two tables above against
-the directories on disk in both directions, and checks that every directory has a README;
+1. **A row here** for every top-level directory and every *direct* subpackage of `src/chemclaw/` —
+   the two tables above, and nothing deeper. A package nested below one of those is documented by
+   its own README and by its parent's, not by a third table restating them.
+2. **A `README.md` in every directory under `src/chemclaw/` that holds Python modules**, at any
+   depth, because GitHub renders one the moment a reader clicks the folder. A directory holding a
+   manifest and no code — `ingest/sources/*`, `deliver/channels/*`, `publish/sinks/postgres/`, a
+   bundle's `skills/<name>/` — is described by that manifest and by the seam's own README; that is
+   a narrowing taken on purpose, because ten near-identical files nobody writes is worse than a
+   rule everybody keeps.
+
+Both are **enforced, not requested**, and now at the depth they claim.
+`tests/test_repo_map.py::test_every_python_package_has_a_readme` walks the package recursively; the
+two map tests check the tables against the directories on disk in both directions;
 `tests/test_packaging.py` holds the structural half (`src/` is exactly one package, and no import
-package reappears beside it). This paragraph asked for the same thing for two restructures and got
-it by luck; a map nobody verifies is read, believed, and wrong.
+package reappears beside it). The reason for the shape is a measured hole rather than a
+hypothetical: the README half used to read `iterdir()` — direct children only — so
+`src/chemclaw/retrieval/rerank/` with neither a README nor a row left every test in that file green,
+while the same two files one level shallower failed four, and **38 directories** sat in the gap.
+This paragraph asked for the same thing for two restructures and got it by luck; a map nobody
+verifies is read, believed, and wrong — and a map verified one level less deep than it promises is
+worse, because it is believed for a reason.
+
+**One corpus lives inside `src/`, and it is the only one.**
+`science/bo/benchmarks/data/reizman_suzuki_case_1.csv` is package data pinned to the surrogate that
+reads it: `objectives._reizman_suzuki` registers the fit under a name a `CampaignSpec` can carry, so
+swapping the file silently changes what that name means, which is exactly what an operator-settable
+corpus is allowed to do and this must not. `data/vendored/` is a `DataSource` with a manifest
+contract — checksum, licence, `text_column` — that a benchmark's training grid does not have. The
+exception is enumerated in `tests/test_repo_map.py::_CORPUS_IN_SRC` and a second one fails there,
+which is the direction nothing checked before.
 
 The design record is `docs/decisions/` (one file per ADR, `D-NNN`), indexed by
 `docs/decisions/README.md`. `docs/reference/architektur.md` is the original pre-implementation

@@ -125,10 +125,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     The pool belongs here because it belongs to one process and one event loop, and because
     everything below `chemclaw.core.db.connection` inherits it with no plumbing: the session store,
-    the ownership registry, the push-back tailer and the rollback watermark all stop paying a
-    TCP+auth handshake per call. That churn — measured at ~2.7 connects per turn — was what made
-    a connect fail to be scheduled inside its timeout under load, which silently disarmed the
-    non-fatal rollback-watermark guard (D-107).
+    the ownership registry and the push-back tailer all stop paying a TCP+auth handshake per call.
+    That churn — measured at ~2.7 connects per turn — was what made a connect fail to be scheduled
+    inside its timeout under load, and under load a non-fatal guard that cannot get a connection
+    disarms itself in silence, which is the failure this pool exists to prevent (D-107). **The
+    example that argument was originally written from is gone**: the rollback watermark over
+    `session_messages` left with the MAF turn loop
+    (`D-2026-08-10-langgraph-rebuild-of-the-conversation-layer`), and neither it nor
+    `chemclaw_rollback_watermark_unavailable_total` — named in D-119 §42 and D-143 §16 in the
+    present tense — exists anywhere in `src/`. Naming a dead consumer among the live ones is what
+    made this docstring read as evidence that a control was still running.
 
     The connector probe's *result* only informs (readiness reports it, a gauge counts it) — a
     missing connector costs capability, not correctness, so the default is to serve anyway.
@@ -211,11 +217,21 @@ def create_app(
 ) -> FastAPI:
     """Build the front-door FastAPI app.
 
+    **All four arguments are a test seam and none is a deployment knob.** Every production entry
+    calls `create_app()` bare — it is the uvicorn factory — and no setting, manifest or chart value
+    can supply any of them, so a branch reached only by a non-default argument is reached only from
+    `tests/`. Saying so here is not pedantry: `GET /sessions` and the plan inbox each carry a branch
+    for a registry that is not `SessionOwnerStore`, and both used to describe it as *a deployment's*
+    registry — an operational caveat about a deployment that cannot exist, which sends an operator
+    looking for a knob (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`). The seam itself
+    stays: `graph_factory` is what lets the whole HTTP surface be driven without a model credential,
+    which is the reason the front door is testable at all.
+
     Args:
         owner_store: The durable session-ownership registry used to reattach a client to its session
             after a pod restart. Defaults to the config-gated store (present only under
-            `session_store="postgres"`); tests inject an in-memory fake to exercise rehydration
-            without a database.
+            `session_store="postgres"`), which is what every shipped configuration gets; tests
+            inject an in-memory fake to exercise rehydration without a database.
         connector_factory: Builds *this turn's* connector specs for one profile name
             (`chemclaw.agent.chemclaw_agent.connector_specs`). A factory rather than a list because
             a connector's connection must belong to a single turn, so the app calls it per turn; and
@@ -224,8 +240,9 @@ def create_app(
             whole HTTP surface without a connector server running.
         turn_claims: The durable "one turn at a time per session" claim, which is what makes that
             guard hold across processes rather than only within one (D-121). Defaults to the
-            config-gated store (present only under `session_store="postgres"`); tests inject an
-            in-memory fake to exercise the cross-process conflict without a database.
+            config-gated store (present only under `session_store="postgres"`), which is what every
+            shipped configuration gets; tests inject an in-memory fake to exercise the
+            cross-process conflict without a database.
         graph_factory: Builds *this turn's* compiled graph, given the profile, the turn's identity
             and its already-open connectors. It is the seam a test injects a credential-free turn
             through, and the only one: without it the front door's own surface would need a live

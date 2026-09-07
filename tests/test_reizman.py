@@ -17,8 +17,8 @@ from chemclaw.science.bo.benchmarks.reizman_suzuki import (
     load_benchmark,
     load_dataset,
 )
-from chemclaw.science.bo.campaign import optimize
 from chemclaw.science.bo.problem import CategoricalParameter
+from tests.bo_harness import optimize
 
 warnings.filterwarnings("ignore")
 

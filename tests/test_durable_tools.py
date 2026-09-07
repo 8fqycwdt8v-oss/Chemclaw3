@@ -602,3 +602,57 @@ def test_asking_twice_in_a_day_rejoins_rather_than_re_scanning(
         "a same-day repeat must hand back the existing run's id, so the caller sees a job rather "
         "than silence"
     )
+
+
+def test_no_workflow_starter_here_is_reachable_from_nowhere() -> None:
+    """A launcher nobody calls is a capability this deployment advertises and does not have.
+
+    `request_note_reindex` was half-removed once already: `tests/test_service.py` records stripping
+    it from `api/app.__all__` because "no route read `front_door.request_note_reindex`, no test
+    patched it, and its only production starter is a merge webhook this app does not serve" — and
+    the function itself stayed for another week, with a present-tense docstring about a git host
+    that "can deliver several within seconds". It was deleted on 2026-09-07
+    (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`); `NoteReindexWorkflow` is alive on
+    its Schedule, so nothing was lost but the door.
+
+    Written as a rule rather than as that name's absence, because the specific check would pass
+    forever while the next unreachable launcher is written. **String constants count as a
+    reference**: this repository resolves half its capability by `module:callable`, and a scan that
+    only saw identifiers would report `create_face_app` — reached solely through
+    `uvicorn.run("chemclaw.api.mcp_face:create_face_app")` — as dead.
+    """
+    import ast
+
+    module = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "agent" / "durable_tools.py"
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    starters = [
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+        and any(
+            isinstance(inner, ast.Attribute) and inner.attr == "start_workflow"
+            for inner in ast.walk(node)
+        )
+    ]
+    assert starters, "no workflow starters found here; the scan or the module moved"
+
+    root = Path(__file__).resolve().parents[1]
+    named: set[str] = set()
+    for tree_root in (root / "src", root / "tests"):
+        for path in sorted(tree_root.rglob("*.py")):
+            if path == module:
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Name):
+                    named.add(node.id)
+                elif isinstance(node, ast.Attribute):
+                    named.add(node.attr)
+                elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    named.update(node.value.replace(":", " ").replace(".", " ").split())
+
+    unreachable = sorted(name for name in starters if name not in named)
+    assert not unreachable, (
+        f"workflow starters in agent/durable_tools.py that nothing reaches: {unreachable}. A "
+        "launcher with no route, tool, CLI or manifest behind it reads as a capability and is not "
+        "one; bring its caller in the same change, or delete it."
+    )

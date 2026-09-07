@@ -63,18 +63,6 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **The sixth manifest loader is still unbounded** — [S], found 2026-09-06 driving all six
-  loaders against one hostile corpus. `D-2026-09-06-a-manifest-is-data-in-every-field-that-executes`
-  routed five of them through `core/manifest_io.read_manifest` and bounded the prose fields they
-  feed the prompt. `agent/profile_discovery.py` is the sixth and is unchanged: bare
-  `yaml.safe_load` at `:58`, so the alias bomb, the `RecursionError` and the silent duplicate key
-  all still land there, and `AgentProfile.instructions` has no `max_length` — measured, a
-  500,000-character `data/profiles/p.yaml` loaded and went straight into the system prompt. It was
-  left out of that commit only because it was outside the change's ownership, not because it is a
-  different case; the fix is `read_manifest(path, AgentProfileError)` plus
-  `max_length=MAX_MANIFEST_TEXT_CHARS`, and `tests/test_manifest_io.py` shows the shape of the two
-  tests.
-
 - [ ] **A connector can claim a step-template launcher name, and the registry says it cannot** —
   [S], found 2026-09-05 reviewing the ambient-name guard. `_bound_by_this_process` refuses a bundle
   that claims an in-process tool, a scratchpad verb, `write_todos` or `task`. Its docstring adds
@@ -300,15 +288,19 @@ topic).
       the same three lines as `live.py:499-500`. Plus a cheap **offline** validator that every
       `expects_notes` id exists in `knowledge/`, which is the half CI can run. Its own PR: it needs
       a running front door to verify green.
-- [ ] **The PR-gate's submission is O(corpus) and serialises cluster-wide** — [M], measured
-      2026-09-04 against real bare remotes: 0.218 s per proposal at 100 notes, 0.574 s at 1,000,
-      **2.916 s at 10,000** — 87% of it `git worktree add -B`, a full checkout of the corpus, in
-      `git_submitter.py`. `_SUBMIT_LOCK` and `_cluster_lock` serialise submissions across the whole
-      cluster on one remote, so the ceiling is **~1,240 proposals/hour** and an 8-note fan-out
-      blocks its process for 21 s. **The obvious fix is not free**: `--no-checkout` removes the
-      materialized tree that `_contained_note_path`'s symlink defence reads, so it has to be
-      replaced by a lexical path check plus `git ls-tree <base>` for mode `120000` — a
-      security-relevant control, which is why this is a row and not a patch.
+- [ ] **Knowledge writes serialise cluster-wide on one advisory lock** — [M], re-measured
+      2026-09-07 against real bare remotes (best of 3): **141.5 ms** per write at 100 notes,
+      152.2 ms at 1,000, **252.0 ms at 10,000**. The O(corpus) half of this row is closed and its
+      figures are deleted rather than corrected: the 2,916 ms it quoted was `git worktree add -B`
+      inside `git_submitter.py`, and `D-2026-09-05-the-gate-is-deleted-not-dormant` deleted that
+      module with the other 2,232 lines of the gate — `kg/git_writer.py` commits to the base branch
+      and no worktree is created anywhere in `src/`. What survives is the serialisation:
+      `git_writer.py:562-567` takes `_WRITE_LOCK` and then a Postgres advisory lock keyed on the
+      remote, so every pod's every note write queues behind every other one. At 252 ms that is a
+      ceiling near **14,000 writes/hour** for the whole fleet, which is not pressing — the row
+      exists because the ceiling is fleet-wide rather than per-pod, so it does not improve by
+      adding pods, and because `_cluster_lock`'s own docstring points here for the case it does
+      *not* cover (several writer pods with a memory session store take no lock at all).
 
 - [ ] **The fingerprint index is keyed by source and the citation is not, so two sources collapse
       to one note id** — [M], and it is the half `D-2026-08-27-a-fingerprint-is-keyed-by-its-source`
@@ -973,6 +965,88 @@ topic).
       never reach it. Anchors: `agent/session_store.py::_SELECT_RECENT_USER_ROWS`,
       `api/runner.py::_turn_ambient`, `infra/sql/008_sessions.sql`.
 
+- [ ] **The checkpointer's write volume is quadratic in a thread's length** — [L], stated by
+      `D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record` under "what this does not fix"
+      and queued here because nothing else records it. Upstream's `_dump_blobs` rewrites the whole
+      `messages` channel on every superstep, so a 139.6 kB conversation cost **16.7 MB of WAL**, and
+      the per-thread prune that ADR shipped does not reach it — measured, the prune *adds* ~4%
+      (3.51 → 3.64 MB over 20 turns, reproduced twice). The only mechanism that would is a
+      destructive trim of thread state, which contradicts
+      `D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has` — so this is a decision about
+      that trade, not a patch. Anchors: `agent/checkpointer.py::_PRUNE_SUPERSEDED`,
+      `core/config/memory.py::checkpoint_retain_per_thread`.
+
+- [ ] **The retention sweep has no durable resume watermark, so a sparse pass still visits every
+      thread** — [M], same ADR. Bounding depth takes the steady-state 20,000-thread pass from
+      248.9 ms to 59.8 ms, but finding an expired minority means walking the whole table each time;
+      `durable/retention.py:472,486` names the missing watermark twice in its own comments and the
+      register was silent about it. A watermark is a row this job has nowhere to keep, which is the
+      design question rather than the code.
+
+- [ ] **`_assemble_graph` rebuilds every node and edge on any corpus change** — [M], stated by
+      `D-2026-09-06-one-note-changed-is-not-the-corpus-changed`, which made the note *cache* per
+      file and left the assembly whole: ~**1,450 ms** of the 20,000-note figure. Patching it
+      incrementally means removing and re-adding one note's node, and that ADR flags the trap —
+      `networkx.remove_node` takes the node's in-edges with it, so a naive patch silently drops
+      every citation *into* the changed note. Anchor: `kg/graph.py::_assemble_graph`.
+
+- [ ] **The checkpoint sweep and a live turn are two writers, and only the read side notices** —
+      [M], stated by `D-2026-09-06-a-sweep-and-a-live-turn-are-two-writers`. `aput` writes blobs
+      first and the `checkpoints` row second, so a turn whose blobs land before `_DELETE_ORPHANED`'s
+      snapshot and whose row lands after it loses them; the guard that ADR shipped is on the
+      **read**, which detects the loss rather than preventing it. Nothing synchronises the two
+      parties without a lock on the turn-serving write path, and taking one there is the decision
+      this row is for.
+
+- [ ] **An erasure that races a live turn cannot be completed by re-running it** — [M], stated by
+      `D-2026-09-06-an-erasure-that-races-a-live-turn-is-not-an-erasure`, whose own last line is
+      "It stays open". The fleet-wide sweep takes the turn claim and counts what it could not hold,
+      but the residual rows need an operator with owner rights to remove them by session id — a
+      re-run does not reach them — and the transcript and the checkpoint can diverge by one turn.
+      Anchor: `agent/leaver.py::_ERASE`, `durable/retention.py`.
+
+- [ ] **The runtime role holds `CREATE ON SCHEMA public`, and the narrower posture is not written
+      down anywhere** — [S]. `infra/sql/grants/app_privileges.sql:68-70` states the cost honestly
+      and then says the narrower posture — the runtime's own schema, or a migrator-side `setup()`
+      so the app never issues DDL — "needs a decision and code outside this file; **it is
+      recorded**, not silently taken here." It was not: `grep -rn 'narrower posture\|migrator-side'
+      docs/` returned nothing before this row, and
+      `D-2026-08-16-a-revoke-reaches-tables-the-grants-never-name` does not carry it either. A
+      comment asserting that a decision is recorded when it is not is a claim that a control exists,
+      which is the shape this repository has spent sweeps deleting. This row is what makes the
+      sentence true; closing it means choosing between the two postures, or writing the ADR that
+      keeps the current one deliberately.
+
+- [ ] **Nine reference stores ship inside the image and no configuration can select any** — [M],
+      opened by `D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`, which decided every
+      other item on its list and deliberately did not decide this one. 772 lines across
+      `ingest/documents/index.py` (`InMemoryDocumentIndex`, 277), `science/fingerprints/store.py`
+      (122), `science/labels/store.py` (117), `retrieval/vector_index.py` (96),
+      `ingest/eln/records.py` (56), `science/calc/store.py` (45), `science/calc/artifacts.py` (44),
+      `retrieval/vectors/memory.py` (40) and `science/calc/structures.py` (20). Each file's
+      `default_*()` returns the Postgres implementation **unconditionally** — the return annotation
+      is the concrete class, so no configuration branch is even expressible — and
+      `retrieval/vectors/registry.SHIPPED` holds `qdrant` and `databricks` only. By this
+      repository's own predicate (`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`: a thing no
+      configuration can reach is dead) they are dead code in the shipped wheel.
+      **They are also real coverage, which is why this is a row and not a deletion.**
+      `tests/test_store.py::test_find_matches_the_in_memory_backend` compares the Postgres answer
+      against the in-memory one, and `D-2026-08-08-a-test-that-survives-the-mutation-it-names` uses
+      `InMemoryStore` as the mutation target proving `default_store()` is Postgres-backed. These are
+      differential oracles, not mocks: `retrieval/vectors/memory.py`'s own docstring calls itself
+      "the definition of what the adapters are expected to agree with".
+      So the ask is **relocation to `tests/`, not deletion** — which is where a reference
+      implementation with no runtime selector belongs, and would take them out of the rootless
+      image, out of `mypy --strict`'s `src/` pass and out of the coverage denominator. The check
+      that the premise holds is the move itself: if relocating one breaks a non-test import, the
+      premise was wrong for that store and it stays.
+      **Not to be confused with `InMemoryCampaignStore`** (`science/bo/campaign_record.py`), which
+      `campaign_store()` selects under `session_store="memory"` and is a deployment backend by the
+      same predicate — `D-2026-08-27-a-bound-that-multiplies-and-a-record-that-survives-the-cancel`
+      says so explicitly. Closing this row means either doing the move, or deciding that a
+      Postgres-free single-user mode is intended and writing the `DEFERRED.md` row that says so
+      with its trigger — what may not happen is a third sweep re-finding nine undecided classes.
+
 ## 5 — Where the field moved past us
 
 Filed by the 2026-08-25 field benchmark — see
@@ -1185,82 +1259,66 @@ only holds defects can only ever restore the system to what it already intended 
       `memory/campaign.py`, `interaction.py`, `failure.py`, `playbook.py`, `progression.py`,
       `observations.py`, surfaced by `recall_observations`, `find_past_jobs` and `record_failure`.
       Nothing in that set changes the agent's behaviour on the next turn unless a human writes a
-      `SKILL.md`: `skills/playbook-distillation/SKILL.md` is the distillation *judgment*, and the
-      PR-gate is where a distilled playbook becomes knowledge — but the loop is manual end to end and
-      nobody has measured how often it closes. The 2026 work (SkillRL, SkillForge and the
-      self-evolving surveys) is specifically about abstracting recurring trajectories into reusable
-      procedure automatically. **The PR-gate is the right control for that, not an argument against
-      it** — a proposed skill is exactly the shape the gate already carries. What is owed first is a
-      measurement rather than a mechanism: over the sessions on disk, how many recurring trajectories
-      *are* there, and would a distilled one have changed a later answer? A generator built before
-      that number is a routing hypothesis nobody measured, which is the mistake
-      `D-2026-08-15` already made once here.
+      `SKILL.md` — `skills/playbook-distillation/SKILL.md` is the distillation *judgment*, and the
+      loop is manual end to end. The 2026 work (SkillRL, SkillForge and the self-evolving surveys)
+      is specifically about abstracting recurring trajectories into reusable procedure
+      automatically. What is owed first is a measurement rather than a mechanism: over the sessions
+      on disk, how many recurring trajectories *are* there, and would a distilled one have changed
+      a later answer? A generator built before that number is a routing hypothesis nobody measured,
+      which is the mistake `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` already
+      made once here.
 
-      **Attempted 2026-08-25, and the corpus to measure does not exist.** Against a live Postgres:
-      `session_messages` 12 (all from that day's own probe run), `session_turns` 0, `observations` 0,
-      `note_proposals` 0, `audit_events` 3. The five notes under `knowledge/playbook/` are committed
-      examples, not distillations of anything. So this row is blocked on **deployment history**
-      rather than on effort — nobody can count recurring trajectories in a database that has never
-      served a user. Its trigger is therefore a deployment with real sessions in it, and until then
-      building the generator would be building against an imagined corpus, which is the row's own
-      objection.
-
-      **The measurement itself is no longer owed — the corpus is.**
+      **The measurement is no longer owed; the corpus is.**
       `D-2026-08-27-count-the-trajectories-before-building-the-distiller` defines the recurring
-      trajectory, ships `make trajectory-census` (`chemclaw.cli.trajectory_census`), and states the
-      greenlight numbers (≥5 recurring classes across ≥3 sessions, ≥1 would-have-helped multi-tool
-      class); the command prints the verdict itself. Run 2026-08-27: 0 sessions, 0 turns, not
-      greenlit. The day a deployment has sessions, this row is one command to check.
+      trajectory and ships `make trajectory-census` (`chemclaw.cli.trajectory_census`), which
+      prints its own verdict against the greenlight numbers. It was blind to half the signal —
+      recurrence was an identical tool-name *sequence*, so a corpus dense in repeated **failure**
+      reported zero — and `D-2026-09-05-a-census-that-counts-only-success-is-blind-to-half-the-signal`
+      gave it a second arm over tools that errored across sessions. Read `any_greenlit`, not
+      `generator_greenlit`. Both arms report zero on a database that has never served a user
+      (measured 2026-08-27: 0 sessions, 0 turns; `session_turns` 0, `observations` 0), so the
+      block is **deployment history**, not effort. The day a deployment has sessions this row is
+      one command to check.
 
-      **That instrument was blind to half the signal, and now has two arms**
-      (`D-2026-09-05-a-census-that-counts-only-success-is-blind-to-half-the-signal`). Its definition
-      of recurrence is an identical tool-name *sequence*, which is the shape SkillRL and SkillForge
-      abstract; a recurring **failure** produces divergent sequences that end badly, so a corpus
-      dense in repeated mistakes reported zero. The second arm counts tools that errored across
-      sessions and the subset where an earlier session recovered before a later one failed again
-      (≥3 classes / ≥3 sessions / ≥1 repeat). `generator_greenlit` is unchanged; read
-      `any_greenlit`. Both still report zero on 0 sessions, so the block is unchanged.
+      **The tier question this row used to carry is settled**
+      (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`, and
+      `D-2026-09-05-the-gate-is-deleted-not-dormant` which deleted the PR-gate and all 2,232 lines
+      behind it). Knowledge is global the moment it is learned and is corrected rather than
+      pre-approved; a **skill** is the opposite case, because it is injected into the prompt with
+      no citation trail, and no agent path may write one
+      (`agent/skill_backend.SkillsReadOnlyRefusal`). So a distilled playbook does not become
+      knowledge through a review queue — it lands through `kg/record.py` like any other note, and
+      what needs an admin is the `SKILL.md` a distiller would want to write. What is open here is
+      the generator alone, plus the per-actor skills directory that tier needs, which is blocked on
+      the same generator because nothing writes one until a distiller exists.
 
-      **The tier question this row implied is settled and is no longer part of it**
-      (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): knowledge is global the moment it
-      is learned and ungated; a skill is **live for its own user before review** and reaches the
-      shared tree only after an **admin** merges it, so the end user never waits on a gate and no
-      unreviewed instruction reaches a second person. The knowledge half of that is **built** —
-      `D-2026-09-05-the-gate-is-deleted-not-dormant` deleted the PR-gate outright (all nine callers
-      were knowledge, so ungating left it with no subject) and `kg/record.py` is the one write path.
-      What is open here is now the generator alone —
-      plus the per-actor skills directory that tier needs, which is blocked on the same generator
-      (nothing writes one until a distiller exists) and whose invariants that ADR states — plus the follow-up that ADR names and does not claim shipped: the
-      direct write path that actually ungates agent-asserted notes, which owes D-161 migration
-      `025`'s self-confirmation guard.
-
-      **Review scaling and convergence, ideated 2026-09-05 and mostly not built.** The owner asked
-      how an admin avoids drowning in near-identical proposals, and how local and global skills stay
-      convergent. `D-2026-09-05-a-rejection-nobody-reads-is-a-decision-taken-twice` built the one
-      part that is real today — the reviewer now sees every earlier version of the note in front of
-      them, so a rejection is not re-derived or accidentally overturned. The rest waits on the
-      distiller and is recorded there rather than here in full: promotion thresholds on skills
-      (used N times **and** by ≥ 2 distinct chemists — D-161's two-threshold shape, and the single
-      most effective flood control available); duplicate suppression in the **generator** rather
-      than the queue (propose an edit to the nearest existing skill unless none is close — a
-      queue-side deduplicator is a bandage on a generator that should not have produced them);
-      cluster review over `cluster_by_similarity`; benefit-ranked triage over `evals/ab.py`, with
-      the machine ordering and the human still deciding, which is why it does not re-open
-      `D-2026-08-16`; and the convergence half — global-wins-on-conflict with the conflict
-      surfaced, promotion retiring the local variants that fed it via `memory/supersede.py`, expiry
-      on disuse read as a signal about the *distiller* rather than about review capacity, and
-      `skill-validate` run on local skills at write time so form converges even where content does
-      not. One constraint binds all of it: `D-2026-08-25` ends with **no Temporal Schedule opens a
-      pull request**, so a reconciliation job may cluster, measure and report, and a human opens the
-      proposal.
+      **Review scaling and convergence, ideated 2026-09-05 and not built.** The owner asked how an
+      admin avoids drowning in near-identical proposals and how local and global skills stay
+      convergent. Every part of that ideation is downstream of the distiller, and the one piece
+      that was built — a reviewer seeing every earlier version of a note
+      (`D-2026-09-05-a-rejection-nobody-reads-is-a-decision-taken-twice`) — was built against the
+      PR-gate's review queue and deleted with it hours later, on the same day. Recorded so it is
+      not re-derived: promotion thresholds on skills (used N times **and** by ≥ 2 distinct
+      chemists — D-161's two-threshold shape, and the single most effective flood control
+      available); duplicate suppression in the **generator** rather than in a queue (propose an
+      edit to the nearest existing skill unless none is close); cluster review over
+      `cluster_by_similarity`; benefit-ranked triage over `evals/ab.py`, with the machine ordering
+      and the human still deciding, which is why it does not re-open `D-2026-08-16`; and the
+      convergence half — global-wins-on-conflict with the conflict surfaced, promotion retiring the
+      local variants that fed it via `memory/supersede.py`, expiry on disuse read as a signal about
+      the *distiller* rather than about review capacity, and `skill-validate` run on local skills at
+      write time so form converges even where content does not. One constraint binds all of it:
+      `D-2026-08-25` ends with **no Temporal Schedule opens a pull request**, so a reconciliation
+      job may cluster, measure and report, and a human opens the proposal.
 
       **Two findings from the reviewed framework (WikiSkill, arXiv 2608.27454) are recorded because
       they contradict the obvious design and cost nothing to carry**: giving the *executing* agent
       the accumulated experience measured **worse** than not (63.7% → 60.9%), while giving it to the
       *proposer* was the largest ablation (+15.0pp) — so experience is compiled into skills, never
-      injected into the turn; and rejected proposals were load-bearing input, which this tree
-      already retains (`kg/proposal.py::rejected_version`, and `durable/retention.py` refuses to
-      prune `note_proposals`) and nothing reads back.
+      injected into the turn; and rejected proposals were load-bearing input, which this tree no
+      longer retains at all. `kg/proposal.py` and its `rejected_version` went with the gate, and
+      `durable/retention.py:413` still refuses to prune `note_proposals` for a reason whose subject
+      no longer exists. A distiller that wants its own rejections has to keep them itself.
 
 ### The upstream-capability register — what our pinned dependencies now ship that we build ourselves
 

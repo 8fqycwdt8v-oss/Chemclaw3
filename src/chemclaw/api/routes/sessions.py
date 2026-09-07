@@ -238,11 +238,18 @@ async def list_sessions(
     # front door handed some other registry through `create_app(owner_store=...)` can answer the
     # first page and nothing further, and saying so is better than silently answering the first
     # page again and leaving a client to page forever.
+    # **That other registry is a test's, not a site's, and this comment used to say otherwise.**
+    # `create_app`'s arguments are a test seam: no setting or chart value can supply one, and
+    # `api/state.py` builds a `SessionOwnerStore` in every shipped configuration. So the two arms
+    # below are reached from `tests/` alone, and calling them "a deployment whose registry is not a
+    # `SessionOwnerStore`" invited an operator to look for a knob that does not exist
+    # (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`). They stay, because the seam is
+    # what makes the listing testable without a database; what changed is the sentence.
     # **The cursor is advertised in the branch that can honour it, and nowhere else.** It used to
-    # be set on any full page, so a deployment whose `create_app(owner_store=...)` registry is not
-    # a `SessionOwnerStore` answered `200` with an `X-Next-Cursor` and then `422` to the client
-    # that followed it — the route telling a caller to do the one thing it refuses. Absent is
-    # already this header's word for "there is no next page", and for such a registry there is not.
+    # be set on any full page, so an injected registry that is not a `SessionOwnerStore` answered
+    # `200` with an `X-Next-Cursor` and then `422` to the client that followed it — the route
+    # telling a caller to do the one thing it refuses. Absent is already this header's word for
+    # "there is no next page", and for such a registry there is not.
     if isinstance(owners, SessionOwnerStore):
         try:
             rows = await owners.page_for_owner(principal.oid, after=after or None)
@@ -255,9 +262,7 @@ async def list_sessions(
             last_id, _, last_activity = rows[-1][:3]
             response.headers[_NEXT_CURSOR] = encode_session_cursor(last_activity, last_id)
     elif after:
-        raise HTTPException(
-            status_code=422, detail="this deployment's session registry cannot resume a listing"
-        )
+        raise HTTPException(status_code=422, detail="this session registry cannot resume a listing")
     else:
         rows = await owners.list_for_owner(principal.oid)
     return [

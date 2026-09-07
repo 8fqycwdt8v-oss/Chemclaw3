@@ -1,9 +1,9 @@
 """Whether an optimization is still finding anything, judged against the assay's own noise (W1).
 
 The question this answers is "have we plateaued, or is there more in it?" — asked by a lab leader
-who does not want to burn another two weeks. Nothing in the tree computed it: `campaign.optimize`
-runs exactly `n_rounds`, and the only early stop is `space_exhausted`, which is discrete-space
-exhaustion rather than a plateau.
+who does not want to burn another two weeks. Nothing in the tree computed it: a campaign runs
+exactly the rounds it was given, and the only early stop is `space_exhausted`, which is
+discrete-space exhaustion rather than a plateau.
 
 **`assay_noise` is a required argument with no default, and that is the whole design.** A live
 probe was graded *fabricated* for asserting "the last 1-2% gains are real" against a +/-2%

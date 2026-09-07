@@ -7,6 +7,7 @@ BoFire runs; kept small so it stays fast.
 
 import asyncio
 import warnings
+from pathlib import Path
 from typing import Any
 
 import numpy.linalg
@@ -17,7 +18,6 @@ from bofire.strategies import api as bofire_strategies
 from botorch.exceptions.errors import BotorchError, ModelFittingError
 from linear_operator.utils.errors import NanError, NotPSDError
 
-from chemclaw.science.bo.campaign import optimize
 from chemclaw.science.bo.engine import SurrogateFitError, initial_candidates, propose_candidates
 from chemclaw.science.bo.problem import (
     CategoricalParameter,
@@ -30,6 +30,7 @@ from chemclaw.science.bo.problem import (
     best_of,
     space_exhausted,
 )
+from tests.bo_harness import optimize
 
 warnings.filterwarnings("ignore")
 
@@ -300,3 +301,45 @@ def test_propose_candidates_does_not_swallow_unrelated_errors(
     monkeypatch.setattr(bofire_strategies, "map", lambda data_model: _BoomStrategy())
     with pytest.raises(KeyError):
         propose_candidates(problem, observations, n=1)
+
+
+def test_the_in_process_campaign_loop_has_no_definition_under_src() -> None:
+    """The loop and the library problem live in `tests/`, and re-adding one needs a caller with it.
+
+    `science/bo/campaign.py` shipped for months with **zero** `src/` callers — no manifest named it,
+    no entrypoint reached it, and its own docstring conceded the durable `BoCampaignWorkflow` was
+    the version that runs. It was not harmless: a session measured a 16-second event-loop stall
+    inside `optimize` and threaded two BoFire calls to fix it, on a path no process can enter, and
+    the fix's measurement paragraph then read as evidence that the function was live.
+    `objectives.molecule_library_problem` was the same shape with a smaller radius, and worse in
+    one way — three pieces of live prose argued a rule by citing it, so the warrant for a real
+    invariant resolved to unreachable code.
+
+    Both moved to `tests/bo_harness.py` on 2026-09-07 rather than being deleted: they drive the
+    production engine, and
+    `D-2026-08-27-a-bound-that-multiplies-and-a-record-that-survives-the-cancel` kept `optimize`
+    precisely because inlining it into three suites is worse duplication. One
+    definition, in the tree whose callers are real, answers that objection
+    (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`).
+
+    This is the absence test the pattern asks for. Nothing else would notice the module coming
+    back — it would import cleanly, type-check, and be exercised by whatever test came with it,
+    which is exactly how it survived the last two dead-code sweeps.
+    """
+    import ast
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    defined: list[str] = []
+    for path in sorted(src.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and node.name in {
+                "optimize",
+                "molecule_library_problem",
+            }:
+                defined.append(f"{path.relative_to(src)}: {node.name}")
+
+    assert not defined, (
+        f"an in-process BO driver is back under src/ with no configuration reaching it: {defined}. "
+        "A campaign ships as `connectors/bo/workflows.BoCampaignWorkflow`; if an in-process loop "
+        "is wanted again, bring the caller that enters it in the same change."
+    )

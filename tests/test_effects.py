@@ -520,3 +520,52 @@ def test_the_ledger_publishes_no_reader_nothing_in_this_repository_names() -> No
         f"{unreached} is published by the effect ledger and named nowhere else in the tree — a "
         "reader that exists only in its own module is a claim that something is observable"
     )
+
+
+def test_no_operator_surface_serves_the_unsettled_set_without_saying_so() -> None:
+    """The module docstring's "served by no route, CLI or tool" is a claim; this is the check.
+
+    `get_effect` and `unsettled` were reported as 22 lines of operator query with no way to run
+    them, and the fork offered was expose-or-delete. Neither was taken, and that is the decision
+    (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`): they are the write path's
+    read-back under test, and `effects_unsettled_idx` is *partial* on `state = 'attempting'`, so it
+    holds in-flight rows only and a never-pruned table does not pay for it.
+
+    What a decision to leave something absent needs is the thing `map_to_hpc_identity` and
+    `audit_events.agent` both lacked — something that fails when the sentence stops being true. The
+    absence tests this repository writes fail when a deleted claim is *re-added*; this one is the
+    mirror image, because here the prose asserts an absence that a future route would quietly
+    falsify. Serving the set is welcome; serving it while the module still says nothing does is
+    what this refuses.
+
+    Scoped to the surfaces the sentence names — the front door, the terminal entrypoints and the
+    agent's tool modules — and read as *identifiers*, so this file's own prose does not count as a
+    caller.
+    """
+    import ast
+
+    surfaces = [
+        *sorted((SRC / "api").rglob("*.py")),
+        *sorted((SRC / "cli").rglob("*.py")),
+        *sorted((SRC / "agent").glob("*tools*.py")),
+    ]
+    assert surfaces, "the scan found no operator surface at all, so it is proving nothing"
+
+    served: list[str] = []
+    for path in surfaces:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            name = (
+                node.id
+                if isinstance(node, ast.Name)
+                else node.attr
+                if isinstance(node, ast.Attribute)
+                else None
+            )
+            if name in {"unsettled", "get_effect"}:
+                served.append(f"{path.relative_to(SRC)}: {name}")
+
+    assert not served, (
+        f"an operator surface now reads the effect ledger ({served}), and "
+        "`durable/effect_ledger.py`'s docstring still says none does. Rewrite the sentence in the "
+        "same change that serves it."
+    )

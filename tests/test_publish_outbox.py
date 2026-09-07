@@ -12,6 +12,7 @@ Three properties, and each was a design decision rather than an implementation d
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import psycopg
@@ -817,6 +818,66 @@ def test_an_emptied_queue_reads_as_zero_seconds_behind_not_as_fifty_six_years(
         )
 
     asyncio.run(_run())
+
+
+def test_all_three_backlog_gauge_families_are_actually_bound() -> None:
+    """The declaration is not the binding, and only the binding puts a series on `/metrics`.
+
+    `record_metric` swallows a `None` callable by design — a metrics failure may not take a request
+    down — so a `bind_gauge_family` call that stops happening is a silent no-op: the family is
+    declared, never registered, never exported, and `ChemclawResultOutboxStuck` can never fire
+    because the series it alerts on does not exist. Replacing the whole
+    `chemclaw_outbox_oldest_pending_seconds` binding with `None` left the repository green under
+    every test whose tracing named this function, which is the same shape as the counter
+    `D-2026-08-08` found declared and never incremented.
+
+    Off the database on purpose. The Postgres-backed reading in
+    `tests/test_datapath_observability.py` does exercise all three, and it skips wherever Postgres
+    does — so the claim "the alert's series exists" would rest on a lane that can go quiet. This
+    asserts the registration itself, which needs no queue.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    probe = "gauge-binding-probe"
+    outbox._PENDING_GAUGE[probe] = 2.0
+    outbox._DEAD_GAUGE[probe] = 1.0
+    outbox._OLDEST_ENQUEUED[probe] = time.time() - 30.0
+    try:
+        outbox.bind_backlog_gauges()
+        rendered = METRICS.render()
+        for family in (
+            "chemclaw_outbox_pending",
+            "chemclaw_outbox_oldest_pending_seconds",
+            "chemclaw_outbox_dead_lettered",
+        ):
+            assert f'{family}{{sink="{probe}"}}' in rendered, (
+                f"{family} is declared but nothing bound it, so it is never exported and any rule "
+                "written against it evaluates on an absent series"
+            )
+    finally:
+        outbox._PENDING_GAUGE.pop(probe, None)
+        outbox._DEAD_GAUGE.pop(probe, None)
+        outbox._OLDEST_ENQUEUED.pop(probe, None)
+
+
+def test_a_row_enqueued_by_a_pod_whose_clock_runs_ahead_reads_as_zero_not_as_one() -> None:
+    """The other end of the same clamp, and the end no fixture reached.
+
+    The test above pins the drained-queue case, where the stored epoch is the zero placeholder.
+    This is the skew case the clamp's own docstring names: a row enqueued by a pod whose clock runs
+    ahead of this one subtracts to a negative age. Zero is the honest reading — the row is not
+    behind — and a floor of anything else is a fabricated backlog that grows no matter how healthy
+    the drain is. `max(0.0, ...)` could become `max(1.0, ...)` with 63 tests green, because every
+    one of them had a row genuinely in the past.
+    """
+    probe = "clock-skew-probe"
+    outbox._OLDEST_ENQUEUED[probe] = time.time() + 300.0
+    try:
+        assert outbox._oldest_pending_seconds()[probe] == 0.0, (
+            "a clock-skewed row read as a backlog; an alert cannot interpret a fabricated age"
+        )
+    finally:
+        outbox._OLDEST_ENQUEUED.pop(probe, None)
 
 
 def test_rows_for_a_disabled_sink_stop_paging_and_are_reported_instead(

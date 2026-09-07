@@ -126,7 +126,7 @@ def test_the_note_carries_the_molecules_it_recommends() -> None:
     expose is unchanged by its removal.
 
     Both routes a campaign has to name a molecule are covered: `molecule` is a library-style
-    categorical whose levels are SMILES (`bo.objectives.molecule_library_problem`), `ligand` is a
+    categorical whose levels are SMILES (`tests.bo_harness.molecule_library_problem`), `ligand` is a
     featurized categorical carrying a label → SMILES `structures` map, and neither reaches the body
     without the writer putting it there — a categorical's `structures` are not printed at all by
     the searched-space listing, so no extractor change could have recovered them.
@@ -156,7 +156,7 @@ def test_compound_smiles_is_set_only_when_one_molecule_is_recommended() -> None:
     naming a ligand *and* a substrate has no single subject, and picking one would file the note
     under a compound nobody chose.
     """
-    from chemclaw.science.bo.objectives import molecule_library_problem
+    from tests.bo_harness import molecule_library_problem
 
     library = molecule_library_problem(["CCCN=[N+]=[N-]", "CCCCO"])
     best = Observation(params={"molecule": "CCCN=[N+]=[N-]"}, value=-1.0, provenance="predicted")
@@ -273,7 +273,7 @@ def test_a_library_campaigns_note_stays_readable(monkeypatch: pytest.MonkeyPatch
     (review of D-157). Bounded by the shared note-excerpt budget, with the omitted count stated
     and the complete space still in the run record.
     """
-    from chemclaw.science.bo.objectives import molecule_library_problem
+    from tests.bo_harness import molecule_library_problem
 
     library = [
         f"{'C' * (1 + index // 6)}c1ccc({'O' * (index % 6) or 'N'}C)cc1" for index in range(60)

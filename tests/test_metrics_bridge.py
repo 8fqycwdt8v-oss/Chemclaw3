@@ -154,6 +154,57 @@ def test_the_priced_token_dimensions_are_published_separately() -> None:
     assert usage.input == 100
 
 
+def test_a_provider_that_reports_cache_outside_its_input_meters_no_negative_input() -> None:
+    """The clamp under the cache subtraction, which every fixture so far kept comfortably positive.
+
+    LangChain's own client reports `input_tokens` *including* the cached share and breaks it out
+    again, which is what the test above pins. A gateway is not obliged to: reporting the cached
+    tokens beside the input rather than inside it makes the subtraction negative, and a negative
+    input token count would flow into `chemclaw_input_tokens_total` and into the turn's own record
+    as a credit against real spend. It meters 0 — the honest answer when two of a provider's own
+    numbers disagree — and the total, which is what the budget binds on, is untouched.
+    """
+    from chemclaw.api.runner_usage import graph_usage_tokens
+
+    chunk = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 1_070,
+            "input_token_details": {"cache_read": 900, "cache_creation": 50},
+        }
+    )
+
+    usage = graph_usage_tokens(chunk)
+
+    assert usage.input == 0, f"a provider's disagreeing numbers metered {usage.input} input tokens"
+    assert usage.total == 1_070, "the clamp changed the total the budget binds on"
+
+
+def test_an_unreadable_usage_block_is_counted_once_per_chunk() -> None:
+    """`chemclaw_usage_unreadable_total` is incremented *by the count*, so the count is the claim.
+
+    `unreadable` distinguishes "nobody reported usage" from "usage was reported and we could not
+    read it" — the second is an upstream rename, which measured on the reader this replaced booked
+    50 turns of 15,000 real tokens each as zero while the budget went on allowing the next one. The
+    counter it feeds is a rate an operator alerts on, so a flag that reads 2 per chunk doubles that
+    rate; nothing asserted the value, only that it was truthy.
+    """
+    from chemclaw.agent.turn_usage import TurnUsage
+    from chemclaw.api.runner_usage import graph_usage_tokens
+
+    turn = TurnUsage()
+    for _ in range(3):
+        turn.add(graph_usage_tokens(SimpleNamespace(usage_metadata={"total_tokens": 0})))
+    # A chunk carrying no usage at all is the normal case, not a signal, and must not be counted.
+    turn.add(graph_usage_tokens(SimpleNamespace(usage_metadata=None)))
+
+    assert turn.unreadable == 3, (
+        f"three unreadable usage blocks were counted as {turn.unreadable}; the counter an operator "
+        "alerts on is scaled by whatever this flag happens to be"
+    )
+
+
 def test_a_provider_reporting_no_cache_counts_leaves_those_counters_alone() -> None:
     """A fabricated zero is indistinguishable from a genuinely uncached deployment.
 
