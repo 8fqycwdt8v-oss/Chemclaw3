@@ -48,10 +48,6 @@
       "failed": "bool",
       "source": "str"
     },
-    "handoff": {
-      "reason": "str",
-      "to": "str"
-    },
     "job_completed": {
       "job_id": "str",
       "summary": "dict[str, object]"

@@ -119,6 +119,7 @@ spec:
           volumeMounts:
             {{- include "chemclaw.tlsMount" . | nindent 12 }}
             {{- include "chemclaw.knowledgeMounts" . | nindent 12 }}
+            {{- include "chemclaw.extraConnectorMounts" . | nindent 12 }}
         {{- include "chemclaw.knowledgeSidecar" . | nindent 8 }}
       initContainers:
         {{- include "chemclaw.knowledgeInit" . | nindent 8 }}

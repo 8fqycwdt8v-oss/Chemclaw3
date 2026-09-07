@@ -279,8 +279,8 @@ def test_a_hung_up_client_stops_charging_admission_for_a_turn_nobody_is_watching
     `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` runs at the pump's *true* end rather than
     when the client goes away. `detach.py` framed that per session — "a session stays 409-locked
     for exactly as long as a turn is running" — but the permit is not per session: it is the
-    process's shared `service_max_concurrent_turns` semaphore. Measured on the real app with the
-    shipped cap of 8: eight fresh sessions POSTed and hung up left **0** permits free and every
+    process's shared `service_max_concurrent_turns` semaphore. Measured on the real app at its
+    shipped cap: that many fresh sessions POSTed and hung up left **0** permits free and every
     other chemist's turn on that replica got `queued` then a shed `error`, for up to
     `service_turn_timeout_seconds`. It needs no malice — a closed laptop, a Wi-Fi handoff or a UI
     that retries on disconnect produces it, and the retry *adds* a holder rather than replacing

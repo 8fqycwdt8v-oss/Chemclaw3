@@ -38,6 +38,7 @@ import pytest
 import yaml
 
 from chemclaw.core.config import Settings
+from tests.siblings import sibling_root
 
 _CHART = Path(__file__).resolve().parents[1] / "deploy" / "helm" / "chemclaw"
 _VALUES: dict[str, Any] = yaml.safe_load((_CHART / "values.yaml").read_text(encoding="utf-8"))
@@ -908,11 +909,11 @@ def test_the_labelling_server_is_addressable_from_the_chart() -> None:
     assert port, "networkPolicy.egressPorts names no rxnlabel port"
     assert str(port) in url, f"the egress port {port} is not the port the URL dials ({url})"
 
-    policy = (_CHART / "templates" / "networkpolicy.yaml").read_text(encoding="utf-8")
-    assert "egressPorts.rxnlabel" in policy, (
-        "the port is declared in values.yaml but never emitted in the egress rule, so it permits "
-        "nothing"
-    )
+    # That the entry is actually *emitted* is asserted against the rendered NetworkPolicy in
+    # `tests/test_deploy_chart.py::test_every_declared_egress_port_reaches_the_rendered_policy`.
+    # It used to be `"egressPorts.rxnlabel" in <the template text>`, which asked whether somebody
+    # had written a line naming this key — a question that stopped meaning anything the moment the
+    # rule started ranging the whole map, and never covered a key an operator added themselves.
 
 
 def test_every_externally_hosted_connector_can_actually_be_dialled() -> None:
@@ -920,18 +921,20 @@ def test_every_externally_hosted_connector_can_actually_be_dialled() -> None:
 
     `connectors.<name>.url` says a sibling repository hosts this capability, and three separate
     things have to line up before a packet reaches it: the address, a `networkPolicy.egressPorts`
-    entry carrying *that* port, and the template actually emitting the entry. Miss the second and
-    the connection is dropped even with the host in `egressDestinations`, because a NetworkPolicy
-    egress rule restricts by port independently of its `to:` peer list. Miss the third and the
-    values entry is a knob that renders nothing
-    (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`).
+    entry carrying *that* port, and the rule actually emitting it. Miss the second and the
+    connection is dropped even with the host in `egressDestinations`, because a NetworkPolicy
+    egress rule restricts by port independently of its `to:` peer list. The third is asked of the
+    rendered object next door
+    (`tests/test_deploy_chart.py::test_every_declared_egress_port_reaches_the_rendered_policy`),
+    because it is the question a knob that renders nothing fails
+    (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`) and the template text could only
+    ever answer it for keys somebody had already written a line for.
 
     Derived from the values file rather than listed, so the *next* externally-hosted bundle is
     covered on the day its `url:` is written. The hand-written version above stays because
     `rxnlabel` is not a connector at all — its address is a `config` key, and no walk of the
     `connectors` block can see it.
     """
-    policy = (_CHART / "templates" / "networkpolicy.yaml").read_text(encoding="utf-8")
     ports = _VALUES["networkPolicy"]["egressPorts"]
     external = {name: cfg["url"] for name, cfg in _VALUES["connectors"].items() if cfg.get("url")}
     assert external, "no externally-hosted connector found; this test would assert nothing"
@@ -945,26 +948,96 @@ def test_every_externally_hosted_connector_can_actually_be_dialled() -> None:
         assert str(ports[name]) == dialled.group(1), (
             f"{name}: egressPorts.{name} is {ports[name]} but the url dials {dialled.group(1)}"
         )
-        assert f"egressPorts.{name}" in policy, (
-            f"egressPorts.{name} is declared in values.yaml and never emitted in the egress rule, "
-            "so it permits nothing"
-        )
 
 
-def test_no_egress_port_is_declared_without_being_emitted() -> None:
-    """The other direction, over the whole map: a port entry no rule names permits nothing.
+def _fleet_addresses() -> dict[str, tuple[str, str, int]]:
+    """Every address in `values.yaml` that names a `Chemclaw3-mcp` server, by where it is declared.
 
-    The test above only reaches ports belonging to a connector `url:`. This one asks the question
-    of every key in `egressPorts`, which is where a value added for a client that is *not* a
-    connector — the labeller was one — would otherwise sit unreferenced and read, in review, as a
-    control that had been set up.
+    Each entry is `(service name, whole host, port)`. The host is matched on the shape the fleet's
+    Services have — `chemclaw-mcp-<server>` — deliberately *loosely*, as `chemclaw<digits?>-mcp-`,
+    so that a wrong spelling is picked up and checked rather than silently falling out of the set
+    it is wrong about. The chart shipped `chemclaw3-mcp-calc` for exactly that reason, and a
+    pattern anchored on the correct name would have found nothing to complain about.
+
+    Only the host's first label is the Service name: a deployment that qualifies the address
+    (`chemclaw-mcp-props.chemclaw-tools.svc`) still names the same Service.
     """
-    policy = (_CHART / "templates" / "networkpolicy.yaml").read_text(encoding="utf-8")
-    ports = _VALUES["networkPolicy"]["egressPorts"]
-    assert ports, "networkPolicy.egressPorts is empty; this test would assert nothing"
-    unemitted = sorted(key for key in ports if f"egressPorts.{key}" not in policy)
-    assert not unemitted, (
-        f"networkPolicy.egressPorts declares {unemitted}, which no egress rule emits. Either the "
-        "rule is missing — in which case the destination is unreachable — or the entry is dead "
-        "and should be deleted."
+    found: dict[str, tuple[str, str, int]] = {}
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, f"{path}.{key}" if path else str(key))
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{path}[{index}]")
+        elif isinstance(node, str):
+            match = re.match(r"https?://(chemclaw[0-9]*-mcp-[a-z0-9-]+)(?:\.[^:/]+)?:(\d+)", node)
+            if match:
+                host = match.group(1)
+                found[path] = (host.split(".", 1)[0], host, int(match.group(2)))
+
+    walk(_VALUES, "")
+    return found
+
+
+def _fleet_services(checkout: Path) -> dict[str, int]:
+    """Every Service the sibling fleet actually creates, name onto port.
+
+    Read from `servers/*/deploy/service.yaml` — the objects `kubectl apply` puts in the namespace —
+    rather than from that repository's prose. The fleet ships no Chart.yaml and no kustomization,
+    so nothing prefixes or transforms these names between the file and the cluster.
+    """
+    services: dict[str, int] = {}
+    for manifest in sorted(checkout.glob("servers/*/deploy/service.yaml")):
+        document = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        services[document["metadata"]["name"]] = int(document["spec"]["ports"][0]["port"])
+    return services
+
+
+def test_every_fleet_address_names_a_service_the_sibling_actually_creates() -> None:
+    """The addresses this chart dials are objects in another repository, so measure them there.
+
+    Five values named `chemclaw3-mcp-<server>` and the fleet's Services are `chemclaw-mcp-<server>`
+    — one character, five NXDOMAINs, and one of them is `CHEMCLAW_CALC_SERVER_URL`, which
+    `connectors/calc/remote.py::calc_session` dials for **every** calculation this system performs
+    (there is no second tier: `D-2026-08-26-semiempirical-is-the-whole-tier`). The failure is
+    silent by the chart's own account — the pod's `/healthz` never touches it and the probes stay
+    green — so nothing in a cluster reports it either.
+
+    Prose could not have caught it and had already failed to: `values.yaml` stated the correct rule
+    ("whatever Service the sibling repo's chart gives its `calc` server in this namespace") in the
+    comment directly above the wrong name. The name was wrong *by its own definition*, which is
+    what makes this a measurement rather than a style check.
+
+    **A skip is not a pass.** Without the sibling checkout this asserts nothing, and says which
+    addresses it therefore did not check, so a CI job that never clones the fleet cannot read a
+    green line as evidence about these five values.
+    """
+    addresses = _fleet_addresses()
+    assert addresses, (
+        "no fleet address found in values.yaml — either the chart stopped naming "
+        "Chemclaw3-mcp's servers, or `_fleet_addresses` no longer matches how it names them"
     )
+
+    checkout, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
+    if checkout is None:
+        listed = ", ".join(f"{path}={host}:{port}" for path, (_, host, port) in addresses.items())
+        pytest.skip(f"{reason}; NOT checked against the fleet's own Services: {listed}")
+
+    services = _fleet_services(checkout)
+    assert services, f"{checkout} declares no servers/*/deploy/service.yaml to compare against"
+
+    wrong: list[str] = []
+    for path, (service, host, port) in sorted(addresses.items()):
+        if service not in services:
+            wrong.append(
+                f"values.yaml `{path}` dials {host}:{port}, and {checkout} creates no Service "
+                f"named {service!r} — it creates {sorted(services)}"
+            )
+        elif services[service] != port:
+            wrong.append(
+                f"values.yaml `{path}` dials {host}:{port}, and {checkout}'s Service "
+                f"{service!r} serves port {services[service]}"
+            )
+    assert not wrong, "\n".join(wrong)

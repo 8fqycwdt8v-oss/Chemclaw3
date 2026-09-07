@@ -542,6 +542,37 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end }}
 - name: knowledge-checkout
   emptyDir: {}
+{{- include "chemclaw.extraConnectorVolumes" . }}
+{{- end -}}
+
+{{- /* The connector bundles this image does not ship, one ConfigMap each (`extraConnectors`).
+
+       In `chemclaw.volumes` and `chemclaw.extraConnectorMounts` rather than on the one component
+       that "needs" them, because there is no such component: `CHEMCLAW_CONNECTORS_DIR` is set once
+       in a ConfigMap every pod reads, and `registry.enabled()` raises on a name it cannot discover.
+       So a pod that got the variable and not the mount does not degrade — it crash-loops on
+       `connectors_enabled names unknown connector(s)`. Uniform is the only shape that is not a
+       trap. `_bundle_dirs` skips a directory that is not there in silence, which is what makes the
+       loud half worth relying on and the quiet half worth avoiding.
+
+       `readOnly` is not decoration: nothing in this system writes a connector manifest, and a
+       ConfigMap volume is read-only in the API anyway — saying so is what keeps the two agreeing
+       if the source ever becomes something writable. */ -}}
+{{- define "chemclaw.extraConnectorVolumes" -}}
+{{- range .Values.extraConnectors.bundles }}
+- name: extra-connector-{{ .name }}
+  configMap:
+    name: {{ .configMap }}
+{{- end }}
+{{- end -}}
+
+{{- define "chemclaw.extraConnectorMounts" -}}
+{{- $root := .Values.extraConnectors.mountPath -}}
+{{- range .Values.extraConnectors.bundles }}
+- name: extra-connector-{{ .name }}
+  mountPath: {{ printf "%s/%s" $root .name }}
+  readOnly: true
+{{- end }}
 {{- end -}}
 
 {{- /* The note writer's writable clone (gap DEP-2) — and, inside it at `knowledge_dir`, the

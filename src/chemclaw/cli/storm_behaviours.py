@@ -280,6 +280,36 @@ BEHAVIOURS: list[Behaviour] = [
         adversarial=True,
     ),
     Behaviour(
+        name="h-size-billed",
+        # The only behaviour whose bill follows the request, and it exists so the estimator
+        # calibration has something to calibrate against. Every other entry here names a constant
+        # `input_tokens`, so `billed / estimated` is always far below 1 and `_Calibration.ratio()`
+        # clamps to 1.0 — which means the EWMA, `agent_context_calibration_max_factor` and the
+        # tightening branch that two merged budget decisions rest on were exercised by no lane
+        # measurement anywhere, only by unit tests with hand-fed numbers. At 0.5 tokens per
+        # character the bill runs roughly twice the chars/4 estimator, so a lane that drives this
+        # sees the ratio move above 1 and the budget tighten, which is the behaviour under test.
+        calls=[ToolCall(tool="find_notes", arguments={"text": "calibration"})],
+        text="Billed by size, so the estimator has something to be wrong about.",
+        input_tokens=None,
+        input_tokens_per_char=0.5,
+    ),
+    Behaviour(
+        name="h-oversize",
+        # The endpoint refusing a request outright — the one request-level failure that unlocks a
+        # label nothing else can reach. `llm_provider._is_context_length` decides whether a turn is
+        # recorded as `context_length` and whether it fails over, and until this entry existed no
+        # lane could produce the 400 it classifies: `Behaviour.http_status` injects a failure per
+        # *behaviour*, and every such injection lands on the generic `error` label instead.
+        # Deliberately not accompanied by 401 or 404 entries — measured, both of those also land on
+        # `error`, so they would add lane time and no reachable path.
+        calls=[ToolCall(tool="find_notes", arguments={"text": "over the endpoint's limit"})],
+        text="",
+        input_tokens=None,
+        refuse_over_input_tokens=2_000,
+        adversarial=True,
+    ),
+    Behaviour(
         name="h-injection",
         calls=[
             ToolCall(

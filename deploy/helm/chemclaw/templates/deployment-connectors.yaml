@@ -144,6 +144,21 @@ spec:
                 command: ["sleep", {{ $.Values.connectorDrainSeconds | quote }}]
           resources:
             {{- toYaml $.Values.resources.connector | nindent 12 }}
+          {{- /* This pod declared no volume at all until 2026-09-07, which is why the key and the
+                 list are both conditional: `volumeMounts:` with an empty body renders `null`, a
+                 different manifest from one without the key. It needs the mounted bundles for the
+                 same reason every other component does — `connectors/server.py` calls
+                 `discovered()` over `connectors_dirs` at startup, and a directory that is not
+                 there is skipped in silence, so this pod would serve a smaller surface than the
+                 front door advertises rather than failing. */}}
+          {{- if $.Values.extraConnectors.bundles }}
+          volumeMounts:
+            {{- include "chemclaw.extraConnectorMounts" $ | nindent 12 }}
+          {{- end }}
+      {{- if $.Values.extraConnectors.bundles }}
+      volumes:
+        {{- include "chemclaw.extraConnectorVolumes" $ | nindent 8 }}
+      {{- end }}
 ---
 {{- end }}
 {{- if $cfg.worker }}
@@ -217,12 +232,15 @@ spec:
                    holds a slot per in-flight search) says so in its own entry rather than
                    adding a key to the global `resources:` block. */}}
             {{- toYaml (default $.Values.resources.worker $cfg.resources) | nindent 12 }}
-          {{- /* The mTLS mount is this container's only one, so the key itself is conditional:
-                 `volumeMounts:` with an empty body renders `null`, which is a different manifest
-                 from one without the key. */}}
-          {{- if $.Values.secrets.temporalTls.enabled }}
+          {{- /* Neither mount is unconditional, so the key itself is: `volumeMounts:` with an
+                 empty body renders `null`, which is a different manifest from one without the key.
+                 The bundle mounts are here for the reason `chemclaw.extraConnectorMounts` gives —
+                 this pod reads the same ConfigMap and would crash-loop on a name it cannot
+                 discover, not merely serve one bundle fewer. */}}
+          {{- if or $.Values.secrets.temporalTls.enabled $.Values.extraConnectors.bundles }}
           volumeMounts:
             {{- include "chemclaw.tlsMount" $ | nindent 12 }}
+            {{- include "chemclaw.extraConnectorMounts" $ | nindent 12 }}
           {{- end }}
       volumes:
         {{- include "chemclaw.volumes" $ | nindent 8 }}

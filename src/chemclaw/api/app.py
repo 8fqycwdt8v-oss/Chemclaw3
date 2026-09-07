@@ -46,6 +46,7 @@ from chemclaw.agent.scratchpad import close_memory_store
 from chemclaw.agent.session_events import stream_new_events
 from chemclaw.agent.verifier import require_verifier_capability
 from chemclaw.api.budget import BudgetTracker
+from chemclaw.api.deps import CurrentUser
 from chemclaw.api.detach import RunningTurns
 from chemclaw.api.middleware import (
     _add_body_size_limit,
@@ -255,11 +256,14 @@ def create_app(
     """
     _refuse_unauthenticated_exposure()
     _refuse_unconfigured_llm_gateway()
-    # `openapi_url=None` for the same reason as `docs_url`/`redoc_url`: FastAPI serves the schema
-    # from a plain `Route`, not an `APIRoute`, so `require_principal` never applied to it and
-    # `tests/test_route_auth_coverage.py` could not see it — the full route/parameter/model surface
-    # was readable by anyone who could reach the pod. Nothing consumes it (the UI is static and the
-    # docs pages are already off), so it is closed rather than gated.
+    # `openapi_url=None` keeps FastAPI from registering the schema on a plain `Route`, which is not
+    # an `APIRoute` and therefore carries no dependency tree `require_principal` could sit in — the
+    # defect D-2026-08-06 §4 closed, where the full route/parameter/model surface was readable by
+    # anyone who could reach the pod. The document itself is served again, from a real `APIRoute`
+    # registered below (`D-2026-09-07-a-contract-check-that-cannot-reach-the-contract`): what that
+    # ADR rejected was the *route shape*, and its second reason — no consumer — stopped being true
+    # when `Chemclaw3_ui` grew a contract check that fetches it. `docs_url`/`redoc_url` stay off:
+    # they are pages for a human, and nothing consumes those.
     app = FastAPI(
         title="Chemclaw", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan
     )
@@ -490,6 +494,31 @@ def create_app(
         protocols,
     ):
         module.register(app)
+
+    # The schema, gated like everything else — and registered here rather than in a `routes/`
+    # module because it is not a resource of any domain: it is this app describing itself, and it
+    # has to be declared after the loop above so its own path lands last in the listing.
+    #
+    # **Why it is served at all.** `Chemclaw3_ui/scripts/check-openapi.mjs` diffs that repo's BFF
+    # whitelist against the routes this service publishes, and it exists because the same class of
+    # miss reached production three times. Against a real backend it fetched a 404 and exited 1, so
+    # the check had never once run, and its own failure text says "The FastAPI service serves this"
+    # — so the one honest signal it had ("this check did not run") read as a mistyped base URL.
+    # `D-2026-09-07-a-contract-check-that-cannot-reach-the-contract` weighs that against publishing
+    # a generated artifact instead, and takes this arm.
+    #
+    # **Why it is a handler and not `openapi_url`.** `CurrentUser` is what makes it an `APIRoute`
+    # with `require_principal` in its dependency tree, which is both the gate and the reason
+    # `tests/test_route_auth_coverage.py` can see it. `principal` is deliberately unused: the
+    # document is the same for every caller — being *someone* is the whole check.
+    @app.get("/openapi.json")
+    async def openapi_schema(principal: CurrentUser) -> dict[str, Any]:
+        """The OpenAPI document, for an authenticated caller only.
+
+        `app.openapi()` caches into `app.openapi_schema` on the first call, so this is one
+        generation per process rather than per request.
+        """
+        return app.openapi()
 
     # **Only when identity is not enforced**, and that is a property of this UI rather than a
     # policy choice. `api/static/app.js` sends no `Authorization` header at all — measured: the

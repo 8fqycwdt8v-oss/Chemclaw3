@@ -33,7 +33,7 @@ archives it:
   "environment": "staging",
   "order": ["mcp-props", "mcp-calc", "core", "ui"],
   "components": {
-    "mcp-props": {"kind": "deployment", "deployment": "chemclaw3-mcp-props", "container": "props",
+    "mcp-props": {"kind": "deployment", "deployment": "chemclaw-mcp-props", "container": "server",
                   "image": "registry/chemclaw-mcp-props", "digest": "sha256:…"},
     "core":      {"kind": "helm", "release": "chemclaw", "chart": "deploy/helm/chemclaw",
                   "image": "registry/chemclaw", "digest": "sha256:…",

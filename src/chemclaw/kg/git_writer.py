@@ -372,7 +372,14 @@ def _is_auth_failure(stderr: str) -> bool:
 
 
 class GitNoteWriter:
-    """Push a note on a per-note branch via git. Conforms to `NoteSubmitter`."""
+    """Commit a note onto the base branch via git. Conforms to `NoteSubmitter`.
+
+    Not a per-note branch: `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the
+    review the branch existed to feed, and this class's own module docstring has said so since.
+    The sentence that stood here outlived it by describing the mechanism rather than the purpose,
+    which is why it read as current — `_require_dedicated_checkout` refuses any branch but the
+    base, so the shape it promised is one the code now rejects.
+    """
 
     def __init__(
         self,

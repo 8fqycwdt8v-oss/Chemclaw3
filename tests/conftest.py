@@ -504,13 +504,54 @@ def _report_temporal_skips(terminalreporter: TerminalReporter) -> None:
     )
 
 
+def _report_sibling_skips(terminalreporter: TerminalReporter) -> None:
+    """Say plainly that the cross-repository checks did not run, and what that leaves unchecked.
+
+    One more thing a green line can be silent about, and the one with the largest consequence
+    behind it. `tests/test_context_floor.py` bounds the half of the request prefix served out of
+    `Chemclaw3-mcp` — the half `SERVED_ELSEWHERE_ALLOWANCE` stands in for, which `PREFIX_BOUND` is
+    built from, which `core/config/agent.py` derives **both** compaction defaults from — and
+    `tests/test_sibling_manifest_agreement.py` compares the declarations the two repositories hold
+    of one surface. Without a checkout of that repository every one of them skips.
+
+    **Two sentences in `tests/test_context_floor.py` claimed this reporter existed before it
+    did.** `grep` for a sibling in this module found nothing, while both said in the present tense
+    that the epilogue counted the skip — a claim about a control, which is the class of sentence
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` is about. Correcting the
+    prose was the alternative and it was the worse one: `-ra` does print the skip, in a list this
+    file's other three reporters exist because nobody reads. So the sentence was made true
+    instead.
+
+    Matched on `tests/siblings.SIBLING_SKIP`, imported rather than restated, because the marker is
+    the one thing this reporter and those skips must agree about.
+    """
+    from tests.siblings import SIBLING_SKIP
+
+    skipped = [
+        report
+        for report in terminalreporter.stats.get("skipped", [])
+        if SIBLING_SKIP in str(report.longrepr)
+    ]
+    if not skipped:
+        return
+    terminalreporter.write_sep("=", "Cross-repository checks did not run", yellow=True)
+    terminalreporter.write_line(
+        f"{len(skipped)} tests were skipped because there is no Chemclaw3-mcp checkout to read, so "
+        "this run is not evidence about the half of the request prefix that fleet serves — the "
+        "allowance PREFIX_BOUND is built from and both compaction defaults are derived from — nor "
+        "about whether the two repositories still declare the same connector surface and the same "
+        "`calc` tool names. Clone it beside this one, or set CHEMCLAW_MCP_REPO."
+    )
+
+
 def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     """Say plainly which failures were timeouts, and how much of the suite never ran.
 
     Every section is about the same misreading: a run's headline number is believed without the
     things that qualify it. A timed-out test proves nothing about the assertions it never
     reached, and a skipped Postgres, Temporal or helm test proves nothing at all — see
-    `_report_postgres_skips`, `_report_temporal_skips` and `_report_helm_skips`.
+    `_report_postgres_skips`, `_report_temporal_skips`, `_report_helm_skips` and
+    `_report_sibling_skips`.
 
     `FAILED tests/test_pka.py::test_… - Failed: Timeout (>180.0s) from pytest-timeout` in the
     short summary was read as a numerical failure by two separate reviewers of this repository, and
@@ -524,6 +565,7 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     _report_temporal_skips(terminalreporter)
     _report_helm_skips(terminalreporter)
     _report_public_schema_shadowing(terminalreporter)
+    _report_sibling_skips(terminalreporter)
     timed_out = sorted(
         report.nodeid
         for report in terminalreporter.stats.get("failed", [])

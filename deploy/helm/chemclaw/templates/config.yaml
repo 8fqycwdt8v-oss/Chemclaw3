@@ -106,6 +106,18 @@
          `chemclaw.connectorsEnabled`. Without it, `enabled: false` took a bundle's pods away and
          left its tools advertised, so the switch this file documents did half of what it says. */}}
   CHEMCLAW_CONNECTORS_ENABLED: {{ include "chemclaw.connectorsEnabled" . | quote }}
+  {{- /* And *where* the bundles those two names are discovered from live, when this release mounts
+         any the image does not ship (`extraConnectors` in `values.yaml`).
+
+         Conditional on the list rather than always written, because setting it at all replaces the
+         code's own default outright — `connectors_dir` is a plain pathsep list, not an extension
+         point — so an unconditional value would be a second statement of the image's layout on
+         every release, including the ones that mount nothing. The mounted directory comes first:
+         earlier directories win a name collision, which is the precedence `registry._bundle_dirs`
+         documents and the fleet's `manifests/` relies on for `chem` and `safety`. */}}
+  {{- if .Values.extraConnectors.bundles }}
+  CHEMCLAW_CONNECTORS_DIR: {{ printf "%s:%s" .Values.extraConnectors.mountPath .Values.extraConnectors.shippedPath | quote }}
+  {{- end }}
   {{- /* Derived from the autoscaling block rather than hand-written in `config`, and for the
          sharpest version of the same reason: the admission cap is per-process, so the load the
          shared LLM endpoint really sees is `this × uvicorn workers × the cap`. Written by hand it

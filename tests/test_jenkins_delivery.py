@@ -24,6 +24,10 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from tests.siblings import SIBLING_SKIP, sibling_root
+
 _ROOT = Path(__file__).resolve().parents[1]
 _JENKINS_DIR = _ROOT / "deploy" / "jenkins"
 _PIPELINES = (_ROOT / "Jenkinsfile", _JENKINS_DIR / "Jenkinsfile.release")
@@ -196,3 +200,100 @@ def test_every_free_text_release_parameter_is_allowlist_validated() -> None:
         )
         # Every validation is an anchored allowlist match, not a loose contains-check.
         assert "c.value ==~ c.pattern" in text, f"{pipeline.name}: validation is not a regex match"
+
+
+def _fleet_workloads(checkout: Path) -> dict[str, set[str]]:
+    """Every Deployment `Chemclaw3-mcp` creates, mapped to the container names inside it.
+
+    Read off the sibling's own manifests rather than restated here, for the reason the whole of
+    this wave's fleet-seam work rests on: a name this repository writes down for an object another
+    repository creates is a claim about that repository, and the only evidence about it is there.
+    """
+    import yaml
+
+    workloads: dict[str, set[str]] = {}
+    for manifest in sorted(checkout.glob("servers/*/deploy/deployment.yaml")):
+        for document in yaml.safe_load_all(manifest.read_text(encoding="utf-8")):
+            if not isinstance(document, dict) or document.get("kind") != "Deployment":
+                continue
+            spec = document["spec"]["template"]["spec"]
+            workloads[str(document["metadata"]["name"])] = {
+                str(container["name"]) for container in spec["containers"]
+            }
+    return workloads
+
+
+#: A component descriptor's `deployment:` value, and the `container:` beside it.
+#:
+#: Both pipelines and the README write the pair within a few tokens of each other, in Groovy
+#: (`deployment: "chemclaw-mcp-${name}", container: 'server'`) and in JSON (`"deployment": "…",
+#: "container": "…"`). One pattern reads both because the question is the same in either syntax.
+_COMPONENT_PAIR = re.compile(
+    r"""["']?deployment["']?\s*:\s*["']([^"']*mcp-[^"']*)["']\s*,\s*"""
+    r"""["']?container["']?\s*:\s*["']?([A-Za-z0-9_${}-]+)["']?""",
+)
+
+
+def _declared_fleet_workloads() -> dict[str, tuple[str, str]]:
+    """Every `(deployment, container)` pair this repository declares for a fleet server."""
+    declared: dict[str, tuple[str, str]] = {}
+    for path in (*_PIPELINES, _JENKINS_DIR / "README.md"):
+        for deployment, container in _COMPONENT_PAIR.findall(path.read_text(encoding="utf-8")):
+            declared[f"{path.relative_to(_ROOT)}: {deployment}"] = (deployment, container)
+    return declared
+
+
+def test_a_release_patches_a_fleet_workload_that_exists() -> None:
+    """The release descriptor names objects in another repository, so measure them there.
+
+    `Jenkinsfile.release` built every MCP component as `deployment: "chemclaw3-mcp-${name}",
+    container: name` — and the fleet's Deployments are `chemclaw-mcp-<name>` with the container
+    called `server` in all seven. So a release patching image digests targeted a Deployment that
+    does not exist and, inside it, a container that does not exist either. The image reference on
+    the next line was already spelled correctly, which is precisely what made the mismatch
+    invisible to a reader: two adjacent lines, one right, one wrong, about the same server.
+
+    This is the third place one repository wrote down a name the other owns — after the chart's
+    five `chemclaw3-mcp-*` addresses and its own prose asserting the rule those five broke — which
+    is why it is checked rather than corrected and left to drift again.
+
+    **A skip is not a pass**: with no fleet checkout this asserts nothing and says which pairs it
+    therefore did not check.
+    """
+    declared = _declared_fleet_workloads()
+    assert declared, (
+        "no (deployment, container) pair found for a fleet server — either the release descriptor "
+        "stopped naming them, or `_COMPONENT_PAIR` no longer matches how it does"
+    )
+
+    checkout, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
+    if checkout is None:
+        listed = ", ".join(f"{d}/{c}" for d, c in sorted(declared.values()))
+        pytest.skip(
+            f"{SIBLING_SKIP} {reason}; NOT checked against the fleet's own workloads: {listed}"
+        )
+
+    workloads = _fleet_workloads(checkout)
+    assert workloads, f"{checkout} declares no servers/*/deploy/deployment.yaml to compare against"
+
+    servers = sorted(name.removeprefix("chemclaw-mcp-") for name in workloads)
+    wrong: list[str] = []
+    for where, (deployment, container) in sorted(declared.items()):
+        # A Groovy template is checked against every server it will be rendered for; a literal
+        # names one. Substituting each in turn covers both without parsing Groovy.
+        for server in servers if "${name}" in deployment else [""]:
+            rendered = deployment.replace("${name}", server)
+            in_container = container.replace("${name}", server)
+            # `container: name` in Groovy is the loop variable, which holds the server name.
+            resolved = server if in_container == "name" and server else in_container
+            if rendered not in workloads:
+                wrong.append(
+                    f"{where} patches Deployment {rendered!r}, and {checkout} creates no such "
+                    f"workload — it creates {sorted(workloads)}"
+                )
+            elif resolved not in workloads[rendered]:
+                wrong.append(
+                    f"{where} patches container {resolved!r} in {rendered!r}, and that Deployment "
+                    f"runs {sorted(workloads[rendered])}"
+                )
+    assert not wrong, "\n".join(dict.fromkeys(wrong))

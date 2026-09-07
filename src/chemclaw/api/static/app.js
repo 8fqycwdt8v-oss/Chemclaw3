@@ -174,11 +174,6 @@ function applyEvent(evt, answerEl) {
       // failure D-2026-08-01 went looking for, and it is invisible in the merged evidence list.
       add("trace", `⌕ ${evt.source}: ${evt.chunks} chunk(s)`);
       return answerEl;
-    case "handoff":
-      // Its own line rather than a prefix on what follows: a reader needs to see *where* control
-      // went, not only that the next tool call came from somewhere else.
-      add("trace", evt.to ? `⇢ handed to ${evt.to}${evt.reason ? ` — ${evt.reason}` : ""}` : "⇠ back to the main agent");
-      return answerEl;
     case "answer":
       if (!answerEl) add("assistant", evt.text);
       return answerEl;

@@ -157,6 +157,60 @@ shape. The key is written out as an explicit `""` instead, so the emptiness appe
 `helm show values`, in the rendered ConfigMap, and in any values diff — where an absent key appears
 in none of them.
 
+## Attaching a connector bundle this image does not ship
+
+`Chemclaw3-mcp`'s servers, and any private bundle a site keeps of its own, reach an OpenShift
+release through four declarations — all four in a values file, none of them a chart edit
+(`D-2026-09-07-a-seam-that-stops-at-the-chart-is-not-a-seam`). Three were already map-valued and one
+had to be built; the table is here because the *absence* of any of them fails differently:
+
+| declaration | what it gives | how it fails without it |
+| --- | --- | --- |
+| `connectors.<name>.{enabled,server,url}` | the address, and the bundle on the agent's surface | no capability; and `enabled` without the manifest is a **crash loop**, see below |
+| `extraConnectors.bundles[]` | the manifest directory, as a ConfigMap mounted into every pod | `connectors_enabled names unknown connector(s)`, raised at import in every pod |
+| `networkPolicy.egressPorts.<name>` | permission to dial that port | every packet dropped, **silently** — the bundle reports as merely unreachable |
+| `secrets.optionalKeys.<name>Token` | the bearer the server enforces | every call refused |
+
+The bearer's *variable* name is not this repository's to write down: it is whatever that bundle's
+manifest declares as `auth.token_env`, which is why `make prose-validate` refuses a concrete one
+here — a name in operator prose has to resolve to a manifest something in this checkout can see,
+and a bundle mounted from elsewhere brings its own.
+
+Plus a `networkPolicy.egressDestinations` entry for the host, on the same terms as the sibling
+servers this release already dials. A worked example, `Chemclaw3-mcp`'s `props`:
+
+```yaml
+connectors:
+  props: {enabled: true, server: true, url: http://chemclaw-mcp-props:8850/mcp}
+extraConnectors:
+  bundles:
+    - name: props
+      configMap: chemclaw-connector-props   # keys are that bundle's files; `connector.yaml` must be one
+networkPolicy:
+  egressPorts: {props: 8850}
+secrets:
+  optionalKeys: {propsToken: <the name that bundle's manifest gives `auth.token_env`>}
+```
+
+Two things worth knowing before you write that:
+
+- **`enabled` without a mounted manifest is a crash loop, not a missing tool.**
+  `CHEMCLAW_CONNECTORS_ENABLED` is derived from the `connectors:` block, and `registry.enabled()`
+  refuses a name no bundle provides — deliberately, because the alternative is a capability that
+  silently stops working. The two halves go in together.
+- **A mounted bundle overrides a shipped one of the same name.** `extraConnectors.mountPath` is
+  prepended to `CHEMCLAW_CONNECTORS_DIR` and earlier directories win a name collision, which
+  `Chemclaw3-mcp`'s `manifests/` uses on purpose for `chem` and `safety`. That is a real capability
+  and a real footgun; two entries in that directory are complete ports carrying their bundle's name
+  and two more (`calc`, `rxnlabel`) must never be registered at all — its `README.md` says which.
+
+The addresses above are the Services `Chemclaw3-mcp` creates in **this** namespace: its servers'
+NetworkPolicies admit their caller with a bare `podSelector`, which is same-namespace only, so a
+namespace-qualified address resolves and is then dropped on the far side.
+`tests/test_helm_chart.py::test_every_fleet_address_names_a_service_the_sibling_actually_creates`
+holds every fleet address in `values.yaml` against those manifests, and skips — naming each address
+it did not check — where no sibling checkout is present.
+
 ## Stateful dependencies (F6-T3, ADR **D-049**, Teilentscheidung D-A6a)
 
 - **Temporal: self-hosted in-cluster** (not Temporal Cloud). Rationale: keeps the durable core inside

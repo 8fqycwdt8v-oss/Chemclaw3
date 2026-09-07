@@ -57,9 +57,10 @@ spec:
                  renders `null`. This hook is also where an absent `chemclaw-temporal-tls` Secret
                  used to surface — as `FileNotFoundError: /etc/temporal/tls/tls.crt` from a Job whose
                  message named neither Temporal nor a Secret. */}}
-          {{- if .Values.secrets.temporalTls.enabled }}
+          {{- if or .Values.secrets.temporalTls.enabled .Values.extraConnectors.bundles }}
           volumeMounts:
             {{- include "chemclaw.tlsMount" . | nindent 12 }}
+            {{- include "chemclaw.extraConnectorMounts" . | nindent 12 }}
           {{- end }}
       volumes:
         {{- include "chemclaw.volumes" . | nindent 8 }}
