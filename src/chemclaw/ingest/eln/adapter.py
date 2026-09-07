@@ -34,8 +34,19 @@ def parse_iso_utc(value: str) -> datetime:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
-def is_late_arrival(path: Path, since: datetime) -> bool:
-    """True if `path` appeared at/after the fetch floor although its payload predates it.
+def is_late_arrival(path: Path, floor: datetime) -> bool:
+    """True if `path` appeared at/after the *run's* floor although its payload predates it.
+
+    **`floor` is the run's, never a continuation chunk's**, and the difference is not academic. A
+    drain advances its cursor per chunk, so on a bulk-copy backfill — files whose mtime is the copy
+    time and whose payload timestamps are old — every file the earlier chunks already ingested sits
+    behind the new cursor with an mtime after it, and re-qualifies here on every later chunk.
+    Measured on a 3,000-file corpus at the shipped batch size: 43,471 ledger writes across 30
+    chunks, growing 99, 199, 299 … per chunk, each row telling a chemist that no scheduled run will
+    fetch an entry that is already in the corpus. The question this answers — *will any scheduled
+    run ever fetch this file* — is a question about the floor the run reached down to, which is why
+    `fetch_new_entries` takes `report_late_arrivals` and the sync says False on every chunk whose
+    floor is not that one.
 
     Why this exists: a file-export adapter keeps entries stamped `>= since` and drops the rest,
     and the sync's overlap window (`eln_sync_overlap_seconds`) rewinds `since` only far enough to
@@ -53,7 +64,7 @@ def is_late_arrival(path: Path, since: datetime) -> bool:
         mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
     except OSError:
         return False
-    return mtime >= since
+    return mtime >= floor
 
 
 def warn_late_arrivals(logger: Logger, source: str, names: list[str]) -> None:
@@ -162,10 +173,22 @@ class ElnAdapter(Protocol):
 
         `None` means unbounded, which is what a caller reading a whole corpus passes.
 
+        **`report_late_arrivals` is the second capability, and it is a per-*run* question.** An
+        adapter that reads a whole directory can see files it is *not* returning — payload behind
+        the floor, mtime after it — and reports them as arrivals no scheduled run will fetch. That
+        is only answerable against the floor the run reached down to: a continuation chunk's floor
+        is the advancing cursor, and every file between the two was ingested by this very run, so
+        judging lateness there re-refuses what the drain has just taken in. The sync passes `False`
+        on exactly those chunks. An adapter that does not declare the parameter is never told, and
+        keeps its previous behaviour.
+
         Args:
             since: The fetch floor — entries at or after it, in `entry_window` order.
             limit: At most this many entries *strictly newer* than `since`; entries at or before
                 it (the sync's overlap replay) are not counted against it. `None` is unbounded.
+            report_late_arrivals: Whether `since` is the run's own floor, so a file behind it that
+                arrived after it may be reported as never-to-be-fetched. `False` on a continuation
+                chunk, whose floor answers a different question.
         """
         ...
 
@@ -181,6 +204,39 @@ class BoundedFetch(Protocol):
     def fetch_truncated(self) -> bool:
         """Whether the last `fetch_new_entries` stopped at its own limit with rows still waiting."""
         ...
+
+
+def _accepts(adapter: object, parameter: str) -> bool:
+    """Whether `adapter.fetch_new_entries` declares `parameter`, so it may be offered.
+
+    The one place the introspection happens, because two capabilities are now asked this way and
+    the answer for a callable with no introspectable signature has to be the same for both.
+    `inspect.signature` rather than a `runtime_checkable` Protocol because structural checks see
+    method *names*, not their parameters — the distinction these questions are entirely about.
+    """
+    fetch = getattr(adapter, "fetch_new_entries", None)
+    if fetch is None:
+        return False
+    try:
+        return parameter in inspect.signature(fetch).parameters
+    except (TypeError, ValueError):
+        # A builtin or a C-implemented callable has no introspectable signature. "It does not take
+        # this" is the safe answer for both callers: the sync bounds the result itself, and it
+        # keeps reporting late arrivals on every chunk, which is what every adapter did before
+        # either capability existed.
+        return False
+
+
+def accepts_a_late_arrival_switch(adapter: object) -> bool:
+    """Whether `adapter.fetch_new_entries` will take the `report_late_arrivals` flag.
+
+    Asked rather than required, for the reason `accepts_a_limit` gives below: the protocol may not
+    grow a parameter an out-of-tree adapter has never heard of. An adapter that does not take it is
+    simply never told to stay quiet — it reports late arrivals on every chunk, which is what every
+    adapter did before this existed, and which is only wrong for an adapter that reads a whole
+    directory per chunk.
+    """
+    return _accepts(adapter, "report_late_arrivals")
 
 
 def accepts_a_limit(adapter: object) -> bool:
@@ -200,16 +256,7 @@ def accepts_a_limit(adapter: object) -> bool:
     a `runtime_checkable` Protocol because structural checks see method *names*, not their
     parameters — the distinction this question is entirely about.
     """
-    fetch = getattr(adapter, "fetch_new_entries", None)
-    if fetch is None:
-        return False
-    try:
-        return "limit" in inspect.signature(fetch).parameters
-    except (TypeError, ValueError):
-        # A builtin or a C-implemented callable has no introspectable signature. Unbounded is the
-        # safe answer: the sync bounds the result instead, which is what it did for every adapter
-        # before this existed.
-        return False
+    return _accepts(adapter, "limit")
 
 
 def fetch_was_truncated(adapter: object) -> bool:
@@ -304,17 +351,26 @@ class DatedIngest:
         """
         return self._inner
 
-    async def fetch_new_entries(self, since: datetime, limit: int | None = None) -> list[RawEntry]:
+    async def fetch_new_entries(
+        self, since: datetime, limit: int | None = None, *, report_late_arrivals: bool = True
+    ) -> list[RawEntry]:
         """Delegate unchanged — dating is purely a mapping concern, and so is bounding.
 
-        The wrapper declares `limit` so `accepts_a_limit` answers `True` for a source whose adapter
-        can bound its read; it forwards one only when the wrapped adapter actually takes it, for
-        the reason that function gives. A wrapper that advertised a capability its inner adapter
+        The wrapper declares both optional parameters so the two probes answer `True` for a source
+        whose adapter takes them; it forwards each only when the wrapped adapter actually does, for
+        the reason those functions give. A wrapper that advertised a capability its inner adapter
         lacks would move the `TypeError` rather than prevent it.
+
+        Only a `False` `report_late_arrivals` is forwarded, because `True` is the default every
+        adapter already has and passing it would make the call fail for an adapter that predates
+        the flag — the one thing the probe exists to prevent.
         """
+        extra: dict[str, Any] = {}
         if limit is not None and accepts_a_limit(self._inner):
-            return await self._inner.fetch_new_entries(since, limit)  # type: ignore[call-arg]
-        return await self._inner.fetch_new_entries(since)
+            extra["limit"] = limit
+        if not report_late_arrivals and accepts_a_late_arrival_switch(self._inner):
+            extra["report_late_arrivals"] = False
+        return await self._inner.fetch_new_entries(since, **extra)
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Map through the wrapped adapter, then date the record if it came back undated."""

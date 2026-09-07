@@ -342,7 +342,14 @@ class ReactionRecordStore(Protocol):
 
 
 class InMemoryReactionRecordStore:
-    """Process-local `ReactionRecordStore` for tests and single-run use.
+    """Process-local `ReactionRecordStore` — the reference the SQL one is written to match.
+
+    **A differential oracle, not a deployment backend.** No configuration returns it — every
+    `default_*()` in this tree resolves to the Postgres implementation — and that is deliberate
+    (`D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend`). It stays in
+    `src/` because it is the executable statement of the contract its Postgres sibling is written
+    to reproduce, and it is read beside that sibling; `tests/test_reference_stores.py` holds both
+    halves of that — the absence of a shipped caller, and the absence of this claim.
 
     Keyed by `(source, reaction_id)`, so re-recording one source's id replaces it and two sources
     sharing an id keep both rows — the same identity the durable store's primary key gives, which

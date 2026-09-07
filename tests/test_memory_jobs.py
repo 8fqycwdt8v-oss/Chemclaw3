@@ -9,7 +9,7 @@ default config points at (`data/eln-exports` + `data/eln-exports/ord`); no serve
 """
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -107,3 +107,83 @@ def test_background_worker_registers_memory_fan_out() -> None:
         publish_memory_note_activity,
     ):
         assert built in BACKGROUND_ACTIVITIES
+
+
+def test_the_memory_corpus_is_the_whole_source_and_not_its_first_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source that pages is read to the end, and a read that cannot be is not called complete.
+
+    `read_corpus` fetched once, from `datetime.min`, and took whatever came back. That is the whole
+    corpus for a drop directory, which reads its directory in one go — and it is **one page** for a
+    source that pages. Measured against the warehouse adapter over a 12-row corpus at
+    `fetch_limit: 5`: `read_corpus` saw **5 of 12** and returned `complete=True`, so the three
+    memory miners distilled campaign, playbook and optimization notes from the oldest 500 rows of
+    an ELN at the shipped binding default and nothing said so. The register had this recorded as a
+    *cost* — a full table scan per activity — and the shipped behaviour was the opposite failure:
+    not too much read, but far too little, silently.
+
+    So the fetch is a loop, on the adapter's own truncation signal, and `complete` carries the case
+    the loop cannot finish — a source stuck on a block of rows sharing one watermark reports itself
+    truncated forever, and the second arm below is that.
+    """
+    from chemclaw.ingest.eln.warehouse.adapter import WarehouseElnAdapter
+    from tests import warehouse_fake
+    from tests.test_warehouse_adapter import _binding, _charge_rows, _reaction_row
+
+    binding = _binding()
+    binding["ingest"]["entry"]["fetch_limit"] = 5
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    warehouse_fake.prime_warehouse(
+        warehouse_fake.WatermarkWarehouse(
+            {
+                "V_REACTION": [
+                    _reaction_row(f"RX-{index}", base + timedelta(hours=index), None)
+                    for index in range(12)
+                ],
+                "V_CHARGE": [row for index in range(12) for row in _charge_rows(f"RX-{index}")],
+            },
+            entry_relation="V_REACTION",
+            created_at="CREATED_TS",
+            modified_at="LAST_MODIFIED_TS",
+            key="REACTION_ID",
+        )
+    )
+    adapter = WarehouseElnAdapter(binding=binding, name="eln-test")
+    monkeypatch.setattr(memory_jobs, "active_ingest_sources", lambda: [adapter])
+    read = asyncio.run(memory_jobs.read_corpus())
+    assert len(read.reactions) == 12, (
+        f"the memory corpus is {len(read.reactions)} of 12 reactions — the miners would distil "
+        "the oldest page of the ELN and call it what this deployment knows"
+    )
+    assert read.complete
+
+    class _Wedged:
+        """A source that reports more waiting and cannot get past its first page."""
+
+        def __init__(self) -> None:
+            self.fetches = 0
+
+        async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+            self.fetches += 1
+            return [RawEntry(entry_id="stuck", created_at=base, payload={})]
+
+        def fetch_truncated(self) -> bool:
+            return True
+
+        def map_to_ord(self, raw: RawEntry) -> OrdReaction:
+            return OrdReaction(
+                reaction_id=raw.entry_id,
+                inputs=[Component(smiles="CCO", role=Role.REACTANT)],
+                outcomes=[Component(smiles="CCOC", role=Role.PRODUCT)],
+                provenance="wedged-source",
+            )
+
+    wedged = _Wedged()
+    monkeypatch.setattr(memory_jobs, "active_ingest_sources", lambda: [wedged])
+    stuck = asyncio.run(memory_jobs.read_corpus())
+    assert wedged.fetches == 2, "a page that offers nothing new ends the loop rather than spinning"
+    assert not stuck.complete, (
+        "a corpus read that stopped with the source still reporting rows waiting is not complete, "
+        "and the miners are handed that fact rather than a full-looking corpus"
+    )
