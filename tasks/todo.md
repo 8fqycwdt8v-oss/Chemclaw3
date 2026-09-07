@@ -1,223 +1,170 @@
-# Multi-wave re-review — waves 4-8 (building on 1-3)
+# Multi-wave re-review — waves 10-15
 
-Waves 1-3 (merged: #331, #332, #333) read the tree: per-package, then cross-cutting,
-then the regressions the first two introduced. 107 defects fixed. Waves 4-8 escalate
-from *reading* the tree to *running* it, attacking it, and measuring it.
+**What came before.** Nine waves are merged (#331-#339). Waves 1-3 *read* the tree, 4 **ran**
+it, 5 **attacked** it, 6 **interrupted** it, 7 **measured** it, 8 audited **the doctrine**, and 9
+worked the register down. Their plan and closing review are at `git show aa7a3b28:tasks/todo.md`;
+they are not restated here, because a ticked item that outlives its closure reads as live state
+(lesson 16, and the reason `DEFERRED.md` grew nine sections describing each other).
 
-Rules carried forward from waves 1-3 (they were earned):
-- No fix agent may run `git checkout --`, `git stash`, or `git reset`. A/B by hand-edit.
-- Fix agents get disjoint file sets. Cross-scope residuals come back to the orchestrator.
-- Every fix must reproduce the defect first, check `docs/decisions/` for an ADR making the
-  behaviour intentional, and prove the fix with a test watched failing against unfixed source.
-- `.mypy_cache` corrupts under concurrent `mypy` in one directory. `rm -rf .mypy_cache`
-  before the gate whenever agents ran in parallel.
-- Prose is evidence about what its author believed, never about what the code does.
+**What is left is what those nine waves treated as given.** That is the axis these six take, and
+each entry below names the thing not to assume:
 
-## Wave 4 — Execution truth: run it, do not read it (MERGED, #334)
-- [x] W4.1 Postgres-backed suite driven against the live DB (the ~200 skips), every gate reached
-- [x] W4.2 Temporal worker + durable jobs end to end against the running broker
-- [x] W4.3 Front door: OIDC-off and OIDC-on, SSE stream, session push-back, budget metering
-- [x] W4.4 The live lane (`make live-infra`/`live-up`/`live-probes`) against `chemclaw.cli.mock_llm`
-- [x] W4.5 Every CLI entry point and every `make` target actually invoked
-- [x] W4.6 Chart render + kubeconform + promtool on shipped defaults and on the refusal paths
-- [x] W4 fix stage, gate, PR, merge on green
+- Waves 1-9 read, ran and attacked **this repository**. Three others complete the system, and
+  every claim about the seam between them was made from this side of it. — W10
+- Every wave measured *plumbing*. Nothing checked whether a **number this system computes about
+  chemistry is right** — units, magnitudes, or whether a cache key names everything that changes
+  its value. — W11
+- Everything ran on **one generation of code against one generation of schema**, migrated forward
+  from empty, once. — W12
+- Everything ran on a **fixture-sized deployment**: a corpus of tens, a thread of forty turns, a
+  fresh database. Wave 9's `read_corpus` returning 5 of 12 entries with `complete=True` is that
+  blindness caught once, by accident. — W13
+- Wave 8 asked of every control *does it exist and is it called*. It did not ask **whether the
+  human on the other end can act on what it produces** — which is the whole of the argument
+  `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` rests on. — W14
+- And waves 4-9 each found that **the review had reproduced, inside its own repair, the defect it
+  exists to find**. Assume waves 10-14 did it again. — W15
 
-## Wave 5 — Adversarial input and hostile state (MERGED, #335)
-- [x] W5.1 Untrusted text: envelope framing/defanging, nonce, Cf category, helper reports
-- [x] W5.2 Authorization chain: every middleware order, refusal paths, subagent attenuation
-- [x] W5.3 Manifest/declaration fuzz: connector.yaml, datasource.yaml, sink, SKILL.md, templates
-- [x] W5.4 Egress guard + secrets: what escapes, what is logged, what reaches a metric label
-- [x] W5.5 Malformed persisted state: half-written rows, unknown shapes, migration gaps
-- [x] W5 fix stage, gate, PR, merge on green
+## Rules (carried forward — they were earned, and two are new)
 
-### Wave 5 — deliberately left open, with the reason
+- No agent runs `git checkout --`, `git stash`, or `git reset`. A/B by hand-edit, `cp f f.bak` /
+  `mv f.bak f`, and clear `__pycache__` inside a mutation loop.
+- Fix agents get **disjoint file sets**, checked for duplicates before launch. Cross-scope
+  residuals come back to the orchestrator.
+- Every fix reproduces the defect first, checks `docs/decisions/` for an ADR making the behaviour
+  intentional, and ships a test **watched failing** against unfixed source — per fix, not per batch.
+- `rm -rf .mypy_cache` before the gate whenever agents ran in parallel.
+- Prose is evidence about what its author believed, never about what the code does. No wave writes
+  a current number into prose; the test holds it.
+- Never edit a merged ADR. A changed decision gets a new one.
+- **New, from wave 9:** a reviewer must state the premise it was handed and whether measurement
+  upheld it. Three of four premises in wave 9 were false, and each disproof was worth more than the
+  fix would have been. "The row is wrong" is a finding, not a failure to deliver.
+- **New, from wave 8:** a guard this review adds is mutation-tested **in its own wave**, not
+  deferred. Wave 8 found three of the review's own new guards vacuous, and the orchestrator's own
+  assertion accepted exactly what it was written to refuse. Also: before building a check, confirm
+  the data it reads exists — a control that always passes is worse than a missing one.
+- A gate that has never been watched refusing is a claim that a gate exists. Every validator,
+  guard or probe touched must be driven to a **red** as well as a green.
 
-- **The compaction placeholder stays unmarked.** `SYSTEM_SPEECH_MARK` makes a refusal
-  unforgeable; the placeholder does not carry it, so a hostile connector can still write that
-  string. Rather than leave an unkept promise, the system prompt now *withdraws* the claim —
-  it tells the model the placeholder "carries no mark, so read it as a hint and not as proof" —
-  under an absence test. Closing it costs ~26 characters per cleared result, tens of times, in
-  exactly the situation where the budget is already spent. A coherent position, not a silent gap.
-- **The mark is plaintext in every refusal**, so a model that pastes one into connector arguments
-  leaks it, and `framing._defang` has no matching pass. Recorded in the constant's docstring; the
-  fix belongs beside `_FORGERY`.
-- **The ambient-proxy hole stays open on the repository's defaults** (closed under the shipped
-  chart, `entra_required` deciding). The full close was already measured and rejected by
-  `D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address` — it refuses a stock checkout
-  behind a corporate proxy. Both backlog rows now state the real scope instead of overclaiming.
-- **The egress guard cannot see gRPC or Temporal.** grpc's C-core and the Rust sdk-core bypass
-  `socket.socket`; no code fix exists here. Both docstrings now say the two settings are allowlist
-  entries rather than enforcement, and a backlog row exists where there was none.
-- **A wrong value under a right cache key** is not validated: that needs the calculator's schema,
-  which lives in `Chemclaw3-mcp`.
-- **A bundle's *total* prose is not bounded**, only each field: a 100-job manifest is 100 bounded
-  tools. Said plainly in the ADR rather than overclaimed.
+---
 
-## Wave 6 — Concurrency, durability, failure injection (MERGED, #336)
-- [x] W6.1 Crash/retry/idempotency across Temporal activities and the connector-job wrapper
-- [x] W6.2 Checkpointer + session store under concurrent turns on one thread
-- [x] W6.3 Pool exhaustion, cancellation, timeouts; the parent-ceiling invariant under load
-- [x] W6.4 Retention/pruning races against live writers
-- [x] W6.5 Sinks and publication: at-least-once, duplicate suppression, partial failure
-- [x] W6 fix stage, gate, PR, merge on green
+## Wave 10 — The fleet seam: the three repositories this one talks to
 
-## Wave 7 — Numbers: budgets, accounting, cost (MERGED, #337)
-- [x] W7.1 Context prefix/floor/compaction arithmetic measured end to end, connectors bound
-- [x] W7.2 Token/spend accounting: every counter proved to move, and to move by the right amount
-- [x] W7.3 Every number in prose (CLAUDE.md, ARCHITECTURE.md, ADRs, docstrings) re-measured
-- [x] W7.4 Hot paths profiled; quadratic growth hunted (checkpoints, ELN re-read, KG scans)
-- [x] W7.5 Memory: resident growth, cache bounds, the one eviction policy
-- [x] W7 fix stage, gate, PR, merge on green
+All three siblings are checked out (`/home/user/8fqycwdt8v-oss/chemclaw3-mcp`,
+`/home/user/chemclaw3_mock`, `/home/user/chemclaw3_ui`). Fixes there ship as **their own PR in
+that repo**, per CLAUDE.md — never proxied through this one.
 
-## Wave 8 — Doctrine, dead weight, and the tests themselves (fixed; gate running)
-- [x] W8.1 Every merged ADR's claim checked against the code: does the control exist, is it called
-- [x] W8.2 Dead code, settings with no reader, metrics with no producer, one-caller abstractions
-- [x] W8.3 Mutation sweep over everything waves 4-7 touched
-- [x] W8.4 Repo map / ARCHITECTURE / layering / validator conformance
-- [x] W8.5 The four items waves 1-3 deliberately left open, re-decided with measurement
-- [x] W8 fix stage, gate, PR, merge on green
+- [ ] W10.1 `connector.yaml` in both directions: this repo's loader against every manifest the
+      fleet actually serves. A field this side ignores, a field that side needs and this side
+      drops, a bundle that loads here and fails there. Same for `datasource.yaml` and the sink
+      manifest against any real consumer.
+- [ ] W10.2 The calc seam (`CHEMCLAW_CALC_SERVER_URL`): request/response shapes, error and timeout
+      semantics, and the item wave 5 deferred as needing the other repo — **a wrong value under a
+      right cache key**. Does D-011's key name every input that changes the answer (method,
+      solvent model, charge/multiplicity, server version)? Drive it: change an input the key omits
+      and see whether the stale value comes back.
+- [ ] W10.3 `SERVED_ELSEWHERE_ALLOWANCE`: run the sibling's own servers against the ratchet,
+      measure today's real bound-tool prefix with connectors bound, and check the skip path is
+      honest about what it did not look at.
+- [ ] W10.4 The mock's fidelity. Every green test resting on `Chemclaw3_mock` or
+      `chemclaw.cli.mock_llm` is evidence about **the mock**. Diff the mock's surface against the
+      real one it stands for: usage fields, streaming/tool-call shapes, JWKS/OIDC claims, error
+      bodies. Where they diverge, that divergence is the size of the untested gap.
+- [ ] W10.5 The UI contract: every SSE event name and field the front door emits against what
+      `Chemclaw3_ui` consumes, and its e2e/full-stack config against what this repo actually
+      serves. A renamed field is a silent break in the direction no test here can see.
+- [ ] W10 fix stage (per repo), gate, PR, merge on green
 
-## Wave 9 — the register, worked down
+## Wave 11 — The science: units, magnitudes, and identity
 
-Waves 4-8 found and measured the defects. What is left is a register, and a row
-that reads as pending forever is the thing `DEFERRED.md`'s own rules forbid. So
-this wave closes what is actionable and *decides* what is not — an ADR taking a
-posture deliberately is a close; a row nobody ever revisits is not.
+The first wave whose subject is whether a computed number is *right*. Lessons 20, 24, 25 and 26
+are all science-side defect classes, and no wave has swept for them.
 
-Sorted by which they are, because the two need different work:
+- [ ] W11.1 Unit and constant audit across `science/`, `connectors/`, `publish/` and the wire
+      models: hartree/kcal/eV, bohr/Å, K/°C, ppm, molarity. Each conversion traced to **one**
+      definition — two branches nearly inflated every geometry by 1.8897 for want of this.
+- [ ] W11.2 The arithmetic that stayed here after the physics left: RRHO thermochemistry, Crippen,
+      the calibration ledger's fit, the `dft` backfill projector. Each against a **reference
+      value**, not against itself; split the class before judging a bad fit.
+- [ ] W11.3 Cache identity in this repo (the in-process half of W10.2): `key` derivation, its
+      normalisation, and the round trip through `result JSONB` — does a float, a null or a unit
+      survive it unchanged?
+- [ ] W11.4 Fingerprints and similarity: ECFP4/DRFP parameters, bit collisions, the metric's
+      actual semantics, and `standardize()`'s class of defects re-swept beyond the three instances
+      already named.
+- [ ] W11.5 BO: objective sign conventions, constraint handling, whether the benchmark corpus
+      exercises what its registration claims, and whether any documented ceiling bounds the thing
+      it is documented as bounding.
+- [ ] W11.6 Labels, safety projections and reaction records: does a value keep its meaning across
+      every store round-trip and every projection into the result store?
+- [ ] W11 fix stage, gate, PR, merge on green
 
-**Actionable — close them**
-- [x] W9.1 The retention sweep's missing resume watermark (steady-state pass walks the whole table)
-- [x] W9.2 An erasure that races a live turn cannot be completed by re-running it
-- [x] W9.3 `_assemble_graph` rebuilds every node and edge on any corpus change (~1,450 ms at 20k)
-- [x] W9.4 The outbox double-claim, which needs the lease column a comment already describes
-- [x] W9.5 A bulk ELN backfill re-qualifies every ingested file per chunk, writing false rejections
-- [x] W9.6 The nine reference stores no configuration can select
-- [x] W9.7 The system-speech mark is plaintext in every refusal and `_defang` has no pass for it
+## Wave 12 — Lifecycle: upgrade, rollback, two generations at once
 
-**Decisions, not patches — take them or record why not**
-*(Three were taken. Two are marked `[~]`: recorded as not-taken with the trade stated, because
-they change what the system keeps or what every turn costs.)*
-- [x] W9.8 `CREATE ON SCHEMA public`: choose the narrower posture or write the ADR keeping this one
-- [ ] W9.9 The checkpointer's quadratic WAL — only destructive trimming reaches it, and that
-      contradicts a merged decision. Decide it or state the trade in an ADR.
-- [x] W9.10 The sweep/turn write race the read guard only detects — a lock on the turn-serving
-      write path is the cost; decide whether it is worth paying.
+- [ ] W12.1 All 89 migrations replayed from empty against the live database, in order, **twice**
+      (idempotency), and against a database that already holds the objects.
+- [ ] W12.2 Grants: reconciled on every deploy rather than applied once (lesson 22). Does a table
+      added by a late migration arrive with its grant, and does the reconciliation notice a drift?
+- [ ] W12.3 Rolling update, both directions: old code against new schema, new code against old.
+      Every persisted shape read by both — the `session_messages` stamp, checkpoint blobs,
+      `turn_costs`' new columns, the outbox lease, `reaction_records`.
+- [ ] W12.4 Rollback: does the previous image run against the migrated database, and is the
+      failure **loud** where it does not?
+- [ ] W12.5 Backfills and projectors run against a mixed-shape table, not a uniform one: the `dft`
+      backfill, the message migration, the record backfill.
+- [ ] W12 fix stage, gate, PR, merge on green
 
-- [x] W9 gate, PR, merge on green
+## Wave 13 — Day one and day one thousand
 
-Same rules as waves 4-8: disjoint file sets, reproduce before fixing, every fix
-ships with a test watched failing, never edit a merged ADR, and no agent runs
-`git checkout --`/`stash`/`reset`.
+- [ ] W13.1 Cold start: empty database, no corpus, no connectors, no sinks, no skills, no
+      `SERVED_ELSEWHERE` sibling. Every read path at zero rows — does each answer *honestly*, or
+      silently emptily? (Lesson 18: the obvious implementation returns a silently empty answer.)
+- [ ] W13.2 **The silent-truncation sweep.** ~50 default `limit=` parameters and every unpaginated
+      scan in `src/`: which return one page while the caller believes it holds everything? This
+      generalises wave 9's `read_corpus` (5 of 12 with `complete=True`) from an accident into a
+      class, per lesson 20.
+- [ ] W13.3 Aged state: synthesise a deployment with years of rows — a large corpus, thousands of
+      sessions and turns, a big graph — and measure what degrades that was fine at wave-7 scale.
+- [ ] W13.4 What is implicitly single-site: ids, namespaces, caches, metric labels, the knowledge
+      graph's git repository, the checkpointer's thread space. A second tenant is a question this
+      tree has never been asked.
+- [ ] W13.5 Ceilings at rest under the aged tree: disk, WAL, index bloat, and whether the retention
+      posture actually holds it bounded.
+- [ ] W13 fix stage, gate, PR, merge on green
+
+## Wave 14 — The chemist's view: what actually reaches the human
+
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the PR gate and named three
+existing things as the control that replaced it: provenance on every chunk, citations checked at
+the point of use, and contradiction. Wave 8 asked whether those exist. This asks whether they
+**work for the reader**, which is the only form in which they are a control at all.
+
+- [ ] W14.1 Drive an agent-written note end to end: does it land carrying `created_by: agent`,
+      reach a reader beside its citations, and can a chemist tell it from a reviewed one?
+- [ ] W14.2 Contradiction and supersede, driven: write a note that contradicts a held one and
+      check what a later retrieval actually returns — including bi-temporal `valid_to`.
+- [ ] W14.3 Retrieval quality measured rather than asserted: a probe set, recall and precision, and
+      a re-check that the cap still does not starve a source (D-2026-08-01).
+- [ ] W14.4 The answer surface: SSE, CLI, report harness, evidence pack. Does an error tell the
+      truth, and is a **degraded** answer distinguishable from a complete one?
+- [ ] W14.5 `explain` and the audit trail read back on a current session, end to end — the
+      reconstruction that was silently blank once already.
+- [ ] W14.6 What the model is told about its own controls versus what is true (the withdrawn-claim
+      shape): every present-tense sentence in the system prompt and the skills listing, checked.
+- [ ] W14 fix stage, gate, PR, merge on green
+
+## Wave 15 — Residue, and the operator's incident
+
+- [ ] W15.1 Everything waves 10-14 leave open, worked down as wave 9 did: closed, or **decided**
+      with the trade stated. A row nobody revisits is not a decision.
+- [ ] W15.2 Mutation sweep over every guard waves 10-14 added, and over the modules they touched.
+- [ ] W15.3 Incident rehearsal: inject three real failures — a connector serving wrong data, a
+      wedged durable job, a poisoned checkpoint — and diagnose each using **only** logs, metrics,
+      traces and the dashboards. What cannot be diagnosed is the finding.
+- [ ] W15.4 Re-derive every number waves 10-14 wrote into prose, at HEAD, one last time.
+- [ ] W15.5 Final gate incl. `make cov`, PR, merge on green
 
 ## Review
 
-Five waves (4-8) on top of the first three. Each was reviewed by a fan-out of
-agents, fixed by a second fan-out on disjoint file sets, gated on
-`make lint type test`, PR'd and merged on green CI.
-
-**The escalation was the point.** Waves 1-3 *read* the tree. Wave 4 **ran** it,
-wave 5 **attacked** it, wave 6 **interrupted** it, wave 7 **measured** it, wave 8
-audited **the doctrine itself**. Almost nothing found from wave 4 onwards was
-reachable by reading — the defects were in what the code did when executed,
-under attack, mid-crash, at scale, or in what it claimed about itself.
-
-### The pattern that ran through all five
-
-*A gate that has never been watched refusing is a claim that a gate exists.* It
-appeared in every wave and in nearly every form:
-
-- `kg-validate` answering `OK: /etc is a valid knowledge graph` (wave 4)
-- `sink-validate` and `channel-validate` green at zero manifests (wave 4)
-- `live-probes` exiting 0 in two distinct nothing-happened states (wave 4)
-- `restart-postgres` restarting nothing, so a resilience probe reported 24/24
-  survivors of a bounce that never happened (wave 4)
-- the DDL posture asserted by regex against a file's text, never the ACL (wave 4)
-- `_is_auth_failure` reached only from the fetch path while every wording it
-  matches is push-side (wave 6)
-- the repo-map guard reading only direct children while the document called the
-  rule enforced (wave 8)
-- and finally the guards **this review itself added**, found by mutation: a
-  ceiling-off translation, a boundary never driven at its limit, a budget
-  accumulation with no three-block fixture (wave 8)
-
-The last one matters most. The review reproduced the defect it exists to find,
-inside its own repair — twice, counting the orchestrator's own vacuous assertion
-that compared a module path instead of the imported symbol and accepted exactly
-what it was written to refuse.
-
-### Where measurement overturned a reviewer
-
-Six times a fixer disproved the finding it was given, which is the discipline
-working rather than failing:
-
-1. The checkpoint read-guard proposal would have refused **every thread in the
-   fleet** — consumed channels bump a version with no blob.
-2. The routed ELN fix returns an arbitrary subset: the list sorts by filename
-   while the window is in the payload.
-3. The two-population estimator ratio is correct and was still declined —
-   `turn_usage` multiplies a whole-request estimate by that same ratio.
-4. A per-term retrieval scan: 92x faster on a non-matching query, 1,718 → 3,075
-   ms on a matching one.
-5. The namespace caveat came out **opposite** to its prediction — a leak that
-   grows with helper use, not an over-prune.
-6. The effect ledger's fork was decided as neither offered arm.
-
-### The six-wave impasse, closed
-
-Quadratic checkpoint growth was left open by every previous wave because
-`retention.py` stated in two places that in-thread pruning was impossible.
-Measured false. A 40-turn thread went from 520 rows and 10.3 MB to 15 rows and
-757 kB, resuming byte-identical. It was blocked by a sentence, not a constraint.
-
-### Deliberately open, with the reason recorded
-
-Each has a register row or an ADR paragraph, and each says what would change the
-answer: the ambient-proxy hole on repo defaults (a merged ADR already measured
-and rejected the full close); gRPC and Temporal being invisible to the egress
-guard (no code fix exists — grpc's C-core bypasses `socket.socket`); the
-checkpointer's still-quadratic **WAL** (only destructive trimming reaches it, and
-that contradicts the compaction decision); `_assemble_graph`'s full rebuild; the
-sweep/turn race the read guard only *detects*; an erasure that cannot be
-completed by re-running; the narrower DDL posture; the nine `InMemory*` stores;
-and the compaction placeholder's unmarked status, where the system prompt now
-*withdraws* the claim rather than leaving an unkept promise.
-
-### What held
-
-Worth recording, because a review that only reports defects misleads about the
-system. The authorization chain survived a driven compiled graph with **no hole**
-— 15 load-bearing claims verified sound. Across 519 ADRs, 430 settings, 367 SQL
-columns and 183 metric series there was **no fifth `reject_widening`**: every
-governance function an ADR names has a real caller. Zero settings with no reader,
-zero metrics with no producer, zero unread corpora. The untested layering rule —
-capability code lives in a bundle or in `science/` — holds by hand-audit. And
-CLAUDE.md's subagent arithmetic, the paragraph most likely to have rotted,
-measured correct on every figure.
-
-### Wave 9 — the register, worked down
-
-Nine items closed, two decisions deliberately left to the maintainer with their
-trade stated. What made this wave different: **three of the four agents
-overturned the premise of the row they were handed.**
-
-- The graph optimisation was worth *nothing* as first built — 1,618 against
-  1,584 ms — because the git writer discards the cache after every write. And
-  its own break-even was reasoned at a sixth of the corpus, measured at 42%.
-- The store row's premise was false: one of its nine is reachable, because a
-  setting takes a `module:callable`. Two more of its four claims were backwards
-  (coverage) or nil (the type gate).
-- The retention row asked for a watermark; a sparse pass turned out to be
-  irreducible, and the real cost was a drain restarting at the top every sweep —
-  13,499 → 1,492 ms on a first pass, with no migration, table or grant.
-- The erasure row said residual rows needed owner rights; the rows were never
-  beyond the app's privileges, the *query* was.
-
-Two defects were found that no row named: `read_corpus` returned **5 of 12
-entries with `complete=True`** — one page, silently, so a deployment's knowledge
-corpus was its oldest entries — and `ANALYZE` ran per sweep rather than per pass,
-10.8 s of a 13.8 s drain.
-
-And closing the forgeable system-speech mark exposed a live defect in the fix
-itself: `_refusal_message` defangs what it is handed, so the new pass escaped
-*the system's own* mark.
+*(written at the close of wave 15)*
