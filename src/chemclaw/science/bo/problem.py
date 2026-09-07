@@ -793,7 +793,7 @@ def require_descriptors_distinguish_categories(problem: OptimizationProblem) -> 
     `CategoricalDescriptorInput` gives the model *only* that position: the label is gone. Two
     categories at the same position are therefore one point to the surrogate, and it will predict
     one value for both — **measured**, on a two-descriptor parameter whose A and B rows matched:
-    with A observed at 10 and B at 90, `predict_at` returned 70.85 for each. No warning, no error;
+    with A observed at 10 and B at 90, the surrogate returned 70.85 for each. No warning, no error;
     a chemist reads a confident recommendation for a reagent the model has never distinguished from
     another.
 
@@ -865,10 +865,12 @@ def require_direction_matches_objective(spec: CampaignSpec) -> None:
 def require_problem_yields_one_best_point(problem: OptimizationProblem) -> None:
     """Every rule a loop that returns a single best observation needs of its problem.
 
-    The three checks were written out twice — once in `science.bo.campaign.optimize`, once in
+    The three checks were written out twice — once in the in-process ask/tell loop, once in
     `require_campaign_startable` — with two different wordings of the same multi-objective refusal.
     Two statements of one rule is one rule that can drift, and the drift is silent: whichever
-    caller is edited second keeps the old message while both claim to enforce the same thing.
+    caller is edited second keeps the old message while both claim to enforce the same thing. The
+    in-process loop has since moved to `tests/bo_harness.py`, having never had a caller here; it
+    calls this function rather than restating it, which is why the rule survived the move.
 
     The multi-objective refusal is the substantive one. A trade-off has no single best point
     (`best_of` raises rather than quietly picking the lead objective's winner), so a loop shaped to

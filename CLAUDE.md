@@ -470,9 +470,14 @@ middle one feel safe when nothing checks it:
   ELN adapter and validator under `ingest/` import RDKit for structure handling that is
   infrastructure, so the rule would have to be written as an allowlist of its own exceptions, which
   is a policy nobody reads.
-- **`data/` holds every corpus the code reads at runtime** — except `knowledge/` and `skills/`,
-  which stay at the root because they are architecture layers 4 and 3, not configuration.
-  (`tests/test_deploy_chart.py`, `test_every_runtime_data_directory_actually_exists`.)
+- **`data/` holds every corpus the code reads at runtime**, with three exceptions and no more.
+  `knowledge/` and `skills/` stay at the root because they are architecture layers 4 and 3, not
+  configuration. The third is `science/bo/benchmarks/data/`: package data pinned to a *registered
+  benchmark's* name and read through `Path(__file__).parent`, where `data/vendored/` is a
+  `DataSource` with a checksum and licence contract this corpus does not have. Enforced in both
+  directions — `tests/test_deploy_chart.py::test_every_runtime_data_directory_actually_exists`
+  says the declared ones exist, and `test_no_corpus_lives_outside_data_except_the_one_that_is_argued`
+  says no fourth appears.
 
 Four layers, each with a single responsibility. **Never merge their concerns.**
 

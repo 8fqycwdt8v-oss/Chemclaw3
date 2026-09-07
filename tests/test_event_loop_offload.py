@@ -373,24 +373,27 @@ def test_the_commitment_export_is_read_off_the_event_loop(
     )
 
 
-def test_the_bo_campaign_fits_its_surrogate_off_the_event_loop(
+def test_the_bo_activities_fit_their_surrogate_off_the_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A GP fit is pure synchronous CPU, and this loop's only `await`s are between rounds.
+    """A GP fit is pure synchronous CPU, and the campaign's only `await`s are between its rounds.
 
-    `connectors/bo/activities.py` threads the identical `initial_candidates`/`propose_candidates`
-    pair; the in-process path did not, so every round ran to completion without yielding. Measured
-    2026-09-06 on a one-parameter problem, 5 seed points and 2 rounds, with a 5 ms sampler on the
-    same loop: **16,069.7 ms of stall against a 16,071 ms call**, the loop never scheduled.
+    Measured 2026-09-06 against the in-process loop that used to live in `science/bo/campaign.py`:
+    a one-parameter problem, 5 seed points and 2 rounds, with a 5 ms sampler on the same loop, held
+    the loop for **16,069.7 ms of a 16,071 ms call** when the two BoFire calls ran inline. That
+    module had no `src/` caller and was deleted on 2026-09-07, so this drives the pair that ships —
+    `connectors/bo/activities.py`, the two activities `BoCampaignWorkflow` runs every round. It is
+    the same claim about the same two functions, asked of the path a chemist reaches.
 
-    BoFire is stubbed here rather than fitted: the property is where the fit runs, and a real one
+    BoFire is stubbed here rather than fitted: the property is *where* the fit runs, and a real one
     would put a minute of surrogate arithmetic in the suite for a claim it does not sharpen.
     """
-    import chemclaw.science.bo.campaign as campaign
+    import chemclaw.connectors.bo.activities as activities
     from chemclaw.science.bo.problem import (
         Candidate,
         ContinuousParameter,
         Objective,
+        Observation,
         OptimizationProblem,
     )
 
@@ -401,20 +404,22 @@ def test_the_bo_campaign_fits_its_surrogate_off_the_event_loop(
         time.sleep(_BLOCK_SECONDS / 2)
         return [Candidate(params={"t": 1.0 * len(threads)})]
 
-    monkeypatch.setattr(campaign, "initial_candidates", _slow)
-    monkeypatch.setattr(campaign, "propose_candidates", _slow)
-
-    async def _evaluate(params: dict[str, Any]) -> float:
-        return float(params["t"])
+    monkeypatch.setattr(activities, "initial_candidates", _slow)
+    monkeypatch.setattr(activities, "propose_candidates", _slow)
 
     problem = OptimizationProblem(
         parameters=[ContinuousParameter(name="t", lower=0.0, upper=100.0)],
         objectives=[Objective(name="y", direction="maximize")],
     )
+    observations = [
+        Observation(params={"t": float(i)}, value=float(i), provenance="measured") for i in range(5)
+    ]
 
-    stall_ms, loop_thread = _worst_loop_stall(
-        lambda: campaign.optimize(problem, _evaluate, n_initial=3, n_rounds=1, seed=1)
-    )
+    async def _both() -> None:
+        await activities.propose_initial(problem, 3, 1)
+        await activities.propose_next(problem, observations, 1, 1)
+
+    stall_ms, loop_thread = _worst_loop_stall(_both)
 
     assert len(threads) == 2, "neither BoFire call ran"
     assert stall_ms < _BLOCK_SECONDS * 1000 / 2, (

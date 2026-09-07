@@ -110,9 +110,10 @@ def _molecule_in(parameter: Parameter | None, value: ParamValue) -> str | None:
 
     A campaign declares "this choice is a molecule" in one of two ways and both have to be read
     here, because between them they cover every shipped objective: a featurized categorical carries
-    an explicit label → SMILES map (`CategoricalParameter.structures`), while a library campaign
-    (`science.bo.objectives.molecule_library_problem`) makes the SMILES *itself* the category
-    label. Only the second needs RDKit, and only to answer "is this label a structure at all" — a
+    an explicit label → SMILES map (`CategoricalParameter.structures`), while a `solubility_max`
+    campaign — which reads its candidate from `params[MOLECULE_KEY]` — makes the SMILES *itself*
+    the category label. Only the second needs RDKit, and only to answer "is this label a structure
+    at all" — a
     heuristic over label spellings would be a second, weaker answer to a question RDKit answers.
 
     **A bare, lenient `Chem.MolFromSmiles`, and deliberately not the strict gate**
@@ -219,7 +220,7 @@ def _parameter_range(parameter: Parameter) -> str:
 
     Categorical options are listed rather than counted — "one of 4 ligands" tells a reviewer
     nothing about whether the ligand they would have tried was even on the list — but the listing
-    is **bounded**, because one shipped objective makes it unbounded: `molecule_library_problem`
+    is **bounded**, because one shipped objective makes it unbounded: a `solubility_max` campaign
     turns a screening library into one categorical whose levels are every SMILES in it, so a
     500-molecule campaign would write a single 12 KB line into a note whose job is to let a chemist
     decide on one experiment. Past the budget it says how many were left out, and the complete

@@ -545,6 +545,24 @@ def _series(name: str, **labels: str) -> float:
     raise AssertionError(f"no series {name}{{{', '.join(wanted)}}} in the exposition")
 
 
+def _baseline(name: str, **labels: str) -> float:
+    """The same reading taken *before* the drain under test, with absence read as zero.
+
+    A counter nothing has observed yet is genuinely absent from the exposition, so `_series`
+    raising on it is right after an act and wrong before one. Both tests below used to assert the
+    *absolute* reading of a process-wide monotonic counter, which holds exactly once: driven a
+    second time in one process — two `pytest.main` sessions, the shape a repeated or re-entrant run
+    takes — `test_the_drain_books_the_rows_it_read...` and
+    `test_the_series_are_per_source...` both failed, having doubled. They pass in CI because the
+    file is collected once, and a test that only passes on the first pass is asserting the
+    registry's history rather than this drain's arithmetic.
+    """
+    try:
+        return _series(name, **labels)
+    except AssertionError:
+        return 0.0
+
+
 def test_the_drain_books_the_rows_it_read_and_the_two_series_partition_them() -> None:
     """The corpus drain was the one ingest pass emitting nothing, so a healthy feed read flat.
 
@@ -561,13 +579,19 @@ def test_the_drain_books_the_rows_it_read_and_the_two_series_partition_them() ->
     source = "pistachio-metrics-partition"
 
     async def _run() -> None:
+        counter = "chemclaw_ingest_records_total"
+        # Deltas, because the registry is process-wide and these counters are monotonic: the
+        # claim is about what *this* drain booked, not about what the process has booked since it
+        # started. See `_baseline`.
+        was_ingested = _baseline(counter, source=source, outcome="ingested")
+        was_rejected = _baseline(counter, source=source, outcome="rejected")
         index, warehouse, binding = InMemoryLabelIndex(), _fake(), _binding()
         first = await drain_corpus(warehouse, binding, index, source, limit=2)
         page = await drain_corpus(warehouse, binding, index, source, after=first.cursor, limit=2)
 
         assert (page.read, page.recorded, page.skipped) == (2, 1, 1)
-        ingested = _series("chemclaw_ingest_records_total", source=source, outcome="ingested")
-        rejected = _series("chemclaw_ingest_records_total", source=source, outcome="rejected")
+        ingested = _series(counter, source=source, outcome="ingested") - was_ingested
+        rejected = _series(counter, source=source, outcome="rejected") - was_rejected
         # Both pages, so the totals are the whole four-row release rather than the second page.
         assert (ingested, rejected) == (3.0, 1.0)
         assert ingested + rejected == float(first.read + page.read)
@@ -613,14 +637,25 @@ def test_the_series_are_per_source_which_is_what_the_aggregated_outcome_cannot_s
     """
 
     async def _run() -> None:
-        warehouse, binding = _fake(), _binding()
-        await drain_corpus(warehouse, binding, InMemoryLabelIndex(), "pistachio-metrics-a", limit=2)
-        await drain_corpus(warehouse, binding, InMemoryLabelIndex(), "pistachio-metrics-b", limit=1)
-
         counter = "chemclaw_ingest_records_total"
-        assert _series(counter, source="pistachio-metrics-a", outcome="ingested") == 2.0
-        assert _series(counter, source="pistachio-metrics-b", outcome="ingested") == 1.0
-        assert _series(counter, source="pistachio-metrics-a", outcome="rejected") == 0.0
-        assert _series(counter, source="pistachio-metrics-b", outcome="rejected") == 0.0
+        sources = ("pistachio-metrics-a", "pistachio-metrics-b")
+        was = {
+            (source, outcome): _baseline(counter, source=source, outcome=outcome)
+            for source in sources
+            for outcome in ("ingested", "rejected")
+        }
+        warehouse, binding = _fake(), _binding()
+        await drain_corpus(warehouse, binding, InMemoryLabelIndex(), sources[0], limit=2)
+        await drain_corpus(warehouse, binding, InMemoryLabelIndex(), sources[1], limit=1)
+
+        def moved(source: str, outcome: str) -> float:
+            return _series(counter, source=source, outcome=outcome) - was[(source, outcome)]
+
+        assert moved(sources[0], "ingested") == 2.0
+        assert moved(sources[1], "ingested") == 1.0
+        # `_series`, not `_baseline`, on the far side: a rejection series that moved by nothing
+        # must still *exist*, which is the whole reason the drain books a zero.
+        assert moved(sources[0], "rejected") == 0.0
+        assert moved(sources[1], "rejected") == 0.0
 
     asyncio.run(_run())

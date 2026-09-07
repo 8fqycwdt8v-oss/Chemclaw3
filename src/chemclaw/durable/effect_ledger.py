@@ -13,10 +13,21 @@ the set an incident starts from.
 `operations/evidence_pack.assemble` selects this table by `session_id` with its own statement, so
 "what did this conversation change outside" is answerable. `unsettled` — "what is in doubt right
 now, across every session" — is served by no route, CLI or tool, so this sentence says *reads*
-rather than claiming a workflow: an operator wanting that set runs it themselves. A second
-per-session reader here was deleted on 2026-09-06 rather than left standing as a duplicate of the
-evidence pack's: it had never had a caller, while its docstring named one that has always issued
-its own SQL.
+rather than claiming a workflow: an operator wanting that set runs the query themselves, and
+`unsettled`'s own docstring carries it so that is a copy-paste rather than a reconstruction. A
+second per-session reader here was deleted on 2026-09-06 rather than left standing as a duplicate
+of the evidence pack's: it had never had a caller, while its docstring named one that has always
+issued its own SQL.
+
+**That absence is a decision and is checked, not merely admitted**
+(`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`). The two accessors here stay because
+they are the write path's read-back under test — deleting them would put raw SQL in a test instead
+of removing a claim — and `effects_unsettled_idx` stays with them because it is *partial*, over
+`state = 'attempting'` only: it holds one entry per in-flight effect and drops it on settle, so a
+never-pruned table does not pay for it, and it is the index the hand-run query below uses. What may
+not happen quietly is the opposite of a deletion: the day a route, CLI or tool serves this set, the
+paragraph above becomes false, so `tests/test_effects.py` fails on the *addition* and makes whoever
+serves it rewrite the sentence in the same change.
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -175,7 +186,20 @@ async def unsettled(limit: int = 50) -> list[EffectRecord]:
 
     Each row means: this system may have changed something outside itself and cannot prove either
     way. That is a small set in a healthy deployment and the first thing to read in an unhealthy
-    one, which is why it has an index of its own.
+    one, which is why it has an index of its own (`effects_unsettled_idx`, partial on exactly this
+    predicate).
+
+    **No route, CLI or tool calls this**, and the module docstring says why that is a decision. An
+    operator during an incident runs the same query by hand, so it is written out here rather than
+    left to be reconstructed from the schema under pressure::
+
+        SELECT effect_id, connector, job, system, reversal, requested_by, session_id,
+               correlation_id, approved_by, state, external_ref, detail, attempted_at, settled_at
+        FROM effects WHERE state = 'attempting' ORDER BY attempted_at LIMIT 50;
+
+    Args:
+        limit: Rows to return, clamped to 1..200 — an incident wants the oldest few, and an
+            unbounded read of a table nothing prunes is not what a person under pressure wants.
     """
     async with _connect() as conn:
         async with conn.cursor() as cur:

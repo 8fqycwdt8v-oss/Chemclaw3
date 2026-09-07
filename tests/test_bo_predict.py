@@ -4,6 +4,14 @@ Two capabilities over one fit: what the model expects at a point the *caller* na
 that model predicts runs it was not shown. The second was refused until a measurement reversed the
 refusal — the objection was that `cross_validate` forces us to name a surrogate class, and
 `strategy.surrogate_specs` turns out to expose the one BoFire itself chose (M-7).
+
+Every assertion here goes through `interrogate_surrogate`, which is the spelling
+`connectors/bo/server/tools.py::predict_outcome` uses — the only path a chemist reaches. It used to
+go through `engine.predict_at`, a one-statement wrapper that baked in `assess_fit=False` and
+projected the first half, and that wrapper had **zero** `src/` callers: 667 lines exercised a second
+entry into this function while the shipped one was untested here. `predict_at` was deleted on
+2026-09-07 and these calls inlined onto the function it forwarded to; `_predictions` below is a
+test's own convenience for the projection, named as such, the same way `_fit_quality` is.
 """
 
 import asyncio
@@ -19,10 +27,7 @@ from chemclaw.connectors.bo.server.tools import (
 )
 from chemclaw.core.config import settings
 from chemclaw.science.bo import engine
-from chemclaw.science.bo.engine import (
-    interrogate_surrogate,
-    predict_at,
-)
+from chemclaw.science.bo.engine import interrogate_surrogate
 from chemclaw.science.bo.problem import (
     Candidate,
     CategoricalParameter,
@@ -31,6 +36,7 @@ from chemclaw.science.bo.problem import (
     Objective,
     Observation,
     OptimizationProblem,
+    Prediction,
     pareto_front,
     point_in_domain,
 )
@@ -74,11 +80,27 @@ def _fit_quality(
     return interrogate_surrogate(problem, observations, [], folds=folds, seed=seed)[1]
 
 
+def _predictions(
+    problem: OptimizationProblem,
+    observations: list[Observation],
+    points: list[dict[str, float | str]],
+    seed: int | None = None,
+) -> list[Prediction]:
+    """The prediction half of one interrogation, with no fit assessed — this file's convenience.
+
+    Deliberately here and not in `engine`, which is where it was: as `engine.predict_at` it was a
+    second public entry into `interrogate_surrogate` with a different default posture, so a reader
+    had two spellings of one question and no way to tell which the system used. The answer was
+    neither — `predict_outcome` asks for both halves at once.
+    """
+    return interrogate_surrogate(problem, observations, points, assess_fit=False, seed=seed)[0]
+
+
 def test_a_point_among_the_runs_predicts_near_what_was_measured() -> None:
     """The floor: a surrogate that cannot reproduce its own training data explains nothing."""
     runs = _runs()
     at = dict(runs[4].params)
-    prediction = predict_at(_problem(), runs, [at])[0]
+    prediction = _predictions(_problem(), runs, [at])[0]
     assert prediction.values["yield"] == pytest.approx(runs[4].value, abs=3.0)
     assert prediction.sds["yield"] < 5.0
     assert prediction.in_domain
@@ -92,7 +114,7 @@ def test_an_unexplored_corner_carries_a_larger_sd_than_an_observed_point() -> No
     every 10 °C from 20; the corner below asks about a temperature nothing sits near.
     """
     runs = _runs()
-    observed, corner = predict_at(
+    observed, corner = _predictions(
         _problem(),
         runs,
         [dict(runs[0].params), {"temperature": 119.0, "solvent": "THF"}],
@@ -109,7 +131,7 @@ def test_an_out_of_range_point_is_answered_and_labelled_rather_than_refused() ->
     mean is unconstrained there.
     """
     runs = _runs()
-    inside, outside = predict_at(
+    inside, outside = _predictions(
         _problem(),
         runs,
         [{"temperature": 60.0, "solvent": "THF"}, {"temperature": 400.0, "solvent": "THF"}],
@@ -128,7 +150,7 @@ def test_a_prediction_says_it_is_not_a_recommendation() -> None:
     distinction lives in a `computed_field`, not a docstring, because a bare property is not
     serialized and the caveat would never reach the model composing the reply.
     """
-    prediction = predict_at(_problem(), _runs(), [{"temperature": 60.0, "solvent": "THF"}])[0]
+    prediction = _predictions(_problem(), _runs(), [{"temperature": 60.0, "solvent": "THF"}])[0]
     assert "not a recommendation" in prediction.summary
 
 
@@ -164,7 +186,7 @@ def test_a_featurized_categorical_is_accepted() -> None:
     # Not `sds > 0` — a GP posterior sd is positive by construction, so that passes even if all
     # three ligands' descriptor rows had collapsed onto one point, which is the thing featurization
     # exists to prevent. Three distinct descriptor rows must give three distinct predictions.
-    at_seventy = predict_at(
+    at_seventy = _predictions(
         problem,
         runs,
         [{"temperature": 70.0, "ligand": ligand} for ligand in ("L1", "L2", "L3")],
@@ -189,7 +211,7 @@ def test_a_trade_off_is_predicted_on_every_axis() -> None:
         )
         for index, run in enumerate(_runs())
     ]
-    prediction = predict_at(problem, runs, [{"temperature": 60.0, "solvent": "THF"}])[0]
+    prediction = _predictions(problem, runs, [{"temperature": 60.0, "solvent": "THF"}])[0]
     assert set(prediction.values) == {"yield", "impurity"}
     assert set(prediction.sds) == {"yield", "impurity"}
 
@@ -197,13 +219,19 @@ def test_a_trade_off_is_predicted_on_every_axis() -> None:
 def test_predicting_below_the_observation_floor_is_refused() -> None:
     """A surrogate cannot be fitted to one point, and the message says to seed first."""
     with pytest.raises(ValueError, match="at least 2 observations"):
-        predict_at(_problem(), _runs()[:1], [{"temperature": 60.0, "solvent": "THF"}])
+        _predictions(_problem(), _runs()[:1], [{"temperature": 60.0, "solvent": "THF"}])
 
 
 def test_predicting_at_no_point_is_refused() -> None:
-    """An empty ask is a caller mistake, not an empty answer."""
-    with pytest.raises(ValueError, match="at least one point"):
-        predict_at(_problem(), _runs(), [])
+    """An empty ask is a caller mistake, not an empty answer.
+
+    The message changed with `predict_at`'s deletion and the behaviour did not: the wrapper raised
+    "needs at least one point to predict", and `interrogate_surrogate` — asked for no point *and*
+    no fit — already refused the same call in its own words. One guard, in the function that
+    ships, is what the wrapper's removal leaves.
+    """
+    with pytest.raises(ValueError, match="neither a prediction nor a fit"):
+        _predictions(_problem(), _runs(), [])
 
 
 def test_point_in_domain_reads_both_kinds_of_parameter() -> None:
@@ -378,8 +406,9 @@ def test_the_prediction_and_the_score_come_from_one_fit(monkeypatch: pytest.Monk
     """`predict_outcome` fits the surrogate exactly once — counted, not inferred.
 
     **This test replaced a version that could not fail.** It used to run `interrogate_surrogate`
-    and `predict_at` separately and assert their predictions agreed, which is two fits agreeing —
-    the by-construction check it claimed to replace. Reverting the tool to fit twice left it green.
+    and the `predict_at` wrapper separately and assert their predictions agreed, which is two fits
+    agreeing — the by-construction check it claimed to replace. Reverting the tool to fit twice left
+    it green.
 
     Counting the fits is the only assertion that distinguishes the two designs, and the distinction
     is load-bearing: the GP's hyperparameter fit is non-deterministic, so two fits are genuinely two
@@ -409,8 +438,9 @@ def test_the_prediction_itself_is_deterministic() -> None:
     strategy varies, which is why the score carries a caveat and the prediction does not.
     """
     point: list[dict[str, float | str]] = [{"temperature": 60.0, "solvent": "THF"}]
-    predictions, _ = interrogate_surrogate(_problem(), _runs(), point, assess_fit=False)
-    assert predict_at(_problem(), _runs(), point)[0].values == pytest.approx(predictions[0].values)
+    predictions, _ = interrogate_surrogate(_problem(), _runs(), point, assess_fit=False, seed=7)
+    again, _ = interrogate_surrogate(_problem(), _runs(), point, assess_fit=False, seed=7)
+    assert again[0].values == pytest.approx(predictions[0].values)
 
 
 def test_asking_for_neither_a_prediction_nor_a_score_is_refused() -> None:

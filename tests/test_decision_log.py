@@ -14,6 +14,12 @@ that a machine can still catch: an id that names two files, a file whose name an
 and a ledger that has drifted from the files beside it.
 
 Deliberately about *identity*, not formatting: the prose style of an ADR is a review matter.
+
+Two later checks live here for the same reason and are about the index rather than the ids: the
+"By topic" table, which is how a reader finds the *current* decision on a subject and which went
+180 ADRs stale under four green assertions about the record table beside it; and the `test_*`
+names an ADR cites in its "What keeps it true" section, which a rename retires in silence. Both
+are bounds with a declared exception list, not measurements — see each constant.
 """
 
 import re
@@ -288,3 +294,294 @@ def test_a_malformed_id_is_still_rejected() -> None:
     """
     for bad in ("D-2026-7-31-slug", "D-2026-07-31", "D-999", "D-2026-07-31-Slug", "D-1234-slug"):
         assert not _FILENAME.match(bad), f"{bad} should not be a valid ADR filename"
+
+
+# ---------------------------------------------------------------------------------------------
+# The "By topic" table — the navigational half of this index, and the half nothing checked.
+# ---------------------------------------------------------------------------------------------
+# The record table above is enforced four ways: unique ids, filename↔heading, ledger↔disk, order.
+# The topic table beside it — "where the current decision on a subject is", the one thing a reader
+# consults before opening any ADR — was enforced by nothing at all. So it could not go red; it
+# could only go wrong, and it did: audited on 2026-09-07 it cited **nothing** newer than
+# 2026-08-30, **zero** of the 54 September ADRs appeared in it, and seven rows pointed a reader at
+# a decision that had since been reversed (the PR-gate, deleted; the HPC tier, deleted; the
+# provider seam, collapsed to one gateway; the compaction arithmetic, rewritten four times). One
+# row was worse than stale — it listed D-160 as *absorbed* while five modules in `src/` cite it as
+# a live mechanism.
+#
+# **A bound, not a measurement.** Requiring a topic row per ADR would be wrong: the index's own
+# preamble says a subject with exactly one ADR is not listed, and a review sweep is not a subject.
+# What is asserted instead is that no ADR newer than the cursor can land *unfiled* — it is either
+# cited by a topic row, or named here with the one line saying why it is not a topic. That check
+# would have failed 54 times before it was written, which is why it is written.
+_TOPIC_CURSOR = "D-2026-09-01"
+
+_NOT_A_TOPIC: dict[str, str] = {
+    # Review sweeps. Each is a record of what a set of fresh contexts found across the whole tree,
+    # so its subject is the method rather than a part of the system; the fixes it made are filed
+    # under the topics they touched.
+    "D-2026-09-03-a-guard-that-fails-open-in-its-own-example": "review sweep, not a subject",
+    "D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit": "review sweep, not a subject",
+    "D-2026-09-04-a-review-of-a-review-finds-the-fixes": "review sweep, not a subject",
+    "D-2026-09-04-fifteen-fresh-contexts-over-one-tree": "review sweep, not a subject",
+    "D-2026-09-05-four-reviews-of-one-days-measurement": "review sweep, not a subject",
+    "D-2026-09-05-six-reviews-of-eight-hours-work": "review sweep, not a subject",
+    "D-2026-09-05-a-reader-outlives-its-writer-more-quietly-than-a-writer": (
+        "review sweep over the gate deletion, not a subject"
+    ),
+    "D-2026-09-05-a-reader-with-no-caller-passes-its-own-tests": (
+        "review sweep over the gate deletion, not a subject"
+    ),
+}
+
+
+def _topic_section() -> str:
+    """The `## By topic` section only — the record table below it is a different assertion."""
+    index = _INDEX.read_text("utf-8")
+    start = index.index("## By topic")
+    end = index.index("## Where the record still says")
+    return index[start:end]
+
+
+def _topic_cited_ids() -> set[str]:
+    """Every ADR id any topic row names, in either column."""
+    return set(re.findall(rf"{_DATED}|{_NUMBERED}", _topic_section()))
+
+
+def test_no_recent_adr_lands_unfiled_by_the_topic_table() -> None:
+    """Every ADR on or after `_TOPIC_CURSOR` is either a topic row's subject or declared not one.
+
+    The topic table is the reader's entry point over 500+ decisions, and it is the only part of
+    this index that a *new* ADR can silently invalidate: writing one changes what is current about
+    a subject without touching any row that says so. Nothing here can force a row to be *right* —
+    that is a review matter, like an ADR's prose. What it can force is that the question was asked.
+    """
+    unfiled = sorted(
+        adr
+        for adr in _adr_ids()
+        if adr >= _TOPIC_CURSOR and adr not in _topic_cited_ids() and adr not in _NOT_A_TOPIC
+    )
+    assert not unfiled, (
+        f"{len(unfiled)} ADR(s) newer than {_TOPIC_CURSOR} are cited by no row of the 'By topic' "
+        f"table in docs/decisions/README.md and are not declared in _NOT_A_TOPIC: {unfiled}. "
+        "Either put the ADR in the row for its subject (updating what that row says to read now), "
+        "or add it here with the one line saying why it is not a subject."
+    )
+
+
+def test_no_declared_non_topic_is_stale() -> None:
+    """`_NOT_A_TOPIC` may not outlive its ADRs, and may not shadow a row that now cites one.
+
+    The same ratchet shape as `_KNOWN_PRIVATE_IMPORTS` in `tests/test_third_party_layering.py`: a
+    declared exception that is never re-checked becomes a second, unread index. A row added for an
+    ADR later must delete its line here, and an ADR that is renamed or removed must too.
+    """
+    on_disk = set(_adr_ids())
+    missing = sorted(adr for adr in _NOT_A_TOPIC if adr not in on_disk)
+    assert not missing, f"_NOT_A_TOPIC names ADRs that do not exist: {missing}"
+    filed_anyway = sorted(adr for adr in _NOT_A_TOPIC if adr in _topic_cited_ids())
+    assert not filed_anyway, (
+        f"declared not-a-topic but now cited by a topic row: {filed_anyway}; delete the row here"
+    )
+
+
+def test_the_topic_cursor_is_not_ahead_of_the_record() -> None:
+    """The cursor may only move backwards in time, i.e. cover *more* of the record, never less.
+
+    A cursor set past the newest ADR would make the check above vacuous while still passing — the
+    failure mode of every ratchet, and the reason `tests/test_context_floor.py` states its ceiling
+    rather than deriving one. Asserting that at least one ADR is in scope is the cheap half; the
+    real bound is that this constant is a date somebody has to raise deliberately, in a diff.
+    """
+    in_scope = [adr for adr in _adr_ids() if adr >= _TOPIC_CURSOR]
+    assert in_scope, (
+        f"_TOPIC_CURSOR = {_TOPIC_CURSOR} is newer than every ADR on disk, so the ratchet asserts "
+        "nothing. Lower it, or delete it and say in a commit why the table needs no bound."
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# "What keeps it true" — an ADR's list of guards, resolved against the suite.
+# ---------------------------------------------------------------------------------------------
+# An ADR's closing section names the tests that hold its decision in place. That list is the
+# load-bearing half of the document — the part a later session reads to find out whether a claim is
+# still enforced — and it was the only half nothing checked, so a rename retired a citation in
+# silence. Audited on 2026-09-07: 200 distinct `test_*` names are claimed across the record and 38
+# resolve to nothing, three of them silent renames that leave a merged ADR naming a live guard by a
+# dead name (`test_the_registry_has_no_duplicate_reservations` → `test_the_index_…`,
+# `test_concurrent_first_turns_get_one_migrated_store` → `…_memory_store`,
+# `test_registry_holds_exactly_the_inprocess_tools` → `test_registry_holds_the_inprocess_tools_…`).
+#
+# **A merged ADR is never edited**, so this cannot be fixed by correcting them — the record is
+# right about the moment it was written. What it can do is stop the *next* one from being written,
+# and put the 38 in one place a reader can see. Same allowlist shape as
+# `tests/test_docstring_paths.py::_REMOVED`, and the same reason for the friction: adding a row here
+# should cost a sentence.
+#
+# Scope note: `tests/test_docstring_paths.py` deliberately excludes `docs/decisions/` from its path
+# check, because a stale *path* in an ADR is accurate about the past. A `test_*` citation is a
+# different claim — "this guarantee is enforced right now, here" — which is why it is checked here
+# and there rather than exempted with the paths.
+_RETIRED_TEST_CITATIONS: dict[str, str] = {
+    # Renamed. The guard is live and the ADR names it by a name nothing answers to.
+    "test_the_registry_has_no_duplicate_reservations": (
+        "renamed `test_the_index_has_no_duplicate_reservations`, in this file"
+    ),
+    "test_concurrent_first_turns_get_one_migrated_store": (
+        "renamed `test_concurrent_first_turns_get_one_migrated_memory_store` "
+        "(tests/test_scratchpad.py)"
+    ),
+    "test_registry_holds_exactly_the_inprocess_tools": (
+        "renamed `test_registry_holds_the_inprocess_tools_and_only_generated_launchers_besides` "
+        "(tests/test_tool_registry.py)"
+    ),
+    "test_chart_config_keys_are_real_settings": (
+        "renamed `test_chart_config_keys_have_a_consumer` (tests/test_helm_chart.py)"
+    ),
+    "test_image_ships_every_first_party_package": (
+        "renamed `test_image_ships_the_first_party_source_tree` (tests/test_deploy_chart.py)"
+    ),
+    "test_a_rejected_statement_reaches_the_caller_without_the_query_in_it": (
+        "nearest live guard is `test_a_rejected_statement_is_not_retryable_and_quotes_nothing` "
+        "(tests/test_databricks_warehouse.py); not obviously the same assertion, which is why it "
+        "is listed rather than treated as a rename"
+    ),
+    "test_no_connector_bundle_can_reach_the_pr_gate_itself": (
+        "renamed `test_no_connector_bundle_can_reach_the_note_write_path` when the gate went"
+    ),
+    # The subject left this repository. `D-2026-08-16-the-physics-leaves-the-cache-stays` moved the
+    # calculators to `Chemclaw3-mcp`, and `D-2026-08-26-semiempirical-is-the-whole-tier` deleted the
+    # HPC/DFT tier; `D-2026-08-15-safety-is-a-tool-not-a-gate` moved the screen the same way.
+    "test_a_complex_key_names_both_programs_that_produced_it": (
+        "the physics left; the guard is in Chemclaw3-mcp"
+    ),
+    "test_a_crest_search_refuses_by_name_when_the_binary_is_absent": "the physics left",
+    "test_both_backends_reach_the_same_minimum": "the physics left",
+    "test_deriving_a_key_runs_no_scf": "the physics left",
+    "test_in_sample_pkah_errors_are_far_below_the_acid_calibrations": "the physics left",
+    "test_predicted_pkah_ranks_aromatic_bases_correctly": "the physics left",
+    "test_the_three_optimizations_run_on_the_backend_the_key_names": "the physics left",
+    "test_the_bundle_has_no_way_to_write_the_note_itself": (
+        "rewritten by D-2026-08-26-semiempirical-is-the-whole-tier"
+    ),
+    "test_an_ordinary_combination_is_not_flagged": (
+        "the safety screen left (D-2026-08-15-safety-is-a-tool-not-a-gate)"
+    ),
+    # The specialist team and the challenge panel were deleted whole.
+    "test_a_delegated_turn_announces_the_handoff_and_the_hand_back": (
+        "no specialist team (D-2026-08-15-a-capability-that-ships-off-is-not-a-capability)"
+    ),
+    "test_a_specialists_events_are_attributed_to_the_specialist_not_to_the_tool_node": (
+        "no specialist team"
+    ),
+    "test_the_agent_attribution_is_read_from_the_subgraph_namespace": "no specialist team",
+    "test_the_specialists_own_output_falls_between_its_handoff_and_its_hand_back": (
+        "no specialist team"
+    ),
+    "test_the_main_agent_records_an_empty_specialist_and_nothing_else_changes": (
+        "no specialist team"
+    ),
+    # The PR-gate and its review queue.
+    "test_a_non_reviewer_sees_only_their_own_proposals": (
+        "the gate is deleted (D-2026-09-05-the-gate-is-deleted-not-dormant)"
+    ),
+    # Absence tests that became presence tests, and a provider that became one gateway.
+    "test_nothing_in_the_tree_writes_the_agent_column": (
+        "inverted by D-2026-09-06-the-one-agent-that-exists-is-named-in-the-trail, which is the "
+        "outcome that absence test demanded"
+    ),
+    "test_the_audit_row_records_an_empty_agent_and_nothing_else_changes": "same inversion",
+    "test_the_anthropic_payload_is_why_that_refusal_exists": (
+        "the provider concept is deleted (D-2026-09-04-a-gateway-is-the-only-provider)"
+    ),
+    "test_no_module_level_call_dials_the_provider_at_collection": "same collapse",
+    # Deleted deliberately, and each deletion is stated in an ADR rather than inferred here.
+    "test_the_same_series_at_one_point_steps_is_plateaued": (
+        "D-2026-08-05-a-gain-is-measured-from-the-last-gain says it is replaced by its own opposite"
+    ),
+    "test_the_sync_path_announces_what_the_async_path_announces": (
+        "D-2026-08-30-a-review-of-the-review records the deletion; "
+        "tests/test_agent_observability_model.py carries the note"
+    ),
+    "test_the_grandfathered_set_can_only_shrink": (
+        "deleted by D-2026-08-27-eighteen-names-for-a-primitive-set"
+    ),
+    "test_the_counter_counts_attempts_while_the_stream_counts_losses": (
+        "the mechanism is replaced by "
+        "D-2026-08-30-an-unparseable-tool-call-is-an-ordinary-tool-failure"
+    ),
+    "test_the_private_ca_client_is_built_once_per_process": (
+        "named by D-2026-09-05-four-reviews-of-one-days-measurement inside a fix it discarded"
+    ),
+    "test_the_newest_decision_is_the_last_one": (
+        "this file's own earlier assertion, replaced by "
+        "test_the_index_lists_exactly_the_decisions_on_disk"
+    ),
+    # Module names written as function names. They read as a `test_*` citation and are not one.
+    "test_agent": "a module name from D-036, and no module of that name exists either",
+    "test_audit_chain": "a module name; deleted with the hash chain (D-2026-08-14)",
+    "test_embedding_provider": "a module name; no such file",
+    "test_interaction_tools": "a module name; no such file",
+    "test_kg_validate": "a module name; no such file",
+    "test_mcp_transport": (
+        "a module name; the transport guard is tests/test_connector_transport.py"
+    ),
+}
+
+_TEST_CITATION = re.compile(r"`(test_[a-z0-9_]+)`")
+
+
+def _defined_test_names() -> set[str]:
+    """Every `test_*` function the suite defines, plus every `test_*.py` module stem.
+
+    Both are legitimate things for an ADR to cite by name, and the stems have to be included or a
+    sentence naming `tests/test_authz.py` as `test_authz` reads as a dangling function.
+    """
+    import ast
+
+    tests = _DECISIONS.parents[1] / "tests"
+    names = {path.stem for path in tests.rglob("test_*.py")}
+    for path in tests.rglob("test_*.py"):
+        for node in ast.walk(ast.parse(path.read_text("utf-8"), filename=str(path))):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name.startswith(
+                "test_"
+            ):
+                names.add(node.name)
+    return names
+
+
+def test_every_test_an_adr_names_still_exists() -> None:
+    """A guard an ADR cites by name resolves against the suite, or is declared retired above.
+
+    The "What keeps it true" list is what makes an ADR checkable instead of persuasive. A citation
+    that resolves to nothing looks identical to one that resolves — it reads as authoritative while
+    pointing at nothing, which is the same failure `test_every_adr_id_is_unique` exists for one
+    level down.
+    """
+    defined = _defined_test_names()
+    dangling = sorted(
+        {
+            name
+            for path in _adr_files()
+            for name in _TEST_CITATION.findall(path.read_text("utf-8"))
+            if name not in defined and name not in _RETIRED_TEST_CITATIONS
+        }
+    )
+    assert not dangling, (
+        f"{len(dangling)} test name(s) cited in docs/decisions/ resolve to nothing: {dangling}. "
+        "A merged ADR is never edited, so the fix is one of two things: rename the test back, or "
+        "add the name to _RETIRED_TEST_CITATIONS with the line saying what replaced it."
+    )
+
+
+def test_no_retired_test_citation_is_stale() -> None:
+    """A name that comes back — restored, or re-used by a new test — loses its row.
+
+    Without this the allowlist becomes a second, unread index of names nobody re-checks, which is
+    the failure mode the list is meant to end rather than reproduce.
+    """
+    defined = _defined_test_names()
+    resurrected = sorted(name for name in _RETIRED_TEST_CITATIONS if name in defined)
+    assert not resurrected, (
+        f"declared retired but defined in the suite again: {resurrected}; delete the row"
+    )

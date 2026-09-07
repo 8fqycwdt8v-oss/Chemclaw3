@@ -437,9 +437,9 @@ def _require_fresh_points_exist(
 ) -> None:
     """Refuse an ask a finite space cannot answer, before BoFire fails on it obscurely.
 
-    **This is the guard the inline path never had.** `campaign.optimize` and `BoCampaignWorkflow`
-    both stop on `space_exhausted`; `suggest_next_experiment` — the path a chemist actually reaches
-    — went straight to `ask()`. When every cell of a discrete space has been run,
+    **This is the guard the inline path never had.** An ask/tell loop stops on `space_exhausted`
+    before asking; `suggest_next_experiment` — the path a chemist actually reaches — went straight
+    to `ask()`. When every cell of a discrete space has been run,
     `_optimize_acqf_discrete` drops the already-run rows, hands an empty frame to
     `domain.inputs.transform`, and raises `KeyError: '<parameter name>'`. That is neither a
     `ValueError` nor one of `_SURROGATE_FAILURES`, so `connectors.server` replaces it with "an
@@ -514,36 +514,6 @@ def _fitted_strategy(
     with _translating_surrogate_errors(context):
         strategy.tell(frame)
     return strategy, frame
-
-
-def predict_at(
-    problem: OptimizationProblem,
-    observations: list[Observation],
-    points: list[dict[str, ParamValue]],
-    seed: int | None = None,
-) -> list[Prediction]:
-    """Answer "what would the model predict at these conditions?" (W5).
-
-    The question a chemist asks *instead of* trusting a recommendation — "what does it expect at
-    90 °C in toluene with L3?" — answered from the same fit `propose_candidates` uses, so the two
-    cannot disagree.
-
-    Measured (M-6): `predict()` exists after `tell`, accepts a frame of parameters with no objective
-    columns, and works on a `CategoricalDescriptorInput` domain, which is the shape a featurized
-    problem actually reaches the engine as. An out-of-domain point is **not** clamped — it
-    extrapolates, with the sd rising about sixfold — so the point is answered and labelled rather
-    than refused; `Prediction.in_domain` carries the label and its summary states it.
-
-    **A point's parameters are the caller's to validate**, as they are for `propose_candidates`: a
-    key this problem does not declare is dropped and a missing one becomes a null column. The tool
-    boundary checks it (`_require_points_match`) so the model gets a repairable sentence.
-
-    Raises:
-        ValueError: Below the surrogate's observation floor, or with no point to predict.
-    """
-    if not points:
-        raise ValueError("predict_at needs at least one point to predict")
-    return interrogate_surrogate(problem, observations, points, assess_fit=False, seed=seed)[0]
 
 
 def _predictions_from(
@@ -654,11 +624,16 @@ def interrogate_surrogate(
 
     **One fit, and that is the point rather than an optimization.** The score is only worth quoting
     beside a prediction if it describes the model that made it; fitting twice would give two
-    identically-configured models and a sentence that was true only by construction. `predict_at`
-    is a thin wrapper over this, so no caller can accidentally take the two halves from two fits.
-    The fit-only wrapper beside it, `surrogate_fit_quality`, was deleted unreferenced on
-    2026-08-27; `predict_outcome` asks this function for both halves at once, which is the shape
-    the paragraph above is about.
+    identically-configured models and a sentence that was true only by construction.
+    `predict_outcome` asks this function for both halves at once, which is the shape the paragraph
+    above is about.
+
+    **Both thin wrappers over it are gone, and neither was reachable.** `surrogate_fit_quality` was
+    deleted unreferenced on 2026-08-27; `predict_at` — which baked in `assess_fit=False` and
+    projected the first half — followed on 2026-09-07 with zero `src/` callers, because a second
+    spelling of one question is a reader's problem long before it is a maintainer's. The
+    empty-`points` guard it carried is this function's own: asked for neither a prediction nor a fit
+    score, it raises here.
 
     Raises:
         ValueError: Below the observation floor, when the caller named more folds than runs, or

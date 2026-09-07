@@ -29,6 +29,7 @@ from chemclaw.core import db, embeddings
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.migrate import migrate
+from chemclaw.ingest.documents import external_index
 from chemclaw.ingest.documents.binding import load_binding
 from chemclaw.ingest.documents.external_index import _report_unresolved
 from chemclaw.ingest.documents.index import InMemoryDocumentIndex
@@ -62,6 +63,28 @@ def _series(name: str, **labels: str) -> float:
         if head.startswith(f"{name}{{") and all(pair in head for pair in wanted):
             return float(reading)
     raise AssertionError(f"no series {name}{{{', '.join(wanted)}}} in the exposition")
+
+
+def _baseline(name: str, **labels: str) -> float:
+    """The same reading taken *before* the act under test, with absence read as zero.
+
+    A counter nothing has observed yet is genuinely **absent** from the exposition — Prometheus'
+    convention, and this registry's own stated rule — so `_series` raising on it is right for an
+    assertion made *after* the act and wrong for a baseline taken before one. Reading baselines
+    through `_series` is what made three tests in this file depend on a *predecessor* having minted
+    their series: deselect the two that first mint `source="lexical"` and `source="graph"` and the
+    deltas below fail with "no series", measured `2 failed, 18 passed, 2 deselected`. The file
+    passed as a whole and in the suite, so nothing was red — and a test that only passes in one
+    order is not asserting what its name says.
+
+    The registry is process-wide and these counters are monotonic, so a delta against a baseline is
+    the only self-contained reading available. `_series` is still what reads the *result*, because
+    after the act the series must exist.
+    """
+    try:
+        return _series(name, **labels)
+    except AssertionError:
+        return 0.0
 
 
 def _rendered(name: str) -> list[str]:
@@ -106,6 +129,7 @@ def test_a_document_sync_pass_leaves_exactly_one_record(
     index = InMemoryDocumentIndex()
     binding = load_binding(_share(tmp_path))
     before = _counter("chemclaw_ingest_records_total")
+    before_ingested = _baseline("chemclaw_ingest_records_total", source=_SOURCE, outcome="ingested")
     with caplog.at_level(logging.INFO, logger="chemclaw.ingest.documents.sync"):
         report = asyncio.run(sync_share(_SOURCE, binding, index))
 
@@ -119,7 +143,10 @@ def test_a_document_sync_pass_leaves_exactly_one_record(
     # The `.doc` never reaches the index and would otherwise be invisible in every count.
     assert fields["skipped_unsupported"] == {".doc": 1}
     assert _counter("chemclaw_ingest_records_total") > before
-    assert _series("chemclaw_ingest_records_total", source=_SOURCE, outcome="ingested") == 1.0
+    assert (
+        _series("chemclaw_ingest_records_total", source=_SOURCE, outcome="ingested")
+        == before_ingested + 1.0
+    )
 
 
 def test_a_pass_that_indexed_nothing_still_leaves_a_record(
@@ -393,11 +420,15 @@ def test_a_starved_source_reads_as_zero_rather_than_as_absent() -> None:
     kept series at zero is what gives the ratio a denominator at the moment it matters; without it
     the starved source would simply be missing from the metric.
     """
+    before_graph = _baseline("chemclaw_evidence_source_kept_total", source="graph")
+    before_lexical = _baseline("chemclaw_evidence_source_kept_total", source="lexical")
     offered = _chunk("graph")
     record_kept_chunks([offered], {"graph": [offered], "lexical": [_chunk("lexical", "note-2")]})
 
-    assert _series("chemclaw_evidence_source_kept_total", source="graph") >= 1.0
-    assert _series("chemclaw_evidence_source_kept_total", source="lexical") == 0.0
+    assert _series("chemclaw_evidence_source_kept_total", source="graph") == before_graph + 1.0
+    # Present and unmoved. `_series` rather than `_baseline` on purpose: the claim is that a
+    # starved leg reads as an explicit zero rather than *vanishing*, so absence must still raise.
+    assert _series("chemclaw_evidence_source_kept_total", source="lexical") == before_lexical
 
 
 def test_a_note_two_legs_agreed_on_counts_for_both_of_them() -> None:
@@ -411,7 +442,7 @@ def test_a_note_two_legs_agreed_on_counts_for_both_of_them() -> None:
     every index-backed leg in every hybrid deployment.
     """
     shared = _chunk("graph")
-    before_lexical = _series("chemclaw_evidence_source_kept_total", source="lexical")
+    before_lexical = _baseline("chemclaw_evidence_source_kept_total", source="lexical")
     record_kept_chunks([shared], {"graph": [shared], "lexical": [shared]})
 
     assert _series("chemclaw_evidence_source_kept_total", source="lexical") == before_lexical + 1.0
@@ -431,7 +462,7 @@ async def test_gathering_evidence_records_the_surviving_count_without_being_aske
     A test that drives the real path is the only kind that can fail for the real reason, so this
     one asks `gather_evidence` for evidence and looks at the registry afterwards.
     """
-    before = _series("chemclaw_evidence_source_kept_total", source="graph")
+    before = _baseline("chemclaw_evidence_source_kept_total", source="graph")
     await gather_evidence("anything at all")
     after = _series("chemclaw_evidence_source_kept_total", source="graph")
 
@@ -472,7 +503,12 @@ def test_points_the_catalogue_cannot_resolve_are_counted_and_named(
     """
     before = _counter("chemclaw_vector_unresolved_points_total")
     # The WARNING is throttled per collection (`tests/test_datapath_review_metrics.py`), so this
-    # names one nothing else uses — the point here is that drift is *said*, not how often.
+    # names one nothing else uses — the point here is that drift is *said*, not how often. The
+    # throttle's memory is a process-wide dict, though, and "nothing else uses this name" is not
+    # the same claim as "this process has not warned about it": run a second time in one process
+    # the WARNING was throttled and the assertion below read as a regression. Cleared here, so
+    # what this test asserts is the first report rather than the registry's history.
+    external_index._LAST_UNRESOLVED_WARNING.pop("observability-drifted", None)
     with caplog.at_level(logging.WARNING, logger="chemclaw.ingest.documents.external_index"):
         _report_unresolved(addressed=5, rows=3, hits=2, collection="observability-drifted")
 

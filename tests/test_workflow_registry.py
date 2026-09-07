@@ -251,9 +251,13 @@ _MUST_FAIL = frozenset(
         # expires, and that hour is spent by the parent the chemist is polling.
         "PublishNoteWorkflow",
         "ReportSectionWorkflow",
-        # An uncapped second starter beside the Schedule: a merge webhook
-        # (`request_note_reindex`) and the live lane's backfill, which awaits `handle.result()`.
+        # Schedule-only since its webhook starter was deleted unreferenced on 2026-09-07, and
+        # declared on the visibility argument instead: a failed scheduled run reaches an operator
+        # through `ScheduleHealth.last_outcome`, a parked one reaches nobody while the index it
+        # rebuilds goes stale. See the comment on the workflow itself.
         "NoteReindexWorkflow",
+        # An uncapped second starter beside the Schedule: the live lane's backfill, which awaits
+        # `handle.result()`.
         "ElnSyncWorkflow",
         # Schedule-only, and declared anyway: its output is a claim about a moment, so a resumed
         # park delivers a day-old verdict as current.

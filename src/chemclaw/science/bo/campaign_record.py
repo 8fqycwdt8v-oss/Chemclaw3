@@ -9,9 +9,9 @@ the same framing was rebuilt from scratch on the next question. At the same time
 reactions, with no identity link to any BO run: the system had a word for a campaign and no object
 behind it.
 
-Named `campaign_record` rather than `campaign` because `chemclaw.science.bo.campaign` is the
-*engine's* ask/tell loop. That module runs a campaign; this one remembers it — the same split, for
-the same reason, as `chemclaw.durable.job_record` beside the workflow that produces it.
+Named `campaign_record` rather than `campaign` because the ask/tell loop that *runs* a campaign is
+the durable `BoCampaignWorkflow`; this one remembers it — the same split, for the same reason, as
+`chemclaw.durable.job_record` beside the workflow that produces it.
 
 **A campaign is identified by its problem.** `campaign_id` is a hash of the decision space and the
 objective, so three refinements of one optimization accumulate against one campaign and nobody has
@@ -79,8 +79,9 @@ def _identity_labels(labels: list[str]) -> dict[str, str]:
     **A label list is chemistry when all of it is chemistry, and the decision is the space's.**
     `canonical_text` folds case, and case is chemistry in a SMILES: `C1CCNCC1` is piperidine,
     `c1ccncc1` is pyridine, and the two casefold to one string. That is not a corner of the
-    vocabulary, it is the one shipped decision space — `objectives.molecule_library_problem` makes
-    the canonical SMILES *itself* the category label. Measured before the RDKit rule existed: two
+    vocabulary: the `solubility_max` objective reads its candidate from `params[MOLECULE_KEY]`, so
+    every campaign that names it declares a categorical whose levels *are* canonical SMILES.
+    Measured before the RDKit rule existed: two
     chemists screening those two libraries got one campaign id, the second was told their campaign
     was not new, its space overwrote the first's, and `read_campaign_thread` handed whoever resumed
     either one the other's observations.

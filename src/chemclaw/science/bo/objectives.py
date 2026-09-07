@@ -13,16 +13,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import cache
 
-from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.science.bo.benchmarks.reizman_suzuki import load_benchmark
-from chemclaw.science.bo.problem import (
-    CategoricalParameter,
-    OptimizationProblem,
-    ParamValue,
-)
-from chemclaw.science.bo.problem import (
-    Objective as ObjectiveSpec,
-)
+from chemclaw.science.bo.problem import ParamValue
 
 Objective = Callable[[dict[str, ParamValue]], Awaitable[float]]
 
@@ -40,37 +32,15 @@ LogSFor = Callable[[str], Awaitable[float]]
 MOLECULE_KEY = "molecule"
 
 
-def molecule_library_problem(smiles: list[str]) -> OptimizationProblem:
-    """Build a candidate-set problem: pick the most soluble molecule from a library.
-
-    The categorical `molecule` parameter ranges over the given SMILES and the paired
-    solubility objective is maximized. BoFire optimizes this discrete space by
-    exhaustive acquisition search, so the value of BO is finding a top molecule
-    *without* evaluating the whole library. The evaluation budget
-    (`n_initial + n_rounds * batch`) must stay below the library size, else the
-    unique-candidate pool is exhausted.
-
-    Every entry is canonicalized up front: an unparseable SMILES raises
-    `InvalidSmilesError` naming it *before* any budget is spent (otherwise the
-    campaign would fail non-retryably only when the bad molecule is finally
-    proposed, discarding all completed rounds), and duplicate spellings of one
-    molecule collapse so the discrete-space accounting counts real candidates.
-    """
-    library = list(dict.fromkeys(require_canonical_smiles(entry) for entry in smiles))
-    return OptimizationProblem(
-        parameters=[CategoricalParameter(name=MOLECULE_KEY, categories=library)],
-        objectives=[ObjectiveSpec(name="log_s", direction="maximize")],
-    )
-
-
 def solubility_objective(log_s_for: LogSFor) -> Objective:
     """A BO objective that scores a candidate molecule by cached predicted log S.
 
     This is the calculator-backed objective of plan step 1d.3: each evaluation asks the calculator
     through the calculation store, so a molecule revisited during a search is served from the store
     and never recomputed (D-011). The scorer is injected so the objective is testable without a
-    database or a server. The candidate molecule is read from `params[MOLECULE_KEY]`; pair it with
-    `molecule_library_problem`.
+    database or a server. The candidate molecule is read from `params[MOLECULE_KEY]`, so a campaign
+    naming this objective declares a categorical parameter of that name whose levels are SMILES —
+    that shape is what makes the objective resolvable, and `CampaignSpec` carries it directly.
     """
 
     async def evaluate(params: dict[str, ParamValue]) -> float:
@@ -104,8 +74,8 @@ class RegisteredObjective:
     """
 
     factory: Callable[[LogSFor], Objective]
-    #: `"maximize"` or `"minimize"` — the same vocabulary `ObjectiveSpec.direction` uses, because
-    #: the whole point is that the two are compared as equals.
+    #: `"maximize"` or `"minimize"` — the same vocabulary `problem.Objective.direction` uses,
+    #: because the whole point is that the two are compared as equals.
     direction: str
 
 

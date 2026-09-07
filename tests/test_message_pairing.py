@@ -235,6 +235,58 @@ def test_a_complete_parallel_batch_is_not_flagged_as_unadjacent() -> None:
     assert calls_without_adjacent_results(broken) == {"c-2", "c-3"}
 
 
+def test_every_unanswered_call_in_a_thread_is_reported_not_only_the_last() -> None:
+    """The set accumulates across assistant messages, and one `|=` is what makes that true.
+
+    Every fixture in this file put its unanswered calls in a *single* assistant message, so the
+    accumulation was never exercised: replacing `missing |= called - answered` with `missing =`
+    keeps all 21 tests in the repository that execute this function green while reporting only the
+    newest message's half-pairs. Measured on the shipped source, the thread below returns both ids
+    and under that mutation returns one.
+
+    That is not a cosmetic under-report. This is one half of what `durable/retention.py` checks
+    before it deletes `session_messages` rows, so a thread whose *earlier* half-pair is invisible
+    reads as complete and becomes deletable — the precise failure the guard exists to prevent, in
+    the destructive direction.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    def _asks(call_id: str) -> AIMessage:
+        return AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": call_id}])
+
+    thread = [
+        HumanMessage("first"),
+        _asks("c-early"),
+        HumanMessage("second"),
+        _asks("c-late"),
+        HumanMessage("third"),
+    ]
+
+    assert calls_without_adjacent_results(thread) == {"c-early", "c-late"}
+
+
+def test_a_legacy_row_whose_contents_hold_a_non_dict_is_read_rather_than_raising() -> None:
+    """`message` is bare `jsonb`, so a MAF row's `contents` list is not obliged to hold only dicts.
+
+    The `isinstance(item, dict)` in front of the two `.get`s is what makes that safe, and nothing
+    asked it to be: relaxed to an `or`, a stray scalar in `contents` raises `AttributeError` two
+    lines before `_prune_session_messages`'s per-session skip, which is exactly how one unreadable
+    row took the whole `session_messages` pass down and stopped retention for every session — the
+    failure the non-mapping guard above it already records as having happened once.
+
+    The row is *read*, not skipped: the call it does mention is still reported, because the rest of
+    the payload is intact and a component this row joins must not be silently forgotten either.
+    """
+    payload = {
+        "contents": [
+            "a bare string where a content block should be",
+            {"type": "function_call", "call_id": "c9", "name": "t"},
+        ]
+    }
+
+    assert stored_call_ids(payload) == frozenset({"c9"})
+
+
 def test_each_stored_shape_stamp_is_defined_exactly_once_in_the_tree() -> None:
     """Two modules read the stamp; only one may *say* what it is.
 

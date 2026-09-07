@@ -45,14 +45,15 @@ async def reindex_notes_activity() -> int:
 
 
 @durable_workflow("background")
-# Declared, and it is the *webhook* starter rather than the Schedule that decides it. A
-# scheduled run carries `schedule_run_timeout_seconds`, so parking it is bounded; but
-# `agent.durable_tools.request_note_reindex` starts this workflow from a merge notification
-# with **no `execution_timeout`**, keyed by calendar minute. A plain exception there parks that
-# run for ever, its id is stuck RUNNING so `ALLOW_DUPLICATE_FAILED_ONLY` can never reuse it,
-# and every subsequent merge adds another immortal run re-polling its poisoned task at ~10 s
-# for the life of the deployment — while hybrid retrieval keeps serving the stale index this
-# module's own header calls worse than no index at all. D-2026-08-27.
+# Declared, and the warrant moved on 2026-09-07 without the stance moving. D-2026-08-27 decided it
+# on the *webhook* starter — `agent.durable_tools.request_note_reindex` began a run per calendar
+# minute with no `execution_timeout`, so a park there was immortal — and that starter is now gone:
+# it had no caller, no route and no webhook, and deleting it leaves this workflow Schedule-only.
+# What keeps the declaration is the argument that ADR itself records as having replaced the
+# visibility case: `D-2026-09-04-a-schedule-that-cannot-report-an-outcome` gave the schedule surface
+# `last_outcome`, so a *failed* scheduled run is reported and a parked one is not — and a park here
+# leaves hybrid retrieval serving the stale index this module's own header calls worse than no index
+# at all, silently, for as long as nobody looks.
 @workflow.defn(failure_exception_types=[Exception])
 class NoteReindexWorkflow:
     """Refresh the derived note index so hybrid retrieval sees the current graph.

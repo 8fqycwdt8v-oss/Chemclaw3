@@ -114,6 +114,38 @@ def _tracked_directories(parent: Path) -> set[str]:
     }
 
 
+def _python_packages(parent: Path) -> set[Path]:
+    """Every directory *below* `parent`, at any depth, that holds Python modules.
+
+    The recursive half of this file, and the half that did not exist. `_tracked_directories` reads
+    `iterdir()` — direct children only — and `_ROW` cannot match a path with a slash, so a nested
+    subpackage needed neither a README nor a map row: measured, adding
+    `src/chemclaw/retrieval/rerank/{__init__,engine}.py` with neither left every test here green,
+    while the same two files one level shallower failed four. Thirty-eight directories sat in that
+    gap — every connector bundle but `results`, all three `science/` engines,
+    `publish/{drivers,sinks}` — i.e. the seams a newcomer clicks into first, unexplained, in a tree
+    whose map says that cannot happen.
+
+    **Python is the predicate, and the narrowing is the decision** rather than an accident of what
+    was easy to walk (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`). A directory
+    holding modules is a package someone has to read; a directory holding one manifest is described
+    by that manifest and by the seam's own README, and demanding ten near-identical files of
+    `ingest/sources/*` would buy a broad rule nobody satisfies in place of a narrow one everybody
+    does. `deliver/channels/*`, `publish/sinks/postgres/` and `connectors/*/skills/*` are the same
+    shape and are covered by their parents for the same reason.
+
+    Reuses `_tracked_directories`' filters by recursing through it, so a husk, a cache and a
+    git-ignored tool tree are excluded here for the reasons stated there.
+    """
+    found: set[Path] = set()
+    for name in _tracked_directories(parent):
+        directory = parent / name
+        if any(child.suffix == ".py" for child in directory.iterdir() if child.is_file()):
+            found.add(directory)
+        found |= _python_packages(directory)
+    return found
+
+
 def _mapped_names() -> set[str]:
     """Every directory `ARCHITECTURE.md` claims exists, from either of its two tables."""
     return set(_ROW.findall(_ARCHITECTURE.read_text(encoding="utf-8")))
@@ -167,12 +199,69 @@ def test_a_package_holding_only_an_init_file_is_still_seen(tmp_path: Path) -> No
     )
 
 
-def test_every_subpackage_has_a_readme() -> None:
-    """Clicking a package on GitHub explains it without reading a single module."""
-    subpackages = _tracked_directories(_PACKAGE)
-    assert subpackages, "no subpackages found under src/chemclaw — this test would assert nothing"
-    missing = sorted(name for name in subpackages if not (_PACKAGE / name / "README.md").is_file())
-    assert not missing, f"src/chemclaw/ subpackages with no README.md: {missing}"
+def test_every_python_package_has_a_readme() -> None:
+    """Clicking a package on GitHub explains it without reading a single module — at any depth.
+
+    This used to read `_tracked_directories(_PACKAGE)`, which is direct children only, so it
+    asserted the promise for seventeen directories and made no claim about the fifty-two below
+    them. `ARCHITECTURE.md` said the promise held for "a subpackage under `src/chemclaw/`" and
+    both halves were "enforced, not requested" — a gate green while checking something narrower
+    than the document beside it claims, which is the defect class this whole review kept finding.
+
+    So the walk is recursive and the sentence in `ARCHITECTURE.md` now names *this* predicate: a
+    directory holding Python modules. See `_python_packages` for why that is the line.
+    """
+    packages = _python_packages(_PACKAGE)
+    assert packages, "no packages found under src/chemclaw — this test would assert nothing"
+    missing = sorted(
+        str(path.relative_to(_PACKAGE)) for path in packages if not (path / "README.md").is_file()
+    )
+    assert not missing, f"src/chemclaw/ packages with no README.md: {missing}"
+
+
+# The one corpus that lives inside the package, and the argument for it. A benchmark's dataset is
+# package data pinned to the surrogate that reads it — `objectives._reizman_suzuki` registers the
+# fitted result under a name a `CampaignSpec` can carry, so swapping the file silently changes what
+# that name means. `data/` is for corpora an operator configures, "each behind a `CHEMCLAW_*`
+# setting", and this one must not be.
+_CORPUS_IN_SRC = {"science/bo/benchmarks/data/reizman_suzuki_case_1.csv"}
+# Extensions that carry a corpus rather than a declaration or an asset. `.yaml` is every manifest
+# seam, `.md` is a README or a `SKILL.md`, and `api/static/`'s `.html`/`.js` are the front door's
+# own page — none of them is data the code reads *as a dataset*.
+_CORPUS_SUFFIXES = {".csv", ".tsv", ".parquet", ".jsonl", ".json", ".txt", ".sdf", ".smi"}
+
+
+def test_no_corpus_lives_outside_data_except_the_one_that_is_argued() -> None:
+    """`data/` holds every corpus the code reads at runtime — the direction nothing checked.
+
+    `tests/test_deploy_chart.py` asserts the forward half (a directory the image COPYs exists) and
+    nothing asserted the reverse, so a dataset could be dropped anywhere under `src/` and read with
+    `Path(__file__).parent`. One already was, and this test exists because the honest resolution was
+    to keep it and *name* it rather than to move it into a seam it does not fit
+    (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`): `data/vendored/` is a `DataSource`
+    with a manifest contract — checksum, licence, `text_column` — and a benchmark's training grid is
+    none of those things.
+
+    An exception that is enumerated is a decision; an exception that is merely tolerated is how the
+    next four arrive. So the set is exactly one file, and a second one fails here.
+    """
+    corpora = sorted(
+        str(path.relative_to(_PACKAGE))
+        for path in _PACKAGE.rglob("*")
+        if path.is_file()
+        and path.suffix in _CORPUS_SUFFIXES
+        and not any(_is_cache(part) for part in path.relative_to(_PACKAGE).parts)
+    )
+    assert set(_CORPUS_IN_SRC) <= set(corpora), (
+        f"the argued exception is no longer on disk: {sorted(set(_CORPUS_IN_SRC) - set(corpora))}. "
+        "If it moved to `data/`, delete it from `_CORPUS_IN_SRC` and from ARCHITECTURE.md's rule."
+    )
+    unargued = sorted(set(corpora) - _CORPUS_IN_SRC)
+    assert not unargued, (
+        f"corpora under src/chemclaw/ with no argument: {unargued}. `data/` holds every corpus the "
+        "code reads at runtime, each behind a `CHEMCLAW_*` setting; adding one here means adding "
+        "the argument to ARCHITECTURE.md and the path to `_CORPUS_IN_SRC`."
+    )
 
 
 def test_every_top_level_directory_has_a_readme() -> None:

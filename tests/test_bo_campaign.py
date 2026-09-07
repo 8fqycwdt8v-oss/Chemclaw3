@@ -27,7 +27,6 @@ from chemclaw.durable.awaiting import AwaitAnswerWorkflow
 from chemclaw.durable.connector_job import child_execution_timeout
 from chemclaw.durable.registry import registered_activities
 from chemclaw.science.bo.benchmarks.reizman_suzuki import build_problem, load_dataset
-from chemclaw.science.bo.campaign import optimize
 from chemclaw.science.bo.campaign_record import (
     InMemoryCampaignStore,
     campaign_id_for,
@@ -37,7 +36,6 @@ from chemclaw.science.bo.objectives import (
     MEASURED_OBJECTIVE,
     MOLECULE_KEY,
     get_objective,
-    molecule_library_problem,
     solubility_objective,
 )
 from chemclaw.science.bo.problem import (
@@ -58,6 +56,7 @@ from chemclaw.science.bo.problem import (
     require_campaign_startable,
     require_rounds_within_ceiling,
 )
+from tests.bo_harness import molecule_library_problem, optimize
 from tests.temporal_env import (
     pydantic_client,
     start_env_or_skip,
