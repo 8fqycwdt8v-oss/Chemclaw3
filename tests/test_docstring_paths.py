@@ -172,6 +172,12 @@ _REMOVED = frozenset(
         # `.github/workflows/mutants.yml` names it because that workflow used to claim it as
         # mutation coverage, and saying so is the point of the sentence.
         "kg/pr_gate.py",
+        # The in-process BO campaign loop, deleted by
+        # `D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`: no manifest, chart or string
+        # constant reached it, while the durable successor shipped. Two tests name it because they
+        # are the absence assertions — one says no such definition exists under `src/` any more,
+        # and the other records that its event-loop arm was retargeted onto the path that ships.
+        "science/bo/campaign.py",
     }
 )
 
