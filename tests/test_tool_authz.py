@@ -18,9 +18,9 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 from chemclaw.agent.audit import AuditEvent
 from chemclaw.agent.authz import AuthorizationError, authorize_tool
+from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.tool_authz import (
-    SYSTEM_SPEECH_MARK,
     announce_tool_failures,
     dry_run_refusal,
     enforce_tool_authz,
@@ -918,15 +918,27 @@ def test_an_access_decision_carries_a_mark_no_tool_can_write() -> None:
     gives for that one: a boundary the model is told to trust must be one the text on the other
     side of it cannot spell.
     """
-    from chemclaw.agent.framing import ENVELOPE_TAG
-    from chemclaw.agent.tool_authz import SYSTEM_SPEECH_MARK, denial_result
+    from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
 
     assert ENVELOPE_TAG.endswith(SYSTEM_SPEECH_MARK.rstrip("]").rsplit(" ", 1)[-1]), (
         "the mark stopped being the deployment's own nonce, so it is guessable"
     )
-    refusal = denial_result(AuthorizationError("u-9 lacks a privileged role"))
+
+    async def _denied() -> None:
+        raise AuthorizationError("u-9 lacks a privileged role")
+
+    ctx = _ctx("record_knowledge_note")
+    _drive_surfacing(ctx, _denied)
+    refusal = str(ctx.result)
     assert refusal.startswith("Refused: "), "the prefix every other reader keys on is gone"
     assert refusal.endswith(SYSTEM_SPEECH_MARK), "an access decision is no longer marked"
+
+    # **Driven through the middleware rather than through `denial_result`, because the composition
+    # is where this broke.** `_refusal_message` defangs what it is handed, and `_MARK_FORGERY`
+    # escapes the mark like any other span — so a mark composed in *before* that pass reached the
+    # model as `&#91;system <nonce>]`: an access decision wearing the escape that means a tool
+    # wrote it. Asserting on the returning message is asserting on what the model receives.
+    assert "&#91;" not in refusal, "the system escaped its own mark"
 
 
 def test_every_profile_is_told_to_trust_the_mark_and_not_the_spelling() -> None:
@@ -938,9 +950,9 @@ def test_every_profile_is_told_to_trust_the_mark_and_not_the_spelling() -> None:
     point: a future edit restoring the promise fails here rather than shipping a claim.
     """
     from chemclaw.agent.chemclaw_agent import instructions_for
+    from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
     from chemclaw.agent.profile_discovery import load_profiles
     from chemclaw.agent.profiles import get_profile, registered_profile_names
-    from chemclaw.agent.tool_authz import SYSTEM_SPEECH_MARK
 
     load_profiles()
     for name in registered_profile_names():

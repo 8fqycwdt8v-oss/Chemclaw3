@@ -346,7 +346,14 @@ class FingerprintStore(Protocol):
 
 
 class InMemoryFingerprintStore:
-    """Process-local `FingerprintStore` for tests and single-run use.
+    """Process-local `FingerprintStore` — the reference the SQL one is written to match.
+
+    **A differential oracle, not a deployment backend.** No configuration returns it — every
+    `default_*()` in this tree resolves to the Postgres implementation — and that is deliberate
+    (`D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend`). It stays in
+    `src/` because it is the executable statement of the contract its Postgres sibling is written
+    to reproduce, and it is read beside that sibling; `tests/test_reference_stores.py` holds both
+    halves of that — the absence of a shipped caller, and the absence of this claim.
 
     Computes exact Tanimoto ranking without a database — the reference the Postgres
     backend matches (same threshold and tie-break, exactly for small corpora, up to HNSW

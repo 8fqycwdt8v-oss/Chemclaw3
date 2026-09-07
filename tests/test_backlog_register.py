@@ -56,6 +56,13 @@ _COUNTED = r"(?:rows|findings|items)"
 #:
 #: Position was never what made a sentence retrospective; `_HISTORICAL` below carries that, so the
 #: shape is checked everywhere and the exemption is stated rather than inferred from a heading.
+#:
+#: **It matches a count of anything `_COUNTED` names, not only a count of this file's rows**, and
+#: that is deliberate rather than an oversight to narrow. A row about *database* rows trips it —
+#: wave 9 hit exactly that writing "the oldest 500 rows of an ELN" — and the fix there is one word,
+#: because a register row saying "rows" without saying whose is ambiguous to a reader too. Teaching
+#: the pattern to tell the two apart would mean guessing at the subject of a sentence, which is how
+#: a gate starts passing the case it exists to catch.
 _STATED_COUNT = re.compile(
     rf"\b\d[\d,]*\s+(?:of its\s+)?(?:open\s+)?{_COUNTED}\b"
     rf"|\bholds\s+\d[\d,]*\b"

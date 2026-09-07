@@ -1267,7 +1267,7 @@ def test_the_prefix_two_sessions_are_sent_is_the_same_bytes() -> None:
 #: What a child process prints: its envelope tag, and the prefix hashed with the nonce masked out.
 #:
 #: **Two renderings of one nonce, and both are masked.** The tag is the envelope's
-#: (`<retrieved-note-…>`); `tool_authz.SYSTEM_SPEECH_MARK` is the same value again in the sentence
+#: (`<retrieved-note-…>`); `framing.SYSTEM_SPEECH_MARK` is the same value again in the sentence
 #: that tells the model what marks a refusal as this system's. Masking only the first would make
 #: the second read as "something else in the prefix is per-process", which is the finding this
 #: test exists to make loud — so a deliberate second use of the *same* nonce must be masked with
@@ -1275,8 +1275,7 @@ def test_the_prefix_two_sessions_are_sent_is_the_same_bytes() -> None:
 _CHILD = """
 import hashlib, json, sys
 sys.path.insert(0, "tests")
-from chemclaw.agent.framing import ENVELOPE_TAG
-from chemclaw.agent.tool_authz import SYSTEM_SPEECH_MARK
+from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
 from test_context_floor import sent_prefix
 prefix = sent_prefix("alice@example.com", "corr-a")
 prefix = prefix.replace(SYSTEM_SPEECH_MARK, "<MARK>").replace(ENVELOPE_TAG, "<TAG>")

@@ -190,7 +190,14 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 class InMemoryNoteIndex:
-    """Process-local `NoteIndex` for tests and single-run use (the reference ranking).
+    """Process-local `NoteIndex` computing the reference ranking in Python.
+
+    **A differential oracle, not a deployment backend.** No configuration returns it — every
+    `default_*()` in this tree resolves to the Postgres implementation — and that is deliberate
+    (`D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend`). It stays in
+    `src/` because it is the executable statement of the contract its Postgres sibling is written
+    to reproduce, and it is read beside that sibling; `tests/test_reference_stores.py` holds both
+    halves of that — the absence of a shipped caller, and the absence of this claim.
 
     Dense search is exact cosine — the same ordering `PostgresNoteIndex` produces with pgvector's
     `<=>` (up to HNSW recall). Lexical search is a token-overlap count, a deterministic proxy of
