@@ -223,8 +223,14 @@ _OPERATOR_DOCS = (
     "CLAUDE.md",
     "deploy/README.md",
     "skills/README.md",
+    "knowledge/README.md",
     "docs/README.md",
 )
+# `knowledge/README.md` sits beside `skills/README.md` because `ARCHITECTURE.md` puts them in the
+# same position: layers 4 and 3, at the repository root rather than under `src/`, so neither the
+# package-README glob nor the `docs/` sweep reaches either. It was outside every gate until
+# 2026-09-08 while naming `kg/relations.py`, `kg/conflicts.py`, `kg/note.py` and four ADR ids — the
+# `skills/README.md` case exactly, one directory over.
 # `docs/planning/` is maintained (`docs/README.md`) and is deliberately **not** here yet. Turning
 # this on over it reports 175 further mismatches, and they are a different kind of defect: a ticket
 # that says "create `agents/qm_tools.py`" names a file D-118 later deleted, so there is no path to
