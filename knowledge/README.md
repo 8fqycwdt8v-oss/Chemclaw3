@@ -1,7 +1,14 @@
 # The knowledge graph
 
 Markdown notes with YAML frontmatter, indexed into a NetworkX graph by `kg/graph.py`. Git is the
-source of truth (D-004); agent-authored notes arrive through the PR-gate (D-005).
+source of truth (D-004). Agent-authored notes are **not** gated: they land the moment they are
+learned, carrying `created_by: agent` (D-160), because
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` narrowed D-005 onto behaviour and off
+knowledge. Correction, not pre-approval, is the control here — provenance at the point of use, the
+citations a chemist checks where the note is consumed, and a `contradicts` edge that argues with a
+note rather than editing it. The gated case is the opposite one: a `SKILL.md` is injected into the
+prompt with no citation trail, so no agent path may write one at all
+(`agent/skill_backend.SkillsReadOnlyRefusal`).
 
 ## What is here, and what it is for
 
@@ -11,7 +18,10 @@ validate, and every retrieval, crosslink and conflict property was measured agai
 real shape (STO-10).
 
 These notes are that corpus. They are **seed content, not a record of real experiments**: the
-chemistry is textbook-ordinary and the numbers and dates are illustrative. What is real is the
+chemistry is textbook-ordinary and the numbers and dates are illustrative — **except where a note
+says otherwise.** The corpus is seeded, not sealed: agent-authored notes now land in it directly,
+and a note whose `source:` names a real citation carries real knowledge rather than illustration.
+Read `source:` and `created_by:` before treating a figure here as decorative. What is real is the
 *structure* — every note type in the effective vocabulary (`known_note_types()`: core's
 `KNOWN_NOTE_TYPES` plus what the enabled bundles declare — `bo-candidate` comes from the `bo`
 bundle, so a deployment that disables `bo` must also drop `bo-candidate/` from its corpus) appears,
@@ -58,7 +68,7 @@ There is no separate template file; the corpus is the template, and these are th
 validator cannot fully check. A note is `<type>/<id>.md` — the directory **must** match the
 frontmatter `type` and the filename the `id` (both validator-enforced). Frontmatter keys are
 closed: a key `Note` does not declare is a refused note, not ignored metadata, so a typo fails
-loudly at the gate.
+loudly at the validator.
 
 Per type, the fields that make a note useful rather than merely valid:
 
@@ -80,7 +90,10 @@ Per type, the fields that make a note useful rather than merely valid:
   evidence; members point back with `part-of`.
 - **`playbook`** — the distilled rule, `[[cites:…]]` to the evidence it was distilled from, and
   a `supersedes` edge (plus the old note's `superseded-by` and closed `valid_to`) when it
-  replaces one.
+  replaces one. Evidence that is **not a note** — a paper, a standard — goes in `source:` as a
+  plain citation, never in a `[[cites:…]]`: only `reaction-` ids resolve outside the graph
+  (`kg/note.py::EXTERNAL_ID_PREFIXES`), so any other outside target is a dangling link the
+  validator refuses.
 
 ## Conventions
 
@@ -96,6 +109,8 @@ Run `make kg-validate` after any edit: it checks schema validity, duplicate ids,
 directory against id and type, dangling links, malformed link targets, unknown note types, unknown
 relations, relation direction against `RELATION_SIGNATURES` — and, when a database is reachable
 (`python -m chemclaw.cli.validate_kg`), that every `[[reaction-…]]` citation names a record the
-transcription store holds. The hazard gate it once ran was retired with
-`D-2026-08-15-safety-is-a-tool-not-a-gate`; procedure safety is the reviewing human's judgment,
-assisted by the `safety` MCP server as a tool.
+transcription store holds. **It does not screen chemistry.** The hazard gate it once ran was
+retired with `D-2026-08-15-safety-is-a-tool-not-a-gate`, and that ADR's remaining answer — "a human
+reviews every note at the PR-gate" — has since gone too, so do not read it as one. What stands is
+the `safety` MCP server as a tool the agent is told to reach for before proposing chemistry, and the
+chemist reading the note where it is cited. The system flags; it never certifies.
