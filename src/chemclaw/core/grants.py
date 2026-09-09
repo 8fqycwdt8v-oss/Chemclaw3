@@ -24,6 +24,8 @@ converge.
 import asyncio
 from pathlib import Path
 
+import psycopg
+
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.core.migrate import migration_dsn
@@ -40,6 +42,24 @@ def grant_files() -> list[Path]:
     two files run in a defined sequence rather than whatever the filesystem returns.
     """
     return sorted((Path(settings.sql_migrations_dir) / GRANTS_SUBDIR).glob("*.sql"))
+
+
+def _report(diagnostic: psycopg.errors.Diagnostic) -> None:
+    """Print what the reconciliation reported, so a deploy log carries it.
+
+    `app_privileges.sql` ends in a drift audit — role membership, a write held by `PUBLIC`, default
+    privileges, and a table the app role owns that the blanket REVOKE left it unable to write. Each
+    is a way the role's effective privileges move without any statement in that file changing, and
+    the first two hand back `UPDATE`/`DELETE` on `audit_events`, which since D-2026-08-14 is the
+    whole of the trail's integrity claim. They are reported rather than raised
+    (D-2026-09-09-a-grant-set-that-contracts-is-not-a-pre-upgrade-step) — a raise fails the
+    `pre-upgrade` hook and blocks the release over a hand-grant the deploy cannot undo.
+
+    **Printed rather than left in the diagnostics psycopg collects**, because that is the difference
+    between a report and a claim that one exists: nothing else in this process reads notices, so
+    without this the audit would run on every deploy and be seen by nobody.
+    """
+    print(f"{diagnostic.severity}: {diagnostic.message_primary}")
 
 
 async def apply_grants(dsn: str | None = None) -> list[str]:
@@ -70,6 +90,7 @@ async def apply_grants(dsn: str | None = None) -> list[str]:
         )
     sources = await asyncio.to_thread(lambda: [(p.name, p.read_text()) for p in paths])
     async with await connect(target) as conn:
+        conn.add_notice_handler(_report)
         for _name, text in sources:
             await conn.execute(text)
         await conn.commit()

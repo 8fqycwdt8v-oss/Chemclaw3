@@ -3708,6 +3708,13 @@ def test_the_pre_install_hook_reads_a_configuration_that_exists_when_it_runs() -
     The `post-install`/`post-upgrade` Jobs read the tracked objects deliberately — by then the
     manifest is applied, and `convert` runs as the runtime role against the release that is now
     live, so the configuration it should see is the one the pods see.
+
+    `chemclaw-migrate` also runs on `pre-rollback`
+    (D-2026-09-09-a-grant-set-that-contracts-is-not-a-pre-upgrade-step): the grant file is a full
+    restatement, so it *narrows*, and `helm rollback` runs neither of the two hook points above —
+    without it a rolled-back release restores the older image against the newer ACL. The hook-scoped
+    configuration this test is about is the right source there for the same reason it is at
+    `pre-upgrade`: it is the target revision's own, rendered in the release being restored.
     """
     hooks = {
         doc["metadata"]["name"]: doc
@@ -3715,7 +3722,7 @@ def test_the_pre_install_hook_reads_a_configuration_that_exists_when_it_runs() -
         if doc and (doc["metadata"].get("annotations") or {}).get("helm.sh/hook")
     }
     for name, expected in (
-        ("chemclaw-migrate", "pre-install,pre-upgrade"),
+        ("chemclaw-migrate", "pre-install,pre-upgrade,pre-rollback"),
         ("chemclaw-convert", "post-install,post-upgrade"),
         ("chemclaw-schedules", "post-install,post-upgrade"),
     ):
