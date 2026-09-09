@@ -297,6 +297,14 @@ _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
 # once made, is written down where an operator planning a rollback reads it — the same place the
 # regex-found ones are.
 _REVIEWED_SEMANTIC_BREAKS: dict[str, tuple[str, str]] = {
+    "092_session_owners_updated_at.sql": (
+        "D-2026-09-09-a-sort-key-a-page-cannot-prune-is-a-scan",
+        "`updated_at` is the sidebar's sort key. It does not break a rollback — the pre-092 image "
+        "derives the order and ignores the column — but it does not *maintain* it either, so a "
+        "session taking its first turn during the rollback window comes back with the column NULL "
+        "and is missing from the listing until it is spoken in again. The migration's backfill, "
+        "re-run by hand, restores it.",
+    ),
     "089_result_publication_lease.sql": (
         "D-2026-09-09-a-pattern-that-enumerates-covers-what-it-enumerated",
         "`claimed_at` is a delivery lease. A pre-089 pod's claim ignores it and re-claims a leased "

@@ -371,10 +371,102 @@ _TURN_REFRESH = (
 )
 _TURN_RELEASE = "DELETE FROM session_turns WHERE session_id = %s AND holder = %s"
 
+# The same three operations over a *set* of sessions, in one statement each.
+#
+# **A fleet-wide sweep cannot take a lease one round trip at a time.** `agent/leaver.py` claims
+# every session a departing person owns before it deletes any of them, and one statement per
+# session runs at ~56 sessions/s — so at 6,000 sessions the loop alone took 104 s against a 60 s
+# lease and the claims it took first had already lapsed before it took its last. Measured at 600
+# sessions with a 10 s lease: 37 claims expired before the loop finished, 113 by the time the
+# erase transaction would have run, and a second pod took the first session at t+10.3 s while the
+# sweep was still running. The array form makes that loop one statement per thousand
+# (`leaver.CLAIM_BATCH`), which is the half of the fix that keeps the lease from being outrun; the
+# other half is that the sweep now refreshes what it holds.
+#
+# `unnest(%s::text[])` rather than a `VALUES` list built in Python: one parameter for any batch
+# size, so the statement is a constant and cannot be built from a caller's strings. The cast is not
+# decoration — psycopg sends an untyped array and Postgres cannot infer its element type on its own
+# in the `SELECT` position.
+#
+# **The caller must not repeat a session id inside one batch.** `ON CONFLICT … DO UPDATE` refuses
+# to touch a row twice in one statement (`CardinalityViolation: ON CONFLICT DO UPDATE command
+# cannot affect row a second time`), so the batch is de-duplicated where it is assembled rather
+# than being made tolerant here, which would hide a caller passing the same session twice.
+_TURN_CLAIM_MANY = (
+    "INSERT INTO session_turns (session_id, holder, expires_at) "
+    "SELECT s, %s, now() + make_interval(secs => %s) FROM unnest(%s::text[]) AS s "
+    "ON CONFLICT (session_id) DO UPDATE "
+    "SET holder = EXCLUDED.holder, claimed_at = now(), expires_at = EXCLUDED.expires_at "
+    "WHERE session_turns.expires_at <= now() "
+    "RETURNING session_id"
+)
+# **`FOR UPDATE SKIP LOCKED`, and it is what keeps this heartbeat from deadlocking the sweep it is
+# keeping alive.** The erasure's own transaction deletes `session_turns` rows for the same
+# sessions, so a plain `UPDATE … WHERE session_id = ANY(...)` and that `DELETE` lock the same rows
+# in whatever order each plan chooses: two statements taking the same set of row locks in
+# different orders is a deadlock, and Postgres resolves one by aborting a transaction — which here
+# is the erasure. Skipping a locked row instead costs nothing that matters: a row the erase
+# transaction has locked is a row no other pod can claim either, so the lease it carries is not
+# what is protecting that session at that instant.
+#
+# `ORDER BY session_id` gives every batch one lock order for the same reason.
+#
+# The holder guard sits in the locking sub-select rather than in the outer `UPDATE`: the rows are
+# locked by the time the update runs, so their holder cannot change underneath it, and a second
+# copy of the predicate is a second thing to keep in step.
+_TURN_REFRESH_MANY = (
+    "UPDATE session_turns SET expires_at = now() + make_interval(secs => %s) "
+    "WHERE session_id IN ("
+    "  SELECT session_id FROM session_turns "
+    "   WHERE session_id = ANY(%s::text[]) AND holder = %s "
+    "   ORDER BY session_id FOR UPDATE SKIP LOCKED) "
+    "RETURNING session_id"
+)
+_TURN_RELEASE_MANY = "DELETE FROM session_turns WHERE holder = %s AND session_id = ANY(%s::text[])"
+# Which of these sessions somebody *else* is holding right now. Only asked when a refresh did not
+# come back with everything it was given, and it is what makes that warning true rather than
+# alarming: a claim this sweep failed to refresh is either a takeover — the hazard — or a row its
+# own erase transaction has locked or already deleted, which is the ordinary end of every applied
+# run. Warning on both would fire on every healthy erasure, and a warning that fires on every
+# healthy run is one nobody reads.
+_TURN_OTHER_HOLDERS = (
+    "SELECT session_id FROM session_turns WHERE session_id = ANY(%s::text[]) AND holder <> %s"
+)
+
+# The one definition of the session list's sort key, substituted into both statements that
+# maintain it (092). `updated_at` *is* `max(session_messages.created_at)` for the session — the
+# expression `_OWNER_LIST`'s lateral used to compute per page — so the mirror cannot mean something
+# slightly different from what it replaced, which is the drift `043_session_listing.sql` refused
+# this column for. Correlated on the owning row's id, so it costs one backwards probe of
+# `session_messages_session_recent_idx`.
+_NEWEST_MESSAGE = (
+    "(SELECT max(m.created_at) FROM session_messages m WHERE m.session_id = o.session_id)"
+)
+
+# **`updated_at` is derived here rather than left NULL, and that is what covers the fork.**
+# `agent/session_fork.py` imports this statement and runs it *after* copying the parent's
+# transcript onto the child id, so by the time this row is written the messages it summarises are
+# already there — an ownership row inserted with a NULL sort key would be a fork that never appears
+# in `GET /sessions`, which is failure 2 in that module's own list. For an ordinary new session
+# there are no messages yet and the subquery is NULL, which is the honest value: nothing has been
+# said in it.
+#
+# Written as `SELECT … FROM (VALUES …)` rather than `VALUES (…)` so the correlated subquery can
+# name the session id without the caller passing it twice — the parameter list stays the three
+# every caller already sends. The casts are psycopg's requirement, not decoration: a `VALUES` row
+# of bare placeholders has no type for Postgres to infer.
 _OWNER_INSERT = (
-    "INSERT INTO session_owners (session_id, owner, profile) VALUES (%s, %s, %s) "
+    "INSERT INTO session_owners (session_id, owner, profile, updated_at) "
+    "SELECT o.session_id, o.owner, o.profile, "
+    f"{_NEWEST_MESSAGE} "
+    "FROM (VALUES (%s::text, %s::text, %s::text)) AS o (session_id, owner, profile) "
     "ON CONFLICT (session_id) DO NOTHING"
 )
+# The other writer: the turn that has just appended to `session_messages`, in the same transaction
+# as the append (see `PostgresHistoryProvider.save_messages`). Recomputed from the table rather
+# than stamped `now()`, so a writer that supplies its own `created_at` — the fork shifts every
+# copied row's — is summarised by the same rule as one that does not.
+_OWNER_TOUCH = f"UPDATE session_owners o SET updated_at = {_NEWEST_MESSAGE} WHERE o.session_id = %s"
 # The profile comes back with the owner because both are facts the in-process LRU loses, and a
 # rehydration that restored one without the other silently widened the session's tool surface
 # (REV-14 — a profile can only attenuate, so losing it is never the safe direction).
@@ -391,13 +483,33 @@ _OWNER_SELECT = "SELECT owner, profile FROM session_owners WHERE session_id = %s
 # `created_at` still comes back, because when a conversation began is worth showing; it just no
 # longer decides the order.
 #
-# The lateral is also the filter, deliberately rather than as a trick. `max()` with no GROUP BY
-# always returns a row — NULL when there is nothing to aggregate — so `ON m.updated_at IS NOT NULL`
-# drops precisely the sessions that have never had a turn. Those exist in bulk: the companion UI
-# creates the session on the first keystroke to save a round-trip on the first message, so every
-# abandoned draft leaves an ownership row behind. Listing them handed a caller a column of empty
-# conversations it could not tell apart from ones whose transcript had failed to load — both are an
-# empty array from outside. One join answers "what was the last activity" and "was there any".
+# **The sort key is a column on this row and no longer a lateral, and that is a trade with a
+# number on both sides (092).** `043_session_listing.sql` derived it — `LATERAL (SELECT
+# max(created_at) … WHERE session_id = o.session_id)` — and argued that a mirrored column "would be
+# a second write per turn that can silently fall out of step with the first". The argument was
+# right and the price was never measured: because the sort key came *out* of the lateral, the
+# planner evaluated it for every session the owner had ever created before it could discard any.
+# Measured on this schema, one message per session, warm cache: 2 sessions 0.4 ms · 600 5.3 ms ·
+# 6,000 **47.6 ms** (18,051 buffers) · 20,000 **155.0 ms** (60,154 buffers). Linear, and the keyset
+# cursor below did not help — page 2 measured 49.4 ms against page 1's 47.6 ms at 6,000, because
+# its predicate was on the lateral's output too and could not prune the loop. Nothing bounds the
+# row count: `retention_session_messages_days` ships at 0 and the companion UI mints an ownership
+# row on the first keystroke. The same page over the column and
+# `session_owners_owner_updated_idx` is a bounded index walk — measured below the millisecond at
+# every size above.
+#
+# What the mirror costs is one `_OWNER_TOUCH` per turn, in the same transaction as the message
+# insert, and one definition of what the column means (`_NEWEST_MESSAGE`) used by both writers.
+#
+# **The `EXISTS` arm is what keeps the mirror out of the membership decision.** 043's `ON
+# m.updated_at IS NOT NULL` dropped precisely the sessions that have never had a turn, and those
+# exist in bulk — every abandoned draft leaves an ownership row behind, and listing them handed a
+# caller a column of empty conversations it could not tell apart from ones whose transcript had
+# failed to load. That is now two arms rather than one, deliberately: `o.updated_at IS NOT NULL` is
+# the *index* condition, and the `EXISTS` asks the table the question the old join asked, so a
+# session whose messages `durable/retention.py` has pruned since drops out of the listing at the
+# moment they go rather than when something remembers to rewrite a column. The mirror can therefore
+# only ever mis-*order* a page, never invent or hide a row.
 #
 # **The `after` arm is the cursor, and it is a keyset rather than an offset.** The ceiling
 # (`service_max_listed_sessions`) used to be the end of the list: a chemist with more sessions than
@@ -445,14 +557,13 @@ _OWNER_SELECT = "SELECT owner, profile FROM session_owners WHERE session_id = %s
 # The owner is therefore bound twice, which is the shape this statement already uses for the
 # self-disabling cursor arm below it rather than a new one.
 _OWNER_LIST = (
-    "SELECT o.session_id, o.created_at, m.updated_at, o.title, o.profile FROM session_owners o "
-    "JOIN LATERAL ("
-    "  SELECT max(created_at) AS updated_at FROM session_messages WHERE session_id = o.session_id"
-    ") m ON m.updated_at IS NOT NULL "
+    "SELECT o.session_id, o.created_at, o.updated_at, o.title, o.profile FROM session_owners o "
     "WHERE (o.owner = %s OR (o.owner IS NULL AND %s::text IS NULL)) "
+    "  AND o.updated_at IS NOT NULL "
     "  AND (%s::timestamptz IS NULL "
-    "       OR (m.updated_at, o.session_id) < (%s::timestamptz, %s::text)) "
-    "ORDER BY m.updated_at DESC, o.session_id DESC LIMIT %s"
+    "       OR (o.updated_at, o.session_id) < (%s::timestamptz, %s::text)) "
+    "  AND EXISTS (SELECT 1 FROM session_messages m WHERE m.session_id = o.session_id) "
+    "ORDER BY o.updated_at DESC, o.session_id DESC LIMIT %s"
 )
 # First writer wins, in one statement and without a read first. A title is derived from a session's
 # opening question, so every later turn would otherwise overwrite it; `title IS NULL` is what lets
@@ -731,11 +842,22 @@ class PostgresHistoryProvider:
     ) -> None:
         """Append this turn's messages to the session's durable history (no-op if none to store).
 
-        One statement in one transaction, and nothing follows it. The turn's exchange lands whole or
-        not at all, which is what lets `chemclaw.api.runner` carry no rollback: there is no window
-        in which half of it is committed. Bounding the table is `durable/retention.py`'s job, on its
-        own schedule, and deliberately not this call's — an append on the answer path must not also
-        be deciding what to delete.
+        **One transaction, and the second statement in it is the session list's sort key** (092).
+        The turn's exchange lands whole or not at all, which is what lets `chemclaw.api.runner`
+        carry no rollback: there is no window in which half of it is committed, and that now covers
+        `session_owners.updated_at` as well — a mirror written in a *later* transaction is the
+        "silently falls out of step" `043_session_listing.sql` refused this column for, and one
+        written in this one cannot be missing while the rows it summarises are there.
+
+        It is `_OWNER_TOUCH`'s recomputation rather than an assignment of the timestamp this call
+        happens to know, so the column means `max(created_at)` at every writer (`_NEWEST_MESSAGE`)
+        instead of meaning "whatever the last writer thought". The cost is one indexed `UPDATE` and
+        one backwards probe of `session_messages_session_recent_idx` per turn — measured over a
+        2,000-message session, **0.068 ms and 6 buffers**, against a turn that has just spent
+        seconds in a model.
+
+        Bounding the table is `durable/retention.py`'s job, on its own schedule, and deliberately
+        not this call's — an append on the answer path must not also be deciding what to delete.
         """
         if not session_id or not messages:
             return
@@ -749,6 +871,7 @@ class PostgresHistoryProvider:
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.executemany(_INSERT, rows)
+                await cur.execute(_OWNER_TOUCH, (session_id,))
             await conn.commit()
 
 
@@ -873,10 +996,10 @@ class SessionOwnerStore:
 
         This table is already the durable answer to "which sessions exist and who owns them", so
         listing reads it directly rather than adding a second registry that could disagree with the
-        one `_resolve_session` authorizes against. `updated_at` is derived from `session_messages`
-        rather than mirrored onto a column here, because the turn that would have to maintain a
-        mirror already writes the row the derivation reads — a second write per turn is a second
-        thing that can fall out of step.
+        one `_resolve_session` authorizes against. `updated_at` is a column on it since 092, having
+        been derived from `session_messages` before that — see `_OWNER_LIST` for what deriving it
+        cost per page, and for the two arms that keep the mirror out of the decision about which
+        sessions appear at all.
 
         `profile` is the fifth field rather than a second query — see `_OWNER_LIST` for what reads
         it. `None` is a real value there and means the session runs the default profile, which is
@@ -1034,6 +1157,70 @@ class SessionTurnClaims:
             async with conn.cursor() as cur:
                 await cur.execute(_TURN_RELEASE, (session_id, holder))
             await conn.commit()
+
+    async def claim_many(
+        self, session_ids: Sequence[str], holder: str, lease_seconds: float
+    ) -> set[str]:
+        """Take the turn slot of every one of these sessions at once; return the ones taken.
+
+        The set-shaped `claim`, for the one caller that needs a whole fleet held at the same
+        instant (`agent/leaver.py`'s erasure). The sessions **not** in the returned set are the
+        ones somebody else is running a turn on, which is the same answer `claim` gives one session
+        at a time — this does not wait for them and does not give up the ones it did take.
+
+        Args:
+            session_ids: The sessions to claim. Must not repeat one (see `_TURN_CLAIM_MANY`).
+            holder: Who is claiming, for the release and refresh guards.
+            lease_seconds: How long the claims last without a refresh.
+
+        Returns:
+            The subset that is now held by `holder`.
+        """
+        if not session_ids:
+            return set()
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_TURN_CLAIM_MANY, (holder, lease_seconds, list(session_ids)))
+                taken = {str(row[0]) for row in await cur.fetchall()}
+            await conn.commit()
+        return taken
+
+    async def refresh_many(
+        self, session_ids: Sequence[str], holder: str, lease_seconds: float
+    ) -> set[str]:
+        """Push this holder's claims out by another lease; return the ones still ours.
+
+        The set-shaped `refresh`, and the return value carries the same meaning: a session absent
+        from it is one this holder no longer has — taken over, deleted, or (uniquely to the batch
+        form) locked by a concurrent transaction and skipped rather than waited on
+        (`_TURN_REFRESH_MANY` has the whole argument for that).
+        """
+        if not session_ids:
+            return set()
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_TURN_REFRESH_MANY, (lease_seconds, list(session_ids), holder))
+                still_ours = {str(row[0]) for row in await cur.fetchall()}
+            await conn.commit()
+        return still_ours
+
+    async def release_many(self, session_ids: Sequence[str], holder: str) -> None:
+        """Give a whole batch of slots back (idempotent; only this holder's rows go)."""
+        if not session_ids:
+            return
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_TURN_RELEASE_MANY, (holder, list(session_ids)))
+            await conn.commit()
+
+    async def other_holders(self, session_ids: Sequence[str], holder: str) -> set[str]:
+        """Which of these sessions are claimed by somebody other than `holder`, right now."""
+        if not session_ids:
+            return set()
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_TURN_OTHER_HOLDERS, (list(session_ids), holder))
+                return {str(row[0]) for row in await cur.fetchall()}
 
 
 class InMemoryHistoryProvider:

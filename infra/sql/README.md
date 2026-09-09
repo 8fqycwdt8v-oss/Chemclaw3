@@ -69,7 +69,7 @@ the pair applies in filename order and neither shadows the other.
 | `session_messages` | 008 (+022, 026, 043, 046 `message_shape` check, 067 `message_original`) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145). The in-line compaction on write this row used to name went with the engine that needed it. `message_original` needs no disposal of its own: it dies with its row, and its population cannot grow — nothing has written a `maf`-shaped row since M6, so the set that can ever carry one was fixed then (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step). An operator who has trusted the conversion may `SET message_original = NULL` to reclaim it, which is the deliberate act of giving up the rollback |
 | `session_events` | 009 (+014, 028) | `agent/session_events.py` | `durable/retention.py`, **consumed rows only** — an undelivered push-back must outlive the window that would have destroyed it |
 | `note_index` | 012 (+035, 039) | `retrieval/vector_index.py` | derived and rebuildable (`make reindex`, which now also heals a model change); rows for deleted notes are not removed |
-| `session_owners` | 013 (+021, 043, 046 index) | `agent/session_store.py` | `durable/retention.py`, **last** and only once nothing is left to reopen: past the conversation window, no session-scoped row anywhere, no live turn lease (`D-2026-08-27-a-session-nobody-can-reopen-is-disposable`). The row is what makes a session reopenable *and* what every session-scoped sweep starts from, so it is disposed of behind everything it keys, never in front of it |
+| `session_owners` | 013 (+021, 043, 046 index, 092 sort key) | `agent/session_store.py` | `durable/retention.py`, **last** and only once nothing is left to reopen: past the conversation window, no session-scoped row anywhere, no live turn lease (`D-2026-08-27-a-session-nobody-can-reopen-is-disposable`). The row is what makes a session reopenable *and* what every session-scoped sweep starts from, so it is disposed of behind everything it keys, never in front of it |
 | `user_preferences` | 015 | `agent/preferences.py` | — |
 | `predictions` | 016 | `science/calc/calibration.py` | — |
 | `subscriptions` | 017 (+029) | `agent/subscriptions.py` | deleted on unsubscribe |
@@ -177,6 +177,19 @@ ADR carrying the reading behind it.
   exempted at all — it destroys data, which the guard's other bucket refuses outright
   (D-2026-09-09-a-pattern-that-enumerates-covers-what-it-enumerated).
 
+- `092_session_owners_updated_at.sql` — **judged, not matched.** One nullable column, additive by
+  every pattern, and it does not end the rollback: the pre-092 image derives the sidebar's sort key
+  from `max(session_messages.created_at)` and ignores the column entirely. What it does not do is
+  *maintain* it, so a session taking its first turn during the rollback window comes back with
+  `updated_at IS NULL` and is missing from `GET /sessions` until it is spoken in again. Re-run the
+  migration's own backfill by hand to restore it
+  (D-2026-09-09-a-sort-key-a-page-cannot-prune-is-a-scan).
+- `093_measurement_source.sql` — the `measurements` primary key gains `source`, the fourth table to
+  be keyed that way after 051, 056 and 063. Nothing is destroyed by restoring the previous image —
+  the widening added a column to the key rather than removing information — but a row written under
+  the new key whose `source` is not `chemist-reported` is unreachable to the old reader's
+  two-column lookup. Run the migration forward again
+  (D-2026-09-09-a-measurement-is-keyed-by-who-measured-it).
 ### Migrations that are not re-runnable, and the recipe for each
 
 Re-running the whole set is how a restored database whose `schema_migrations` ledger is older than

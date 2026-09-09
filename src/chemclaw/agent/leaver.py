@@ -35,10 +35,11 @@ them, and this database holds two spellings of the same id (see `_actor_forms`).
 dry run.
 """
 
+import asyncio
 import logging
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 
 import psycopg
@@ -412,6 +413,25 @@ _BEYOND_REACH: dict[str, str] = {
 }
 
 
+# How many sessions one claim, refresh or release statement covers.
+#
+# **A module constant rather than a `Settings` field, deliberately, and the reason is the one
+# `api/state._CLAIM_REFRESHES_PER_LEASE` gives beside it**: this is a property of how the statement
+# is written, not something a deployment tunes. It bounds two things at once — how long one
+# statement holds row locks on `session_turns`, and how much of a fleet is re-claimed if the
+# statement fails — and neither has a per-deployment answer. A thousand is far enough above any
+# real fleet that a large actor is one or two statements, and far enough below "all of them" that
+# a single lock window stays short.
+CLAIM_BATCH = 1000
+
+# The claim is refreshed this many times per lease, exactly as a running turn's is
+# (`api/state._CLAIM_REFRESHES_PER_LEASE`, whose reasoning is the same one: two consecutive
+# refreshes may fail before the lease is genuinely at risk). Not imported from there — `agent/`
+# sits below `api/` and `tests/test_layering.py` enforces that direction — and not a config knob,
+# for the reason `CLAIM_BATCH` is not.
+_CLAIM_REFRESHES_PER_LEASE = 3
+
+
 # The holder name this sweep takes a session's durable turn claim under. A fresh id per run, so a
 # claim can never be refreshed or released by a *later* erasure — the identity rule
 # `api/state.TurnLease.token` states for the in-process slot, applied here for the same reason: the
@@ -650,6 +670,16 @@ async def _sessions_held(sessions: list[str]) -> AsyncIterator[None]:
     release in this system is, and identity-checked by `_erasure_holder`'s per-run id, so a late
     release cannot revoke a successor's claim (`api/state.TurnLease.token`'s rule).
 
+    **Taken in batches and then kept alive, because a guard that expires under its own sweep is not
+    a guard.** One statement per session ran at ~56 sessions/s, so claiming a 6,000-session fleet
+    took 104 s against a 60 s lease — the claims taken first had already lapsed before the last one
+    was taken, and nothing refreshed any of them for the rest of the run. Measured at 600 sessions
+    with a 10 s lease: 37 claims expired before the loop finished, 113 by the time the erase
+    transaction would have run, and a second pod took the first session at t+10.3 s while the sweep
+    was still going. Both halves are needed and neither is sufficient — `CLAIM_BATCH` turns the
+    loop into one statement per thousand (0.51 s for 6,000, measured) and `_keep_claims_alive`
+    holds what it took for as long as the deletion takes.
+
     Raises:
         ErasureError: a turn holds one of these sessions.
     """
@@ -660,16 +690,16 @@ async def _sessions_held(sessions: list[str]) -> AsyncIterator[None]:
     holder = _erasure_holder()
     lease = settings.service_turn_claim_lease_seconds
     held: list[str] = []
+    heartbeat: asyncio.Task[None] | None = None
     try:
         busy: list[str] = []
-        for session_id in sessions:
+        for batch in _batches(sessions):
             try:
-                if await claims.claim(session_id, holder, lease):
-                    held.append(session_id)
-                else:
-                    busy.append(session_id)
+                taken = await claims.claim_many(batch, holder, lease)
             except psycopg.Error as exc:
                 raise ErasureError(f"the database refused the erasure: {exc}") from exc
+            held.extend(session_id for session_id in batch if session_id in taken)
+            busy.extend(session_id for session_id in batch if session_id not in taken)
         if busy:
             raise ErasureError(
                 "a turn is running on "
@@ -678,22 +708,98 @@ async def _sessions_held(sessions: list[str]) -> AsyncIterator[None]:
                 "Erasing a session while a turn writes to it leaves a copy of the conversation "
                 "that no later erasure can reach."
             )
+        heartbeat = asyncio.create_task(_keep_claims_alive(claims, list(held), holder, lease))
         yield
     finally:
-        for session_id in held:
+        if heartbeat is not None:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+        for batch in _batches(held):
             try:
-                await claims.release(session_id, holder)
+                await claims.release_many(batch, holder)
             except psycopg.Error:
                 # The lease is the backstop, exactly as it is for a worker that was SIGKILLed
                 # mid-turn: an unreleased claim costs that session one lease of unavailability
                 # rather than a permanent refusal, which is why the claim expires at all.
                 logger.warning(
-                    "could not release the erasure's turn claim on session %s; it expires on "
-                    "its own after %ss",
-                    session_id,
+                    "could not release the erasure's turn claim on %d session(s) (%s ...); they "
+                    "expire on their own after %ss",
+                    len(batch),
+                    batch[0],
                     lease,
                     exc_info=True,
                 )
+
+
+def _batches(sessions: list[str]) -> list[list[str]]:
+    """`sessions` in `CLAIM_BATCH`-sized batches, each free of repeats.
+
+    The de-duplication is `_TURN_CLAIM_MANY`'s requirement rather than defensiveness: `ON CONFLICT
+    … DO UPDATE` refuses to touch one row twice in a statement, so a repeated session id would end
+    the whole erasure with `CardinalityViolation`. Both callers pass ids read out of a primary key
+    and so cannot repeat one today — which is exactly the property that would go unnoticed the day
+    a third caller does not have it.
+    """
+    unique = list(dict.fromkeys(sessions))
+    return [unique[start : start + CLAIM_BATCH] for start in range(0, len(unique), CLAIM_BATCH)]
+
+
+async def _keep_claims_alive(
+    claims: SessionTurnClaims, sessions: list[str], holder: str, lease: float
+) -> None:
+    """Push this sweep's claims out for as long as the sweep runs, and say what it loses.
+
+    **The claim has to outlast the erasure, and nothing made it.** The lease is
+    `service_turn_claim_lease_seconds` (60 by default) and an applied sweep is a claim loop plus
+    one transaction that measured 85 s for 400k rows — so on any fleet worth the guard, the claims
+    taken at the start had lapsed by the time the deletion ran, and `_TURN_CLAIM`'s
+    `WHERE session_turns.expires_at <= now()` hands a lapsed slot to whoever asks next. Measured
+    at 600 sessions against a 10 s lease: 113 of them expired mid-run and a second pod took the
+    first one at t+10.3 s. This is the same heartbeat a running turn keeps
+    (`api/state._hold_turn_claim`), at the width the sweep holds.
+
+    A refresh that does not come back is *not* by itself a takeover: the erase transaction locks —
+    and then deletes — the very rows this refreshes, so the ordinary end of every applied run is
+    that these stop being ours. Only a session a *different* holder now names is worth a warning,
+    and a session lost that way is dropped from the heartbeat rather than asked about every tick,
+    for `_hold_turn_claim`'s reason: a heartbeat that cannot succeed is a timer burning a
+    connection.
+
+    Cancelled by `_sessions_held`'s `finally`, so it lives exactly as long as the claims do.
+    """
+    interval = lease / _CLAIM_REFRESHES_PER_LEASE
+    alive = list(sessions)
+    while alive:
+        await asyncio.sleep(interval)
+        try:
+            refreshed: set[str] = set()
+            for batch in _batches(alive):
+                refreshed |= await claims.refresh_many(batch, holder, lease)
+            missing = [session_id for session_id in alive if session_id not in refreshed]
+            taken_over: set[str] = set()
+            for batch in _batches(missing):
+                taken_over |= await claims.other_holders(batch, holder)
+            if taken_over:
+                logger.warning(
+                    "the erasure's turn claim on %d session(s) was taken over while the sweep was "
+                    "running (%s); a turn may be writing to a session this run is erasing, so "
+                    "check the residue this run reports",
+                    len(taken_over),
+                    ", ".join(sorted(taken_over)[:10]),
+                )
+                alive = [session_id for session_id in alive if session_id not in taken_over]
+        except psycopg.Error:
+            # Warned rather than fatal, for `api/state._hold_turn_claim`'s reason: the erasure is
+            # already running, and ending it here would leave a half-deleted fleet to be found by
+            # the residue count instead of by a report. The lease is what is at risk, and the
+            # residue count is what says whether that cost anything.
+            logger.warning(
+                "could not refresh the erasure's turn claims; if this keeps failing they lapse "
+                "after %ss and a turn may start on a session this run is erasing",
+                lease,
+                exc_info=True,
+            )
 
 
 async def _erase_within_claims(actors: list[str], report: ErasureReport, *, apply: bool) -> None:
