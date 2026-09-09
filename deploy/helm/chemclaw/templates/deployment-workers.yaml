@@ -29,8 +29,24 @@ spec:
          Temporal redelivers an activity whose worker went away — so the honest statement is that
          the old process is gone before the new one starts.
 
-The connector workers below keep the default on purpose;
-         nothing on their queues is host-local, so an overlap is only capacity. */}}
+         **What that guarantees, and what it therefore costs.** With no overlap, every unfinished
+         run on `background-jobs` is resumed by exactly one code version: the new one. So the new
+         image must be able to *replay* the histories the old one wrote, and that is a property of
+         `src/chemclaw/durable/`, not of this file — checked against committed histories by
+         `tests/test_workflow_replay.py`
+         (`D-2026-09-09-a-replay-control-needs-an-archived-history-not-a-patch`). Measured there
+         rather than argued here, because prose in a chart template cannot fail.
+
+         Temporal's worker versioning is the alternative that would let the two generations
+         disagree, and it is declined in that ADR for this deployment's own reason: pinning an
+         in-flight run to the build id that started it requires the old worker to stay up until it
+         drains — a `TemplateWorkflow` run lives up to `template_run_timeout_seconds`, 12.6 h at
+         the shipped default — which is a second background worker for half a day, the exact thing
+         the paragraph above pins `replicas: 1` to prevent.
+
+         The connector workers below keep the default on purpose; nothing on their queues is
+         host-local, so an overlap is only capacity — and no bundle workflow has an archived
+         history yet either, which is why the control above is scoped to core's queue. */}}
   strategy:
     type: Recreate
   selector:

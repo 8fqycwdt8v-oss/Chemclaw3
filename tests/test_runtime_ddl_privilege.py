@@ -90,9 +90,7 @@ def _reconciliation_for(role: str) -> str:
     return rewritten
 
 
-def _reconcile_reporting(
-    connection: psycopg.Connection, role: str, drift: list[str]
-) -> list[str]:
+def _reconcile_reporting(connection: psycopg.Connection, role: str, drift: list[str]) -> list[str]:
     """Apply `drift`, reconcile, and return what the reconciliation reported — all rolled back.
 
     Every statement runs inside one transaction that is discarded, `GRANT`/`REVOKE`/`CREATE TABLE`

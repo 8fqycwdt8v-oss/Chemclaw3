@@ -652,8 +652,16 @@ class ConnectorJobWorkflow:
         a test that runs a workflow and then replays the history it just produced compares code
         against a history that same code wrote, so the two agree by construction — measured, an
         extra `await self._record_run(record)` injected into `_finish` replayed clean. Detecting a
-        code-versus-history mismatch needs an *archived* history, which is a CI job rather than a
-        unit test. What the suite holds instead is the effect
+        code-versus-history mismatch needs an *archived* history — and that turned out to be the
+        whole obstacle, not the runner: a history recorded from a released shape and committed is
+        an ordinary fixture, so `tests/test_workflow_replay.py` now does this inside `make test`
+        with no broker and no CI job of its own
+        (`D-2026-09-09-a-replay-control-needs-an-archived-history-not-a-patch`). This paragraph is
+        left standing because the argument above it is still exactly right and only its conclusion
+        was wrong. **`ConnectorJobWorkflow` is one of the twenty-one that control does not yet
+        cover** — it is named in `UNCOVERED_BACKGROUND_WORKFLOWS`, because recording its history
+        needs a connector bundle's child workflow to actually run. What the suite holds instead is
+        the effect
         (`test_a_run_that_fails_after_recording_is_not_recorded_a_second_time`), which does go red
         when the guard is removed.
         """
