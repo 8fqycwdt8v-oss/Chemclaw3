@@ -192,10 +192,35 @@ _register(Unit("kPa", "pressure", 1e3))
 _register(Unit("bar", "pressure", 1e5))
 _register(Unit("mbar", "pressure", 1e2), "millibar")
 
+#: The thermochemical calorie in joules — **exact by definition**, not a measurement, so there is
+#: no precision to lose and nothing to update when CODATA does.
+JOULE_PER_CALORIE = 4.184
+
+#: One hartree in kcal/mol (CODATA 2018: E_h = 4.3597447222071e-18 J, N_A = 6.02214076e23 /mol).
+#:
+#: **This is the one definition, and it is here because `core` is the layer everything may import.**
+#: It was written out three times — here as a truncated 2625.4996 kJ/mol, in
+#: `science/calc/thermo.py` and again in `publish/properties.py` — and two of the three were short
+#: enough to disagree: the registry's derived kcal/mol came out 1.5e-08 relative low, which is
+#: nothing today and is one caller away from being a chemist's number. Restating a constant is how
+#: three copies drift, so `science/calc/thermo.py` imports this name rather than repeating its
+#: digits. `publish/properties.py` still spells it out and should import it too — that file belongs
+#: to another change, and this comment says so rather than implying all three copies are gone.
+HARTREE_TO_KCAL = 627.5094740631
+
+#: One electronvolt in kJ/mol. N_A·e with both factors exact under SI-2019, so the full value is
+#: exact too — the registry carried 96.485_332, truncated at the seventh digit for no reason.
+ELECTRONVOLT_TO_KJ = 96.485_332_123_31
+
 _register(Unit("kJ/mol", "energy_per_amount"), "kjmol", "kj mol-1")
-_register(Unit("kcal/mol", "energy_per_amount", 4.184), "kcalmol", "kcal mol-1")
-_register(Unit("hartree", "energy_per_amount", 2625.4996), "eh", "ha", "au")
-_register(Unit("eV", "energy_per_amount", 96.485_332), "electronvolt")
+_register(Unit("kcal/mol", "energy_per_amount", JOULE_PER_CALORIE), "kcalmol", "kcal mol-1")
+# Derived from the two constants above rather than restated as a third number, which is the whole
+# point of them: kJ/mol is this dimension's reference unit, so the hartree's factor is exactly what
+# `HARTREE_TO_KCAL` says a hartree is, expressed in the reference.
+_register(
+    Unit("hartree", "energy_per_amount", HARTREE_TO_KCAL * JOULE_PER_CALORIE), "eh", "ha", "au"
+)
+_register(Unit("eV", "energy_per_amount", ELECTRONVOLT_TO_KJ), "electronvolt")
 
 # **The concentration and length ladders are registered in step, deliberately.** Case is what
 # separates molarity from length here (`M` molar, `m` metre), and a fold claimed by both is poisoned

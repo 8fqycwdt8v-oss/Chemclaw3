@@ -174,11 +174,26 @@ class CalculatorSettings(BaseSettings):
     # rather than reading from here, because it is a definition and not a deployment's choice.
     xtb_thermo_temperature_k: float = 298.15
     xtb_thermo_pressure_pa: float = 101325.0
-    # Quasi-RRHO damping frequency (cm^-1, Grimme 2012): below it a vibration is treated
-    # as a free rotor for the entropy, because a harmonic oscillator's entropy diverges
-    # as the frequency goes to zero and low modes are exactly where the harmonic
-    # approximation fails. 25 cm^-1 is the published value and what xtb itself uses.
-    xtb_rrho_cutoff_cm: float = 25.0
+    # Quasi-RRHO damping frequency (cm^-1, Grimme 2012): the frequency at which a vibration's
+    # entropy is an equal mixture of the harmonic and free-rotor expressions, because a harmonic
+    # oscillator's entropy diverges as the frequency goes to zero and low modes are exactly where
+    # the harmonic approximation fails.
+    #
+    # **50 is xtb's own `--sthr` default, and it is chosen for that reason.** The value shipped
+    # here was 25, under a comment claiming it was "the published value and what xtb itself uses" —
+    # false in both halves: Grimme 2012 (Chem. Eur. J. 18, 9955) publishes w0 = 100 cm^-1 and xtb's
+    # `--sthr` defaults to 50. Every Hessian this arithmetic runs on comes from the GFN2-xTB tier,
+    # so matching the reference implementation is the one choice a chemist can check: a plain
+    # `xtb --ohess` on the same geometry now agrees with what this system reports, where 25 agreed
+    # with nothing.
+    #
+    # It is not free. On eight low modes of an ordinary flexible drug-sized molecule the shift from
+    # 25 to 50 raises -T·S by ~1.1 kcal/mol — a third of `xtb_reaction_uncertainty_kcal` — and it
+    # does **not** cancel across a reaction that changes flexibility. Nothing cached is stale:
+    # `ThermoSettings` is deliberately not part of the Hessian's cache key (D-132), so the free
+    # energy is recomposed from the cached second derivatives on every call and no stored row
+    # carries the old convention. Results already *published* to a result sink do.
+    xtb_rrho_cutoff_cm: float = 50.0
     # A negative Hessian eigenvalue below this magnitude (cm^-1) is numerical noise from
     # the finite differences, not a real imaginary mode. Above it the geometry is a
     # saddle point and the thermochemistry says so.

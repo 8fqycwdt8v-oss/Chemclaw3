@@ -23,8 +23,12 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from chemclaw.core import units
+from chemclaw.core.config import settings
+from chemclaw.science.calc import thermo
 from chemclaw.science.calc.models import (
     EnsembleMember,
     EnsemblePayload,
@@ -372,3 +376,79 @@ def test_a_backend_that_reports_no_gradient_leaves_stationarity_unassessed() -> 
 
     assert result.is_stationary is None
     assert result.is_minimum
+
+
+def test_the_hartree_conversion_is_shared_with_the_unit_registry_not_copied() -> None:
+    """One definition, asserted by identity — because a *copy* is what equal values also give.
+
+    `627.5094740631` was written out three times in this tree: here, in `core/units.py` (as a
+    2625.4996 kJ/mol registry factor that derived to 627.509464627, 1.5e-08 relative low) and in
+    `publish/properties.py`. Equal-value assertions cannot tell a shared constant from a lucky
+    copy, and a copy is precisely what drifted. `from chemclaw.core.units import HARTREE_TO_KCAL`
+    binds the same object; a re-typed literal is a different one, which is what this checks.
+    """
+    assert thermo.HARTREE_TO_KCAL is units.HARTREE_TO_KCAL
+
+
+def test_the_gas_constant_is_derived_once_rather_than_written_twice() -> None:
+    """`_GAS_CONSTANT` and `_GAS_CONSTANT_CAL` are the same constant in two units, so one derives.
+
+    They were two literals, and only one of them was truncated: `8.314462618` against
+    `1.987204258640832`, which is the *untruncated* R/4.184. They disagreed at rel 1.8e-11 — far
+    below anything a chemist sees, and exactly the shape that becomes a real number the day
+    somebody rounds one of them differently. R is `k_B · N_A` with both factors exact under SI-2019,
+    so there is a definition to derive from rather than a value to retype.
+    """
+    assert thermo._GAS_CONSTANT == thermo._BOLTZMANN * thermo._AVOGADRO
+    assert thermo._GAS_CONSTANT_CAL * units.JOULE_PER_CALORIE == thermo._GAS_CONSTANT
+
+
+def test_the_qrrho_cutoff_is_the_one_xtb_uses_and_the_choice_is_worth_a_kcal() -> None:
+    """The damping frequency is a *choice*, and the suite could not see it at all.
+
+    Every measured check in this file is water, CO2 or H2 — none of which has a mode anywhere near
+    the damping region — so the cutoff could have been set to any number without turning a single
+    assertion red. This is the test that makes it a decision rather than a leftover.
+
+    `50 cm^-1` is `xtb`'s own `--sthr` default, and the Hessians this arithmetic runs on come from
+    GFN2-xTB: a chemist cross-checking against a plain `xtb --ohess` on the same geometry gets the
+    same free energy. The shipped `25` matched neither that nor Grimme 2012's published
+    `w0 = 100 cm^-1`, while the comment beside it claimed to be both.
+
+    The second half is the cost, measured rather than asserted in prose: eight low modes of an
+    ordinary flexible drug-sized molecule, and the ~1.1 kcal/mol that separates 25 from 50 on the
+    entropy term. It does not cancel across a reaction that changes flexibility, and the results
+    this tier reports carry a 3.0 kcal/mol uncertainty — so this is a third of the error bar, not
+    a rounding difference.
+    """
+    assert settings.xtb_rrho_cutoff_cm == 50.0
+
+    low_modes = np.array([18.0, 26.0, 35.0, 44.0, 58.0, 71.0, 96.0, 120.0])
+
+    def minus_t_s(cutoff: float) -> float:
+        _zpe, _thermal, entropy = thermo._vibrational(low_modes, 298.15, cutoff)
+        return -298.15 * entropy * thermo._J_PER_MOL_TO_KCAL
+
+    assert minus_t_s(25.0) == pytest.approx(-10.62, abs=0.01)
+    assert minus_t_s(50.0) == pytest.approx(-9.53, abs=0.01)
+    assert minus_t_s(100.0) == pytest.approx(-8.78, abs=0.01)
+    # Monotone in the cutoff, and the step this commit took is a third of the reported error bar.
+    assert minus_t_s(50.0) - minus_t_s(25.0) == pytest.approx(1.09, abs=0.01)
+    assert abs(minus_t_s(50.0) - minus_t_s(25.0)) > settings.xtb_reaction_uncertainty_kcal / 3.0
+
+
+def test_the_two_spellings_of_the_hartree_in_this_module_agree() -> None:
+    """A guard, not a fix: `_HARTREE_J` and `HARTREE_TO_KCAL` are one constant in two units.
+
+    They are both correct today — 4.3597447222071e-18 J is the CODATA primary datum and
+    627.5094740631 kcal/mol is CODATA's own conversion of it, agreeing to rel 7e-14 — and they are
+    *not* derived from each other, because deriving one would need N_A in `core.units`, which is a
+    second copy of a constant introduced to remove the second copy of another. So the relation is
+    asserted instead of enforced: this is what turns red if either is retyped from a different
+    table.
+
+    Nothing in this repository joined them before, which is exactly how three copies of the
+    kcal/mol figure managed to disagree without a test noticing.
+    """
+    from_si = thermo._HARTREE_J * thermo._AVOGADRO / (units.JOULE_PER_CALORIE * 1000.0)
+    assert from_si == pytest.approx(units.HARTREE_TO_KCAL, rel=1e-12)

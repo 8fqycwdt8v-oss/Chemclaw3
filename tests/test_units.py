@@ -13,7 +13,14 @@ is the wiring: the ledger's unit and the reported unit have to meet somewhere, a
 
 import pytest
 
-from chemclaw.core.units import Measurement, UnitError, parse_unit, reconcile
+from chemclaw.core.units import (
+    HARTREE_TO_KCAL,
+    JOULE_PER_CALORIE,
+    Measurement,
+    UnitError,
+    parse_unit,
+    reconcile,
+)
 
 
 def _same_dimension(first: str, second: str) -> bool:
@@ -35,9 +42,15 @@ def test_a_conversion_is_the_number_a_chemist_would_write() -> None:
     assert Measurement.of(25.0, "degC").to("K").value == pytest.approx(298.15)
     # A kcal is 4.184 kJ by definition.
     assert Measurement.of(1.0, "kcal/mol").to("kJ/mol").value == pytest.approx(4.184)
-    # A hartree is ~627.5 kcal/mol — the figure a computational chemist knows by heart, which is
-    # why it is the one asserted rather than the 2625.5 kJ/mol the table stores.
-    assert Measurement.of(1.0, "hartree").to("kcal/mol").value == pytest.approx(627.5, rel=1e-3)
+    # A hartree is 627.5 kcal/mol — the figure a computational chemist knows by heart, which is
+    # why it is the one asserted rather than the 2625.5 kJ/mol the table stores. **Asserted to the
+    # full value, not to `rel=1e-3`**: that tolerance was a band of [626.87, 628.13], so a drift of
+    # ±0.63 kcal/mol per hartree — a whole reaction ΔG — passed the guard that exists to catch it.
+    # `test_the_energy_ladder_carries_the_full_codata_value_and_one_definition` is where the
+    # precision and the single-definition rule are actually pinned.
+    assert Measurement.of(1.0, "hartree").to("kcal/mol").value == pytest.approx(
+        627.5094740631, rel=1e-12
+    )
     assert Measurement.of(2.0, "h").to("min").value == pytest.approx(120.0)
 
 
@@ -287,3 +300,41 @@ def test_reconcile_refuses_a_basis_mismatch_the_way_compare_does() -> None:
     # An unstated basis on either side is "nobody said" and must not block an ordinary conversion.
     assert reconcile(0.15, "area%", "%") == pytest.approx(0.15)
     assert reconcile(0.15, "%", "area%") == pytest.approx(0.15)
+
+
+def test_the_energy_ladder_carries_the_full_codata_value_and_one_definition() -> None:
+    """The guard this replaces admitted ±0.63 kcal/mol per hartree, which is a whole reaction ΔG.
+
+    `approx(627.5, rel=1e-3)` is an admissible band of [626.87, 628.13]: every drift a wrong
+    hartree could introduce fits inside it, so the assertion that exists to pin the conversion
+    could not have failed for any error a chemist would notice. A conversion factor is a defined
+    constant, not a measurement, so the tolerance on it is the tolerance of the arithmetic —
+    exact equality against the one definition, and full CODATA precision against a figure written
+    independently of the table it checks.
+
+    Independent references, CODATA 2018 / SI 2019 (none of them read off `core/units.py`):
+    E_h = 4.3597447222071e-18 J, N_A = 6.02214076e23 /mol, e = 1.602176634e-19 C (the last two
+    exact), and the thermochemical calorie is 4.184 J exactly.
+    """
+    hartree_kj_per_mol = 4.3597447222071e-18 * 6.02214076e23 / 1000.0  # 2625.4996394798...
+    electronvolt_kj_per_mol = 1.602176634e-19 * 6.02214076e23 / 1000.0  # 96.4853321233...
+
+    assert Measurement.of(1.0, "hartree").to("kJ/mol").value == pytest.approx(
+        hartree_kj_per_mol, rel=1e-12
+    )
+    assert Measurement.of(1.0, "hartree").to("kcal/mol").value == pytest.approx(
+        hartree_kj_per_mol / 4.184, rel=1e-12
+    )
+    assert Measurement.of(1.0, "eV").to("kJ/mol").value == pytest.approx(
+        electronvolt_kj_per_mol, rel=1e-12
+    )
+
+    # And **one** definition: the registry's factor is derived from `HARTREE_TO_KCAL` rather than
+    # restating it, so the two cannot drift apart the way three independent literals did. Asserted
+    # on the factor itself rather than on the round trip through `to()`, because `(x*c)/c == x` is a
+    # floating-point coincidence and this is a statement about where the number comes from.
+    assert parse_unit("hartree").factor == HARTREE_TO_KCAL * JOULE_PER_CALORIE
+    assert parse_unit("kcal/mol").factor == JOULE_PER_CALORIE
+    assert Measurement.of(1.0, "hartree").to("kcal/mol").value == pytest.approx(
+        HARTREE_TO_KCAL, rel=1e-15
+    )
