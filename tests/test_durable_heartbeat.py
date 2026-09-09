@@ -284,24 +284,28 @@ def test_the_republish_walk_beats_and_is_bounded_below_the_job_ceiling(
     from chemclaw.connectors.results import workflows as republish
     from chemclaw.connectors.results.specs import RepublishSpec
     from chemclaw.core.config import settings
+    from chemclaw.publish.backfill import WalkCounts
+
+    # A republish refuses before it scans when no sink is enabled, which is the shipped default.
+    monkeypatch.setattr(republish, "publishing_enabled", lambda: True)
+
+    async def _empty_walk(**kwargs: object) -> WalkCounts:
+        return WalkCounts()
 
     # --- the budget the workflow declares -------------------------------------------------
     captured: dict[str, Any] = {}
 
     async def _capture(*args: Any, **kwargs: Any) -> dict[str, int]:
+        """Stand in for the activity, and answer with the report `_walk` itself produces.
+
+        Not a dict literal: this test is about timeouts, and a hand-written key set is a second
+        definition of the activity's report that goes stale silently the next time the walk counts
+        something new — which is exactly what happened when the walk gained its fourth bucket.
+        """
         captured.update(kwargs)
-        return dict.fromkeys(
-            (
-                "requeued",
-                "calculations_seen",
-                "calculations_queued",
-                "calculations_skipped",
-                "jobs_seen",
-                "jobs_queued",
-                "jobs_skipped",
-            ),
-            0,
-        )
+        monkeypatch.setattr(republish, "backfill_cached", _empty_walk)
+        monkeypatch.setattr(republish, "backfill_jobs", _empty_walk)
+        return await republish._walk(RepublishSpec())
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _capture)
     asyncio.run(republish.RepublishResultsWorkflow().run(RepublishSpec()))
@@ -322,12 +326,12 @@ def test_the_republish_walk_beats_and_is_bounded_below_the_job_ceiling(
     monkeypatch.setattr(activity, "heartbeat", lambda *a: beats.append(str(a)))
     monkeypatch.setattr(settings, "result_republish_heartbeat_timeout_seconds", 4.0)
 
-    async def _slow_walk(**kwargs: object) -> tuple[int, int, int]:
+    async def _slow_walk(**kwargs: object) -> WalkCounts:
         await asyncio.sleep(1.3)
-        return (0, 0, 0)
+        return WalkCounts()
 
-    async def _fast_walk(**kwargs: object) -> tuple[int, int, int]:
-        return (0, 0, 0)
+    async def _fast_walk(**kwargs: object) -> WalkCounts:
+        return WalkCounts()
 
     monkeypatch.setattr(republish, "backfill_cached", _slow_walk)
     monkeypatch.setattr(republish, "backfill_jobs", _fast_walk)

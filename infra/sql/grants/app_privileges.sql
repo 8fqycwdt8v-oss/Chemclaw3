@@ -27,6 +27,8 @@
 DO $$
 DECLARE
     app_role CONSTANT TEXT := 'chemclaw_app';
+    app_oid OID;
+    drift TEXT;
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = app_role) THEN
         RAISE NOTICE 'role % does not exist; this deployment runs a single database principal '
@@ -37,6 +39,17 @@ BEGIN
     -- Start from nothing rather than from whatever an earlier release left behind, so this file
     -- states the whole matrix: re-running it after a verb is *removed* from the code narrows the
     -- grant instead of leaving the old one standing.
+    --
+    -- **That narrowing is the file's cost as well as its point, and it is not free**
+    -- (D-2026-09-09-a-grant-set-that-contracts-is-not-a-pre-upgrade-step). The reconciliation runs
+    -- from a `pre-upgrade` hook, so a release that drops a verb revokes it while the *previous*
+    -- release's pods are still the only thing serving. Measured on `7654cfb0`, which dropped
+    -- `note_proposals` from the writer list in the same commit that deleted its writer:
+    -- `note_proposals INSERT` read `t` under release N and `f` after release N+1's hook, and the
+    -- role met `permission denied for table note_proposals`. `migrate-job.yaml` justified its hook
+    -- point with the opposite claim — that this reconciliation is additive — which is true of
+    -- `infra/sql/*.sql` and false of this file. The window is a rollout; `pre-rollback` on that Job
+    -- closes the other one, where an older image comes back against a newer ACL and stays there.
     EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I', app_role);
     EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', app_role);
     EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', app_role);
@@ -301,5 +314,84 @@ BEGIN
     -- nothing. `tests/test_runtime_ddl_privilege.py` now asserts both halves against the live ACL —
     -- the refusals by attempting them as the role, the read by holding this claim to it — so the
     -- next release that disagrees has to change the assertion and this sentence together.
+
+    -- ================= what the restatement above cannot reach =================
+    --
+    -- Everything up to here revokes from, and grants to, the app role **by name**, which is one of
+    -- the four ACL sources Postgres consults for it. The opening paragraph's claim that this file
+    -- "states the whole matrix" is true of that source and false of the other three, and the gap is
+    -- not academic — measured as the role, after a full reconciliation
+    -- (D-2026-09-09-a-grant-set-that-contracts-is-not-a-pre-upgrade-step):
+    --
+    --   role membership          UPDATE/DELETE on audit_events succeed; so does DROP TABLE
+    --   a write held by PUBLIC   UPDATE audit_events succeeds
+    --   default privileges       every table created between two deploys comes back widened
+    --
+    -- The first two retire `D-2026-08-14`'s only surviving control silently: the trail's integrity
+    -- claim is that the credential writing a row cannot rewrite it, and both hand that back without
+    -- changing one line above. The third re-widens future tables, which is the same hazard the
+    -- REVOKE at the top of this file exists to close, arriving from the one direction it cannot see.
+    --
+    -- The fourth check below is this file's own doing rather than an operator's, and it is a *gap*
+    -- rather than a widening: `REVOKE ALL ON ALL TABLES` is indiscriminate, so a table the app role
+    -- created and owns loses even its owner's DML — the eight LangGraph tables are guarded by name
+    -- a few dozen lines up for exactly that reason, and nothing guards a ninth. Measured: a ninth
+    -- table installs fine, survives the deploy that creates it, and dies on the *second* one, with
+    -- `S/I/U/D` going from `t,t,t,t` to `t,f,f,f`.
+    --
+    -- **Reported, not refused, and the line is CI fails / the deploy reports.** A raise here fails
+    -- the `pre-upgrade` hook and blocks the release, and the operator whose hand-grant caused it is
+    -- the one person who cannot fix it from the deploy — that trades a hazard for an outage. A
+    -- refusal wants an opt-out, an opt-out wants a setting, and this file is applied as plain SQL
+    -- with no settings in it. So the hard half is a test — `tests/test_runtime_ddl_privilege.py`
+    -- introduces each drift and fails if the reconciliation says nothing — and this half is the one
+    -- that can see a live database's hand-grants, which no test in this repository can.
+    -- `chemclaw.core.grants` prints these onto the deploy log rather than leaving them in a channel
+    -- psycopg swallows, because a warning with no reader is the "a control exists" claim this
+    -- repository keeps deleting.
+    app_oid := to_regrole(app_role)::OID;
+    FOR drift IN
+        SELECT format(
+            'role membership: %I is a member of %I and holds every privilege that role has, '
+            'including the ones this file withholds', app_role, granter.rolname)
+        FROM pg_auth_members AS member_of
+        JOIN pg_roles AS granter ON granter.oid = member_of.roleid
+        WHERE member_of.member = app_oid
+        UNION ALL
+        SELECT format(
+            'PUBLIC holds %s on public.%I, which no REVOKE naming a role can reach',
+            entry.privilege_type, rel.relname)
+        FROM pg_class AS rel
+        JOIN pg_namespace AS space ON space.oid = rel.relnamespace
+        CROSS JOIN LATERAL aclexplode(rel.relacl) AS entry
+        WHERE space.nspname = 'public'
+          AND rel.relkind = 'r'
+          AND entry.grantee = 0
+          AND entry.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')
+        UNION ALL
+        SELECT format(
+            'default privileges give %s to %s on every table created from now on, so a table a '
+            'later migration adds arrives already widened',
+            entry.privilege_type, coalesce(beneficiary.rolname, 'PUBLIC'))
+        FROM pg_default_acl AS defaults
+        CROSS JOIN LATERAL aclexplode(defaults.defaclacl) AS entry
+        LEFT JOIN pg_roles AS beneficiary ON beneficiary.oid = entry.grantee
+        WHERE defaults.defaclobjtype = 'r'
+          AND entry.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')
+          AND (entry.grantee = 0 OR entry.grantee = app_oid)
+        UNION ALL
+        SELECT format(
+            '%I owns public.%I and cannot write it: the blanket REVOKE above strips an owner''s own '
+            'DML, and this file names no verb to hand back. It installed on the deploy that created '
+            'it and fails on the next one', app_role, rel.relname)
+        FROM pg_class AS rel
+        JOIN pg_namespace AS space ON space.oid = rel.relnamespace
+        WHERE space.nspname = 'public'
+          AND rel.relkind = 'r'
+          AND rel.relowner = app_oid
+          AND NOT has_table_privilege(app_role, rel.oid, 'INSERT')
+    LOOP
+        RAISE WARNING 'grant drift: %', drift;
+    END LOOP;
 END
 $$;

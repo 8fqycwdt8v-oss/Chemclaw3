@@ -104,15 +104,108 @@ _DESTROYS_DATA = re.compile(
 # plain index costs only a plan. A pattern cannot tell them apart, and the previous version of this
 # check called every `DROP INDEX` destructive, which is further from the truth than this is. The
 # answer to an over-flag is a reviewed exemption naming the statement, not a looser pattern.
+#
+# `ALTER COLUMN … TYPE` is here rather than in `_DESTROYS_DATA`, and the choice is the judgement
+# this bucket exists to hold. A **narrowing** conversion destroys data outright and irreversibly:
+# measured on Postgres 16, `DOUBLE PRECISION` -> `REAL` turns `0.3333333333333333` into
+# `0.33333334`, and converting back yields `0.3333333432674408` rather than the original — the
+# rows are still there and what they said is gone. A **widening** destroys nothing at all, and the
+# tree has exactly one (`091`, `confidence REAL` -> `DOUBLE PRECISION`). No pattern can tell the
+# two apart without tracking each column's current type across ninety files, which is a type
+# checker for SQL. So the statement goes in the bucket that *has* an exemption path, and the
+# refusal is carried by the failure message: a narrowing may not be exempted, because the bucket
+# below it refuses data loss with no exemption at all. Both comment blocks used to enumerate what
+# they cover and omit a type change from both lists, which is an omission rather than a decision.
 _BREAKS_PREVIOUS_IMAGE = re.compile(
     r"^\s*(?:"
     rf"ALTER\s+TABLE\s+{_TABLE}\s+ALTER\s+(?:COLUMN\s+)?{_NAME}\s+SET\s+NOT\s+NULL"
+    rf"|ALTER\s+TABLE\s+{_TABLE}\s+ALTER\s+(?:COLUMN\s+)?{_NAME}\s+TYPE\b"
     rf"|ALTER\s+TABLE\s+{_TABLE}\s+DROP\s+CONSTRAINT"
     rf"|ALTER\s+TABLE\s+{_TABLE}\s+ADD\s+(?:CONSTRAINT\s+{_NAME}\s+)?PRIMARY\s+KEY"
     r"|DROP\s+INDEX"
     r")",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# A constraint is added by name, and a name is unique per table — so an `ADD CONSTRAINT` is the one
+# additive-looking statement that is **not** re-runnable on its own. `CREATE … IF NOT EXISTS` covers
+# every other object in this directory; `ALTER TABLE … ADD CONSTRAINT` has no `IF NOT EXISTS`
+# spelling in Postgres at all, so the only re-runnable way to write one is to drop it first.
+#
+# Measured, because the scan above enumerates `CREATE` and therefore covers exactly what it
+# enumerated: on a database carrying the whole schema with its `schema_migrations` ledger emptied —
+# the logical restore the re-runnability check exists for — the runner aborts at 046 with
+# `DuplicateObject: constraint "session_messages_shape_known" for relation "session_messages"
+# already exists`, and 058 aborts with `UndefinedObject` on the other arm the same docstring names
+# (a database built by hand, without that constraint), because its drop omits `IF EXISTS`.
+#
+# The table name is compared bare for the reason `_NAME` exists: `ALTER TABLE ONLY public."t"` is
+# the same table as `ALTER TABLE t`, and a rule that reads only the bare spelling would let a
+# `pg_dump`-shaped paste through.
+_ADD_CONSTRAINT = re.compile(
+    rf"^\s*ALTER\s+TABLE\s+({_TABLE})\s+ADD\s+CONSTRAINT\s+({_NAME})",
+    re.IGNORECASE | re.MULTILINE,
+)
+_DROP_CONSTRAINT_IF_EXISTS = re.compile(
+    rf"^\s*ALTER\s+TABLE\s+({_TABLE})\s+DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+({_NAME})",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _bare(identifier: str) -> str:
+    """`ONLY public."t"` -> `t`: the name without a modifier, a schema qualifier or quotes."""
+    return identifier.strip().rsplit(None, 1)[-1].replace('"', "").rsplit(".", 1)[-1].lower()
+
+
+def _constraints_re_added_without_a_drop(sql: str) -> tuple[str, ...]:
+    """`table.constraint` for every `ADD CONSTRAINT` the file does not first drop `IF EXISTS`.
+
+    Position-aware rather than set-based: a drop that comes *after* the add makes the file worse,
+    not better, so "the file mentions both" is not the property. Compared on the bare table and
+    constraint names, so the four spellings Postgres accepts resolve to one object.
+    """
+    dropped: dict[tuple[str, str], int] = {}
+    for match in _DROP_CONSTRAINT_IF_EXISTS.finditer(sql):
+        dropped.setdefault((_bare(match.group(1)), _bare(match.group(2))), match.start())
+    return tuple(
+        f"{table}.{constraint}"
+        for table, constraint, at in (
+            (_bare(m.group(1)), _bare(m.group(2)), m.start()) for m in _ADD_CONSTRAINT.finditer(sql)
+        )
+        if dropped.get((table, constraint), at + 1) > at
+    )
+
+
+# Merged migrations that are not re-runnable, each with the **recipe** an operator applies before
+# a replay. Not a rollback procedure — the file is merged and its statements are immutable, so the
+# only fix that exists is one statement run against the database first. Reported here and in the
+# runbook, because an operator recovering a restore does not read a test file.
+#
+# `(ADR, the flagged objects, the recipe)`, exact rather than per-file, for the reason
+# `_REVIEWED_ROLLBACK_BREAKS` gives: an exemption covers statements somebody read.
+_REVIEWED_REPLAY_BREAKS: dict[str, tuple[str, tuple[str, ...], str]] = {
+    "046_review_hardening_indexes.sql": (
+        "D-2026-09-09-a-pattern-that-enumerates-covers-what-it-enumerated",
+        ("session_messages.session_messages_shape_known",),
+        # The constraint is `NOT VALID`, so re-adding it costs no scan; dropping it first is free
+        # and the file then replays whole.
+        "ALTER TABLE session_messages DROP CONSTRAINT IF EXISTS session_messages_shape_known;",
+    ),
+    "058_note_proposal_superseded.sql": (
+        "D-2026-09-09-a-pattern-that-enumerates-covers-what-it-enumerated",
+        ("note_proposals.note_proposals_state_known",),
+        # The other arm: 058 *does* drop first, without `IF EXISTS`, so it replays against a
+        # restore and fails against a database built without that constraint. The recipe puts the
+        # constraint back so the bare drop finds one — unconditionally, because an operator under
+        # pressure should not have to first work out which arm they are in, and a bare `ADD` fails
+        # on the arm where the constraint is present. It re-adds the *post*-058 form, identical to
+        # what the file itself re-adds, so it cannot fail on data 058 already permits, where the
+        # pre-058 form would reject any row holding `superseded`.
+        "ALTER TABLE note_proposals DROP CONSTRAINT IF EXISTS note_proposals_state_known; "
+        "ALTER TABLE note_proposals ADD CONSTRAINT note_proposals_state_known "
+        "CHECK (state IN ('open', 'merged', 'rejected', 'failed', 'superseded'));",
+    ),
+}
 
 # Migrations reviewed and accepted as ending the previous-image rollback, each mapped to the exact
 # statement prefixes `_BREAKS_PREVIOUS_IMAGE` matches in it and to the ADR that says what an
@@ -149,6 +242,15 @@ _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
             "ALTER TABLE reaction_records ADD PRIMARY KEY",
         ),
     ),
+    "091_reaction_label_confidence_precision.sql": (
+        # Reviewed, and — like 058 — it does not in fact end the rollback: the conversion *widens*
+        # `confidence` from `REAL` to `DOUBLE PRECISION`, every stored value survives it exactly,
+        # and the previous image writes a Python float into the column as before. The row exists
+        # because no pattern can read a conversion's direction, and the direction is the whole
+        # question: a narrowing loses data irreversibly and may not be exempted here at all.
+        "D-2026-09-09-a-pattern-that-enumerates-covers-what-it-enumerated",
+        ("ALTER TABLE reaction_labels ALTER COLUMN confidence TYPE",),
+    ),
     "041_document_chunk_identity.sql": (
         "D-2026-08-08-a-rollback-that-is-not-a-schema-step",
         (
@@ -157,6 +259,35 @@ _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
             "ALTER TABLE document_chunks DROP CONSTRAINT",
             "ALTER TABLE document_chunks ADD PRIMARY KEY",
         ),
+    ),
+}
+
+# Migrations that end the previous-image rollback **for a reason no statement shape carries**, and
+# so are found by review rather than by either pattern above. A separate register on purpose: a row
+# here is a judgement somebody made, where a row in `_REVIEWED_ROLLBACK_BREAKS` is a judgement about
+# a statement a regex found and can re-find.
+#
+# The case that opened it is 089. It adds one nullable column with no default — additive by every
+# reading above, and its own ADR says approvingly that "the previous image keeps writing the
+# table". It does. **Without the lease.** `claimed_at` is a mutual exclusion, so a pod that does not
+# know about it re-claims a row a new-pod drain is mid-delivering: driven against the migrated
+# schema with the pre-089 `_CLAIM` verbatim, one row came to rest at `id=1 state=pending attempts=2
+# leased=t` — one delivery, two attempts spent, which is the double-delivery symptom 089 exists to
+# close. The sink converges (every key there is content-addressed), so what is lost is the attempt
+# budget: eight attempts empty after four real ones, and the row then dead-ends `pending` where no
+# remedy matches it.
+#
+# **This register does not catch the next one and must not be read as if it did.** "Does this new
+# column mean something the previous image must honour?" is a question about the code on both
+# sides, not about the SQL, and a pattern that claimed to answer it would be the shape this
+# repository calls a control that is really a claim. What the register buys is that the judgement,
+# once made, is written down where an operator planning a rollback reads it — the same place the
+# regex-found ones are.
+_REVIEWED_SEMANTIC_BREAKS: dict[str, tuple[str, str]] = {
+    "089_result_publication_lease.sql": (
+        "D-2026-09-09-a-pattern-that-enumerates-covers-what-it-enumerated",
+        "`claimed_at` is a delivery lease. A pre-089 pod's claim ignores it and re-claims a leased "
+        "row, spending an attempt on a delivery already in flight.",
     ),
 }
 
@@ -304,6 +435,13 @@ def test_a_migration_leaves_the_previous_image_able_to_write(path: Path) -> None
         ("ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY (a, b);", 0, 1),
         # Removing an index removes no row, so it is reviewable rather than refused outright.
         ("DROP INDEX IF EXISTS t_idx;", 0, 1),
+        # A type conversion, in both directions and in the spellings the tree does not use. The
+        # bucket is the same either way — narrowing is refused by review, not by the pattern, which
+        # cannot see which way the conversion goes.
+        ("ALTER TABLE t ALTER COLUMN c TYPE REAL;", 0, 1),
+        ("ALTER TABLE t ALTER COLUMN c TYPE DOUBLE PRECISION;", 0, 1),
+        ("ALTER TABLE ONLY public.t ALTER c TYPE NUMERIC(4,2);", 0, 1),
+        ("ALTER TABLE t ALTER COLUMN c TYPE TEXT USING c::text;", 0, 1),
         # The additive shapes 004/010/011/026/029/033/036/037 use, and 019's TOAST hint: neither.
         ("ALTER TABLE t ADD COLUMN IF NOT EXISTS c TEXT NOT NULL DEFAULT '';", 0, 0),
         ("ALTER TABLE t ALTER COLUMN data SET STORAGE EXTERNAL;", 0, 0),
@@ -334,8 +472,105 @@ def test_no_exemption_outlives_its_migration() -> None:
     never added (a typo) or has gone (a rename) is simply never consulted. That is the shape a
     granted exemption drifts into an unnoticed blanket one, so it is asserted here instead.
     """
-    orphaned = sorted(set(_REVIEWED_ROLLBACK_BREAKS) - {p.name for p in _migration_files()})
+    on_disk = {p.name for p in _migration_files()}
+    registered = (
+        set(_REVIEWED_ROLLBACK_BREAKS)
+        | set(_REVIEWED_REPLAY_BREAKS)
+        | set(_REVIEWED_SEMANTIC_BREAKS)
+    )
+    orphaned = sorted(registered - on_disk)
     assert not orphaned, f"reviewed exemption(s) naming no migration: {orphaned}"
+
+
+def test_a_judged_break_is_one_no_pattern_could_have_found() -> None:
+    """`_REVIEWED_SEMANTIC_BREAKS` holds only what review can find and a regex cannot.
+
+    The register's whole justification is that its members are invisible to
+    `_BREAKS_PREVIOUS_IMAGE`. A migration that *is* flagged there and also listed here would be
+    reviewed twice, under two procedures, with nothing saying which one an operator follows — and
+    the flagged half would keep passing on the other register's exemption. So the two are asserted
+    disjoint, and a member of this one is asserted to be genuinely unflagged: if a later widening of
+    the pattern reaches it, the row belongs in `_REVIEWED_ROLLBACK_BREAKS` instead.
+
+    Each row still owes what every exemption here owes: an ADR that exists and names the migration,
+    because the row's content is the rollback procedure and an operator has to be able to find it.
+    """
+    both = sorted(set(_REVIEWED_SEMANTIC_BREAKS) & set(_REVIEWED_ROLLBACK_BREAKS))
+    assert not both, f"migration(s) in two rollback-break registers at once: {both}"
+    for name, (adr, reason) in _REVIEWED_SEMANTIC_BREAKS.items():
+        path = _MIGRATIONS / name
+        assert not _BREAKS_PREVIOUS_IMAGE.findall(_sql(path)), (
+            f"{name} is now flagged by `_BREAKS_PREVIOUS_IMAGE`, so it is a reviewed *statement* "
+            "rather than a judgement — move it to `_REVIEWED_ROLLBACK_BREAKS` with the statements "
+            "named, where a later edit adding a second break still fails."
+        )
+        assert reason.strip(), f"{name} is listed as a judged break with no reading recorded"
+        assert (_DECISIONS / f"{adr}.md").is_file(), f"{name} is exempted by a missing ADR {adr}"
+        assert name in (_DECISIONS / f"{adr}.md").read_text(encoding="utf-8"), (
+            f"{adr} records {name} as a judged rollback break without naming it."
+        )
+
+
+@pytest.mark.parametrize(
+    ("sql", "flagged"),
+    [
+        # The shape 046 has: an add with no drop at all.
+        ("ALTER TABLE t ADD CONSTRAINT c CHECK (x);", ("t.c",)),
+        # The shape 058 has: a drop that omits `IF EXISTS`, which replays against a restore and
+        # fails against a database that does not carry the constraint.
+        (
+            "ALTER TABLE t DROP CONSTRAINT c;\nALTER TABLE t ADD CONSTRAINT c CHECK (x);",
+            ("t.c",),
+        ),
+        # The re-runnable form, including across the line break every migration here writes it on.
+        (
+            "ALTER TABLE t DROP CONSTRAINT IF EXISTS c;\nALTER TABLE t ADD CONSTRAINT c CHECK (x);",
+            (),
+        ),
+        (
+            "ALTER TABLE t DROP CONSTRAINT IF EXISTS c;\n"
+            "ALTER TABLE t\n  ADD CONSTRAINT c CHECK (x);",
+            (),
+        ),
+        # The spellings of a table name Postgres accepts, on both halves — a rule that reads only
+        # the bare identifier would call the `pg_dump` form a different table and flag a sound file.
+        (
+            'ALTER TABLE ONLY public."t" DROP CONSTRAINT IF EXISTS c;\n'
+            "ALTER TABLE t ADD CONSTRAINT c CHECK (x);",
+            (),
+        ),
+        (
+            "ALTER TABLE IF EXISTS t DROP CONSTRAINT IF EXISTS c;\n"
+            "ALTER TABLE public.t ADD CONSTRAINT c CHECK (x);",
+            (),
+        ),
+        # Order is the property, not co-occurrence: dropping afterwards makes the file worse.
+        (
+            "ALTER TABLE t ADD CONSTRAINT c CHECK (x);\nALTER TABLE t DROP CONSTRAINT IF EXISTS c;",
+            ("t.c",),
+        ),
+        # A different constraint's drop does not cover this one.
+        (
+            "ALTER TABLE t DROP CONSTRAINT IF EXISTS other;\n"
+            "ALTER TABLE t ADD CONSTRAINT c CHECK (x);",
+            ("t.c",),
+        ),
+        # A constraint declared inline in a `CREATE TABLE` is created with the table, so it is
+        # covered by `IF NOT EXISTS` and is not an `ADD`.
+        ("CREATE TABLE IF NOT EXISTS t (a TEXT, CONSTRAINT c CHECK (a <> ''));", ()),
+    ],
+)
+def test_the_replay_rule_reads_the_object_not_the_spelling(
+    sql: str, flagged: tuple[str, ...]
+) -> None:
+    """Asked of synthetic SQL, because the tree holds exactly two examples and both are exempt.
+
+    A rule validated only against the files it was written for is a rule that fits those files. The
+    cases that decide whether this one is honest are the ones the tree does not contain: a sound
+    drop-then-add, the same across a line break and a schema qualifier, and a drop that comes after
+    the add — which co-occurrence would pass and which replays no better than no drop at all.
+    """
+    assert _constraints_re_added_without_a_drop(sql) == flagged
 
 
 def test_every_migration_is_re_runnable() -> None:
@@ -363,6 +598,54 @@ def test_every_migration_is_re_runnable() -> None:
             if "IF NOT EXISTS" not in rest.upper():
                 offenders.append(f"{path.name}: CREATE {kind}{rest[:60]}")
     assert not offenders, "migrations must be re-runnable:\n" + "\n".join(offenders)
+
+
+@pytest.mark.parametrize("path", _migration_files(), ids=lambda p: p.name)
+def test_a_re_added_constraint_is_dropped_first(path: Path) -> None:
+    """The other half of re-runnability, and the half the `CREATE` scan above cannot see.
+
+    A constraint has no `IF NOT EXISTS`, so `ALTER TABLE … ADD CONSTRAINT` re-runs only behind a
+    `DROP CONSTRAINT IF EXISTS` of the same name. That is not a hypothetical: the recovery the
+    check above is written for — a restored database whose ledger is older than its tables — aborts
+    the whole run at the first such statement, and the run is one transaction, so nothing after it
+    applies either.
+
+    Both arms of that docstring's own sentence were measured on a scratch database carrying all 91
+    migrations. Ledger emptied (a logical restore): `DuplicateObject … session_messages_shape_known
+    … already exists` at 046, file 46 of 91. Built by hand without one constraint: `UndefinedObject
+    … note_proposals_state_known … does not exist` at 058, whose drop omits `IF EXISTS`. Every
+    other file replayed clean, so the two exemptions below are the whole set rather than the two
+    that were noticed.
+
+    Exempted exactly, like `_REVIEWED_ROLLBACK_BREAKS`: the constraints flagged must be *the*
+    reviewed ones, so a later edit adding a second un-dropped constraint to an exempted file still
+    fails. What an exemption carries here is a recipe rather than a rollback procedure — the one
+    statement an operator runs before the replay — because the migration is merged and immutable
+    and the recipe is therefore the only fix that exists.
+    """
+    found = _constraints_re_added_without_a_drop(_sql(path))
+    reviewed = _REVIEWED_REPLAY_BREAKS.get(path.name)
+    if reviewed is None:
+        assert not found, (
+            f"{path.name} adds constraint(s) {list(found)} it does not first drop `IF EXISTS`, so "
+            "replaying it against a database that already carries them aborts the migration run — "
+            "the recovery `test_every_migration_is_re_runnable` exists for. Write `ALTER TABLE t "
+            "DROP CONSTRAINT IF EXISTS c;` above the `ADD`, or — if the file is already merged and "
+            "so immutable — add it to `_REVIEWED_REPLAY_BREAKS` with the recipe an operator runs "
+            "instead, and put that recipe in the runbook."
+        )
+        return
+    adr, expected, recipe = reviewed
+    assert found == expected, (
+        f"{path.name}'s reviewed replay exemption no longer describes it: flagged {list(found)}, "
+        f"reviewed {list(expected)}. Re-review it and update {adr}."
+    )
+    assert recipe.strip().endswith(";"), f"{path.name}'s recipe is not a statement an operator runs"
+    assert (_DECISIONS / f"{adr}.md").is_file(), f"{path.name} is exempted by a missing ADR {adr}"
+    assert path.name in (_DECISIONS / f"{adr}.md").read_text(encoding="utf-8"), (
+        f"{adr} grants {path.name} an exemption without naming it, so the recipe it is supposed to "
+        "carry cannot be found from the migration."
+    )
 
 
 def _git(repo: Path, *args: str) -> str:

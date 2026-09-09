@@ -11,8 +11,18 @@ this activity identically on every retry and stopped labelling *the entire corpu
 That is not a hypothetical: it is what `ingest/documents/sync.py::reembed_stale` was changed to
 prevent after one un-embeddable chunk stalled every share. The isolation is the same here, and so
 is the rule that follows from it: a reaction that genuinely cannot be labelled is still **stamped**
-with the current version, so it leaves the stale set instead of being retried forever. What it
+for the current version, so it leaves the stale set instead of being retried forever. What it
 carries is a row with nothing derived, which the coverage report counts honestly as unlabelled.
+
+**That last sentence was false for as long as it stood here**
+(`D-2026-09-09-a-rebuild-nothing-counts-reports-as-finished`). The stamp was the plain current
+version, and
+`coverage` counts `labeller_version = version`, so a pass that derived nothing reported
+"COMPLETE: … counts over this facet are totals rather than lower bounds" over rows whose content
+came from a superseded labeller — `merge` keeps what was already there. It is true now because
+`store_labels` is told which it is: the stamp for a row nothing was derived for carries a marker
+(`science.labels.store.underived_stamp`), which `stale()` accepts as done and every currency
+reader rejects.
 """
 
 import logging
@@ -85,14 +95,16 @@ def _token(index: int, row: ReactionLabel) -> str:
 class LabelReport(BaseModel):
     """What one drain pass did, in the shape the workflow's loop condition reads."""
 
-    labelled: int = Field(default=0, ge=0, description="Rows stamped with the current version.")
+    labelled: int = Field(default=0, ge=0, description="Rows this pass stamped, derived or not.")
     unlabelled: int = Field(
         default=0,
         ge=0,
         description=(
-            "Rows stamped but carrying nothing derived — the server could not label them. Counted "
-            "separately because a pass that stamps 200 rows and derives nothing is a broken "
-            "labeller, and a pass that reports only `labelled` cannot say so."
+            "Rows stamped but carrying nothing derived — the server could not label them. They "
+            "are stamped with the marked form of the version, so they leave the stale set without "
+            "claiming to be labelled at it. Counted separately because a pass that stamps 200 "
+            "rows and derives nothing is a broken labeller, and a pass that reports only "
+            "`labelled` cannot say so."
         ),
     )
     has_more: bool = False
@@ -137,13 +149,18 @@ async def label_stale(
         policy = policies.get(row.source, _DERIVE_EVERYTHING)
         representation = representations.get(_key(row))
         naming = namings.get(_key(row))
-        await index.store_labels(merge(row, policy, representation, naming), version)
+        # "Derived" is *the server answered for at least one half*, read off the answers rather
+        # than inferred from the merged row — because a merged row always has roles: `_species`
+        # falls back to the coarse map of what the source recorded, deliberately, and a check on
+        # the stored value would therefore report every failure as a success. The same boolean
+        # decides the count below and the stamp the row is written with, so the number this pass
+        # reports and the currency the index will claim for that row cannot disagree.
+        derived = representation is not None or naming is not None
+        await index.store_labels(
+            merge(row, policy, representation, naming), version, derived=derived
+        )
         labelled += 1
-        # "Unlabelled" is *the server answered for neither half*, read off the answers rather than
-        # inferred from the merged row — because a merged row always has roles: `_species` falls
-        # back to the coarse map of what the source recorded, deliberately, and a check on the
-        # stored value would therefore report every failure as a success.
-        if representation is None and naming is None:
+        if not derived:
             unlabelled += 1
     if unlabelled:
         logger.warning(

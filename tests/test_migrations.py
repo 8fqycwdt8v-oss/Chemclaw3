@@ -17,6 +17,7 @@ breaks the path rather than on the first job that needs the schema.
 """
 
 import asyncio
+import logging
 import re
 from pathlib import Path
 
@@ -26,6 +27,7 @@ import pytest
 from chemclaw.core.config import settings
 from chemclaw.core.migrate import (
     _LEDGER_FILE,
+    _MIGRATION_LOCK_KEY,
     MigrationError,
     _checksum,
     _legacy_checksum,
@@ -33,6 +35,7 @@ from chemclaw.core.migrate import (
     _statements,
     migrate,
     migration_dsn,
+    newest_shipped_migration,
 )
 from tests.pg import migrated_db_or_skip
 
@@ -224,13 +227,22 @@ class _RecordingCursor:
     `migrate`'s `if row is not None:` went untested with it.
     """
 
-    def __init__(self, row: tuple[str] | None = None) -> None:
-        """Hold the one row this cursor will hand back (`None` = this file is not applied)."""
+    def __init__(self, row: tuple[str] | None = None, rows: tuple[tuple[str], ...] = ()) -> None:
+        """Hold the one row this cursor hands back (`None` = not applied), and the whole ledger.
+
+        `rows` answers the *unparameterised* `SELECT filename FROM schema_migrations` the
+        ahead-of-image check makes — a listing, not a lookup, so it needs the other fetch verb.
+        """
         self.row = row
+        self.rows = rows
 
     async def fetchone(self) -> tuple[str] | None:
         """The recorded ledger row for the file just queried."""
         return self.row
+
+    async def fetchall(self) -> list[tuple[str]]:
+        """Every filename the ledger holds — what `_warn_if_the_database_is_ahead` reads."""
+        return list(self.rows)
 
 
 class _RecordingConnection:
@@ -252,6 +264,8 @@ class _RecordingConnection:
     async def execute(self, sql: str, params: tuple[object, ...] | None = None) -> _RecordingCursor:
         """Log the statement; the ledger lookup is answered from `ledger`, the rest with `None`."""
         self.statements.append((sql, params))
+        if sql == "SELECT filename FROM schema_migrations":
+            return _RecordingCursor(rows=tuple((name,) for name in sorted(self.ledger)))
         if "FROM schema_migrations" in sql and params:
             recorded = self.ledger.get(str(params[0]))
             return _RecordingCursor(None if recorded is None else (recorded,))
@@ -471,5 +485,118 @@ def test_the_live_ledger_refuses_a_drifted_row_and_upgrades_a_legacy_one() -> No
             )
             await conn.commit()
             await conn.close()
+
+    asyncio.run(_run())
+
+
+# --- the database is ahead of the image (a rollback), and a peer holds the lock ----------------
+
+
+def test_the_newest_shipped_migration_is_what_a_full_run_applies_last(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`newest_shipped_migration` and `migrate`'s apply order must agree on "newest".
+
+    Both are a plain sort of the whole filename, and the readiness probe in
+    `api/routes/ops.py` compares one against a `schema_migrations` row the other wrote — so if
+    these two ever disagree (a Postgres collation in the comparison, a numeric sort here) the
+    probe asks about a file no full run ends on and every pod goes unready.
+    """
+    monkeypatch.chdir(_REPO_ROOT)
+    tracked = sorted(name for name in _read_sql_files() if name != _LEDGER_FILE)
+    assert newest_shipped_migration() == tracked[-1]
+
+
+def test_the_bootstrap_file_is_never_the_newest_shipped_migration(tmp_path: Path) -> None:
+    """An image shipping only the ledger's own DDL ships no *tracked* migration.
+
+    `000_schema_migrations.sql` is the one file that is never recorded in the ledger it creates,
+    so returning it would hand the readiness probe a filename no database can ever have applied —
+    a check that can only ever fail, on every pod, forever.
+    """
+    (tmp_path / _LEDGER_FILE).write_text("CREATE TABLE schema_migrations ();")
+    original = settings.sql_migrations_dir
+    settings.sql_migrations_dir = str(tmp_path)
+    try:
+        assert newest_shipped_migration() is None
+    finally:
+        settings.sql_migrations_dir = original
+
+
+def test_a_ledger_row_this_image_ships_no_file_for_is_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A database ahead of the image is a WARNING — and still a run that starts.
+
+    The apply loop iterates the *image's* files, so a ledger row with no corresponding file was
+    never looked at: measured, an image shipping through `080` against a database at `091` applied
+    nothing, returned `[]`, and printed "(none — already up to date)" over eleven migrations it had
+    never heard of. That is exactly the state an operator is in after a rollback, and exactly when
+    they run the documented recovery command to find out whether the schema matches the image.
+
+    Both halves are asserted here on purpose. The warning is the fix; the *absence* of a refusal is
+    the constraint on it — a rollback has to be able to start, and this schema only ever goes
+    forward, so there is nothing here for the migrator to undo.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        dsn = migration_dsn()
+        planted = "999_a_migration_from_a_newer_image.sql"
+        conn = await psycopg.AsyncConnection.connect(dsn)
+        try:
+            await conn.execute(
+                "INSERT INTO schema_migrations (filename, checksum) VALUES (%s, %s)",
+                (planted, "0" * 64),
+            )
+            await conn.commit()
+            with caplog.at_level(logging.WARNING, logger="chemclaw.core.migrate"):
+                assert await migrate(dsn) == [], "a ledger row ahead of the image refused the run"
+        finally:
+            await conn.execute("DELETE FROM schema_migrations WHERE filename = %s", (planted,))
+            await conn.commit()
+            await conn.close()
+
+        ahead = [
+            record
+            for record in caplog.records
+            if getattr(record, "event", "") == "migrate.database_ahead"
+        ]
+        assert ahead, "nothing at WARNING said the database is ahead of this image"
+        assert ahead[0].levelno == logging.WARNING
+        assert getattr(ahead[0], "unknown", None) == 1
+        assert getattr(ahead[0], "newest_unknown", None) == planted
+
+    asyncio.run(_run())
+
+
+def test_a_peer_holding_the_lock_is_named_rather_than_raised_as_a_traceback() -> None:
+    """The *normal* concurrency case must not read as a crash.
+
+    Two overlapping deploys, or `make db-migrate` run during one, is the event this lock exists
+    for. Before this, waiting out the budget surfaced as
+    `psycopg.errors.LockNotAvailable: canceling statement due to lock timeout` pointing at the
+    `pg_advisory_xact_lock` line — the hook Job's `backoffLimit: 3` self-heals it, so the traceback
+    only ever bought an operator reading a crash where the system was working as designed.
+
+    The budget is named in the message because it is the one thing an operator can change.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        dsn = migration_dsn()
+        peer = await psycopg.AsyncConnection.connect(dsn)
+        try:
+            await peer.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK_KEY,))
+            original = settings.pg_migration_lock_wait_seconds
+            settings.pg_migration_lock_wait_seconds = 1.0
+            try:
+                with pytest.raises(MigrationError, match="another migrator held"):
+                    await migrate(dsn)
+            finally:
+                settings.pg_migration_lock_wait_seconds = original
+        finally:
+            await peer.rollback()
+            await peer.close()
 
     asyncio.run(_run())

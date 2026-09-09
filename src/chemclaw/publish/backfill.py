@@ -14,10 +14,38 @@ store.
 **Rows this release has no projector for are skipped, not failed.** `calculation_results` is never
 pruned, so a deployment legitimately holds results from calculators that no longer ship, and a walk
 that aborted on the first one would never reach the rest.
+
+**Every row visited lands in exactly one bucket, and that is the property this module owes its
+caller.** `seen == queued + skipped + failed` is what makes "the backfill is done" a statement
+about the whole corpus rather than about the part of it the walk happened to understand. It did not
+hold: `outbox.enqueue_payload` returns 0 both for a row it queued nothing for *and* for a row whose
+projector raised, and this module added that 0 to `queued` and touched nothing else — so a row
+written by an older calculator was seen, not queued, not skipped, and named in no line of the
+report. Measured on a four-row corpus holding one such row, the dry run reported
+`(seen=4, queued=3, skipped=1)` and the real pass `(seen=4, queued=2, skipped=1)`; subtracting
+`skipped` from `seen` could not recover the loss either, because `queued` counted outbox *rows*
+while `seen` counted table rows, so a walk over a shape that decomposes reported more queued than
+seen. `WalkCounts` is that partition, and `records` is the record count kept apart from it.
+
+**A dry run projects.** It used to count a row as queueable the moment `projector_for` returned
+something, which is a *route* rather than an attempt — so the number an operator previewed was the
+number the real pass would produce only when no row in the corpus was unreadable, which is exactly
+the case the preview exists to find. It now runs the same `project_payload` the real pass runs and
+stops one step short of the write. **The measurement that says it can afford to**: reading a page
+and skipping the projection costs 54.4 us/row, projecting costs a further ~274 us, and the pass
+being previewed costs 19,241 us/row — so a projecting dry run is ~6x the old preview and 1.7% of
+the run it describes (1M rows: ~5.5 min against ~5.3 h). The two passes therefore agree on all four
+row counts exactly, in both directions.
+
+**`records` is what the walk *projected*, not what the outbox wrote**, and that is deliberate: the
+outbox is an upsert over `(sink, calc_ref, schema_version)`, so a second pass writes nothing while
+covering everything, and it writes one row *per enabled sink*, so a two-sink deployment would make
+a dry run and a real pass disagree by a factor nobody asked about. `chemclaw_results_queued_total`
+is where rows written are metered.
 """
 
-import logging
 from datetime import UTC, datetime
+from typing import NamedTuple
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -25,7 +53,34 @@ from chemclaw.publish import outbox
 from chemclaw.publish.project import projector_for
 from chemclaw.publish.record import Publication
 
-logger = logging.getLogger(__name__)
+
+class WalkCounts(NamedTuple):
+    """What one walk did. `seen == queued + skipped + failed`, always.
+
+    Four row counts that partition the corpus and one record count that does not, kept apart
+    because they are in different units and a report that mixed them could say "4 row(s) seen, 5
+    queued".
+
+    - `seen` — rows the walk visited.
+    - `queued` — rows whose records reached the outbox. "Reached", not "were written": the enqueue
+      is an upsert, so a re-run re-covers a row rather than re-writing it, and a row already queued
+      is covered rather than lost.
+    - `skipped` — rows this release has no projector for at all. A deployment legitimately holds
+      results from calculators that no longer ship.
+    - `failed` — rows this release *has* a projector for, which could not read them. A different
+      question with a different answer: a skip is a corpus this release never claimed to cover,
+      while a failure is a shape it claims to cover and cannot, and it will fail identically on
+      every pass until code changes.
+    - `records` — the scientific records those `queued` rows project into. Not a row count: one
+      solvent screen decomposes into an aggregate and its parts.
+    """
+
+    seen: int = 0
+    queued: int = 0
+    skipped: int = 0
+    failed: int = 0
+    records: int = 0
+
 
 # The keyset cursor before the first row: earlier than any stored timestamp, and the empty string
 # sorts before every key and job id. A sentinel rather than a second "first page" statement,
@@ -87,18 +142,18 @@ _REQUEUE = f"""
 _COUNT_RETIRED = f"SELECT count(*) FROM result_publications {_RETIRED}"
 
 
-async def backfill_cached(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
-    """Walk the calculation cache. Returns `(seen, queued, skipped)`."""
-    seen = queued = skipped = 0
+async def backfill_cached(*, dry_run: bool, batch: int) -> WalkCounts:
+    """Walk the calculation cache. See `WalkCounts` for what the five numbers are."""
+    seen = queued = skipped = failed = records = 0
     cursor_key: tuple[datetime, str] = _WALK_START
     while True:
         async with db.connection(settings.postgres_dsn) as conn:
             cursor = await conn.execute(_CACHED, (*cursor_key, batch))
             rows = list(await cursor.fetchall())
         if not rows:
-            return seen, queued, skipped
+            return WalkCounts(seen, queued, skipped, failed, records)
         # Advance before the page is worked: the cursor is the *last row read*, so an exception
-        # mid-page re-reads that page on the next run rather than skipping it, and `enqueue_payload`
+        # mid-page re-reads that page on the next run rather than skipping it, and the enqueue
         # is an upsert on the calc ref, so re-reading costs nothing.
         cursor_key = (rows[-1][8], rows[-1][0])
         for row in rows:
@@ -114,10 +169,7 @@ async def backfill_cached(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
             if projector_for(calc_type) is None:
                 skipped += 1
                 continue
-            if dry_run:
-                queued += 1
-                continue
-            queued += await outbox.enqueue_payload(
+            projected = outbox.project_payload(
                 calc_ref=key,
                 calc_type=calc_type,
                 payload=payload,
@@ -128,18 +180,27 @@ async def backfill_cached(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
                 compute_seconds=compute_seconds,
                 computed_at=created_at,
             )
+            if projected is None:
+                # No second log line: `project_payload` has already logged the row, its calc_type
+                # and the traceback at exception level. What this walk adds is the *count*.
+                failed += 1
+                continue
+            queued += 1
+            records += len(projected)
+            if not dry_run:
+                await outbox.enqueue(projected)
 
 
-async def backfill_jobs(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
-    """Walk the durable job record. Returns `(seen, queued, skipped)`."""
-    seen = queued = skipped = 0
+async def backfill_jobs(*, dry_run: bool, batch: int) -> WalkCounts:
+    """Walk the durable job record. See `WalkCounts` for what the five numbers are."""
+    seen = queued = skipped = failed = records = 0
     cursor_key: tuple[datetime, str] = _WALK_START
     while True:
         async with db.connection(settings.postgres_dsn) as conn:
             cursor = await conn.execute(_JOBS, (*cursor_key, batch))
             rows = list(await cursor.fetchall())
         if not rows:
-            return seen, queued, skipped
+            return WalkCounts(seen, queued, skipped, failed, records)
         # See `backfill_cached` for why the cursor advances before the page is worked.
         cursor_key = (rows[-1][9], rows[-1][0])
         for row in rows:
@@ -156,10 +217,7 @@ async def backfill_jobs(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
             if projector_for(calc_type, payload_kind) is None:
                 skipped += 1
                 continue
-            if dry_run:
-                queued += 1
-                continue
-            queued += await outbox.enqueue_payload(
+            projected = outbox.project_payload(
                 calc_ref=job_id,
                 calc_type=calc_type,
                 payload_kind=payload_kind,
@@ -174,6 +232,14 @@ async def backfill_jobs(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
                     rationale=rationale,
                 ),
             )
+            if projected is None:
+                # See `backfill_cached`: the row is already logged where it was projected.
+                failed += 1
+                continue
+            queued += 1
+            records += len(projected)
+            if not dry_run:
+                await outbox.enqueue(projected)
 
 
 async def requeue_failed(*, dry_run: bool = False) -> int:

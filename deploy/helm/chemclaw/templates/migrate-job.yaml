@@ -3,13 +3,34 @@
 
        **Two Jobs, and the split is the point**
        (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step). This one
-       stays `pre-upgrade` because everything it does is safe for the release that is still running:
+       stays `pre-upgrade` because the *migrations* are safe for the release that is still running:
        the schema is forward-only and additive (D-2026-08-04-the-schema-only-goes-forward), so a
-       migration adds what the new image needs and takes nothing the old image is using, and the
-       grants only widen. The *data* conversion below is the opposite — it rewrites rows the
-       previous release is still serving, into a shape its reader raises on — so it runs
-       `post-upgrade`, in its own document, after the new pods are up. They are one file rather than
-       two because their order is the thing worth reading in one place. */ -}}
+       migration adds what the new image needs and takes nothing the old image is using. The *data*
+       conversion below is the opposite — it rewrites rows the previous release is still serving,
+       into a shape its reader raises on — so it runs `post-upgrade`, in its own document, after the
+       new pods are up. They are one file rather than two because their order is the thing worth
+       reading in one place.
+
+       **The grants are not additive, and this comment used to say they were**
+       (D-2026-09-09-a-grant-set-that-contracts-is-not-a-pre-upgrade-step). `app_privileges.sql` is
+       a full restatement — it revokes and then states the whole matrix — so a verb removed from the
+       file is a verb *revoked* from the role, by this hook, while the old pods are still the only
+       thing serving. Measured on `7654cfb0`, which dropped `note_proposals` from the writer list:
+       `note_proposals INSERT | t` under release N, `| f` after release N+1's hook, and
+       `permission denied for table note_proposals` as the role. The window is the rollout, and
+       closing it needs a second hook document this file does not yet have; the ADR states that and
+       what it is waiting on.
+
+       **What `pre-rollback` closes is the window that is not a rollout.** `helm rollback` restores
+       the previous release's manifest and image and runs neither `pre-upgrade` nor `post-upgrade`,
+       so without it the older image comes back against the newer, possibly narrower ACL and stays
+       there until the next successful deploy. With it, the target revision's own Job — its image,
+       its `infra/sql`, its grant file — re-applies the matrix that image was written against.
+       `pre-` rather than `post-`, so the restored pods find their ACL already in place; the release
+       that loses verbs in the meantime is the one being abandoned. Its `migrate` half is a no-op
+       there by construction: `chemclaw.core.migrate` iterates the files *in the image* and skips
+       every one the ledger already records, and a newer release's extra ledger rows name no file it
+       has. */ -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -17,7 +38,7 @@ metadata:
   labels:
     {{- include "chemclaw.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:

@@ -41,6 +41,14 @@ mattered here: it made concurrent migration sound routine, when the real concurr
 overlapping or an operator running `make db-migrate` during one. The chart runs this as a
 `pre-install,pre-upgrade` hook Job that completes before any app container starts (D-034).
 
+**It reports what it applied; it does not certify that the database matches this image.** The apply
+loop iterates the *image's* files, so before this ran a ledger row with no corresponding file was
+never looked at and an image behind its database reported "already up to date" — see
+`_warn_if_the_database_is_ahead`, which is a WARNING rather than a refusal because a rollback must
+still be able to start. The forward mismatch (an image *ahead* of its schema, which cannot serve a
+turn at all) is answered where a rollout can act on it, by `api/routes/ops.py`'s readiness probe
+over `newest_shipped_migration`.
+
 **It runs as the migrator, not as the application.** `postgres_migration_dsn` is the credential
 that owns the schema; `postgres_dsn` is the runtime one, which under a split deployment cannot
 issue DDL at all (D-2026-08-05-append-only-by-grant-not-by-contract). Unset, it falls back to
@@ -57,6 +65,9 @@ import hashlib
 import logging
 import time
 from pathlib import Path
+
+import psycopg
+from psycopg.rows import TupleRow
 
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
@@ -88,6 +99,29 @@ def _read_sql_files() -> dict[str, str]:
     """
     sql_dir = Path(settings.sql_migrations_dir)
     return {path.name: path.read_text() for path in sorted(sql_dir.glob("*.sql"))}
+
+
+def newest_shipped_migration() -> str | None:
+    """The newest migration filename **this image** ships, or None if it ships none but the ledger.
+
+    Sorted by the whole filename, which is the order `migrate` applies in and the key
+    `schema_migrations` records — so "newest shipped" and "last applied by a full run" are the same
+    string, and neither depends on a Postgres collation.
+
+    Names only: `Path.glob` is one directory read and no file is opened, because the one caller
+    outside this module (`api/routes/ops.py`'s readiness probe) wants a filename to compare against
+    the ledger and has no use for a megabyte of SQL.
+
+    `_LEDGER_FILE` is excluded because it is the one file that is never recorded in the ledger it
+    creates. Including it would make an image shipping *only* the bootstrap file report a newest
+    migration that no database can ever have applied — a readiness check that can only fail.
+    """
+    names = sorted(
+        path.name
+        for path in Path(settings.sql_migrations_dir).glob("*.sql")
+        if path.name != _LEDGER_FILE
+    )
+    return names[-1] if names else None
 
 
 def _statements(text: str) -> str:
@@ -150,6 +184,51 @@ def migration_dsn() -> str:
     return settings.postgres_migration_dsn or settings.postgres_dsn
 
 
+async def _warn_if_the_database_is_ahead(
+    conn: psycopg.AsyncConnection[TupleRow], sources: dict[str, str]
+) -> list[str]:
+    """Log the ledger rows this image ships no file for; return their names.
+
+    **The apply loop iterates the *image's* files, so a ledger row with no corresponding file is
+    never looked at.** Measured: an image shipping through `080` against a database at `091`
+    applied nothing, returned `[]`, and printed "(none — already up to date)" over eleven
+    migrations it has never heard of. That is precisely the state an operator is in immediately
+    after a rollback, and it is precisely when they run the documented recovery command to find out
+    whether the schema matches the image.
+
+    **A warning, not a refusal, and that direction is the decision.** A rollback has to be able to
+    start — the release that is rolling back is the one that cannot serve — and this schema only
+    ever goes forward, by a merged decision, so there is nothing here for the migrator to undo. The
+    whole defect is that the mismatch was *silent*; one WARNING line naming the count and the
+    newest unknown filename is what turns it into something an operator can act on.
+
+    Set difference rather than "newer than the newest file I ship", so a *deleted* migration file
+    is caught by the same line. Both are the same claim — the ledger records work this image has no
+    record of — and `infra/sql` is append-only, so on any tree where a file was not removed the two
+    formulations agree.
+
+    Computed in Python against `sorted(sources)`'s own comparator rather than by a `WHERE filename
+    > …` predicate, because Postgres would compare under the database's collation and this module's
+    apply order is a Python string sort. A ledger of ~90 short filenames is one small round trip.
+    """
+    cursor = await conn.execute("SELECT filename FROM schema_migrations")
+    unknown = sorted({str(row[0]) for row in await cursor.fetchall()} - set(sources))
+    if unknown:
+        log_event(
+            logger,
+            "migrate.database_ahead",
+            "this database records %d migration(s) this image does not ship (newest: %s) — "
+            "the schema is ahead of this image, which is expected after a rollback and means "
+            "'already up to date' would be a false reading",
+            len(unknown),
+            unknown[-1],
+            level=logging.WARNING,
+            unknown=len(unknown),
+            newest_unknown=unknown[-1],
+        )
+    return unknown
+
+
 async def migrate(dsn: str | None = None) -> list[str]:
     """Apply every not-yet-applied `infra/sql/*.sql` file in order; return the names applied.
 
@@ -201,7 +280,26 @@ async def migrate(dsn: str | None = None) -> list[str]:
             lock_wait_budget_s=settings.pg_migration_lock_wait_seconds,
             files=len(sources),
         )
-        await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK_KEY,))
+        try:
+            await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK_KEY,))
+        except psycopg.errors.LockNotAvailable as exc:
+            # The *normal* concurrency case — two overlapping deploys, or `make db-migrate` run
+            # during one — surfaced as a raw `psycopg.errors.LockNotAvailable: canceling statement
+            # due to lock timeout` traceback naming this line. The hook Job's `backoffLimit: 3`
+            # means it self-heals, so the only thing the traceback ever bought was an operator
+            # reading a crash where the system was working as designed.
+            #
+            # Narrow, and only around this statement: the same `lock_timeout` bounds every DDL
+            # statement below, where `LockNotAvailable` means a *table* lock queued behind live
+            # traffic — a different event with a different budget, and one that must keep its own
+            # error rather than be reported as a peer migrator.
+            raise MigrationError(
+                f"another migrator held the migration lock for the whole "
+                f"{settings.pg_migration_lock_wait_seconds:.0f}s budget "
+                "(CHEMCLAW_PG_MIGRATION_LOCK_WAIT_SECONDS) — an overlapping deploy or a concurrent "
+                "`make db-migrate`. Nothing was applied and nothing is half-applied; re-run once "
+                "the other migrator finishes."
+            ) from exc
         log_event(
             logger,
             "migrate.locked",
@@ -214,6 +312,7 @@ async def migrate(dsn: str | None = None) -> list[str]:
         await conn.execute(_SET_LOCAL_TIMEOUT, (_ms(settings.pg_migration_lock_timeout_seconds),))
         # Bootstrap the ledger before anything can be tracked against it.
         await conn.execute(sources[_LEDGER_FILE])
+        await _warn_if_the_database_is_ahead(conn, sources)
         for name in sorted(sources):
             if name == _LEDGER_FILE:
                 continue
@@ -278,4 +377,7 @@ if __name__ == "__main__":
     # logged — without this the module's own records go nowhere and the run is as silent as it was.
     configure_logging()
     names = asyncio.run(migrate())
-    print(f"applied migrations: {', '.join(names) or '(none — already up to date)'}")
+    # Not "(none — already up to date)": this line is the documented recovery command's whole
+    # output, and it asserted a match the run had never checked. What it can honestly say is
+    # what it did; `migrate.database_ahead` above says when that is not the same thing.
+    print(f"applied migrations: {', '.join(names) or '(none)'}")

@@ -24,6 +24,7 @@ from chemclaw.connectors.health import ConnectorHealth
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import CONTENT_TYPE, METRICS
+from chemclaw.core.migrate import newest_shipped_migration
 from chemclaw.durable.schedules import ScheduleHealth, describe_schedules
 
 log = logging.getLogger(__name__)
@@ -127,8 +128,15 @@ def _drain(task: "asyncio.Task[Any]") -> None:
         task.exception()
 
 
-async def _database_reachable(request: Request) -> bool:
-    """Whether Postgres answers, re-probed at most once per `service_readiness_cache_seconds`.
+async def _database_ready(request: Request) -> bool:
+    """Whether Postgres answers **and** its schema carries this image, re-probed once per window.
+
+    Two verdicts from one round trip, cached together because they are taken together
+    (`_probe_database`). The route reads them apart again to say which one failed; nothing here
+    collapses them, because "the database is down" and "this pod is ahead of the schema" have
+    different operators and different fixes.
+
+    Re-probed at most once per `service_readiness_cache_seconds`.
 
     Cached on the same window and for the same reason as the connector sweep: this route is
     unauthenticated by necessity and runs every ten seconds per pod, so an uncached probe is a
@@ -146,7 +154,7 @@ async def _database_reachable(request: Request) -> bool:
     front = state(request)
     window = settings.service_readiness_cache_seconds
     if window and time.monotonic() - front.database_probed_at < window:
-        return front.database_reachable
+        return front.database_reachable and front.schema_current
     return await _shared_probe(front, "database", lambda: _probe_database(front))
 
 
@@ -217,7 +225,7 @@ async def _probe_database(front: FrontDoorState) -> bool:
     """
     try:
 
-        async def _ask() -> None:
+        async def _ask() -> bool:
             async with db.connection(
                 settings.session_store_dsn or settings.postgres_dsn,
                 statement_timeout_seconds=settings.service_readiness_db_timeout_seconds,
@@ -225,15 +233,90 @@ async def _probe_database(front: FrontDoorState) -> bool:
                 pool_max_size=1,
             ) as conn:
                 await conn.execute("SELECT 1")
+                return await _schema_carries_this_image(conn)
 
-        await asyncio.wait_for(_ask(), timeout=settings.service_readiness_db_timeout_seconds)
+        current = await asyncio.wait_for(
+            _ask(), timeout=settings.service_readiness_db_timeout_seconds
+        )
         reachable = True
     except (psycopg.Error, ConnectionError, TimeoutError):
         log.warning("readiness: Postgres did not answer", exc_info=True)
         reachable = False
+        # Not a schema verdict: a database that did not answer was not asked. Leaving this False
+        # would report "schema behind image" for an outage, which is the misdiagnosis the second
+        # verdict exists to prevent.
+        current = True
     front.database_reachable = reachable
+    front.schema_current = current
     front.database_probed_at = time.monotonic()
-    return reachable
+    return reachable and current
+
+
+async def _schema_carries_this_image(conn: psycopg.AsyncConnection[Any]) -> bool:
+    """Whether `schema_migrations` records the newest migration **this image** ships.
+
+    **The comparison is one-directional, and that is the whole design.** It asks only whether the
+    newest file this image ships has been applied; ledger rows *beyond* it are not looked at. So a
+    pod whose image is ahead of the schema — new code against an old database, which throws
+    `UndefinedColumn` on the first turn — is unready, while a **rollback**, whose image is behind a
+    schema that only ever goes forward, stays ready and can serve. Those are two different
+    comparisons, and conflating them into "the ledger equals the file set" would make a rollback
+    impossible: every rolled-back pod would refuse traffic, which is a worse failure than the one
+    this closes. The backwards half is answered where it can be acted on rather than by refusing to
+    serve — `core/migrate.py`'s `migrate.database_ahead` WARNING.
+
+    Why readiness at all: the Helm `pre-upgrade` hook Job normally applies the migration before any
+    new pod starts, so this is unreachable on the happy path. `--no-hooks`, a `kubectl set image`,
+    and an ArgoCD sync that proceeds past a failed hook all reach it, and until this existed the
+    probe was `SELECT 1` only — so such a pod passed readiness, joined the Route, and failed in
+    traffic instead of at rollout. Measured against a schema at `080` with today's code:
+    `/readyz` answered `200 {"status": "ready"}` while `outbox`, `calculation_results.epoch` and
+    `turn_costs.turn_id` were all missing.
+
+    **It gates on positive evidence only.** A ledger that cannot be read at all — no
+    `schema_migrations` table, or a role that cannot select it — returns True, because the
+    alternative turns a diagnostic into a fleet-wide outage in a deployment this repository cannot
+    see. The probe reads `session_store_dsn or postgres_dsn`, which under a split session store is
+    a *different* server from the one `migrate()` runs against; any database that can serve as the
+    session store was migrated by this same runner and so carries the ledger, but "was" is a claim
+    about someone else's operations, and readiness is the wrong place to be right about it by
+    refusing.
+
+    Readiness, not startup: a pod that came up against an old schema becomes ready again the moment
+    an operator applies the migration, with no restart — and a schema mismatch drains the pod from
+    the Route rather than crash-looping it, the same trade
+    `test_a_database_outage_drains_the_pod_without_restarting_it` pins for an outage.
+
+    On the same connection and inside the same cached, single-flighted probe as `SELECT 1`, so it
+    costs one extra round trip per `service_readiness_cache_seconds` per pod and nothing per
+    request. Reading the newest shipped filename is one directory listing with no file opened
+    (`newest_shipped_migration`), which is why it is not worth a cache of its own.
+    """
+    newest = newest_shipped_migration()
+    if newest is None:
+        return True
+    try:
+        cursor = await conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE filename = %s)", (newest,)
+        )
+        row = await cursor.fetchone()
+    except (psycopg.errors.UndefinedTable, psycopg.errors.InsufficientPrivilege):
+        log.warning(
+            "readiness: cannot read schema_migrations, so the schema is not being checked "
+            "against this image (newest shipped: %s)",
+            newest,
+            exc_info=True,
+        )
+        return True
+    if row is not None and bool(row[0]):
+        return True
+    log.warning(
+        "readiness: this image ships migration %s and the database has not applied it — "
+        "this pod's code is ahead of the schema and would fail in traffic. Run the migration "
+        "(the chart's pre-upgrade hook Job, or `make db-migrate`).",
+        newest,
+    )
+    return False
 
 
 async def readyz(request: Request, response: Response) -> dict[str, str | int]:
@@ -258,6 +341,15 @@ async def readyz(request: Request, response: Response) -> dict[str, str | int]:
     thing that costs a capability and not the thing that costs the service
     (D-2026-08-05-readiness-answers-for-the-store-it-cannot-serve-without).
 
+    **The database verdict is two questions, and the second one is directional.** Reaching Postgres
+    was the whole probe until 2026-09-09, so a pod whose image was *ahead* of the schema passed
+    readiness on a `SELECT 1`, joined the Route, and threw `UndefinedColumn` on its first turn.
+    `_schema_carries_this_image` adds the second question — is the newest migration this image
+    ships applied? — and asks it in that direction only, so a **rollback** (image behind a schema
+    that only moves forward) stays ready and can serve. Making it symmetric would refuse traffic on
+    every rolled-back pod, which is a worse defect than the one being fixed; the backwards case is
+    reported by `core/migrate.py` instead, where an operator can act on it.
+
     Not gated under `session_store="memory"`, where there is no store to answer for.
 
     503 rather than an exception, so the body still names what failed — a kubelet only reads the
@@ -271,12 +363,23 @@ async def readyz(request: Request, response: Response) -> dict[str, str | int]:
     """
     health = await _connector_health(request)
     ready = True
+    status = "ready"
     if settings.session_store == "postgres":
-        ready = await _database_reachable(request)
+        ready = await _database_ready(request)
+        if not ready:
+            # Which of the two verdicts failed, read back from the same cached probe. A kubelet
+            # reads only the status code; this line is the whole diagnosis for the operator
+            # running `curl`, and "database unreachable" over a schema mismatch would send them
+            # to the wrong system.
+            status = (
+                "database unreachable"
+                if not state(request).database_reachable
+                else "schema behind image"
+            )
     if not ready:
         response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
     return {
-        "status": "ready" if ready else "database unreachable",
+        "status": status,
         # `unhealthy` rather than `state == "unreachable"`: a jobs-only bundle whose queue nobody
         # polls is down in the way that matters, and this body and `/metrics` must not hold two
         # definitions of it (D-2026-08-27-a-queue-with-no-poller-is-unreachable).

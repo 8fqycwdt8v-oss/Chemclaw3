@@ -656,6 +656,12 @@ def test_agent_supplied_threshold_is_clamped() -> None:
         async def count(self) -> int:
             raise NotImplementedError
 
+        async def has_superseded_records(self) -> bool:
+            raise NotImplementedError
+
+        async def superseded_count(self) -> int:
+            raise NotImplementedError
+
     async def _run() -> None:
         recording = _RecordingStore()
         await find_matches(recording, "01", threshold=-5.0)
@@ -1033,3 +1039,193 @@ def test_the_startup_report_never_takes_the_connector_down() -> None:
             raise ConnectionError("Postgres unreachable at postgres://host/db")
 
     asyncio.run(log_index_size(_BrokenStore(), "molecule"))  # must not raise
+
+
+# --- a partly re-indexed corpus ----------------------------------------------------------
+# D-2026-09-09-a-rebuild-nothing-counts-reports-as-finished------
+
+
+def _superseded(record: FingerprintRecord) -> FingerprintRecord:
+    """The same record as the previous fingerprint definition stored it."""
+    return record.model_copy(
+        update={"definition": record.definition.replace("std7", "std6") + "-old"}
+    )
+
+
+def test_one_rebuilt_row_does_not_make_a_stale_corpus_answerable() -> None:
+    """The state a definition bump walks every deployment through, and what it used to answer.
+
+    `D-2026-09-09-a-map-number-is-not-a-molecule` moved `STANDARDIZATION_VERSION`, which retires
+    every fingerprint row at once. The instant of the bump is honest — nothing is searchable, so
+    `index_empty` is True and the verdict says the question was not answered. The *next* moment is
+    not: one row re-indexed by a resumed ELN sync flips `index_empty` to False, and measured
+    against 50 superseded rows the search answered
+
+        hits 1  index_empty False  verdict "1 indexed molecule(s) matched this query."
+
+    which is a confident, complete-looking answer to "have we made this before?" drawn from 2% of
+    the corpus. Nothing counted rows under a superseded definition — `count`, `is_empty` and
+    `log_index_size` all filter to the current one — so no reader anywhere could see the other 98%.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore(molecule_definition())
+        for i, smiles in enumerate(["CCO", "CCCO", "CCCCO", "c1ccccc1", "CC(=O)O"]):
+            await store.add(_superseded(record_for(f"old-{i}", smiles)))
+        await store.add(record_for("rebuilt", "CCO"))
+
+        result = await find_similar_molecules(store, "CCO")
+        assert [hit.smiles for hit in result.hits] == ["CCO"]
+        assert result.index_empty is False, "one rebuilt row is not an empty index"
+        assert result.index_partial is True
+        assert result.verdict != "1 indexed molecule(s) matched this query."
+        assert "SUPERSEDED" in result.model_dump()["verdict"]
+
+    asyncio.run(_run())
+
+
+def test_the_instant_of_a_definition_bump_is_still_reported_as_a_search_not_run() -> None:
+    """The state *before* the one above, which was already honest and had to stay so.
+
+    Every row superseded and none rebuilt is an index with nothing searchable, and "SEARCH NOT
+    RUN" is the right sentence for it — a partial-index notice must not displace it, because the
+    reader's action differs: nothing here can be answered at all.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore(molecule_definition())
+        for i, smiles in enumerate(["CCO", "CCCO", "CCCCO"]):
+            await store.add(_superseded(record_for(f"only-old-{i}", smiles)))
+
+        result = await find_similar_molecules(store, "CCO")
+        assert result.hits == []
+        assert result.index_empty is True and result.index_partial is True
+        assert "SEARCH NOT RUN" in result.verdict
+
+    asyncio.run(_run())
+
+
+def test_a_fully_rebuilt_index_is_not_flagged_partial() -> None:
+    """The counterfactual: without it every assertion above passes on a build that always flags."""
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore(molecule_definition())
+        for i, smiles in enumerate(["CCO", "CCCO", "c1ccccc1"]):
+            await store.add(record_for(f"current-{i}", smiles))
+
+        result = await find_similar_molecules(store, "CCO", threshold=0.9)
+        assert result.index_partial is False
+        assert result.verdict == "1 indexed molecule(s) matched this query."
+        assert await store.superseded_count() == 0
+
+    asyncio.run(_run())
+
+
+def test_no_hits_over_a_partly_rebuilt_index_is_not_a_genuine_negative() -> None:
+    """The half that asserts absence, which is the sentence a chemist acts on.
+
+    A populated index with no match says "every stored record was compared — so this is a genuine
+    negative result". Over a corpus 90% of which is waiting to be re-indexed that claim is simply
+    false, and it is the exact failure `FingerprintSearch` exists to prevent, reached through a
+    definition change rather than through an unpopulated table.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore(molecule_definition())
+        await store.add(_superseded(record_for("old-azide", "CCCCN=[N+]=[N-]")))
+        await store.add(record_for("rebuilt-benzene", "c1ccccc1"))
+
+        result = await find_similar_molecules(store, "CCCCN=[N+]=[N-]", threshold=0.5)
+        assert result.hits == [] and result.index_empty is False
+        assert "genuine negative" not in result.verdict
+        assert "SEARCH INCOMPLETE" in result.verdict
+        assert "SUPERSEDED" in result.verdict
+
+    asyncio.run(_run())
+
+
+def test_a_substructure_scan_is_not_partial_because_it_reads_every_definition() -> None:
+    """A substructure scan reads every definition, so it is never partial and must not say it is.
+
+    `all_records` is unfiltered by definition on purpose, so this entry point searches the whole
+    table even mid-rebuild.
+
+    Worth pinning rather than leaving implicit: a stale-definition row's stored SMILES is still a
+    correct substructure hit, so flagging this search partial would tell a chemist to distrust an
+    answer that is complete.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore(molecule_definition())
+        await store.add(_superseded(record_for("old-ethanol", "CCO")))
+
+        result = await find_substructure_matches(store, "CCO")
+        assert [hit.smiles for hit in result.hits] == ["CCO"]
+        assert result.index_partial is False
+        assert result.verdict == "1 indexed molecule(s) matched this query."
+
+    asyncio.run(_run())
+
+
+def test_the_two_notices_compose_instead_of_shadowing_each_other() -> None:
+    """A partial index and an approximate arm are independent facts, so both must be said.
+
+    The hits arm already carried this rule in a comment ("two independent facts, so two
+    independent clauses — not two branches"); the no-hits arm below it was still an `if`/`return`
+    chain, which no test could see because the two facts it could shadow cannot co-occur today. A
+    third one that co-occurs with both is what makes the shape matter.
+    """
+    both = FingerprintSearch[Match](
+        subject="molecule", hits=[], index_partial=True, approximate=True
+    )
+    assert "SUPERSEDED" in both.verdict and "APPROXIMATELY" in both.verdict
+    assert "NOT proof" in both.verdict
+
+    page = FingerprintSearch[Match](
+        subject="reaction",
+        hits=[Match(id="r1", label="CCO>>CC=O", similarity=0.9)],
+        index_partial=True,
+        approximate=True,
+    )
+    assert page.verdict.startswith("PARTIAL AND APPROXIMATE RESULT:")
+    assert "SUPERSEDED" in page.verdict and "may exist" in page.verdict
+
+
+def test_the_operator_log_names_the_rows_waiting_to_be_rebuilt(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The number is the operator's, and it is the half a boolean cannot give.
+
+    "1 of 50 rebuilt" is what says a re-index is unfinished and how far it got; the search surface
+    carries only the boolean, because the count is a `count(*)` and that one is read on every
+    query. Three states, because the message differs in what an operator must *do*: rebuild what
+    is there, finish rebuilding it, or nothing.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore(molecule_definition())
+        for i, smiles in enumerate(["CCO", "CCCO", "c1ccccc1"]):
+            await store.add(_superseded(record_for(f"log-old-{i}", smiles)))
+
+        with caplog.at_level("INFO"):
+            await log_index_size(store, "molecule")
+            assert "is EMPTY" in caplog.text
+            assert "3 record(s) are stored under a superseded definition" in caplog.text
+
+            caplog.clear()
+            await store.add(record_for("log-new", "CCS"))
+            await log_index_size(store, "molecule")
+            assert "is PARTIAL" in caplog.text
+            assert "1 record(s) indexed under the current definition and 3 still under a" in (
+                caplog.text
+            )
+            assert caplog.records[-1].levelname == "WARNING"
+
+            caplog.clear()
+            for i, smiles in enumerate(["CCO", "CCCO", "c1ccccc1"]):
+                await store.add(record_for(f"log-old-{i}", smiles))
+            await log_index_size(store, "molecule")
+            assert "is PARTIAL" not in caplog.text and "is EMPTY" not in caplog.text
+            assert caplog.records[-1].levelname == "INFO"
+
+    asyncio.run(_run())

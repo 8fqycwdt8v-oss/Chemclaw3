@@ -30,6 +30,12 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_migrations_are_additive import (
+    _REVIEWED_REPLAY_BREAKS,
+    _REVIEWED_ROLLBACK_BREAKS,
+    _REVIEWED_SEMANTIC_BREAKS,
+)
+
 _ROOT = Path(__file__).resolve().parents[1]
 _SQL = _ROOT / "infra" / "sql"
 _README = _SQL / "README.md"
@@ -59,6 +65,24 @@ _MIGRATION_CELL = re.compile(r"^\|\s*`(\w+)`\s*\|([^|]*)\|", re.MULTILINE)
 _NUMBER = re.compile(r"\d{3}")
 
 _LINE_COMMENT = re.compile(r"--[^\n]*")
+
+# The two operator lists at the foot of the README, each keyed by its own `###` heading rather than
+# by position, and each read as the migration filenames its bullets open with. Scoped to a heading
+# on purpose: migration filenames appear in the README's running prose too (`037_document_index.sql`
+# is named in the "two files may share a number" paragraph), so a whole-file scan would read that as
+# a claim about rollbacks.
+_ROLLBACK_HEADING = '### Migrations that end "deploy the previous image"'
+_REPLAY_HEADING = "### Migrations that are not re-runnable, and the recipe for each"
+_BULLET = re.compile(r"^- `(\d{3}_[a-z0-9_]+\.sql)`", re.MULTILINE)
+
+
+def _listed_under(heading: str) -> list[str]:
+    """The migration filenames the bullets under `heading` name, in the order they are listed."""
+    body = _README.read_text(encoding="utf-8")
+    assert heading in body, f"infra/sql/README.md no longer has the section {heading!r}"
+    after = body.split(heading, 1)[1]
+    return _BULLET.findall(after.split("\n### ", 1)[0].split("\n## ", 1)[0])
+
 
 # A statement acts on the table it names in one of these positions. Matching the construct rather
 # than the bare identifier is load-bearing: `observations` is both a table and a column of
@@ -299,3 +323,49 @@ def test_the_migration_column_names_every_migration_that_touches_the_table() -> 
         f"{{table: (row says, files say)}}: {wrong}. Extend the row in the same commit as the "
         "migration — a later ALTER TABLE belongs in the cell as much as the CREATE does"
     )
+
+
+def test_the_rollback_note_names_every_reviewed_break() -> None:
+    """The list an operator reads before a `helm rollback`, checked against the registers.
+
+    It was transcribed, and it was wrong in the direction that matters: the README said **four**
+    reviewed rollback-breaking migrations and listed 041, 056, 058, 063 while the register held
+    five, the missing one being 088 — the newest, and the only one bearing on a rollback of the
+    current release. So a paragraph whose own sentence claimed the list was "derived from that set"
+    told an operator that the `turn_costs` primary-key move is not a rollback break. It is.
+
+    Checked in both directions and in order, the same shape as the **Migration** column above: a
+    register entry with no bullet is a break nobody planning a rollback will see, and a bullet with
+    no entry is a warning about a migration that does not break anything. The count that used to
+    open the paragraph is gone rather than checked — it is derivable from the list, and a redundant
+    number is the thing that went stale.
+
+    Both registers, because an operator does not care which one found the break: one holds the
+    migrations a pattern flagged, the other the one that only review could reach.
+    """
+    reviewed = sorted(set(_REVIEWED_ROLLBACK_BREAKS) | set(_REVIEWED_SEMANTIC_BREAKS))
+    assert _listed_under(_ROLLBACK_HEADING) == reviewed, (
+        "infra/sql/README.md's rollback list disagrees with `_REVIEWED_ROLLBACK_BREAKS` + "
+        f"`_REVIEWED_SEMANTIC_BREAKS` (which say {reviewed}). Extend the list in the same commit "
+        "as the exemption — an operator plans a rollback from this file, not from a test"
+    )
+
+
+def test_the_replay_note_names_every_recipe() -> None:
+    """The same, for the migrations that cannot simply be replayed.
+
+    A restore whose `schema_migrations` ledger is older than its tables is recovered by re-running
+    the migrations, and two of them abort the run instead (046 on a restore, 058 on a
+    hand-built database). The recipe for each is one statement, and it is useless in a test file:
+    the person who needs it is reading this directory at the time.
+    """
+    assert _listed_under(_REPLAY_HEADING) == sorted(_REVIEWED_REPLAY_BREAKS), (
+        "infra/sql/README.md's replay-recipe list disagrees with `_REVIEWED_REPLAY_BREAKS` "
+        f"(which says {sorted(_REVIEWED_REPLAY_BREAKS)})"
+    )
+    body = _README.read_text(encoding="utf-8")
+    for name, (_, _, recipe) in _REVIEWED_REPLAY_BREAKS.items():
+        assert recipe in body, (
+            f"{name}'s replay recipe is not in infra/sql/README.md verbatim: {recipe!r}. A recipe "
+            "an operator has to reconstruct is a recipe nobody runs under pressure"
+        )

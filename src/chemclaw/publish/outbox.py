@@ -6,7 +6,8 @@ succeeded — and must not lose it either. Publishing inline forces a choice bet
 both answers are wrong. An outbox is what refuses the choice: the record is written locally in the
 same act that produces it, and a Temporal job drains it with retries.
 
-**Projection happens here, at enqueue, not at drain.** Turning a payload into a record is the step
+**Projection happens here, at enqueue, not at drain** — in `project_payload`, which
+`enqueue_payload` is the count-only shorthand for. Turning a payload into a record is the step
 that can fail on a shape this release cannot read, and failing at enqueue means failing beside the
 calculation that produced it, where the context to diagnose it exists. A drain that projected would
 surface the same defect hours later inside a background worker, detached from its cause.
@@ -361,7 +362,7 @@ async def _enqueue_one(
     return rows
 
 
-async def enqueue_payload(
+def project_payload(
     *,
     calc_ref: str,
     calc_type: str,
@@ -375,32 +376,27 @@ async def enqueue_payload(
     computed_at: datetime | None = None,
     depends_on: list[str] | None = None,
     publication: Publication | None = None,
-) -> int:
-    """Project one stored payload and queue what it becomes.
+) -> list[ResultRecord] | None:
+    """The records one stored payload becomes, or **None** when the projector raised.
 
-    Never raises — see the module docstring. Returns how many rows were written, which is **not
-    always one**: a shape that decomposes queues the aggregate and its parts (`records_for`), so a
-    solvent screen is three rows rather than one.
+    Never raises. Three states, and the third is why this exists apart from `enqueue_payload`: a
+    list is "queue these", `[]` is "nothing to queue", and `None` is "this release has a projector
+    for the row and it could not read it". An `int` cannot carry that distinction —
+    `enqueue_payload` returned 0 for all three, and `backfill.py` added that 0 to its `queued`
+    counter and touched nothing else, so a row whose projection failed landed in **no bucket at
+    all**: measured on a four-row corpus holding one
+    `xtb.scan` row from a calculator that wrote `energy` where this release reads
+    `energy_hartree`, the dry run reported `(seen=4, queued=3, skipped=1)` and the real pass
+    `(seen=4, queued=2, skipped=1)`. The operator-facing line said "4 row(s) seen, 2 queued, 1
+    skipped" over a corpus of four, and nothing named the fourth.
 
-    The single entry point every hook uses, so "what gets published" is decided in one place rather
-    than three. A payload this release has no projector for is skipped with a debug line, not an
-    error: `calculation_results` is never pruned, so a deployment legitimately holds rows from
-    calculators that no longer ship.
-
-    `payload_kind` is the model's own name and is what routes a *composite*: its `calc_type` is
-    `<connector>.<job>`, a route, and no projector prefix matches one. Empty falls back to the
-    prefix inference, which is right for a cached primitive whose `calc_type` is its calculator.
+    Callers that only need the count keep using `enqueue_payload`, which is this plus the write.
     """
-    if not publishing_enabled():
-        return 0
     # Imported inside the function, deliberately: with no sink configured the projection machinery
     # and RDKit's canonicalization are never imported at all, so the hot cache path pays nothing
     # for a subsystem that is off.
-    from chemclaw.publish.project import projector_for, records_for
+    from chemclaw.publish.project import records_for
 
-    if projector_for(calc_type, payload_kind) is None:
-        logger.debug("publish: no projector for %s; not queued", calc_type)
-        return 0
     try:
         records = records_for(
             calc_ref=calc_ref,
@@ -438,9 +434,71 @@ async def enqueue_payload(
         # own declaration for the case that proved it.
         logger.exception("publish: could not project %s (%s)", calc_ref, calc_type)
         record_metric(lambda m: m.increment("chemclaw_result_projection_failures_total"))
-        return 0
+        return None
     if publication is not None:
         records = [record.model_copy(update={"publications": [publication]}) for record in records]
+    return records
+
+
+async def enqueue_payload(
+    *,
+    calc_ref: str,
+    calc_type: str,
+    payload: dict[str, Any],
+    payload_kind: str = "",
+    calc_version: str = "",
+    input_hash: str = "",
+    params_hash: str = "",
+    structure_id: str = "",
+    compute_seconds: float | None = None,
+    computed_at: datetime | None = None,
+    depends_on: list[str] | None = None,
+    publication: Publication | None = None,
+) -> int:
+    """Project one stored payload and queue what it becomes.
+
+    Never raises — see the module docstring. Returns how many rows were written, which is **not
+    always one**: a shape that decomposes queues the aggregate and its parts (`records_for`), so a
+    solvent screen is three rows rather than one.
+
+    The single entry point every hook uses, so "what gets published" is decided in one place rather
+    than three. A payload this release has no projector for is skipped with a debug line, not an
+    error: `calculation_results` is never pruned, so a deployment legitimately holds rows from
+    calculators that no longer ship.
+
+    `payload_kind` is the model's own name and is what routes a *composite*: its `calc_type` is
+    `<connector>.<job>`, a route, and no projector prefix matches one. Empty falls back to the
+    prefix inference, which is right for a cached primitive whose `calc_type` is its calculator.
+
+    **The count this returns cannot say why it is zero**, which is what `project_payload` is for —
+    a caller that must distinguish "nothing to queue" from "could not read the row" calls that and
+    `enqueue` instead. Kept `int` here because the three hooks behind a finished calculation
+    genuinely do not care: the science is already persisted either way.
+    """
+    if not publishing_enabled():
+        return 0
+    # Imported inside the function for the reason `project_payload` states.
+    from chemclaw.publish.project import projector_for
+
+    if projector_for(calc_type, payload_kind) is None:
+        logger.debug("publish: no projector for %s; not queued", calc_type)
+        return 0
+    records = project_payload(
+        calc_ref=calc_ref,
+        calc_type=calc_type,
+        payload=payload,
+        payload_kind=payload_kind,
+        calc_version=calc_version,
+        input_hash=input_hash,
+        params_hash=params_hash,
+        structure_id=structure_id,
+        compute_seconds=compute_seconds,
+        computed_at=computed_at,
+        depends_on=depends_on,
+        publication=publication,
+    )
+    if records is None:
+        return 0
     return await enqueue(records)
 
 

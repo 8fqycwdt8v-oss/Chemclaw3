@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 import uvicorn
@@ -29,6 +30,12 @@ from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from tests.fakes import asgi_client
 from tests.fakes_turn import Piece, ScriptedTurn
+from tests.pg import (
+    TEST_SCHEMA,
+    create_test_schema,
+    drop_test_schema,
+    migrated_db_or_skip,
+)
 
 # A minimal ASGI HTTP scope, for the one test that drives the app below `TestClient` (which
 # cannot express "the handler was cancelled and nothing was ever sent").
@@ -255,6 +262,102 @@ def test_readyz_does_not_probe_a_database_a_memory_deployment_does_not_have(
     assert res.json()["status"] == "ready"
 
 
+def test_readyz_refuses_a_pod_whose_image_is_ahead_of_the_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """New code against an old schema must fail at rollout, not in traffic.
+
+    The probe was `SELECT 1` only, which every schema answers. Measured against a database
+    migrated through `080` while the code was current: `/readyz` answered
+    `200 {"status": "ready"}`, the pod joined the Route, and `outbox`,
+    `calculation_results.epoch` and `turn_costs.turn_id` were all missing under it. The Helm
+    `pre-upgrade` hook Job normally prevents that state; `--no-hooks`, a `kubectl set image` and
+    an ArgoCD sync that proceeds past a failed hook all reach it.
+
+    Driven by naming a migration this image "ships" that no ledger can hold, against the real
+    `schema_migrations` — the query, the connection and the ledger are the shipped ones, and only
+    the filename is arranged.
+    """
+    asyncio.run(migrated_db_or_skip())
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+    monkeypatch.setattr(
+        "chemclaw.api.routes.ops.newest_shipped_migration",
+        lambda: "999_a_migration_this_database_has_never_seen.sql",
+    )
+    with _client(_FakeAgent()) as client:
+        res = client.get("/readyz")
+    assert res.status_code == 503
+    assert res.json()["status"] == "schema behind image", (
+        "the pod was drained for the wrong reason — an operator running `curl` gets this line "
+        "and nothing else"
+    )
+
+
+def test_readyz_stays_ready_when_the_schema_is_ahead_of_the_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollback must serve. The schema check is one-directional, and this is that direction.
+
+    An image behind its database is the *normal* state after a rollback: the schema only goes
+    forward, by a merged decision, so ledger rows past the newest file this image ships are
+    expected and must not gate. Making the comparison symmetric — "the ledger equals the file
+    set" — would refuse traffic on every rolled-back pod, which is a worse failure than the
+    forward one being fixed. The backwards case is reported by `core/migrate.py`'s
+    `migrate.database_ahead` warning instead, where an operator can act on it.
+    """
+    asyncio.run(migrated_db_or_skip())
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+    # The image ships through the *first* tracked migration; the database holds every later one.
+    oldest = sorted(
+        path.name
+        for path in (Path(settings.sql_migrations_dir).glob("*.sql"))
+        if path.name != "000_schema_migrations.sql"
+    )[0]
+    monkeypatch.setattr("chemclaw.api.routes.ops.newest_shipped_migration", lambda: oldest)
+    with _client(_FakeAgent()) as client:
+        res = client.get("/readyz")
+    assert res.status_code == 200, f"a rolled-back pod refused to serve: {res.text}"
+    assert res.json()["status"] == "ready"
+
+
+def test_a_ledger_it_cannot_read_does_not_take_the_pod_out_of_the_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The schema verdict gates on positive evidence of a mismatch, never on its absence.
+
+    A database with no `schema_migrations` at all is not a supported deployment — every database
+    that can serve as the session store was migrated by the same runner that creates the ledger —
+    but "was" is a claim about somebody else's operations, and the probe reads
+    `session_store_dsn or postgres_dsn`, which under a split session store is a different server
+    from the one `migrate()` runs against. Turning a diagnostic into a fleet-wide outage on a
+    deployment this repository cannot see is the wrong trade, so an unreadable ledger reports
+    itself and stays ready.
+    """
+    schema = f"{TEST_SCHEMA}_no_ledger"
+    base = settings.postgres_dsn.split("?")[0]
+    asyncio.run(migrated_db_or_skip())
+    asyncio.run(create_test_schema(base, schema))
+    try:
+        # `search_path` to the empty schema *only*: with `public` behind it the ledger every other
+        # test migrated would resolve, and this test would silently assert nothing.
+        separator = "&" if "?" in base else "?"
+        monkeypatch.setattr(
+            settings,
+            "session_store_dsn",
+            f"{base}{separator}options={quote(f'-c search_path={schema}')}",
+        )
+        monkeypatch.setattr(settings, "session_store", "postgres")
+        monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+        with _client(_FakeAgent()) as client:
+            res = client.get("/readyz")
+        assert res.status_code == 200, f"an unreadable ledger drained the pod: {res.text}"
+        assert res.json()["status"] == "ready"
+    finally:
+        asyncio.run(drop_test_schema(base, schema))
+
+
 def test_readyz_reuses_its_database_verdict_inside_the_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -272,9 +375,18 @@ def test_readyz_reuses_its_database_verdict_inside_the_window(
         nonlocal probes
         probes += 1
 
+        class _Cursor:
+            async def fetchone(self) -> tuple[bool]:
+                return (True,)
+
         class _Conn:
-            async def execute(self, _sql: str) -> None:
-                return None
+            # Two statements now, and the double has to answer both: `SELECT 1` for reachability
+            # and the ledger `EXISTS` for whether the schema carries this image. A double that
+            # only accepted the first would make this test pass by not exercising the probe.
+            async def execute(
+                self, _sql: str, _params: tuple[object, ...] | None = None
+            ) -> _Cursor:
+                return _Cursor()
 
         yield _Conn()
 
@@ -406,9 +518,18 @@ def test_concurrent_readiness_probes_cost_one_database_checkout(
         checkouts += 1
         await asyncio.sleep(0.05)
 
+        class _Cursor:
+            async def fetchone(self) -> tuple[bool]:
+                return (True,)
+
         class _Conn:
-            async def execute(self, _sql: str) -> None:
-                return None
+            # Two statements now, and the double has to answer both: `SELECT 1` for reachability
+            # and the ledger `EXISTS` for whether the schema carries this image. A double that
+            # only accepted the first would make this test pass by not exercising the probe.
+            async def execute(
+                self, _sql: str, _params: tuple[object, ...] | None = None
+            ) -> _Cursor:
+                return _Cursor()
 
         yield _Conn()
 
