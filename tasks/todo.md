@@ -102,18 +102,18 @@ are all science-side defect classes, and no wave has swept for them.
 
 ## Wave 12 — Lifecycle: upgrade, rollback, two generations at once
 
-- [ ] W12.1 All 89 migrations replayed from empty against the live database, in order, **twice**
+- [x] W12.1 All 89 migrations replayed from empty against the live database, in order, **twice**
       (idempotency), and against a database that already holds the objects.
-- [ ] W12.2 Grants: reconciled on every deploy rather than applied once (lesson 22). Does a table
+- [x] W12.2 Grants: reconciled on every deploy rather than applied once (lesson 22). Does a table
       added by a late migration arrive with its grant, and does the reconciliation notice a drift?
-- [ ] W12.3 Rolling update, both directions: old code against new schema, new code against old.
+- [x] W12.3 Rolling update, both directions: old code against new schema, new code against old.
       Every persisted shape read by both — the `session_messages` stamp, checkpoint blobs,
       `turn_costs`' new columns, the outbox lease, `reaction_records`.
-- [ ] W12.4 Rollback: does the previous image run against the migrated database, and is the
+- [x] W12.4 Rollback: does the previous image run against the migrated database, and is the
       failure **loud** where it does not?
-- [ ] W12.5 Backfills and projectors run against a mixed-shape table, not a uniform one: the `dft`
+- [x] W12.5 Backfills and projectors run against a mixed-shape table, not a uniform one: the `dft`
       backfill, the message migration, the record backfill.
-- [ ] W12 fix stage, gate, PR, merge on green
+- [x] W12 fix stage, gate, PR, merge on green
 
 ## Wave 13 — Day one and day one thousand
 
@@ -168,6 +168,100 @@ the point of use, and contradiction. Wave 8 asked whether those exist. This asks
 ## Review
 
 *(the closing review is written at the end of wave 15; each wave adds its own section)*
+
+### Wave 12 — lifecycle (MERGED: see PR below)
+
+Eleven waves ran one generation of code against one generation of schema,
+migrated forward from empty, once. This one asked about the upgrade, the
+rollback, and the minutes when both generations are live — which is every
+deploy. Five review agents, six fix agents.
+
+**The deploy-breaking finding.** The grant set is a full restatement
+applied by a `pre-upgrade` hook, so a verb removed from the file is
+**revoked from the release that is still serving**. Measured on a real
+commit: the old release lost `INSERT` on a table it was writing. There was
+no rollback hook at all, so `helm rollback` restored the old image against
+the new ACL. Two prose claims — "the grants only widen", in the job
+template and an ADR — were falsified by their own repository.
+
+**The silent one.** Rolling back past migration 090 reverses a correctness
+control: the calculation cache stops filtering by epoch, so
+`find_calculations` hands the model superseded results as evidence to
+cite, with no exception, log or counter. Every other rollback break found
+is loud; this one is not.
+
+**And the operator was told the opposite.** `migrate()` iterates the
+image's own files, so a rolled-back image printed "already up to date"
+against a database eleven migrations ahead — the documented recovery
+command asserting the thing that is false. `/readyz` probed `SELECT 1`, so
+a pod *ahead* of the schema passed readiness and threw on the first turn.
+The runbook's one rollback paragraph promised every migration "only
+expands"; four drop and re-add a primary key, one replaces a CHECK, one
+nulls a backfilled column out, one rewrites a type.
+
+### Where measurement overturned the brief — again, four times
+
+1. **The Temporal severity was wrong.** A change appended at the *end* of
+   a run does not wedge an unfinished one: driven as a real handover on
+   the live broker, generation N parked a run and today's code completed
+   it. Nondeterminism is a property of a **closed** history, and
+   production never resumes one. The hazard is relocated, not removed.
+2. **And the hang was partly first-party**: `failure_exception_types=
+   [Exception]` turns the error into a workflow-failure command a closed
+   history cannot accept, so it evicts forever. Emptied, it raises in
+   under a second — a detector not knowing that hangs CI instead of
+   failing it.
+3. **A second replay-breaking migration** nobody had named (058, failing
+   the other arm of the same docstring), found by replaying every file
+   individually rather than trusting the first.
+4. **A third way a row lands in no bucket**: `ON CONFLICT DO NOTHING`
+   means a re-run over a fully covered corpus reports rows unaccounted
+   for with nothing wrong at all.
+
+**Two of the wave's findings were consequences of wave 11's own `std7`
+bump**, which I had called "worth expecting rather than discovering". They
+were sharper than that: one re-indexed row flips `index_is_empty` to
+False, so a chemist gets a confident answer over 2% of the corpus, and the
+re-label stamps rows the labelling server could not answer for as current.
+
+### Decisions taken, with what each costs
+
+- **`pre-rollback` hook** for grants, and the *contract step* declined:
+  enforcing "hold a verb for one release" needs a lag set that weakens the
+  excess ratchet exactly where it is strongest, for a discipline no test
+  enforces. **The upgrade window is still open and the ADR says so**, with
+  the exact blocker.
+- **Archived histories replayed by the ordinary suite**, not a CI job —
+  the docstring that asked for one named the wrong obstacle, since what a
+  self-recorded history lacks is *age*, not a runner. `workflow.patched`
+  declined for an empty recipient set; worker versioning declined because
+  draining a 12.6-hour run needs the two-worker overlap `replicas: 1`
+  exists to prevent.
+- **`ALTER COLUMN … TYPE` into `_BREAKS_PREVIOUS_IMAGE`, not
+  `_DESTROYS_DATA`**: 091 is a widening that already exists, and the
+  destroy bucket refuses with no exemption mechanism *on purpose*.
+- **Drift reported, not refused**: refusing fails the `pre-upgrade` hook
+  and blocks the release, and the operator whose hand-grant caused it is
+  the one person who cannot fix it from the deploy. CI fails; the deploy
+  reports.
+- **No fingerprint re-index built**: re-fingerprinting from stored labels
+  reproduces the previous standardization's losses, and the runtime role
+  holds no DELETE, so a key-changing bump would leave orphans counted
+  forever. The state is made discoverable instead; the register carries
+  the rest.
+
+**What held.** All 90 migrations replay from empty in 437 ms as one
+transaction — a mid-run failure left the ledger at zero rows, not
+half-applied. All 38 `ADD COLUMN NOT NULL` statements carry a `DEFAULT`,
+so an old pod's INSERT still works. No ledger drift on the live database.
+The session store round-trips against a schema eleven migrations ahead.
+The publish walk is genuinely resumable and both backfills are idempotent.
+And the INSERT-only audit grant is really in force — UPDATE and DELETE
+both denied as the role, not merely asserted by a file.
+
+**Deliberately open**: the upgrade window for contracting grants (blocked
+on a two-document assertion); 21 of 22 background workflows have no
+archived history; and there is no fingerprint re-index path.
 
 ### Wave 11 — the science (MERGED: fleet #53; this repo's PR below)
 
