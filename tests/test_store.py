@@ -454,3 +454,112 @@ def test_the_publish_is_offered_before_the_row_is_persisted() -> None:
         assert events == ["publish", "put"]
 
     asyncio.run(_run())
+
+
+def test_a_value_postgres_cannot_store_is_refused_by_name_before_the_write() -> None:
+    """A payload the `jsonb` column would reject must fail here, naming the field.
+
+    Measured before this (`cached_compute` against a migrated database): `{"max_gradient":
+    float("nan")}` passed `checked_payload`, and the refusal arrived from the driver as
+    `InvalidTextRepresentation: invalid input syntax for type json / DETAIL: Token "NaN" is
+    invalid` — raised out of `store.put` *inside* `cached_compute`, after the single-flight future
+    exists, so every concurrent waiter on that key failed with a message naming a JSON token and
+    neither the calculation nor the field. `Decimal` and `datetime` failed the same way one layer
+    earlier (`TypeError: Object of type Decimal is not JSON serializable`), and a string carrying a
+    NUL as `UntranslatableCharacter`.
+
+    Reachable rather than hypothetical: the fleet's `max_gradient` is
+    `float(np.max(np.abs(gradient)))`, a diverged SCF gives NaN, and `json.loads` — which is how a
+    calculation server's answer reaches this process — accepts the literal `NaN` by default.
+    """
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from chemclaw.science.calc.store import CorruptCacheRow, checked_payload
+
+    key = CalculationKey.build("probe.unstorable", "1", inputs={"n": 1})
+    unstorable: list[tuple[str, dict[str, object]]] = [
+        ("max_gradient", {"energy": -1.0, "max_gradient": float("nan")}),
+        ("max_gradient", {"max_gradient": float("inf")}),
+        ("converged", {"nested": [{"converged": float("-inf")}]}),
+        ("energy", {"energy": Decimal("1.5")}),
+        ("when", {"when": datetime.now(UTC)}),
+        ("note", {"note": "a\x00b"}),
+    ]
+    for field, payload in unstorable:
+        with pytest.raises(CorruptCacheRow) as caught:
+            checked_payload(key, payload)
+        message = str(caught.value)
+        assert field in message, f"the refusal does not name the offending field: {message!r}"
+        assert key.as_str() in message, f"the refusal does not name the calculation: {message!r}"
+
+
+def test_a_storable_payload_is_still_returned_unchanged() -> None:
+    """The guard above must not narrow what a calculator may legitimately return.
+
+    Ordinary unicode round-trips byte-identically through `jsonb` (measured:
+    `α-pinene · Δ 25 °C — ünïcode 中文 🧪`), and a float of any finite magnitude comes back as the
+    same double — `5e-324` and `1.797e308` included, though one over 1e16 comes back as an `int`,
+    which `tests/test_postgres_store.py` pins against the real column. Only NUL is refused among
+    strings, because Postgres `text` cannot hold one.
+    """
+    from chemclaw.science.calc.store import checked_payload
+
+    key = CalculationKey.build("probe.storable", "1", inputs={"n": 1})
+    payload: dict[str, object] = {
+        "note": "α-pinene · Δ 25 °C — ünïcode 中文 🧪",
+        "avogadro": 6.02214076e23,
+        "tiny": 5e-324,
+        "counts": [1, 2, 3],
+        "nested": {"ok": True, "absent": None},
+    }
+    assert checked_payload(key, payload) is payload
+
+
+def test_the_browse_does_not_serve_a_row_the_epoch_invalidated() -> None:
+    """`get` misses a superseded row; `find` used to hand it back beside its replacement.
+
+    Measured before this, on the reference store, with the epoch moved between two writes of one
+    molecule::
+
+        epoch 1 -> key thermo@xtb-6.7:a7d334ebee616d78:a075a6029c28d314
+        epoch 2 -> key thermo@xtb-6.7:a7d334ebee616d78:3ba6ef80c850abd1
+        find(smiles='CCO', calc_type='thermo') returned 2 rows:
+            3ba6ef80c850abd1 {'g': -40.222} | a075a6029c28d314 {'g': -40.111}
+
+    Indistinguishable in the result, because the epoch rides in `params_hash` — which is not a
+    filter and is not invertible — and `calc_version` not moving is the entire reason the epoch
+    exists. `find_calculations` then tells the model to use those values instead of recomputing and
+    to cite the `calc_ref` in a knowledge note, `calculation_results` is never pruned, and the
+    store's own docstring already said the invalidated half "cannot be separated" and that "serving
+    the wrong half is the failure this exists to stop". The lookup path stopped it; the browse did
+    not.
+    """
+    inputs = {"smiles": "CCO"}
+
+    async def _run() -> tuple[list[str], bool]:
+        store = InMemoryStore()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(store_module, "CALCULATION_EPOCH", "1")
+            old = CalculationKey.build("thermo", "xtb-6.7", inputs=inputs)
+
+            async def _old() -> dict[str, float]:
+                return {"g": -40.111}
+
+            await cached_compute(store, old, _old)
+        new = CalculationKey.build("thermo", "xtb-6.7", inputs=inputs)
+
+        async def _new() -> dict[str, float]:
+            return {"g": -40.222}
+
+        _, was_cached = await cached_compute(store, new, _new)
+        found = await store.find(
+            store_module.CalculationQuery(smiles="CCO", calc_type="thermo", limit=10)
+        )
+        return [stored.key.params_hash for stored in found], was_cached
+
+    hashes, was_cached = asyncio.run(_run())
+    assert not was_cached, "the epoch stopped re-addressing `get`, which is the other half"
+    assert hashes == [CalculationKey.build("thermo", "xtb-6.7", inputs=inputs).params_hash], (
+        f"the browse served a row a later epoch invalidated: {hashes}"
+    )

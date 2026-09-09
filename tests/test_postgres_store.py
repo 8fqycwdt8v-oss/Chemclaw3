@@ -13,6 +13,7 @@ from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.migrate import migrate
 from chemclaw.science.calc.postgres_store import PostgresStore, default_store
 from chemclaw.science.calc.store import (
+    CALCULATION_EPOCH,
     CalculationKey,
     CalculationQuery,
     CorruptCacheRow,
@@ -369,3 +370,162 @@ def test_one_corrupt_row_does_not_empty_the_browse() -> None:
     keys = asyncio.run(_run())
     assert keys, "one corrupt row emptied the whole browse"
     assert all("bad" not in key for key in keys), "the corrupt row was handed back anyway"
+
+
+def test_put_refuses_a_non_finite_float_in_this_process_not_at_the_wall() -> None:
+    """`store.put` is a second door, and `checked_payload` does not guard it.
+
+    `cached_compute` checks what a calculator returned; `put` is public and is called directly by
+    `ArrayOffloadingStore`'s rewrite, by a backfill, and by any future writer that does not come
+    through the cache — the same "paired with `put` rather than with `cached_compute`" argument
+    `publish_stored_result` already makes. Measured before this, a NaN reaching that door came back
+    as `psycopg.errors.InvalidTextRepresentation: invalid input syntax for type json / DETAIL:
+    Token "NaN" is invalid`, a server-side error naming a JSON token and no field.
+
+    `chemclaw.core.jsonb.json_column` turns that wall into a `ValueError` raised in this process,
+    at the column holding the value, with a stack naming the caller — which is the whole of what a
+    backstop behind an already-checked path can be worth.
+    """
+
+    async def _run() -> str:
+        store = await _store_or_skip()
+        key = CalculationKey.build("probe.strictjson", "1", inputs={"n": 1})
+        stored = StoredResult.model_construct(
+            key=key,
+            result={"max_gradient": float("nan")},
+            provenance="computed",
+            compute_seconds=None,
+            created_at=None,
+            structure_id="",
+        )
+        try:
+            await store.put(stored)
+        except ValueError as exc:  # `psycopg.Error` is not a `ValueError`; the local guard is
+            return type(exc).__name__
+        return "no error"
+
+    assert asyncio.run(_run()) == "ValueError", (
+        "the non-finite float reached the server instead of being refused in this process"
+    )
+
+
+def test_the_two_backends_agree_about_a_superseded_epoch() -> None:
+    """The epoch exclusion is stated twice — in `_matches` and in `_FIND` — so it is pinned twice.
+
+    `find` filters before it fetches, so the Postgres store cannot reuse `_matches`; every other
+    filter in this file is the same shape and the same risk. Driven here as a differential against
+    the reference store the Postgres one is written to match: one molecule, one `calc_version`, two
+    epochs, and both backends must answer with the current row only. A row written before migration
+    090 records no epoch and is deliberately still returned — a store cannot classify its own
+    history, and hiding it would answer "nothing found" about everything on disk the day the
+    migration ran.
+    """
+
+    async def _run() -> tuple[list[str], list[str], list[str]]:
+        store = await _store_or_skip()
+        memory = InMemoryStore()
+        inputs = {"smiles": "pg-epoch-CCO"}
+
+        stale = CalculationKey.build("probe.epoch", "v1", inputs=inputs)
+        stale = stale.model_copy(update={"params_hash": "stalepar"})
+        current = CalculationKey.build("probe.epoch", "v1", inputs=inputs)
+        unrecorded = CalculationKey.build("probe.epoch", "v1", inputs=inputs)
+        unrecorded = unrecorded.model_copy(update={"params_hash": "unrecpar"})
+
+        for backend in (store, memory):
+            await backend.put(StoredResult(key=stale, result={"g": -40.111}, epoch="0"))
+            await backend.put(
+                StoredResult(key=current, result={"g": -40.222}, epoch=CALCULATION_EPOCH)
+            )
+            await backend.put(StoredResult(key=unrecorded, result={"g": -40.333}))
+
+        query = CalculationQuery(calc_type="probe.epoch", limit=10)
+        from_pg = sorted(row.key.params_hash for row in await store.find(query))
+        from_memory = sorted(row.key.params_hash for row in await memory.find(query))
+        expected = sorted([current.params_hash, "unrecpar"])
+        return from_pg, from_memory, expected
+
+    from_pg, from_memory, expected = asyncio.run(_run())
+    assert from_pg == expected, f"the Postgres browse served a superseded epoch: {from_pg}"
+    assert from_memory == expected, f"the reference browse served a superseded epoch: {from_memory}"
+
+
+def test_a_rewrite_that_carries_no_epoch_does_not_blank_a_recorded_one() -> None:
+    """`ArrayOffloadingStore`'s rewrite and a backfill re-`put` a row they did not compute.
+
+    Same rule as `structure_id` and `compute_seconds` above it in `_UPSERT`: an empty value on the
+    incoming row means "this writer does not know", and letting it overwrite a recorded one moves a
+    known-current row back into the unrecorded class the browse has to hand back and mark.
+    """
+
+    async def _run() -> str:
+        store = await _store_or_skip()
+        key = CalculationKey.build("probe.epochkeep", "v1", inputs={"smiles": "pg-keep"})
+        await store.put(StoredResult(key=key, result={"g": 1.0}, epoch=CALCULATION_EPOCH))
+        await store.put(StoredResult(key=key, result={"g": 2.0}))
+        found = await store.get(key)
+        assert found is not None
+        return found.epoch
+
+    assert asyncio.run(_run()) == CALCULATION_EPOCH, "a re-`put` blanked the recorded epoch"
+
+
+def test_a_large_float_keeps_its_value_and_loses_only_its_python_type() -> None:
+    """`jsonb` is not refused for this, and the reason is recorded so nobody "fixes" it later.
+
+    Measured through a real column: `1e16` reads back as `10000000000000000` and `6.02214076e23`
+    as `602214076000000000000000` — `int`, not `float`, because psycopg reads a `jsonb` number with
+    no decimal point as an integer.
+
+    **`float()` of what comes back is the original float, and that is the exact claim.** The looser
+    one — "the value is preserved exactly" — is false and this assertion is where that was caught:
+    `6.02214076e23` is the double `602214075999999987023872`, `json.dumps` writes its shortest
+    round-tripping decimal `6.02214076e+23`, and the integer that comes back is
+    `602214076000000000000000`, which is a *different* exact number and the *same* double. So a
+    reader comparing the returned object to the float it stored gets `False` while nothing about
+    the value has moved.
+
+    Refusing this is what would be wrong: Avogadro's number is a legitimate thing for a calculator
+    to return, and `checked_payload` draws its line at "refuse what fails, document what converts".
+    This is the documented half, asserted so the documentation is a measurement rather than a
+    memory.
+    """
+
+    async def _run() -> dict[str, object]:
+        store = await _store_or_skip()
+        key = CalculationKey.build("probe.bigfloat", "1", inputs={"n": 1})
+        await store.put(
+            StoredResult(
+                key=key,
+                result={
+                    "at_the_boundary": 1e16,
+                    "avogadro": 6.02214076e23,
+                    "smallest_subnormal": 5e-324,
+                    "largest": 1.7976931348623157e308,
+                    "below_the_boundary": 1e15,
+                },
+            )
+        )
+        found = await store.get(key)
+        assert found is not None
+        return found.result
+
+    result = asyncio.run(_run())
+    stored = {
+        "at_the_boundary": 1e16,
+        "avogadro": 6.02214076e23,
+        "smallest_subnormal": 5e-324,
+        "largest": 1.7976931348623157e308,
+        "below_the_boundary": 1e15,
+    }
+    for name, original in stored.items():
+        assert float(result[name]) == original, (  # type: ignore[arg-type]
+            f"{name} came back as {result[name]!r}, which is a different double from {original!r}"
+        )
+    assert isinstance(result["below_the_boundary"], float), (
+        "a float below 1e16 stopped round-tripping as a float, which is a new conversion"
+    )
+    assert isinstance(result["at_the_boundary"], int), (
+        "1e16 now round-trips as a float — the conversion `checked_payload` documents is gone, so "
+        "delete that paragraph rather than leaving prose describing a behaviour that ended"
+    )
