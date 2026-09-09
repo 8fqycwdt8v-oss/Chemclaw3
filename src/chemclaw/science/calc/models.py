@@ -599,6 +599,14 @@ class HessianPayload(BaseModel):
     hessian_npy: str
     dipole_derivatives_npy: str | None = None
     ir_intensities: list[float] | None = None
+    #: The wavenumber the server paired with each entry of `ir_intensities`, same order and
+    #: length, including the external modes it projected out (which it writes as zeros).
+    #:
+    #: Optional because a row cached before `Chemclaw3-mcp` began sending it has none, and
+    #: because the in-process backend populates `dipole_derivatives_npy` instead. Present, it
+    #: is what lets `thermo._align_intensities` pair by wavenumber rather than by position —
+    #: see that function for why counting is not sufficient.
+    ir_wavenumbers_cm: list[float] | None = None
 
 
 class VibrationalMode(BaseModel):

@@ -452,3 +452,63 @@ def test_the_two_spellings_of_the_hartree_in_this_module_agree() -> None:
     """
     from_si = thermo._HARTREE_J * thermo._AVOGADRO / (units.JOULE_PER_CALORIE * 1000.0)
     assert from_si == pytest.approx(units.HARTREE_TO_KCAL, rel=1e-12)
+
+
+def _co2_at(angle_offset: float) -> Structure:
+    """A CO2-like structure, optionally bent by a fraction of a degree."""
+    return Structure(
+        smiles="O=C=O",
+        elements=[8, 6, 8],
+        positions=[[0.0, 0.0, -1.16], [0.0, 0.0, 0.0], [0.0, angle_offset, 1.16]],
+        charge=0,
+        multiplicity=1,
+    )
+
+
+#: One real `vibspectrum` shape: xtb 6.7.1 writes the projected-out modes first, as exact zeros.
+#: Six of them here, because at 179.0 degrees xtb judges the molecule non-linear.
+_XTB_ROWS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 68.71118, 0.00429, 1046.64228]
+_XTB_WAVENUMBERS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 667.0, 667.1, 2593.0]
+
+
+def test_an_intensity_is_paired_by_wavenumber_rather_than_by_position() -> None:
+    """The agreeing case: the three real intensities pair with the three real modes.
+
+    **This one passes against the old arithmetic too, and that is not a defect in it.** Where the
+    two sides agree on how many modes are external, counting reaches the same answer by a different
+    route — `9 - 3` drops the same six rows the wavenumbers mark. It pins the common case so a
+    future rewrite cannot quietly stop pairing at all; the two tests below are the guards, and both
+    were watched failing with the wavenumber branch disabled and the signature left intact.
+    """
+    paired = thermo._align_intensities(np.asarray(_XTB_ROWS), 3, _co2_at(0.0), _XTB_WAVENUMBERS)
+    assert list(paired) == [68.71118, 0.00429, 1046.64228]
+
+
+def test_a_disagreement_about_how_many_modes_are_external_fails_loudly() -> None:
+    """The check the old docstring promised and the old arithmetic could not perform.
+
+    How many modes are external is a judgement about the molecule, and the two sides make it by
+    different criteria — xtb tests unmassed inertia against an absolute threshold, `_is_linear`
+    tests mass-weighted moments against a relative one. Measured against xtb 6.7.1 over a real
+    O-C-O bend they agree at 180.0 and 175.0 degrees and disagree at **179.0**, where xtb projects
+    out six of nine and this projection expects four.
+
+    Counting cannot see that: `9 - 4 = 5` is neither negative nor odd-looking, so the old code
+    returned five entries beginning with one of xtb's own zeros and every band shifted by one —
+    the 2593 cm^-1 stretch reported against the band below it, silently, on the geometry a scan
+    point looks like.
+    """
+    with pytest.raises(ValueError, match="would shift every band"):
+        thermo._align_intensities(np.asarray(_XTB_ROWS), 4, _co2_at(0.02), _XTB_WAVENUMBERS)
+
+
+def test_a_row_cached_before_the_server_sent_wavenumbers_still_pairs_by_count() -> None:
+    """The fallback is the old arithmetic, because for those rows it is all there is."""
+    paired = thermo._align_intensities(np.asarray(_XTB_ROWS), 3, _co2_at(0.0))
+    assert list(paired) == [68.71118, 0.00429, 1046.64228]
+
+
+def test_a_wavenumber_list_that_does_not_match_the_intensities_is_refused() -> None:
+    """Two lists the server says are parallel, that are not, cannot be paired at all."""
+    with pytest.raises(ValueError, match="wavenumbers for"):
+        thermo._align_intensities(np.asarray(_XTB_ROWS), 3, _co2_at(0.0), _XTB_WAVENUMBERS[:-1])

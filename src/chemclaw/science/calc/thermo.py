@@ -163,14 +163,54 @@ def _atomic_masses(elements: list[int]) -> np.ndarray:
     return np.array([table.GetAtomicWeight(number) for number in elements])
 
 
-def _align_intensities(intensities: np.ndarray, modes: int, structure: Structure) -> np.ndarray:
-    """Drop xtb's projected-out external modes so intensities pair with our own modes.
+#: Below this wavenumber (cm^-1) the server has projected the mode out as a translation or a
+#: rotation. xtb writes those rows as exact zeros; the tolerance is for float formatting, not for
+#: a real mode, the softest of which are two orders above it.
+_EXTERNAL_MODE_CM = 0.01
 
-    xtb lists all 3N entries with the translations and rotations first; the projection below reports
-    only the vibrations. Reconciling by count is the point — if the two projections disagree about
-    how many external modes a molecule has, every intensity would shift by one mode, so a mismatch
-    fails loudly instead (gate G4).
+
+def _align_intensities(
+    intensities: np.ndarray,
+    modes: int,
+    structure: Structure,
+    wavenumbers_cm: list[float] | None = None,
+) -> np.ndarray:
+    """Pair the server's intensities with this projection's modes, by wavenumber where possible.
+
+    xtb lists all 3N entries with the translations and rotations first — measured against xtb 6.7.1
+    itself, on water, a planar-ammonia saddle and CO2, so the ordering is not an assumption.
+
+    **Counting was never sufficient, and the sentence that stood here claimed otherwise.** It said a
+    disagreement "fails loudly instead", and that check cannot fire: how many modes are external is
+    a judgement about the molecule, and the two sides make it by different criteria — xtb tests
+    unmassed inertia against an absolute threshold, `_is_linear` tests mass-weighted moments against
+    a relative one. Measured over a real O-C-O bend, they agree at 180.0 deg and at 175.0 deg and
+    disagree at **179.0 deg**, where xtb projects out six and this side expects four of nine. The
+    subtraction then yields five, which is neither negative nor suspicious, so nothing raised and
+    the 2593 cm^-1 stretch's intensity was reported against the band below it — every band shifted,
+    silently, on the geometry a scan point looks like.
+
+    So when the server says which wavenumber each entry belongs to, that is what is used: the
+    external rows it zeroed are dropped by value, and what remains must then match this projection's
+    mode count or the mismatch really does fail loudly. Without the field — a row cached before the
+    server sent it — the old subtraction stands, because it is the only thing available.
     """
+    if wavenumbers_cm is not None:
+        if len(wavenumbers_cm) != intensities.size:
+            raise ValueError(
+                f"the server sent {len(wavenumbers_cm)} wavenumbers for {intensities.size} "
+                f"intensities for {structure.smiles or structure.structure_id}"
+            )
+        internal = np.abs(np.asarray(wavenumbers_cm)) >= _EXTERNAL_MODE_CM
+        paired = np.asarray(intensities[internal])
+        if paired.size != modes:
+            raise ValueError(
+                f"the server projected out {intensities.size - paired.size} external mode(s) "
+                f"leaving {paired.size}, and this projection found {modes} "
+                f"for {structure.smiles or structure.structure_id}; pairing them would shift "
+                "every band"
+            )
+        return paired
     external = intensities.size - modes
     if external < 0:
         raise ValueError(
@@ -404,7 +444,10 @@ def thermochemistry_from_hessian(
     electronic = hessian.electronic_energy_hartree
     if hessian.ir_intensities is not None:
         intensities = _align_intensities(
-            np.asarray(hessian.ir_intensities), wavenumbers.size, structure
+            np.asarray(hessian.ir_intensities),
+            wavenumbers.size,
+            structure,
+            hessian.ir_wavenumbers_cm,
         )
     elif hessian.dipole_derivatives_npy is not None:
         intensities = _ir_intensities(unpack_npy(hessian.dipole_derivatives_npy), vectors, masses)
