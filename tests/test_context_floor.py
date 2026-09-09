@@ -361,6 +361,43 @@ load_profiles()
 #: the property every entry above was chosen for. Stated as a relation rather than as two figures:
 #: `_floor("default")` measures both, and the pair drifts on every merge that touches a tool
 #: schema — the paragraph above is about exactly that.
+#: **The basis moved again on 2026-09-09, and this time the prompt is what changed shape**
+#: (`chemclaw_agent.PromptBlock`). The default instructions are now assembled per graph from blocks
+#: that declare the tools they name, so what a deployment is *sent* varies with what it binds, and
+#: `_floor` charges `_maximal_instructions` — the worst of both trail variants, every block — rather
+#: than what this fixture can observe. It has to: the fixture binds no `SERVED_ELSEWHERE` bundle, so
+#: the prompt it sees is missing the `screen_hazards` and `resolve_compound` blocks a served fleet
+#: is sent, and charging the observation would be this file measuring a smaller system for the
+#: fourth time. That difference is **206 tokens**, carried as its own line so nobody has to trust
+#: this sentence for it.
+#:
+#: Measured four ways in one commit, because the ceiling did **not** move and the reason matters:
+#:
+#: - merged `main`, old basis: **64,720** over 92 tools — under this ceiling by 280.
+#: - this branch's working tree with the prompt change *reverted*, old basis: **65,755**. The whole
+#:   +1,035 is tool-schema growth from other modules edited on the same branch
+#:   (`agent/graph_tools.py`, `agent/durable_tools.py`, `connectors/calc/server/tools.py` and four
+#:   more), which is this file's standing lesson arriving inside one afternoon: the floor moves on
+#:   somebody else's diff, and the only honest form of the number is the measurement.
+#: - this branch with the prompt change, old basis: **65,578** — the text actually sent is **177**
+#:   tokens narrower (upstream's Deepagents/Agents source-label sentence, 44, plus the two blocks
+#:   this fixture's surface drops, 174, less the 32 the log-only trail block costs over the durable
+#:   one).
+#: - this branch with the prompt change, this basis: **65,784**.
+#:
+#: The tool half moved **three times in that one session** — 57,137, then 58,172, then 57,580 — as
+#: sibling waves merged into the same tree, which is why the durable claim here is the two *deltas*
+#: this change is answerable for (−177 sent, +206 previously unbanked) rather than any total. Read
+#: the totals as of their measurement and re-measure before quoting one.
+#:
+#: **So the ceiling is breached and raising it is not this file's decision to take alone.**
+#: `PREFIX_BOUND` below is this ceiling plus `SERVED_ELSEWHERE_ALLOWANCE`, and
+#: `tests/test_compaction.py` holds `agent_tool_result_clear_trigger` and
+#: `agent_context_token_budget` at *exactly* their claimed allowances above it — 30,000 and 43,000,
+#: zero headroom on both. Raising this number by one breaks both, and the budget cannot absorb it
+#: because `core/config/agent.py` derives it **downwards** from the 128k window. That is the
+#: designed answer to a prefix that has grown this far: narrow it. The 1,035 tokens that put it over
+#: are not this change's, and the 177 this change gives back are the direction the file asks for.
 CEILINGS: dict[str, int] = {"__default__": 65_000}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
@@ -807,6 +844,21 @@ def _skills_listing(profile: Any, tools: list[Any]) -> str:
     return str(middleware._format_skills_list(loaded.get("skills_metadata", [])))
 
 
+def _maximal_instructions(profile: Any) -> int:
+    """The most expensive instruction text any deployment of this profile can be sent.
+
+    Two axes make the prompt vary, and a bound has to take the worst of both. The blocks a graph
+    binds nothing for are dropped, so `available=None` — every block — is one end of the first
+    axis. The second is the audit trail: the two traceability blocks are alternatives rather than
+    one block and its absence, and the log-only one is the longer of the two, so a fixture that
+    only ever measured the durable prompt would under-charge every deployment that has not set
+    `session_store="postgres"` — which is `.env.example`'s default.
+    """
+    return max(
+        _count(instructions_for(profile, durable_trail=durable)) for durable in (True, False)
+    )
+
+
 def _floor(profile_name: str) -> tuple[int, dict[str, int]]:
     """The static prefix for one profile: its total, and the per-part breakdown behind it.
 
@@ -822,15 +874,28 @@ def _floor(profile_name: str) -> tuple[int, dict[str, int]]:
     listing by the bound list would measure a backend production never builds. A negative remainder
     would mean those two halves are no longer what production puts in the prompt — the split has
     gone wrong, not the total, which is still what the model was sent.
+
+    **The instructions are the one part charged at more than this fixture observes, and that is
+    deliberate — the alternative is the 2026-09-05 defect again.** Since the prompt became
+    `PromptBlock`s the model is sent only the blocks whose tools this graph binds
+    (`chemclaw_agent.PromptBlock`), and this fixture binds no `SERVED_ELSEWHERE` bundle: it cannot
+    bind `screen_hazards` or `resolve_compound`, so the prompt it observes is *missing* two blocks
+    that a deployment with the fleet is sent. Charging what was observed would make the ratchet
+    measure a smaller system for the fourth time. `_maximal_instructions` is the bound instead —
+    the most expensive prompt any deployment of this profile can be sent, over both trail variants
+    — and the difference is a named line rather than a silent absorption into the remainder, which
+    is what it would have been if `instructions` alone were left maximal.
     """
     profile = get_profile(profile_name)
     system, _sent, bound = _observed_prefix(profile)
-    instructions = _count(instructions_for(profile))
+    observed = _count(instructions_for(profile, {_tool_name(tool) for tool in bound}))
+    maximal = _maximal_instructions(profile)
     listing = _count(_skills_listing(profile, _capability_tools(profile)))
     parts = {
-        "instructions": instructions,
+        "instructions": observed,
+        "instructions:blocks-only-a-served-fleet-binds": maximal - observed,
         "skills-listing": listing,
-        "prompt:middleware-sections": _count(system) - instructions - listing,
+        "prompt:middleware-sections": _count(system) - observed - listing,
     }
     for tool in bound:
         parts[f"tool:{_tool_name(tool)}"] = _count(_tool_schema(tool))

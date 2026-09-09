@@ -119,7 +119,13 @@ import sys
 from collections.abc import Collection, Sequence
 from pathlib import Path
 
-from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, available_tool_names
+from chemclaw.agent.chemclaw_agent import (
+    _INSTRUCTION_BLOCKS,
+    available_tool_names,
+    harness_tool_names,
+    skill_tool_names,
+    subagent_tool_names,
+)
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core.config import Settings, settings
 from chemclaw.core.metrics import declared_histogram_names, declared_metric_names
@@ -334,13 +340,77 @@ _NON_SETTINGS_ENV = frozenset(
 )
 
 
+def _block_origin(index: int) -> str:
+    """How one instruction block is named in a problem line — the index plus its opening words.
+
+    The index alone is a coordinate that shifts whenever a block is inserted above; the opening
+    words are what makes a failure findable by search. Both, because either alone is worse: the
+    words are not unique enough to address a block and the index is not stable enough to cite.
+    """
+    opening = " ".join(_INSTRUCTION_BLOCKS[index].text.split()[:6])
+    return f"src/chemclaw/agent/chemclaw_agent.py::_INSTRUCTION_BLOCKS[{index}] ({opening}…)"
+
+
 def _prose_sources() -> dict[str, str]:
-    """The agent-facing prose to check: every SKILL.md plus the built-in instructions."""
-    sources = {"src/chemclaw/agent/chemclaw_agent.py::_INSTRUCTIONS": _INSTRUCTIONS}
+    """The agent-facing prose to check: every SKILL.md plus the built-in instructions.
+
+    **Block by block rather than as one string**, which is what makes rules 1-4 and rule 10 ask the
+    same question of the same text. `_INSTRUCTIONS` is now an assembly of `PromptBlock`s and the
+    *maximal* one — the log-only traceability block is not in it, so checking the joined string
+    would leave one of the two paragraphs a deployment can be sent outside every rule here.
+    """
+    sources = {_block_origin(index): block.text for index, block in enumerate(_INSTRUCTION_BLOCKS)}
     for skills_dir in [*settings.skills_dirs, *connector_skills_dirs()]:
         for path in sorted(Path(skills_dir).glob("*/SKILL.md")):
             sources[str(path)] = path.read_text()
     return sources
+
+
+def check_instruction_blocks() -> list[str]:
+    """Rule 10: a block declares exactly the tools its own text names, from a bindable name space.
+
+    **The rule that makes block-dropping a control rather than a decoration.** A `PromptBlock` is
+    dropped when the graph does not bind everything in its `requires`
+    (`chemclaw_agent.PromptBlock`), so a block that names `screen_hazards` and requires nothing is
+    the original defect with an extra step: it never drops, and it reads — in the declaration, to a
+    reviewer — as though it does. Equality rather than containment, because the other direction is
+    a defect too: a block requiring a tool it does not mention disappears from deployments that had
+    no reason to lose it, and nothing in the text would tell anyone why.
+
+    The second half is about which name space a requirement may come from.
+    `build_langgraph_agent` narrows the prompt against the tools it *binds* — the registry, the
+    connectors and the template launchers — and the three middleware name spaces
+    (`skill_tool_names`, `harness_tool_names`, `subagent_tool_names`) are attached afterwards by
+    middleware, so they are never in that set. A block requiring `read_file` or `task` would
+    therefore pass rules 1-2 (those are real tools) and be silently dropped from every deployment
+    that exists. That is exactly D-117's shape — a name space a checker cannot see — arriving from
+    the other side, so it is named here rather than left to be discovered.
+    """
+    bindable = (
+        available_tool_names()
+        - skill_tool_names()
+        - harness_tool_names()
+        - set(subagent_tool_names())
+    )
+    problems: list[str] = []
+    for index, block in enumerate(_INSTRUCTION_BLOCKS):
+        named = referenced_tool_names(block.text)
+        if named != block.requires:
+            problems.append(
+                f"{_block_origin(index)}: names {sorted(named)} and requires "
+                f"{sorted(block.requires)}. A block must require exactly the tools it names — one "
+                "it names but does not require is never dropped, and one it requires but does not "
+                "name is dropped from deployments with no reason to lose it."
+            )
+        unreachable = sorted(block.requires - bindable)
+        if unreachable:
+            problems.append(
+                f"{_block_origin(index)}: requires {unreachable}, which `build_langgraph_agent` "
+                "never binds — a middleware's tool (a filesystem verb, `write_todos`, `task`) is "
+                "attached after the surface the prompt is narrowed against, so this block would be "
+                "dropped from every deployment."
+            )
+    return problems
 
 
 def _operator_sources() -> dict[str, str]:
@@ -669,6 +739,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     problems = (
         check_corpus_is_assembled()
         + check_prose_contract()
+        + check_instruction_blocks()
         + check_operator_prose()
         + check_metric_citations()
     )

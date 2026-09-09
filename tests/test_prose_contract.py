@@ -13,13 +13,24 @@ from pathlib import Path
 import pytest
 
 import chemclaw.cli.validate_prose_contract as prose
-from chemclaw.agent.chemclaw_agent import available_tool_names
+from chemclaw.agent.chemclaw_agent import (
+    _INSTRUCTION_BLOCKS,
+    _INSTRUCTIONS,
+    PromptBlock,
+    advertised_tool_names,
+    available_tool_names,
+    instructions_for,
+)
+from chemclaw.agent.framing import ENVELOPE_TAG
+from chemclaw.agent.profiles import get_profile
 from chemclaw.cli.validate_prose_contract import (
     _ALLOWED_NON_TOOLS,
+    check_instruction_blocks,
     check_metric_citations,
     check_operator_prose,
     check_prose_contract,
 )
+from chemclaw.core.tool_registry import registered_tool_names
 from chemclaw.kg.note import KNOWN_NOTE_TYPES
 
 
@@ -475,3 +486,144 @@ def test_the_prose_gate_refuses_a_corpus_it_could_not_assemble(
     assert problems, "a corpus of zero documents reported nothing wrong"
     assert any("README.md" in problem for problem in problems), problems
     assert any("docs/decisions" in problem for problem in problems), problems
+
+
+def test_the_shipped_blocks_require_exactly_what_they_name() -> None:
+    """Rule 10 over the committed blocks — the regression guard for the declaration itself."""
+    assert check_instruction_blocks() == []
+
+
+def test_a_block_that_names_a_tool_it_does_not_require_is_caught(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The defect rule 10 exists for: a block that names a tool and declares nothing never drops.
+
+    This is the original finding with one extra step. `_assemble` drops a block when the graph does
+    not bind everything in `requires`, so a block whose `requires` is empty is sent to every
+    deployment — and reads, in the declaration, exactly like one that would be dropped. Nothing
+    else in this repository can see the difference: rules 1-2 are satisfied (`screen_hazards` is a
+    real tool), `mypy` sees a `frozenset`, and the prompt is assembled at runtime from whatever is
+    written here.
+    """
+    monkeypatch.setattr(
+        prose,
+        "_INSTRUCTION_BLOCKS",
+        (_INSTRUCTION_BLOCKS[0], PromptBlock("Always call screen_hazards first. ")),
+    )
+    problems = check_instruction_blocks()
+    assert problems, "a block naming a tool it does not require was reported as sound"
+    assert "screen_hazards" in problems[0], problems
+
+
+def test_a_block_requiring_a_tool_it_does_not_name_is_caught(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other direction, which is a defect too — and a silent one.
+
+    A block requiring a tool its text never mentions vanishes from any deployment lacking that
+    tool, and the prose gives a reader no reason why. Equality, not containment, is what makes both
+    directions visible.
+    """
+    monkeypatch.setattr(
+        prose,
+        "_INSTRUCTION_BLOCKS",
+        (PromptBlock("Cite the note id behind every claim. ", frozenset({"gather_evidence"})),),
+    )
+    problems = check_instruction_blocks()
+    assert problems, "a block requiring a tool it never names was reported as sound"
+    assert "gather_evidence" in problems[0], problems
+
+
+def test_a_block_requiring_a_middleware_tool_is_caught(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-117's shape from the other side: a name space the prompt is never narrowed against.
+
+    `build_langgraph_agent` narrows against the tools it *binds* — registry, connectors, template
+    launchers. The filesystem verbs, `write_todos` and `task` are attached by middleware
+    afterwards, so a block requiring one of them passes rules 1-2 (they are real tools, and
+    `available_tool_names` knows all six name spaces) and is then dropped from every deployment
+    that exists. Loud rather than silent.
+    """
+    monkeypatch.setattr(
+        prose,
+        "_INSTRUCTION_BLOCKS",
+        (PromptBlock("Use read_file on the path shown. ", frozenset({"read_file"})),),
+    )
+    problems = check_instruction_blocks()
+    assert any("read_file" in problem and "middleware" in problem for problem in problems), problems
+
+
+def test_the_prompt_a_graph_is_sent_names_no_tool_that_graph_cannot_call() -> None:
+    """The property the blocks exist for, asserted against two real surfaces.
+
+    Measured before the blocks: the default prompt named **16** tools a cold deployment binds
+    nothing for — every calculator, the structure searches, `resolve_compound`, and
+    `screen_hazards`, whose paragraph told the model to screen every proposed reagent against a
+    hazard screen that was not there.
+
+    **The bound half only.** This asserts what `instructions_for` produces, not the whole system
+    message: `SkillsMiddleware` appends a skills listing carrying each skill's own declared tools,
+    and that listing is narrowed by `skill_access`'s *advertised* names (the manifests) rather than
+    by what a turn binds — so a deployment whose bundles are declared and unreachable is still
+    offered the safety-screening skill. That is a second defect with the same shape and a different
+    owner; naming it here is better than a test whose green line implies it was covered.
+    """
+    profile = get_profile("default")
+    for available in (frozenset(registered_tool_names()), advertised_tool_names(profile)):
+        text = instructions_for(profile, available)
+        named = prose.referenced_tool_names(text)
+        assert named <= available, sorted(named - available)
+
+
+def test_the_maximal_prompt_is_what_a_validator_and_a_caller_still_get() -> None:
+    """`available=None` is every block, so nothing that reads the prose sees a narrowed one.
+
+    The validators, `tests/surface.py` and `AgentProfile`'s default all ask "what does this profile
+    say" without a graph to ask about. A narrowed answer there would make the gate check less prose
+    than a deployment is sent, which is this file's own failure mode.
+    """
+    profile = get_profile("default")
+    maximal = instructions_for(profile)
+    assert maximal == _INSTRUCTIONS
+    for block in _INSTRUCTION_BLOCKS:
+        if block.trail in (None, "durable"):
+            assert block.text in maximal, block.text[:60]
+
+
+def test_a_deployment_with_no_durable_trail_is_not_told_it_has_one() -> None:
+    """F1's prompt half: the traceability paragraph follows the sink, not the wish.
+
+    `default_audit_sink()` returns `NullAuditSink` on every deployment that has not set
+    `session_store="postgres"` — the shipped `.env.example` — and the prompt asserted an
+    append-only trail in the present tense regardless. The two texts are a pair rather than one
+    text and its absence, because "how is this number defended" deserves an answer either way.
+    """
+    profile = get_profile("default")
+    durable = instructions_for(profile, durable_trail=True)
+    log_only = instructions_for(profile, durable_trail=False)
+    assert "append-only audit trail" in durable
+    assert "append-only audit trail" not in log_only
+    assert "no durable audit trail here" in log_only
+    assert "reproducibility, which is a different claim from integrity" in durable
+    assert "reproducibility, which is a different claim from integrity" in log_only
+
+
+def test_the_safety_floor_survives_narrowing_to_a_surface_with_no_tools_at_all() -> None:
+    """A block carrying a floor sentence requires nothing — measured, not intended.
+
+    **This caught a regression the blocks themselves introduced.** The envelope rule — half of the
+    two-part prompt-injection defense (`agent/framing.py`) — sat in the same paragraph as the
+    `record_knowledge_note` instruction, so the block required two side-effecting tools, and
+    `agent/subagents.py` subtracts exactly those from the one helper this deployment builds.
+    Measured on the compiled helper graph: 24 tools bound and **no envelope rule in its prompt**,
+    while `tests/test_framing.py` stayed green because it reads the maximal text.
+
+    The empty surface is the right probe: no real profile is that narrow, and a floor that survives
+    it survives every narrowing that can occur. `_SAFETY_RULES` covers the profiles that replace
+    the prose entirely; this covers the ones that keep it and lose tools.
+    """
+    profile = get_profile("default")
+    floor = instructions_for(profile, frozenset())
+    assert f"<{ENVELOPE_TAG}>" in floor, "the envelope rule is behind a tool this graph may lack"
+    assert "'Refused:'" in floor
+    assert "Earlier tool result dropped" in floor
+    assert "What this system does not hold" in floor

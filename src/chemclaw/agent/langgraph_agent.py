@@ -77,7 +77,12 @@ from typing import Annotated, Any, NotRequired, cast
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, StateBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
-from deepagents.middleware.skills import SkillMetadata, SkillsMiddleware, SkillsState
+from deepagents.middleware.skills import (
+    SKILLS_SYSTEM_PROMPT,
+    SkillMetadata,
+    SkillsMiddleware,
+    SkillsState,
+)
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import PrivateStateAttr
 from langgraph.channels.untracked_value import UntrackedValue
@@ -89,7 +94,12 @@ from langgraph.channels.untracked_value import UntrackedValue
 # and `durable/template_activities.py` — and within one package that is the established idiom here.
 # (Unnumbered deliberately: this said "three tests", and it was six importers including a
 # production one, which is what a count in a comment does.)
-from chemclaw.agent.audit import AuditSink, make_audit_middleware
+from chemclaw.agent.audit import (
+    AuditSink,
+    NullAuditSink,
+    default_audit_sink,
+    make_audit_middleware,
+)
 from chemclaw.agent.chemclaw_agent import (
     _advertised_names,
     _capability_tools,
@@ -236,10 +246,18 @@ def build_langgraph_agent(
     if helper:
         prof = helper_profile(prof, frozenset(fn.__name__ for fn in tools))
         tools = _capability_tools(prof)
+    # **Resolved once, here, because two things now depend on which sink this graph got.** The
+    # middleware writes the rows and the prompt tells the chemist what the trail is
+    # (`instructions_for(durable_trail=…)`), and the two disagreeing is precisely the defect that
+    # made this necessary: the prompt asserted an append-only trail in the present tense while
+    # `default_audit_sink()` resolved to `NullAuditSink` on every deployment that has not set
+    # `session_store="postgres"`. Passing the same *object* to both makes them one fact rather than
+    # two readings of one setting.
+    sink = audit_sink if audit_sink is not None else default_audit_sink()
     audit = make_audit_middleware(
         correlation_id=correlation_id if correlation_id is not None else uuid.uuid4().hex,
         actor=actor,
-        sink=audit_sink,
+        sink=sink,
         # Which of the two graphs in a turn wrote the row. Taken from `prof` *after* the narrowing
         # above, so it is the derived `<caller>-helper` name rather than a literal — a caller that
         # resolved `property-lookup` gets `property-lookup-helper`, and a profile added next year
@@ -285,7 +303,17 @@ def build_langgraph_agent(
         # and a helper that has to be told what a knowledge note is would need the whole prompt
         # rewritten anyway. What it adds is the part its caller's prompt cannot be right about —
         # that this graph reads and reports, sees no conversation, and reaches no connector.
-        "system_prompt": instructions_for(prof) + (HELPER_BRIEF if helper else ""),
+        # Narrowed to the tools this graph actually binds, so the prompt cannot promise capability
+        # the model would then fail to find (`chemclaw_agent.PromptBlock`). The names come off
+        # `bound` rather than from the registry for the same reason the helper narrowing above
+        # reads `tools`: `bound` *is* the surface, connectors included, and a connector that was
+        # declared but unreachable is exactly the case the prose must not over-promise.
+        "system_prompt": instructions_for(
+            prof,
+            {tool.name for tool in bound},
+            durable_trail=not isinstance(sink, NullAuditSink),
+        )
+        + (HELPER_BRIEF if helper else ""),
         "state_schema": ChemclawState,
         "middleware": _middleware(prof, backend, audit, chat_model, labelled),
         "name": "chemclaw",
@@ -316,7 +344,7 @@ def build_langgraph_agent(
         # `skills=` is deliberately absent: it is what would make upstream compose a second skills
         # middleware beside `ReloadingSkillsMiddleware`. `_skills_middleware` says why one is right.
         permissions=filesystem_permissions(),
-        subagents=_subagents(prof, chat_model, audit_sink, correlation_id, actor),
+        subagents=_subagents(prof, chat_model, sink, correlation_id, actor),
         **shared,
     )
 
@@ -602,6 +630,82 @@ class ReloadingSkillsMiddleware(SkillsMiddleware):
 
     state_schema = ReloadingSkillsState
 
+    def _format_skills_list(self, skills: list[SkillMetadata]) -> str:
+        """Upstream's listing, except when there is nothing to list — see `NO_SKILLS`.
+
+        The one case upstream cannot get right for this deployment, because its answer is an
+        invitation to do the thing `NarrowedSkillsBackend` refuses. Overriding the formatter rather
+        than the template, since `{skills_list}` is where that sentence is substituted in: the
+        template cannot tell an empty listing from a full one.
+
+        A private-method override, and therefore an upstream-shape dependency —
+        `tests/test_upstream_surface.py` pins it, so a rename goes red in the file that exists to
+        catch that rather than silently restoring the invitation.
+        """
+        if not skills:
+            return NO_SKILLS
+        return str(super()._format_skills_list(skills))
+
+
+#: What the model is told when its narrowed skills listing is empty.
+#:
+#: **Upstream's answer is an invitation to write one**, verbatim on a cold deployment: *"(No skills
+#: available yet. You can create skills in /cold)"*. Every write verb on the skills tree raises
+#: `SkillsReadOnlyRefusal` (`agent/skill_backend.py`), by a decision with no configuration —
+#: `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` — so that sentence is a prompt telling
+#: the model to attempt something this system exists to refuse, and the refusal it earns costs a
+#: turn and reads to the model as a fault it should route around.
+#:
+#: It also said `/cold` — the *virtual* route this repository invented for the tree, which is not a
+#: path on the pod and not one a chemist could be pointed at either.
+#:
+#: Empty is a real state and it has two causes worth telling apart in the model's own answer: the
+#: deployment ships no skills at all, or the three predicates narrowed them all away for this
+#: caller (`agent/skill_access.py`). The model cannot distinguish them and must not guess, so it is
+#: told what is true of both and what to do about it — answer without a procedure, and say so.
+NO_SKILLS = (
+    "(None are available to you in this session. This is either a deployment that ships no "
+    "skills or a caller whose role reaches none of them; you cannot tell which, and you cannot "
+    "create one — the skills tree is read-only to every turn. Answer from the instructions and "
+    "the evidence you gather, and say plainly that you have no procedure for a task that "
+    "obviously wants one.)"
+)
+
+#: The Deepagents/Agents provenance sentence, removed from the skills prompt this deployment sends.
+#:
+#: It tells the model that a source labelled "Deepagents" is specific to this agent tool and one
+#: labelled "Agents" is shared across every agent tool *on this machine*. Neither label exists
+#: here: `_labelled` derives each source's label from its directory (`skills`, or a bundle's name),
+#: there is no machine-wide skills tree, and nothing else on the pod shares one. So the sentence is
+#: a distinction the model cannot apply to anything it can see, in a prompt this file otherwise
+#: pays for by the token.
+#:
+#: Removed by substring rather than by re-declaring upstream's template, so the ~40 lines that are
+#: correct keep arriving from upstream and only the one false sentence is this repository's
+#: decision. `_skills_prompt` refuses rather than silently keeping it when upstream rewords.
+_UPSTREAM_SOURCE_LABELS = (
+    'Sources labeled "Deepagents" are specific to this agent tool; sources labeled "Agents" are '
+    "shared across all agent tools on this machine.\n\n"
+)
+
+
+def _skills_prompt() -> str:
+    """Upstream's skills prompt minus the one sentence that is false here.
+
+    Raises:
+        RuntimeError: When the sentence is no longer in upstream's template. Loud, because the
+            alternative is that a bump quietly restores it — and because the substring is the whole
+            mechanism, so its absence means this function has stopped doing anything at all.
+    """
+    if _UPSTREAM_SOURCE_LABELS not in SKILLS_SYSTEM_PROMPT:
+        raise RuntimeError(
+            "deepagents' SKILLS_SYSTEM_PROMPT no longer contains the Deepagents/Agents "
+            "source-label sentence this deployment removes; re-check what upstream now says "
+            "about source labels "
+            "and update `_UPSTREAM_SOURCE_LABELS` (agent/langgraph_agent.py)"
+        )
+    return SKILLS_SYSTEM_PROMPT.replace(_UPSTREAM_SOURCE_LABELS, "", 1)
+
 
 def _harness_middleware(profile: AgentProfile) -> list[Any]:
     """The plan/execute harness's todo list, and the runaway cap every profile gets.
@@ -665,7 +769,13 @@ def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]
     upstream composes one unconditionally — which is why `_middleware` explains the rule there.
     """
     return ReloadingSkillsMiddleware(
-        backend=backend, sources=[(f"/{label}", label) for label, _ in labelled]
+        backend=backend,
+        sources=[(f"/{label}", label) for label, _ in labelled],
+        # Upstream's own template, minus one sentence that is false on this deployment. Passed
+        # here rather than defaulted because the constructor is the supported seam for it, and
+        # because a template that arrives from upstream every bump is the half that cannot go
+        # stale — see `_skills_prompt`.
+        system_prompt=_skills_prompt(),
     )
 
 

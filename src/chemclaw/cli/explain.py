@@ -16,7 +16,7 @@ A tool call now also names **which plan step it served** (`audit_events.plan_ste
 recorded without inventing one — including for a call a gate *refused*, where no job exists to carry
 the rationale.
 
-Read-only by construction: three `SELECT`s and no writes. Deliberately not an agent tool — the
+Read-only by construction: four `SELECT`s and no writes. Deliberately not an agent tool — the
 audit trail is evidence *about* the agent, and a surface that let the agent read its own trail
 would invite it to summarize rather than to be examined.
 """
@@ -67,6 +67,18 @@ _JOBS = """
     FROM job_records
     WHERE session_id = %s
     ORDER BY completed_at ASC
+"""
+
+# Whether the session was ever created here at all. One row is written per session at creation
+# (`infra/sql/013_session_owners.sql`), so its presence is the only thing in this database that can
+# tell a mistyped id from a session that ran and left nothing — and telling those apart is the whole
+# of what an empty reconstruction was missing. Read for that message alone: nothing else in this
+# report needs it, and the owner itself is deliberately not printed, since this is a reconstruction
+# of a session's *work* and the actor is already on every row that has one.
+_OWNED = """
+    SELECT 1
+    FROM session_owners
+    WHERE session_id = %s
 """
 
 
@@ -144,6 +156,41 @@ def _speaker(message: object, shape: str | None = None) -> tuple[str, str]:
     return message_role(restored), message_text(restored).strip()
 
 
+def _why_nothing(known: bool) -> list[str]:
+    """Why this reconstruction is empty — the half that made an empty one useless.
+
+    **`explain <a session that just ran a tool>` and `explain <an id that never existed>` printed
+    the identical line.** That is worth little on its own and it is the *symptom* of the defect
+    above it: on the shipped configuration nothing is written for any session, so the two really
+    are the same state and the report was right to be unable to tell them apart. What it could
+    have said, and did not, is which of the three situations a reader is in — and two of the three
+    are things the reader can act on.
+
+    Under `session_store="memory"` no id can be distinguished from any other, so this says so and
+    names the setting rather than implying the session is unknown. Under `postgres`,
+    `session_owners` holds one row per session from its creation, so an id with no row was never
+    created here (a typo, another deployment, another database) and an id with a row ran and left
+    nothing — which is retention, an abandoned turn, or a session that never took one.
+    """
+    if settings.session_store != "postgres":
+        return [
+            "  this deployment records nothing: CHEMCLAW_SESSION_STORE="
+            f"{settings.session_store}, so `default_audit_sink()` is log-only and no transcript "
+            "row is written either. An unknown id and a session that ran a hundred tools print "
+            "exactly this. Set CHEMCLAW_SESSION_STORE=postgres to keep the record.",
+        ]
+    if known:
+        return [
+            "  the session exists (session_owners has its row) and nothing is recorded under it: "
+            "retention has pruned it, its turns were abandoned before the projection was written, "
+            "or it never took a turn.",
+        ]
+    return [
+        "  no session with this id was ever created against this database — check the id, the "
+        "deployment and CHEMCLAW_POSTGRES_DSN. This is not an empty session; it is an unknown one.",
+    ]
+
+
 def _wrap(text: str, *, limit: int = 400) -> str:
     """One line, bounded — a turn's transcript can be long and this is an index, not an archive."""
     flat = " ".join(text.split())
@@ -189,7 +236,10 @@ async def explain(session_id: str, dsn: str | None = None) -> list[str]:
         for correlation_id, connector, job, rationale, summary in await cursor.fetchall():
             jobs.setdefault(correlation_id, []).append(Job(connector, job, rationale, summary))
 
-    return _render(session_id, order, turns, calls, jobs)
+        cursor = await conn.execute(_OWNED, (session_id,))
+        known = await cursor.fetchone() is not None
+
+    return _render(session_id, order, turns, calls, jobs, known=known)
 
 
 def _render(
@@ -198,6 +248,8 @@ def _render(
     turns: dict[str, list[tuple[str, str]]],
     calls: dict[str, list[ToolCall]],
     jobs: dict[str, list[Job]],
+    *,
+    known: bool = False,
 ) -> list[str]:
     """Format the gathered rows; separated from the fetch so it is testable without a database.
 
@@ -220,6 +272,7 @@ def _render(
     lines = [f"session {session_id}", ""]
     if not shown:
         lines.append("  no messages, tool calls or jobs recorded for this session")
+        lines.extend(_why_nothing(known))
         return lines
     for correlation_id in shown:
         label = correlation_id or "(unattributed — written before the correlation id was recorded)"
