@@ -1545,3 +1545,62 @@ def test_a_pipeline_block_on_an_autocommit_connection_is_still_one_transaction()
         )
 
     asyncio.run(_run())
+
+
+def test_the_editing_middleware_hands_its_edited_request_to_its_handler() -> None:
+    """`agent/compaction.OffLoopContextEditing` reuses upstream's sync method for its request.
+
+    The edits are pure CPU over a message list that grows with the session, and upstream runs them
+    inline in `awrap_model_call` — on the event loop of a pod serving other sessions. Moving them
+    off it without copying upstream's method body (the empty-messages check, the private
+    `_resolve_token_counter`, the `deepcopy`, the edit loop, `request.override`) is done by
+    running the *synchronous* `wrap_model_call` in a worker thread under a handler that captures
+    the request it was about to send. That works only while upstream's own middleware contract
+    holds: the handler is called, once, with the prepared request.
+
+    If it stops holding, the model call goes out uncompacted — the safe direction, and reported
+    rather than silent — but the compaction has stopped running, which is the exact defect
+    `agent/compaction.py` exists to end. So it is pinned here rather than believed.
+    """
+    from typing import Any, cast
+
+    from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
+    from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
+
+    messages: list[AnyMessage] = [
+        HumanMessage("go"),
+        AIMessage("", tool_calls=[{"name": "t", "args": {}, "id": "c0"}]),
+        ToolMessage("x " * 6000, tool_call_id="c0"),
+        AIMessage("", tool_calls=[{"name": "t", "args": {"n": 1}, "id": "c1"}]),
+        ToolMessage("x " * 6000, tool_call_id="c1"),
+    ]
+
+    class _Request:
+        def __init__(self, messages: list[AnyMessage]) -> None:
+            self.messages = messages
+
+        def override(self, **updates: Any) -> "_Request":
+            return _Request(updates.get("messages", self.messages))
+
+    seen: list[_Request] = []
+
+    def capture(request: _Request) -> None:
+        seen.append(request)
+
+    middleware = ContextEditingMiddleware(
+        edits=[ClearToolUsesEdit(trigger=1, keep=1, placeholder="[cleared]")]
+    )
+    middleware.wrap_model_call(cast(Any, _Request(messages)), cast(Any, capture))
+
+    assert len(seen) == 1, (
+        "ContextEditingMiddleware.wrap_model_call no longer calls its handler exactly once. "
+        "agent/compaction.OffLoopContextEditing runs that method in a worker thread with a "
+        "capturing handler, to move the per-model-call deepcopy and the context edits off the "
+        "event loop without duplicating upstream's method body. Adjust it, or duplicate the body "
+        "deliberately."
+    )
+    assert seen[0].messages[2].content == "[cleared]", (
+        "ContextEditingMiddleware.wrap_model_call no longer hands the *edited* message list to its "
+        "handler. agent/compaction.OffLoopContextEditing takes the request from that call, so a "
+        "handler that receives the unedited one means compaction has silently stopped running."
+    )

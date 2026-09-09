@@ -19,11 +19,14 @@ Three things are worth proving here and they are not the same thing:
 
 import asyncio
 import json
+import random
 import re
-from typing import Any
+import threading
+from dataclasses import dataclass
+from typing import Any, cast
 
 import pytest
-from langchain.agents.middleware import ClearToolUsesEdit
+from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import (
     AIMessage,
@@ -41,7 +44,9 @@ from chemclaw.agent.compaction import (
     TOOL_RESULT_PLACEHOLDER,
     ClearOlderToolResultsEdit,
     KeepLastConversationGroupsEdit,
+    OffLoopContextEditing,
     RecordContextCompaction,
+    _clear_older_tool_results,
     _placeholder,
     cited_note_ids,
     context_compaction_middleware,
@@ -1828,3 +1833,318 @@ def test_a_note_body_cannot_forge_a_citation_through_the_tool_that_may_write_one
         "a note body named itself as a citation in this system's own placeholder"
     )
     assert named == ["rxn-real"], f"the real citation stopped being read back: {named}"
+
+
+# ---------------------------------------------------------------------------------------------
+# What the strategy *costs*. It runs on every model call, over a thread that never shrinks, on the
+# event loop of a pod serving other sessions — so its complexity is a property worth asserting,
+# and it was asserted nowhere until upstream's `apply` turned out to be quadratic in thread length.
+# ---------------------------------------------------------------------------------------------
+
+
+def _long_thread(turns: int) -> list[AnyMessage]:
+    """`turns` one-call turns: the shape a long research session actually grows into.
+
+    Deliberately not `_thread` above. That fixture is built to be read; this one is built to be
+    *large* — thousands of messages, where the quadratic term is the whole of the measurement and
+    an inline fixture would be unreadable at the sizes that show it.
+    """
+    messages: list[AnyMessage] = []
+    for turn in range(turns):
+        call_id = f"long-{turn}"
+        messages += [
+            HumanMessage(content=f"question {turn} " + "x" * 100),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "find_notes", "args": {"n": turn}, "id": call_id}],
+            ),
+            ToolMessage(content="r" * 400, tool_call_id=call_id, name="find_notes"),
+            AIMessage(content="answer " + "a" * 200),
+        ]
+    return messages
+
+
+class _CountingEstimator:
+    """The estimator, wrapped so the *work* asked of it is measurable rather than timed.
+
+    `messages_counted` is the total number of messages handed to it across a whole `apply` — the
+    quantity that is linear in one implementation and quadratic in the other, and the one that is
+    99.7% of the wall-clock difference between them. Counting it instead of timing it is what makes
+    the assertion below deterministic: a ratio of two durations on a shared runner was measured at
+    2.97-6.23 for the linear arm on an idle machine and 11.74-19.68 while the box was busy, which
+    is a bound with no safe place to sit. A count does not move.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.messages_counted = 0
+
+    def __call__(self, messages: Any) -> int:
+        """Count `messages`, recording how much was asked of the estimator on the way."""
+        listed = list(messages)
+        self.calls += 1
+        self.messages_counted += len(listed)
+        return count_tokens_approximately(listed)
+
+
+def _clearing_work(turns: int) -> int:
+    """Messages handed to the estimator by one `ClearOlderToolResultsEdit.apply` over `turns` turns.
+
+    `trigger=1` puts the whole thread over budget and makes `clear_at_least` the entire overshoot,
+    which is the worst case and the one that was quadratic: every reclaimable result is a candidate.
+    """
+    estimator = _CountingEstimator()
+    edit = ClearOlderToolResultsEdit(trigger=1, keep=3, placeholder=TOOL_RESULT_PLACEHOLDER)
+    edit.apply(_long_thread(turns), count_tokens=estimator)
+    return estimator.messages_counted
+
+
+def test_clearing_tool_results_does_not_cost_the_square_of_the_thread() -> None:
+    """Four times the thread costs about four times the work, not sixteen.
+
+    **A scaling assertion, and deliberately not a wall-clock one.** The machine's speed is not the
+    property under test, and a duration ratio on a shared CI runner cannot separate the two
+    implementations reliably — measured on this very fixture, the linear arm ranged 2.97-6.23 idle
+    and 11.74-19.68 under load, straddling the 16 a quadratic implementation would produce. So the
+    ratio is taken over the *work* asked of the estimator, which is the same property and does not
+    move: linear lands at 4.02, quadratic at 16.06, and the bound sits at 8.
+
+    What this catches is a re-delegation to upstream's `ClearToolUsesEdit.apply`, which is quadratic
+    twice over: it re-slices the entire message prefix per candidate to find the assistant message
+    that made the call, and — the term this test measures, at 99.7% of the wall clock — it re-counts
+    the *whole thread* after each cleared result to decide whether `clear_at_least` is satisfied.
+    Both terms live in the same loop, so a re-delegation brings back both and this sees it.
+
+    The seconds, since a count is easier to dismiss: against upstream on this fixture, 320 ms at 250
+    turns, 1,310 at 500, 5,600 at 1,000, 23,851 at 2,000 and 96,070 at 4,000 — every doubling
+    quadrupling — against 5.5, 11.4, 24.2 and 57.7 ms for the same sizes here. The trigger engages
+    at roughly 130 turns of a real session and nothing shrinks the thread from there. Not a
+    micro-optimisation dressed as a test: this runs on **every model call**, synchronously, inside
+    `awrap_model_call`, so on a pod it is time no other session is served.
+    """
+    small = _clearing_work(200)
+    large = _clearing_work(800)
+    ratio = large / small
+    assert ratio < 8.0, (
+        f"clearing 800 turns asked the estimator for {large:,} messages against {small:,} for 200 "
+        f"— {ratio:.1f}x the work for 4x the thread, which is the quadratic scaling "
+        "agent/compaction.py::_clear_older_tool_results exists to avoid. Something re-delegated to "
+        "upstream's ClearToolUsesEdit.apply, or reintroduced a full-thread count inside the "
+        "per-candidate loop."
+    )
+
+
+def _awkward_thread(rnd: random.Random, length: int) -> list[AnyMessage]:
+    """A thread built to hit every branch the clearing can take, including the malformed ones.
+
+    Orphan tool results whose call id no assistant message ever made, results whose call was made by
+    an assistant message that is *not* the one immediately before them, results already stamped as
+    cleared, assistant messages with zero to three calls, and payloads small enough that the
+    placeholder costs more than the content it replaces (a negative reclaim). None of these is
+    hypothetical — a fan-out interleaves results, a re-derived reduction re-reads its own
+    placeholders, and `agent/tool_result_size.py` can leave a result of a handful of characters.
+    """
+    messages: list[AnyMessage] = []
+    minted: list[str] = []
+    for index in range(length):
+        roll = rnd.random()
+        if roll < 0.2:
+            messages.append(HumanMessage(content="h" * rnd.randint(1, 300)))
+        elif roll < 0.5:
+            calls = [
+                {"name": f"tool_{slot}", "args": {}, "id": f"id{index}_{slot}"}
+                for slot in range(rnd.randint(0, 3))
+            ]
+            minted += [str(call["id"]) for call in calls]
+            messages.append(AIMessage(content="a" * rnd.randint(0, 200), tool_calls=calls))
+        else:
+            known = minted and rnd.random() < 0.8
+            metadata = (
+                {"context_editing": {"cleared": True, "strategy": "clear_tool_uses"}}
+                if rnd.random() < 0.1
+                else {}
+            )
+            messages.append(
+                ToolMessage(
+                    content="r" * rnd.choice([1, 5, 400, 4000]),
+                    tool_call_id=rnd.choice(minted) if known else f"orphan{index}",
+                    name="tool_0",
+                    response_metadata=metadata,
+                )
+            )
+    return messages
+
+
+def test_the_first_party_clearing_is_upstreams_clearing() -> None:
+    """`_clear_older_tool_results` produces exactly what `ClearToolUsesEdit.apply` produces.
+
+    **This is the price of not delegating, and it is paid here rather than argued in a docstring.**
+    `D-2026-08-14-the-coupling-is-the-cost-not-the-line-count` says the cost of a first-party copy
+    is not its line count but the number of places reading a shape upstream never promised; a copy
+    of a whole *strategy* is that risk in its largest form, because it can drift in behaviour while
+    every other test in this file goes on passing. A differential over threads built to be awkward
+    is what makes the drift loud: if upstream changes what it clears, this goes red and a reviewer
+    decides whether to follow.
+
+    Seeded, so a failure is reproducible rather than a story about one run. Swept over every `keep`
+    and every `clear_at_least` regime that matters — none, the tightest possible floor, two middling
+    ones, and more than the thread can ever reclaim.
+
+    Compared on content, on the cleared stamp and on `artifact`, which is the whole of what either
+    implementation writes.
+    """
+    placeholder = "[a placeholder deliberately long enough to sometimes cost more than it saves]"
+    rnd = random.Random(20260909)
+    compared = 0
+    for _ in range(120):
+        base = _awkward_thread(rnd, rnd.randint(1, 60))
+        for keep in (0, 1, 3, 8):
+            for clear_at_least in (0, 1, 50, 500, 10**9):
+                theirs: list[AnyMessage] = [message.model_copy() for message in base]
+                ours: list[AnyMessage] = [message.model_copy() for message in base]
+                ClearToolUsesEdit(
+                    trigger=-1,
+                    keep=keep,
+                    clear_at_least=clear_at_least,
+                    placeholder=placeholder,
+                ).apply(theirs, count_tokens=_count)
+                _clear_older_tool_results(
+                    ours,
+                    count_tokens=_count,
+                    keep=keep,
+                    clear_at_least=clear_at_least,
+                    placeholder=placeholder,
+                )
+                assert [_shape(message) for message in ours] == [
+                    _shape(message) for message in theirs
+                ], (
+                    f"the first-party clearing diverged from upstream's at keep={keep}, "
+                    f"clear_at_least={clear_at_least}. agent/compaction.py copied "
+                    "ClearToolUsesEdit.apply to make it linear; if upstream's behaviour has moved, "
+                    "decide whether to follow it rather than letting the copy drift."
+                )
+                compared += 1
+    assert compared == 120 * 4 * 5
+
+
+def _shape(message: AnyMessage) -> tuple[Any, Any, Any]:
+    """Everything either clearing implementation writes to a message: content, stamp, artifact."""
+    return (
+        message.content,
+        message.response_metadata.get("context_editing"),
+        getattr(message, "artifact", None),
+    )
+
+
+def test_the_estimator_adds_up_one_message_at_a_time() -> None:
+    """A message list costs what its messages cost separately.
+
+    That is the property the linear fix rests on.
+
+    `_clear_older_tool_results` decides whether `clear_at_least` is satisfied from the difference
+    between the result it replaced and the placeholder that replaced it, instead of re-counting the
+    whole thread. That is exact only because `count_tokens_approximately` rounds *per message*, and
+    its own NOTE says it does so precisely to make individual counts add up. Asserting it is what
+    turns "upstream's comment says so" into evidence: if the rounding moves, the clearing stops at
+    the wrong point and reclaims too much or too little, silently.
+    """
+    thread = _thread(4, with_tool_calls=True, filler="x" * 137)
+    assert _count(thread) == sum(_count([message]) for message in thread)
+
+
+def test_the_context_edits_do_not_run_on_the_event_loop() -> None:
+    """The edits are pure CPU over a growing list; they belong in a worker thread.
+
+    Upstream's `awrap_model_call` deep-copies the message list and calls each `apply` inline, so
+    every millisecond of it is a millisecond this pod serves no other session. Measured after the
+    linear fix, per model call: 128 ms at 2,000 messages, 234 at 8,000, 491 at 20,000 — and three
+    quarters of that is upstream's `deepcopy`, not the edits, which is why `OffLoopContextEditing`
+    moves the whole call rather than the edits alone.
+
+    Asserted on the thread identity rather than on a duration, for the reason the scaling test
+    above gives: a stopwatch on a shared runner measures the runner.
+    """
+    probe = _ThreadProbe()
+    handed: list[Any] = []
+
+    async def handler(request: Any) -> str:
+        handed.append(request)
+        return "answered"
+
+    request = _StubRequest(messages=[HumanMessage(content="go")])
+    middleware = OffLoopContextEditing(edits=[probe])
+    answer = asyncio.run(middleware.awrap_model_call(cast(Any, request), handler))
+
+    assert answer == "answered"
+    assert probe.threads, "the edit never ran"
+    assert probe.threads[0] != threading.get_ident(), (
+        "a context edit ran on the event loop's own thread; OffLoopContextEditing exists so that "
+        "the per-model-call deepcopy and the two edits cannot starve this pod's other sessions."
+    )
+    assert [message.content for message in handed[0].messages] == ["go", "edited"], (
+        "the edited request did not reach the handler, so the compaction ran and was discarded"
+    )
+
+
+def test_an_editor_that_hands_nothing_on_is_reported_rather_than_silently_skipped() -> None:
+    """`OffLoopContextEditing` depends on upstream calling its handler; a change to that is loud.
+
+    The class reuses upstream's own synchronous `wrap_model_call` and steals the request it was
+    about to send, which is what keeps it from copying that method's body. The contract it rests on
+    is that the handler is called at all. If upstream ever stops calling it, the request goes out
+    uncompacted — the safe direction — but a compaction that silently stops running is the exact
+    defect `agent/compaction.py` was written to end, so it is counted and reported instead.
+
+    Driven red as well as green: without the `if not edited` branch this passes the request through
+    and moves no counter.
+    """
+    middleware = OffLoopContextEditing(edits=[_ThreadProbe()])
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(ContextEditingMiddleware, "wrap_model_call", lambda self, request, handler: None)
+    handed: list[Any] = []
+
+    async def handler(request: Any) -> str:
+        handed.append(request)
+        return "answered"
+
+    request = _StubRequest(messages=[HumanMessage(content="go")])
+    before = METRICS.value("chemclaw_degraded_total")
+    try:
+        asyncio.run(middleware.awrap_model_call(cast(Any, request), handler))
+    finally:
+        monkey.undo()
+
+    assert handed[0] is request, "the uncompacted request should still be sent"
+    assert METRICS.value("chemclaw_degraded_total") > before, (
+        "an editing middleware that handed nothing on was not reported"
+    )
+
+
+class _ThreadProbe:
+    """A `ContextEdit` that records which thread ran it and leaves a mark on the message list."""
+
+    def __init__(self) -> None:
+        self.threads: list[int] = []
+
+    def apply(self, messages: list[AnyMessage], *, count_tokens: Any) -> None:
+        """Record the calling thread and append a message, so the caller can see the edit landed."""
+        self.threads.append(threading.get_ident())
+        messages.append(AIMessage(content="edited"))
+
+
+@dataclass
+class _StubRequest:
+    """The `ModelRequest` members upstream's `wrap_model_call` touches under approximate counting.
+
+    Two of them: the message list and `override`.
+
+    A stub rather than a real `ModelRequest`, because building one needs a model, a runtime and a
+    state, none of which this assertion is about — and the shape being depended on is exactly the
+    two members named here.
+    """
+
+    messages: list[AnyMessage]
+
+    def override(self, **updates: Any) -> "_StubRequest":
+        """Upstream's own way of producing the edited request; only `messages` is ever changed."""
+        return _StubRequest(messages=updates.get("messages", self.messages))

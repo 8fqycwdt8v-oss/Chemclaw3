@@ -113,7 +113,7 @@ _EXPECTED_ORDER = (
     # the request, so the prefix it must budget against can only be published by a middleware above
     # the editor (`agent/context_budget.py`).
     "MeasureRequestPrefix",
-    "ContextEditingMiddleware",
+    "OffLoopContextEditing",
     "RecordContextCompaction",
     # The two model-call observers, innermost of this repository's block and therefore closest to
     # the provider call. Below the compaction group deliberately: the context edits also run in
