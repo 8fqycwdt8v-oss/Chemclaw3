@@ -345,7 +345,7 @@ def test_a_listed_calculation_is_bounded_and_says_when_it_was(
     monkeypatch.setattr(tools, "default_store", lambda: store)
 
     monkeypatch.setattr(settings, "calc_find_max_result_chars", 100_000)
-    generous = _run(tools.find_calculations(calc_type="xtb.conformers"))[0]
+    generous = _run(tools.find_calculations(calc_type="xtb.conformers")).hits[0]
     assert generous.result_omitted is False
     # The projection alone is most of the reduction: 47 geometries became 47 addresses. Measured
     # against the row rather than against a literal, so the claim is about the change and not
@@ -355,7 +355,7 @@ def test_a_listed_calculation_is_bounded_and_says_when_it_was(
     assert all(member["structure"]["geometry_omitted"] for member in generous.result["members"])
 
     monkeypatch.setattr(settings, "calc_find_max_result_chars", 500)
-    bounded = _run(tools.find_calculations(calc_type="xtb.conformers"))[0]
+    bounded = _run(tools.find_calculations(calc_type="xtb.conformers")).hits[0]
     assert bounded.result_omitted is True
     assert bounded.result == {}
     # The identity survives the bound — a listing whose rows could not be named would be useless.
@@ -382,7 +382,7 @@ def test_a_geometry_keyed_calculation_is_findable_by_its_geometry(
     # The recorded id is the geometry each calculation *ran on*, which is what makes this the
     # chemist's question: "here is the conformer I picked — what has already been computed on it?"
     found = _run(tools.find_calculations(structure_id=chosen.structure_id))
-    assert [record.calc_type for record in found] == ["xtb.opt"]
+    assert [record.calc_type for record in found.hits] == ["xtb.opt"]
 
     # And the refusal that remains points somewhere workable rather than at a different question.
     with pytest.raises(ValueError, match="structure_id"):

@@ -83,6 +83,11 @@ pipeline {
              pattern: ~'^[A-Za-z0-9._-]*$'],
             [name: 'DATABRICKS_CREDENTIALS_ID', value: params.DATABRICKS_CREDENTIALS_ID,
              pattern: ~'^[A-Za-z0-9._-]*$'],
+            // A Temporal namespace, reaching both `helm template` in the render stage and
+            // `openshift.sh`'s environment. Same alphabet as NAMESPACE plus dot and underscore,
+            // which Temporal permits and Kubernetes does not.
+            [name: 'TEMPORAL_NAMESPACE', value: params.TEMPORAL_NAMESPACE,
+             pattern: ~'^[A-Za-z0-9._-]*$'],
           ]
           for (c in checks) {
             if (!(c.value ==~ c.pattern)) {

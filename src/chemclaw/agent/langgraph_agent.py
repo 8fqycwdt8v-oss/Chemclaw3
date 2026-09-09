@@ -94,10 +94,10 @@ from langgraph.channels.untracked_value import UntrackedValue
 # and `durable/template_activities.py` — and within one package that is the established idiom here.
 # (Unnumbered deliberately: this said "three tests", and it was six importers including a
 # production one, which is what a count in a comment does.)
+from chemclaw.agent import audit as audit_module
 from chemclaw.agent.audit import (
     AuditSink,
     NullAuditSink,
-    default_audit_sink,
     make_audit_middleware,
 )
 from chemclaw.agent.chemclaw_agent import (
@@ -253,7 +253,12 @@ def build_langgraph_agent(
     # `default_audit_sink()` resolved to `NullAuditSink` on every deployment that has not set
     # `session_store="postgres"`. Passing the same *object* to both makes them one fact rather than
     # two readings of one setting.
-    sink = audit_sink if audit_sink is not None else default_audit_sink()
+    # Resolved through the module rather than the name imported above, and that is not style:
+    # seven test sites patch `chemclaw.agent.audit.default_audit_sink` and none patch a
+    # re-export, so a from-import here is a second lookup path that the established patch
+    # point silently misses — measured, three template-step tests recorded no audit rows at
+    # all while asserting over them.
+    sink = audit_sink if audit_sink is not None else audit_module.default_audit_sink()
     audit = make_audit_middleware(
         correlation_id=correlation_id if correlation_id is not None else uuid.uuid4().hex,
         actor=actor,

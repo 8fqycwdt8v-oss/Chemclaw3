@@ -321,9 +321,17 @@ def test_the_session_listing_uses_the_owner_index() -> None:
                 shipped = "\n".join(str(row[0]) for row in await cur.fetchall())
                 await cur.execute(f"EXPLAIN (COSTS OFF) {retired}", ("owner-plan-test",))
                 before = "\n".join(str(row[0]) for row in await cur.fetchall())
-        assert "session_owners_owner_idx" in shipped, (
-            "GET /sessions does not reach session_owners_owner_idx; the plan was:\n" + shipped
-        )
+        # **Either owner-scoped index, and the reason is migration 092.** The property is that the
+        # listing is *served from an index on `owner`* rather than scanning every session in the
+        # table; which index serves it is the planner's choice between two that both do. Before 092
+        # there was one candidate, so naming it was the same claim. 092 added
+        # `(owner, updated_at DESC, session_id DESC)` to take the sort key off a lateral the keyset
+        # cursor could not prune — 158 ms to 0.46 ms at 20,000 lifetime sessions — and the planner
+        # now prefers it, measured. Pinning the older name would fail on a *better* plan, which is
+        # a test asserting an implementation detail while claiming to assert a property.
+        assert (
+            "session_owners_owner_idx" in shipped or "session_owners_owner_updated_idx" in shipped
+        ), "GET /sessions reaches no owner-scoped index; the plan was:\n" + shipped
         assert "session_owners_owner_idx" not in before, (
             "IS NOT DISTINCT FROM now reaches the index, so the two-arm predicate in _OWNER_LIST "
             "(and the notes in migrations 039 and 046) no longer describe this Postgres:\n" + before
