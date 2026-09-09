@@ -113,6 +113,53 @@ retention_flags() {
     "the release states no retention posture: put retention.windows in the values file (the CHEMCLAW_RETENTION_* day windows this deployment keeps history for), or set ACCEPT_UNBOUNDED_GROWTH=true to say the durable tables may grow forever. The chart will not render without one."
 }
 
+# The third thing the chart refuses to render without, and **not** a posture: there is no permissive
+# default to accept, so `posture_flags` is the wrong shape for it and it gets its own body. The chart
+# used to ship the constant `chemclaw` against a `CHEMCLAW_TEMPORAL_ADDRESS` naming a *cluster-shared*
+# broker, so dev, staging and prod landed on one Temporal namespace, one task queue and one
+# schedule-id space. Measured: a peer's `helm upgrade` rewrote `eln-sync` to a different workflow type
+# at a different interval, and `_prune` deleted its `eval-drift` outright, because
+# `OWNED_SCHEDULE_IDS - planned_ids` cannot tell a peer's Schedule from a leftover of its own. A
+# boolean acknowledgement would not have helped — three environments would each set it true and still
+# collide. **The string the operator types is the discriminator**, so the string is what is required.
+#
+# Read out of the values file when it states one, so a release that has already answered in YAML is
+# not asked twice — the same exclusive-or the two postures above obey, for the same reason: the
+# chart's guard refuses a `--set` beside a stated value.
+states_temporal_namespace() {
+  local values_file="$1"
+  [ -n "${values_file}" ] || return 1
+  [ -f "${values_file}" ] || return 1
+  # Scoped to the `temporal:` block rather than matching a bare `namespace:` anywhere, which every
+  # other block in a values file is entitled to spell.
+  local verdict
+  verdict="$(awk -v q="\"'" '
+    /^temporal:[[:space:]]*$/ { in_block = 1; next }
+    /^[^[:space:]#]/          { in_block = 0 }
+    in_block && $0 ~ /^[[:space:]]+namespace:/ {
+      value = $0
+      sub(/^[[:space:]]+namespace:[[:space:]]*/, "", value)
+      sub(/[[:space:]]*#.*$/, "", value)
+      gsub("^[" q "]|[" q "]$", "", value)
+      if (value != "" && value != "null" && value != "~") { print "yes"; exit }
+    }
+  ' "${values_file}")"
+  [ "${verdict}" = "yes" ]
+}
+
+temporal_flags() {
+  local values_file="$1"
+  if states_temporal_namespace "${values_file}"; then
+    return 0
+  fi
+  if [ -n "${TEMPORAL_NAMESPACE:-}" ]; then
+    printf -- '--set temporal.namespace=%s' "${TEMPORAL_NAMESPACE}"
+    return 0
+  fi
+  echo "the release names no Temporal namespace: put temporal.namespace in the values file, or set TEMPORAL_NAMESPACE. It has no default because it must be unique to this release - two releases sharing one namespace rewrite and delete each other's Schedules, and they need separate databases too, which no chart guard can check. The chart will not render without one." >&2
+  return 1
+}
+
 # **A release installed before `templates/config.yaml` moved two objects out of Helm hooks cannot be
 # upgraded until they are adopted, and Helm cannot do it itself.**
 #
@@ -171,10 +218,11 @@ apply_helm() {
   # assignment propagates the substitution's status under `set -e`. And *two* substitutions in one
   # assignment would take only the last one's status, so a refused egress posture beside an accepted
   # retention posture would pass — which is the same silent-fallthrough one line up.
-  local egress retention
+  local egress retention temporal
   egress="$(egress_flags "${values}")"
   retention="$(retention_flags "${values}")"
-  read -r -a extra <<<"${egress} ${retention}"
+  temporal="$(temporal_flags "${values}")"
+  read -r -a extra <<<"${egress} ${retention} ${temporal}"
 
   adopt_leftover_hook_objects "${release}"
 

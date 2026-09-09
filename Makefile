@@ -226,6 +226,14 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# neither destinations nor windows to enumerate, so it takes both escape hatches explicitly —
 	@# the same sentences an operator has to write, which is why the flags are visible here.
 	@#
+	@# `--set temporal.namespace=chemclaw` is the third, and it is not an escape hatch: it is the
+	@# value itself, because there is no safe default for it. The chart used to ship the constant
+	@# `"chemclaw"` against an address naming a *cluster-shared* broker, so two releases landed on
+	@# one namespace, one task queue and one schedule-id space — measured, a peer's `helm upgrade`
+	@# rewrote `eln-sync` to another workflow type and interval and `_prune` deleted its
+	@# `eval-drift` outright. `chemclaw` is what a validation render passes because it reproduces
+	@# the old behaviour exactly; a real release states its own.
+	@#
 	@# Twice, and the second render is the point: every switch this chart ships **off** was
 	@# validated by nobody. `mcpFace.enabled` rendered a Deployment mounting a volume the pod did
 	@# not declare and `monitoring.temporalSdkMetrics.enabled` rendered a container port name one
@@ -248,7 +256,8 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
-	      --set retention.unboundedGrowthAccepted=true $$flags \
+	      --set retention.unboundedGrowthAccepted=true \
+	      --set temporal.namespace=chemclaw $$flags \
 	    | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
 	        -schema-location default -schema-location \
 	        'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'; \
@@ -268,6 +277,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  render=$$(helm template chemclaw deploy/helm/chemclaw \
 	    --set networkPolicy.allowAnyDestination=true \
 	    --set retention.unboundedGrowthAccepted=true \
+	    --set temporal.namespace=chemclaw \
 	    --set connectors.molfp.url=https://model.invalid/mcp); \
 	  case "$$render" in *chemclaw-connector-molfp*) \
 	    echo "FAIL: an externally hosted connector still gets a Deployment/Service"; exit 1;; esac; \
@@ -293,7 +303,8 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  for flag in "" "--set monitoring.temporalSdkMetrics.enabled=true"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
-	      --set retention.unboundedGrowthAccepted=true $$flag \
+	      --set retention.unboundedGrowthAccepted=true \
+	      --set temporal.namespace=chemclaw $$flag \
 	      > "$$work/render.yaml"; \
 	    uv run python "$$work/extract.py" < "$$work/render.yaml" > "$$work/rules.yaml"; \
 	    promtool check rules "$$work/rules.yaml"; \

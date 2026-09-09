@@ -1856,8 +1856,19 @@ docker image inspect "${REGISTRY}/chemclaw:${VERSION}" --format '{{ index .RepoD
 helm upgrade --install chemclaw deploy/helm/chemclaw \
   --set image.digest="sha256:<the digest from step 2>" \
   --set networkPolicy.allowAnyDestination=true \  # or list networkPolicy.egressDestinations
-  --set retention.unboundedGrowthAccepted=true   # or state retention.windows
+  --set retention.unboundedGrowthAccepted=true \  # or state retention.windows
+  --set temporal.namespace=chemclaw-prod          # no default: one Temporal namespace per release
 ```
+
+The third flag is not an escape hatch like the two above it — it is the value, and the chart ships
+no default for it. `CHEMCLAW_TEMPORAL_ADDRESS` names a broker in the cluster-shared `temporal`
+namespace, so a constant put dev, staging and prod on one Temporal namespace, one task queue and
+one schedule-id space; measured, a peer's `helm upgrade` rewrote this release's `eln-sync` to a
+different workflow type at a different interval and `_prune` deleted its `eval-drift` outright.
+**Two releases need separate databases for the same reason**, and that half is not enforceable from
+the chart: 44 tables carry no deployment discriminator, so one release's retention sweep disposes of
+another's expired threads under its own window. Passing `--set temporal.namespace=chemclaw`
+reproduces the old behaviour exactly, which is what a validation render uses.
 
 **The pipeline does exactly the three steps above.** `Jenkinsfile` builds with
 `CHEMCLAW_REVISION`, publishes, reads the digest back from the registry and passes it as

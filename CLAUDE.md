@@ -370,11 +370,16 @@ so and propose an experiment — there is no tier to escalate to.**
 
 **Live edges remain open** (need a real Temporal broker / OpenShift cluster): live cluster durability
 + `helm`/`kubeconform` render. See `docs/planning/BACKLOG.md` for the exact list. Note that the
-render edge now has two things to catch: `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`
+render edge has several things to catch: `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`
 makes the chart **refuse to render** until a release states its egress posture, and the retention
-posture is refused the same way — so `helm template` on the shipped defaults takes `--set
-networkPolicy.allowAnyDestination=true --set retention.unboundedGrowthAccepted=true`, as the
-Makefile's renders, the runbook and `deploy/README.md` all do. The same ADR derives
+posture is refused the same way. A count is not written here — the live set is whatever
+`tests/test_deploy_chart.py` renders with and `Makefile`'s `helm-validate` passes, and the one that
+was written here said "two" the day a third arrived. That third is **not** a posture with a
+permissive escape hatch: `temporal.namespace` has no default at all, because
+`CHEMCLAW_TEMPORAL_ADDRESS` names a *cluster-shared* broker and the constant it replaced put every
+environment on one namespace, one task queue and one schedule-id space — measured, a peer's `helm
+upgrade` rewrote this release's Schedules and deleted the ones it did not itself plan. Two releases
+need separate **databases** for the same reason, which no chart guard can check. The same ADR derives
 `CHEMCLAW_CONNECTORS_ENABLED` from the `connectors` block (`enabled: false` used to take a bundle's
 pods and leave its tools advertised) and splits `replicas` into `serverReplicas`/`workerReplicas`.
 
