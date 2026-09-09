@@ -83,7 +83,7 @@ the pair applies in filename order and neither shadows the other.
 | `effects` | 075, 078 | `durable/effect_ledger.py` | **refused**: what this system changed in a system it does *not* own, and who approved it when the change could not be undone. The change is still standing on the far side and outlives any window this could be pruned on. Bounded by how often this system acts outside itself — which no job in this repository does at all |
 | `observations` | 025 (+062 index) | `memory/observations.py` | stale rows retired by status, not deleted |
 | `note_proposals` | 027 (+036, +058) | `kg/proposal_store.py` | refused: kept through erasure |
-| `measurements` | 030 | `science/calc/calibration.py` | — |
+| `measurements` | 030 (+093 key) | `science/calc/calibration.py` | — |
 | `bo_campaigns` | 031 | `science/bo/campaign_record_store.py` | refused: kept through erasure |
 | `bo_suggestions` | 031 (+037) | `science/bo/campaign_record_store.py` | cascades from `bo_campaigns` |
 | `audit_anchors` | 032 | — (retired with the audit hash chain; nothing writes it) | never — the table is empty and kept only because the schema is forward-only |

@@ -74,38 +74,78 @@ ON CONFLICT (calc_type, calc_version, input_hash) DO UPDATE SET
 # The measurement itself, kept whether or not anything predicted it (DARK-9, `infra/sql/030`).
 # Written *before* the reconciliation below, so a measurement for a molecule nothing has predicted
 # survives instead of being discarded by an UPDATE that matches nothing.
+#
+# **The conflict target is the source too** (`infra/sql/093`). `030` keyed the table on
+# `(property, input_hash)` and argued that "two values for one property of one molecule is a
+# correction, not two facts" — true of a lab revising its own number, false of a replicate or a
+# second site, and this statement is where the difference was destroyed: a second lab's `DO UPDATE`
+# overwrote the first lab's value and stamped its own name on the row. It still replaces under one
+# source, which is the correction case that argument is right about.
 _UPSERT_MEASUREMENT = """
 INSERT INTO measurements (property, input_hash, subject, value, unit, source, observed_at)
 VALUES (%s, %s, %s, %s, %s, %s, now())
-ON CONFLICT (property, input_hash) DO UPDATE SET
+ON CONFLICT (property, input_hash, source) DO UPDATE SET
     value = EXCLUDED.value,
     unit = EXCLUDED.unit,
-    source = EXCLUDED.source,
     observed_at = now()
+"""
+
+# Every measurement on file for one property of one molecule, as a single row: the value a
+# prediction is scored against, how far the reporters are apart, and who they were.
+#
+# **One fragment, three readers**, because the number `calculator_trust` reports and the number
+# `report_measurement` quotes back to the chemist must be the same number by construction rather
+# than by two implementations agreeing. The reconciliation is a mean: with the source in the key
+# there can be several rows, and an unaggregated `UPDATE … FROM measurements` would have taken
+# whichever one the planner handed it first — a scored value determined by nothing the caller
+# could see.
+#
+# `count(*)` is the number of *sources*, not of reports: the primary key holds one row per source,
+# so a lab that measured three times contributes one. `count(DISTINCT unit)` is carried because a
+# mean over two units is a number in neither; `report_measurement` reconciles every calibrated
+# value into the ledger's own unit before it gets here, so this reads 1 in every shipped path and
+# says so rather than being believed.
+_CONSENSUS = """
+    SELECT avg(value)                                AS value,
+           min(value)                                AS lowest,
+           max(value)                                AS highest,
+           count(*)                                  AS sources,
+           count(DISTINCT unit)                      AS units,
+           max(observed_at)                          AS observed_at,
+           string_agg(source, ', ' ORDER BY source)  AS reported_by
+      FROM measurements
+     WHERE property = %s AND input_hash = %s
 """
 
 # The reverse direction, and the reason the table is worth having rather than merely honest: a
 # prediction made *after* a measurement reconciles against it immediately. Without this, storing
 # the measurement would only stop the lie, and the ledger would still learn nothing from the
 # measure-then-predict order that new chemistry actually follows.
-_RECONCILE_FROM_MEASUREMENT = """
+_RECONCILE_FROM_MEASUREMENT = f"""
 UPDATE predictions p
-   SET observed_value = m.value, observed_at = m.observed_at, observed_source = m.source
-  FROM measurements m
- WHERE p.calc_type = m.property
-   AND p.input_hash = m.input_hash
-   AND p.calc_type = %s
+   SET observed_value = c.value, observed_at = c.observed_at, observed_source = c.reported_by
+  FROM ({_CONSENSUS}) AS c
+ WHERE p.calc_type = %s
    AND p.input_hash = %s
    AND p.observed_value IS NULL
+   AND c.value IS NOT NULL
 """
 
 # Deliberately *not* scoped by version: a measurement is a fact about the molecule, not about the
 # calculator that guessed at it. One reported value scores every version's prediction of that
 # molecule, which is what makes a version-over-version comparison possible at all.
-_RECORD_OBSERVATION = """
-UPDATE predictions
-   SET observed_value = %s, observed_at = now(), observed_source = %s
- WHERE calc_type = %s AND input_hash = %s
+#
+# It writes the *consensus* rather than the value just reported, so the figure a chemist reads does
+# not move to whichever source wrote last. `c.value IS NOT NULL` guards the empty aggregate: a
+# grouping-free aggregate over no rows still yields one row of NULLs, and blanking an observed
+# value is worse than doing nothing.
+_RECORD_OBSERVATION = f"""
+UPDATE predictions p
+   SET observed_value = c.value, observed_at = c.observed_at, observed_source = c.reported_by
+  FROM ({_CONSENSUS}) AS c
+ WHERE p.calc_type = %s
+   AND p.input_hash = %s
+   AND c.value IS NOT NULL
 """
 
 # Scoped to one calculator *version*. Pooling versions was the other half of REV-12: even with the
@@ -193,6 +233,42 @@ class Calibration(BaseModel):
         )
 
 
+class ObservedConsensus(BaseModel):
+    """Every measurement on file for one property of one molecule, reduced to what scores it.
+
+    The read half of `infra/sql/093`. `value` is the mean over *sources* — the number
+    `_RECORD_OBSERVATION` writes into every matching prediction — and the rest is what a mean
+    conceals: how many reporters stand behind it, who they were, and how far apart they are. Two
+    labs 0.85 log units apart average to a number neither of them measured, and a chemist told only
+    the average cannot tell that from two labs that agree.
+
+    Not a tool payload — `report_measurement` renders one sentence out of it — so `spread` is a
+    plain property rather than a `computed_field`: nothing serializes this model, and the rule that
+    made `FingerprintSearch.verdict` a `computed_field` is about a payload that leaves the process.
+    """
+
+    # `property_name` rather than `property`: the field would shadow the builtin decorator inside
+    # this class body, which is a `"str" not callable` error on `spread` below rather than a
+    # readability preference.
+    property_name: str
+    value: float
+    lowest: float
+    highest: float
+    # One row per source, so this counts reporters rather than reports: a lab that measured three
+    # times under one source name contributes one.
+    sources: int
+    # How many distinct units those rows carry. `1` in every shipped path, because
+    # `report_measurement` reconciles a calibrated value into the ledger's own unit before writing
+    # — carried rather than assumed, because a mean over two units is a number in neither.
+    units: int
+    reported_by: str
+
+    @property
+    def spread(self) -> float:
+        """How far the extreme reporters are apart, in the ledger's unit. Zero for one source."""
+        return self.highest - self.lowest
+
+
 class Residual(BaseModel):
     """One reconciled prediction: what was predicted, what was measured, and the gap.
 
@@ -264,7 +340,8 @@ async def record_prediction(record: PredictionRecord) -> None:
                 # it is predicted — so scoring the prediction it was just written for happens here
                 # rather than waiting for a measurement that has already arrived.
                 await cur.execute(
-                    _RECONCILE_FROM_MEASUREMENT, (record.calc_type, record.input_hash)
+                    _RECONCILE_FROM_MEASUREMENT,
+                    (record.calc_type, record.input_hash, record.calc_type, record.input_hash),
                 )
             await conn.commit()
     except Exception:
@@ -285,6 +362,20 @@ async def record_observation(
     unit: str = "",
 ) -> int | None:
     """Store a measured value, reconcile any matching predictions, and return how many it scored.
+
+    **A measurement is identified by who reported it** (`infra/sql/093`). Two sources measuring one
+    property of one molecule — a replicate, a second solvent system, a second site — are two facts,
+    and the predictions they score are updated to their *consensus* (the mean over sources) rather
+    than to whichever arrived last. Before this, `measurements` was keyed on
+    `(property, input_hash)` and the second write deleted the first: measured on one prediction of
+    -0.30 log S, `lab-basel`'s -0.10 reported a bias of -0.200 and `lab-shanghai`'s -0.95 then
+    reported +0.650 — a sign flip on the arrival of an equally valid number, at `n=1` both times,
+    with nothing logged and no counter moved.
+
+    A second value under the **same** source still replaces, because that is one reporter revising
+    one number — the case `030_measurements.sql` argued for, kept where it is true. `source` is
+    therefore load-bearing at the caller: `report_measurement` defaults it to `chemist-reported`,
+    so two chemists who do not name their labs still collapse into one row, and the reply says so.
 
     **The measurement is kept either way**, which it was not before (DARK-9). This was a bare
     `UPDATE` against `predictions`, so a value for a molecule nothing had predicted matched no row
@@ -326,10 +417,40 @@ async def record_observation(
                 _UPSERT_MEASUREMENT,
                 (calc_type, input_hash, subject or input_hash, observed_value, unit, source),
             )
-            await cur.execute(_RECORD_OBSERVATION, (observed_value, source, calc_type, input_hash))
+            await cur.execute(_RECORD_OBSERVATION, (calc_type, input_hash, calc_type, input_hash))
             matched = cur.rowcount
         await conn.commit()
     return int(matched)
+
+
+async def consensus_for(property_name: str, input_hash: str) -> ObservedConsensus | None:
+    """What every source has measured for one property of one molecule, or `None` for nothing.
+
+    The same `_CONSENSUS` fragment the two reconciliations write from, so the value a chemist is
+    told their prediction is scored against and the value actually written are the same number by
+    construction. `None` means no measurement is on file — not a failure, and not a zero.
+
+    Raises whatever the database raises, for `reconciled_for`'s reason: the caller's whole
+    deliverable is this read, so an unreachable database must not answer "nothing was measured".
+    """
+    if not settings.calibration_enabled:
+        return None
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(_CONSENSUS, (property_name, input_hash))
+            row = await cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    value, lowest, highest, sources, units, _observed_at, reported_by = row
+    return ObservedConsensus(
+        property_name=property_name,
+        value=float(value),
+        lowest=float(lowest),
+        highest=float(highest),
+        sources=int(sources),
+        units=int(units),
+        reported_by=reported_by or "",
+    )
 
 
 def summarize(

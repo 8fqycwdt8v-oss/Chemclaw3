@@ -39,9 +39,11 @@ from chemclaw.core.ids import stable_hash
 from chemclaw.core.units import reconcile
 from chemclaw.science.calc.calibration import (
     Calibration,
+    ObservedConsensus,
     PredictionRecord,
     Residual,
     calibration_for,
+    consensus_for,
     reconciled_for,
     record_observation,
     record_prediction,
@@ -66,7 +68,13 @@ from chemclaw.science.calc.models import (
 from chemclaw.science.calc.postgres_artifacts import default_artifact_store
 from chemclaw.science.calc.postgres_store import PostgresStore
 from chemclaw.science.calc.postgres_structures import default_structure_store
-from chemclaw.science.calc.store import CalculationQuery, ResultPayload, ResultStore, StoredResult
+from chemclaw.science.calc.store import (
+    CalculationQuery,
+    ResultPayload,
+    ResultStore,
+    StoredResult,
+    as_page,
+)
 from chemclaw.science.calc.structures import require_structure
 from chemclaw.science.calc.thermo import ThermoSettings
 
@@ -160,7 +168,7 @@ async def _log_prediction(
 
 @server.tool()
 async def report_measurement(
-    property_name: str, smiles: str, measured_value: float, unit: str = ""
+    property_name: str, smiles: str, measured_value: float, unit: str = "", source: str = ""
 ) -> str:
     """Record a *measured* property value, so predictions can be scored against reality.
 
@@ -190,12 +198,18 @@ async def report_measurement(
             ~2000, on the strength of one row. That is worse than the empty string it replaced,
             because an empty unit at least marked the row as unstated; asserting the wrong one
             removes the only signal anybody could find it by.
+        source: Who measured it — a lab, a site, an instrument — half the row's identity. A **new**
+            source joins the values on file and predictions are scored against their mean; a repeat
+            under a source already present **replaces** that source's number. Name it for a
+            replicate or a second site. Empty files it under "chemist-reported", where the next
+            unnamed report overwrites it.
 
     Returns:
-        Whether the measurement matched an existing prediction. "No prediction on file" is a normal
-        answer — say so rather than implying the measurement was scored. If the reply says the
-        measurement was **not** recorded, report exactly that: it was not kept, and repeating the
-        call will not help.
+        Whether the measurement matched a prediction, and what else is on file for that property of
+        that molecule. "No prediction on file" is a normal answer — say so rather than implying the
+        measurement was scored. If the reply names more than one source, quote the spread beside
+        the mean. If it says the measurement was **not** recorded, report exactly that: it was not
+        kept, and repeating the call will not help.
     """
     canonical = canonical_smiles(smiles)
     # **The name this measurement is filed under, normalised once and used for every later use of
@@ -226,11 +240,19 @@ async def report_measurement(
         # passes through verbatim — so the chemist is told what unit the ledger holds rather than
         # being told the measurement was recorded.
         measured_value = reconcile(measured_value, unit, ledger_unit)
+    # **The one place a second measurement can be distinguished from a correction.** The row
+    # identity is `(property, input_hash, source)` since `infra/sql/093`, and every value this tool
+    # wrote used to carry the constant `"chemist-reported"` — so keying on the source would have
+    # been a control that never fires: two chemists reporting one compound still collapse to one
+    # row unless somebody names them apart. The default keeps that spelling so rows written before
+    # this parameter existed stay one source rather than becoming an unnamed second one.
+    ledger_source = source.strip() or "chemist-reported"
+    input_hash = stable_hash(canonical)
     matched = await record_observation(
         ledger_property,
-        stable_hash(canonical),
+        input_hash,
         measured_value,
-        source="chemist-reported",
+        source=ledger_source,
         subject=canonical,
         unit=ledger_unit,
     )
@@ -244,16 +266,60 @@ async def report_measurement(
             "Tell the chemist the value was not kept, and that an operator must enable "
             "`calibration_enabled` before measurements can be reported."
         )
+    standing = _measurements_on_file(
+        await consensus_for(ledger_property, input_hash), ledger_property, canonical, ledger_unit
+    )
     if matched:
-        return f"Recorded; it reconciled {matched} prediction(s) for {canonical}."
+        return f"Recorded; it reconciled {matched} prediction(s) for {canonical}. {standing}"
     # This branch used to say "Recorded" and be wrong: the write was a bare UPDATE against
     # `predictions`, so a measurement nothing had predicted matched no row and was discarded
     # (DARK-9). It is now stored on its own, and the next prediction of the same thing scores
     # against it — which is worth saying, because it is the reason reporting it was not wasted.
     return (
         f"Recorded for {canonical}. Nothing had predicted {ledger_property} for it yet, so no "
-        "prediction was scored — the measurement is kept and the next prediction of it will be "
-        "scored against this value."
+        f"prediction was scored — the measurement is kept and the next prediction of it will be "
+        f"scored against what is on file. {standing}"
+    )
+
+
+def _measurements_on_file(
+    consensus: ObservedConsensus | None, property_name: str, subject: str, unit: str
+) -> str:
+    """What the ledger now holds for this property of this molecule, in one sentence.
+
+    **The sentence exists because the write is destructive in exactly one direction and silent
+    about it.** A value reported under a source already on file replaces that source's earlier
+    number; one under a new source joins it, and every prediction is then scored against the mean.
+    Neither is visible in "Recorded" — before `infra/sql/093` the destructive case was the *only*
+    case, and the tool answered "Recorded; it reconciled 1 prediction(s)" identically whether it
+    had stored a second lab's measurement or deleted the first lab's.
+
+    So both are said out loud: the single-source reply names the mechanism that would overwrite it,
+    and the multi-source reply gives the spread beside the mean, because two labs 0.85 log units
+    apart average to a number neither measured.
+    """
+    if consensus is None:  # pragma: no cover - the write above just stored a row
+        return ""
+    quantity = f" {unit}" if unit else ""
+    if consensus.sources == 1:
+        return (
+            f"It is the only {property_name} measurement on file for {subject}, reported by "
+            f"{consensus.reported_by}. Reporting {property_name} for {subject} again under that "
+            "same source replaces this value rather than adding to it — name a different `source` "
+            "for a replicate, a second instrument or a second site."
+        )
+    if consensus.units > 1:
+        return (
+            f"{consensus.sources} sources have reported {property_name} for {subject} "
+            f"({consensus.reported_by}) in {consensus.units} different units, so their mean is a "
+            "number in none of them. Do not quote it; report that the ledger holds mixed units "
+            "for this property and that an operator must reconcile them."
+        )
+    return (
+        f"{consensus.sources} independent sources have now reported {property_name} for {subject} "
+        f"({consensus.reported_by}); their values span {consensus.spread:.3g}{quantity} and every "
+        f"prediction is scored against their mean of {consensus.value:.3g}{quantity}, which is a "
+        "value none of them measured. Quote the spread beside it."
     )
 
 
@@ -295,6 +361,72 @@ class CalculationRecord(BaseModel):
     compute_seconds: float | None = None
 
 
+class CalculationSearch(BaseModel):
+    """One browse of the calculation store: the hits, **and what the page left out**.
+
+    Why this is not a bare `list[CalculationRecord]`, which is what it was. The tool answers *what
+    do we already know about this molecule* — "the question a chemist asks before committing hours
+    of compute" — and a list cut at `limit` answers it with a number that looks complete. Measured:
+    30 stored `pka` rows for `CCO` came back as 20 records, with nothing in the payload, in any
+    record, or anywhere else saying that ten more existed. `find_calculations`' own `_timestamp`
+    already states the rule that breaks — *"silently ignoring 'last Tuesday' would answer a
+    question about a window with results from outside it, which reads as an authoritative 'nothing
+    else exists' — the failure mode this tool is least able to afford"* — and the row-count cut
+    does exactly that with the date parsed correctly.
+
+    The shape is `FingerprintSearch`'s, deliberately rather than a new one: hits, the flags that
+    say the page is a lower bound, and a `verdict` the model reads before it writes an answer.
+    """
+
+    hits: list[CalculationRecord] = Field(default_factory=list)
+    # Every stored calculation matching the query, not just the ones on this page — so a full page
+    # says how much it is a page *of*. Includes rows `rows_unreadable` counts, because it answers
+    # "what else is on file" rather than "what did this page parse".
+    total_matched: int = 0
+    # True when `total_matched` exceeds the page: the hits are the newest, never all of them.
+    hits_truncated: bool = False
+    # Rows this page matched and could not hand back, because their stored payload is not a result
+    # (`science/calc/postgres_store.py::_readable_row` logs one and drops it). Zero is the ordinary
+    # case. Carried because a dropped row makes the page shorter in exactly the way a *complete*
+    # page is short, and the difference is a corrupted cache row an operator has to go and delete.
+    rows_unreadable: int = 0
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """The one sentence to read before reporting what the store holds.
+
+        A `computed_field` and not a bare property, for `FingerprintSearch.verdict`'s reason: a
+        property is not serialized, so the sentence qualifying the page would never leave this
+        process. The hazard it guards is the one this tool is least able to afford — an incomplete
+        listing read as "nothing else exists", and then quoted to a chemist as the reason not to
+        look further.
+        """
+        if not self.hits and not self.rows_unreadable:
+            return (
+                "Nothing stored matches this query. The store was searched and it holds no such "
+                "calculation — a real answer, not a failed lookup. Say the store has nothing "
+                "rather than implying the calculation was tried and failed."
+            )
+        showing = f"{len(self.hits)} of {self.total_matched} stored calculation(s) match."
+        if not self.hits_truncated and not self.rows_unreadable:
+            return f"{showing} This is every match, so it is a complete answer."
+        clauses = []
+        if self.hits_truncated:
+            clauses.append(
+                "The newest ones are listed and the rest were not returned — narrow the query "
+                "(by calc_type, version or date) or raise `limit` before saying what the store "
+                "does or does not hold."
+            )
+        if self.rows_unreadable:
+            clauses.append(
+                f"{self.rows_unreadable} matching row(s) could not be read back and are missing "
+                "from this list; their calculations exist. Report that the store holds unreadable "
+                "rows for this query — an operator has to look at them."
+            )
+        return " ".join([f"PARTIAL RESULT: {showing}", *clauses])
+
+
 @server.tool()
 async def find_calculations(
     smiles: str = "",
@@ -304,7 +436,7 @@ async def find_calculations(
     since: str = "",
     until: str = "",
     limit: int = 20,
-) -> list[CalculationRecord]:
+) -> CalculationSearch:
     """Look up calculations this system has already run, instead of running them again.
 
     Every calculation ever computed is kept forever, keyed by (calculator, version, input,
@@ -340,13 +472,14 @@ async def find_calculations(
             precisely when asking whether an older version's number is still what is on file.
         since: ISO-8601 date or timestamp; only results computed at or after it.
         until: ISO-8601 date or timestamp; only results computed at or before it.
-        limit: How many to return, newest first.
+        limit: How many to return, newest first; the deployment caps it.
 
     Returns:
-        The matching calculations, newest first. Each carries the result payload the calculator
-        produced. A result a later correction invalidated is not listed; one with
-        `epoch_recorded` false predates that record and may be such a value — recompute before
-        citing it.
+        `hits`, newest first, each carrying the result payload — and `total_matched`,
+        `hits_truncated`, `rows_unreadable`, which say whether the hits are all of them. Read
+        `verdict` first: a page cut at the limit looks exactly like a complete listing. A result a
+        later correction invalidated is not listed; one with `epoch_recorded` false predates that
+        record and may be such a value — recompute before citing it.
     """
     query = CalculationQuery(
         smiles=smiles or None,
@@ -357,7 +490,13 @@ async def find_calculations(
         until=_timestamp(until),
         limit=max(1, min(limit, settings.calc_find_max_results)),
     )
-    return [_record(stored) for stored in await default_store().find(query)]
+    page = as_page(await default_store().find(query), query.limit)
+    return CalculationSearch(
+        hits=[_record(stored) for stored in page],
+        total_matched=page.total_matched,
+        hits_truncated=page.truncated,
+        rows_unreadable=page.unreadable,
+    )
 
 
 def _timestamp(value: str) -> datetime | None:

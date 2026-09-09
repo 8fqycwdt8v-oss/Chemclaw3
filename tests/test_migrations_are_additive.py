@@ -213,6 +213,19 @@ _REVIEWED_REPLAY_BREAKS: dict[str, tuple[str, tuple[str, ...], str]] = {
 # an exempted migration still fails — an exemption is granted to statements somebody read, not to a
 # filename.
 _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "093_measurement_source.sql": (
+        # The fourth table to be keyed by its source, after 056, 063 and 051 — and the same
+        # rollback shape as 056 and 063 above. The widening adds `source` to the key rather than
+        # removing information, so nothing is destroyed by restoring the previous image; what
+        # breaks is that a row written under the new key with a `source` other than
+        # `chemist-reported` is unreachable to the old reader's two-column lookup. The operator
+        # runs the migration forward again.
+        "D-2026-09-09-a-measurement-is-keyed-by-who-measured-it",
+        (
+            "ALTER TABLE measurements DROP CONSTRAINT",
+            "ALTER TABLE measurements ADD PRIMARY KEY",
+        ),
+    ),
     "088_turn_cost_identity.sql": (
         "D-2026-09-06-an-id-a-caller-chooses-is-not-a-key",
         (
