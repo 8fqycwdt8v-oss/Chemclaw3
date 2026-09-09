@@ -12,7 +12,7 @@ without a second naming scheme.
 
 **That `input_hash` is *not* the calculation cache's, and this docstring claimed it was.** The
 ledger hashes the canonical SMILES (`stable_hash(canonical)` in
-`connectors/calc/server/tools.py::_record_prediction`); the cache hashes a dict around it
+`connectors/calc/server/tools.py::_log_prediction`); the cache hashes a dict around it
 (`store.molecule_hash` is `stable_hash({"smiles": ...})`). Measured on ethanol: `f29e20f49d416e54`
 against `a7d334ebee616d78`. Nothing joins the two tables today, so the claim cost nothing — but it
 is a claim about a key, and whoever writes that join on the strength of this sentence gets zero
