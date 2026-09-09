@@ -7,15 +7,24 @@ schema is **forward-only and additive** — no migration may drop, rename, trunc
 `tests/test_migrations_are_additive.py`). New SQL is a new numbered file; an applied file is never
 edited, because the ledger flags the changed checksum as drift.
 
-That check asks **two** questions, because destroying data and ending the rollback are different
-things with different answers (D-2026-08-08-a-rollback-that-is-not-a-schema-step). Destroying data
-is refused outright. Leaving the *previous image* unable to write — `SET NOT NULL` on an existing
-column, or a dropped or replaced key — is refused unless the migration is listed in
-`_REVIEWED_ROLLBACK_BREAKS` with the statements read and an ADR saying what an operator does
-instead of "deploy the previous image". Four migrations are: `041_document_chunk_identity.sql`, `056_reaction_record_identity.sql`, `058_note_proposal_superseded.sql`, `063_reaction_fingerprint_source.sql`,
-each with its rollback procedure in the ADR `tests/test_migrations_are_additive.py` makes it
-name. (The count and the list are both derived from that set, which is the only place they are
-maintained — this sentence said "exactly one" while the set held four.)
+That check asks **three** questions, because destroying data, ending the rollback and being
+replayable are different things with different answers
+(D-2026-08-08-a-rollback-that-is-not-a-schema-step,
+D-2026-09-09-a-pattern-that-enumerates-covers-what-it-enumerated). Destroying data is refused
+outright. Leaving the *previous image* unable to write — `SET NOT NULL` on an existing column, a
+dropped or replaced key, an `ALTER COLUMN … TYPE` — is refused unless the migration is listed in
+`_REVIEWED_ROLLBACK_BREAKS` with the statements read and an ADR saying what an operator does instead
+of "deploy the previous image". Two registers sit beside it for what a pattern cannot reach: a
+column whose *meaning* the previous image must honour (`_REVIEWED_SEMANTIC_BREAKS`, judged rather
+than matched — the guard reads statements, and a lease and a comment are the same eleven tokens),
+and an `ADD CONSTRAINT` that no `DROP CONSTRAINT IF EXISTS` precedes, which aborts a *replay* rather
+than a rollback (`_REVIEWED_REPLAY_BREAKS`).
+
+**All three are listed at the foot of this file**, and `tests/test_schema_inventory.py` checks those
+lists against the registers in both directions. No count is given with them: the count is what went
+stale, twice. This paragraph said "exactly one" while the set held four, then "four" while it held
+five — and the one it omitted was `088_turn_cost_identity.sql`, the newest and the only one bearing
+on a rollback of the current release, under a sentence claiming the list was "derived from that set".
 
 `grants/` is not part of that set and is invisible to the runner's non-recursive glob by
 construction. See the note at the bottom.
@@ -131,3 +140,61 @@ grant is a reconciliation between a schema that keeps growing and a runtime role
 at any point, so run-once semantics would leave every later table ungranted and break the
 application on first use of it. It re-runs on every deploy, after the migrations, and no-ops where
 no `chemclaw_app` role exists (D-2026-08-05-append-only-by-grant-not-by-contract).
+
+## What a rollback and a replay cannot assume
+
+Both lists below are checked against `tests/test_migrations_are_additive.py`'s registers, in both
+directions, by `tests/test_schema_inventory.py`. Read them before a `helm rollback`, and before
+re-running the migrations against a database that already carries the schema. Each entry names the
+ADR carrying the reading behind it.
+
+### Migrations that end "deploy the previous image"
+
+- `041_document_chunk_identity.sql` — `SET NOT NULL` on `document_files.chunking_key` and
+  `document_chunks.chunking_key`, plus a replaced primary key. The previous image's file writes and
+  its `ON CONFLICT` on the old key both fail (D-2026-08-08-a-rollback-that-is-not-a-schema-step).
+- `056_reaction_record_identity.sql` — the `reaction_records` key widens to
+  `(ingest_source, reaction_id)` (D-2026-08-26-a-transcription-is-keyed-by-its-source).
+- `058_note_proposal_superseded.sql` — flagged for the `DROP CONSTRAINT` text and reviewed as **not**
+  a break: the drop-and-re-add *widens* the state `CHECK`, and the previous image writes only states
+  it already allowed (D-2026-08-27-the-gate-tells-the-truth-about-what-it-pushed).
+- `063_reaction_fingerprint_source.sql` — the `reaction_fingerprints` key gains `source`
+  (D-2026-08-27-a-fingerprint-is-keyed-by-its-source).
+- `088_turn_cost_identity.sql` — the `turn_costs` primary key moves off `correlation_id` onto
+  `turn_id`, so the previous image's `ON CONFLICT (correlation_id)` no longer plans
+  (D-2026-09-06-an-id-a-caller-chooses-is-not-a-key).
+- `089_result_publication_lease.sql` — **judged, not matched.** One nullable column, additive by
+  every pattern, and the previous image keeps writing the table — *without the lease*. A pre-089
+  pod's claim ignores `claimed_at` and re-claims a row a new-pod drain is mid-delivering, spending
+  an attempt on a delivery already in flight. Quiesce publishing for the duration of the rollback;
+  afterwards `UPDATE result_publications SET attempts = 0, claimed_at = NULL WHERE state =
+  'pending';` returns double-spent attempts, and also resurrects any genuinely exhausted row
+  (D-2026-09-09-a-pattern-that-enumerates-covers-what-it-enumerated).
+- `091_reaction_label_confidence_precision.sql` — flagged for the `ALTER COLUMN … TYPE` text and
+  reviewed as **not** a break: the conversion *widens* `reaction_labels.confidence` from `REAL` to
+  `DOUBLE PRECISION`, every stored value survives it exactly, and the previous image writes a Python
+  float into the column as before. A *narrowing* conversion is a different matter and may not be
+  exempted at all — it destroys data, which the guard's other bucket refuses outright
+  (D-2026-09-09-a-pattern-that-enumerates-covers-what-it-enumerated).
+
+### Migrations that are not re-runnable, and the recipe for each
+
+Re-running the whole set is how a restored database whose `schema_migrations` ledger is older than
+its tables is recovered. Two files abort that run — the runner sends everything in one transaction,
+so nothing after the failure applies either. Apply the recipe first; both were verified end to end,
+after which all 90 tracked files replay clean against a fully populated database.
+
+- `046_review_hardening_indexes.sql` — `ADD CONSTRAINT session_messages_shape_known` with no drop
+  above it, so a replay aborts with `DuplicateObject: constraint "session_messages_shape_known" for
+  relation "session_messages" already exists`. The constraint is `NOT VALID`, so re-adding it costs
+  no table scan. Run first:
+  `ALTER TABLE session_messages DROP CONSTRAINT IF EXISTS session_messages_shape_known;`
+- `058_note_proposal_superseded.sql` — it *does* drop first, without `IF EXISTS`, so it replays
+  against a restore and aborts against a database built by hand without that constraint:
+  `UndefinedObject: constraint "note_proposals_state_known" of relation "note_proposals" does not
+  exist`. The recipe puts the constraint back so the bare drop finds one, and re-adds the
+  *post*-058 form — identical to what the file itself re-adds, so it cannot fail on data 058
+  already permits, where the pre-058 form would reject any row already holding `superseded`.
+  Both recipes are unconditional and idempotent: run them without first working out which arm
+  the database is in. Run first:
+  `ALTER TABLE note_proposals DROP CONSTRAINT IF EXISTS note_proposals_state_known; ALTER TABLE note_proposals ADD CONSTRAINT note_proposals_state_known CHECK (state IN ('open', 'merged', 'rejected', 'failed', 'superseded'));`
