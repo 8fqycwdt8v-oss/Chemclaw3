@@ -64,6 +64,12 @@ class EvidenceSweepWithRefusals(EvidenceSweep):
     # tool return reaches the model as its `repr` (`tests/test_upstream_surface.py`), so this field
     # name and `IngestRejection`'s own `kind` are what the model actually reads.
     refused_on_ingest: list[IngestRejection] = Field(default_factory=list)
+    # How many refusals matched the question, which is not `len(refused_on_ingest)` once the
+    # ledger's own `_MAX_MATCHES` bites. That bound is argued and stays — it is prompt budget — but
+    # a bound applied silently made "the refusals" and "the top five refusals" the same list, which
+    # is the swallowing `rejections.py`'s own header refuses one category over. The same rule
+    # `total_before_cap` follows for the sweep beside it.
+    refusals_total: int = Field(default=0, ge=0)
     # Why the rejection ledger could not be asked; empty when it was. An unreachable ledger and a
     # clean corpus must not render alike — the same rule `sources_failed` exists for one field up.
     refusals_unavailable: str = ""
@@ -185,8 +191,11 @@ def _interleave_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceC
     return merged
 
 
-async def _refused_on_ingest(query: str) -> tuple[list[IngestRejection], str]:
-    """The refused records this question matches, and why the ledger could not be asked if it was.
+async def _refused_on_ingest(query: str) -> tuple[list[IngestRejection], int, str]:
+    """The refused records this question matches, how many matched, and any read failure.
+
+    The three are one answer: which rows, how many there were, and why there were none when the
+    ledger could not be asked at all.
 
     Both halves are needed because an empty list has to keep meaning "nothing was refused". A
     ledger that cannot be reached would otherwise say the same thing as a clean corpus, which is
@@ -224,6 +233,10 @@ async def _refused_on_ingest(query: str) -> tuple[list[IngestRejection], str]:
     untouched: `kind="ingest-rejection"` leads the repr, the field is named `refused_on_ingest`,
     the envelope's own id says `refused-on-ingest:…` rather than naming a note a reader could
     expand, and `refusals_unavailable` still separates an unreachable ledger from a clean corpus.
+
+    The middle element is the ledger's own `total_matching`: `_MAX_MATCHES` cuts this list to five,
+    which is a deliberate prompt budget and was invisible, so a chemist shown five refusals had no
+    way to know twelve matched.
     """
     try:
         found = await refusals_matching(query)
@@ -232,25 +245,29 @@ async def _refused_on_ingest(query: str) -> tuple[list[IngestRejection], str]:
         # answer, and failing the whole turn over a data-quality annotation would be the larger
         # harm. Reported in the return value, never swallowed into an empty list.
         logger.warning("ingest rejection ledger could not be read: %s", exc)
-        return [], f"the ingest rejection ledger could not be read ({type(exc).__name__})"
-    return [
-        rejection.model_copy(
-            update={
-                # The content channel: framed, so the words an export wrote arrive as data the
-                # system prompt has already told the model not to obey. The id names the ledger
-                # row rather than a note, because there is nothing here to expand — the record is
-                # absent, which is the whole statement.
-                "reason": frame_untrusted(
-                    rejection.reason,
-                    note_id=f"refused-on-ingest:{rejection.source}:{rejection.entry_id}",
-                ),
-                # The label channels: neutralised, not wrapped.
-                "entry_id": defang(rejection.entry_id),
-                "source": defang(rejection.source),
-            }
-        )
-        for rejection in found
-    ], ""
+        return [], 0, f"the ingest rejection ledger could not be read ({type(exc).__name__})"
+    return (
+        [
+            rejection.model_copy(
+                update={
+                    # The content channel: framed, so the words an export wrote arrive as
+                    # data the system prompt has already told the model not to obey. The id
+                    # names the ledger row rather than a note, because there is nothing here to
+                    # expand — the record is absent, which is the whole statement.
+                    "reason": frame_untrusted(
+                        rejection.reason,
+                        note_id=f"refused-on-ingest:{rejection.source}:{rejection.entry_id}",
+                    ),
+                    # The label channels: neutralised, not wrapped.
+                    "entry_id": defang(rejection.entry_id),
+                    "source": defang(rejection.source),
+                }
+            )
+            for rejection in found.rejections
+        ],
+        found.total_matching,
+        "",
+    )
 
 
 def _as_date(value: str, field: str) -> date:
@@ -308,12 +325,11 @@ async def gather_evidence(
         chunks look.
 
         `refused_on_ingest` is **not evidence and not a result**. Each entry is a record an ingest
-        source offered and this system *refused*, with the reason — so it is absent from the
-        corpus however well it matches. Report it as what it is ("that entry was rejected on
-        ingest because …"); never present its id, its numbers or
-        its reason as something found in the corpus, and never fill the gap it names with a value.
-        `refusals_unavailable` is non-empty when that ledger could not be asked, in which case an
-        empty list says nothing about whether anything was refused.
+        source offered and this system *refused*, with the reason, so it is absent from the corpus
+        however well it matches. Say that ("rejected on ingest because …"); never present its id,
+        its numbers or its reason as something found in the corpus, and never fill the gap it names
+        with a value. The list is capped and `refusals_total` is how many matched;
+        `refusals_unavailable` is non-empty when the ledger could not be asked at all.
     """
     filters: dict[str, Any] = {}
     if note_type is not None:
@@ -433,10 +449,11 @@ async def gather_evidence(
     )
     # Counted before the refusals are read, deliberately: a rejection is not a retrieved chunk and
     # must not enter the accounting a starved-source alert reads.
-    refused, refusals_unavailable = await _refused_on_ingest(query)
+    refused, refusals_total, refusals_unavailable = await _refused_on_ingest(query)
     return EvidenceSweepWithRefusals(
         chunks=kept,
         refused_on_ingest=refused,
+        refusals_total=refusals_total,
         refusals_unavailable=refusals_unavailable,
         truncated_by=truncated_by,
         total_before_cap=len(framed),

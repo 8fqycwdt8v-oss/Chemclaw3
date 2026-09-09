@@ -17,7 +17,7 @@ from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 from chemclaw.api.tool_results import content_address
 from chemclaw.core.config import settings
@@ -185,14 +185,48 @@ class PendingRequestOut(BaseModel):
 
 
 class PendingRequestsOut(BaseModel):
-    """Everything waiting on this caller, soonest deadline first.
+    """One page of what is waiting on this caller, soonest deadline first.
 
     `count` is the length of `requests` rather than a total, and the list is bounded by the store.
     An inbox that said "12" over five rows would be describing a page as a population.
+
+    **That was honest to a code reader and silent on the wire**, which is the same defect one
+    remove: the docstring reasoned carefully about the distinction and the JSON carried only the
+    page, so a client with 35 waiting rows rendered 20 as the whole inbox with nothing to say
+    otherwise. `total_routed_to_you` and `truncated` are that reasoning made into fields.
+
+    `total_routed_to_you` is counted over the store's **routing** predicate, before separation of
+    duties is applied — so it can exceed `count` for two different reasons, and `verdict` says
+    both: rows the page did not reach, and rows this caller may not answer (an approval they
+    raised themselves). Not counted post-gate, because the gate turns on the *kind* and the
+    requester, which no SQL predicate here expresses.
     """
 
     requests: list[PendingRequestOut] = Field(default_factory=list)
     count: int = 0
+    # Everything matching this caller's routing, before the page bound and before the gate.
+    total_routed_to_you: int = 0
+    # Whether waiting rows exist that this page did not carry.
+    truncated: bool = False
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """What this page is, in one sentence a client can render above the list."""
+        if self.truncated:
+            return (
+                f"PARTIAL: {self.count} shown of {self.total_routed_to_you} routed to you, "
+                "soonest deadline first. The rest are still waiting — ask for a larger `limit`."
+            )
+        if self.total_routed_to_you > self.count:
+            return (
+                f"COMPLETE: every request you may answer is shown. "
+                f"{self.total_routed_to_you - self.count} further request(s) are routed to you "
+                "but not yours to answer (you raised them)."
+            )
+        if not self.count:
+            return "NOTHING WAITING: no open request is routed to you."
+        return "COMPLETE: every request waiting on you is shown."
 
 
 class PendingAnswerIn(BaseModel):

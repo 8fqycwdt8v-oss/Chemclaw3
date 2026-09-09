@@ -470,6 +470,22 @@ _COUNTERS: dict[str, str] = {
     # channel that takes nothing while another takes everything is a broken webhook, and both
     # failing is an outage.
     "chemclaw_deliveries_total": ("Messages a delivery channel accepted, by channel."),
+    # Refused records the ledger's per-source growth bound deleted. `ingest/rejections._EVICT`
+    # keeps the newest `_MAX_ROWS_PER_SOURCE` rows per source on the argument that a source
+    # refusing more than that has one systematic defect its newest thousand rows describe as well
+    # as a million would. That is an assumption about the *distribution* of a source's refusals: a
+    # source with more distinct one-off refusals than the cap loses its oldest permanently, and
+    # `refusals_matching` then reports those records as never refused — the record is gone, not
+    # merely unread. This counter is what turns the assumption into a checked invariant.
+    "chemclaw_ingest_rejections_evicted_total": (
+        "Refused records deleted by the per-source growth bound of the ingest rejection ledger."
+    ),
+    # Uploads dropped from a live session past `attachment_max_per_session` or
+    # `attachment_store_max_bytes`. Silent until wave 13: a chemist's file left the store and
+    # `read_attachment` then said it had never been sent.
+    "chemclaw_attachment_evictions_total": (
+        "Uploads dropped from a session past its per-session count or byte bound."
+    ),
     "chemclaw_delivery_failures_total": (
         "Messages a delivery channel refused or could not be sent, by channel. A failure here is "
         "swallowed so one channel's outage is not everyone's, which is exactly why it must count."
@@ -943,6 +959,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Bounded by `CHEMCLAW_DELIVERY_CHANNELS` — a deployment's own list of channel folder names,
     # never a caller's string. Same rule as every label here.
     "chemclaw_deliveries_total": ("channel",),
+    # A source name is a registry entry an operator configured, never a caller's string — the same
+    # rule the `channel` label above follows. Attachment evictions carry no label at all: the only
+    # candidate is a session id, which is unbounded cardinality.
+    "chemclaw_ingest_rejections_evicted_total": ("source",),
     "chemclaw_delivery_failures_total": ("channel",),
     # Three values, fixed in `agent/condense.py`'s own `DigestSource` literal rather than by a
     # caller: `extracted`, `degraded`, `oversized`. Bounded by the code that emits it, which is the

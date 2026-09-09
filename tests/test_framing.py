@@ -32,7 +32,7 @@ from chemclaw.agent.framing import (
 from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.tool_framing import defanged_payload
 from chemclaw.core.config import settings
-from chemclaw.durable.job_record import JobRecordSummary
+from chemclaw.durable.job_record import JobRecordSearch, JobRecordSummary
 from chemclaw.retrieval.evidence import EvidenceChunk
 
 
@@ -304,13 +304,19 @@ def _past_job(rationale: str, summary: str = "") -> JobRecordSummary:
 def _find_past_jobs(
     records: list[JobRecordSummary], monkeypatch: pytest.MonkeyPatch
 ) -> list[JobRecordSummary]:
-    """Run `find_past_jobs` against a fixed set of stored records, with no database."""
+    """Run `find_past_jobs` against a fixed set of stored records, with no database.
 
-    async def _search(text: str, connector: str) -> list[JobRecordSummary]:
-        return records
+    The tool answers with a `JobRecordSearch` rather than a bare list since wave 13 — the search
+    has to be able to say its answer is only the newest page — so the framing this file is about
+    is asserted over `.hits`. What crosses the boundary is unchanged: the envelope wraps each
+    stored record, not the wrapper the search returns.
+    """
+
+    async def _search(text: str, connector: str, after: str = "") -> JobRecordSearch:
+        return JobRecordSearch(hits=records)
 
     monkeypatch.setattr(durable_tools, "search_job_records", _search)
-    return asyncio.run(durable_tools.find_past_jobs())
+    return list(asyncio.run(durable_tools.find_past_jobs()).hits)
 
 
 def test_find_past_jobs_frames_another_chemists_rationale(monkeypatch: pytest.MonkeyPatch) -> None:

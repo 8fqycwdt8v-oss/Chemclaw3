@@ -796,7 +796,7 @@ def test_every_dispatched_step_actually_heartbeats(
 
 def _problems(write_tools: list[str], profile: str | None = None) -> list[str]:
     """Every problem the validator reports for one agent step declaring `write_tools`."""
-    from chemclaw.cli.validate_templates import _available_tools, _step_problems
+    from chemclaw.agent.template_surface import available_tools, step_problems
     from chemclaw.templates.manifest import Template
 
     template = Template.model_validate(
@@ -814,8 +814,8 @@ def _problems(write_tools: list[str], profile: str | None = None) -> list[str]:
             ],
         }
     )
-    _available_tools()  # the in-process registry is an import side effect; see the validator
-    return _step_problems(template)
+    available_tools()  # the in-process registry is an import side effect; see the validator
+    return step_problems(template)
 
 
 def test_declaring_a_read_tool_as_a_write_is_a_problem() -> None:

@@ -112,7 +112,13 @@ def discovered() -> dict[str, Template]:
 
 
 def enabled() -> list[Template]:
-    """The templates this deployment turns on; empty enable-list means every discovered one."""
+    """The templates this deployment turns on; empty enable-list means every discovered one.
+
+    **`templates_enabled` is the only filter here, and deliberately still is.** Whether a
+    template's steps resolve against the connectors this deployment actually runs is a separate
+    question, asked at launch by `unrunnable_reason` rather than here — withdrawing the launcher
+    would break every profile that names it, which is measured in that docstring.
+    """
     found = discovered()
     names = settings.templates_enabled_list
     if not names:
@@ -212,6 +218,60 @@ async def _still_running(handle: Any) -> bool:
     return bool(description.status == WorkflowExecutionStatus.RUNNING)
 
 
+def unrunnable_reason(template: Template) -> str:
+    """Why this deployment cannot run `template`, or `""` when it can.
+
+    **The runtime half of `make template-validate`.** That gate has always been able to say a
+    template names a tool, a job or a profile that does not exist — at a deployment with no `calc`
+    bundle it reports *"template 'bond-strength-survey' step 'survey' runs unknown job
+    'survey_bond_strengths'; declared jobs: []"* and exits 1 — and nothing at run time asked it.
+    `enabled()` filters on `templates_enabled` alone, so all nine `run_*` launchers were bound
+    whatever the connector set, a chemist could start a bond-dissociation survey into a fleet that
+    does not exist, and the system prompt then told the model to report the id as work in progress
+    and poll it.
+
+    **How badly that ends depends on who polls the queue, and both endings are bad.** Where nothing
+    polls `background-jobs` — a dev process with no worker, or a fleet scaled to zero — the run
+    reports `running` for as long as anybody asks, and `find_past_jobs` finds nothing, because a
+    run that reaches no step records none. Under the Helm chart it does not: measured on the
+    rendered manifests, `deployment-workers.yaml` always emits a background worker at
+    `workers.background.replicas` (1, pinned), so the run starts, reaches the step, and
+    `authorize_job_step` fails it non-retryably — a wasted launch and a named failure some minutes
+    later rather than a promise that never resolves. Neither is worth starting.
+
+    **This refuses the launch; it does not withdraw the tool.** Not registering an unrunnable
+    launcher is the obvious answer and it is measurably worse: `data/profiles/computation.yaml`
+    names eight of them and `safety.yaml` names the ninth, and `chemclaw_agent`'s
+    `_reject_unknown_tool_names` *raises* when a profile lists a tool the surface does not provide.
+    Measured with only the `results` bundle enabled, withdrawing them takes two shipped profiles
+    from "one procedure is unavailable" to "every turn on this profile fails at build" — the dead
+    deployment `discovered()`'s own docstring argues against, arrived at from the other side. A
+    refusal that names the missing job is also the more useful answer: absence tells the model
+    nothing, and this tells it (and the operator reading the log) exactly which capability is
+    missing.
+
+    `step_problems` is the gate's own function rather than a second reading of the same rule —
+    two copies of "what resolves" is the defect class this repository keeps finding. Resolved
+    without signatures, because the argument half of that check imports every bundle's server
+    module for 14 s and a launch must not pay it; an empty signature map makes the argument check
+    silent, which is what it already is for every tool it cannot resolve.
+
+    Imported lazily because `chemclaw.agent.chemclaw_agent` imports this module at import time —
+    the edge is `templates -> agent`, which the architecture has, and taking it at module scope
+    would be a cycle rather than a layering violation.
+
+    Args:
+        template: The template a launcher is about to start.
+
+    Returns:
+        The problems, one per line, or `""` when every step resolves.
+    """
+    from chemclaw.agent.template_surface import TemplateSurface, step_problems
+
+    problems = step_problems(template, TemplateSurface.resolve(with_signatures=False))
+    return "\n".join(f"  - {problem}" for problem in problems)
+
+
 def build_template_tool(template: Template) -> CapabilityTool:
     """Build the agent tool that starts one template run."""
     params_model = _params_model(template)
@@ -228,6 +288,28 @@ def build_template_tool(template: Template) -> CapabilityTool:
         # lived. `model_validate` is the one entry point that accepts either a dict or an
         # already-built model, so a caller holding one (a test, a step) is still not wrong.
         spec = params_model.model_validate(params)
+        # **Before the actor, the client and the start** — see `unrunnable_reason`. A template
+        # whose steps do not resolve against this deployment's surface cannot produce anything, so
+        # the only honest outcome is a refusal that names what is missing — rather than a workflow
+        # that fails several minutes in, or never resolves at all where nothing polls the queue.
+        #
+        # WARNING rather than only raising, because the two readers need different things: the
+        # model is told a capability is missing, and an operator needs to see *which bundle* to
+        # enable without reading a chat transcript.
+        blocked = unrunnable_reason(template)
+        if blocked:
+            logger.warning(
+                "template %r cannot run at this deployment; refusing to start it:\n%s",
+                template.name,
+                blocked,
+            )
+            raise TemplateError(
+                f"the {template.name!r} template cannot run at this deployment, so nothing was "
+                f"queued:\n{blocked}\nThis is the connector set this deployment runs, not a bad "
+                "request: the same problem `make template-validate` reports. Do not retry it — "
+                "use the tools that are available, or ask for the missing capability to be "
+                "enabled."
+            )
         inputs: dict[str, Any] = spec.model_dump(mode="json", exclude_none=True)
         workflow_id = run_workflow_id(template, inputs)
         requested_by = require_actor()
@@ -294,7 +376,11 @@ def build_template_tool(template: Template) -> CapabilityTool:
 
 
 def template_tools() -> list[CapabilityTool]:
-    """One generated launcher per enabled template."""
+    """One generated launcher per enabled template, each refusing what it cannot run.
+
+    Every enabled template gets a launcher whatever the connector set — see `enabled` — and the
+    launcher checks `unrunnable_reason` before it queues anything.
+    """
     return [build_template_tool(template) for template in enabled()]
 
 

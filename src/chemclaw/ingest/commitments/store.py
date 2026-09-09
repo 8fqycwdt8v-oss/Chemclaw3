@@ -17,10 +17,19 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import TupleRow
+from pydantic import BaseModel, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.ingest.commitments.models import LIVE_STATES, Commitment
+
+#: The most rows one `outstanding` call will serve, whatever a caller asks for. A module constant
+#: rather than a `Settings` field for the reason `ingest/rejections._MAX_ROWS_PER_SOURCE` is one:
+#: it bounds what a portfolio read may put into a prompt, which is not a deployment decision.
+#: Reported as `limit_applied` rather than applied silently — a caller asking for 1,000 used to get
+#: 200 and had no way to tell that from a programme with 200 commitments (measured: 205 rows
+#: mirrored, `outstanding(limit=1000)` returned 200).
+_MAX_PAGE = 200
 
 _COLUMNS = (
     "source",
@@ -108,13 +117,43 @@ async def record_commitments(commitments: list[Commitment]) -> int:
     return len(commitments)
 
 
-async def outstanding(
-    *, owner: str = "", source: str = "", limit: int = 50
-) -> tuple[list[Commitment], datetime | None]:
-    """What is still live, soonest deadline first, and when the mirror was last refreshed.
+class Outstanding(BaseModel):
+    """One page of the live book, when the mirror was last refreshed, **and how big the book is**.
+
+    The `(rows, freshness)` tuple this replaced carried one of the mirror's two silences and not
+    the other. Staleness was answered — that is what `observed_at` is for — and *size* was not:
+    measured against a real database, 40 outstanding commitments answered a `limit=25` read with 25
+    rows and nothing anywhere saying so, which a portfolio-risk question turns into "these are the
+    programmes at risk" over the 25 soonest deadlines. The tool above it reasoned carefully that an
+    empty list has two meanings and distinguished them, and was blind to this one beside it.
+
+    `total_outstanding` is counted over the same predicate in the same transaction as the page, so
+    "25 of 40" is one statement about one snapshot rather than two reads of a table a sync rewrites
+    wholesale.
+    """
+
+    commitments: list[Commitment] = Field(default_factory=list)
+    # `max(observed_at)` over the returned rows; `None` when the page is empty — which is why
+    # `mirror_freshness` exists and why the tool asks it when this is null.
+    mirrored_at: datetime | None = None
+    # Everything live under the same filters, before the page bound.
+    total_outstanding: int = Field(default=0, ge=0)
+    # The bound actually used, which is not the bound asked for once `_MAX_PAGE` bites.
+    limit_applied: int = Field(default=_MAX_PAGE, ge=1)
+
+    @property
+    def truncated(self) -> bool:
+        """Whether live commitments exist that this page does not carry."""
+        return self.total_outstanding > len(self.commitments)
+
+
+async def outstanding(*, owner: str = "", source: str = "", limit: int = 50) -> Outstanding:
+    """What is still live, soonest deadline first, with the freshness and the size of the book.
 
     Returns the freshness alongside the rows rather than expecting a caller to ask: an answer built
-    on a mirror that stopped updating in March is wrong in a way no individual row reveals.
+    on a mirror that stopped updating in March is wrong in a way no individual row reveals. It
+    returns `total_outstanding` for the same reason one field over — an answer built on a page of a
+    programme is wrong in a way no individual row reveals either.
 
     `due_at IS NULL` sorts last, because a commitment with no date is not the most urgent one —
     which is what a plain `ORDER BY due_at` would make it under Postgres' NULLS FIRST for DESC and
@@ -128,17 +167,23 @@ async def outstanding(
     if source:
         clauses.append("source = %s")
         params.append(source)
-    params.append(max(1, min(limit, 200)))
-    sql = (
-        f"{_SELECT} WHERE {' AND '.join(clauses)} "
-        "ORDER BY due_at ASC NULLS LAST, external_id LIMIT %s"
-    )
+    where = f"WHERE {' AND '.join(clauses)}"
+    page = max(1, min(limit, _MAX_PAGE))
     async with _connect() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(sql, tuple(params))
+            await cur.execute(
+                f"{_SELECT} {where} ORDER BY due_at ASC NULLS LAST, external_id LIMIT %s",
+                (*params, page),
+            )
             rows = [_row(tuple(row)) for row in await cur.fetchall()]
-    freshness = max((observed for _c, observed in rows), default=None)
-    return [commitment for commitment, _observed in rows], freshness
+            await cur.execute(f"SELECT count(*) FROM commitments {where}", tuple(params))
+            counted = await cur.fetchone()
+    return Outstanding(
+        commitments=[commitment for commitment, _observed in rows],
+        mirrored_at=max((observed for _c, observed in rows), default=None),
+        total_outstanding=int(counted[0]) if counted else len(rows),
+        limit_applied=page,
+    )
 
 
 async def mirror_freshness(source: str = "") -> datetime | None:

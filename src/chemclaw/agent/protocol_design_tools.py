@@ -23,7 +23,7 @@ import logging
 import re
 from collections.abc import Sequence
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.framing import defang
@@ -49,7 +49,6 @@ from chemclaw.protocols.models import (
     design_id_for,
 )
 from chemclaw.protocols.render import (
-    DesignListing,
     ProtocolReadout,
     receipt,
     render_markdown,
@@ -607,6 +606,52 @@ async def read_experiment_protocol(design_id: str, revision: int = 0) -> str:
     return _readable(body)
 
 
+class ProtocolListing(BaseModel):
+    """A page of designs, **and how many designs that page is a page of**.
+
+    `protocols.render.DesignListing` — a bare `designs` list — is what this replaced, and it had
+    the silence `GET /sessions` in the same tree was explicitly fixed for. Driven: 60 designs
+    stored, the shipped default returned 20, and the payload's only key was `designs`, so the
+    answer "here are the stored experiment designs" was written over a third of them.
+    """
+
+    designs: list[DesignSummary] = Field(default_factory=list)
+    # Everything matching the same filters, before the page bound.
+    total: int = Field(default=0, ge=0)
+    # The bound actually applied, which is not always the one asked for.
+    limit_applied: int = Field(default=0, ge=0)
+
+    # `frozen` but **not** `extra="forbid"`, unlike its neighbours here: a `computed_field` is
+    # serialized and is not a settable field, so its own `model_dump_json()` cannot be validated
+    # back under `forbid` — the round trip the listing tests do. Forbidding extras would make the
+    # honesty field and the model's own output mutually exclusive.
+    model_config = ConfigDict(frozen=True)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """The one sentence to read before saying what designs exist.
+
+        `computed_field` rather than a bare property, for the reason `FingerprintSearch.verdict`
+        states in full: a plain property is not serialized, and this listing reaches the model as
+        JSON.
+        """
+        if self.total > len(self.designs):
+            return (
+                f"PARTIAL: {len(self.designs)} of {self.total} matching designs are shown, most "
+                f"recently updated first (page bound {self.limit_applied}). Older ones exist — "
+                "narrow with `status`/`project` or raise `limit` before saying what has been run."
+            )
+        if not self.designs:
+            return (
+                "NONE: no stored design matches these filters. Nothing has been designed here yet, "
+                "or the filters exclude it."
+            )
+        return (
+            "COMPLETE: every design matching these filters is shown, most recently updated first."
+        )
+
+
 @tool
 async def find_experiment_protocols(status: str = "", project: str = "", limit: int = 20) -> str:
     """List stored experiment designs, newest first.
@@ -614,18 +659,20 @@ async def find_experiment_protocols(status: str = "", project: str = "", limit: 
     Args:
         status: `requested`, `draft`, `approved`, `executed` or `abandoned`. Empty for all.
         project: Narrow to one project.
-        limit: How many, up to 50.
+        limit: How many, up to 50 (see `limit_applied`).
 
     Returns:
-        JSON list of `{design_id, title, mode, status, project, head_revision, arms, blockers,
-        updated_at}`.
+        JSON: `designs`, a page of `{design_id, title, mode, status, project, head_revision, arms,
+        blockers, updated_at}`, plus `total` and a `verdict` — a short page is not a short corpus.
     """
     allowed = {"requested", "draft", "approved", "executed", "abandoned"}
     if status and status not in allowed:
         raise ChemclawError(f"unknown status {status!r}; one of {', '.join(sorted(allowed))}")
-    summaries = await _store().listing(
+    index = await _store().listing(
         status=status or None,  # type: ignore[arg-type]
         project=project,
         limit=max(1, min(limit, _LISTING_LIMIT)),
     )
-    return _readable(DesignListing(designs=summaries))
+    return _readable(
+        ProtocolListing(designs=index.designs, total=index.total, limit_applied=index.limit_applied)
+    )

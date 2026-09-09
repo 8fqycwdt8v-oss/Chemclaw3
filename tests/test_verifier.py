@@ -28,6 +28,7 @@ from chemclaw.agent.verifier import (
     _verifier_prompt,
     promised_uncalled_tools,
     require_verifier_capability,
+    score_answer,
     turn_evidence,
     ungrounded_parameter_shapes,
     verify_answer,
@@ -1349,3 +1350,53 @@ def test_the_bands_rerolls_are_counted(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _SequencedVerifierClient([_judged(0.7), _judged(0.7), _judged(0.7)])
     asyncio.run(verify_answer("An answer [[n1]].", [_chunk("n1")], client=client))
     assert METRICS.value("chemclaw_verifier_band_rerolls_total") == before + 2
+
+
+def test_an_ungated_answer_is_distinguishable_from_a_cleared_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unchecked answer and a checked-and-clean one must not be the same bytes.
+
+    Both honesty gates ship off, and with them off every scored field is at its `None`/`False`
+    default. That is right for the verifier — `confidence`/`verified_by` are its own null — and
+    the shape gate has no field of its own at all, so an answer it scanned and cleared serialized
+    byte-for-byte identically to one nothing looked at. A surface flagging on `review_required`
+    renders both as an unflagged answer, which is the honest half; what it cannot say is which one
+    it is looking at.
+
+    Measured before `checks_run` existed: `model_dump_json()` of the two was identical, character
+    for character.
+    """
+    from chemclaw.api.runner_answer import build_answer_event
+
+    monkeypatch.setattr(settings, "verifier_enabled", False)
+    monkeypatch.setattr(settings, "answer_shape_gate_enabled", False)
+    ungated = asyncio.run(build_answer_event("Ethanol's pKa is 15.9.", ['{"pka": 15.9}']))
+
+    monkeypatch.setattr(settings, "answer_shape_gate_enabled", True)
+    cleared = asyncio.run(build_answer_event("Ethanol's pKa is 15.9.", ['{"pka": 15.9}']))
+
+    assert ungated.review_required is False and cleared.review_required is False
+    assert ungated.model_dump_json() != cleared.model_dump_json(), (
+        "an unchecked answer and a checked-and-clean one are the same bytes on the wire"
+    )
+    assert ungated.checks_run == []
+    assert cleared.checks_run == ["answer-shape"]
+
+
+def test_every_gate_that_ran_names_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`checks_run` names the checks, in the order `score_answer` runs them.
+
+    A check that was configured on and *crashed* still ran: it flags the answer, and a reader that
+    saw no name beside a flag would have to guess which gate spoke.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    monkeypatch.setattr(settings, "answer_shape_gate_enabled", True)
+
+    async def _boom(*_: object, **__: object) -> object:
+        raise RuntimeError("judge unreachable and the citation gate too")
+
+    monkeypatch.setattr("chemclaw.agent.verifier.verify_turn_answer", _boom)
+    review = asyncio.run(score_answer("An answer.", [], []))
+    assert review.checks_run == ["verifier", "answer-shape"]
+    assert review.review_required is True

@@ -152,6 +152,39 @@ FROM experiment_protocols
 """
 
 
+#: The most summaries one `listing` call will serve, whatever a caller asks for. Both backends
+#: clamped to this already; what is new is that they *report* it, because a caller asking for
+#: 10,000 and getting 500 could not tell that from a site with 500 designs.
+_MAX_LISTING = 500
+
+
+class DesignIndex(BaseModel):
+    """One page of the design listing, **and how many designs that page is a page of**.
+
+    The bare `list[DesignSummary]` this replaced is the same silence `GET /sessions` was fixed for
+    in the same API package — "it always bounded the answer, and nothing said so" — and the sibling
+    listing was left with it. Driven on both backends: 60 designs stored, `listing(limit=20)`
+    returned 20, and `find_experiment_protocols`/`GET /protocols` each answered "the stored
+    experiment designs" over a third of them with nothing anywhere to say otherwise.
+
+    `total` counts the same filters in the same transaction as the page, so "20 of 60" is one
+    statement about one snapshot of a table two chemists may be appending to.
+    """
+
+    designs: list[DesignSummary] = Field(default_factory=list)
+    # Everything matching the same filters, before the page bound.
+    total: int = Field(default=0, ge=0)
+    # The bound actually used, which is not the bound asked for once `_MAX_LISTING` bites.
+    limit_applied: int = Field(default=_MAX_LISTING, ge=1)
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    @property
+    def truncated(self) -> bool:
+        """Whether matching designs exist that this page does not carry."""
+        return self.total > len(self.designs)
+
+
 class DesignPage(BaseModel):
     """One design as `GET /protocols/{design_id}` serves it, read as a single consistent snapshot.
 
@@ -267,8 +300,8 @@ class DesignStore(Protocol):
         project: str = "",
         session_id: str = "",
         limit: int = 50,
-    ) -> list[DesignSummary]:
-        """Designs, newest first."""
+    ) -> DesignIndex:
+        """One page of designs, newest first, with how many matched the same filters."""
         ...
 
     async def set_status(
@@ -431,13 +464,13 @@ class InMemoryDesignStore:
         project: str = "",
         session_id: str = "",
         limit: int = 50,
-    ) -> list[DesignSummary]:
-        """Designs, newest first."""
+    ) -> DesignIndex:
+        """One page of designs, newest first, with how many matched the same filters."""
         # Clamped exactly as Postgres clamps it. `[:limit]` and `max(1, min(limit, 500))` disagree
         # on `limit=0` (memory returns nothing, Postgres one row) and on a negative (memory returns
         # all but the last, Postgres one row) — a divergence in a `Protocol` method whose two
         # implementations are documented as interchangeable.
-        bounded = max(1, min(limit, 500))
+        bounded = max(1, min(limit, _MAX_LISTING))
         summaries = [
             DesignSummary(
                 design_id=design_id,
@@ -457,7 +490,8 @@ class InMemoryDesignStore:
             and (not project or meta.get("project") == project)
             and (not session_id or meta.get("session_id") == session_id)
         ]
-        return sorted(summaries, key=lambda s: s.updated_at, reverse=True)[:bounded]
+        ordered = sorted(summaries, key=lambda s: s.updated_at, reverse=True)
+        return DesignIndex(designs=ordered[:bounded], total=len(ordered), limit_applied=bounded)
 
     async def set_status(
         self,
@@ -694,10 +728,16 @@ class PostgresDesignStore:
         project: str = "",
         session_id: str = "",
         limit: int = 50,
-    ) -> list[DesignSummary]:
-        """Designs, newest first."""
+    ) -> DesignIndex:
+        """One page of designs, newest first, with how many matched the same filters.
+
+        The count runs in the same transaction as the page for the reason `DesignPage` gives about
+        its four halves: two connections would let a concurrent `append` make "20 of 60" describe
+        two different tables.
+        """
         clauses: list[str] = []
-        params: dict[str, Any] = {"limit": max(1, min(limit, 500))}
+        bounded = max(1, min(limit, _MAX_LISTING))
+        params: dict[str, Any] = {"limit": bounded}
         if status is not None:
             clauses.append("status = %(status)s")
             params["status"] = status
@@ -714,7 +754,16 @@ class PostgresDesignStore:
                     f"{_SELECT_SUMMARY} {where}ORDER BY updated_at DESC LIMIT %(limit)s", params
                 )
                 rows = await cur.fetchall()
-        return [_summary(row) for row in rows]
+                await cur.execute(
+                    f"SELECT count(*) FROM experiment_protocols {where}",
+                    {key: value for key, value in params.items() if key != "limit"},
+                )
+                counted = await cur.fetchone()
+        return DesignIndex(
+            designs=[_summary(row) for row in rows],
+            total=int(counted[0]) if counted else len(rows),
+            limit_applied=bounded,
+        )
 
     async def set_status(
         self,

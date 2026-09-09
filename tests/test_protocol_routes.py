@@ -105,7 +105,9 @@ def test_an_empty_listing_is_an_empty_list_and_not_a_404(client: TestClient) -> 
     """The policy the client's own `orEmpty()` expects of every listing here."""
     response = client.get("/protocols")
     assert response.status_code == 200
-    assert response.json() == {"designs": []}
+    # ...and the empty list says it is the whole of what matched, rather than only being empty:
+    # this route bounds its answer and, until now, the body could not say so.
+    assert response.json() == {"designs": [], "total": 0, "truncated": False}
 
 
 def test_the_listing_reports_the_header_row_of_each_design(
@@ -119,6 +121,30 @@ def test_the_listing_reports_the_header_row_of_each_design(
     assert (row["head_revision"], row["arms"], row["status"]) == (1, 3, "draft")
     # `evidence_present` is the blocker an uncited design fails, and it is counted on the row.
     assert row["blockers"] == 1
+
+
+def test_the_listing_says_it_is_a_page_when_it_is_one(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """`designs` was the response's only key, and the route has always bounded it.
+
+    Driven: 60 designs stored, `GET /protocols?limit=20` served 20, and a client had nothing to
+    read that would have told it forty more existed — so the newest twenty rendered as the corpus.
+    `GET /sessions` in this same package carries a `X-Next-Cursor` for exactly that reason; the
+    sibling listing route carried nothing at all.
+    """
+    for index in range(60):
+        asyncio.run(store.append(f"design-page-{index:02d}", _design(), [], author_kind="agent"))
+
+    page = client.get("/protocols", params={"limit": 20}).json()
+    assert len(page["designs"]) == 20
+    assert page["total"] == 60
+    assert page["truncated"] is True
+
+    # The marker means something, because a page that reaches the end does not set it.
+    whole = client.get("/protocols", params={"limit": 200}).json()
+    assert len(whole["designs"]) == 60
+    assert whole["truncated"] is False
 
 
 def test_the_listing_refuses_a_status_that_is_not_a_status(client: TestClient) -> None:

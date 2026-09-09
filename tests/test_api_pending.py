@@ -275,3 +275,39 @@ def test_both_routes_are_behind_the_authentication_gate(path: str) -> None:
     assert path in handlers
     dependencies = str(handlers[path].dependant.dependencies)  # type: ignore[attr-defined]
     assert "require_principal" in dependencies
+
+
+def test_the_inbox_says_it_is_a_page_rather_than_the_whole_inbox() -> None:
+    """`GET /pending` bounded its answer and the response could not express that.
+
+    `PendingRequestsOut`'s own docstring reasoned that `count` is a page length and not a total —
+    honest to a code reader, and invisible on the wire, so a client with 35 waiting rows rendered
+    the first 20 as the whole inbox. That is how a raised question ages out unanswered: it never
+    appeared in anybody's list.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute(
+                "DELETE FROM pending_requests WHERE asked_of = %s", ("u-alice-page",)
+            )
+            await conn.commit()
+        for index in range(35):
+            await _open(f"api-pending-page-{index:02d}", asked_of="u-alice-page")
+
+    asyncio.run(_run())
+    alice = Principal(oid="u-alice-page", upn="alice-page@example.com", roles=frozenset())
+    with _client(_app(), alice) as client:
+        page = client.get("/pending", params={"limit": 20}).json()
+        whole = client.get("/pending", params={"limit": 200}).json()
+
+    # The response could not say any of this: three keys that did not exist.
+    assert {"total_routed_to_you", "truncated", "verdict"} <= set(page)
+    assert page["count"] == 20, "the route ignored `limit` and had no way to serve a page"
+    assert page["total_routed_to_you"] >= 35
+    assert page["truncated"] is True
+    assert "PARTIAL" in page["verdict"]
+    # ...and the marker means something, because the unbounded read does not set it.
+    assert whole["truncated"] is False
+    assert "COMPLETE" in whole["verdict"]

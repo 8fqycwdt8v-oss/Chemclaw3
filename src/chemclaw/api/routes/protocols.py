@@ -72,9 +72,22 @@ class RevisionSummary(BaseModel):
 
 
 class DesignListOut(BaseModel):
-    """A page of designs."""
+    """A page of designs, **and how many designs that page is a page of**.
+
+    `designs` was the whole of this, and the route bounded it — default 50, clamped to 200 — so a
+    site with more designs than the page rendered the newest 50 as the corpus. `GET /sessions` in
+    this same package was fixed for exactly that ("it always bounded the answer, and nothing said
+    so"); the sibling listing route was not.
+
+    A `total` and a marker rather than the keyset cursor `GET /sessions` grew: see `list_protocols`
+    for why the cursor is a separate decision and what it would need.
+    """
 
     designs: list[DesignSummary] = Field(default_factory=list)
+    # Everything matching the same filters, before the page bound.
+    total: int = 0
+    # Whether matching designs exist that this page does not carry.
+    truncated: bool = False
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -159,20 +172,31 @@ async def list_protocols(
     project: str = "",
     limit: int = 50,
 ) -> DesignListOut:
-    """Designs, newest first.
+    """One page of designs, newest first, with how many matched the same filters.
 
     A list route, so an empty result is an empty list rather than a 404 — the same policy the
     client's own `orEmpty()` expects of every listing here.
+
+    **It has always been a page and the response could not say so.** Driven on both backends: 60
+    designs stored, the default page returned 50 and the body's only key was `designs`, so a client
+    rendered "the stored experiment designs" over five sixths of them.
+
+    A `total` plus `truncated` rather than the `X-Next-Cursor` keyset `GET /sessions` grew, and
+    that is a decision rather than an omission: a second keyset cursor wants the same encoder
+    (`agent/session_store.encode_session_cursor`), whose only non-duplicating home is a shared
+    module, and copying it here is precisely the drift the DRY rule exists to stop for two things
+    that must agree forever. What the finding was about is the statement, and this is the
+    statement; `docs/planning/BACKLOG.md` is where paging past 200 belongs.
     """
     known = {"requested", "draft", "approved", "executed", "abandoned"}
     if status and status not in known:
         raise HTTPException(status_code=422, detail=f"unknown status {status!r}")
-    designs = await default_design_store().listing(
+    index = await default_design_store().listing(
         status=status or None,  # type: ignore[arg-type]
         project=project,
         limit=max(1, min(limit, 200)),
     )
-    return DesignListOut(designs=designs)
+    return DesignListOut(designs=index.designs, total=index.total, truncated=index.truncated)
 
 
 async def get_protocol(

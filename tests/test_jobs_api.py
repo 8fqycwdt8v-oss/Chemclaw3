@@ -25,7 +25,7 @@ from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.events import ErrorEvent
 from chemclaw.api.runner import _classify
 from chemclaw.core.errors import ChemclawError
-from chemclaw.durable.job_record import JobRecordSummary
+from chemclaw.durable.job_record import JobRecordSearch, JobRecordSummary
 
 _DEV_OID = "dev-user"
 
@@ -54,16 +54,18 @@ def test_finished_jobs_are_listable(client: TestClient, monkeypatch: pytest.Monk
     worth reading rather than a wall of opaque ids.
     """
 
-    async def _records(text: str = "", connector: str = "") -> list[JobRecordSummary]:
-        return [
-            JobRecordSummary(
-                job_id="job-1",
-                connector="qm",
-                job="sample_conformers",
-                rationale="the reviewer questioned the reported barrier",
-                summary="done",
-            )
-        ]
+    async def _records(text: str = "", connector: str = "", after: str = "") -> JobRecordSearch:
+        return JobRecordSearch(
+            hits=[
+                JobRecordSummary(
+                    job_id="job-1",
+                    connector="qm",
+                    job="sample_conformers",
+                    rationale="the reviewer questioned the reported barrier",
+                    summary="done",
+                )
+            ]
+        )
 
     monkeypatch.setattr("chemclaw.api.app.search_job_records", _records)
 
