@@ -2449,7 +2449,9 @@ def test_the_validator_checks_the_sources_that_are_attached(
 
     Two properties, and the second is the one that bites: the failure is labelled with the *source
     name*, so an operator is sent to the manifest to fix rather than to a format; and an empty
-    enabled set does not print `OK`.
+    enabled set neither prints `OK` nor exits 0. It printed "This is not a pass: nothing was
+    checked" and returned 0 for as long as that sentence existed — the human channel and the
+    machine channel of one function disagreeing, with CI reading the machine one.
     """
     from chemclaw.ingest.eln.validate import main
 
@@ -2478,6 +2480,16 @@ def test_the_validator_checks_the_sources_that_are_attached(
         f"config:\n  export_dir: {export}\n",
         encoding="utf-8",
     )
+    # A second manifest, declared up front because `discovered()` caches: a source that is *known
+    # and enabled* while declaring no `ingest:` half is the third arm below, and adding its folder
+    # after the first `main()` would never be seen.
+    (manifests / "retrieve-only").mkdir(parents=True)
+    (manifests / "retrieve-only" / "datasource.yaml").write_text(
+        "name: retrieve-only\n"
+        "description: A source with a retrieve half and no ingest half.\n"
+        "retrieve: chemclaw.retrieval.retrievers:GraphRetriever\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(settings, "data_sources_dir", str(manifests))
     monkeypatch.setattr(settings, "data_sources", "eln-under-test")
 
@@ -2487,10 +2499,17 @@ def test_the_validator_checks_the_sources_that_are_attached(
     assert "mass balance" in reported
 
     monkeypatch.setattr(settings, "data_sources", "")
-    assert main() == 0, "a retrieve-only deployment is a configuration, not a failure"
+    assert main() == 1, "nothing checked is not a pass, and the exit code is the channel CI reads"
     nothing = capsys.readouterr().out
-    assert "not a pass" in nothing, "but it must never read as one"
+    assert "not a pass" in nothing, "and it must not read as one either"
     assert "OK" not in nothing
+
+    # And the arm that reaches the same branch without anyone having chosen it: a source that is
+    # *enabled and known* but declares no `ingest:` half. `active_manifests` raises on an unknown
+    # name, so a typo is already loud; `graph` instead of `graph,eln-json` is not, and it is the
+    # shape an operator who meant to attach an ELN actually produces.
+    monkeypatch.setattr(settings, "data_sources", "retrieve-only")
+    assert main() == 1, "a deployment that meant to attach an ELN and did not must not go green"
 
 
 def test_the_validator_does_not_report_ok_over_a_source_that_yielded_nothing(

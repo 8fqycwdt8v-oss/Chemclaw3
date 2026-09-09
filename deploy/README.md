@@ -277,6 +277,33 @@ half-written.
   and pydantic-settings ignores an unknown prefixed environment variable, so a typo used to satisfy
   the gate, report retention on, and leave every window disabled. A key that is not one of the nine
   `CHEMCLAW_RETENTION_*` fields now refuses to render, naming the set it is not in.
+- **Stating windows does not bound the artifact store, so it is asked for separately.**
+  `artifact_blobs` — a calculation's Hessians, geometries and conformer ensembles — is swept by its
+  own job under `CHEMCLAW_ARTIFACT_STORE_MAX_BYTES` / `CHEMCLAW_ARTIFACT_EVICT_IDLE_DAYS`, both of
+  which default to 0 (off), and none of the nine windows reaches it. A release that carefully
+  stated a retention posture therefore still grew that table forever and was never asked. So on the
+  `retention.windows` arm the chart also requires exactly one of `retention.artifactStore` (either
+  bound) or `retention.artifactGrowthAccepted: true`. **Only on that arm**: `unboundedGrowthAccepted`
+  already says everything grows, which is true of this table too — which is why the shipped
+  defaults still render with two `--set`s and not three.
+- **Which Temporal namespace this release owns must be stated, and there is no default.**
+  `CHEMCLAW_TEMPORAL_ADDRESS` names one broker for the whole cluster (its own `temporal` Kubernetes
+  namespace, not one per release). Inside that broker the Temporal namespace is the only boundary
+  there is: the background task queue is the constant `background-jobs`, every Schedule id
+  `durable/schedules.py` owns is a bare constant, and a job's workflow id carries no site. Measured
+  against a live broker through the shipped applier, a second release's `helm upgrade` rewrote the
+  first's `eln-sync` Schedule to fire a different workflow type at a different interval, and — having
+  `eval_drift_enabled: false` — deleted the first's `eval-drift` Schedule outright, because `_prune`
+  removes every owned id *this* release did not plan and cannot tell a peer's Schedule from a
+  leftover of its own. Beyond Schedules, workers on one queue take each other's tasks and a
+  deduplicated job resolves to a peer's completed execution. The namespace was a constant inside
+  `config`; it is now `temporal.namespace` with no default, because a default is exactly what two
+  releases would share. `helm template` on the shipped defaults therefore takes a third flag,
+  `--set temporal.namespace=chemclaw`, and a real release names one per environment — the release's
+  own Kubernetes namespace is unique by construction — and registers it on the broker.
+  **A shared Postgres is the same hazard and this knob does not cover it**: 44 tables carry no
+  deployment discriminator and the retention sweep's expired-thread predicate would prune a peer's
+  live threads, so two ChemClaw releases need their own database as well as their own namespace.
 - **`/metrics` is on the public host, and the NetworkPolicy is not what bounds it.** The Route
   declares no `spec.path`, and neither a Route nor a NetworkPolicy filters by path — the ingress
   rule must allow the router, and the router publishes every path. What makes an unauthenticated

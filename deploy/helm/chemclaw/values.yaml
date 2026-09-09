@@ -814,8 +814,14 @@ config:
   # `Settings.knowledge_path` resolves. Left implicit, the chart would have to name the notes
   # subdirectory a second time, and a second name is what published the graph where nothing read it.
   CHEMCLAW_KNOWLEDGE_DIR: "knowledge"
+  # The broker, which is one deployment for the whole cluster in its own `temporal` namespace —
+  # note the address names no release. `CHEMCLAW_TEMPORAL_NAMESPACE` used to sit on the next line
+  # as the constant `"chemclaw"`, and is now `temporal.namespace` below, which this chart refuses
+  # to render without: the namespace is the only thing separating two ChemClaw releases that share
+  # this address, and a constant separated nothing. Written here as well it would render twice,
+  # every parser keeps the last, and the gate would be checking a value nothing reads — so the
+  # render refuses that too.
   CHEMCLAW_TEMPORAL_ADDRESS: "chemclaw-temporal-frontend.temporal.svc:7233"
-  CHEMCLAW_TEMPORAL_NAMESPACE: "chemclaw"
   # Where the calc physics server lives (`Chemclaw3-mcp`'s `servers/calc`,
   # D-2026-08-16-the-physics-leaves-the-cache-stays). `calc_server_url` is a `CalculatorSettings`
   # field `connectors/calc/remote.py::calc_session` dials directly for EVERY calculation — every
@@ -1474,6 +1480,48 @@ securityContext:
   # `emptyDir` mounted at `/tmp`, never on its own.
   readOnlyRootFilesystem: false
 
+# **Which Temporal this release owns, and the reason it has no default.**
+#
+# `CHEMCLAW_TEMPORAL_ADDRESS` above names one broker for the whole cluster, in its own `temporal`
+# Kubernetes namespace rather than one per release. Inside that broker the *Temporal namespace* is
+# the only boundary there is: `CHEMCLAW_BACKGROUND_TASK_QUEUE` is the constant `background-jobs`,
+# `durable/schedules.py`'s `OWNED_SCHEDULE_IDS` is a set of bare constants (`eln-sync`,
+# `retention`, `eval-drift`, …), and a job's workflow id carries no site. So the ordinary layout
+# this repository documents — `dev.yaml`, `staging.yaml`, `prod.yaml` in
+# `deploy/jenkins/environments/`, three Kubernetes namespaces, one shared Temporal — put every
+# release on one namespace, one queue and one schedule-id space while nothing said so.
+#
+# Measured against a live broker through the shipped `apply_schedules`/`_prune`, with the ids
+# probe-prefixed:
+#
+#   site A applied:  eln-sync -> workflow=SiteAWorkflow  interval=0:30:00
+#   site B applied:  eln-sync -> workflow=SiteBWorkflow  interval=0:05:00   <-- overwritten
+#   site A's schedules, settled:  ['eln-sync', 'eval-drift']
+#   after site B's apply pruned:  ['eln-sync']                              <-- deleted
+#
+# Site B's `helm upgrade` rewrote site A's Schedule to fire a different workflow type at a
+# different interval, and site B having `eval_drift_enabled: false` deleted site A's `eval-drift`
+# Schedule outright — `_prune` deletes every id in `OWNED_SCHEDULE_IDS` that *this* release did not
+# plan, and it cannot tell a peer's Schedule from a leftover of its own. Beyond Schedules: workers
+# polling `background-jobs` take each other's tasks, so a peer's `RetentionWorkflow` runs against
+# this release's Postgres and this release's knowledge checkout; and under
+# `ALLOW_DUPLICATE_FAILED_ONLY` a job requested here resolves to a peer's completed execution and
+# returns its result.
+#
+# **So the namespace is stated, never inherited.** There is no default because a default is exactly
+# what two releases would share: what this gate buys is that the discriminating string is typed
+# where it takes effect, in this release's own values file, rather than being a constant three
+# environments quietly agree on. The release's own Kubernetes namespace is the value that is
+# unique by construction where each environment gets one of its own, and it is what the
+# refusal suggests by name.
+#
+# **A shared Postgres is the same hazard and this knob does not cover it** — 44 tables carry no
+# deployment discriminator, and `durable/retention.py`'s expired-thread sweep would prune a peer's
+# live threads. Two ChemClaw releases need their own database as well as their own Temporal
+# namespace; nothing here can check that, which is why it is written down here.
+temporal:
+  namespace: ""
+
 # What happens to the durable tables' history — a posture this chart refuses to leave unstated,
 # by the same rule as the egress block below (D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob):
 # every retention window in `Settings` defaults to 0, meaning *disabled*, because "keep for N days,
@@ -1544,6 +1592,45 @@ retention:
   # wants no disposal says so here, in its own values file, where the next person greps for it.
   # The tables then grow exactly as they always did — the posture is unchanged, the silence is not.
   unboundedGrowthAccepted: false
+
+  # **The growth the nine windows above do not bound, and the reason it is asked here.**
+  # `artifact_blobs` — a calculation's Hessians, optimized geometries and conformer ensembles —
+  # is swept by a different job (`ArtifactEvictionWorkflow`) on a different schedule under two
+  # settings that carry no `CHEMCLAW_RETENTION_` prefix and both default to 0, meaning off. No
+  # window above reaches it. So a release that stated a retention posture, satisfied the gate and
+  # believed its growth bounded still accumulated by-products for the deployment's lifetime, and
+  # nothing asked — which is the same silence `unboundedGrowthAccepted` exists to break, one table
+  # over.
+  #
+  # **Only the `windows` arm is asked.** `unboundedGrowthAccepted: true` already says the durable
+  # tables grow forever and is true of this one too; there is nothing further to state, and asking
+  # anyway would make a third `--set` mandatory at every render of the shipped defaults. It is the
+  # release that says "I bound my growth" whose statement was incomplete. Set exactly one of
+  # `artifactStore` or `artifactGrowthAccepted` once you set `windows`, or the render refuses
+  # naming both ways out.
+  #
+  # Either bound turns the sweep on (`planned_schedules` creates the Schedule when either is
+  # non-zero), so there is no enable switch to forget:
+  #   artifactStore:
+  #     # The eviction budget in *stored* bytes — post-compression, blobs only. The sweep evicts
+  #     # least-recently-used blobs down to it; `calculation_results` is never evicted (D-011), so
+  #     # this bounds the by-products and not the cache of results that cite them.
+  #     CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: "53687091200"
+  #     # And/or the idle window a blob must exceed to be a candidate at all. Stated alone it is an
+  #     # age policy with no size ceiling; stated together the budget decides how much goes and this
+  #     # decides what is eligible.
+  #     CHEMCLAW_ARTIFACT_EVICT_IDLE_DAYS: "90"
+  #
+  # A key here must name one of those two, or the render refuses — the same reason `windows` checks
+  # its own: an unknown prefixed variable is ignored by pydantic-settings, so a typo would state a
+  # posture and evict nothing. The sweep's *cadence*
+  # (`CHEMCLAW_ARTIFACT_EVICTION_SCHEDULE_MINUTES`, a day by default) is deliberately not accepted
+  # here and belongs in `config` above: it is how often the sweep runs, not whether anything is
+  # bounded, and a block that accepted it could be satisfied by a key that bounds nothing.
+  artifactStore: {}
+  # The escape hatch for this half, on the same terms as `unboundedGrowthAccepted` above: a
+  # deployment that wants every by-product kept says so where the next person greps for it.
+  artifactGrowthAccepted: false
 
 networkPolicy:
   enabled: true
