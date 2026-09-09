@@ -1191,6 +1191,35 @@ _GAUGE_FAMILIES: dict[str, str] = {
     "chemclaw_connector_tool_schema_tokens": (
         "Estimated tokens of bound tool schema advertised by each connector at handshake."
     ),
+    # **The only series that answers "is the store filling", and there was none.** Nothing in this
+    # registry matched `retention`, `disk`, `table_size` or `prune`, and `durable/retention.py`
+    # imported no metrics at all — so a sweep that deleted 1 900 rows and returned 0 bytes, and a
+    # sweep that had not run since Tuesday, were the same silence. Read from
+    # `pg_total_relation_size` once per retention pass rather than per scrape — the same "publish
+    # the last reading, never query on a scrape" shape as the outbox families above — and over
+    # every table `durable/retention.py`'s register names, not just the swept ones, because the
+    # table filling the volume is quite often one nothing prunes.
+    #
+    # **A gauge and not a pair of counters, and that is a narrowing taken on measurement.** Rows
+    # deleted and bytes reclaimed were both drafted here as counters and both removed: the row
+    # count is already in the pass's own `RetentionOutcome`, where the module's docstring has
+    # always said the deletion is auditable, and reclaimed *bytes* is structurally near-zero —
+    # retention deletes the oldest rows, which sit at the front of the relation, where a plain
+    # `VACUUM` truncates nothing. Neither had an alert that could fire on it without also firing on
+    # a healthy deployment (a table that legitimately expires nothing yet; a table that grows
+    # because the deployment grows), and a series with no reader is a cost with no benefit —
+    # `tests/test_deploy_chart.py::test_every_declared_metric_has_a_consumer` is where that rule
+    # lives. What survives is the one reading an operator actually queries: `topk(5,
+    # chemclaw_table_bytes)`.
+    #
+    # **Absent until a pass has run, which includes "for ever, on a deployment that never
+    # sweeps".** That is not seeded to zero for the reason `chemclaw_outbox_pending` is not: a
+    # fabricated 0 for a table holding gigabytes is worse than no reading. The absence is what
+    # `ChemclawRetentionNotSweeping` fires on.
+    "chemclaw_table_bytes": (
+        "Total relation size of each durable table in bytes, as of the last retention pass "
+        "(heap, indexes and TOAST — `pg_total_relation_size`)."
+    ),
     "chemclaw_connector_unhealthy": (
         "1 per enabled connector that could not be reached, by connector. The unlabelled "
         "`chemclaw_connectors_unhealthy` says how many; this says which, which is the half "
@@ -1199,6 +1228,7 @@ _GAUGE_FAMILIES: dict[str, str] = {
 }
 
 _GAUGE_FAMILY_LABELS: dict[str, str] = {
+    "chemclaw_table_bytes": "table",
     "chemclaw_outbox_pending": "sink",
     "chemclaw_outbox_oldest_pending_seconds": "sink",
     "chemclaw_outbox_dead_lettered": "sink",

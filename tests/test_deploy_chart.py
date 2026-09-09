@@ -2545,15 +2545,21 @@ def test_an_unstated_retention_posture_refuses_to_render() -> None:
     assert _values()["retention"]["unboundedGrowthAccepted"] is False, (
         "the shipped default grants a permission the release never wrote down"
     )
-    # Every render of the shipped defaults must carry the escape hatch, or it cannot render at all
-    # — the same renders the egress test walks, now each paying both flags.
+    # Every render must state a retention posture, or it cannot render at all — the same renders
+    # the egress test walks. **A disjunction rather than the escape hatch by name**, because the
+    # guard above is an exclusive-or and the escape hatch is only one of its two arms: the
+    # `helm-validate` render that exists to parse `ChemclawRetentionNotSweeping` states
+    # `retention.windows` instead, since that rule renders on *that* arm and on no other. Asserting
+    # the flag by name would have failed the one render that covers the rule this half of the gate
+    # is about — and demanding both flags would fail every render, which is the guard working.
+    stated = ("--set retention.unboundedGrowthAccepted=true", "--set retention.windows")
     unflagged = [
         block[0].strip()
         for block in _makefile_renders()
-        if not any("--set retention.unboundedGrowthAccepted=true" in line for line in block)
+        if not any(flag in line for line in block for flag in stated)
     ]
     assert not unflagged, (
-        f"a shipped-defaults render is missing the flag it cannot render without: {unflagged}"
+        f"a render states no retention posture, so the chart refuses it: {unflagged}"
     )
 
 

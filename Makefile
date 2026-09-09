@@ -292,9 +292,15 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# it. That failure is silent from the cluster's side: the object exists and is `Valid` by every
 	@# check this repo ran, and the alerts in it simply never evaluate.
 	@#
-	@# Both renders, because a rule behind a flag is a rule nothing else parses: the shipped
-	@# defaults, and the one with the Temporal SDK exporter on, which is the only shape that renders
-	@# `ChemclawWorkerNotPolling`. The dashboards go through the same check for the same reason at
+	@# Three renders, because a rule behind a flag is a rule nothing else parses: the shipped
+	@# defaults, the one with the Temporal SDK exporter on (the only shape that renders
+	@# `ChemclawWorkerNotPolling`), and one that *states retention windows* rather than accepting
+	@# unbounded growth — `ChemclawRetentionNotSweeping` renders only on that arm, because with the
+	@# growth accepted there is no sweep to be absent, so the two renders above parse every rule in
+	@# the file except that one. It is a separate invocation rather than a third arm of the loop,
+	@# because the chart refuses a release that states *both* postures — which is the guard
+	@# working — so the two arms cannot share a prefix with it.
+	@# The dashboards go through the same check for the same reason at
 	@# one remove — over a hundred panel queries that no other gate reads, where a mistyped one is a
 	@# blank panel rather than an error.
 	@set -e; \
@@ -308,7 +314,15 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	      > "$$work/render.yaml"; \
 	    uv run python "$$work/extract.py" < "$$work/render.yaml" > "$$work/rules.yaml"; \
 	    promtool check rules "$$work/rules.yaml"; \
-	  done
+	  done; \
+	  helm template chemclaw deploy/helm/chemclaw \
+	    --set networkPolicy.allowAnyDestination=true \
+	    --set retention.windows.CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS=365 \
+	    --set retention.artifactGrowthAccepted=true \
+	    --set temporal.namespace=chemclaw \
+	    > "$$work/render.yaml"; \
+	  uv run python "$$work/extract.py" < "$$work/render.yaml" > "$$work/rules.yaml"; \
+	  promtool check rules "$$work/rules.yaml"
 
 upstream-check:  ## Re-check every upstream shape this repo borrows (run on any langchain/langgraph/deepagents bump).
 	@# The whole point of `tests/test_upstream_surface.py` is that a dependency bump becomes one

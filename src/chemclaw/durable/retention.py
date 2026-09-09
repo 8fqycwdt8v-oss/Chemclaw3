@@ -60,6 +60,14 @@ to be exhaustive, not asserted to be.
   thread's state split across three keys with no foreign key to enforce it — `_prune_checkpoints`
   says what committing them separately would cost.
 
+  **A thread with blob or write rows and no `checkpoints` row is reached by none of that**, and
+  the register entries for those two tables said otherwise for as long as they existed. Both
+  delete statements take their ids from `_EXPIRED_THREADS`, which selects out of `checkpoints`,
+  so a thread that is not in that table is not a candidate — proved by seeding three such rows and
+  watching a full pass leave them. `_REPAIR_ORPHANED` is the unrestricted, batched arm that
+  reaches them; this module's own transaction is what stops *this* sweep producing one, and a PITR
+  restore or hand surgery is what produces one anyway.
+
   **This used to say deleting rows inside a live thread was impossible, and that sentence was the
   only thing holding the largest growth defect in the system open for six review waves.** It read:
   "A checkpoint chains to the one before it through `parent_checkpoint_id`, so deleting the old rows
@@ -163,6 +171,19 @@ to be exhaustive, not asserted to be.
 
 Every prune is age-based against a per-table window, runs on `background-jobs`, and reports what it
 removed so the deletion is itself auditable in the job's own result.
+
+**And what it removed is now reported in bytes as well as rows, because rows were being read as
+bytes.** Measured on a throwaway schema: one pass deleted 1 900 rows across five tables and
+returned **0 bytes**, leaving 1 919 dead tuples — a `DELETE` reclaims nothing on its own, and
+reclamation was left to an autovacuum this repository neither configures nor checks, at the stock
+`autovacuum_vacuum_scale_factor = 0.2`. The module's own argument about migrations sharpens that:
+no migration can reach the checkpoint tables, because `setup()` creates them after migrations run —
+which applies verbatim to per-table autovacuum storage parameters, so the three highest-churn
+tables in the system are exactly the three no migration can tune. `_vacuum_swept_tables` is the
+answer, `bytes_on_disk`/`bytes_reclaimed` are what the pass reports, and `chemclaw_table_bytes`,
+`chemclaw_retention_rows_deleted_total` and `chemclaw_retention_bytes_reclaimed_total` are what an
+operator can alert on — there was no such series at all before, so "the sweep removed nothing" and
+"the sweep has not run since Tuesday" were the same silence.
 """
 
 import logging
@@ -184,6 +205,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.db import connection, existing_tables
     from chemclaw.core.logging import log_event
+    from chemclaw.core.metrics_bridge import record_metric
     from chemclaw.durable.heartbeat import beating
     from chemclaw.durable.registry import durable_activity, durable_workflow
 
@@ -360,15 +382,44 @@ _NOT_PRUNED: dict[str, str] = {
     "of a design, and why — the only record of a sign-off, because a later revision moves the "
     "header's status off it. INSERT-only by grant, like the revisions it points at",
     # Disposed by a mechanism that is not an age cutoff, and deliberately not duplicated here.
+    #
+    # **Both entries used to stop at "swept with the thread it belongs to", and for a thread with
+    # no `checkpoints` row that was false.** Proved: seed three `checkpoint_blobs` /
+    # `checkpoint_writes` rows under thread ids that have no `checkpoints` row and run
+    # `_prune_checkpoints` — all three survive, and no window, cap or later pass reaches them.
+    # Both delete statements are restricted to `thread_id = ANY(candidates)` and the candidate list
+    # comes from `_EXPIRED_THREADS`, which selects **out of `checkpoints`** — so a thread that is
+    # not in that table is not a candidate, and its rows are permanent. Worse, they pin the
+    # session's `session_owners` row for ever through `_untouched_arms`, which is the one outcome
+    # the ordering rule above exists to prevent.
+    #
+    # This module's own transaction is what stops *this* sweep producing one; it is not the only
+    # producer. A restore to a point in time, hand surgery, or a partial delete on any other path
+    # leaves one, and until `_repair_orphaned_checkpoint_rows` nothing repaired it.
     "checkpoint_blobs": "swept by `_prune_checkpoints` with the thread it belongs to, not by a "
-    "cutoff of its own — `checkpoints` in `_PRUNABLE` is the key that finds it",
-    "checkpoint_writes": "swept by `_prune_checkpoints` with its thread, as `checkpoint_blobs` is",
+    "cutoff of its own — `checkpoints` in `_PRUNABLE` is the key that finds it. A row whose "
+    "thread has no `checkpoints` row at all is reached by neither delete and is repaired by "
+    "`_repair_orphaned_checkpoint_rows` instead",
+    "checkpoint_writes": "swept by `_prune_checkpoints` with its thread, as `checkpoint_blobs` "
+    "is, and repaired by `_repair_orphaned_checkpoint_rows` on the same terms when its thread "
+    "has no `checkpoints` row",
     "artifact_blobs": "`durable/artifact_eviction.py`, by idle window and size budget",
     "document_files": "`ingest/documents/sync.py`, mark-and-sweep — rows a *complete* crawl did "
     "not see are removed, so a file deleted from the share leaves the index",
     "subscriptions": "deleted on unsubscribe, which is an event rather than an age",
     "observations": "stale rows are retired by status, not deleted",
-    "store": "the scratchpad memory store (`agent/scratchpad.py`); erasure reaches it per actor",
+    # **This entry used to read "erasure reaches it per actor", and that is not a bound.** The
+    # `session_owners` entry above rejects exactly that reasoning in its own words — "the only
+    # DELETE against this table was actor-scoped erasure, which a deployment that no one leaves
+    # never runs" — so one register applied one argument in two directions in the same file. An
+    # agent-writable table with no size cap, no window and no clock is a "nothing bounds it" case;
+    # naming a disposal route that fires only on a leaver request dressed it as a bounded one.
+    # `docs/planning/BACKLOG.md` carries the capability question (a per-actor or per-session size
+    # cap on the scratchpad, the shape `ingest_rejections` already has); what belongs here is the
+    # finding.
+    "store": "**nothing bounds it** — the scratchpad memory store (`agent/scratchpad.py`), which "
+    "an agent writes to at will. Erasure reaches it per actor, which is a leaver's request and "
+    "not a bound; no decision is on record",
     # Cascades. A `ON DELETE CASCADE` parent is the whole policy, and listing the child separately
     # would be a second, racing definition of one disposal.
     "bo_suggestions": "cascades from `bo_campaigns`",
@@ -628,6 +679,114 @@ _DELETE_ORPHANED = (
     "AND NOT EXISTS (SELECT 1 FROM checkpoints c WHERE c.thread_id = {table}.thread_id)"
 )
 
+# The repair for the orphan the statement above cannot reach, run once per pass.
+#
+# **What it exists for, measured rather than argued.** `_DELETE_ORPHANED` and
+# `_DELETE_EXPIRED_CHECKPOINTS` are both restricted to `thread_id = ANY(candidates)`, and the
+# candidate list comes from `_EXPIRED_THREADS`, which selects out of `checkpoints`. So a thread
+# holding blob or write rows and **no** `checkpoints` row is not a candidate for either: driven on
+# a throwaway schema, three such rows survived a full `_prune_checkpoints` and no window, cap or
+# later pass can ever take them. They also pin that session's `session_owners` row for ever
+# through `_untouched_arms`, which is the outcome the ordering rule in `_prune_session_owners`
+# exists to prevent.
+#
+# **Unrestricted, and that is the whole difference.** The register entry beside these two tables
+# used to say they are "swept with the thread they belong to", which is true of every thread that
+# has one. This statement is the arm for the thread that does not.
+#
+# **Why deleting an unmatched row is safe, and why the answer is a measurement in this module
+# rather than an assumption.** The obvious fear is a live turn whose blobs commit before its
+# `checkpoints` row, which this would then take. That window does not exist: `aput` runs its
+# statements in a psycopg pipeline and a pipeline on an autocommit connection is **one**
+# transaction — `txid_current()` identical across it, a concurrent poller seeing only `(0,0)` and
+# `(1,1)` — which is the same finding `_DELETE_EXPIRED_CHECKPOINTS`' comment already rests on. The
+# other producers (a PITR restore, hand surgery, a partial delete on some other path) leave rows
+# that are already dead by the time anything can see them.
+#
+# **Bounded to one batch per pass, deliberately, and it is the cheap shape rather than the
+# thorough one.** Measured on 50 000 live threads, batch 10 000: a `Hash Anti Join` over
+# `checkpoints`' thread set costs **43.9 ms with nothing to repair** (1 186 buffers) and 40.5 ms
+# removing 5 000 rows — three orders below the pass's own budget, which is what makes running it
+# on every pass affordable. One batch and not a drain loop because an orphan is an artifact of a
+# restore rather than a population that arrives: a set larger than one batch converges over the
+# next few passes, and a full batch is reported as a tail like every other branch here.
+# `ctid = ANY(ARRAY(... LIMIT))` for the reason `_prune_by_age` uses it — Postgres has no `LIMIT`
+# on `DELETE`.
+_REPAIR_ORPHANED = (
+    "DELETE FROM {table} WHERE ctid = ANY(ARRAY("
+    "SELECT o.ctid FROM {table} o WHERE NOT EXISTS ("
+    "SELECT 1 FROM checkpoints c WHERE c.thread_id = o.thread_id) LIMIT %s))"
+)
+
+# Every table this register names, and what it costs on disk right now.
+#
+# **A row count is not a quantity of disk, and until this existed the job reported only rows.**
+# Measured on a throwaway schema: one pass deleted 1 900 rows across five tables and returned
+# **0 bytes** — because a `DELETE` reclaims nothing on its own and autovacuum's stock
+# `autovacuum_vacuum_scale_factor = 0.2` is a permanent 20%-dead floor it never crossed on tables
+# this size. Six cycles of "insert 500 conversation rows, sweep 500" grew `session_messages` from
+# **319 488 to 1 277 952 bytes** with the live set constant at 500 rows; the same six cycles with
+# `_vacuum_swept_tables` in place measured 327 680 -> 344 064 and flat from the second cycle on.
+#
+# Read through `to_regclass`, so it resolves on the connection's own `search_path` exactly as
+# every statement in this module does, and a table this deployment does not have (the three
+# checkpoint tables on a database that has never run the graph engine) is simply absent from the
+# answer rather than an error. `pg_total_relation_size` and not `pg_relation_size`: the indexes
+# and the TOAST table are the majority of what `tool_result_blobs` and `checkpoint_blobs` occupy,
+# and an operator watching a volume fill is watching all of it.
+_TABLE_BYTES = (
+    "SELECT t.name, pg_total_relation_size(to_regclass(quote_ident(t.name))) "
+    "FROM unnest(%s::text[]) AS t(name) "
+    "WHERE to_regclass(quote_ident(t.name)) IS NOT NULL"
+)
+
+# What one pass of `VACUUM` is run against: the tables this pass actually deleted from.
+#
+# **`SKIP_LOCKED`, so it can never be the thing that blocks a turn.** A plain `VACUUM` takes a
+# `SHARE UPDATE EXCLUSIVE` lock, which does not block reads or writes but does queue behind DDL;
+# `SKIP_LOCKED` makes an unavailable table a skip instead of a wait, and the next pass takes it.
+#
+# **Not `FULL` and never `FULL`.** `VACUUM FULL` rewrites the relation under an `ACCESS EXCLUSIVE`
+# lock — every reader and writer of that table blocked for the rewrite, on the table a chemist's
+# next turn reads — and needs the free disk to hold a second copy of the very relation that is
+# filling the volume. What a plain `VACUUM` buys is that the space the sweep freed becomes
+# *reusable*, which is what makes the table stop growing; returning bytes to the filesystem only
+# happens where the dead space is at the end of the relation, and retention deletes the *oldest*
+# rows, which are at the front. That is why `bytes_reclaimed` is usually zero and
+# `chemclaw_table_bytes` going flat is the signal — stated here because reading the first as a
+# failure is exactly the row-count-for-bytes confusion this whole pass exists to end.
+#
+# **A role that may not vacuum a table gets a WARNING and a skip, not an error** — verified on
+# PostgreSQL 16.15 against a role holding only SELECT/DELETE: `WARNING: permission denied to
+# vacuum "…", skipping it`, and the command still reports success. So this needs no privilege
+# guard, for the same reason `_ANALYZE_THREADS` needs none under the split-principal grants of
+# `D-2026-08-05-append-only-by-grant-not-by-contract`.
+_VACUUM = "VACUUM (SKIP_LOCKED) {table}"
+
+# The last reading of every table's size, published as `chemclaw_table_bytes` and refreshed by
+# each pass.
+#
+# **Not queried on a scrape**, which is the same rule `publish/outbox.py`'s three families follow:
+# a gauge source runs inside `render()` on the scrape thread, and a catalog round trip there makes
+# `/metrics` depend on the database being up. It is also **not seeded**, so a process that has
+# never swept publishes no series at all rather than a fabricated zero for a table holding
+# gigabytes — and that absence is what `ChemclawRetentionNotSweeping` fires on, which is the only
+# way "the sweep stopped running" can be seen at all.
+_TABLE_SIZES: dict[str, float] = {}
+
+
+def bind_table_size_gauges() -> None:
+    """Publish `chemclaw_table_bytes` off the last pass's reading (no query on a scrape).
+
+    Called at import, like `publish/outbox.bind_backlog_gauges`: the reading lives in this module,
+    so the process that sweeps is exactly the process that reports what the store holds, and there
+    is no startup hook that could be forgotten.
+    """
+    record_metric(lambda m: m.bind_gauge_family("chemclaw_table_bytes", lambda: _TABLE_SIZES))
+
+
+bind_table_size_gauges()
+
 # The three statements the per-session conversation prune needs. Only sessions that actually have an
 # expired row are visited, so a deployment whose sessions are all recent pays one indexed scan.
 #
@@ -839,6 +998,19 @@ class RetentionOutcome(BaseModel):
     """
 
     deleted: dict[str, int] = {}
+    # **What the pass cost the store, beside what it removed from it.** `deleted` is a *row* count
+    # and an operator watching a filling disk reads it as progress; measured, one pass deleted
+    # 1 900 rows and returned 0 bytes. These two are the quantity that question was actually
+    # about: `bytes_on_disk` is `pg_total_relation_size` per table as this pass left it, and
+    # `bytes_reclaimed` is how much of that the pass gave back to the filesystem.
+    #
+    # A zero in `bytes_reclaimed` beside a large `deleted` is the normal reading rather than a
+    # fault, and saying so here is the point: retention deletes the *oldest* rows, which sit at
+    # the front of the relation, and a plain `VACUUM` truncates only trailing empty pages. What
+    # the vacuum pass buys is that the freed space becomes reusable, which shows up as
+    # `bytes_on_disk` going flat over passes instead of climbing.
+    bytes_on_disk: dict[str, int] = {}
+    bytes_reclaimed: dict[str, int] = {}
     skipped: list[str] = []
     sessions_deferred: int = 0
     threads_deferred: int = 0
@@ -967,6 +1139,166 @@ async def prune_expired_rows() -> RetentionOutcome:
     )
 
 
+async def _table_sizes(conn: AsyncConnection[TupleRow]) -> dict[str, int]:
+    """`pg_total_relation_size` for every table this module's register names, by table.
+
+    Every table, not just the prunable ones, because the table filling the volume is quite often
+    one nothing prunes — `_NOT_PRUNED` holds `calculation_results`, `audit_events` and the two
+    fingerprint tables, and two of those entries say in their own words that nothing bounds them.
+    A reading that covered only what the sweep touches would answer "did the sweep work" and not
+    "is the store filling", which is the question an operator brings.
+
+    Args:
+        conn: The pass's connection. The statement is a catalog read resolved through
+            `to_regclass`, so it sees exactly the tables this connection's `search_path` does.
+
+    Returns:
+        `{table: bytes}` for the tables that exist here; a table this deployment does not have is
+        absent rather than zero.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(_TABLE_BYTES, (sorted(set(_PRUNABLE) | set(_NOT_PRUNED)),))
+        return {str(row[0]): int(row[1]) for row in await cur.fetchall()}
+
+
+async def _vacuum_swept_tables(tables: list[str], budget: _Budget) -> list[str]:
+    """`VACUUM (SKIP_LOCKED)` each table this pass deleted from. Returns the ones it skipped.
+
+    **This is what makes the sweep bound anything.** A `DELETE` marks a tuple dead and reclaims
+    nothing; reclamation was left entirely to an autovacuum this repository neither configures nor
+    checks, at the stock `autovacuum_vacuum_scale_factor = 0.2` — a permanent 20%-dead floor on a
+    large table, and on a small one a threshold that is simply never crossed. Measured over six
+    cycles of "insert 500 conversation rows, sweep 500" with the live set constant at 500:
+    **319 488 -> 1 277 952 bytes** without this pass, **327 680 -> 344 064 and flat from the second
+    cycle** with it.
+
+    **And the module's own argument turns against the module here.** `retention.py` explains at
+    length that no migration can reach the checkpoint tables, because `AsyncPostgresSaver.setup()`
+    creates them after migrations have run — which applies verbatim to per-table autovacuum
+    storage parameters. So the three highest-churn tables in the system are exactly the three no
+    migration can tune, and a vacuum the sweep runs itself is the only instrument left.
+
+    On its own connection, in autocommit: `VACUUM` cannot run inside a transaction block, and the
+    sweep's connection has one open by the time this is reached. The autocommit flag is restored
+    in a `finally` because a pooled connection is handed back with its session state, not with a
+    fresh one — the pool's reset rolls back, it does not re-set this.
+
+    Args:
+        tables: The tables this pass deleted rows from, in the order it swept them.
+        budget: The pass's clock. A table is vacuumed only while another unit as slow as the
+            slowest one seen would still land inside the activity's own timeout.
+
+    Returns:
+        The tables the budget did not reach, so the pass can report them rather than let a
+        deployment believe every table was reclaimed.
+    """
+    deferred: list[str] = []
+    async with connection(settings.postgres_dsn, operation="retention_vacuum") as conn:
+        await conn.commit()
+        await conn.set_autocommit(True)
+        try:
+            for table in tables:
+                if not budget.affords_more():
+                    deferred.append(table)
+                    continue
+                with budget.measuring():
+                    async with conn.cursor() as cur:
+                        # `table` is a key of the closed register above, never a caller's string,
+                        # which is what makes the interpolation safe; `VACUUM` takes no bound
+                        # parameters at all, so there is no alternative to it here.
+                        await cur.execute(_VACUUM.format(table=table))
+        finally:
+            await conn.set_autocommit(False)
+    return deferred
+
+
+async def _sized_or_empty() -> dict[str, int]:
+    """Read every register table's size, or report nothing if it cannot be read.
+
+    Its own connection and its own `try`, for one reason: this is telemetry wrapped around a
+    disposal job, and a catalog read that failed must never be what stops rows being deleted. An
+    empty answer costs the pass its byte figures and nothing else.
+    """
+    try:
+        async with connection(settings.postgres_dsn, operation="retention_sizes") as conn:
+            return await _table_sizes(conn)
+    except Exception:
+        logger.warning("retention: could not read table sizes; this pass reports rows only")
+        return {}
+
+
+async def _reclaim(outcome: RetentionOutcome, before: dict[str, int], budget: _Budget) -> None:
+    """Vacuum what the pass deleted from, then record what the store holds and what it gave back.
+
+    **This is the half the sweep never had.** `RetentionOutcome.deleted` is a row count, and a row
+    count is what an operator watching a filling disk misreads as progress: measured, one pass
+    deleted 1 900 rows across five tables and returned **0 bytes**, leaving 1 919 dead tuples
+    behind. The word `VACUUM` appeared nowhere in `src/`, `infra/` or `deploy/`, and reclamation
+    was left to an autovacuum this repository neither configures nor checks.
+
+    The vacuum runs before the second reading, so `bytes_reclaimed` is what the pass *including*
+    its reclamation gave back rather than what the deletes alone did — the two differ by exactly
+    the thing this function was added for.
+
+    A table whose size grew across the pass reports `0` rather than a negative: another writer is
+    always inserting into these tables, and a negative "reclaimed" is not a quantity anybody can
+    read. The growth itself is not lost — it is in `bytes_on_disk`, which is the gauge.
+
+    Never raises, for the same reason `_sized_or_empty` does not: the disposal is the job.
+
+    Args:
+        outcome: The pass's totals, updated in place with `bytes_on_disk` and `bytes_reclaimed`.
+        before: Sizes read at the start of the pass; empty when that read failed.
+        budget: The pass's clock, so the vacuum stops short of the activity's own timeout.
+    """
+    swept = [table for table, rows in outcome.deleted.items() if rows]
+    if swept:
+        try:
+            deferred = await _vacuum_swept_tables(swept, budget)
+        except Exception:
+            logger.exception("retention: the vacuum pass failed; the deletions above still stand")
+            deferred = swept
+        if deferred:
+            # Said out loud rather than left to a flat byte count: a pass that disposed of rows and
+            # ran out of clock before reclaiming them looks identical to one that reclaimed nothing
+            # because there was nothing to reclaim.
+            outcome.skipped.append(
+                f"{', '.join(deferred)} (not vacuumed: the pass budget was spent)"
+            )
+    after = await _sized_or_empty()
+    outcome.bytes_on_disk = after
+    outcome.bytes_reclaimed = {
+        table: max(0, size - after.get(table, size)) for table, size in before.items()
+    }
+
+
+def _publish_store_size(outcome: RetentionOutcome) -> None:
+    """Republish `chemclaw_table_bytes` off this pass's reading, so disposal is visible outside it.
+
+    Nothing here ever reported to `/metrics`: `core/metrics.py` declared no series matching
+    retention, disk, table size or prune, and this module imported no metrics at all. That is not
+    the flat-counter case this repository keeps finding — the series did not exist, so "the sweep
+    ran and removed nothing" and "the sweep has not run since Tuesday" were the same silence.
+
+    **One gauge family and no counters, which is a narrowing taken on measurement rather than an
+    omission.** A `rows_deleted{table}` and a `bytes_reclaimed{table}` counter were both written
+    and both removed: the row count is already in `RetentionOutcome`, which is where this module's
+    docstring has always said the deletion is auditable, and reclaimed bytes is structurally
+    near-zero because retention deletes the *oldest* rows and a plain `VACUUM` truncates only
+    trailing pages. Neither had a rule that could fire on it without also firing on a healthy
+    deployment, and `core/metrics.py` carries the argument beside the declaration.
+
+    Republished on **every** pass, including one that disposed of nothing, because its absence is
+    the signal: `ChemclawRetentionNotSweeping` fires on it, and a family that appeared only when
+    the sweep found work would make a drained backlog look like a dead job.
+
+    Never raises: `record_metric` swallows, because telemetry inside a disposal job must not be
+    what fails the disposal.
+    """
+    _TABLE_SIZES.clear()
+    _TABLE_SIZES.update({table: float(size) for table, size in outcome.bytes_on_disk.items()})
+
+
 async def _prune_expired_rows() -> RetentionOutcome:
     """Sweep until the backlog is drained or the pass budget is spent, and report the total.
 
@@ -993,6 +1325,11 @@ async def _prune_expired_rows() -> RetentionOutcome:
     """
     budget = _Budget()
     total = RetentionOutcome(deleted={}, skipped=[])
+    # What the store held before this pass, so what it gave back is a measurement rather than a
+    # claim. Read on its own connection because `_sweep_once` opens and closes one per sweep, and
+    # never allowed to fail the pass: a size that could not be read leaves `bytes_reclaimed` empty
+    # and every deletion still happens.
+    before = await _sized_or_empty()
     # Where this pass's checkpoint-thread scan has got to. It starts at the beginning of the table
     # on every pass and is not kept between them — `_EXPIRED_THREADS` carries why.
     resume_threads_from = ""
@@ -1011,7 +1348,10 @@ async def _prune_expired_rows() -> RetentionOutcome:
         # Progress *and* a tail *and* budget. Dropping the first is what let a sweep that removed
         # nothing be asked to run again for as long as the clock allowed.
         if not outcome.made_progress() or not outcome.has_tail() or not budget.affords_more():
-            return total
+            break
+    await _reclaim(total, before, budget)
+    _publish_store_size(total)
+    return total
 
 
 async def _sweep_once(
@@ -1347,6 +1687,14 @@ async def _prune_checkpoints(
     where the next sweep of this pass should start)`. The last element is `""` whenever the scan
     reached the end of the table, which is also what a caller with no pass to resume passes in.
 
+    **It also repairs the orphan no expiry can reach, once per pass.** A thread holding blob or
+    write rows and no `checkpoints` row is a candidate for neither delete below, because both are
+    restricted to ids `_EXPIRED_THREADS` selected *out of `checkpoints`* — so such a row is
+    permanent and pins its session's ownership row for ever. `_REPAIR_ORPHANED` carries the proof,
+    the safety argument and the cost; it runs on the sweep that also analyzes, so a drain of forty
+    sweeps pays for it once, and its rows are counted into this function's own per-table totals
+    because they are rows the table really lost.
+
     **The pass analyzes `checkpoints` before it queries it, and that one statement is what bounds
     the work.** `_ANALYZE_THREADS` carries the measurement; the short version is that this table is
     created outside `infra/sql`, so nothing ever gives the planner statistics for it, and without
@@ -1422,6 +1770,7 @@ async def _prune_checkpoints(
     retention job is for. `core.db.existing_tables` is asked once, because the check cannot live
     inside the `DELETE` (Postgres resolves the relation at parse time).
     """
+    repaired: dict[str, int] = {}
     async with conn.cursor() as cur:
         present = await existing_tables(cur, CHECKPOINT_TABLES)
         missing = sorted(set(CHECKPOINT_TABLES) - present)
@@ -1442,13 +1791,24 @@ async def _prune_checkpoints(
             # and that only ever leaves the planner believing the table is *larger* than it is —
             # the direction that keeps the conservative plan — until the next pass analyzes it.
             await cur.execute(_ANALYZE_THREADS)
+            # Once per pass, on the same sweep and for a related reason: a thread with no
+            # `checkpoints` row is invisible to every statement below, so no amount of sweeping
+            # reaches it. `_REPAIR_ORPHANED` carries the proof and the measurement.
+            for table in (name for name in CHECKPOINT_TABLES if name != _CHECKPOINTS):
+                await cur.execute(
+                    _REPAIR_ORPHANED.format(table=table),
+                    (settings.retention_delete_batch_rows,),
+                )
+                repaired[table] = max(cur.rowcount, 0)
         cap = settings.retention_max_sessions_per_pass
         await cur.execute(_EXPIRED_THREADS, (resume_from, days, cap + 1))
         found = [str(row[0]) for row in await cur.fetchall()]
         deferred = max(len(found) - cap, 0)
         threads = found[:cap]
         if not threads:
-            return dict.fromkeys(CHECKPOINT_TABLES, 0), [], 0, ""
+            # The repair still counts: a pass with no expired thread is exactly the steady state,
+            # and an orphaned row is disposal this pass really did.
+            return {**dict.fromkeys(CHECKPOINT_TABLES, 0), **repaired}, [], 0, ""
         # Both statements re-ask their question inside this transaction;
         # `_DELETE_EXPIRED_CHECKPOINTS` carries the measurement and what the pair does not close.
         await cur.execute(_DELETE_EXPIRED_CHECKPOINTS, (threads, threads, days))
@@ -1460,7 +1820,9 @@ async def _prune_checkpoints(
         deleted: dict[str, int] = {_CHECKPOINTS: len(checkpoint_rows)}
         for table in (name for name in CHECKPOINT_TABLES if name != _CHECKPOINTS):
             await cur.execute(_DELETE_ORPHANED.format(table=table), (swept,))
-            deleted[table] = max(cur.rowcount, 0)
+            # Plus whatever the repair above took for a thread that has no `checkpoints` row at
+            # all, so the reported count is what the table actually lost this pass.
+            deleted[table] = max(cur.rowcount, 0) + repaired.get(table, 0)
     await conn.commit()
     logger.info(
         "pruned %d of %d expired checkpoint thread(s)%s; %s",

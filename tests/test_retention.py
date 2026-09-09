@@ -10,20 +10,27 @@ that a deployment must opt in before anything is deleted.
 """
 
 import asyncio
+import re
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Any, cast
 
 import psycopg
 import pytest
+import yaml
 from langchain_core.messages import HumanMessage, message_to_dict
 from psycopg.types.json import Jsonb
 
 from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
+from chemclaw.agent.leaver import _ERASE as leaver_erase
 from chemclaw.agent.leaver import _RETAINED as leaver_retained
 from chemclaw.agent.message_migration import to_langchain
 from chemclaw.agent.message_pairing import droppable_rows, unmatched_result_ids
 from chemclaw.agent.scratchpad import STORE_TABLES
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
 from chemclaw.durable import retention
 from chemclaw.durable.retention import (
     _ANALYZE_THREADS,
@@ -2416,4 +2423,436 @@ def test_a_drain_analyzes_the_table_once_and_not_once_per_sweep() -> None:
         f"the drain analyzed `checkpoints` {after - before} times over {sweeps} sweeps; the "
         "statistics are what make the pass's first scan plan as an index walk, and every sweep "
         "after it resumes inside that plan"
+    )
+
+
+async def _table_bytes(table: str) -> int:
+    """`pg_total_relation_size` for one table on the test schema, in bytes."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute("SELECT pg_total_relation_size(to_regclass(quote_ident(%s)))", (table,))
+        row = await cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+async def _dead_tuples(table: str) -> int:
+    """Dead tuples the statistics collector currently attributes to `table` on this schema."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(f"ANALYZE {table}")
+        await cur.execute(
+            "SELECT n_dead_tup FROM pg_stat_all_tables "
+            "WHERE relname = %s AND schemaname = current_schema()",
+            (table,),
+        )
+        row = await cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+async def _pinned_horizon() -> int:
+    """Other backends holding a transaction snapshot, which is what stops `VACUUM` reclaiming.
+
+    **A control on the environment, not on the code.** `VACUUM` may only remove a tuple no running
+    transaction can still see, so one long-lived transaction anywhere on the server pins the
+    horizon and every vacuum in the database becomes a no-op — measured here on a shared dev
+    database, where a concurrent benchmark's `INSERT INTO bench_live ...` held `backend_xmin` and
+    even a hand-run `VACUUM (VERBOSE)` left all 400 dead tuples in place. CI's database is a
+    throwaway container with nothing else on it, so this reads zero there and the assertion below
+    is a real one; on a shared database it is what lets the test say what it is not evidence about
+    rather than fail for somebody else's transaction.
+    """
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT count(*) FROM pg_stat_activity "
+            "WHERE pid <> pg_backend_pid() AND datname = current_database() "
+            "AND backend_xmin IS NOT NULL"
+        )
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+async def _seed_fat_sessions(count: int, start: int) -> None:
+    """`count` fully-expired single-message sessions with a payload big enough to move the heap."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            message = legacy_text("user", "x" * 2000)
+            for index in range(start, start + count):
+                await cur.execute(
+                    "INSERT INTO session_messages (session_id, message, created_at) "
+                    "VALUES (%s, %s, now() - make_interval(days => 400))",
+                    (f"reclaim-{index:06d}", Jsonb(message)),
+                )
+        await conn.commit()
+
+
+def test_a_pass_reports_bytes_beside_rows_and_stops_the_table_growing() -> None:
+    """A row count is not a quantity of disk, and until this the sweep reported only rows.
+
+    **Measured before the fix**: one pass deleted 1 900 rows across five tables and returned
+    **0 bytes** — 1 919 dead tuples left, every relation the same size it started. `deleted` is a
+    row count, and an operator watching a filling disk reads it as progress. Nothing anywhere
+    corrected that: the word `VACUUM` appeared nowhere in `src/`, `infra/` or `deploy/`, so
+    reclamation was left entirely to an autovacuum this repository neither configures nor checks,
+    at the stock `autovacuum_vacuum_scale_factor = 0.2`.
+
+    So this drives the property that actually matters, which is not "one pass frees bytes" — it
+    usually cannot, because retention deletes the *oldest* rows and those sit at the front of the
+    relation, where a plain `VACUUM` truncates nothing. It is that **a table whose live set is
+    constant stops growing**. Six cycles of "insert 500 rows, sweep them" measured
+    319 488 -> 1 277 952 bytes without the vacuum pass (4.0x, live set never above 500) and
+    327 680 -> 344 064 with it, flat from the second cycle on.
+
+    Four cycles here rather than six, and a 2x ceiling rather than an exact figure: the assertion
+    has to survive a heap that starts at a page boundary and a fixture whose row width changes,
+    while still failing the unbounded case, which is already at 3.1x by cycle four.
+
+    The reporting half is asserted beside it, because the growth fix without the report leaves the
+    same misreading in place: `bytes_on_disk` names the tables and `bytes_reclaimed` exists at all.
+    """
+
+    async def _run() -> tuple[list[int], RetentionOutcome, int, int]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_tool_results_days", 0)
+        monkeypatch.setattr(settings, "retention_result_publications_days", 0)
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 0)
+        try:
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute("TRUNCATE session_messages")
+                await conn.commit()
+            sizes: list[int] = []
+            outcome = RetentionOutcome()
+            for cycle in range(4):
+                await _seed_fat_sessions(400, cycle * 400)
+                outcome = await retention._prune_expired_rows()
+                sizes.append(await _table_bytes("session_messages"))
+            return (
+                sizes,
+                outcome,
+                await _dead_tuples("session_messages"),
+                await _pinned_horizon(),
+            )
+        finally:
+            monkeypatch.undo()
+
+    sizes, outcome, dead, pinned = asyncio.run(_run())
+    if pinned:
+        pytest.skip(
+            f"{pinned} other backend(s) hold a transaction snapshot on this database, which pins "
+            "the vacuum horizon for every table on it; this run is not evidence about reclamation"
+        )
+    assert sizes[0] > 0, "the fixture never put anything on disk"
+    assert dead == 0, (
+        f"{dead} dead tuple(s) are still in session_messages after a pass that deleted every row "
+        "it inserted: the sweep marks tuples dead and nothing reclaims them, so the space is not "
+        "even reusable, let alone returned"
+    )
+    # Convergence rather than an absolute ceiling, because the shape is what separates the two
+    # cases and a ceiling would be a number about this fixture. Measured over the four cycles:
+    # 147 456 / 245 760 / 270 336 / 294 912 with the vacuum pass — increments 98 304 then 24 576
+    # then 24 576, decelerating as the freed pages come back into use — against 253 952 -> 737 280
+    # without it, where every cycle adds a fresh cycle's worth and nothing is ever reused.
+    early, late = sizes[1] - sizes[0], sizes[3] - sizes[2]
+    assert late * 2 <= early, (
+        f"session_messages grew {sizes} bytes over four cycles that each deleted every row they "
+        f"inserted, and the last cycle added {late} against the first cycle's {early}: the sweep "
+        "removes rows and reclaims nothing, so the table grows without bound while the job "
+        "reports success"
+    )
+    assert "session_messages" in outcome.bytes_on_disk, (
+        "the pass reports what it deleted in rows and says nothing about bytes, which is the "
+        "quantity an operator watching a disk is actually asking about"
+    )
+    assert outcome.bytes_reclaimed.get("session_messages", -1) >= 0
+
+
+def test_an_orphaned_checkpoint_row_is_swept_rather_than_permanent() -> None:
+    """A blob or write row whose thread has no `checkpoints` row was unreachable, for ever.
+
+    The register said both tables are *"swept by `_prune_checkpoints` with the thread it belongs
+    to"*. That is true of every thread that has one. `_DELETE_EXPIRED_CHECKPOINTS` and
+    `_DELETE_ORPHANED` are both restricted to `thread_id = ANY(candidates)`, and the candidate list
+    comes from `_EXPIRED_THREADS`, which selects **out of `checkpoints`** — so a thread that is not
+    in that table is not a candidate for either statement, at any window, on any pass. Measured
+    against the unfixed sweep: three such rows survived a full `_prune_checkpoints` and nothing in
+    the module could ever reach them. They also pin that session's `session_owners` row for ever
+    through `_untouched_arms`, which is the outcome the ordering rule exists to prevent.
+
+    This module's single transaction is what stops *this* sweep producing one, and it is not the
+    only producer: a restore to a point in time, hand surgery, or a partial delete on any other
+    path leaves one, and nothing repaired it.
+
+    The live thread in the same fixture is the counter-example every retention test here carries:
+    an unrestricted `DELETE ... WHERE NOT EXISTS` that took a live thread's blobs would pass an
+    assertion that only looked at the orphan, and would silently blank a running conversation.
+    """
+
+    async def _run() -> tuple[int, int, int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                for table in CHECKPOINT_TABLES:
+                    await cur.execute(f"TRUNCATE {table}")
+                # A live thread, whole: it must survive.
+                await cur.execute(
+                    "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, "
+                    "checkpoint, metadata) VALUES ('orphan-live', '', 'c1', %s, '{}'::jsonb)",
+                    (Jsonb({"v": 1, "id": "c1", "ts": "2999-01-01T00:00:00+00:00"}),),
+                )
+                for thread in ("orphan-live", "orphan-dead"):
+                    await cur.execute(
+                        "INSERT INTO checkpoint_blobs (thread_id, checkpoint_ns, channel, "
+                        "version, type, blob) VALUES (%s, '', 'messages', 'c1', 'msgpack', %s)",
+                        (thread, b"payload"),
+                    )
+                    await cur.execute(
+                        "INSERT INTO checkpoint_writes (thread_id, checkpoint_ns, checkpoint_id, "
+                        "task_id, idx, channel, type, blob) VALUES (%s, '', 'c1', 't', 0, "
+                        "'messages', 'msgpack', %s)",
+                        (thread, b"payload"),
+                    )
+            await conn.commit()
+        async with db.connection(settings.postgres_dsn) as conn:
+            await _prune_checkpoints(conn, 30)
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM checkpoint_blobs WHERE thread_id = 'orphan-dead'"
+            )
+            blobs = int((await cur.fetchone() or (0,))[0])
+            await cur.execute(
+                "SELECT count(*) FROM checkpoint_writes WHERE thread_id = 'orphan-dead'"
+            )
+            writes = int((await cur.fetchone() or (0,))[0])
+            await cur.execute(
+                "SELECT count(*) FROM checkpoint_blobs WHERE thread_id = 'orphan-live'"
+            )
+            live = int((await cur.fetchone() or (0,))[0])
+        return blobs, writes, live
+
+    blobs, writes, live = asyncio.run(_run())
+    assert (blobs, writes) == (0, 0), (
+        f"an orphaned thread's rows survived the sweep ({blobs} blob(s), {writes} write(s)): "
+        "no window, cap or later pass reaches a thread that has no `checkpoints` row, so those "
+        "rows are permanent and pin their session's ownership row with them"
+    )
+    assert live == 1, "the repair took a live thread's blob, which blanks a running conversation"
+
+
+def test_no_disposal_entry_offers_actor_erasure_as_what_bounds_a_table() -> None:
+    """Erasure is a leaver's request, and this register already says so about another table.
+
+    `_NOT_PRUNED["store"]` read *"the scratchpad memory store; erasure reaches it per actor"* — a
+    disposal route that fires only when somebody leaves. The `session_owners` prose four screens
+    up **rejects exactly that reasoning in its own words**: *"the only DELETE against this table
+    was actor-scoped erasure, which a deployment that no one leaves never runs."* One argument,
+    applied in two directions in one file, which is the same shape as the erasure/retention split
+    `test_a_table_the_erasure_keeps_is_not_disposed_of_on_a_clock` exists to join.
+
+    So the rule, derived from `agent/leaver.py`'s erasable tier rather than typed out here: for a
+    table erasure *deletes from*, mentioning that erasure is not stating a bound, and the entry has
+    to also say what does bound it — including saying that nothing does, which is this register's
+    own recognised way of recording a finding rather than inventing an answer.
+    """
+    erasable = {table for table, *_ in leaver_erase}
+    assert erasable, "the erasure register's shape moved; this rule now derives from nothing"
+    for table in sorted(erasable & set(_NOT_PRUNED)):
+        stated = _NOT_PRUNED[table]
+        if "erasure" not in stated and "erases" not in stated:
+            continue
+        assert "nothing bounds it" in stated or stated.startswith(("refused:", "cascades from")), (
+            f"{table} is erased per actor and its disposal entry leans on that erasure without "
+            f"saying what bounds the table; `_NOT_PRUNED` says {stated!r}. A leaver's request is "
+            "not a clock — this register's own `session_owners` entry argues so"
+        )
+
+
+def test_a_pass_publishes_what_the_store_holds() -> None:
+    """Nothing reported disposal to `/metrics`, so a sweep that stopped looked like a quiet one.
+
+    `core/metrics.py` declared no series matching retention, disk, table size or prune, and
+    `durable/retention.py` imported no metrics at all — so "the sweep ran and found nothing
+    expired" and "the sweep has not run since Tuesday" were the same silence. That is not the
+    flat-counter case this repository keeps finding; the series did not exist.
+
+    **The whole register, not just the tables the sweep touched**, because the table filling the
+    volume is quite often one nothing prunes: `audit_events` and `calculation_results` are refused
+    on purpose and two entries say in their own words that nothing bounds them. A reading that
+    covered only the prunable set would answer "did the sweep work" rather than "is the store
+    filling", which is the question an operator brings.
+
+    Republished on every pass including one that disposed of nothing, because the *absence* of
+    this family is what `ChemclawRetentionNotSweeping` fires on — a family that appeared only when
+    the sweep found work would make a drained backlog look like a dead job.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, str]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_tool_results_days", 0)
+        monkeypatch.setattr(settings, "retention_result_publications_days", 0)
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 0)
+        try:
+            await _seed_expired_sessions(3, "metrics-")
+            outcome = await retention._prune_expired_rows()
+            return outcome, METRICS.render()
+        finally:
+            monkeypatch.undo()
+
+    outcome, rendered = asyncio.run(_run())
+    assert outcome.deleted["session_messages"] == 3
+    assert 'chemclaw_table_bytes{table="session_messages"}' in rendered, (
+        "no series says how large the store is, which is the question an operator watching a "
+        "filling volume actually brings — and whose absence is the only signal that the sweep "
+        "has stopped running at all"
+    )
+    assert 'chemclaw_table_bytes{table="audit_events"}' in rendered, (
+        "only the swept tables are measured, so the tables the register *refuses* to prune — the "
+        "ones with no bound at all — are the ones nothing can see filling the volume"
+    )
+
+
+_RETENTION_ALERT = "ChemclawRetentionNotSweeping"
+
+# The two arms the rule is driven over, as `promtool` input series. Both tick at the deployment's
+# own sweep cadence, because the rule's window and hold are multiples of it: a series sampled at
+# any other rate would be driving different arithmetic from the one that ships. `stale` is how
+# `promtool` expresses a series that ends, which is exactly what a retention pass that stops firing
+# looks like on `/metrics` — `chemclaw_table_bytes` is republished by every pass and by nothing
+# else, so its absence *is* the fault.
+_SWEEPING = "581632 581632 581632 581632 581632 581632 581632 581632"
+_STOPPED = "581632 581632 stale stale stale stale stale stale"
+
+
+def _rendered_retention_rule() -> dict[str, object]:
+    """The `{_RETENTION_ALERT}` rule as Helm renders it, with retention windows stated.
+
+    Rendered rather than read out of the template, because the rule's two durations are Helm
+    arithmetic over the deployment's own sweep cadence — the template text carries `{{ mul ... }}`
+    and not a number, so a test that read the file would be checking a string nothing evaluates.
+
+    It is also the only render that produces this rule at all: it is behind
+    `{{- if .Values.retention.windows }}`, and every `helm template` in the Makefile passes
+    `retention.unboundedGrowthAccepted=true` instead — the "a rule behind a flag is a rule nothing
+    else parses" case that file's own PromQL check was written for.
+    """
+    rendered = subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(Path(__file__).resolve().parents[1] / "deploy" / "helm" / "chemclaw"),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "temporal.namespace=chemclaw",
+            "--set",
+            "retention.artifactGrowthAccepted=true",
+            "--set",
+            "retention.windows.CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS=365",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    for document in yaml.safe_load_all(rendered):
+        if not isinstance(document, dict) or document.get("kind") != "PrometheusRule":
+            continue
+        for group in document["spec"]["groups"]:
+            for rule in group["rules"]:
+                if rule.get("alert") == _RETENTION_ALERT:
+                    return cast(dict[str, object], rule)
+    raise AssertionError(f"{_RETENTION_ALERT} is not in the render that states retention windows")
+
+
+def test_a_sweep_that_stops_firing_raises_an_alert(tmp_path: Path) -> None:
+    """Twelve Temporal Schedules run here; the two disposal jobs had no liveness alert at all.
+
+    A retention sweep that silently stops — a Schedule paused by hand, a `background-jobs` worker
+    that never came back, an activity failing every attempt — left every durable table growing with
+    no signal anywhere, and arrived as an out-of-disk incident months later. `prometheusrule.yaml`
+    held no alert about the store filling and none about this job running.
+
+    **Driven, not asserted.** A rule that has never been evaluated against firing data is a claim
+    that an alert exists, which is the same shape as a gate nothing has watched refuse. So this
+    renders the rule Helm actually produces and runs `promtool test rules` over it in both
+    directions: silent while the sweep reports every pass, firing once the family has been absent
+    for the window *and* the hold. Both arms matter — an absence rule with no hold pages on every
+    fresh install, before the first pass has run.
+    """
+    if not shutil.which("helm") or not shutil.which("promtool"):  # pragma: no cover - env
+        pytest.skip("helm and promtool are needed to evaluate a rendered alert rule")
+    rule = _rendered_retention_rule()
+    expression = " ".join(str(rule["expr"]).split())
+    window = int(re.search(r"\[(\d+)m\]", expression).group(1))  # type: ignore[union-attr]
+    hold = int(str(rule["for"]).removesuffix("m"))
+    # The cadence the render was given: `retention_schedule_minutes` defaults to 1440 and the
+    # window is `silenceWindowPasses` of them, so the unit test's series has to tick at the same
+    # rate the deployment sweeps at or the arithmetic under test is not the arithmetic driven.
+    cadence = 1440
+    assert window > cadence, (
+        "the absence window is shorter than one sweep, so an ordinary pass pages"
+    )
+    assert hold >= cadence, "the hold is under one sweep, so a fresh install pages before its first"
+    series = 'chemclaw_table_bytes{table="session_messages"}'
+    (tmp_path / "rules.yaml").write_text(
+        yaml.safe_dump({"groups": [{"name": "chemclaw.durable", "rules": [rule]}]})
+    )
+    expected = {
+        "exp_labels": {"alertname": _RETENTION_ALERT, **cast(dict[str, str], rule["labels"])},
+        "exp_annotations": rule["annotations"],
+    }
+    (tmp_path / "unit.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "rule_files": ["rules.yaml"],
+                "evaluation_interval": "30m",
+                "tests": [
+                    {
+                        # The sweep is running: every pass republishes the family, so the rule
+                        # never fires however long it is left evaluating.
+                        "interval": f"{cadence}m",
+                        "input_series": [{"series": series, "values": _SWEEPING}],
+                        "alert_rule_test": [
+                            {
+                                "eval_time": f"{window + hold + cadence * 2}m",
+                                "alertname": _RETENTION_ALERT,
+                                "exp_alerts": [],
+                            }
+                        ],
+                    },
+                    {
+                        # The sweep stopped after two passes. Silent while the window still holds a
+                        # reading and through the hold, then firing — the hold is what keeps a
+                        # fresh install, where the family is absent from t=0, from paging.
+                        "interval": f"{cadence}m",
+                        "input_series": [{"series": series, "values": _STOPPED}],
+                        "alert_rule_test": [
+                            {
+                                "eval_time": f"{window}m",
+                                "alertname": _RETENTION_ALERT,
+                                "exp_alerts": [],
+                            },
+                            {
+                                "eval_time": f"{window + hold + cadence * 2}m",
+                                "alertname": _RETENTION_ALERT,
+                                "exp_alerts": [expected],
+                            },
+                        ],
+                    },
+                ],
+            }
+        )
+    )
+    driven = subprocess.run(
+        ["promtool", "test", "rules", "unit.yaml"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert driven.returncode == 0, (
+        f"the rule does not behave as an absence alert:\n{driven.stdout}\n{driven.stderr}"
     )

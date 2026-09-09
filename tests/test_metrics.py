@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from chemclaw.api.app import create_app
 from chemclaw.core.metrics import (
     _COUNTER_LABELS,
+    _GAUGE_FAMILIES,
     _GAUGE_FAMILY_LABELS,
     _HISTOGRAM_LABELS,
     _MAX_SERIES_PER_COUNTER,
@@ -232,3 +233,43 @@ def test_a_swallowed_audit_sink_failure_is_counted() -> None:
     before = METRICS.value("chemclaw_audit_sink_failures_total")
     record_metric(lambda metrics: metrics.increment("chemclaw_audit_sink_failures_total"))
     assert METRICS.value("chemclaw_audit_sink_failures_total") == before + 1
+
+
+def test_every_gauge_family_declares_the_label_it_is_keyed_by() -> None:
+    """A family with no label name renders one bare line per reading, which collides on itself.
+
+    `_GAUGE_FAMILIES` and `_GAUGE_FAMILY_LABELS` are two tables that have to name the same set:
+    the first says a metric is a family of readings, the second says what the key *is*. Declare a
+    family and forget the label and every one of its series renders without the label that
+    distinguishes it — one metric name emitted N times with no way to tell the sinks, sources or
+    tables apart, which a scraper reads as a single series flapping between N values.
+
+    Asserted in both directions rather than one, for the reason `_COUNTER_LABELS` is: a label
+    entry for a family nobody declares is a name that renders nothing, and it reads as coverage.
+    """
+    assert set(_GAUGE_FAMILIES) == set(_GAUGE_FAMILY_LABELS), (
+        "a gauge family and the label it is keyed by are one declaration in two tables: "
+        f"undeclared labels {sorted(set(_GAUGE_FAMILIES) - set(_GAUGE_FAMILY_LABELS))}, "
+        f"labels for no family {sorted(set(_GAUGE_FAMILY_LABELS) - set(_GAUGE_FAMILIES))}"
+    )
+
+
+def test_a_gauge_family_renders_one_labelled_series_per_reading() -> None:
+    """The rendering contract the retention sizes and the outbox depths both depend on.
+
+    A family is bound to a callable returning `{label value: reading}` and read on every scrape.
+    What an operator has to be able to do with the result is `topk(5, chemclaw_table_bytes)` and
+    see which table is filling the volume — which needs the label on every line, and needs a
+    family that has never been read to be absent rather than zero.
+    """
+    metrics = Metrics()
+    assert "chemclaw_table_bytes{" not in metrics.render(), (
+        "an unread gauge family renders a series anyway, so a table holding gigabytes would be "
+        "indistinguishable from one nobody has measured"
+    )
+    metrics.bind_gauge_family(
+        "chemclaw_table_bytes", lambda: {"session_messages": 581632.0, "audit_events": 4096.0}
+    )
+    rendered = metrics.render()
+    assert 'chemclaw_table_bytes{table="session_messages"} 581632' in rendered
+    assert 'chemclaw_table_bytes{table="audit_events"} 4096' in rendered
