@@ -437,6 +437,11 @@ def create_app(
     # the kubelet's first probe answers within one interval, and refusing traffic until then would
     # turn every rollout into a needless gap.
     app.state.database_reachable = True
+    # Whether the schema carries the newest migration this image ships, taken in the same round
+    # trip. `True` before any probe has run for the same reason `database_reachable` is, and
+    # `True` again whenever the question cannot be answered: this verdict gates only on positive
+    # evidence of a mismatch, never on the absence of evidence.
+    app.state.schema_current = True
     app.state.database_probed_at = float("-inf")
     # The probe tasks currently in flight, keyed by probe name. Both readiness probes are
     # single-flight (`chemclaw.api.routes.ops._shared_probe`): the cache window suppresses

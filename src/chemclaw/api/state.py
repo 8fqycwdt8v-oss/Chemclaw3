@@ -597,6 +597,23 @@ class FrontDoorState:
         self._app.state.database_reachable = reachable
 
     @property
+    def schema_current(self) -> bool:
+        """Whether the schema carries the newest migration this image ships (True until asked).
+
+        A second verdict beside `database_reachable` rather than a second reason folded into it,
+        because the two are different outages with different fixes — one is "the database is
+        down", the other "this pod's image is ahead of the schema" — and `/readyz`'s body is the
+        only diagnosis an operator running `curl` gets.
+        """
+        current: bool = self._app.state.schema_current
+        return current
+
+    @schema_current.setter
+    def schema_current(self, current: bool) -> None:
+        """Store the schema verdict from the same round trip the reachability probe made."""
+        self._app.state.schema_current = current
+
+    @property
     def database_probed_at(self) -> float:
         """When the database was last probed (`time.monotonic`); -inf means "never"."""
         return float(self._app.state.database_probed_at)
