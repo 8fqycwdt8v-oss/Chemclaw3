@@ -1528,13 +1528,17 @@ Migrations run as a Helm `pre-install,pre-upgrade` hook Job that completes befor
 starts (D-034), so a failure here blocks the release rather than half-applying it. Three things were
 missing until D-2026-08-01-a-migration-waits-in-front-of-live-traffic, and each has its own symptom.
 
-**Why `helm rollback` below is safe: every migration in `infra/sql/` only expands.** Checked over
-the whole directory, not one `infra/sql/*.sql` file contains a `DROP TABLE` or `DROP COLUMN` — every
-one is a new table or an `ADD COLUMN`, and `chemclaw.core.migrate` refuses to let an applied
-file change afterward (a checksum mismatch raises `MigrationError`; see (ii)). So the schema only
-ever grows, which is exactly what a rollback needs: the older binary a rollback restores was written
-against a schema that is still a strict subset of whatever is live, so every table and column it
-expects is still there. That is the *expand* half of expand/contract, and this repo has practiced it
+**`helm rollback` keeps every table and column the older image needs — and that is not the same as
+safe.** Checked over the whole directory, not one `infra/sql/*.sql` file contains a `DROP TABLE` or
+`DROP COLUMN`, and `chemclaw.core.migrate` refuses to let an applied file change afterward (a
+checksum mismatch raises `MigrationError`; see (ii)). So the schema only ever grows and the older
+binary still finds every column it reads.
+
+**What it does not keep is every *constraint* that binary depends on**, and this paragraph used to
+say "every one is a new table or an `ADD COLUMN`", which is false: four migrations drop and re-add a
+primary key, one replaces a `CHECK`, one nulls a backfilled column out, and one rewrites a column's
+type. The authority is `_REVIEWED_ROLLBACK_BREAKS` in `tests/test_migrations_are_additive.py` — read
+it rather than a list here, and see **Roll back a release** below for what each one strands. That is the *expand* half of expand/contract, and this repo has practiced it
 consistently — measured, not assumed. The **contract** half — dropping a column only once no
 deployed code still reads or writes it — has never actually been exercised here: nothing has ever
 been dropped, and no test or gate enforces the ordering the way `migrate`'s checksum check enforces
@@ -1661,9 +1665,80 @@ step.
 to edit the file back: `schema_migrations` records a checksum precisely so an in-place change is
 loud. Add a new numbered file that makes the change forward.
 
-**`applied migrations: (none — already up to date)` on a fresh database.** The migration directory
+**`applied migrations: (none)` on a fresh database.** The migration directory
 resolved to nothing. `CHEMCLAW_SQL_MIGRATIONS_DIR` is workdir-relative (`/app/infra/sql` in the
 image); an empty glob applies zero files and reports success (D-148).
+
+## Replay the migrations against a database that already has the schema
+
+A restore from a logical dump, or a runner re-pointed at a hand-built database, gives you objects
+without a matching `schema_migrations` ledger. Two merged migrations are not re-runnable in that
+state and the runner sends everything in one transaction, so the run aborts and *nothing* applies.
+Run both statements first — unconditional and idempotent, so there is no arm to work out:
+
+```sql
+ALTER TABLE session_messages DROP CONSTRAINT IF EXISTS session_messages_shape_known;
+ALTER TABLE note_proposals   DROP CONSTRAINT IF EXISTS note_proposals_state_known;
+ALTER TABLE note_proposals   ADD CONSTRAINT note_proposals_state_known
+    CHECK (state IN ('open', 'merged', 'rejected', 'failed', 'superseded'));
+```
+
+Without them the run stops at file 46 of 91 (`DuplicateObject … session_messages_shape_known`) or at
+58 (`UndefinedObject … note_proposals_state_known`). The authority is `_REVIEWED_REPLAY_BREAKS` in
+`tests/test_migrations_are_additive.py`, which carries the recipe beside each one.
+
+## A fingerprint index or a label corpus mid-rebuild
+
+**`PARTIAL: N record(s) indexed under the current definition and M still under a superseded one.**
+A fingerprint-definition change (the `std6`→`std7` bump, say) retired those M rows. Searches answer
+over the N and say so in their own `verdict` — they are never wrong, only narrow. There is no
+re-index target: the fingerprint tables are written only by the ELN sync, so a rebuild means
+re-running that sync from the start, which means deleting the corpus's `corpus_cursors` row. Two
+limits before you do. The runtime role holds no `DELETE` on `molecule_fingerprints` or
+`reaction_fingerprints`, so a molecule whose standardized SMILES changed leaves its old row behind
+permanently and it stays in the superseded count. And re-fingerprinting from the stored labels
+rather than from the corpus is not a valid rebuild: the stored label is the *previous*
+standardization's output, and standardization discards information.
+
+**`N of M reaction(s) were stamped with nothing derived.`** Those rows carry the marked stamp, so
+they have left the stale set and the drain advances, and `coverage` counts them as unlabelled —
+which is what it should do. They are re-derived on the next version bump. If `current_version()`
+returns nothing at all, the whole corpus is in that state: bring the labelling server back and bump
+the version to force a pass.
+
+## Roll back a release
+
+The case (xi) covers is the *safe* one: the migrations did not apply, so nothing moved. This is the
+other one — the migrations applied, the release is bad, and the previous image has to come back
+against a database that has already moved on.
+
+**Do this first.** `helm rollback chemclaw`. The release pipeline pins by digest, so it restores the
+bytes that were reviewed, and Helm reads hooks off the *target* revision's stored manifest — so the
+grant file that revision was written against is re-applied with it
+(`D-2026-09-09-a-grant-set-that-contracts-is-not-a-pre-upgrade-step`). A rollback to a release
+installed *before* that annotation existed does not get that, and needs `make db-grants` run by hand
+from the restored image.
+
+**Then read the logs for one line.** `migrate.database_ahead` names how many ledger rows the restored
+image ships no file for, and the newest one. It is a WARNING and not a refusal, because the schema
+only goes forward and a rollback must still start — but it is the only thing that will tell you the
+database is ahead. `make db-migrate` prints `(none)` in this state, which means "this image applied
+nothing", not "the database matches this image".
+
+**What is still broken after a successful rollback**, by the migration that stranded it:
+
+| Migration | What the restored image loses | Loud? |
+|---|---|---|
+| 041, 056, 063 | the document-share sync, ELN ingest, and the fingerprint index stop writing (`ON CONFLICT` no longer plans) | yes — `InsufficientPrivilege`/`InvalidColumnReference` in the log |
+| 088 | **every turn's cost ledger row**, indefinitely | only where monitoring is deployed: `ChemclawSubsystemDegraded` fires, and `operations.activity.spend` then reports an empty ledger with no error |
+| 090 | the calculation cache stops filtering by epoch, so `find_calculations` offers superseded results to the model as evidence to cite | **no — this one is silent.** Treat browse results as unfiltered until you are forward again |
+| 089 | the publish lease is ignored, so a drain re-claims a row another is mid-delivering and the attempt budget empties twice as fast | no |
+| 083 | nothing — but note it *erased* the zeros 082 backfilled, and rolling forward cannot restore them | n/a |
+
+058 is exempted and does not actually break: its `CHECK` widens.
+
+**What no rollback undoes**: the ConfigMap history, the `post-upgrade` data conversion, and any row
+the newer generation wrote in a shape the older one cannot read.
 
 ## (xii) A caller is being refused (429 / 413), or should be and is not
 
