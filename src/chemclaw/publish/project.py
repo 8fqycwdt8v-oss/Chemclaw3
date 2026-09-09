@@ -305,6 +305,55 @@ def _warnings(messages: list[str]) -> list[FlagFact]:
     ]
 
 
+def _renamed(payload: dict[str, Any], current: str, legacy: str, what: str) -> Any:
+    """A payload field read under its current name, falling back to the name it used to have.
+
+    **Only for a rename that was a rename**, i.e. one where the diff shows the *same expression*
+    assigned to a new keyword. `RefinedEnsemble`'s entropy and ensemble correction are the one such
+    case in this module: `c7035b66` changed
+    `conformational_entropy_cal_per_mol_k=round(entropy, 3)` to
+    `refined_conformational_entropy_cal_per_mol_k=round(entropy, 3)` and
+    `ensemble_correction_kcal=round(-temperature * entropy / 1000.0, 3)` to
+    `refined_ensemble_correction_kcal=...` in `connectors/calc/compose.py`, and changed nothing
+    else — same `entropy = ensemble_entropy(populations, degeneracies)`, same `populations`, same
+    `degeneracies`. Its own message says so ("What was wrong was the label, not the arithmetic")
+    and the diff is what confirms it; a rename where the *quantity* also moved must refuse the row
+    instead, because a fallback would then publish a silently wrong number under a trusted name.
+
+    **Why a fallback rather than a refusal here.** Without one, a `RefinedEnsemble` stored between
+    migration 055 and that commit projected cleanly, counted as queued, and reached the results
+    store missing both of its headline numbers — with no warning, no counter and no refusal, so a
+    consumer could not tell it from an ensemble that genuinely had none. Refusing would at least
+    have made it *visible* (it would land in `backfill.WalkCounts.failed`), but the value is
+    recoverable and identical, so refusing would discard science to make a point.
+
+    Reachable only through `payload_kind="RefinedEnsemble"` — an exact model-name lookup, and no
+    `_CALC_TYPE_PROJECTORS` prefix routes here — so the legacy name on a payload that reaches this
+    is the refined subset's own entropy. `ConformerEnsemble`'s field of that name means the
+    whole-ensemble quantity and never arrives here: `_ensemble` owns those rows.
+    """
+    value = payload.get(current)
+    if value is not None:
+        return value
+    value = payload.get(legacy)
+    if value is not None:
+        # WARNING rather than a flag on the record: the value published is the same number under
+        # the correct name, so there is nothing for a *consumer* to be told, while an operator
+        # running a backfill over a legacy corpus wants to know it is one. The subject label rather
+        # than the calc ref because a projector is handed a `model_dump` and nothing else (see the
+        # note above the projectors); `outbox.project_payload` is what names the ref, on the
+        # failures.
+        logger.warning(
+            "publish: %s read from the legacy field %r (now %r) for %r; the arithmetic is "
+            "unchanged, only the name",
+            what,
+            legacy,
+            current,
+            payload.get("smiles") or payload.get("structure_id") or "<unlabelled>",
+        )
+    return value
+
+
 # --- the projectors, one per result model -------------------------------------------------------
 #
 # Each takes the model's `model_dump(mode="json")` rather than the model itself, deliberately. Two
@@ -313,6 +362,11 @@ def _warnings(messages: list[str]) -> list[FlagFact]:
 # path run the *same* projector rather than two that can disagree; and importing the models here
 # would make this module depend on shapes that cross a Temporal wire, where an older history can
 # carry a field this release has renamed.
+#
+# That last clause is a hazard rather than a note, and it went unhandled for one release: a
+# `.get()` under the *new* name reads `None` off an older payload and `_kept` then drops the fact,
+# so the row publishes cleanly and short. `_renamed` above is the one place a legacy name is read,
+# and it exists for the one rename that was a rename.
 
 
 def _reaction(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
@@ -648,10 +702,13 @@ def _refined_ensemble(
     """A conformer ensemble re-weighted by free energy over its top N members.
 
     Shares `_ensemble`'s subject and conformer rows, and deliberately does **not** share its
-    property names. `RefinedEnsemble` renamed its own entropy and correction to `refined_*` because
-    they are computed over the refined subset and renormalized within it — the ensemble-wide names
-    mean something else one model away — and publishing them under the shared names would put two
-    meanings in one column, which is the exact confusion the model's own comment exists to prevent.
+    property names — and reads the two renamed fields through `_renamed`, because a payload stored
+    before that rename carried the same numbers under the ensemble-wide names and was publishing
+    without either of them. `RefinedEnsemble` renamed its own entropy and correction to `refined_*`
+    because they are computed over the refined subset and renormalized within it — the
+    ensemble-wide names mean something else one model away — and publishing them under the shared
+    names would put two meanings in one column, which is the exact confusion the model's own
+    comment exists to prevent.
 
     **`energy_hartree` carries the electronic energy, not the Gibbs energy**, even though the
     ranking here is by G. `ConformerFact` holds one absolute energy, and the electronic one is the
@@ -701,12 +758,22 @@ def _refined_ensemble(
         _fact("refined_population_covered", payload.get("refined_population_covered"), ""),
         _fact(
             "refined_conformational_entropy",
-            payload.get("refined_conformational_entropy_cal_per_mol_k"),
+            _renamed(
+                payload,
+                "refined_conformational_entropy_cal_per_mol_k",
+                "conformational_entropy_cal_per_mol_k",
+                "the refined ensemble's conformational entropy",
+            ),
             "cal/(mol*K)",
         ),
         _fact(
             "refined_ensemble_correction",
-            payload.get("refined_ensemble_correction_kcal"),
+            _renamed(
+                payload,
+                "refined_ensemble_correction_kcal",
+                "ensemble_correction_kcal",
+                "the refined ensemble's correction",
+            ),
             "kcal/mol",
         ),
         _text("conformer_treatment", payload.get("treatment")),

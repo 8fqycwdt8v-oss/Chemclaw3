@@ -1179,3 +1179,49 @@ def test_a_calculation_that_produced_a_non_finite_number_is_refused_at_projectio
     assert METRICS.value("chemclaw_result_publish_failures_total") == publish_before, (
         "refused before the queue, so the destination-health counter must not move"
     )
+
+
+def test_project_payload_separates_a_projector_that_raised_from_a_payload_with_nothing_to_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The three-state `enqueue_payload`'s `int` cannot carry, and why one caller needs it.
+
+    `enqueue_payload` returns 0 for "queued nothing", for "the projector raised" and for "no sink" —
+    which is correct for the three hooks behind a finished calculation, all of which are
+    best-effort and none of which reports a number to anyone. `backfill.py` is the caller that
+    *is* a report: it added that 0 to its `queued` counter and touched nothing else, so a row an
+    older calculator wrote landed in no bucket at all and the operator-facing line said "4 row(s)
+    seen, 2 queued, 1 skipped" over four rows.
+
+    `None` is that missing state. Asserted against the same payload through both entry points, so
+    the two cannot drift into disagreeing about what a failed projection is: `enqueue_payload`
+    still answers 0, and `project_payload` says why.
+    """
+    _with_sink(monkeypatch, "alpha")
+    monkeypatch.setattr(outbox, "enqueue", _counting_enqueue)
+
+    # `points[].energy_hartree` missing is the real legacy shape: `xtb.scan` rows written before
+    # the field was renamed carry `energy`, and `_scan` subscripts rather than `.get()`s it.
+    legacy_scan = {
+        "smiles": "CCO",
+        "coordinate": "dihedral",
+        "points": [{"value": 0.0, "energy": -1.0}],
+    }
+    assert (
+        outbox.project_payload(calc_ref="s1", calc_type="xtb.scan", payload=legacy_scan) is None
+    ), "a projector that raised must be distinguishable from one with nothing to queue"
+    counted = asyncio.run(
+        outbox.enqueue_payload(calc_ref="s1", calc_type="xtb.scan", payload=legacy_scan)
+    )
+    assert counted == 0, "the count-only entry point keeps its contract: never raises, answers 0"
+
+    good = {"smiles": "CCO", "pka": 4.2, "method": "empirical"}
+    records = outbox.project_payload(calc_ref="p1", calc_type="pka", payload=good)
+    assert records is not None and len(records) == 1, (
+        "a readable payload must come back as its records, not as the absence"
+    )
+
+
+async def _counting_enqueue(records: Any) -> int:
+    """Stand in for the queue write: this pair of assertions is about the projection."""
+    return len(records)

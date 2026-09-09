@@ -20,6 +20,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.connector_job import ConnectorJobResult
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.publish.backfill import backfill_cached, backfill_jobs, requeue_failed
+    from chemclaw.publish.registry import ResultSinkError, publishing_enabled
 
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.publish import BAD_DATA_RETRY, connector_queue_wait_timeout
@@ -47,20 +48,43 @@ async def republish_stored_results(spec: RepublishSpec) -> dict[str, int]:
 
 
 async def _walk(spec: RepublishSpec) -> dict[str, int]:
-    """The scan itself, so the activity above is nothing but its heartbeat wrapper."""
+    """The scan itself, so the activity above is nothing but its heartbeat wrapper.
+
+    **Refuses before it scans when this deployment publishes nowhere.** `enqueue` is a no-op with
+    `CHEMCLAW_RESULT_SINKS` empty, so without this the job ran a full pass over two never-pruned
+    tables, wrote nothing, and reported `calculations_seen: 10, calculations_queued: 0` — which is
+    exactly what a corpus with nothing left to publish reports. The CLI has had this guard from the
+    start and exits 1; the durable job is the *chemist*-facing half of the same walk, where a
+    misconfiguration is least diagnosable, so it was missing precisely where it mattered more.
+
+    `ResultSinkError` rather than a report field: it is already in
+    `durable/publish._BAD_DATA_TYPES`, so the job fails fast with the reason instead of spending
+    eight attempts on a setting no retry changes, and the chemist reads it in the push-back rather
+    than in a count.
+    """
+    if not publishing_enabled():
+        raise ResultSinkError(
+            "no result sink is enabled (CHEMCLAW_RESULT_SINKS is empty), so a republish would "
+            "scan the whole stored corpus and queue nothing. Enable a sink first."
+        )
     requeued = await requeue_failed() if spec.requeue_failed else 0
-    cached_seen, cached_queued, cached_skipped = await backfill_cached(
-        dry_run=False, batch=spec.batch
-    )
-    jobs_seen, jobs_queued, jobs_skipped = await backfill_jobs(dry_run=False, batch=spec.batch)
+    cached = await backfill_cached(dry_run=False, batch=spec.batch)
+    jobs = await backfill_jobs(dry_run=False, batch=spec.batch)
+    # Flat, because `ConnectorJobResult.data` is `dict[str, int]` and a chemist reads these keys.
+    # `_failed` is its own key rather than folded into `_skipped` for the reason `WalkCounts`
+    # gives: they need different actions, and the union of them is what hid the first.
     return {
         "requeued": requeued,
-        "calculations_seen": cached_seen,
-        "calculations_queued": cached_queued,
-        "calculations_skipped": cached_skipped,
-        "jobs_seen": jobs_seen,
-        "jobs_queued": jobs_queued,
-        "jobs_skipped": jobs_skipped,
+        "calculations_seen": cached.seen,
+        "calculations_queued": cached.queued,
+        "calculations_skipped": cached.skipped,
+        "calculations_failed": cached.failed,
+        "records_from_calculations": cached.records,
+        "jobs_seen": jobs.seen,
+        "jobs_queued": jobs.queued,
+        "jobs_skipped": jobs.skipped,
+        "jobs_failed": jobs.failed,
+        "records_from_jobs": jobs.records,
     }
 
 
@@ -103,13 +127,26 @@ class RepublishResultsWorkflow:
             schedule_to_start_timeout=connector_queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,
         )
+        # Rows and records are different units and the summary names both as what they are. The
+        # sentence used to read "Queued N stored result(s)" over a row count, which a shape that
+        # decomposes made larger than the number of rows examined beside it.
         queued = counts["calculations_queued"] + counts["jobs_queued"]
+        records = counts["records_from_calculations"] + counts["records_from_jobs"]
         skipped = counts["calculations_skipped"] + counts["jobs_skipped"]
+        failed = counts["calculations_failed"] + counts["jobs_failed"]
+        seen = counts["calculations_seen"] + counts["jobs_seen"]
         summary = (
-            f"Queued {queued} stored result(s) for the external results store "
+            f"Queued {records} scientific record(s) from {queued} of {seen} stored row(s) "
             f"({counts['calculations_seen']} calculations and {counts['jobs_seen']} job records "
             f"examined; {skipped} skipped as unprojectable by this release"
         )
+        # Named only when it is non-zero, because it is the one number that asks for a code change
+        # — and a line reading "0 unreadable" on every healthy pass is how it stops being read.
+        if failed:
+            summary += (
+                f"; {failed} had a projector in this release that could not read them, so this "
+                f"pass did not cover them"
+            )
         summary += (
             f"; {counts['requeued']} retired publication(s) re-queued)."
             if counts["requeued"]
