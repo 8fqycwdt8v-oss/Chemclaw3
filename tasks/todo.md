@@ -81,24 +81,24 @@ that repo**, per CLAUDE.md — never proxied through this one.
 The first wave whose subject is whether a computed number is *right*. Lessons 20, 24, 25 and 26
 are all science-side defect classes, and no wave has swept for them.
 
-- [ ] W11.1 Unit and constant audit across `science/`, `connectors/`, `publish/` and the wire
+- [x] W11.1 Unit and constant audit across `science/`, `connectors/`, `publish/` and the wire
       models: hartree/kcal/eV, bohr/Å, K/°C, ppm, molarity. Each conversion traced to **one**
       definition — two branches nearly inflated every geometry by 1.8897 for want of this.
-- [ ] W11.2 The arithmetic that stayed here after the physics left: RRHO thermochemistry, Crippen,
+- [x] W11.2 The arithmetic that stayed here after the physics left: RRHO thermochemistry, Crippen,
       the calibration ledger's fit, the `dft` backfill projector. Each against a **reference
       value**, not against itself; split the class before judging a bad fit.
-- [ ] W11.3 Cache identity in this repo (the in-process half of W10.2): `key` derivation, its
+- [x] W11.3 Cache identity in this repo (the in-process half of W10.2): `key` derivation, its
       normalisation, and the round trip through `result JSONB` — does a float, a null or a unit
       survive it unchanged?
-- [ ] W11.4 Fingerprints and similarity: ECFP4/DRFP parameters, bit collisions, the metric's
+- [x] W11.4 Fingerprints and similarity: ECFP4/DRFP parameters, bit collisions, the metric's
       actual semantics, and `standardize()`'s class of defects re-swept beyond the three instances
       already named.
-- [ ] W11.5 BO: objective sign conventions, constraint handling, whether the benchmark corpus
+- [x] W11.5 BO: objective sign conventions, constraint handling, whether the benchmark corpus
       exercises what its registration claims, and whether any documented ceiling bounds the thing
       it is documented as bounding.
-- [ ] W11.6 Labels, safety projections and reaction records: does a value keep its meaning across
+- [x] W11.6 Labels, safety projections and reaction records: does a value keep its meaning across
       every store round-trip and every projection into the result store?
-- [ ] W11 fix stage, gate, PR, merge on green
+- [x] W11 fix stage, gate, PR, merge on green
 
 ## Wave 12 — Lifecycle: upgrade, rollback, two generations at once
 
@@ -168,6 +168,68 @@ the point of use, and contradiction. Wave 8 asked whether those exist. This asks
 ## Review
 
 *(the closing review is written at the end of wave 15; each wave adds its own section)*
+
+### Wave 11 — the science (MERGED: fleet #53; this repo's PR below)
+
+The first wave whose subject is whether a **number is right** rather than
+whether the plumbing around it works. Six review agents, six fix agents.
+
+**The two worst findings are wrong answers, not crashes.** A NaN in a
+secondary objective is a wildcard that never loses — `_dominates` reads it
+as "no difference", so a run whose impurity assay *failed* dominated every
+clean run it beat on yield and the chemist was shown a one-point Pareto
+front consisting solely of it. And an objective with no spread reported
+R² 1.00 with "predicts held-out runs perfectly", which is exactly the
+answer a flatlined assay must not give.
+
+**The class four agents found independently.** Non-finite floats reaching
+`jsonb` on five paths, doing different damage each time: the calc cache
+recomputes forever, the publish outbox loses the batch beside the poison
+record, and the ELN sync **never advances its cursor**, so one site row
+holds a corpus at a fixed date on every run thereafter. The rule already
+existed here — applied by hand in two subsystems, missed in five. Now one
+function plus a derived guard; the eight unreviewed sites are *counted*
+rather than converted, because whether each needs a write guard or a model
+constraint depends on a reachability measurement this wave did not make.
+
+**Where measurement overturned the brief — five times.**
+
+1. The RDKit divergence between repos does not exist (14/14 identical);
+   the cross-repo control shipped anyway, proven by injecting one.
+2. My own claim that a large float "keeps its value exactly" is false —
+   `6.02214076e23` returns a different exact integer, the same double.
+3. `ProcessConditions` was guarded on four of five fields **by accident**,
+   because `ge`/`le` reject NaN.
+4. The fleet's xtb ordering assumption was *correct*; the real defect was
+   the external-mode **count**, where the two repos disagree at 179.0° and
+   every IR band shifts silently.
+5. My proposed units fix was illegal — the layering test forbids `core`
+   importing a sibling, forcing the opposite direction.
+
+**Three decisions taken with their cost stated.** `includeChirality=True`,
+decided not by the tie but by the citation: a hit carries a stereo-aware
+`compound_note_id`, so the index returned the wrong enantiomer at 1.0000
+citing a *different compound's note*. The qRRHO cutoff 25 → 50 cm⁻¹,
+because one of the two Hessian producers is the xtb binary, making 50 the
+only value a chemist can check. And the alkali-salt sweep **split**: the
+alkoxide collapse accepted and asserted, the hydride case fixed, because
+neutralization there removes a hydrogen and turns a reducing agent into a
+borate ester.
+
+**What held.** Every CODATA constant checked is right; the RRHO chain
+reproduces closed-form references to 1e-13 and NIST-JANAF to within the
+anharmonicity RRHO omits; two AST sweeps over 4,906 unit-named assignments
+found zero double or missing conversions; all sign conventions correct;
+56/56 BO proposals honoured their constraints; every `DOUBLE PRECISION`
+path exact under `==`. The 1.8897 trap the brief named is genuinely absent.
+
+**Deliberately open**, each with what would change the answer: the eight
+unmeasured `jsonb` boundaries; `std7` makes every stored reaction label
+stale on the next drain pass (designed, worth expecting); the similarity
+threshold now sits 0.0061 above the measured worst case for a
+stereo-unspecified query; and a carbanion written as a separated ion pair
+still standardises to its hydrocarbon, left alone because the obvious
+guard would also split sodium acetylacetonate from acetylacetone.
 
 ### Wave 10 — the fleet seam (MERGED: mock #12, fleet #51, UI #70)
 
